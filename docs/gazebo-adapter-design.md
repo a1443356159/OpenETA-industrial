@@ -12,7 +12,7 @@ node/executor; both are started during create and shut down in close/finally.
 ## Observation mapping
 
 The top camera is the global `scene_primary` camera.  Its RGB and metric depth,
-calibration, and explicit frame tags map to `CameraFrame`.  Robot joint/E​​EF/
+calibration, and explicit frame tags map to `CameraFrame`.  Robot joint/EEF/
 gripper values map to `RobotState`; M1 publishes an empty state because no
 robot-control process is started.  Oracle objects are compact summaries with
 `provenance=gazebo_oracle`, never hidden perception results.
@@ -36,7 +36,6 @@ process/node termination verified by integration tests.
 
 Unit tests cover deterministic reset, metric camera packet conventions,
 oracle provenance, lifecycle ordering, and idempotent close.  Contract tests
-round-trip through `EnvObservation` and assert the M​​CP create/reset/render/
+round-trip through `EnvObservation` and assert the MCP create/reset/render/
 close schema.  Integration tests are gated on an installed Gazebo/ROS 2
 profile and are not silently replaced by oracle results.
-
