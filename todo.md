@@ -32,6 +32,8 @@ when work advances; do not start later milestones early.
       expose them as provenance metadata without fabricating live frames.
 - [x] Add an official-schema RGB-D smoke world and verify Gazebo publishes the
       configured raw RGB/depth/CameraInfo topics.
+- [x] Gate bridge startup on Gazebo raw-topic readiness rather than process
+      liveness alone.
 - [ ] Exercise the live ROS subscription/executor source against a configured
       bridge world with CameraInfo and explicit TF/extrinsics. The test is
       opt-in because `parameter_bridge` lazy discovery depends on an external

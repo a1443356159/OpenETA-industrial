@@ -88,6 +88,28 @@ class GazeboProcess:
         if process.stderr is not None:
             process.stderr.close()
 
+    def wait_for_topics(self, topics: tuple[str, ...], *, timeout_s: float = 15.0) -> None:
+        """Wait until Gazebo's transport advertises every requested topic."""
+
+        if not self.running:
+            raise GazeboProcessError("Gazebo must be running before waiting for topics")
+        if not topics:
+            return
+        executable = shutil.which(self.gz_executable) or self.gz_executable
+        deadline = time.monotonic() + float(timeout_s)
+        while time.monotonic() < deadline:
+            try:
+                result = subprocess.run(
+                    [executable, "topic", "-l"], capture_output=True, text=True, timeout=5.0,
+                )
+                available = set(result.stdout.splitlines())
+                if set(topics).issubset(available):
+                    return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            time.sleep(0.1)
+        raise GazeboProcessError(f"Gazebo topics not ready before timeout: {topics}")
+
     def __enter__(self) -> "GazeboProcess":
         self.start()
         return self

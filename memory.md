@@ -48,6 +48,9 @@
   Jazzy `parameter_bridge` lazy discovery requires a launch/TTY context that
   pytest's captured stdin does not provide; no live CameraFrame claim is made
   until that deployment boundary is supplied.
+- Added `GazeboProcess.wait_for_topics()` and gated bridge startup on raw topic
+  discovery. This fixes the race where a live Gazebo process existed before
+  sensor topics were registered; the stable raw RGB-D bridge test passes.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

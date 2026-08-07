@@ -17,8 +17,8 @@ def test_gazebo_process_lifecycle_when_gz_is_installed() -> None:
         pid = process.start()
         assert pid > 0
         assert process.running
+        process.wait_for_topics(())
     finally:
         process.close()
         process.close()
     assert not process.running
-

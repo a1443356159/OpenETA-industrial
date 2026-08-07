@@ -60,3 +60,5 @@ process lifecycle testing; it is not a robot or perception benchmark scene.
 used to prove raw RGB, depth, and CameraInfo topic availability. The bridge
 test proves process ownership and raw topic discovery; converting ROS messages
 into `CameraFrame` remains the next adapter step.
+`GazeboProcess.wait_for_topics()` is the readiness gate between server startup
+and bridge startup; process liveness alone is not treated as sensor readiness.

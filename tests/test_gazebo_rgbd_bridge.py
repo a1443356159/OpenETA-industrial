@@ -25,6 +25,7 @@ def test_m1_rgbd_bridge_process_contract() -> None:
     )
     try:
         sim.start()
+        sim.wait_for_topics(("/top_camera/image", "/top_camera/depth_image", "/top_camera/camera_info"))
         bridge.start()
         assert sim.running and bridge.running
         raw_topics = subprocess.run(

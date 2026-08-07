@@ -62,6 +62,7 @@ def test_live_ros_rgbd_source_builds_camera_frame() -> None:
     thread = None
     try:
         sim.start()
+        sim.wait_for_topics(("/top_camera/image", "/top_camera/depth_image"))
         bridge.start()
         source.start()
         thread = threading.Thread(target=publish_info, daemon=True)
