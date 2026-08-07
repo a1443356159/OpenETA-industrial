@@ -10,5 +10,6 @@ from .config import GazeboConfig, GazeboObject
 from .adapter import GazeboSimulatorAdapter
 from .lifecycle import GazeboEnvironment, GazeboLifecycleError
 from .mcp import GazeboOracleMcpTransport
+from .process import GazeboProcess, GazeboProcessError
 
-__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport"]
+__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport", "GazeboProcess", "GazeboProcessError"]

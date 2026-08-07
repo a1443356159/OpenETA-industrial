@@ -6,8 +6,9 @@
 performs a deterministic reset.  `reset(task, seed)` restores the configured
 robot/object/camera initial state.  `observe()` returns the latest observation
 without mutation.  `close()` is idempotent and clears all retained state.
-The first real transport implementation will own a Gazebo process and ROS 2
-node/executor; both are started during create and shut down in close/finally.
+`GazeboProcess` owns a headless `gz sim -s -r <world>` process and terminates
+its process group in `close()`/`finally`.  ROS 2 nodes/executors and sensor
+bridges remain separate until their deployment configuration is supplied.
 
 ## Observation mapping
 
@@ -44,3 +45,6 @@ For M1 contract coverage, `GazeboOracleMcpTransport` is an in-process test
 transport that feeds the existing `SimulatorMcpEpisodeEnvironment`. It is
 explicitly oracle-only and does not claim to start Gazebo or ROS 2. The real
 deployment transport must retain the same tool names and cleanup semantics.
+
+The checked-in `worlds/m1_oracle.sdf` is only a deterministic smoke world for
+process lifecycle testing; it is not a robot or perception benchmark scene.

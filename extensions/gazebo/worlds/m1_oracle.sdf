@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <world name="industrial_pick_place">
+    <gravity>0 0 -9.81</gravity>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <model name="ground">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></collision>
+        <visual name="visual"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></visual>
+      </link>
+    </model>
+    <model name="silver_screw">
+      <pose>0.42 -0.11 0.03 0 0 0</pose>
+      <link name="link"><inertial><mass>0.01</mass></inertial><collision name="collision"><geometry><cylinder><radius>0.01</radius><length>0.05</length></cylinder></geometry></collision><visual name="visual"><geometry><cylinder><radius>0.01</radius><length>0.05</length></cylinder></geometry></visual></link>
+    </model>
+    <model name="bin_3">
+      <pose>0.61 0.20 0.08 0 0 0</pose>
+      <link name="link"><inertial><mass>0.2</mass></inertial><collision name="collision"><geometry><box><size>0.2 0.2 0.16</size></box></geometry></collision><visual name="visual"><geometry><box><size>0.2 0.2 0.16</size></box></geometry></visual></link>
+    </model>
+  </world>
+</sdf>

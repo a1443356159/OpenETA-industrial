@@ -25,6 +25,10 @@
   MCP server or a claim of real Gazebo execution.
 - Added fail-fast validation for camera dimensions, object SI-unit positions,
   quaternions, labels, and confidence bounds; Gazebo tests now pass `6/6`.
+- The environment contains ROS 2 Jazzy/Gazebo Sim. Added
+  `GazeboProcess` plus `worlds/m1_oracle.sdf`; with `/opt/ros/jazzy/setup.bash`
+  sourced, process lifecycle and oracle tests pass `7/7`. This validates only
+  process ownership/cleanup, not camera topics or robot control.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
