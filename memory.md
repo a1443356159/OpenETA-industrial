@@ -19,6 +19,9 @@
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
+- Git record: commit `8220bdb` (`feat(gazebo): add M1 lifecycle oracle adapter`).
+- `uv` is not installed in the current shell, so the documented `uv run`
+  baseline command could not be used.
 
 ## Open questions / blockers
 

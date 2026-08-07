@@ -10,6 +10,8 @@ when work advances; do not start later milestones early.
 - [x] Record extension points and deviations in
       `docs/gazebo-integration-audit.md`.
 - [ ] Run full upstream baseline in an environment with declared dependencies.
+  - Current shell lacks both `gymnasium` and `uv`; retain this item open until
+    a declared project environment is available.
 
 ## M1 — Gazebo read-only observation
 
@@ -28,4 +30,3 @@ when work advances; do not start later milestones early.
 - [ ] M3 physical grasp and placement verification.
 - [ ] M4 oracle pick/place.
 - [ ] M5+ SAM3 integration and industrial benchmark.
-
