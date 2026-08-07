@@ -33,7 +33,9 @@ when work advances; do not start later milestones early.
 - [x] Add an official-schema RGB-D smoke world and verify Gazebo publishes the
       configured raw RGB/depth/CameraInfo topics.
 - [ ] Exercise the live ROS subscription/executor source against a configured
-      bridge world with CameraInfo and explicit TF/extrinsics.
+      bridge world with CameraInfo and explicit TF/extrinsics. The test is
+      opt-in because `parameter_bridge` lazy discovery depends on an external
+      ROS launch/TTY context.
 - [x] Implement the documented conversion boundary and unit-test RGB/BGR,
       16UC1/32FC1 depth, CameraInfo intrinsics, and fail-closed validation.
 - [ ] Connect the adapter to a real Gazebo/ROS 2 process through the existing

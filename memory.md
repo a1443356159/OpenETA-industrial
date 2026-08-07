@@ -44,6 +44,10 @@
   encodings, 16UC1 millimetre depth, 32FC1 metre depth, and CameraInfo.K are
   decoded into OpenETA packets; explicit extrinsics are required and invalid
   packets fail closed. Conversion tests pass `7/7` with no ROS runtime needed.
+- Added an opt-in live ROS integration test. Its default skip is intentional:
+  Jazzy `parameter_bridge` lazy discovery requires a launch/TTY context that
+  pytest's captured stdin does not provide; no live CameraFrame claim is made
+  until that deployment boundary is supplied.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
