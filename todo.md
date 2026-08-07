@@ -10,8 +10,10 @@ when work advances; do not start later milestones early.
 - [x] Record extension points and deviations in
       `docs/gazebo-integration-audit.md`.
 - [ ] Run full upstream baseline in an environment with declared dependencies.
-  - Current shell lacks both `gymnasium` and `uv`; retain this item open until
-    a declared project environment is available.
+  - Focused M0/M1/MCP set: **62 passed** in `/tmp/openeta-plan-venv`.
+  - Broader suite: **1154 passed, 11 skipped, 4 pre-existing failures**;
+    one additional optional `torch` test cannot collect. Keep open until the
+    upstream baseline is green in its intended environment.
 
 ## M1 — Gazebo read-only observation
 

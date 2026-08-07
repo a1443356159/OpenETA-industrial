@@ -25,6 +25,12 @@
 - Git record: commit `8220bdb` (`feat(gazebo): add M1 lifecycle oracle adapter`).
 - `uv` is not installed in the current shell, so the documented `uv run`
   baseline command could not be used.
+- Created isolated `/tmp/openeta-plan-venv` from the declared project
+  dependencies. The focused M0/M1/MCP regression set passes `62 passed`.
+  The broader suite reaches `1154 passed, 11 skipped` but has four unrelated
+  pre-existing failures (CLI contact-graspnet binding, object-memory URL
+  validation, and two web-fetch resolver expectations); full collection also
+  requires optional `torch` for `test_behavior_vector_contract.py`.
 
 ## Open questions / blockers
 
