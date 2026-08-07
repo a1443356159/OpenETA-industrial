@@ -9,5 +9,6 @@ can later replace the deterministic oracle provider without changing callers.
 from .config import GazeboConfig, GazeboObject
 from .adapter import GazeboSimulatorAdapter
 from .lifecycle import GazeboEnvironment, GazeboLifecycleError
+from .mcp import GazeboOracleMcpTransport
 
-__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError"]
+__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport"]

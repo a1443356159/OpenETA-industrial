@@ -39,3 +39,8 @@ oracle provenance, lifecycle ordering, and idempotent close.  Contract tests
 round-trip through `EnvObservation` and assert the MCP create/reset/render/
 close schema.  Integration tests are gated on an installed Gazebo/ROS 2
 profile and are not silently replaced by oracle results.
+
+For M1 contract coverage, `GazeboOracleMcpTransport` is an in-process test
+transport that feeds the existing `SimulatorMcpEpisodeEnvironment`. It is
+explicitly oracle-only and does not claim to start Gazebo or ROS 2. The real
+deployment transport must retain the same tool names and cleanup semantics.

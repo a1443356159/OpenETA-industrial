@@ -19,6 +19,10 @@
   and close is idempotent.
 - M1 adapter is intentionally read-only. `step()` rejects control until M2;
   it does not claim Gazebo or ROS 2 physical execution.
+- Added `GazeboOracleMcpTransport`, which reuses the existing
+  `SimulatorMcpEpisodeEnvironment` for a create/reset/render/close contract
+  test. It is explicitly an in-process oracle transport, not a replacement
+  MCP server or a claim of real Gazebo execution.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
@@ -31,6 +35,8 @@
   pre-existing failures (CLI contact-graspnet binding, object-memory URL
   validation, and two web-fetch resolver expectations); full collection also
   requires optional `torch` for `test_behavior_vector_contract.py`.
+- Oracle MCP episode test passes (`5 passed` across the two Gazebo test files)
+  and confirms the handle is released in `finally`.
 
 ## Open questions / blockers
 

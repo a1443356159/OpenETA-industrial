@@ -24,7 +24,9 @@ when work advances; do not start later milestones early.
 - [x] Add lifecycle/serialization/provenance tests.
 - [ ] Connect the adapter to a real Gazebo/ROS 2 process through the existing
       MCP worker boundary (requires documented deployment transport).
-- [ ] Verify an end-to-end OpenETA MCP episode and resource cleanup.
+- [x] Verify the OpenETA MCP lifecycle contract with the oracle transport and
+      resource cleanup (`tests/test_gazebo_mcp_episode.py`).
+- [ ] Verify an end-to-end episode against a real Gazebo/ROS 2 deployment.
 
 ## Deferred by plan
 
