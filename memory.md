@@ -44,10 +44,13 @@
   encodings, 16UC1 millimetre depth, 32FC1 metre depth, and CameraInfo.K are
   decoded into OpenETA packets; explicit extrinsics are required and invalid
   packets fail closed. Conversion tests pass `7/7` with no ROS runtime needed.
-- Added an opt-in live ROS integration test. Its default skip is intentional:
-  Jazzy `parameter_bridge` lazy discovery requires a launch/TTY context that
-  pytest's captured stdin does not provide; no live CameraFrame claim is made
-  until that deployment boundary is supplied.
+- The live ROS integration test remains opt-in because it starts a full Gazebo
+  demo launch, but it now uses the official launch context rather than a
+  captured-stdin bridge process.
+- Replaced the custom bridge in the opt-in test with the official ROS 2 launch
+  process `ros_gz_sim_demos/rgbd_camera_bridge.launch.py`. With
+  `OPENETA_RUN_LIVE_ROS_TEST=1` and ROS Jazzy sourced, a real 320x240 RGB-D +
+  CameraInfo stream now converts to `CameraFrame` successfully (`1 passed`).
 - Added `GazeboProcess.wait_for_topics()` and gated bridge startup on raw topic
   discovery. This fixes the race where a live Gazebo process existed before
   sensor topics were registered; the stable raw RGB-D bridge test passes.

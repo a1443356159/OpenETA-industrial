@@ -191,3 +191,68 @@ class RosGzBridgeProcess:
                     process.wait(timeout=2.0)
         if process.stderr is not None:
             process.stderr.close()
+
+
+class Ros2LaunchProcess:
+    """Own a documented ROS 2 launch description and its child processes."""
+
+    def __init__(
+        self,
+        *,
+        package: str,
+        launch_file: str,
+        arguments: tuple[str, ...] = (),
+        ros2_executable: str = "ros2",
+        startup_timeout_s: float = 5.0,
+    ) -> None:
+        self.package = package
+        self.launch_file = launch_file
+        self.arguments = tuple(arguments)
+        self.ros2_executable = ros2_executable
+        self.startup_timeout_s = float(startup_timeout_s)
+        self._process: subprocess.Popen | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def start(self) -> int:
+        if self.running:
+            return int(self._process.pid)
+        executable = shutil.which(self.ros2_executable) or self.ros2_executable
+        if not Path(executable).exists() and shutil.which(self.ros2_executable) is None:
+            raise GazeboProcessError(f"ROS 2 executable not found: {self.ros2_executable}")
+        self._process = subprocess.Popen(
+            [executable, "launch", self.package, self.launch_file, *self.arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            text=True,
+        )
+        deadline = time.monotonic() + self.startup_timeout_s
+        while time.monotonic() < deadline:
+            if self.running:
+                return int(self._process.pid)
+            output = self._process.stderr.read() if self._process.stderr else ""
+            raise GazeboProcessError(f"ROS 2 launch exited during startup: {output[-1000:]}")
+        self.close()
+        raise GazeboProcessError("ROS 2 launch did not stay running")
+
+    def close(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=8.0)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=3.0)
+        if process.stderr is not None:
+            process.stderr.close()

@@ -33,6 +33,9 @@ CameraInfo topic names in metadata; it does not claim those topics are live.
 are decoded into RGB uint8 and metric float32 depth, `CameraInfo.K` supplies
 fx/fy/cx/cy, and explicit camera-to-world extrinsics are mandatory. Missing
 calibration, unsupported encodings, or incomplete frames fail closed.
+`Ros2LaunchProcess` can own an official ROS 2 launch description. The opt-in
+integration test uses the installed `ros_gz_sim_demos/rgbd_camera_bridge.launch.py`
+and verifies a real RGB-D + CameraInfo packet becomes `CameraFrame`.
 
 ## Reset, errors, and cleanup
 

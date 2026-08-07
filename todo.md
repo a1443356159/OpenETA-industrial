@@ -34,10 +34,9 @@ when work advances; do not start later milestones early.
       configured raw RGB/depth/CameraInfo topics.
 - [x] Gate bridge startup on Gazebo raw-topic readiness rather than process
       liveness alone.
-- [ ] Exercise the live ROS subscription/executor source against a configured
-      bridge world with CameraInfo and explicit TF/extrinsics. The test is
-      opt-in because `parameter_bridge` lazy discovery depends on an external
-      ROS launch/TTY context.
+- [x] Exercise the live ROS subscription/executor source against the official
+      `ros_gz_sim_demos/rgbd_camera_bridge.launch.py` world with CameraInfo and
+      explicit extrinsics (`OPENETA_RUN_LIVE_ROS_TEST=1`).
 - [x] Implement the documented conversion boundary and unit-test RGB/BGR,
       16UC1/32FC1 depth, CameraInfo intrinsics, and fail-closed validation.
 - [ ] Connect the adapter to a real Gazebo/ROS 2 process through the existing

@@ -10,8 +10,8 @@ from .config import GazeboConfig, GazeboObject
 from .adapter import GazeboSimulatorAdapter
 from .lifecycle import GazeboEnvironment, GazeboLifecycleError
 from .mcp import GazeboOracleMcpTransport
-from .process import GazeboProcess, GazeboProcessError, RosGzBridgeProcess
+from .process import GazeboProcess, GazeboProcessError, Ros2LaunchProcess, RosGzBridgeProcess
 from .observation import (GazeboObservationError, RosRgbdCameraConfig, RosRgbdCameraSource,
                           camera_info_intrinsics, decode_ros_depth, decode_ros_rgb)
 
-__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport", "GazeboProcess", "GazeboProcessError", "RosGzBridgeProcess", "GazeboObservationError", "RosRgbdCameraConfig", "RosRgbdCameraSource", "camera_info_intrinsics", "decode_ros_depth", "decode_ros_rgb"]
+__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport", "GazeboProcess", "GazeboProcessError", "Ros2LaunchProcess", "RosGzBridgeProcess", "GazeboObservationError", "RosRgbdCameraConfig", "RosRgbdCameraSource", "camera_info_intrinsics", "decode_ros_depth", "decode_ros_rgb"]
