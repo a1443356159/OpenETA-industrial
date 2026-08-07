@@ -36,6 +36,10 @@
 - Camera topic names are now explicit configuration (`rgb`, metric `depth`,
   `CameraInfo`) and are emitted as metadata; the oracle still makes no claim
   that those topics are live until a configured sensor world is attached.
+- Added `worlds/m1_rgbd.sdf` based on the installed Gazebo RGB-D sensor schema;
+  test evidence confirms raw `/top_camera/image`, `/top_camera/depth_image`,
+  and `/top_camera/camera_info` topics are published. ROS message conversion
+  is intentionally still pending a documented executor/subscription boundary.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

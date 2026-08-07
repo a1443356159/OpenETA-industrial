@@ -128,9 +128,16 @@ class RosGzBridgeProcess:
         executable = shutil.which(self.ros2_executable) or self.ros2_executable
         if not Path(executable).exists() and shutil.which(self.ros2_executable) is None:
             raise GazeboProcessError(f"ROS 2 executable not found: {self.ros2_executable}")
+        bridge_executable = Path(executable).parent.parent / "lib" / "ros_gz_bridge" / "parameter_bridge"
+        command = ([str(bridge_executable), *self.topics]
+                   if bridge_executable.is_file()
+                   else [executable, "run", "ros_gz_bridge", "parameter_bridge", *self.topics])
         self._process = subprocess.Popen(
-            [executable, "run", "ros_gz_bridge", "parameter_bridge", *self.topics],
-            stdin=subprocess.DEVNULL,
+            command,
+            # ros_gz_bridge's underlying rclcpp process does not initialize
+            # its lazy subscriptions correctly when stdin is /dev/null;
+            # retain the parent stdin as in the official launch action.
+            stdin=None,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -162,4 +169,3 @@ class RosGzBridgeProcess:
                     process.wait(timeout=2.0)
         if process.stderr is not None:
             process.stderr.close()
-

@@ -52,5 +52,7 @@ deployment transport must retain the same tool names and cleanup semantics.
 
 The checked-in `worlds/m1_oracle.sdf` is only a deterministic smoke world for
 process lifecycle testing; it is not a robot or perception benchmark scene.
-The `/clock` bridge test proves ROS/Gazebo process ownership only; it does not
-assert camera or robot state topics that are not configured in this world.
+`worlds/m1_rgbd.sdf` follows the installed Gazebo RGB-D sensor schema and is
+used to prove raw RGB, depth, and CameraInfo topic availability. The bridge
+test proves process ownership and raw topic discovery; converting ROS messages
+into `CameraFrame` remains the next adapter step.
