@@ -10,6 +10,9 @@
   and the MCP lifecycle in `sim/mcp_server/server.py`.
 - Added `docs/gazebo-integration-audit.md` and
   `docs/gazebo-adapter-design.md`.
+- The audit now records the requested README/architecture/action-pipeline/
+  simulator/agent/real/protocol source inventory and the existing ToolResult,
+  environment-receipt, MCP cleanup, and fresh-observation requirements.
 - Added dependency-light oracle adapter under `extensions/gazebo/`. It emits
   `EnvObservation` with metric RGB-D, explicit OpenCV camera conventions, and
   `provenance=gazebo_oracle`; reset is deterministic for a given config/seed
