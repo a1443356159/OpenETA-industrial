@@ -8,8 +8,6 @@ an action was executed and therefore exposes no manipulation controls yet.
 from __future__ import annotations
 
 import time
-from dataclasses import replace
-from typing import Any
 
 import numpy as np
 
@@ -103,4 +101,3 @@ class GazeboEnvironment:
             metadata={"backend": "gazebo", "world": self.config.world, "seed": self.seed,
                       "scene_epoch": self._epoch, "observation_provenance": "gazebo_oracle"},
         )
-

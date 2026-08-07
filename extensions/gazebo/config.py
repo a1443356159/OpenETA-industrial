@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +15,18 @@ class GazeboObject:
     position: tuple[float, float, float]
     orientation_xyzw: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     confidence: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not self.name.strip() or not self.label.strip():
+            raise ValueError("GazeboObject name and label must be non-empty")
+        if len(self.position) != 3 or not all(math.isfinite(float(v)) for v in self.position):
+            raise ValueError("GazeboObject position must be three finite values in metres")
+        if len(self.orientation_xyzw) != 4 or not all(
+            math.isfinite(float(v)) for v in self.orientation_xyzw
+        ):
+            raise ValueError("GazeboObject orientation must be four finite xyzw values")
+        if not math.isfinite(float(self.confidence)) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("GazeboObject confidence must be in [0, 1]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,3 +44,10 @@ class GazeboConfig:
         GazeboObject("bin_3", "storage bin", (0.61, 0.20, 0.08)),
     ))
 
+    def __post_init__(self) -> None:
+        if not self.world.strip() or not self.robot_name.strip() or not self.top_camera_name.strip():
+            raise ValueError("Gazebo world, robot, and camera names must be non-empty")
+        if self.image_width <= 0 or self.image_height <= 0:
+            raise ValueError("Gazebo camera dimensions must be positive")
+        if not self.camera_frame.strip():
+            raise ValueError("Gazebo camera_frame must be non-empty")

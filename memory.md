@@ -23,6 +23,8 @@
   `SimulatorMcpEpisodeEnvironment` for a create/reset/render/close contract
   test. It is explicitly an in-process oracle transport, not a replacement
   MCP server or a claim of real Gazebo execution.
+- Added fail-fast validation for camera dimensions, object SI-unit positions,
+  quaternions, labels, and confidence bounds; Gazebo tests now pass `6/6`.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

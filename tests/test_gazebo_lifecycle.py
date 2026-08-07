@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from adapter.protocol import EnvAction, EnvObservation
-from extensions.gazebo import GazeboEnvironment, GazeboSimulatorAdapter
+from extensions.gazebo import GazeboConfig, GazeboEnvironment, GazeboObject, GazeboSimulatorAdapter
 from extensions.gazebo.lifecycle import GazeboLifecycleError
 
 
@@ -41,3 +41,12 @@ def test_standard_adapter_exposes_lifecycle_and_rejects_control_in_m1() -> None:
     with pytest.raises(GazeboLifecycleError):
         adapter.step(EnvAction(action_type="tool_call"))
     adapter.close()
+
+
+def test_gazebo_config_rejects_invalid_contract_values() -> None:
+    with pytest.raises(ValueError, match="dimensions"):
+        GazeboConfig(image_width=0)
+    with pytest.raises(ValueError, match="position"):
+        GazeboObject("x", "x", (0.0, 1.0))
+    with pytest.raises(ValueError, match="confidence"):
+        GazeboObject("x", "x", (0.0, 1.0, 2.0), confidence=2.0)

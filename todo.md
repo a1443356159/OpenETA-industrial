@@ -22,6 +22,8 @@ when work advances; do not start later milestones early.
 - [x] Add deterministic oracle create/reset/observe/close adapter.
 - [x] Emit OpenETA `EnvObservation` with metric depth and explicit frame tags.
 - [x] Add lifecycle/serialization/provenance tests.
+- [x] Validate configured camera dimensions and oracle object geometry before
+      constructing an observation.
 - [ ] Connect the adapter to a real Gazebo/ROS 2 process through the existing
       MCP worker boundary (requires documented deployment transport).
 - [x] Verify the OpenETA MCP lifecycle contract with the oracle transport and
