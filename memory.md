@@ -40,6 +40,10 @@
   test evidence confirms raw `/top_camera/image`, `/top_camera/depth_image`,
   and `/top_camera/camera_info` topics are published. ROS message conversion
   is intentionally still pending a documented executor/subscription boundary.
+- Added `RosRgbdCameraSource` and pure ROS message conversion helpers. RGB/BGR
+  encodings, 16UC1 millimetre depth, 32FC1 metre depth, and CameraInfo.K are
+  decoded into OpenETA packets; explicit extrinsics are required and invalid
+  packets fail closed. Conversion tests pass `7/7` with no ROS runtime needed.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

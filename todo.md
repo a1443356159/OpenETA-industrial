@@ -32,8 +32,10 @@ when work advances; do not start later milestones early.
       expose them as provenance metadata without fabricating live frames.
 - [x] Add an official-schema RGB-D smoke world and verify Gazebo publishes the
       configured raw RGB/depth/CameraInfo topics.
-- [ ] Convert live ROS RGB/depth/CameraInfo messages into `CameraFrame` after
-      finalizing the deployment's ROS subscription/executor boundary.
+- [ ] Exercise the live ROS subscription/executor source against a configured
+      bridge world with CameraInfo and explicit TF/extrinsics.
+- [x] Implement the documented conversion boundary and unit-test RGB/BGR,
+      16UC1/32FC1 depth, CameraInfo intrinsics, and fail-closed validation.
 - [ ] Connect the adapter to a real Gazebo/ROS 2 process through the existing
       MCP worker boundary (requires documented deployment transport).
 - [x] Verify the OpenETA MCP lifecycle contract with the oracle transport and

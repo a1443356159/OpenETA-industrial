@@ -29,6 +29,10 @@ entity APIs.  Top and wrist roles remain semantic (`scene_primary`,
 `wrist_primary`).
 The oracle packet records configurable top-camera RGB, metric-depth, and
 CameraInfo topic names in metadata; it does not claim those topics are live.
+`RosRgbdCameraSource` is the live conversion boundary: standard ROS encodings
+are decoded into RGB uint8 and metric float32 depth, `CameraInfo.K` supplies
+fx/fy/cx/cy, and explicit camera-to-world extrinsics are mandatory. Missing
+calibration, unsupported encodings, or incomplete frames fail closed.
 
 ## Reset, errors, and cleanup
 
