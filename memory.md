@@ -57,6 +57,10 @@
 - Added `GazeboWorldControl.reset_all()` using the installed Gazebo service
   contract. The `m1_rgbd` world reset with seed 7 returns trusted `data: true`
   and the process cleans up successfully.
+- Added `GazeboLiveSession`, composing the official RGB-D launch,
+  `RosRgbdCameraSource`, and `GazeboWorldControl` behind
+  `create/reset/observe/close`. The opt-in live lifecycle test passes (`1
+  passed`) and confirms scene epoch/reset metadata and idempotent cleanup.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

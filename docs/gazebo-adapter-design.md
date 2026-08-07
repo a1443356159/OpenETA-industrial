@@ -36,6 +36,8 @@ calibration, unsupported encodings, or incomplete frames fail closed.
 `Ros2LaunchProcess` can own an official ROS 2 launch description. The opt-in
 integration test uses the installed `ros_gz_sim_demos/rgbd_camera_bridge.launch.py`
 and verifies a real RGB-D + CameraInfo packet becomes `CameraFrame`.
+`GazeboLiveSession` composes that launch, `RosRgbdCameraSource`, and the
+official world-control reset service behind `create/reset/observe/close`.
 
 ## Reset, errors, and cleanup
 
