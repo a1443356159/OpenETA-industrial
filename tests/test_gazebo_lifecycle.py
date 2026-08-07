@@ -16,6 +16,7 @@ def test_gazebo_create_reset_observe_is_deterministic() -> None:
     assert first.metadata["observation_provenance"] == "gazebo_oracle"
     assert second.cameras[0].depth[0][0] == pytest.approx(1.0)
     assert second.cameras[0].extrinsics["camera_frame"] == "opencv"
+    assert second.metadata["camera_topics"]["depth"] == "/top_camera/depth_image"
 
 
 def test_gazebo_observation_round_trip_and_close_is_idempotent() -> None:
@@ -50,3 +51,5 @@ def test_gazebo_config_rejects_invalid_contract_values() -> None:
         GazeboObject("x", "x", (0.0, 1.0))
     with pytest.raises(ValueError, match="confidence"):
         GazeboObject("x", "x", (0.0, 1.0, 2.0), confidence=2.0)
+    with pytest.raises(ValueError, match="absolute ROS topic"):
+        GazeboConfig(top_rgb_topic="relative/image")

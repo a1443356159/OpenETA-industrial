@@ -28,6 +28,8 @@ when work advances; do not start later milestones early.
       ROS 2 Jazzy/Gazebo toolchain is installed (`tests/test_gazebo_process.py`).
 - [x] Start and clean up the official ROS-Gazebo `/clock` bridge process using
       the documented `parameter_bridge` syntax.
+- [x] Keep top-camera RGB/depth/CameraInfo topic names in configuration and
+      expose them as provenance metadata without fabricating live frames.
 - [ ] Connect the adapter to a real Gazebo/ROS 2 process through the existing
       MCP worker boundary (requires documented deployment transport).
 - [x] Verify the OpenETA MCP lifecycle contract with the oracle transport and

@@ -27,6 +27,8 @@ intrinsics, and depth encoding.  The adapter converts ROS image timestamps and
 units at the boundary; Planner code never receives ROS topics or raw Gazebo
 entity APIs.  Top and wrist roles remain semantic (`scene_primary`,
 `wrist_primary`).
+The oracle packet records configurable top-camera RGB, metric-depth, and
+CameraInfo topic names in metadata; it does not claim those topics are live.
 
 ## Reset, errors, and cleanup
 

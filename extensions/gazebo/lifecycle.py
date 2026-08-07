@@ -99,5 +99,8 @@ class GazeboEnvironment:
         return EnvObservation(
             task=self.task, cameras=[camera], robot=RobotState(), objects=objects,
             metadata={"backend": "gazebo", "world": self.config.world, "seed": self.seed,
+                      "camera_topics": {"rgb": self.config.top_rgb_topic,
+                                         "depth": self.config.top_depth_topic,
+                                         "camera_info": self.config.top_camera_info_topic},
                       "scene_epoch": self._epoch, "observation_provenance": "gazebo_oracle"},
         )

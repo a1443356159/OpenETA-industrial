@@ -33,6 +33,9 @@
   `ros_gz_bridge parameter_bridge` contract. The documented `/clock` mapping
   starts and cleans up successfully; no undocumented camera/controller topic
   is introduced.
+- Camera topic names are now explicit configuration (`rgb`, metric `depth`,
+  `CameraInfo`) and are emitted as metadata; the oracle still makes no claim
+  that those topics are live until a configured sensor world is attached.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
