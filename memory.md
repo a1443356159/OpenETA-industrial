@@ -29,6 +29,10 @@
   `GazeboProcess` plus `worlds/m1_oracle.sdf`; with `/opt/ros/jazzy/setup.bash`
   sourced, process lifecycle and oracle tests pass `7/7`. This validates only
   process ownership/cleanup, not camera topics or robot control.
+- Added `RosGzBridgeProcess` using the installed Jazzy
+  `ros_gz_bridge parameter_bridge` contract. The documented `/clock` mapping
+  starts and cleans up successfully; no undocumented camera/controller topic
+  is introduced.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

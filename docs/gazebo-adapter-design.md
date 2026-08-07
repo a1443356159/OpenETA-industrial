@@ -9,6 +9,8 @@ without mutation.  `close()` is idempotent and clears all retained state.
 `GazeboProcess` owns a headless `gz sim -s -r <world>` process and terminates
 its process group in `close()`/`finally`.  ROS 2 nodes/executors and sensor
 bridges remain separate until their deployment configuration is supplied.
+`RosGzBridgeProcess` can own the documented Jazzy `ros_gz_bridge
+parameter_bridge` process; M1 tests use only the standard `/clock` mapping.
 
 ## Observation mapping
 
@@ -48,3 +50,5 @@ deployment transport must retain the same tool names and cleanup semantics.
 
 The checked-in `worlds/m1_oracle.sdf` is only a deterministic smoke world for
 process lifecycle testing; it is not a robot or perception benchmark scene.
+The `/clock` bridge test proves ROS/Gazebo process ownership only; it does not
+assert camera or robot state topics that are not configured in this world.
