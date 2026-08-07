@@ -65,3 +65,7 @@ test proves process ownership and raw topic discovery; converting ROS messages
 into `CameraFrame` remains the next adapter step.
 `GazeboProcess.wait_for_topics()` is the readiness gate between server startup
 and bridge startup; process liveness alone is not treated as sensor readiness.
+`GazeboWorldControl.reset_all()` uses the official
+`/world/<name>/control` service (`gz.msgs.WorldControl` → `gz.msgs.Boolean`)
+and checks the trusted `data: true` response. A reset seed is passed through
+the documented WorldControl field.

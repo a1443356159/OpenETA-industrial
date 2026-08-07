@@ -34,6 +34,8 @@ when work advances; do not start later milestones early.
       configured raw RGB/depth/CameraInfo topics.
 - [x] Gate bridge startup on Gazebo raw-topic readiness rather than process
       liveness alone.
+- [x] Implement and test deterministic Gazebo world reset through the official
+      `/world/<name>/control` WorldControl service.
 - [x] Exercise the live ROS subscription/executor source against the official
       `ros_gz_sim_demos/rgbd_camera_bridge.launch.py` world with CameraInfo and
       explicit extrinsics (`OPENETA_RUN_LIVE_ROS_TEST=1`).

@@ -110,6 +110,33 @@ class GazeboProcess:
             time.sleep(0.1)
         raise GazeboProcessError(f"Gazebo topics not ready before timeout: {topics}")
 
+
+class GazeboWorldControl:
+    """Invoke Gazebo's documented ``/world/<name>/control`` reset service."""
+
+    def __init__(self, *, world_name: str, gz_executable: str = "gz", timeout_ms: int = 3000) -> None:
+        if not world_name.strip() or "/" in world_name:
+            raise ValueError("world_name must be a non-empty Gazebo world identifier")
+        self.world_name = world_name
+        self.gz_executable = gz_executable
+        self.timeout_ms = int(timeout_ms)
+
+    def reset_all(self, *, seed: int | None = None) -> None:
+        executable = shutil.which(self.gz_executable) or self.gz_executable
+        request = "reset: {all: true}"
+        if seed is not None:
+            request += f" seed: {int(seed)}"
+        result = subprocess.run(
+            [executable, "service", "-s", f"/world/{self.world_name}/control",
+             "--reqtype", "gz.msgs.WorldControl", "--reptype", "gz.msgs.Boolean",
+             "--timeout", str(self.timeout_ms), "--req", request],
+            capture_output=True, text=True, timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
+        )
+        if result.returncode != 0 or "data: true" not in result.stdout.lower():
+            raise GazeboProcessError(
+                f"Gazebo world reset failed for {self.world_name}: {result.stdout[-500:]} {result.stderr[-500:]}"
+            )
+
     def __enter__(self) -> "GazeboProcess":
         self.start()
         return self

@@ -54,6 +54,9 @@
 - Added `GazeboProcess.wait_for_topics()` and gated bridge startup on raw topic
   discovery. This fixes the race where a live Gazebo process existed before
   sensor topics were registered; the stable raw RGB-D bridge test passes.
+- Added `GazeboWorldControl.reset_all()` using the installed Gazebo service
+  contract. The `m1_rgbd` world reset with seed 7 returns trusted `data: true`
+  and the process cleans up successfully.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
