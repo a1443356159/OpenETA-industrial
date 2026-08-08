@@ -108,6 +108,13 @@
   `1194 passed, 14 skipped`; worker contract tests report `57 passed`, and
   the opt-in real worker episode reports `1 passed` with no residual Gazebo,
   ROS launch, bridge, or worker processes.
+- Local planner provider configuration: `.env` now selects provider
+  `deepseek`, model `deepseek-v4-pro`, and base `https://api.deepseek.com`.
+  The provider `/models` endpoint confirmed that exact model ID, and
+  `load_planner_provider_config()` plus
+  `OpenAICompatiblePlannerBackendConfig.from_provider_config()` validate
+  successfully. The API key is intentionally not recorded in this memory or
+  Git history.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

@@ -59,3 +59,10 @@ when work advances; do not start later milestones early.
 - [ ] M3 physical grasp and placement verification.
 - [ ] M4 oracle pick/place.
 - [ ] M5+ SAM3 integration and industrial benchmark.
+
+## Runtime configuration
+
+- [x] Configure the local OpenAI-compatible planner provider for DeepSeek
+      `deepseek-v4-pro`; verify the model through the provider `/models`
+      endpoint and validate the OpenETA provider schema. The API key remains
+      only in the ignored local `.env` file.
