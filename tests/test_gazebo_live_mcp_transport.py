@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from extensions.gazebo import GazeboLiveMcpTransport
 
 
@@ -39,3 +41,15 @@ def test_live_transport_uses_existing_mcp_tool_names_and_cleanup() -> None:
     assert transport.call_tool("close_env", {"handle": handle})["ok"]
     assert made[0].closed and transport.active_handles == ()
 
+
+def test_live_transport_closes_session_when_create_fails() -> None:
+    class FailingSession(FakeSession):
+        def create(self):
+            raise RuntimeError("launch failed")
+
+    session = FailingSession("inspect", 3)
+    transport = GazeboLiveMcpTransport(lambda *, task, seed: session)
+    with pytest.raises(RuntimeError, match="launch failed"):
+        transport.call_tool("create_env", {"task": "inspect", "seed": 3})
+    assert session.closed is True
+    assert transport.active_handles == ()

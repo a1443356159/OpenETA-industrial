@@ -70,6 +70,12 @@
   separately under the system ROS Python. Without the ROS environment, the
   process/topic smoke test can time out because Gazebo resources are not
   sourced, so ROS sourcing remains part of the documented test command.
+- The deployed worker-pool MCP registration for a Gazebo environment is still
+  intentionally open: the repository documents the generic SSE worker
+  boundary but provides no Gazebo worker registration/process contract. The
+  live MCP facade therefore fails closed and cleans up a session if launch
+  creation raises, without inventing a second server or undocumented worker
+  protocol.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

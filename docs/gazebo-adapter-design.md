@@ -62,7 +62,11 @@ deployment transport must retain the same tool names and cleanup semantics.
 configured `GazeboLiveSession`: `create_env` owns the live launch, while
 `reset_env`, `render_env`, and `close_env` delegate to the documented session
 lifecycle. The opt-in live episode test exercises the full create/reset/
-observe/close path and asserts the trusted fresh-observation receipt.
+observe/close path and asserts the trusted fresh-observation receipt. A failed
+launch is also closed before the error is re-raised. This remains an
+in-process contract facade; wiring it into the deployed worker pool requires
+the worker's documented Gazebo registration and process transport, which are
+not present in this repository.
 
 The checked-in `worlds/m1_oracle.sdf` is only a deterministic smoke world for
 process lifecycle testing; it is not a robot or perception benchmark scene.
