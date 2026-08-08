@@ -104,6 +104,10 @@
   existing `GazeboLiveSession` behind `sim/bench_worker.py`. The live worker
   MCP episode passes with ROS Jazzy sourced; M1 reset skips generic action
   settling because the adapter is explicitly read-only.
+- Final post-integration regression: the full sourced suite reports
+  `1194 passed, 14 skipped`; worker contract tests report `57 passed`, and
+  the opt-in real worker episode reports `1 passed` with no residual Gazebo,
+  ROS launch, bridge, or worker processes.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

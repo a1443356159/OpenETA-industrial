@@ -12,10 +12,10 @@ when work advances; do not start later milestones early.
 - [x] Record extension points and deviations in
       `docs/gazebo-integration-audit.md`.
 - [x] Run full upstream baseline in an environment with declared dependencies.
-  - Focused M0/M1/MCP set remains green; current Gazebo collection is
-    **13 passed, 3 skipped** with ROS Jazzy sourced.
+  - Focused M0/M1/MCP set remains green; worker contract tests report
+    **57 passed**, and the opt-in live worker episode reports **1 passed**.
   - Sourced regression with CPU `torch` and `omegaconf` installed in the
-    isolated declared-dependency environment: **1192 passed, 13 skipped**.
+    isolated declared-dependency environment: **1194 passed, 14 skipped**.
 
 ## M1 — Gazebo read-only observation
 
