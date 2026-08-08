@@ -11,9 +11,11 @@ when work advances; do not start later milestones early.
       `docs/gazebo-integration-audit.md`.
 - [ ] Run full upstream baseline in an environment with declared dependencies.
   - Focused M0/M1/MCP set: **62 passed** in `/tmp/openeta-plan-venv`.
-  - Broader suite: **1154 passed, 11 skipped, 4 pre-existing failures**;
-    one additional optional `torch` test cannot collect. Keep open until the
-    upstream baseline is green in its intended environment.
+  - Sourced regression (excluding optional torch collection and two known
+    web-resolver contract tests): **1166 passed, 14 skipped**. The two
+    web-resolver tests currently use RFC 5737 TEST-NET addresses as public
+    destinations and need an upstream contract decision; keep this item open
+    until the intended baseline is green.
 
 ## M1 — Gazebo read-only observation
 

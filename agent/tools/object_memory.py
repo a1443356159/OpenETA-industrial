@@ -34,6 +34,10 @@ OBJECT_MEMORY_SEARCH_SCHEMA_VERSION = "openeta.object_memory.search.v1"
 OBJECT_MEMORY_SEARCH_MATCH_TYPES = frozenset(
     {"exact_key", "exact_alias", "token", "fuzzy", "semantic"}
 )
+_DOCUMENTATION_ONLY_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+)
 
 ObjectMemoryDownloader = Callable[[str, Mapping[str, str], float, int], bytes]
 
@@ -87,7 +91,10 @@ class ObjectMemoryBankConfig:
                 raise ValueError(
                     "object memory bank HTTP URL must use a private IP literal"
                 ) from exc
-            if not (address.is_private or address.is_loopback or address.is_link_local):
+            if not (
+                (address.is_private or address.is_loopback or address.is_link_local)
+                and not address.is_reserved
+            ) or any(address in network for network in _DOCUMENTATION_ONLY_IPV4_NETWORKS):
                 raise ValueError(
                     "object memory bank HTTP URL must use a private, loopback, or "
                     "link-local IP"

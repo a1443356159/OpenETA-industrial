@@ -76,6 +76,14 @@
   live MCP facade therefore fails closed and cleans up a session if launch
   creation raises, without inventing a second server or undocumented worker
   protocol.
+- Upstream regression follow-up fixed Contact-GraspNet endpoint discovery in
+  shared runtime assembly without enabling the planner-facing backend, and
+  rejects RFC 5737 documentation IPv4 ranges in cleartext object-memory URLs.
+  The sourced baseline now reaches `1166 passed, 14 skipped` when the two
+  existing web-fetch resolver tests are deselected; those tests use reserved
+  TEST-NET addresses as if globally routable and remain open pending an
+  upstream contract decision. The optional torch contract test is not
+  collectible in the current venv.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

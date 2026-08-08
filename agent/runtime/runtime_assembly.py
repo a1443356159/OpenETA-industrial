@@ -72,6 +72,7 @@ from agent.tools.handlers import (
     build_sam3_handler,
     build_sse_anygrasp_mcp_grasper,
     build_sse_anyplace_mcp_placer,
+    build_sse_contact_graspnet_mcp_predictor,
     build_sse_depth_prior_mcp_estimator,
     build_sse_graspgenx_mcp_gripper_lister,
     build_sse_graspgenx_mcp_predictor,
@@ -536,6 +537,11 @@ def bind_runtime_perception_tools(
             list_grippers,
             output_root=artifact_root / "graspgenx_results",
         )
+    # Resolve the configured Contact-GraspNet endpoint for startup/discovery,
+    # but keep the backend disabled until its planner-facing contract is
+    # explicitly re-enabled for the target deployment.
+    if endpoints.contact_graspnet_url:
+        build_sse_contact_graspnet_mcp_predictor(url=endpoints.contact_graspnet_url)
     # Contact-GraspNet is temporarily disabled for the simulator drawer track.
     # Keep its endpoint/configuration and implementation available for a later
     # re-enable, but do not expose it as an executable grasp backend here.
