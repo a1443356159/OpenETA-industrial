@@ -98,6 +98,12 @@
   ROS Jazzy sourced full collection reports `1192 passed, 13 skipped`.
   These packages were installed only in the test environment; project
   dependency declarations and runtime architecture were not changed.
+- The former worker-boundary blocker is resolved using the repository's own
+  documented bench protocol: `gazebo` is a worker-manager bench, the stable
+  env ID is `openeta/gazebo_live_rgbd-v0`, and `GazeboWorkerEnv` adapts the
+  existing `GazeboLiveSession` behind `sim/bench_worker.py`. The live worker
+  MCP episode passes with ROS Jazzy sourced; M1 reset skips generic action
+  settling because the adapter is explicitly read-only.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

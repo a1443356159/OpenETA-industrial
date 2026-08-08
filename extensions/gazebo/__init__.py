@@ -15,5 +15,6 @@ from .process import (GazeboProcess, GazeboProcessError, GazeboWorldControl,
 from .observation import (GazeboObservationError, RosRgbdCameraConfig, RosRgbdCameraSource,
                           camera_info_intrinsics, decode_ros_depth, decode_ros_rgb)
 from .live import GazeboLiveSession, GazeboLiveSessionConfig
+from .worker import GazeboWorkerEnv, live_session_config_from_env
 
-__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport", "GazeboLiveMcpTransport", "GazeboProcess", "GazeboProcessError", "GazeboWorldControl", "Ros2LaunchProcess", "RosGzBridgeProcess", "GazeboObservationError", "RosRgbdCameraConfig", "RosRgbdCameraSource", "GazeboLiveSession", "GazeboLiveSessionConfig", "camera_info_intrinsics", "decode_ros_depth", "decode_ros_rgb"]
+__all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport", "GazeboLiveMcpTransport", "GazeboProcess", "GazeboProcessError", "GazeboWorldControl", "Ros2LaunchProcess", "RosGzBridgeProcess", "GazeboObservationError", "RosRgbdCameraConfig", "RosRgbdCameraSource", "GazeboLiveSession", "GazeboLiveSessionConfig", "GazeboWorkerEnv", "live_session_config_from_env", "camera_info_intrinsics", "decode_ros_depth", "decode_ros_rgb"]

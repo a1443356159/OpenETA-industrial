@@ -45,6 +45,7 @@ _HOT_BENCHES: dict[str, str] = {
     "robocasa":   "robocasa",
     "genesis":    "genesis",
     "d4rl":       "d4rl",
+    "gazebo":     "",                         # ROS 2/Gazebo is process-owned
 }
 
 
@@ -153,6 +154,7 @@ def _register_bench(bench: str) -> None:
         "robocasa":  _register_robocasa_envs,
         "genesis":   _register_genesis_envs,
         "d4rl":      _register_d4rl_envs,
+        "gazebo":    _register_gazebo_envs,
     }.get(bench)
     if _fn is None:
         return
@@ -318,6 +320,10 @@ def make_env(
         ue = UnifiedEnv(raw, render_mode=render_mode)
         ue._include_objects = include_objects
         return ue
+    if env_type == "gazebo":
+        from extensions.gazebo.worker import GazeboWorkerEnv
+
+        return GazeboWorkerEnv(task=task_name, seed=seed)
 
     # ── RLinf-backed env ───────────────────────────────────────
     from sim.envs import get_env_cls
@@ -820,6 +826,25 @@ def _register_dummy_envs() -> None:
     )
 
 
+def _register_gazebo_envs() -> None:
+    """Register the deployment-configured, read-only M1 Gazebo worker env."""
+
+    _register_one(
+        "openeta/gazebo_live_rgbd-v0",
+        EnvSpec(
+            id="openeta/gazebo_live_rgbd-v0",
+            env_type="gazebo",
+            task_slug="live_rgbd",
+            task_description="Gazebo ROS 2 live RGB-D observation (M1 read-only).",
+            max_episode_steps=1_000_000,
+            requires_gpu=False,
+            requires_sim_install=True,
+        ),
+        env_type="gazebo",
+        task_name="live_rgbd",
+    )
+
+
 # ── Behavior (BEHAVIOR-1K via OmniGibson) ────────────────────────────
 
 
@@ -1111,6 +1136,7 @@ def _init_registry() -> None:
     # Registration is static and intentionally does not import OmniGibson.
     # Instantiation still requires the isolated Isaac Sim worker environment.
     _register_behavior_envs()
+    _register_gazebo_envs()
 
     # Auto-register if running from a per-bench venv
     for bench in ["metaworld", "maniskill", "libero", "robocasa", "genesis", "d4rl"]:

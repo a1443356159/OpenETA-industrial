@@ -245,7 +245,7 @@ def _init_bench(bench: str) -> None:
     import sim.env_registry  # noqa: F401 — triggers gym registration
     from sim.env_registry import hot_activate
 
-    if bench not in ("dummy", "behavior"):
+    if bench not in ("dummy", "behavior", "gazebo"):
         ok = hot_activate(bench)
         if not ok:
             print(f"[worker:{bench}] WARNING: hot_activate returned False", flush=True)
@@ -265,6 +265,7 @@ def _auto_activate(env_id: str) -> None:
         "robocasa": "robocasa",
         "genesis": "genesis",
         "d4rl": "d4rl",
+        "gazebo": "gazebo",
     }
     target = mapping.get(bench)
     if target:
@@ -339,7 +340,7 @@ def _inject_render_frame(env, obs: dict) -> None:
     existing_cameras = obs.get("cameras")
     backend = str(getattr(env, "_backend", "") or "")
     if (
-        backend in {"behavior", "robocasa"}
+        backend in {"behavior", "robocasa", "gazebo"}
         and isinstance(existing_cameras, dict)
         and existing_cameras
     ):
@@ -502,6 +503,14 @@ def _observe_with_image(env, handle: str = "") -> dict:
     that was incorrectly written back), falls back to re-rendering only.
     """
     from adapter.protocol import EnvObservation
+
+    if str(getattr(env, "_backend", "") or "") == "gazebo":
+        # Gazebo's camera is an external ROS subscription, not a gym render
+        # buffer.  Ask the adapter for a fresh packet before serialisation.
+        obs = env.refresh_observation()
+        if handle:
+            _last_obs[handle] = obs
+        return EnvObservation.from_dict(obs).to_mcp_dict()
 
     obs = _last_obs.get(handle, {})
     if not obs:

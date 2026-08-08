@@ -38,6 +38,7 @@ _BENCH_MAP: dict[str, str] = {
     "metaworld": "metaworld", "maniskill": "maniskill",
     "libero": "libero", "robocasa": "robocasa",
     "genesis": "genesis", "d4rl": "d4rl", "behavior": "behavior",
+    "gazebo": "gazebo",
 }
 
 
@@ -223,7 +224,7 @@ def _venv_python(bench: str) -> str | None:
         if os.path.isfile(c) and os.access(c, os.X_OK):
             return c
     # Fall back to system python for benches that work on the system interpreter
-    if bench in ("metaworld", "dummy"):
+    if bench in ("metaworld", "dummy", "gazebo"):
         return _sys.executable
     return None
 
@@ -374,6 +375,18 @@ class BenchWorkerManager:
         # ``import adapter`` resolve to sim/adapter.py ("adapter is not a
         # package").  Drop it so the worker's own path setup is authoritative.
         child_env.pop("PYTHONPATH", None)
+        if bench == "gazebo":
+            # ROS 2 Jazzy's Python modules are installed outside the system
+            # interpreter's default path.  Keep the worker's repository path
+            # authoritative while adding only the documented ROS site-packages
+            # needed by rclpy/sensor_msgs.
+            ros_paths = [
+                "/opt/ros/jazzy/lib/python3.12/site-packages",
+                "/opt/ros/jazzy/local/lib/python3.12/dist-packages",
+            ]
+            child_env["PYTHONPATH"] = os.pathsep.join(
+                path for path in ros_paths if os.path.isdir(path)
+            )
         if bench == "behavior":
             behavior_root = os.path.join(str(_SIM_DIR), "venvs", "behavior")
             child_env.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
@@ -620,7 +633,7 @@ class BenchWorkerManager:
     def available_benches(self) -> dict[str, bool]:
         """Return which benches have venvs (i.e. are launchable)."""
         result = {"dummy": True}
-        for bench in ["metaworld", "maniskill", "libero", "robocasa", "genesis", "d4rl", "behavior"]:
+        for bench in ["metaworld", "maniskill", "libero", "robocasa", "genesis", "d4rl", "behavior", "gazebo"]:
             result[bench] = _venv_python(bench) is not None
         return result
 

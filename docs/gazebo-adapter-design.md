@@ -80,3 +80,22 @@ and bridge startup; process liveness alone is not treated as sensor readiness.
 `/world/<name>/control` service (`gz.msgs.WorldControl` → `gz.msgs.Boolean`)
 and checks the trusted `data: true` response. A reset seed is passed through
 the documented WorldControl field.
+
+## Existing worker deployment
+
+The adapter is now registered through OpenETA's existing bench-worker path;
+no second MCP server is introduced. The stable environment ID is
+`openeta/gazebo_live_rgbd-v0`. `BenchWorkerManager` resolves its `gazebo`
+prefix, starts the existing `sim/bench_worker.py --bench gazebo` subprocess,
+and the MCP server pins the returned handle to that worker exactly like the
+other benches. Inside the worker, `GazeboWorkerEnv` adapts the existing
+`GazeboLiveSession` to the worker's `reset/observe/render/close` contract.
+
+Deployment-owned camera/world values are supplied through worker environment
+variables. In particular, `OPENETA_GAZEBO_CAMERA_EXTRINSICS` is required JSON;
+the worker fails closed when explicit camera-to-world calibration is absent.
+The remaining `OPENETA_GAZEBO_*` variables select ROS 2/Gazebo executables,
+launch, world, topics, depth scale, and startup settle time. M1 remains
+read-only: the MCP server skips its generic action-settle hold for the
+`gazebo` backend and control remains unavailable until M2's documented
+contract exists.

@@ -382,7 +382,13 @@ def reset_env(handle: str, *, seed: int | None = None, session_id: str = "") -> 
     reset_obs = _proxy_reset(meta, seed=seed)
     # Let physics settle before returning — objects can spawn hovering /
     # jittering right after reset; a few hold steps bring them to rest.
-    settled = _settle_env(meta, meta.get("backend", ""))
+    # Gazebo M1 is an observation-only adapter; it has no simulator-side hold
+    # action until the documented M2 control contract exists.
+    settled = (
+        {}
+        if meta.get("backend", "") == "gazebo"
+        else _settle_env(meta, meta.get("backend", ""))
+    )
     settled_obs = settled.get("observation") if isinstance(settled, dict) else None
     return settled_obs if isinstance(settled_obs, dict) and settled_obs else reset_obs
 

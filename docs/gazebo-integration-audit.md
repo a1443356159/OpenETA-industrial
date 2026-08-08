@@ -64,14 +64,15 @@ termination, or manipulation-success claim.
 
 The existing proxy maps planner-facing `create_simulator_env`, `observe`, and
 `close_simulator_env` to the simulator MCP lifecycle.  Every episode owner
-must call `close_env` in `finally`; leaked handles are a test failure.  A real
-Gazebo worker should remain behind that boundary rather than adding ROS calls
-to the Planner.
+must call `close_env` in `finally`; leaked handles are a test failure. The
+live worker implementation remains behind that boundary rather than adding
+ROS calls to the Planner. `openeta/gazebo_live_rgbd-v0` is registered through
+`BenchWorkerManager` and `sim/bench_worker.py`; deployment calibration is
+supplied through explicit `OPENETA_GAZEBO_*` worker configuration.
 
 ## Minimum upstream changes
 
-None are required for M1.  `extensions/gazebo/` implements the smallest
-compatible lifecycle adapter and emits `EnvObservation` directly.  The
-existing MCP worker can host it once a registry entry is added in the
-ROS/Gazebo deployment milestone; no core `agent/` or `adapter/` rewrite is
-justified by the current contracts.
+The existing worker path is reused; no second MCP server or planner/runtime
+rewrite is introduced. `extensions/gazebo/` implements the lifecycle adapter,
+and `extensions/gazebo/worker.py` is only the worker-contract wrapper needed
+to host it in the existing bench subprocess.
