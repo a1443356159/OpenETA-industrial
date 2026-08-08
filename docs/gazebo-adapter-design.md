@@ -58,6 +58,11 @@ For M1 contract coverage, `GazeboOracleMcpTransport` is an in-process test
 transport that feeds the existing `SimulatorMcpEpisodeEnvironment`. It is
 explicitly oracle-only and does not claim to start Gazebo or ROS 2. The real
 deployment transport must retain the same tool names and cleanup semantics.
+`GazeboLiveMcpTransport` now supplies that same in-process boundary for a
+configured `GazeboLiveSession`: `create_env` owns the live launch, while
+`reset_env`, `render_env`, and `close_env` delegate to the documented session
+lifecycle. The opt-in live episode test exercises the full create/reset/
+observe/close path and asserts the trusted fresh-observation receipt.
 
 The checked-in `worlds/m1_oracle.sdf` is only a deterministic smoke world for
 process lifecycle testing; it is not a robot or perception benchmark scene.

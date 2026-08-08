@@ -61,6 +61,15 @@
   `RosRgbdCameraSource`, and `GazeboWorldControl` behind
   `create/reset/observe/close`. The opt-in live lifecycle test passes (`1
   passed`) and confirms scene epoch/reset metadata and idempotent cleanup.
+- Added `GazeboLiveMcpTransport`, preserving the existing OpenETA MCP tool
+  names and delegating lifecycle calls to `GazeboLiveSession`. Its opt-in
+  end-to-end episode test uses `SimulatorMcpEpisodeEnvironment`, checks the
+  trusted fresh-observation receipt, and always closes the live handle.
+- Regression evidence: with ROS Jazzy sourced, the complete Gazebo test
+  collection passes `12 passed, 3 skipped`; the opt-in live MCP episode passes
+  separately under the system ROS Python. Without the ROS environment, the
+  process/topic smoke test can time out because Gazebo resources are not
+  sourced, so ROS sourcing remains part of the documented test command.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

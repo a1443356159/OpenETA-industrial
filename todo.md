@@ -47,7 +47,8 @@ when work advances; do not start later milestones early.
       MCP worker boundary (requires documented deployment transport).
 - [x] Verify the OpenETA MCP lifecycle contract with the oracle transport and
       resource cleanup (`tests/test_gazebo_mcp_episode.py`).
-- [ ] Verify an end-to-end episode against a real Gazebo/ROS 2 deployment.
+- [x] Verify an end-to-end episode against a real Gazebo/ROS 2 deployment
+      (opt-in `tests/test_gazebo_live_mcp_episode.py`).
 
 ## Deferred by plan
 
