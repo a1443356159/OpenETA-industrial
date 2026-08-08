@@ -64,6 +64,7 @@ class PlannerProviderConfig:
     max_attempts: int = 3
     retry_backoff_s: float = 0.5
     context_window_tokens: int | None = DEFAULT_CONTEXT_WINDOW_TOKENS
+    max_tokens: int = 512
     fallback: ProviderEndpointConfig | None = None
     metadata: JsonDict = field(default_factory=dict)
 
@@ -91,6 +92,7 @@ class PlannerProviderConfig:
             "max_attempts": self.max_attempts,
             "retry_backoff_s": self.retry_backoff_s,
             "context_window_tokens": self.context_window_tokens,
+            "max_tokens": self.max_tokens,
             "fallback": self.fallback.redacted() if self.fallback is not None else None,
             "metadata": dict(self.metadata),
         }
@@ -104,6 +106,7 @@ class PlannerProviderConfig:
             f"OPENETA_LLM_TIMEOUT_S={self.timeout_s}",
             f"OPENETA_LLM_MAX_ATTEMPTS={self.max_attempts}",
             f"OPENETA_LLM_RETRY_BACKOFF_S={self.retry_backoff_s}",
+            f"OPENETA_LLM_MAX_TOKENS={self.max_tokens}",
         ]
         if self.context_window_tokens is not None:
             lines.append(f"OPENETA_LLM_CONTEXT_WINDOW_TOKENS={self.context_window_tokens}")
@@ -182,6 +185,11 @@ def load_planner_provider_config(
         dotenv.get("OPENETA_LLM_CONTEXT_WINDOW_TOKENS"),
         str(DEFAULT_CONTEXT_WINDOW_TOKENS),
     )
+    max_tokens = _first_positive_int(
+        source_env.get("OPENETA_LLM_MAX_TOKENS"),
+        dotenv.get("OPENETA_LLM_MAX_TOKENS"),
+        "512",
+    ) or 512
     fallback_provider = _first_present(
         source_env.get("OPENETA_LLM_FALLBACK_PROVIDER"),
         dotenv.get("OPENETA_LLM_FALLBACK_PROVIDER"),
@@ -226,6 +234,7 @@ def load_planner_provider_config(
         max_attempts=max_attempts or 3,
         retry_backoff_s=retry_backoff_s,
         context_window_tokens=context_window_tokens,
+        max_tokens=max_tokens,
         fallback=fallback,
         metadata={"sources": {"dotenv_path": str(dotenv_path), "apikey_path": str(apikey_path)}},
     )

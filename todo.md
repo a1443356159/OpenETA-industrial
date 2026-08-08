@@ -64,5 +64,6 @@ when work advances; do not start later milestones early.
 
 - [x] Configure the local OpenAI-compatible planner provider for DeepSeek
       `deepseek-v4-pro`; verify the model through the provider `/models`
-      endpoint and validate the OpenETA provider schema. The API key remains
-      only in the ignored local `.env` file.
+      endpoint, validate the OpenETA provider schema, and run a real planner
+      smoke through `OpenEtaAgentRuntime` with `max_tokens=4096`. The API key
+      remains only in the ignored local `.env` file.

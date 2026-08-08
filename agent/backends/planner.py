@@ -334,6 +334,7 @@ class OpenAICompatiblePlannerBackendConfig:
             max_attempts=config.max_attempts,
             retry_backoff_s=config.retry_backoff_s,
             context_window_tokens=config.context_window_tokens,
+            max_tokens=config.max_tokens,
             enable_vision=_metadata_bool(metadata, "enable_vision", default=True),
             max_vision_images=_metadata_positive_int(
                 metadata,

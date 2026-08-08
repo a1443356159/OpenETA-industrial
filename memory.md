@@ -109,12 +109,19 @@
   the opt-in real worker episode reports `1 passed` with no residual Gazebo,
   ROS launch, bridge, or worker processes.
 - Local planner provider configuration: `.env` now selects provider
-  `deepseek`, model `deepseek-v4-pro`, and base `https://api.deepseek.com`.
+  `deepseek`, model `deepseek-v4-pro`, base `https://api.deepseek.com`, and
+  `max_tokens=4096` to leave room for the model's reasoning output.
   The provider `/models` endpoint confirmed that exact model ID, and
   `load_planner_provider_config()` plus
   `OpenAICompatiblePlannerBackendConfig.from_provider_config()` validate
   successfully. The API key is intentionally not recorded in this memory or
   Git history.
+- Provider smoke evidence: a real `OpenEtaAgentRuntime` turn using the
+  configured DeepSeek backend produced a valid `response` action. The default
+  512-token budget had once yielded an empty content with `finish_reason=length`
+  on the reasoning model, so `OPENETA_LLM_MAX_TOKENS` was added to the existing
+  provider config contract and set locally to 4096; the full regression remains
+  green at `1194 passed, 14 skipped`.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
