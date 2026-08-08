@@ -44,6 +44,10 @@ MAX_WEB_SEARCH_QUERY_CHARS = 512
 MAX_WEB_URL_CHARS = 2048
 WEB_SEARCH_SCHEMA = "openeta.web_search.v1"
 WEB_FETCH_SCHEMA = "openeta.web_fetch.v1"
+_DOCUMENTATION_TEST_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+)
 _BLOCKED_HOST_SUFFIXES = (
     ".internal",
     ".lan",
@@ -573,7 +577,11 @@ def build_web_fetch_handler(
                 diagnostics=[{"code": "invalid_web_fetch_request"}],
             )
         try:
-            resolved = _resolve_public_https_url(requested_url, resolver=resolver)
+            resolved = _resolve_public_https_url(
+                requested_url,
+                resolver=resolver,
+                allow_documentation_test_network=transport is not None,
+            )
             response = fetch(resolved, timeout_s, max_response_bytes)
             if len(response.body) > max_response_bytes:
                 raise WebAccessError(
@@ -858,6 +866,7 @@ def _resolve_public_https_url(
     url: str,
     *,
     resolver: Callable[..., Sequence[tuple[Any, ...]]] = socket.getaddrinfo,
+    allow_documentation_test_network: bool = False,
 ) -> _ResolvedWebUrl:
     if not url or len(url) > MAX_WEB_URL_CHARS:
         raise WebAccessError(
@@ -919,7 +928,10 @@ def _resolve_public_https_url(
             ip = ipaddress.ip_address(ip_text)
         except ValueError:
             continue
-        if not ip.is_global:
+        is_documentation_test_address = any(ip in network for network in _DOCUMENTATION_TEST_NETWORKS)
+        if not ip.is_global and not (
+            allow_documentation_test_network and is_documentation_test_address
+        ):
             raise WebAccessError(
                 "web_fetch_address_blocked",
                 "web_fetch refuses hostnames that resolve to non-public addresses",

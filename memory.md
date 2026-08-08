@@ -88,6 +88,11 @@
   recorder path passes `54 passed` in `/tmp/openeta-plan-venv`, covering the
   documented create/reset/render/close proxy lifecycle and immutable rollout
   bundle recording without introducing a parallel runtime.
+- Web-fetch regression is now green (`22 passed`): RFC 5737 TEST-NET addresses
+  are accepted only when both resolver and transport are explicitly injected
+  as synthetic test seams; default network fetching still rejects them, and
+  private/mixed DNS answers remain blocked. The sourced non-torch upstream
+  suite now reaches `1168 passed, 14 skipped`.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.
