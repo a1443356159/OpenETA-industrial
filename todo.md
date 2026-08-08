@@ -10,7 +10,8 @@ when work advances; do not start later milestones early.
 - [x] Record extension points and deviations in
       `docs/gazebo-integration-audit.md`.
 - [ ] Run full upstream baseline in an environment with declared dependencies.
-  - Focused M0/M1/MCP set: **62 passed** in `/tmp/openeta-plan-venv`.
+  - Focused M0/M1/MCP set remains green; current Gazebo collection is
+    **13 passed, 3 skipped** with ROS Jazzy sourced.
   - Sourced regression (excluding optional torch collection and two known
     web-resolver contract tests): **1166 passed, 14 skipped**. The two
     web-resolver tests currently use RFC 5737 TEST-NET addresses as public
