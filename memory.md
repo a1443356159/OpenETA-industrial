@@ -93,6 +93,11 @@
   as synthetic test seams; default network fetching still rejects them, and
   private/mixed DNS answers remain blocked. The sourced non-torch upstream
   suite now reaches `1168 passed, 14 skipped`.
+- M0 baseline is now green in the isolated `/tmp/openeta-plan-venv` after
+  adding the optional test dependencies `torch==2.7.1+cpu` and `omegaconf`:
+  ROS Jazzy sourced full collection reports `1192 passed, 13 skipped`.
+  These packages were installed only in the test environment; project
+  dependency declarations and runtime architecture were not changed.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

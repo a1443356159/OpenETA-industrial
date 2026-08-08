@@ -11,13 +11,11 @@ when work advances; do not start later milestones early.
       simulator proxy plus rollout recorder regression passes **54 passed**.
 - [x] Record extension points and deviations in
       `docs/gazebo-integration-audit.md`.
-- [ ] Run full upstream baseline in an environment with declared dependencies.
+- [x] Run full upstream baseline in an environment with declared dependencies.
   - Focused M0/M1/MCP set remains green; current Gazebo collection is
     **13 passed, 3 skipped** with ROS Jazzy sourced.
-  - Sourced regression (excluding only the optional torch collection):
-    **1168 passed, 14 skipped**. The remaining gap is the optional
-    `test_behavior_vector_contract.py` dependency, which cannot collect until
-    the declared environment provides `torch`.
+  - Sourced regression with CPU `torch` and `omegaconf` installed in the
+    isolated declared-dependency environment: **1192 passed, 13 skipped**.
 
 ## M1 — Gazebo read-only observation
 
