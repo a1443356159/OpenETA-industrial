@@ -84,6 +84,10 @@
   TEST-NET addresses as if globally routable and remain open pending an
   upstream contract decision. The optional torch contract test is not
   collectible in the current venv.
+- M0 runtime evidence: the existing OpenETA simulator MCP proxy and rollout
+  recorder path passes `54 passed` in `/tmp/openeta-plan-venv`, covering the
+  documented create/reset/render/close proxy lifecycle and immutable rollout
+  bundle recording without introducing a parallel runtime.
 - Validation: `PYTHONPATH=. pytest -q tests/test_gazebo_lifecycle.py` passes
   (4 tests). Broader simulator tests could not collect in the current shell
   because optional dependency `gymnasium` is not installed.

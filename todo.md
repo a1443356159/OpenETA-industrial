@@ -7,6 +7,8 @@ when work advances; do not start later milestones early.
 
 - [x] Inspect architecture, action pipeline, unified observation, adapter
       protocol, and simulator MCP lifecycle.
+- [x] Execute an existing OpenETA simulator/MCP and rollout path: the
+      simulator proxy plus rollout recorder regression passes **54 passed**.
 - [x] Record extension points and deviations in
       `docs/gazebo-integration-audit.md`.
 - [ ] Run full upstream baseline in an environment with declared dependencies.
