@@ -44,7 +44,8 @@ when work advances; do not start later milestones early.
 - [x] Implement the documented conversion boundary and unit-test RGB/BGR,
       16UC1/32FC1 depth, CameraInfo intrinsics, and fail-closed validation.
 - [ ] Connect the adapter to a real Gazebo/ROS 2 process through the existing
-      MCP worker boundary (requires documented deployment transport).
+      MCP worker boundary (requires documented Gazebo worker registration and
+      process transport; generic SSE alone is insufficient).
 - [x] Verify the OpenETA MCP lifecycle contract with the oracle transport and
       resource cleanup (`tests/test_gazebo_mcp_episode.py`).
 - [x] Verify an end-to-end episode against a real Gazebo/ROS 2 deployment
