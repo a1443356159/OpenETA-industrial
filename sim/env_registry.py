@@ -324,11 +324,11 @@ def make_env(
         ue._include_objects = include_objects
         return ue
     if env_type == "gazebo":
-        from extensions.gazebo.worker import GazeboM2WorkerEnv, GazeboRobotiq2F85WorkerEnv, GazeboWorkerEnv
+        from extensions.gazebo.worker import GazeboM2WorkerEnv, GazeboM3WorkerEnv, GazeboRobotiq2F85WorkerEnv, GazeboWorkerEnv
 
         profile = overrides.pop("gazebo_profile", "m1")
         runtime_task = overrides.pop("task", task_name)
-        cls = (GazeboRobotiq2F85WorkerEnv if profile == "m2_robotiq2f85" else GazeboM2WorkerEnv if profile == "m2" else GazeboWorkerEnv)
+        cls = (GazeboM3WorkerEnv if profile == "m3_pickplace" else GazeboRobotiq2F85WorkerEnv if profile == "m2_robotiq2f85" else GazeboM2WorkerEnv if profile == "m2" else GazeboWorkerEnv)
         return cls(task=runtime_task, seed=seed, **overrides)
 
     # ── RLinf-backed env ───────────────────────────────────────
@@ -867,6 +867,22 @@ def _register_gazebo_envs() -> None:
             display_name="Gazebo 仿真环境",
             max_episode_steps=1_000_000, requires_gpu=False, requires_sim_install=True,
         ), env_type="gazebo", task_name="rm75_robotiq2f85", gazebo_profile="m2_robotiq2f85",
+    )
+    _register_one(
+        "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+        EnvSpec(
+            id="openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+            env_type="gazebo",
+            task_slug="rm75_robotiq2f85_pickplace",
+            task_description="Gazebo RM75 + Robotiq deterministic contact-only M3 pick-place verification.",
+            display_name="Gazebo 仿真环境（M3 拾放物理验证）",
+            max_episode_steps=1_000_000,
+            requires_gpu=False,
+            requires_sim_install=True,
+        ),
+        env_type="gazebo",
+        task_name="rm75_robotiq2f85_pickplace",
+        gazebo_profile="m3_pickplace",
     )
 
 

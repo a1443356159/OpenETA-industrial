@@ -12,7 +12,7 @@ import json
 import os
 import shutil
 import time
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 from gymnasium import Env, spaces
@@ -23,7 +23,16 @@ from .live import GazeboLiveSession, GazeboLiveSessionConfig
 from .observation import RosRgbdCameraConfig
 from .process import GazeboProcessError
 from .m2 import JOINT_NAMES, M2Config, M2Controller, Robotiq2F85Config
+from .m3 import (
+    M3_MODEL_ID,
+    M3Config,
+    M3Verifier,
+    ReasonCode,
+    relative_pose,
+    unknown_record,
+)
 from .ros_control import RosM2ControllerFactory
+from .ros_physics import RosM3PhysicsSourceFactory
 
 
 def _json_env(name: str, default: Any = None) -> Any:
@@ -74,7 +83,9 @@ def live_session_config_from_env() -> GazeboLiveSessionConfig:
     )
 
 
-def m2_live_session_config_from_env(*, robotiq: bool = False) -> GazeboLiveSessionConfig:
+def m2_live_session_config_from_env(
+    *, robotiq: bool = False, m3: bool = False
+) -> GazeboLiveSessionConfig:
     """Repository-owned M2 launch settings; no external workspace is accepted."""
     extrinsics = _json_env(
         "OPENETA_GAZEBO_CAMERA_EXTRINSICS",
@@ -94,9 +105,13 @@ def m2_live_session_config_from_env(*, robotiq: bool = False) -> GazeboLiveSessi
         ros2_executable=os.environ.get("OPENETA_GAZEBO_ROS2_EXECUTABLE", shutil.which("ros2") or "ros2"),
         gz_executable=os.environ.get("OPENETA_GAZEBO_GZ_EXECUTABLE", shutil.which("gz") or "gz"),
         launch_package="openeta_rm75_robotiq2f85_sim" if robotiq else "openeta_rm75_parallel_sim",
-        launch_file="m2_gazebo_moveit.launch.py",
+        launch_file="m3_gazebo_pickplace.launch.py" if m3 else "m2_gazebo_moveit.launch.py",
         launch_arguments=(),
-        world_name="m2_rm75_robotiq2f85" if robotiq else "m2_rm75_parallel",
+        world_name=(
+            "m3_rm75_robotiq2f85_pickplace"
+            if m3
+            else "m2_rm75_robotiq2f85" if robotiq else "m2_rm75_parallel"
+        ),
         camera=RosRgbdCameraConfig(
             rgb_topic="/openeta_rgbd/image",
             depth_topic="/openeta_rgbd/depth_image",
@@ -202,11 +217,14 @@ class GazeboM2WorkerEnv(GazeboWorkerEnv):
         self._session = None
         self._latest = None
         self._backend = "gazebo"
-        package_name = "openeta_rm75_robotiq2f85_sim" if cfg.model_id == "rm75_robotiq_2f85_sim_v1" else "openeta_rm75_parallel_sim"
+        is_robotiq = isinstance(cfg, Robotiq2F85Config)
+        package_name = "openeta_rm75_robotiq2f85_sim" if is_robotiq else "openeta_rm75_parallel_sim"
         package_prefix = cfg.ros_workspace / "install" / package_name
         _prepend_env_path("AMENT_PREFIX_PATH", str(package_prefix))
         self._session = GazeboLiveSession(
-            m2_live_session_config_from_env(robotiq=cfg.model_id == "rm75_robotiq_2f85_sim_v1"),
+            m2_live_session_config_from_env(
+                robotiq=is_robotiq, m3=cfg.model_id == M3_MODEL_ID
+            ),
             task=self._task,
         )
         self.openeta_control_spec = {"read_only": False, "m2": True, "model_id": cfg.model_id}
@@ -320,3 +338,263 @@ class GazeboRobotiq2F85WorkerEnv(GazeboM2WorkerEnv):
     def __init__(self, *, controller: M2Controller | None = None, **kwargs: Any) -> None:
         kwargs["m2_config"] = Robotiq2F85Config()
         super().__init__(controller=controller, **kwargs)
+
+
+class GazeboM3WorkerEnv(GazeboM2WorkerEnv):
+    """M3 worker that augments every M2 receipt with physical truth."""
+
+    def __init__(
+        self,
+        *,
+        controller: M2Controller | None = None,
+        physics_source: Any | None = None,
+        physics_source_factory: Any | None = None,
+        m3_config: M3Config | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._m3_config = m3_config or M3Config()
+        self._verifier = M3Verifier(self._m3_config)
+        self._physics_source = physics_source
+        self._physics_source_factory = physics_source_factory or RosM3PhysicsSourceFactory()
+        self._last_snapshot = None
+        kwargs["m2_config"] = self._m3_config
+        super().__init__(controller=controller, **kwargs)
+        self.openeta_control_spec.update(
+            {"m3": True, "physical_verification": True}
+        )
+        try:
+            if self._physics_source is None:
+                self._physics_source = self._physics_source_factory.create(
+                    self._ensure_controller(), self._m3_config
+                )
+            self._latest, snapshot = self._merge_physics(
+                self._latest or {}, require=True
+            )
+            self._initialize_planning_scene(snapshot)
+        except Exception:
+            self.close()
+            raise
+
+    def _camera_timestamp(self, raw: Mapping[str, Any]) -> float:
+        timestamps = [
+            float(camera.get("timestamp_s", 0.0))
+            for camera in raw.get("cameras", {}).values()
+            if isinstance(camera, Mapping)
+        ]
+        if not timestamps or min(timestamps) <= 0:
+            raise RuntimeError("M3_CAMERA_TIMESTAMP_MISSING")
+        return min(timestamps)
+
+    def _merge_physics(
+        self,
+        raw: dict[str, Any],
+        *,
+        action_type: str | None = None,
+        action_timestamp_s: float | None = None,
+        gripper_result: Mapping[str, Any] | None = None,
+        require: bool = False,
+    ) -> tuple[dict[str, Any], Any | None]:
+        try:
+            snapshot = self._physics_source.capture(
+                robot=raw["robot"],
+                camera_timestamp_s=self._camera_timestamp(raw),
+                min_timestamp_s=action_timestamp_s,
+                timeout_s=5.0,
+                gripper_stalled=(
+                    bool(gripper_result["stalled"])
+                    if gripper_result is not None and "stalled" in gripper_result
+                    else None
+                ),
+                gripper_reached_goal=(
+                    bool(gripper_result["reached_goal"])
+                    if gripper_result is not None and "reached_goal" in gripper_result
+                    else None
+                ),
+            )
+            record = self._verifier.verify(
+                snapshot,
+                action_type=action_type,
+                action_timestamp_s=action_timestamp_s,
+            )
+            self._last_snapshot = snapshot
+            raw["objects"] = [item.to_dict() for item in snapshot.objects]
+        except Exception as exc:
+            if require:
+                raise
+            snapshot = None
+            record = unknown_record(
+                ReasonCode.DATA_MISSING,
+                phase=self._verifier.phase,
+                target_id=self._m3_config.target_id,
+                evidence={"error_type": type(exc).__name__, "error": str(exc)},
+            )
+            raw["objects"] = []
+        physical = record.to_dict()
+        gripper = raw.setdefault("robot", {}).setdefault("gripper_state", {})
+        contacts = snapshot.contacts if snapshot is not None else None
+        common_ids = (
+            set(contacts.left_object_ids).intersection(contacts.right_object_ids)
+            if contacts is not None
+            else set()
+        )
+        gripper.update(
+            {
+                "contact_left": bool(contacts and contacts.left_object_ids),
+                "contact_right": bool(contacts and contacts.right_object_ids),
+                "contact_object_id": (
+                    next(iter(common_ids)) if len(common_ids) == 1 else None
+                ),
+                "object_detection": record.object_detection,
+                "grasp_confirmed": record.grasp_confirmed,
+                "slip_detected": record.slip_detected,
+            }
+        )
+        raw.setdefault("metadata", {}).update(
+            {
+                "model_id": self._m3_config.model_id,
+                "physical_verification": physical,
+            }
+        )
+        self._latest = raw
+        return raw, snapshot
+
+    def _initialize_planning_scene(self, snapshot: Any) -> None:
+        if snapshot is None:
+            raise RuntimeError("M3_PHYSICS_TIMEOUT")
+        target = snapshot.object(self._m3_config.target_id)
+        distractor = snapshot.object(self._m3_config.distractor_id)
+        if target is None or distractor is None:
+            raise RuntimeError("M3_PHYSICS_TIMEOUT")
+        planning = getattr(self._physics_source, "planning_scene", None)
+        if planning is not None:
+            planning.initialize(target.pose, distractor.pose)
+
+    def refresh_observation(
+        self,
+        *,
+        min_camera_timestamp_s: float | None = None,
+        min_received_monotonic_s: float | None = None,
+        action_type: str | None = None,
+        gripper_result: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raw = super().refresh_observation(
+            min_camera_timestamp_s=min_camera_timestamp_s,
+            min_received_monotonic_s=min_received_monotonic_s,
+        )
+        merged, _ = self._merge_physics(
+            raw,
+            action_type=action_type,
+            action_timestamp_s=min_camera_timestamp_s,
+            gripper_result=gripper_result,
+        )
+        return merged
+
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        del options
+        if seed is not None:
+            self._seed = int(seed)
+        controller = self._ensure_controller()
+        planning = getattr(self._physics_source, "planning_scene", None)
+        if planning is not None:
+            planning.clear()
+        self._verifier.reset()
+        self._last_snapshot = None
+        self._physics_source.clear()
+        reset_sources = getattr(controller, "reset_sources", None)
+        if callable(reset_sources):
+            reset_sources()
+        self._session.reset(seed=self._seed, preserve_sim_time=True)
+        wait_ready = getattr(controller, "wait_ready", None)
+        if callable(wait_ready):
+            wait_ready(30.0)
+        opened = controller.execute({"action_type": "gripper_open"}).to_dict()
+        if not opened.get("ok"):
+            raise GazeboProcessError(opened.get("error_code") or "GRIPPER_FAILED")
+        barrier = opened.get("action_completed_ros_time_s")
+        observation = super().refresh_observation(
+            min_camera_timestamp_s=float(barrier) if barrier is not None else None
+        )
+        observation, snapshot = self._merge_physics(
+            observation,
+            action_type="gripper_open",
+            action_timestamp_s=float(barrier) if barrier is not None else None,
+            gripper_result=opened,
+            require=True,
+        )
+        self._initialize_planning_scene(snapshot)
+        return observation, {}
+
+    def step(self, action: Any):
+        controller = self._ensure_controller()
+        raw_action = action if isinstance(action, dict) else {}
+        action_type = raw_action.get("action_type")
+        planning = getattr(self._physics_source, "planning_scene", None)
+        if action_type == "gripper_open" and planning is not None and planning.attached:
+            target = (
+                self._last_snapshot.object(self._m3_config.target_id)
+                if self._last_snapshot is not None
+                else None
+            )
+            if target is not None:
+                planning.release(target.pose)
+        result = controller.execute(raw_action).to_dict()
+        completed_monotonic = time.monotonic()
+        barrier = result.get("action_completed_ros_time_s")
+        observation = super().refresh_observation(
+            min_camera_timestamp_s=float(barrier) if barrier is not None else None,
+            min_received_monotonic_s=completed_monotonic,
+        )
+        observation, snapshot = self._merge_physics(
+            observation,
+            action_type=str(action_type) if action_type is not None else None,
+            action_timestamp_s=float(barrier) if barrier is not None else None,
+            gripper_result=result,
+        )
+        physical = observation["metadata"]["physical_verification"]
+        # Opening at a destination or in free space needs post-release physics
+        # time.  Keep returning a fresh complete observation, but wait until a
+        # structured terminal verdict or the bounded settle window expires.
+        deadline = time.monotonic() + 2.5
+        while (
+            action_type == "gripper_open"
+            and physical["reason_code"] == ReasonCode.NOT_SETTLED.value
+            and time.monotonic() < deadline
+        ):
+            observation = super().refresh_observation(
+                min_camera_timestamp_s=float(barrier) if barrier is not None else None
+            )
+            observation, snapshot = self._merge_physics(
+                observation,
+                action_type=None,
+                action_timestamp_s=float(barrier) if barrier is not None else None,
+                gripper_result=result,
+            )
+            physical = observation["metadata"]["physical_verification"]
+        if (
+            snapshot is not None
+            and planning is not None
+            and physical["reason_code"] == ReasonCode.TARGET_HELD.value
+            and not planning.attached
+        ):
+            target = snapshot.object(self._m3_config.target_id)
+            if target is not None:
+                planning.attach(relative_pose(snapshot.eef_pose, target.pose))
+        if action_type == "gripper_open" and planning is not None and snapshot is not None:
+            target = snapshot.object(self._m3_config.target_id)
+            if target is not None and not planning.attached:
+                planning.release(target.pose)
+        result["physical_verification"] = physical
+        result["observation"] = observation
+        return observation, 0.0, False, False, result
+
+    def close(self) -> None:
+        try:
+            if self._physics_source is not None:
+                self._physics_source.close()
+        finally:
+            try:
+                if getattr(self, "controller", None) is not None:
+                    self.controller.close()
+            finally:
+                if getattr(self, "_session", None) is not None:
+                    GazeboWorkerEnv.close(self)
