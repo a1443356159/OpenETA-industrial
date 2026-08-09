@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<robot name="rm75_robotiq_2f85_pickplace_sim_v1" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="controller_config" default="$(find openeta_rm75_robotiq2f85_sim)/config/controllers.yaml"/>
+  <xacro:include filename="$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro"/>
+  <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/rm75_robotiq2f85.urdf.xacro"/>
+  <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/urdf/ros2_control.xacro"/>
+  <xacro:rm75_robotiq2f85 parent="link_7"/>
+  <xacro:openeta_robotiq_ros2_control controller_config="$(arg controller_config)"/>
+
+  <xacro:macro name="gz_gripper_position_controller" params="joint topic">
+    <gazebo>
+      <plugin filename="gz-sim-joint-position-controller-system"
+              name="gz::sim::systems::JointPositionController">
+        <joint_name>${joint}</joint_name><topic>${topic}</topic>
+        <p_gain>12.0</p_gain><i_gain>0.0</i_gain><d_gain>0.4</d_gain>
+        <cmd_max>30.0</cmd_max><cmd_min>-30.0</cmd_min>
+      </plugin>
+    </gazebo>
+  </xacro:macro>
+  <xacro:gz_gripper_position_controller joint="gripper_left_finger_joint" topic="/openeta/gripper/left_outer"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_finger_joint" topic="/openeta/gripper/right_outer"/>
+  <xacro:gz_gripper_position_controller joint="gripper_left_inner_knuckle_joint" topic="/openeta/gripper/left_inner"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_inner_knuckle_joint" topic="/openeta/gripper/right_inner"/>
+  <xacro:gz_gripper_position_controller joint="gripper_left_finger_tip_joint" topic="/openeta/gripper/left_tip"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_finger_tip_joint" topic="/openeta/gripper/right_tip"/>
+
+  <!-- M3-only material/contact settings.  M2's frozen behavior is unchanged. -->
+  <gazebo reference="robotiq_85_left_finger_tip_link">
+    <mu1>1.5</mu1><mu2>1.5</mu2><kp>100000</kp><kd>10</kd>
+    <sensor name="m3_left_fingertip_contact" type="contact">
+      <contact>
+        <collision>robotiq_85_left_finger_tip_link_collision</collision>
+        <topic>/m3/contact/left_fingertip</topic>
+      </contact>
+      <always_on>true</always_on><update_rate>100</update_rate>
+    </sensor>
+  </gazebo>
+  <gazebo reference="robotiq_85_right_finger_tip_link">
+    <mu1>1.5</mu1><mu2>1.5</mu2><kp>100000</kp><kd>10</kd>
+    <sensor name="m3_right_fingertip_contact" type="contact">
+      <contact>
+        <collision>robotiq_85_right_finger_tip_link_collision</collision>
+        <topic>/m3/contact/right_fingertip</topic>
+      </contact>
+      <always_on>true</always_on><update_rate>100</update_rate>
+    </sensor>
+  </gazebo>
+  <gazebo reference="rm75_to_gripper_mount"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
+</robot>

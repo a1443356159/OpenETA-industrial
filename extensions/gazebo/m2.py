@@ -442,6 +442,12 @@ class M2Controller:
                         {"motion_outcome": "unknown", "reconciliation_required": True},
                     )
                 ok = result["ok"]
+                state.gripper_state.update(
+                    {
+                        "reached_goal": bool(result.get("reached_goal", ok)),
+                        "stalled": bool(result.get("stalled", False)),
+                    }
+                )
                 action_timing = {
                     key: result[key]
                     for key in (
@@ -455,6 +461,8 @@ class M2Controller:
                     result.get("error_code") or (None if ok else "GRIPPER_FAILED"),
                     {
                         "gripper_state": state.gripper_state,
+                        "reached_goal": bool(result.get("reached_goal", ok)),
+                        "stalled": bool(result.get("stalled", False)),
                         "observation": {"robot": state.to_dict()},
                         **action_timing,
                     },

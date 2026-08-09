@@ -58,6 +58,16 @@ def expanded_targets(active_position: float) -> dict[str, float]:
 class RobotiqGripperActionAdapter(Node):
     def __init__(self) -> None:
         super().__init__("openeta_robotiq_gripper_action_adapter")
+        self.declare_parameter("allow_stalling", False)
+        self.declare_parameter("stall_velocity_threshold", 0.001)
+        self.declare_parameter("stall_timeout", 1.0)
+        self._allow_stalling = bool(self.get_parameter("allow_stalling").value)
+        self._stall_velocity_threshold = float(
+            self.get_parameter("stall_velocity_threshold").value
+        )
+        self._stall_timeout = float(self.get_parameter("stall_timeout").value)
+        if self._stall_velocity_threshold < 0 or self._stall_timeout <= 0:
+            raise ValueError("stall thresholds must be non-negative with a positive timeout")
         self._callback_group = ReentrantCallbackGroup()
         self._lock = threading.Lock()
         self._positions: dict[str, float] = {}
@@ -139,6 +149,7 @@ class RobotiqGripperActionAdapter(Node):
         targets = expanded_targets(active_position)
         result = ParallelGripperCommand.Result()
         deadline = time.monotonic() + ACTION_TIMEOUT_S
+        last_movement_time = time.monotonic()
 
         while rclpy.ok() and time.monotonic() < deadline:
             positions, velocities, state = self._snapshot()
@@ -163,6 +174,21 @@ class RobotiqGripperActionAdapter(Node):
                     result.state = self._result_state(positions, velocities, state)
                     result.stalled = False
                     result.reached_goal = True
+                    goal_handle.succeed()
+                    return result
+                active_velocity = abs(float(velocities.get(ACTIVE_JOINT, 0.0)))
+                if active_velocity > self._stall_velocity_threshold:
+                    last_movement_time = time.monotonic()
+                elif (
+                    self._allow_stalling
+                    and time.monotonic() - last_movement_time >= self._stall_timeout
+                ):
+                    # Match the documented ros2_control stall-success result:
+                    # the action terminal state is successful, while physical
+                    # grasp success remains exclusively the M3 verifier's job.
+                    result.state = self._result_state(positions, velocities, state)
+                    result.stalled = True
+                    result.reached_goal = False
                     goal_handle.succeed()
                     return result
             time.sleep(0.05)

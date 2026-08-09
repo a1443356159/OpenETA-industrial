@@ -14,6 +14,20 @@ from typing import Any, Mapping
 from .m2 import M2Config, M2Controller, make_move_group_goal, robot_state_from_sources
 
 
+def _stamp_seconds(stamp: Any) -> float | None:
+    if stamp is None:
+        return None
+    return float(int(getattr(stamp, "sec", 0))) + float(
+        int(getattr(stamp, "nanosec", 0))
+    ) * 1e-9
+
+
+def gripper_action_success(*, reached_goal: bool, stalled: bool, allow_stalling: bool) -> bool:
+    """Documented stall-success policy, kept pure for M2/M3 isolation tests."""
+
+    return bool(reached_goal) or (bool(allow_stalling) and bool(stalled))
+
+
 class RosM2StateSource:
     def __init__(self, node: Any, tf_buffer: Any, *, config: M2Config, freshness_s: float = 2.0):
         self.node, self.tf_buffer, self.config = node, tf_buffer, config
@@ -59,9 +73,10 @@ class RosM2StateSource:
                 lookup_time = Time()
             except ImportError:
                 lookup_time = self.node.get_clock().now()
-            transform = self.tf_buffer.lookup_transform(
+            stamped_transform = self.tf_buffer.lookup_transform(
                 self.config.base_link, self.config.mount_child, lookup_time
-            ).transform
+            )
+            transform = stamped_transform.transform
         except Exception as exc:
             raise RuntimeError("TF_TIMEOUT") from exc
         state = robot_state_from_sources(joint, {
@@ -74,6 +89,9 @@ class RosM2StateSource:
             {
                 "joint_state_timestamp_s": joint_stamp,
                 "joint_state_received_monotonic_s": received,
+                "tf_timestamp_s": _stamp_seconds(
+                    getattr(getattr(stamped_transform, "header", None), "stamp", None)
+                ),
             }
         )
         return state
@@ -169,6 +187,7 @@ class RosM2ControllerFactory:
             controller_list_client=controller_list_client,
             controller_service_type=ListControllers,
             listener=listener, subscription=subscription, owns_context=owns_context,
+            allow_stalling=bool(getattr(cfg, "allow_stalling", False)),
         )
         runtime.start()
         controller = RosM2Controller(runtime, config=cfg)
@@ -388,7 +407,19 @@ class _RosRuntime:
             self.state_source.clear()
             raise
         result = wrapped.result
-        return finish({"ok": bool(result.reached_goal), "reached_goal": bool(result.reached_goal), "stalled": bool(result.stalled), "error_code": None if result.reached_goal else "GRIPPER_FAILED"})
+        reached_goal = bool(result.reached_goal)
+        stalled = bool(result.stalled)
+        ok = gripper_action_success(
+            reached_goal=reached_goal,
+            stalled=stalled,
+            allow_stalling=bool(self.allow_stalling),
+        )
+        return finish({
+            "ok": ok,
+            "reached_goal": reached_goal,
+            "stalled": stalled,
+            "error_code": None if ok else "GRIPPER_FAILED",
+        })
 
     def cancel_pending(self) -> None:
         with self._lock:
