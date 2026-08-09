@@ -59,7 +59,11 @@ when work advances; do not start later milestones early.
       structured action routing, worker profile registration, and contract tests.
 - [x] M2 live ROS action client/launch verification using the repository-owned
       Jazzy/Harmonic RM75 + Robotiq 2F-85 profile and frozen vendor assets.
-- [ ] M3 physical grasp and placement verification.
+- [ ] M3 physical grasp and placement verification. The isolated profile,
+      trusted verifier, PlanningScene integration, worker/MCP route and
+      acceptance driver are implemented; formal gates remain blocked by the
+      live bilateral-contact result documented in
+      `docs/gazebo-m3-physical-verification.md`.
 - [ ] M4 oracle pick/place.
 - [ ] M5+ SAM3 integration and industrial benchmark.
 

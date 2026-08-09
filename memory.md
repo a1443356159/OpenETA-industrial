@@ -228,5 +228,11 @@
   plan-only and was not reused. The former `ROS_NOT_READY` blocker is resolved
   by the repository-owned Robotiq profile and `RosM2ControllerFactory`.
 
-- M3 contact, grasp, attachment, and placement physics remain deferred; the M2
-  result establishes motion/gripper/observation/control lifecycle only.
+- M3 contact, grasp, attachment, and placement physics are now implemented as
+  an isolated development checkpoint. Formal M3 acceptance remains pending:
+  the first live candidate reached pregrasp but did not establish bilateral
+  fingertip contact or a stall in the 32–48 mm aperture band, and Harmonic did
+  not publish empty Contact heartbeats for non-contacting fingertips. The
+  fail-closed verifier therefore returned `UNKNOWN` rather than claiming a
+  grasp. See `docs/gazebo-m3-physical-verification.md`; neither the M2 nor M3
+  milestone checkbox is accepted.
