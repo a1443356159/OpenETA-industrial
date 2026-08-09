@@ -1,0 +1,268 @@
+# M3 真实接触抓放物理验证施工计划
+
+M2 baseline SHA: `3ace2b5c97516adda2f56c214e1afa80e43e75fc`
+
+## Summary
+
+在 `main` 上先把当前 M2 开发整理为三个本地提交，但将其状态明确保留为“实现完成、正式验收未通过”。随后从该提交创建 `dev-M3`，把本计划原文写入仓库根目录 `plan-M3.plan` 并单独提交。
+
+M3 新增独立 Gazebo 拾放环境，通过真实碰撞、摩擦、双指接触和物体运动验证抓取、抬升、搬运、掉落及放置。禁止使用 Gazebo detachable joint、固定关节或隐藏吸附模拟成功；纯接触物理不稳定时，M3 保持未完成并记录阻塞。
+
+M3 只负责确定性物理执行与可信校验。LLM/VLM、SAM3、AnyGrasp、AnyPlace 和完整智能抓放流程仍属于 M4/M5。
+
+## 1. M2 提交与分支基线
+
+1. 在 `main` 上执行提交前审计：
+
+   - 不覆盖或丢弃现有用户改动。
+   - 显式分路径、分 hunk 暂存，禁止 `git add -A`。
+   - 将 941 MB 的 `extensions/资料/` 加入忽略规则，冻结的小型正式资产继续保留。
+   - 排除 `.env`、API key、`.openeta_memory/`、`.cache/`、本地 runtime 配置、构建目录和验收 JSON。
+   - 检查大文件、密钥特征、`git diff --cached --check` 和 staged 文件清单。
+   - 不推送远端、不创建 PR，除非用户另行要求。
+
+2. 仅纠正 `todo.md` 和 `memory.md` 的 M2 验收状态：
+
+   - 保留已经完成的实现项和历史测试数据。
+   - 将“formal acceptance passed”改为“本地开发验证证据，尚不构成正式验收”。
+   - M2 正式验收 checkbox 保持未完成。
+   - 不改变两个文档的结构、用途或其他里程碑状态。
+
+3. 创建三个提交：
+
+   - `feat(gazebo): add RM75 Robotiq M2 integration`
+     - 包含 Gazebo/ROS/MoveIt adapter、worker、资产、环境注册、MCP 路由、脚本、依赖和 M2 测试。
+   - `fix(planner): harden OpenAI-compatible text provider interoperability`
+     - 只保留有复现和测试依据的最小兼容修复：`max_tokens`/`enable_vision` 配置持久化、纯文本 Planner 不发送图片附件、空内容返回结构化失败而非崩溃或伪造成功。
+     - 不加入针对某个 DeepSeek 输出的宽泛 schema 猜测或自动改写。
+   - `docs(status): mark M2 acceptance pending`
+     - 提交 M2 未验收状态修正及相关运行说明。
+
+4. 提交前运行：
+
+   - M2 资产、XML、relocatability 和离线合同测试。
+   - Planner provider、CLI、MCP proxy 聚焦测试。
+   - `scripts/check_openeta_m2.sh`。
+   - 排除可选 `torch`/BEHAVIOR 套件后的仓库回归。
+   - 这些结果只标记为 checkpoint verification，不更新 M2 为正式验收。
+
+5. 从第三个提交创建 `dev-M3`，将实际 M2 baseline SHA 写入 `plan-M3.plan`，提交：
+
+   - `docs(m3): add physical pick-place verification plan`
+
+## 2. 上游依据与实现边界
+
+所有机制按以下优先级取证：
+
+1. 当前安装版本的 ROS 2 Jazzy、Gazebo Harmonic、MoveIt 和 ros2_control 文档/API。
+2. 对应版本或 tag 的官方开源仓库和示例。
+3. 已冻结的 RM75、Robotiq 资产及其上游仓库。
+4. 若资料不足或版本冲突，停止该部分开发并记录来源、版本和阻塞，不自行发明协议、插件或控制语义。
+
+采用的正式接口：
+
+- 使用 Gazebo Harmonic 官方 Contact system 和 `<sensor type="contact">` 获取真实碰撞身份及接触数据。[Gazebo Contact sensor 文档](https://gazebosim.org/docs/harmonic/sensors/)、[Contact system API](https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1Contact.html)
+- 使用 `ros_gz_bridge` 已支持的 `gz.msgs.Contacts ↔ ros_gz_interfaces/msg/Contacts` 和 `gz.msgs.Odometry ↔ nav_msgs/msg/Odometry` 映射，不自定义传输协议。[ros_gz bridge 支持列表](https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md)
+- 使用 MoveIt PlanningScene、CollisionObject、AttachedCollisionObject 和 AllowedCollisionMatrix 表达工作台、物体及规划碰撞关系。[MoveIt Planning Around Objects](https://moveit.picknik.ai/main/doc/tutorials/planning_around_objects/planning_around_objects.html)
+- M3 夹爪允许采用 ros2_control 文档定义的 stall-success 语义：物体阻挡闭合时动作可以成功结束，但必须返回 `stalled=true`、`reached_goal=false`，物理抓取成功仍由校验器决定。[ros2_control Gripper Action Controller](https://control.ros.org/jazzy/doc/ros2_controllers/gripper_controllers/doc/userdoc.html)
+- MoveIt 中的 AttachedCollisionObject 仅用于后续轨迹规划；Gazebo 中不得创建附着关节或改变物体运动学关系。
+
+每份 M3 报告记录采用的文档 URL、仓库 commit/tag、已安装包版本及对应实现位置，避免后续升级时失去可追溯性。
+
+## 3. M3 环境、接口与可信校验器
+
+### 独立环境
+
+新增而不修改 M2 行为：
+
+- `env_id`: `openeta/gazebo_rm75_robotiq2f85_pickplace-v0`
+- `model_id`: `rm75_robotiq_2f85_pickplace_sim_v1`
+- 显示名称：`Gazebo 仿真环境（M3 拾放物理验证）`
+- `control_spec` 保留 `m2=true`，新增 `m3=true`、`physical_verification=true`。
+- 继续使用现有 `create/reset/observe/move_to/gripper_open/gripper_close/close` MCP schema，不新增原子 `pick_place` 工具。
+- Dashboard 沿用当前 observation 展示，不新增另一套控制路径。
+
+### 固定双物体场景
+
+M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
+
+- 工作台：中心约 `x=0.35, y=0`，台面 `z=0.40 m`，尺寸 `0.70 × 0.60 m`。
+- 目标物：`m3_target`，`40 × 40 × 60 mm` 立方体，质量 `0.10 kg`，初始中心约 `[0.28, -0.10, 0.43]`。
+- 干扰物：`m3_distractor`，直径 `50 mm`、高 `80 mm` 圆柱，质量 `0.12 kg`，初始中心约 `[0.28, 0.12, 0.44]`。
+- 放置区：中心约 `[0.48, -0.10]`，`120 × 120 mm`，只有视觉标记，不增加承托或吸附功能。
+- 延续当前 Gazebo 物理引擎和重力配置；摩擦、接触刚度等参数只使用 SDF/Gazebo 文档支持的字段，并在报告中记录具体值。
+
+在左右指尖碰撞体上配置 Contact sensor，在目标物碰撞体上配置用于判定工作台支撑的 Contact sensor。目标物和干扰物使用官方 OdometryPublisher 输出世界位姿和速度。
+
+### MoveIt 场景
+
+- reset 后向 PlanningScene 加入工作台、目标物、干扰物。
+- 默认禁止机器人与三者碰撞。
+- 仅允许从冻结 Robotiq 资产中确定的左右指尖碰撞链路与目标物接触；机械臂、工作台、干扰物仍禁止碰撞。
+- 抓取通过物理校验后，才把目标物作为 MoveIt AttachedCollisionObject，用实际 Gazebo 相对位姿描述。
+- 放置前将规划对象恢复为 world object；打开夹爪后使用 Gazebo 实际落定姿态更新 PlanningScene。
+- reset/close 必须清除所有 M3 PlanningScene 状态，不影响 M2 环境。
+
+### 数据与公开回执
+
+在现有 observation 上做向后兼容的增量扩展：
+
+- `objects[]`：`id/name/label/role`、世界 `position/orientation`、线速度、角速度、支撑物、Gazebo 时间戳和 `provenance=gazebo_truth`。
+- `robot.gripper_state`：增加 `contact_left`、`contact_right`、`contact_object_id`、`object_detection`、`grasp_confirmed`、`slip_detected`。
+- `metadata.physical_verification`：
+  - `schema_version=m3_physical_verification_v1`
+  - `phase`
+  - `verdict=PASS|FAIL|UNKNOWN`
+  - `reason_code`
+  - `target_id`
+  - 接触、位姿、速度、相对变换、支撑及时间戳证据。
+- 世界变更动作的 `StepResult.info.physical_verification` 引用同一份可信记录，且动作回执仍必须包含完整 fresh observation。
+
+所有 JointState、TF、RGB-D、Contact 和 Odometry 数据缺失、过期、对象身份不完整或时间戳早于动作时，一律返回 `UNKNOWN`，不得推断成功。
+
+### 校验状态机
+
+实现一个无 ROS 依赖的纯 Python M3 verifier，由 ROS physics source 提供输入：
+
+1. 闭合候选：
+
+   - 同一目标物连续至少 `0.20 s` 接触左右指尖。
+   - 夹爪受到目标阻挡，开口约在 `32–48 mm`。
+   - 返回 `UNKNOWN/LIFT_REQUIRED` 和兼容字段 `object_detection=object_detected_closing`。
+   - 闭合动作本身永远不能产生最终抓取 PASS。
+
+2. 空抓：
+
+   - aperture `≤6 mm` 且无双侧对象接触。
+   - 返回 `FAIL/EMPTY_GRASP`、`object_detection=at_position_no_object`。
+
+3. 抓错物体：
+
+   - 左右指尖稳定接触 `m3_distractor`。
+   - 返回 `FAIL/WRONG_OBJECT`，不得用几何邻近替代对象身份。
+
+4. 抬升确认：
+
+   - 保存闭合时目标和 EEF 相对变换。
+   - 执行 `80 mm` 世界 Z 正方向 lift probe。
+   - 目标上升至少 `60 mm`、脱离工作台、双侧接触保持、EEF—目标平移漂移 `≤10 mm`、旋转漂移 `≤0.15 rad`。
+   - 全部成立返回 `PASS/TARGET_HELD`，否则按证据返回 `FAIL` 或 `UNKNOWN`。
+
+5. 搬运与掉落：
+
+   - 持续监测接触、相对变换和目标高度。
+   - 接触丢失并出现目标下落或重新落到非目标区域时，撤销 held 状态并返回 `FAIL/OBJECT_DROPPED`。
+   - 掉落实测通过在空中完全打开夹爪触发，不使用外力插件或隐藏 detach 命令。
+
+6. 放置：
+
+   - 目标完整包围盒位于放置区内，并保留 `5 mm` 边界余量。
+   - 无指尖接触、目标由工作台支撑。
+   - 连续 `1.0 s` 满足线速度 `≤0.02 m/s`、角速度 `≤0.10 rad/s`。
+   - 返回 `PASS/TARGET_PLACED`。
+   - 区域外落定返回 `FAIL/OUTSIDE_DESTINATION`；尚未落定或数据不新鲜返回 `UNKNOWN/NOT_SETTLED`。
+
+## 4. 实施顺序
+
+1. M3 profile 与场景：
+
+   - 新增 M3 world、launch 和环境注册。
+   - 加入工作台、双物体、放置区、Contact/OdometryPublisher 及 ros_gz bridge。
+   - 验证 Gazebo GUI、双 RGB-D、Contact、Odometry、JointState、TF 和三个 controller 就绪。
+
+2. 夹爪及 PlanningScene：
+
+   - 为 M3 profile 增加 `allow_stalling`，M2 继续保持原行为。
+   - 实现 PlanningScene 初始化、目标允许接触、规划附着、释放和 reset 清理。
+   - 用测试断言 Gazebo joint 列表在抓取前后不变，证明不存在物理假附着。
+
+3. 物理状态源与校验器：
+
+   - 新增 dependency-light `extensions/gazebo/m3.py`，包含配置、不可变数据类型、状态转换和 reason codes。
+   - 新增 ROS Contact/Odometry source，统一 Gazebo 名称、单位、时间戳及 freshness。
+   - reset 清除缓存和历史基线；关闭订阅器必须幂等。
+
+4. Worker/MCP 集成：
+
+   - `GazeboM3WorkerEnv` 复用 M2 controller 和 fresh camera barrier。
+   - 合并 objects、gripper contact 和 physical verification。
+   - 每个世界变更动作等待动作后的 JointState、RGB、depth、Contact 和 Odometry。
+   - 不进入旧模拟器插值控制，不修改 Planner runtime 或 Tool schema。
+
+5. M3 acceptance driver：
+
+   - 复用 M2 的 ROS domain、Gazebo partition、MCP 端口锁、进程组和清理实现。
+   - 抓取位姿不写死未经验证的工具偏移：从 live TF 和指尖碰撞中心计算夹持中心，按 reset 姿态及固定 yaw 候选顺序做 MoveIt plan-only 预检，冻结首个可达目标。
+   - 预抓取高度 `80 mm`，lift probe `80 mm`；放置高度由物体尺寸、实际抓持相对变换和台面高度计算。
+   - 输出忽略提交的 `.cache/reports/m3-pickplace-<timestamp>.json`。
+
+建议的 M3 提交顺序：
+
+- `feat(gazebo): add M3 pick-place physics profile`
+- `feat(gazebo): add trusted physical grasp verifier`
+- `test(gazebo): add M3 direct and MCP acceptance`
+- `docs(gazebo): document M3 physical verification`
+
+## 5. 测试、验收与完成条件
+
+### 离线测试
+
+覆盖：
+
+- M3 环境 ID、model ID、display name、control spec 与 M2 隔离。
+- Contact/Odometry 消息解析、对象身份、单位、时间戳和 stale fail-closed。
+- 闭合候选、空抓、抓错、成功抬升、接触丢失、掉落、成功放置、区域外放置及未落定。
+- M3 stall-success 与 M2 reached-goal 行为互不影响。
+- PlanningScene 添加、允许碰撞、规划附着、释放、reset 和失败清理。
+- worker 每次动作只返回动作后的完整 observation。
+- 资产 digest、XML/SDF、构建、relocatability。
+- 全部 M2 离线回归继续通过。
+
+### Direct ROS/Gazebo live
+
+- 五次连续 reset 后的成功 `approach → close → lift → transport → lower → open → settle`，必须 `5/5` 得到 `TARGET_HELD` 和 `TARGET_PLACED`。
+- 每次运动保持 M2 位姿门限：平移误差 `≤5 mm`、旋转误差 `≤0.08 rad`。
+- 负例分别验证：
+  - 空抓。
+  - 抓取干扰物。
+  - 抬升后主动打开导致掉落。
+  - 放置区外释放。
+- 所有负例必须得到对应结构化 FAIL，不得误报成功。
+- 抓取期间 Gazebo joint/entity 关系保持不变，证明仅使用接触和摩擦。
+
+### 真实 SSE MCP
+
+使用新环境执行同样的原子工具序列：
+
+```text
+create_env
+→ reset_env
+→ observe_env
+→ gripper_open
+→ move_to(pregrasp/contact)
+→ gripper_close
+→ move_to(lift)
+→ move_to(place)
+→ gripper_open
+→ observe_env
+→ close_env
+→ close_env
+```
+
+- 正向流程连续两轮通过。
+- 四个负例各执行一次。
+- 每次动作包含 fresh RGB-D、机器人、Contact、Odometry 和 verifier 记录。
+- 第二次 close 返回 `already_closed=true`。
+- 不依赖 LLM provider，不把 DeepSeek 输出稳定性纳入 M3 物理 gate。
+
+### 隔离与清理
+
+复用 M2 标准检查：
+
+- 独立 ROS domain `100..199`、独立 `GZ_PARTITION`、锁定 MCP 端口。
+- 不使用宽泛 `pkill`。
+- 正常完成、启动失败、动作失败和 SIGINT 四条路径均清理 handle、订阅器、PlanningScene、进程组和锁。
+- 测试端口可重新绑定，测试 domain 无节点，partition 无 Gazebo server。
+- 测试前已有实例保持存活和健康。
+
+M3 所有技术 gate 可以生成通过报告，但在 M2 仍未正式验收期间，不将 M2 或 M3 milestone checkbox 改为已验收。只有用户另行安排 M2 重验且两个里程碑各自 gate 全部通过后，才更新 `todo.md` 和 `memory.md` 的正式状态。
