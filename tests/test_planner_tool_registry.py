@@ -2636,6 +2636,7 @@ def test_provider_config_roundtrips_context_window_tokens_and_retry_policy(
             retry_backoff_s=0.25,
             context_window_tokens=128000,
             max_tokens=4096,
+            metadata={"enable_vision": False},
         ),
         env_path,
     )
@@ -2649,6 +2650,7 @@ def test_provider_config_roundtrips_context_window_tokens_and_retry_policy(
     assert loaded.max_attempts == 4
     assert loaded.retry_backoff_s == 0.25
     assert loaded.max_tokens == 4096
+    assert loaded.metadata["enable_vision"] is False
     assert loaded.redacted()["context_window_tokens"] == 128000
 
 
@@ -10208,6 +10210,41 @@ def test_openai_compatible_backend_uses_chat_completions_transport() -> None:
     assert result.details["usage"]["total_tokens"] == 42
     assert result.details["usage_source"] == "provider"
     assert result.details["provider_attempts"] == 1
+
+
+def test_openai_compatible_backend_fails_structurally_on_empty_content() -> None:
+    def empty_transport(url, body, headers, timeout_s):
+        del url, body, headers, timeout_s
+        return {
+            "id": "chatcmpl-empty",
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "", "reasoning_content": "budget exhausted"},
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 512, "total_tokens": 522},
+        }
+
+    backend = OpenAICompatiblePlannerBackend(
+        OpenAICompatiblePlannerBackendConfig(
+            model="test-model",
+            api_base="https://api.example.test",
+            api_key="secret-key",
+        ),
+        transport=empty_transport,
+    )
+
+    result = backend.decide(
+        PlannerBackendRequest(tool_context={"task": "test"}, system_prompt="return json")
+    )
+
+    assert result.status.value == "failed"
+    assert result.payload["kind"] == "response"
+    assert result.payload["name"] == "ask_human"
+    assert result.details["error"] == "Provider response message content is empty."
+    assert result.details["finish_reason"] == "length"
+    assert result.details["usage"]["total_tokens"] == 522
 
 
 def test_openai_compatible_backend_retries_transient_provider_timeouts() -> None:

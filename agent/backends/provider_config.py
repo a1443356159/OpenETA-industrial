@@ -110,6 +110,11 @@ class PlannerProviderConfig:
         ]
         if self.context_window_tokens is not None:
             lines.append(f"OPENETA_LLM_CONTEXT_WINDOW_TOKENS={self.context_window_tokens}")
+        enable_vision = self.metadata.get("enable_vision")
+        if isinstance(enable_vision, bool):
+            lines.append(
+                "OPENETA_LLM_ENABLE_VISION=" + ("true" if enable_vision else "false")
+            )
         if self.fallback is not None:
             lines.extend(
                 [
@@ -190,6 +195,10 @@ def load_planner_provider_config(
         dotenv.get("OPENETA_LLM_MAX_TOKENS"),
         "512",
     ) or 512
+    enable_vision = _first_optional_bool(
+        source_env.get("OPENETA_LLM_ENABLE_VISION"),
+        dotenv.get("OPENETA_LLM_ENABLE_VISION"),
+    )
     fallback_provider = _first_present(
         source_env.get("OPENETA_LLM_FALLBACK_PROVIDER"),
         dotenv.get("OPENETA_LLM_FALLBACK_PROVIDER"),
@@ -225,6 +234,12 @@ def load_planner_provider_config(
             timeout_s=fallback_timeout_s,
         )
 
+    metadata: JsonDict = {
+        "sources": {"dotenv_path": str(dotenv_path), "apikey_path": str(apikey_path)}
+    }
+    if enable_vision is not None:
+        metadata["enable_vision"] = enable_vision
+
     return PlannerProviderConfig(
         provider=provider,
         model=model,
@@ -236,7 +251,7 @@ def load_planner_provider_config(
         context_window_tokens=context_window_tokens,
         max_tokens=max_tokens,
         fallback=fallback,
-        metadata={"sources": {"dotenv_path": str(dotenv_path), "apikey_path": str(apikey_path)}},
+        metadata=metadata,
     )
 
 
@@ -325,6 +340,18 @@ def _first_non_negative_float(*values: str | None) -> float:
         if parsed >= 0:
             return parsed
     return 0.5
+
+
+def _first_optional_bool(*values: str | None) -> bool | None:
+    for value in values:
+        if value is None or value == "":
+            continue
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
 
 
 def _redact_secret(value: str) -> str:

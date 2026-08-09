@@ -495,7 +495,46 @@ class OpenAICompatiblePlannerBackend(PlannerBackend):
 
         usage_body = dict(body)
         usage_body["model"] = active_endpoint.model
-        content = _extract_chat_content(response)
+        try:
+            content = _extract_chat_content(response)
+        except RuntimeError as exc:
+            usage, usage_source, usage_estimator = _provider_or_estimated_usage(
+                response.get("usage"),
+                request_body=_usage_estimation_body(usage_body),
+                completion="",
+                model=active_endpoint.model,
+            )
+            return PlannerBackendResult(
+                payload={
+                    "kind": "response",
+                    "name": "ask_human",
+                    "parameters": {
+                        "message": "Planner provider returned an unusable response.",
+                        "error_type": type(exc).__name__,
+                        "provider_attempts": provider_attempts,
+                    },
+                    "reasoning": f"Planner provider response could not be decoded: {exc}",
+                },
+                status=PipelineStatus.FAILED,
+                provider=active_endpoint.provider,
+                model=active_endpoint.model,
+                details={
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "finish_reason": _extract_finish_reason(response),
+                    "usage": usage,
+                    "usage_source": usage_source,
+                    "usage_estimator": usage_estimator,
+                    "response_id": response.get("id"),
+                    "vision_attachments": vision_attachments,
+                    "provider_attempts": provider_attempts,
+                    "retry_errors": retry_errors,
+                    "provider_role": provider_role,
+                    "provider_failover": provider_switch_count > 0,
+                    "provider_switch_count": provider_switch_count,
+                },
+                rollout_exchange={"attempts": provider_exchanges},
+            )
         usage, usage_source, usage_estimator = _provider_or_estimated_usage(
             response.get("usage"),
             request_body=_usage_estimation_body(usage_body),

@@ -659,7 +659,9 @@ class OpenEtaCli:
         max_attempts = current.max_attempts
         retry_backoff_s = current.retry_backoff_s
         context_window_tokens = current.context_window_tokens
+        max_tokens = current.max_tokens
         fallback = current.fallback
+        metadata = dict(current.metadata)
 
         if args:
             api_base = args[0]
@@ -757,7 +759,9 @@ class OpenEtaCli:
             max_attempts=max_attempts,
             retry_backoff_s=retry_backoff_s,
             context_window_tokens=context_window_tokens,
+            max_tokens=max_tokens,
             fallback=fallback,
+            metadata=metadata,
         )
         missing = config.missing_fields()
         if missing:
@@ -829,6 +833,7 @@ class OpenEtaCli:
             timeout_s=self.state.config.timeout_s,
             max_attempts=self.state.config.max_attempts,
             retry_backoff_s=self.state.config.retry_backoff_s,
+            max_tokens=self.state.config.max_tokens,
             context_window_tokens=(
                 context_window_tokens
                 if context_window_tokens is not None
@@ -1730,6 +1735,11 @@ class OpenEtaCli:
             ("max_attempts", config["max_attempts"]),
             ("retry_backoff_s", config["retry_backoff_s"]),
             ("context_window_tokens", config["context_window_tokens"] or "(not set)"),
+            ("max_tokens", config["max_tokens"]),
+            (
+                "enable_vision",
+                config.get("metadata", {}).get("enable_vision", True),
+            ),
         ]
         for key, value in rows:
             print(f"  {key:22} {value}")
