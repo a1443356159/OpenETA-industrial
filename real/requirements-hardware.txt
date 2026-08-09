@@ -1,0 +1,5 @@
+# Independent real-robot environment (CPython 3.11).
+# L515 support was dropped after this pyrealsense2 release.
+pyrealsense2==2.54.1.5216
+ur-rtde>=1.5
+opencv-python>=4.8,<5

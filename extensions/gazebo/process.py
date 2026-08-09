@@ -122,8 +122,17 @@ class GazeboWorldControl:
         self.timeout_ms = int(timeout_ms)
 
     def reset_all(self, *, seed: int | None = None) -> None:
+        self._reset("all", seed=seed)
+
+    def reset_models(self, *, seed: int | None = None) -> None:
+        """Reset world entities while preserving the monotonic simulation clock."""
+        self._reset("model_only", seed=seed)
+
+    def _reset(self, mode: str, *, seed: int | None = None) -> None:
         executable = shutil.which(self.gz_executable) or self.gz_executable
-        request = "reset: {all: true}"
+        if mode not in {"all", "model_only"}:
+            raise ValueError("unsupported Gazebo reset mode")
+        request = f"reset: {{{mode}: true}}"
         if seed is not None:
             request += f" seed: {int(seed)}"
         result = subprocess.run(

@@ -189,3 +189,41 @@ def test_close_env_is_idempotent_and_releases_after_remote_error(monkeypatch) ->
     assert first["cleanup_errors"][0].startswith("remote_close:")
     assert ("release", "worker") in calls
     assert second == {"ok": True, "already_closed": True, "cleanup_errors": []}
+
+
+def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
+    calls: list[tuple[dict, int]] = []
+    meta = {
+        "backend": "gazebo",
+        "control_spec": {"m2": True, "model_id": "rm75_robotiq_2f85_sim_v1"},
+    }
+    monkeypatch.setattr(server, "_session_envs", {"sid": {"local": meta}})
+    monkeypatch.setattr(server, "_touch_session", lambda _sid: None)
+    monkeypatch.setattr(
+        server,
+        "_proxy_step",
+        lambda _meta, action, num_steps=1: calls.append((action, num_steps))
+        or {"ok": True},
+    )
+
+    moved = server.move_to.__wrapped__(
+        "local", 0.1, 0.2, 0.3, roll=0.0, pitch=0.0, yaw=0.0, session_id="sid"
+    )
+    opened = server.gripper_open.__wrapped__("local", session_id="sid")
+    closed = server.gripper_close.__wrapped__("local", session_id="sid")
+
+    assert moved == {"ok": True} and opened == {"ok": True} and closed == {"ok": True}
+    assert calls == [
+        (
+            {
+                "action_type": "move_to",
+                "target_pose": {"xyz": [0.1, 0.2, 0.3], "quat_xyzw": [0.0, 0.0, 0.0, 1.0]},
+                "position_tolerance_m": 0.002,
+                "orientation_tolerance_rad": 0.05,
+                "timeout_s": 60.0,
+            },
+            1,
+        ),
+        ({"action_type": "gripper_open"}, 1),
+        ({"action_type": "gripper_close"}, 1),
+    ]

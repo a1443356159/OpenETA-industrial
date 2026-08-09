@@ -1,0 +1,51 @@
+schema_version: 1
+profile:
+  display_name: Gazebo 仿真环境
+  environment_id: openeta/gazebo_rm75_robotiq2f85-v0
+  model_id: rm75_robotiq_2f85_sim_v1
+  compatibility_environment_ids:
+    - openeta/gazebo_rm75_parallel-v0
+platform:
+  os: Ubuntu
+  os_version: "24.04"
+  architecture: amd64
+  python: "3.12"
+  ros_distro: jazzy
+  gazebo_release: harmonic
+tooling:
+  uv: "0.8.13"
+source:
+  # The setup version report records the checked-out commit at execution time.
+  openeta_git_commit: 9bc2a2c67c3881b8c687182de341cc1a8bf7c503
+  robotiq_upstream_commit: 2c047340aeb2440f7a60e429264221aab9658707
+assets:
+  rm75_manifest_sha256: eb30bbf7c115f857b2776c6ea0884329a4dae85b95a66a72b51a3acbc04bc755
+  robotiq_2f85_manifest_sha256: e776c88fa70a99270732f4bba19191a65fa23d0209974ed56083cfeabcc37925
+network:
+  mcp_host: 127.0.0.1
+  mcp_port: 8765
+  ros_domain_id: 42
+ros_packages:
+  # Exact installed Debian versions are captured by setup_openeta_m2.sh in
+  # config/runtime/m0_m2.versions.local.yaml; Jazzy apt updates are permitted.
+  version_source: dpkg-query
+  names:
+    - ros-jazzy-ros-base
+    - ros-jazzy-ros-gz-sim
+    - ros-jazzy-ros-gz-bridge
+    - ros-jazzy-gz-ros2-control
+    - ros-jazzy-ros2-control
+    - ros-jazzy-ros2-controllers
+    - ros-jazzy-controller-manager
+    - ros-jazzy-joint-state-broadcaster
+    - ros-jazzy-joint-trajectory-controller
+    - ros-jazzy-parallel-gripper-controller
+    - ros-jazzy-moveit
+    - ros-jazzy-moveit-ros-move-group
+    - ros-jazzy-moveit-configs-utils
+    - ros-jazzy-xacro
+    - ros-jazzy-robot-state-publisher
+    - ros-jazzy-tf2-ros
+    - ros-jazzy-control-msgs
+    - ros-jazzy-geometry-msgs
+    - ros-jazzy-sensor-msgs

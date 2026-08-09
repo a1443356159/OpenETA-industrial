@@ -1,0 +1,24 @@
+{
+  "description_id": "RM75-6FB-V",
+  "source_package": "extensions/资料/URDF_RM75-6FB-V/URDF_RM75-6FB-V",
+  "upstream_license": "BSD-3-Clause",
+  "terminal_link": "link_7",
+  "joint_names": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"],
+  "camera_links": ["camera_rolink", "camera_link", "wrist_camera_optical_frame"],
+  "files": [
+    {"path":"LICENSE","sha256":"075f2da1c58b7816b003eee607709060dfd6ae6106dfaeb050f443748ac1b621"},
+    {"path":"NOTICE","sha256":"8e0f471c1488df55ec0beb950556e7625a6407c36231b3a45475bd0c31ec6fd1"},
+    {"path":"meshes/base_link.STL","sha256":"1518ff4c95ec501172756540cc40f6a072a47ad84249259cb4c98c35d12cc37e"},
+    {"path":"meshes/camera_link.STL","sha256":"f86f502db343c512a1b1307189d1b0b2d448af4886e84bd9d09e8e125d9ad165"},
+    {"path":"meshes/camera_rolink.STL","sha256":"c1fbc2fef86689e5a5b1d5b8a8d6c5e68cc9a548dee461de0c759a18e5023317"},
+    {"path":"meshes/link_1.STL","sha256":"cde9bb9c6755ed79ab6b85476f3c9e1cda3176268ba7c96c14d65e07e7bac171"},
+    {"path":"meshes/link_2.STL","sha256":"ad12b9f2fc80edbfbba9e12049c58a36aedddb78d58694f558b6b5ef7331faba"},
+    {"path":"meshes/link_3.STL","sha256":"4a0b2f1193c05a2846fdd9b6c2333070b6b90957134bb3f22b3e3a67e305e227"},
+    {"path":"meshes/link_4.STL","sha256":"5d903745e9369009ac064bc24c080d03f503b3386b8e14325a318cf8fde0959d"},
+    {"path":"meshes/link_5.STL","sha256":"2fc93b2bc970eadca950afa3120129766e2bead60234c6d8752d3b223e407046"},
+    {"path":"meshes/link_6.STL","sha256":"f9d0216056f7e1512858033163b0415973e1db573a1fee5af1609171967c043f"},
+    {"path":"meshes/link_7.STL","sha256":"825b4e75fe965c268d19cda2c563ffb5b1381a5e7ab4d5b6b1565bc910045c3b"},
+    {"path":"urdf/arm_ros2_control.xacro","sha256":"e41e85add715c0cf4de0b2e2c557cc8eee0d328fcc4d2b19cb46fb19d6b89209"},
+    {"path":"urdf/rm75_6fb_v.urdf.xacro","sha256":"9ca96caf01af08e1d06907c485525ea2a1c28c2e73ee02ee8e111900735cc11d"}
+  ]
+}

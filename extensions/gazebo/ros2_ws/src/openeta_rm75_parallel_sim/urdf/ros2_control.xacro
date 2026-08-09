@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find openeta_rm75_v_description)/urdf/arm_ros2_control.xacro"/>
+  <xacro:macro name="openeta_ros2_control" params="controller_config">
+    <ros2_control name="OpenEtaGazeboSystem" type="system">
+      <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
+      <xacro:rm75_v_arm_control_interfaces/>
+      <joint name="gripper_left_finger_joint"><command_interface name="position"/><state_interface name="position"><param name="initial_value">0.035</param></state_interface><state_interface name="velocity"/></joint>
+      <!-- Mimic is state-only: it has no independent command interface. -->
+      <joint name="gripper_right_finger_joint"><param name="mimic">gripper_left_finger_joint</param><param name="multiplier">1.0</param><state_interface name="position"><param name="initial_value">0.035</param></state_interface><state_interface name="velocity"/></joint>
+    </ros2_control>
+    <gazebo><plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin"><parameters>${controller_config}</parameters></plugin></gazebo>
+  </xacro:macro>
+</robot>

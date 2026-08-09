@@ -663,16 +663,12 @@ class SimulatorMcpToolProxy:
             position = parameters.get("open")
         if position is None:
             raise ValueError("gripper_control requires `position` or `open`.")
-        if isinstance(position, bool):
-            binary_position = int(position)
-        elif isinstance(position, int | float) and not isinstance(position, bool):
-            binary_position = float(position)
-            if not math.isfinite(binary_position) or binary_position not in {0.0, 1.0}:
-                raise ValueError("gripper_control position must be exactly 0 or 1.")
-            binary_position = int(binary_position)
-        else:
+        # The actuator contract is intentionally type-strict. JSON `true`,
+        # `false`, `0.0`, and `1.0` are not integer commands even though
+        # Python normally compares them equal to 0/1.
+        if type(position) is not int or position not in (0, 1):
             raise ValueError("gripper_control position must be exactly 0 or 1.")
-        return binary_position
+        return position
 
     def _gripper_tool_name(self, binary_position: int) -> str:
         return "gripper_open" if binary_position == 1 else "gripper_close"
@@ -924,6 +920,9 @@ class SimulatorEnvironmentCreator:
             "handle": handle,
             "session_id": session_id,
         }
+        display_name = str(create_response.get("name") or "").strip()
+        if display_name:
+            environment["display_name"] = display_name
         if assigned_task:
             environment["assigned_task"] = assigned_task
         if server_url:

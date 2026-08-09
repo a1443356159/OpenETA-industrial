@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:include filename="$(find openeta_rm75_v_description)/urdf/arm_ros2_control.xacro"/>
+  <!-- One Gazebo system owns the RM75 and 2F-85. Gazebo's Robotiq linkage
+       needs effort commands on every simulated joint; the action adapter
+       below the planner-facing interface enforces the vendor mimic ratios. -->
+  <xacro:macro name="openeta_robotiq_ros2_control" params="controller_config">
+    <ros2_control name="OpenEtaRm75RobotiqGazeboSystem" type="system">
+      <hardware><plugin>gz_ros2_control/GazeboSimSystem</plugin></hardware>
+      <xacro:rm75_v_arm_control_interfaces/>
+      <joint name="gripper_left_finger_joint">
+        <command_interface name="effort"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+      <xacro:macro name="mimic_interface" params="name multiplier">
+        <joint name="${name}" mimic="false">
+          <command_interface name="effort"/>
+          <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+          <state_interface name="velocity"/>
+        </joint>
+      </xacro:macro>
+      <xacro:mimic_interface name="gripper_right_finger_joint" multiplier="-1.0"/>
+      <xacro:mimic_interface name="gripper_left_inner_knuckle_joint" multiplier="1.0"/>
+      <xacro:mimic_interface name="gripper_right_inner_knuckle_joint" multiplier="-1.0"/>
+      <xacro:mimic_interface name="gripper_left_finger_tip_joint" multiplier="-1.0"/>
+      <xacro:mimic_interface name="gripper_right_finger_tip_joint" multiplier="1.0"/>
+    </ros2_control>
+    <gazebo>
+      <plugin filename="gz_ros2_control-system"
+              name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+        <parameters>${controller_config}</parameters>
+      </plugin>
+    </gazebo>
+  </xacro:macro>
+</robot>

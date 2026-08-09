@@ -1,0 +1,13 @@
+RM75-6FB-V description asset provenance
+=======================================
+
+The arm and wrist-camera URDF geometry, inertial parameters, transforms and
+STL meshes in this directory were migrated from the supplied package:
+
+  extensions/资料/URDF_RM75-6FB-V/URDF_RM75-6FB-V
+
+That package declares the BSD license in package.xml. OpenETA changed the ROS
+package URI, fixed camera_rojoint at its zero/default mounting pose, added the
+wrist optical frame and Gazebo RGB-D sensor, and factored the ros2_control arm
+interfaces into a reusable xacro macro. The original link and joint names and
+all arm/camera CAD and inertial values remain unchanged.

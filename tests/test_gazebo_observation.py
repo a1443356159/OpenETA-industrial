@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from extensions.gazebo import GazeboObservationError, camera_info_intrinsics, decode_ros_depth, decode_ros_rgb
+from extensions.gazebo import (
+    GazeboObservationError,
+    RosRgbdCameraConfig,
+    RosRgbdCameraSource,
+    camera_info_intrinsics,
+    decode_ros_depth,
+    decode_ros_rgb,
+)
 
 
 def _image(*, encoding: str, array: np.ndarray, step: int | None = None):
@@ -31,3 +39,86 @@ def test_camera_info_and_invalid_ros_packets_fail_closed() -> None:
     with pytest.raises(GazeboObservationError, match="focal"):
         camera_info_intrinsics(SimpleNamespace(width=1, height=1, k=[0] * 9))
 
+
+def _stamped_image(*, encoding: str, array: np.ndarray, timestamp: float):
+    message = _image(encoding=encoding, array=array)
+    seconds = int(timestamp)
+    message.header = SimpleNamespace(
+        stamp=SimpleNamespace(sec=seconds, nanosec=int((timestamp - seconds) * 1e9))
+    )
+    return message
+
+
+def test_live_camera_capture_consumes_new_rgb_and_depth_timestamps(monkeypatch) -> None:
+    source = RosRgbdCameraSource(
+        RosRgbdCameraConfig(
+            rgb_topic="/rgb",
+            depth_topic="/depth",
+            camera_info_topic="/info",
+            frame_id="camera",
+            extrinsics={"frame_transform": "camera_to_world"},
+        )
+    )
+    source._node = object()
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy",
+        SimpleNamespace(spin_once=lambda _node, timeout_sec=0.0: None),
+    )
+    source._info_callback(
+        SimpleNamespace(width=1, height=1, k=[100.0, 0, 0.5, 0, 100.0, 0.5, 0, 0, 1])
+    )
+    source._rgb_callback(
+        _stamped_image(
+            encoding="rgb8", array=np.array([[[1, 2, 3]]], dtype=np.uint8), timestamp=1.0
+        )
+    )
+    source._depth_callback(
+        _stamped_image(
+            encoding="16UC1", array=np.array([[500]], dtype=np.uint16), timestamp=1.0
+        )
+    )
+    assert source.capture(timeout_s=0.01).timestamp_s == 1.0
+    with pytest.raises(GazeboObservationError, match="fresh"):
+        source.capture(timeout_s=0.01)
+
+    source._rgb_callback(
+        _stamped_image(
+            encoding="rgb8", array=np.array([[[4, 5, 6]]], dtype=np.uint8), timestamp=2.0
+        )
+    )
+    source._depth_callback(
+        _stamped_image(
+            encoding="16UC1", array=np.array([[600]], dtype=np.uint16), timestamp=2.0
+        )
+    )
+    assert source.capture(timeout_s=0.01, min_timestamp_s=1.5).timestamp_s == 2.0
+
+
+def test_live_camera_fails_closed_when_only_one_stream_advances(monkeypatch) -> None:
+    source = RosRgbdCameraSource(
+        RosRgbdCameraConfig(
+            rgb_topic="/rgb",
+            depth_topic="/depth",
+            camera_info_topic="/info",
+            frame_id="camera",
+            extrinsics={"frame_transform": "camera_to_world"},
+        )
+    )
+    source._node = object()
+    monkeypatch.setitem(
+        sys.modules,
+        "rclpy",
+        SimpleNamespace(spin_once=lambda _node, timeout_sec=0.0: None),
+    )
+    source._info_callback(
+        SimpleNamespace(width=1, height=1, k=[100.0, 0, 0.5, 0, 100.0, 0.5, 0, 0, 1])
+    )
+    rgb = np.array([[[1, 2, 3]]], dtype=np.uint8)
+    depth = np.array([[500]], dtype=np.uint16)
+    source._rgb_callback(_stamped_image(encoding="rgb8", array=rgb, timestamp=1.0))
+    source._depth_callback(_stamped_image(encoding="16UC1", array=depth, timestamp=1.0))
+    source.capture(timeout_s=0.01)
+    source._rgb_callback(_stamped_image(encoding="rgb8", array=rgb, timestamp=2.0))
+    with pytest.raises(GazeboObservationError, match="fresh"):
+        source.capture(timeout_s=0.01)

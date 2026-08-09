@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -305,14 +306,19 @@ class BenchWorkerHandle:
         if self.process is None:
             return
         try:
-            self.process.terminate()
+            # Workers own backend process groups (Gazebo/ROS launch included).
+            # Retiring only the Python parent would orphan those children.
+            os.killpg(self.process.pid, signal.SIGTERM)
             if wait:
                 self.process.wait(timeout=5)
         except Exception:
             try:
-                self.process.kill()
+                os.killpg(self.process.pid, signal.SIGKILL)
             except Exception:
-                pass
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -374,19 +380,19 @@ class BenchWorkerManager:
         # puts the repo root ahead of sim/ inconsistently and makes
         # ``import adapter`` resolve to sim/adapter.py ("adapter is not a
         # package").  Drop it so the worker's own path setup is authoritative.
-        child_env.pop("PYTHONPATH", None)
+        inherited_python_paths = child_env.pop("PYTHONPATH", "").split(os.pathsep)
         if bench == "gazebo":
-            # ROS 2 Jazzy's Python modules are installed outside the system
-            # interpreter's default path.  Keep the worker's repository path
-            # authoritative while adding only the documented ROS site-packages
-            # needed by rclpy/sensor_msgs.
+            # Preserve only ROS-generated Python paths from the sourced target
+            # overlay.  Do not encode a distro prefix or developer machine
+            # path: relocated OpenETA deployments may install ROS elsewhere.
             ros_paths = [
-                "/opt/ros/jazzy/lib/python3.12/site-packages",
-                "/opt/ros/jazzy/local/lib/python3.12/dist-packages",
+                path for path in inherited_python_paths
+                if path and os.path.isdir(path)
+                and (os.path.isdir(os.path.join(path, "rclpy"))
+                     or os.path.isdir(os.path.join(path, "sensor_msgs")))
             ]
-            child_env["PYTHONPATH"] = os.pathsep.join(
-                path for path in ros_paths if os.path.isdir(path)
-            )
+            if ros_paths:
+                child_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(ros_paths))
         if bench == "behavior":
             behavior_root = os.path.join(str(_SIM_DIR), "venvs", "behavior")
             child_env.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
@@ -404,6 +410,7 @@ class BenchWorkerManager:
             stderr=subprocess.PIPE,
             text=True,
             env=child_env,
+            start_new_session=True,
         )
         # Read the port line from stdout (first non-empty digit-only line)
         port_str = ""

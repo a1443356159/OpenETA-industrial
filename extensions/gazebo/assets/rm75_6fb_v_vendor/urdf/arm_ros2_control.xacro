@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro name="rm75_v_arm_control_interfaces">
+    <xacro:macro name="rm75_v_arm_interface" params="name">
+      <joint name="${name}">
+        <command_interface name="position"/>
+        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="velocity"/>
+      </joint>
+    </xacro:macro>
+    <xacro:rm75_v_arm_interface name="joint_1"/>
+    <xacro:rm75_v_arm_interface name="joint_2"/>
+    <xacro:rm75_v_arm_interface name="joint_3"/>
+    <xacro:rm75_v_arm_interface name="joint_4"/>
+    <xacro:rm75_v_arm_interface name="joint_5"/>
+    <xacro:rm75_v_arm_interface name="joint_6"/>
+    <xacro:rm75_v_arm_interface name="joint_7"/>
+  </xacro:macro>
+</robot>

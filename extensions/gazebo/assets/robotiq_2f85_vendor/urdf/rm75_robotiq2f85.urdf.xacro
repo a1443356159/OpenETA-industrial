@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="rm75_robotiq_2f85_sim_v1">
+  <!-- OpenETA simulation fixture: this plate is not an assertion of a real UR adapter. -->
+  <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/robotiq_2f_85_macro.urdf.xacro"/>
+  <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/2f_85.ros2_control.xacro"/>
+  <xacro:macro name="rm75_robotiq2f85" params="parent:=link_7">
+    <link name="gripper_mount_link">
+      <inertial><mass value="0.12"/><inertia ixx="0.00002" iyy="0.00002" izz="0.00002" ixy="0" ixz="0" iyz="0"/></inertial>
+      <collision><origin xyz="0 0 0.006"/><geometry><box size="0.08 0.08 0.012"/></geometry></collision>
+    </link>
+    <joint name="rm75_to_gripper_mount" type="fixed"><parent link="${parent}"/><child link="gripper_mount_link"/><origin xyz="0 0 0.025"/></joint>
+    <xacro:robotiq_gripper name="robotiq_2f85" prefix="" parent="gripper_mount_link" sim_gazebo="true" include_ros2_control="false"><origin xyz="0 0 0.006"/></xacro:robotiq_gripper>
+    <!-- ros2_control is supplied by the repository-local RM75 simulation
+         adapter so the arm and gripper share one Gazebo hardware system. -->
+  </xacro:macro>
+</robot>

@@ -9,6 +9,8 @@ __pycache__/
 .venv/
 venv/
 sim/venvs/
+.tools/
+.cache/
 
 .env
 .env.*
@@ -23,6 +25,8 @@ real/config/local/
 *.local.json
 *.local.yaml
 *.local.yml
+config/runtime/*.local.yaml
+config/runtime/*.local.yml
 
 .agents/
 .openeta_memory/
@@ -31,6 +35,10 @@ docs/domain-modeling.md
 # Build artifacts
 dist/
 build/
+/extensions/gazebo/ros2_ws/install/
+/extensions/gazebo/ros2_ws/log/
+/extensions/资料/
+/log/
 *.egg-info/
 
 # Experiment outputs

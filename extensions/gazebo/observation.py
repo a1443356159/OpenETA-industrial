@@ -9,6 +9,7 @@ or extrinsics are inferred from a ROS topic name.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -113,6 +114,7 @@ class RosRgbdCameraConfig:
     frame_id: str
     extrinsics: dict[str, Any]
     depth_units_per_metre: float = 1000.0
+    role: str = "scene_primary"
 
 
 class RosRgbdCameraSource:
@@ -126,6 +128,33 @@ class RosRgbdCameraSource:
         self._rgb: Any | None = None
         self._depth: Any | None = None
         self._info: Any | None = None
+        self._lock = threading.Lock()
+        self._rgb_sequence = 0
+        self._depth_sequence = 0
+        self._info_sequence = 0
+        self._last_rgb_sequence = 0
+        self._last_depth_sequence = 0
+        self._last_rgb_stamp: float | None = None
+        self._last_depth_stamp: float | None = None
+        self._rgb_received_monotonic = 0.0
+        self._depth_received_monotonic = 0.0
+
+    def _rgb_callback(self, message: Any) -> None:
+        with self._lock:
+            self._rgb = message
+            self._rgb_sequence += 1
+            self._rgb_received_monotonic = time.monotonic()
+
+    def _depth_callback(self, message: Any) -> None:
+        with self._lock:
+            self._depth = message
+            self._depth_sequence += 1
+            self._depth_received_monotonic = time.monotonic()
+
+    def _info_callback(self, message: Any) -> None:
+        with self._lock:
+            self._info = message
+            self._info_sequence += 1
 
     def start(self) -> None:
         if not self.config.extrinsics:
@@ -139,30 +168,84 @@ class RosRgbdCameraSource:
             rclpy.init()
             self._owns_context = True
         self._node = rclpy.create_node(self.node_name)
-        self._node.create_subscription(Image, self.config.rgb_topic, lambda msg: setattr(self, "_rgb", msg), 10)
-        self._node.create_subscription(Image, self.config.depth_topic, lambda msg: setattr(self, "_depth", msg), 10)
-        self._node.create_subscription(CameraInfo, self.config.camera_info_topic, lambda msg: setattr(self, "_info", msg), 10)
+        self._node.create_subscription(Image, self.config.rgb_topic, self._rgb_callback, 10)
+        self._node.create_subscription(Image, self.config.depth_topic, self._depth_callback, 10)
+        self._node.create_subscription(
+            CameraInfo, self.config.camera_info_topic, self._info_callback, 10
+        )
 
-    def capture(self, *, timeout_s: float = 2.0) -> CameraFrame:
+    def capture(
+        self,
+        *,
+        timeout_s: float = 2.0,
+        min_timestamp_s: float | None = None,
+        min_received_monotonic_s: float | None = None,
+    ) -> CameraFrame:
+        """Wait for a newly published RGB/depth pair.
+
+        CameraInfo is calibration and may be reused.  RGB and depth may not:
+        every successful call consumes sequence numbers and requires header
+        timestamps strictly newer than the previous successful capture.  The
+        optional barriers let a world-mutating action require frames published
+        after its ROS/simulation-time completion boundary.
+        """
         if self._node is None:
             raise GazeboObservationError("camera source must be started before capture")
         import rclpy
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             rclpy.spin_once(self._node, timeout_sec=min(0.1, max(0.0, deadline - time.monotonic())))
-            if self._rgb is not None and self._depth is not None and self._info is not None:
+            with self._lock:
                 rgb, depth, info = self._rgb, self._depth, self._info
-                stamp = _message_stamp(rgb) or _message_stamp(depth) or time.time()
-                return CameraFrame(
-                    frame_id=self.config.frame_id,
-                    role="scene_primary",
-                    rgb=decode_ros_rgb(rgb).tolist(),
-                    depth=decode_ros_depth(depth, units_per_metre=self.config.depth_units_per_metre).tolist(),
-                    intrinsics=camera_info_intrinsics(info),
-                    extrinsics=dict(self.config.extrinsics),
-                    timestamp_s=stamp,
-                )
-        raise GazeboObservationError("timed out waiting for RGB, depth, and CameraInfo")
+                rgb_sequence, depth_sequence = self._rgb_sequence, self._depth_sequence
+                rgb_received = self._rgb_received_monotonic
+                depth_received = self._depth_received_monotonic
+            if rgb is None or depth is None or info is None:
+                continue
+            if (
+                rgb_sequence <= self._last_rgb_sequence
+                or depth_sequence <= self._last_depth_sequence
+            ):
+                continue
+            rgb_stamp, depth_stamp = _message_stamp(rgb), _message_stamp(depth)
+            # A live ROS packet without a source timestamp cannot establish
+            # action ordering and therefore fails closed.
+            if rgb_stamp is None or depth_stamp is None:
+                continue
+            if self._last_rgb_stamp is not None and rgb_stamp <= self._last_rgb_stamp:
+                continue
+            if self._last_depth_stamp is not None and depth_stamp <= self._last_depth_stamp:
+                continue
+            if min_timestamp_s is not None and (
+                rgb_stamp <= min_timestamp_s or depth_stamp <= min_timestamp_s
+            ):
+                continue
+            if min_received_monotonic_s is not None and (
+                rgb_received <= min_received_monotonic_s
+                or depth_received <= min_received_monotonic_s
+            ):
+                continue
+            frame = CameraFrame(
+                frame_id=self.config.frame_id,
+                role=self.config.role,
+                rgb=decode_ros_rgb(rgb).tolist(),
+                depth=decode_ros_depth(
+                    depth, units_per_metre=self.config.depth_units_per_metre
+                ).tolist(),
+                intrinsics=camera_info_intrinsics(info),
+                extrinsics=dict(self.config.extrinsics),
+                # Use the older member of the pair.  A consumer comparing this
+                # value with an action barrier then knows *both* images are new.
+                timestamp_s=min(rgb_stamp, depth_stamp),
+            )
+            self._last_rgb_sequence = rgb_sequence
+            self._last_depth_sequence = depth_sequence
+            self._last_rgb_stamp = rgb_stamp
+            self._last_depth_stamp = depth_stamp
+            return frame
+        raise GazeboObservationError(
+            "timed out waiting for fresh RGB/depth timestamps and CameraInfo"
+        )
 
     def close(self) -> None:
         if self._node is not None:
@@ -173,4 +256,3 @@ class RosRgbdCameraSource:
             if rclpy.ok():
                 rclpy.shutdown()
             self._owns_context = False
-

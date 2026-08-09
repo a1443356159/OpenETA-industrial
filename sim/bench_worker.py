@@ -459,9 +459,15 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
                 _done_handles.add(handle)
         env_obs = EnvObservation.from_dict(obs)
     # Sanitise info: drop non-serialisable values
+    direct_env = getattr(env, "_env", env)
+    structured_actions = bool(
+        getattr(direct_env, "_openeta_structured_actions", False)
+    )
     safe_info: dict = {}
     if isinstance(info, dict):
         for k, v in info.items():
+            if structured_actions and k == "observation":
+                continue
             try:
                 json.dumps({k: v})
                 safe_info[k] = v
@@ -469,13 +475,21 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
                 safe_info[k] = str(v)
     else:
         safe_info = {"raw_info": str(info)}
-    return StepResult(
+    payload = StepResult(
         observation=env_obs,
         reward=float(rew),
         terminated=bool(term),
         truncated=bool(trunc),
         info=safe_info,
     ).to_mcp_dict()
+    if structured_actions:
+        # The authoritative observation has already been converted by
+        # StepResult above. M2 also carries the same raw observation inside
+        # its structured receipt; that copy may contain numpy arrays and the
+        # generic sanitizer turns it into a string. Never let it overwrite the
+        # complete MCP observation at the top level.
+        payload.update(safe_info)
+    return payload
 
 
 def _reset_with_image(env, seed=None, handle: str = "") -> dict:
@@ -654,7 +668,15 @@ async def list_envs(request):
         specs = _le(env_type=bench_filter if bench_filter else None)
 
     return _json_response({
-        "envs": [{"id": s.id, "type": s.env_type, "description": s.task_description} for s in specs],
+        "envs": [
+            {
+                "id": s.id,
+                "name": s.display_name or s.task_slug,
+                "type": s.env_type,
+                "description": s.task_description,
+            }
+            for s in specs
+        ],
         "count": len(specs),
     })
 
@@ -662,6 +684,8 @@ async def list_envs(request):
 async def create_env(request):
     import gymnasium as gym
     import traceback as _tb
+
+    from sim.env_registry import get_env_spec
 
     body = await request.json()
     eid = body["env_id"]
@@ -738,8 +762,10 @@ async def create_env(request):
     except Exception:
         control_spec = {}
 
+    spec = get_env_spec(eid)
     return _json_response({
         "handle": h, "env_id": eid, "action_dim": adim, "action_desc": adesc,
+        "name": spec.display_name if spec is not None else "",
         "action_low": alo, "action_high": ahi, "backend": be, "action_hint": hints,
         "robot": body.get("robot"), "control_spec": control_spec,
     })

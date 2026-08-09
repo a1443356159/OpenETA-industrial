@@ -1,0 +1,31 @@
+name: Gazebo M2 offline contract
+
+on:
+  push:
+    paths:
+      - "config/runtime/**"
+      - "extensions/gazebo/**"
+      - "scripts/*openeta_m2.sh"
+      - "tests/test_gazebo_m2*"
+      - "tests/test_gazebo_ros_control.py"
+      - "pyproject.toml"
+      - "uv.lock"
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reproduce Python environment
+        run: bash scripts/setup_openeta_m2.sh --no-apt --python-only
+      - name: Compile and test M2 contracts
+        run: |
+          .venv/bin/python -m compileall -q extensions/gazebo sim
+          .venv/bin/python -m pytest -q tests/test_gazebo_m2_assets.py tests/test_gazebo_m2_contract.py tests/test_gazebo_ros_control.py
+      - name: Relocation preflight
+        run: |
+          relocation="$(mktemp -d)/openeta-relocation-test"
+          mkdir -p "${relocation}"
+          git archive HEAD | tar -x -C "${relocation}"
+          python3 "${relocation}/extensions/gazebo/asset_preflight.py"

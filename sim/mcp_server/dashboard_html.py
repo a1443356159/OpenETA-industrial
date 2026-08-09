@@ -85,7 +85,7 @@ async function loadEnvs(){
         btn.onclick=()=>selectEnv(e.handle);
         strip.appendChild(btn)
       }
-      btn.innerHTML='<span class="env-name" title="'+e.env_id+'">'+shortName(e.env_id)+'</span><span class="env-backend">'+e.backend+'</span><span class="env-handle">'+e.handle+'</span>';
+      btn.innerHTML='<span class="env-name" title="'+e.env_id+'">'+(e.display_name||shortName(e.env_id))+'</span><span class="env-backend">'+e.backend+'</span><span class="env-handle">'+e.handle+'</span>';
       delete existing[e.handle]
     });
     // Remove stale buttons

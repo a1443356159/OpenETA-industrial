@@ -1,0 +1,8 @@
+OpenETA includes the Robotiq 2F-85 description and meshes from
+PickNik Robotics' ros2_robotiq_gripper repository, frozen at commit
+2c047340aeb2440f7a60e429264221aab9658707.
+
+Robotiq is a trademark of Robotiq Inc. This simulation asset is not vendor
+supported and the OpenETA RM75 mounting plate is a simulation-only fixture.
+The accompanying source files are redistributed under the BSD 3-Clause
+License in LICENSE.

@@ -44,11 +44,12 @@ an RTSP/HTTP URL).
 
 ## Install
 
-Hardware SDKs are an optional extra and imported lazily, so `real/` stays
+Hardware SDKs are imported lazily and use a separate CPython 3.11 environment, so `real/` stays
 importable (and unit-testable) without them:
 
 ```bash
-uv sync --extra real   # installs pyrealsense2, ur_rtde, opencv-python
+python3.11 -m venv real/.venv
+real/.venv/bin/pip install -r real/requirements-hardware.txt
 ```
 
 ## Quickstart
@@ -89,7 +90,7 @@ cannot close a newer environment. Stopping the real MCP server itself performs
 an internal forced cleanup before process exit.
 
 ```bash
-uv sync --extra real
+real/.venv/bin/pip install -r real/requirements-hardware.txt
 uv run python -m real.mcp.observation_server --transport stdio \
     --config real/config/ur5e_bench.json
 ```

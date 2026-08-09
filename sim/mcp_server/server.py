@@ -23,6 +23,7 @@ from starlette.routing import Route
 
 from sim.mcp_server.session import (
     _current_session,
+    _cleanup_session,
     _get_mgr,
     _init,
     _obs_key,
@@ -226,10 +227,14 @@ def create_env(env_id: str, *, render_mode: str = "rgb_array", seed: int = 0,
 
     remote_handle = result["handle"]
     h = str(uuid.uuid4())[:12]
+    display_name = str(result.get("name") or "")
+    if not display_name and result.get("backend") == "gazebo":
+        display_name = "Gazebo 仿真环境"
     meta = {
         "worker_url": worker.base_url,
         "remote_handle": remote_handle,
         "env_id": env_id,
+        "display_name": display_name,
         "backend": result.get("backend", "unknown"),
         "action_dim": result.get("action_dim"),
         "robot": result.get("robot") or robot,
@@ -243,6 +248,7 @@ def create_env(env_id: str, *, render_mode: str = "rgb_array", seed: int = 0,
     # in reset_env / move_to's implicit reset, i.e. only after a real reset.
     return {
         "session_id": sid, "handle": h, "env_id": env_id,
+        "name": meta["display_name"],
         "action_dim": result.get("action_dim"), "backend": result.get("backend"),
         "robot": result.get("robot") or robot,
         "control_spec": result.get("control_spec", {}),
@@ -616,6 +622,24 @@ def move_to(handle: str, x: float, y: float, z: float, *,
 
     backend = meta.get("backend", "")
     use_ori = roll is not None and pitch is not None and yaw is not None
+
+    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("m2"):
+        import math as _math
+        if use_ori:
+            quat = _euler_to_quat(_math.radians(roll), _math.radians(pitch), _math.radians(yaw))
+        else:
+            observed = _proxy_observe(meta)
+            quat = _extract_ee_quat_from_result(observed)
+            if len(quat) < 4:
+                return {"ok": False, "error_code": "ROBOT_STATE_UNAVAILABLE",
+                        "error": "fresh end-effector orientation is unavailable"}
+        return _proxy_step(meta, {"action_type": "move_to",
+            "target_pose": {"xyz": [x, y, z], "quat_xyzw": quat[:4]},
+            "position_tolerance_m": tolerance,
+            # The conservative RM75 trajectory scaling can require slightly
+            # over 30 seconds for a 30 mm Cartesian offset after gripper
+            # reaction forces have perturbed the reset pose.
+            "orientation_tolerance_rad": ori_tolerance, "timeout_s": 60.0}, num_steps=1)
 
     if use_ori and backend == "metaworld":
         return {"error": "Orientation control is not supported on MetaWorld (4D action, no rotation)"}
@@ -1081,6 +1105,8 @@ def gripper_open(handle: str, *, session_id: str = "") -> dict:
     if not meta:
         return {"error": f"Unknown: {handle}"}
     backend = meta.get("backend", "")
+    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("m2"):
+        return _proxy_step(meta, {"action_type": "gripper_open"}, num_steps=1)
     meta["_gripper_cmd"] = -1.0  # latch OPEN — held on every subsequent step
     try:
         act = make_gripper_action(meta, open_gripper=True, backend=backend)
@@ -1108,6 +1134,8 @@ def gripper_close(handle: str, *, session_id: str = "") -> dict:
     if not meta:
         return {"error": f"Unknown: {handle}"}
     backend = meta.get("backend", "")
+    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("m2"):
+        return _proxy_step(meta, {"action_type": "gripper_close"}, num_steps=1)
     meta["_gripper_cmd"] = 1.0  # latch CLOSED — held (clamping) on every subsequent step
     try:
         act = make_gripper_action(meta, open_gripper=False, backend=backend)
@@ -1387,6 +1415,7 @@ def list_active_envs(*, session_id: str = "") -> dict:
             "index": i,
             "handle": h,
             "env_id": meta.get("env_id", "unknown"),
+            "display_name": meta.get("display_name", ""),
             "backend": meta.get("backend", "unknown"),
         })
     return {
@@ -1526,7 +1555,22 @@ def main() -> None:
     print(f"\n  OpenETA Dashboard:      http://0.0.0.0:{port}/")
     print(f"  MCP (Streamable HTTP):  http://0.0.0.0:{port}/mcp")
     print(f"  MCP (legacy SSE):       http://0.0.0.0:{port}/sse\n")
-    uvicorn.run(combined, host="0.0.0.0", port=port, log_level="warning")
+    try:
+        uvicorn.run(combined, host="0.0.0.0", port=port, log_level="warning")
+    finally:
+        # Bench workers deliberately run in their own process groups.  A
+        # server SIGTERM must therefore close live handles and explicitly stop
+        # the pool; killing only uvicorn's process group would orphan workers
+        # and their nested ROS/Gazebo launch sessions.
+        for sid in list(_session_envs):
+            try:
+                _cleanup_session(sid)
+            except Exception:
+                pass
+        try:
+            _get_mgr().stop_all()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

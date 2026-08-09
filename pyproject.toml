@@ -2,13 +2,15 @@
 name = "openeta"
 version = "0.1.0"
 description = "OpenETA embodied agent runtime and simulator integration."
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "gymnasium>=1.0",
   "imageio[ffmpeg]>=2.34",
-  "mcp>=1.0",
+  # The OpenETA MCP proxy uses the FastMCP 1.x import/API surface.
+  "mcp>=1.0,<2",
   "numpy>=1.26",
   "Pillow>=10",
+  "PyYAML>=6.0",
   "prompt_toolkit>=3.0",
   "tiktoken>=0.7",
 ]
@@ -24,13 +26,10 @@ openeta-replay = "logger.replay:main"
 dev = [
   "pytest>=8",
 ]
-# Real-robot deployment hardware SDKs. Imported lazily by real/ drivers so the
-# base agent runtime and unit tests do not require these to be installed.
-real = [
-  "pyrealsense2==2.54.1.5216",  # pinned: L515 support dropped after 2.54.1 (L515 EOL),
-  "ur_rtde>=1.5",
-  "opencv-python>=4.8,<5",
-]
+# Compatibility name only. Real-robot SDKs are intentionally isolated from
+# the Python 3.12 M0-M2 lock because the L515-compatible pyrealsense2 wheel is
+# available only through CPython 3.11. See real/requirements-hardware.txt.
+real = []
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

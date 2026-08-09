@@ -196,6 +196,9 @@ class EnvSpec:
     task_description: str
     """Natural-language task description."""
 
+    display_name: str = ""
+    """Stable user-facing name; identifiers remain machine-facing contracts."""
+
     suite: str | None = None
     """Parent suite name for multi-task envs, ``None`` for single-task."""
 
@@ -321,9 +324,12 @@ def make_env(
         ue._include_objects = include_objects
         return ue
     if env_type == "gazebo":
-        from extensions.gazebo.worker import GazeboWorkerEnv
+        from extensions.gazebo.worker import GazeboM2WorkerEnv, GazeboRobotiq2F85WorkerEnv, GazeboWorkerEnv
 
-        return GazeboWorkerEnv(task=task_name, seed=seed)
+        profile = overrides.pop("gazebo_profile", "m1")
+        runtime_task = overrides.pop("task", task_name)
+        cls = (GazeboRobotiq2F85WorkerEnv if profile == "m2_robotiq2f85" else GazeboM2WorkerEnv if profile == "m2" else GazeboWorkerEnv)
+        return cls(task=runtime_task, seed=seed, **overrides)
 
     # ── RLinf-backed env ───────────────────────────────────────
     from sim.envs import get_env_cls
@@ -836,12 +842,31 @@ def _register_gazebo_envs() -> None:
             env_type="gazebo",
             task_slug="live_rgbd",
             task_description="Gazebo ROS 2 live RGB-D observation (M1 read-only).",
+            display_name="Gazebo 仿真环境",
             max_episode_steps=1_000_000,
             requires_gpu=False,
             requires_sim_install=True,
         ),
         env_type="gazebo",
         task_name="live_rgbd",
+    )
+    _register_one(
+        "openeta/gazebo_rm75_parallel-v0",
+        EnvSpec(
+            id="openeta/gazebo_rm75_parallel-v0", env_type="gazebo", task_slug="rm75_parallel",
+            task_description="Gazebo Sim Jazzy RM75 arm with simulation-only 70 mm parallel gripper (M2).",
+            display_name="Gazebo 仿真环境",
+            max_episode_steps=1_000_000, requires_gpu=False, requires_sim_install=True,
+        ), env_type="gazebo", task_name="rm75_parallel", gazebo_profile="m2",
+    )
+    _register_one(
+        "openeta/gazebo_rm75_robotiq2f85-v0",
+        EnvSpec(
+            id="openeta/gazebo_rm75_robotiq2f85-v0", env_type="gazebo", task_slug="rm75_robotiq2f85",
+            task_description="Gazebo Sim Jazzy RM75 with the frozen Robotiq 2F-85 simulation asset (M2).",
+            display_name="Gazebo 仿真环境",
+            max_episode_steps=1_000_000, requires_gpu=False, requires_sim_install=True,
+        ), env_type="gazebo", task_name="rm75_robotiq2f85", gazebo_profile="m2_robotiq2f85",
     )
 
 

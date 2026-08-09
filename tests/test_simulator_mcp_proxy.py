@@ -361,6 +361,7 @@ def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Pa
                 "handle": "env-1",
                 "session_id": "session-1",
                 "env_id": "openeta/demo-v0",
+                "name": "Gazebo 仿真环境",
             },
             {
                 "success": True,
@@ -430,6 +431,7 @@ def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Pa
     )
     environment = result.details["outputs"]["environment"]
     assert environment["assigned_task"] == ("pick up alphabet soup and place it into basket")
+    assert environment["display_name"] == "Gazebo 仿真环境"
     assert environment["dashboard_url"] == "http://sim.example/session/session-1"
     camera = result.details["outputs"]["initial_observation"]["cameras"][0]
     assert camera["anygrasp_intrinsics"]["scale"] == 1000.0
@@ -1441,8 +1443,8 @@ def test_gripper_control_selects_open_or_close_mcp_tool(tmp_path: Path) -> None:
         tool_names=("gripper_control",),
     )
 
-    open_result = tools.call("gripper_control", {"position": 1.0})
-    close_result = tools.call("gripper_control", {"position": 0.0})
+    open_result = tools.call("gripper_control", {"position": 1})
+    close_result = tools.call("gripper_control", {"position": 0})
 
     assert open_result.success is True
     assert close_result.success is True
@@ -1474,6 +1476,29 @@ def test_gripper_control_rejects_fractional_command(tmp_path: Path) -> None:
     assert transport.calls == []
 
 
+@pytest.mark.parametrize("position", [0.0, 1.0, True, False, -1, 2])
+def test_gripper_control_rejects_non_integer_binary_commands(
+    tmp_path: Path, position: object
+) -> None:
+    transport = FakeSimulatorMcpTransport({"cameras": [], "robot": {}})
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-strict-binary-gripper",
+            handle="env-strict-binary-gripper",
+            image_output_root=tmp_path,
+        ),
+        tool_names=("gripper_control",),
+    )
+
+    result = tools.call("gripper_control", {"position": position})
+
+    assert result.success is False
+    assert "exactly 0 or 1" in result.content
+    assert transport.calls == []
+
+
 def test_proxy_can_override_agent_tool_name_to_simulator_mcp_tool(tmp_path: Path) -> None:
     transport = FakeSimulatorMcpTransport({"cameras": [], "robot": {}})
     tools = bind_simulator_mcp_tool_handlers(
@@ -1488,7 +1513,7 @@ def test_proxy_can_override_agent_tool_name_to_simulator_mcp_tool(tmp_path: Path
         tool_names=("gripper_control",),
     )
 
-    result = tools.call("gripper_control", {"position": 0.0})
+    result = tools.call("gripper_control", {"position": 0})
 
     assert result.success is True
     assert transport.calls[0]["name"] == "control_gripper"
@@ -1545,7 +1570,7 @@ def test_proxy_reconciles_world_mutation_when_remote_action_receipt_is_not_json(
         tool_names=("gripper_control",),
     )
 
-    result = tools.call("gripper_control", {"position": 1.0})
+    result = tools.call("gripper_control", {"position": 1})
 
     assert result.success is False
     assert result.details["outputs"]["motion_outcome"] == "unknown"
