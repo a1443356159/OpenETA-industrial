@@ -1,0 +1,779 @@
+#!/usr/bin/env python3
+"""Deterministic Direct / SSE acceptance driver for M3 physical pick-place."""
+
+from __future__ import annotations
+
+import argparse
+from contextlib import suppress
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import socket
+import struct
+import subprocess
+import time
+import traceback
+from typing import Any, Iterable, Mapping, Sequence
+
+
+ROOT = Path(__file__).resolve().parents[3]
+REPORT_VERSION = "openeta.m3_physical_acceptance.v1"
+ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
+MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
+WORLD_NAME = "m3_rm75_robotiq2f85_pickplace"
+POSITION_TOLERANCE_M = 0.005
+ORIENTATION_TOLERANCE_RAD = 0.08
+DOCUMENTATION = {
+    "gazebo_contact_sensor": "https://gazebosim.org/docs/harmonic/sensors/",
+    "gazebo_contact_system": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1Contact.html",
+    "gazebo_odometry_publisher": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1OdometryPublisher.html",
+    "ros_gz_bridge_mappings": "https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md",
+    "moveit_planning_scene": "https://moveit.picknik.ai/main/doc/tutorials/planning_around_objects/planning_around_objects.html",
+    "ros2_control_gripper_stall": "https://control.ros.org/jazzy/doc/ros2_controllers/gripper_controllers/doc/userdoc.html",
+}
+
+
+def _assert(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def _load(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def _write(path: Path, report: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _compact(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _compact(item)
+            for key, item in value.items()
+            if key not in {"rgb_base64", "depth_base64"}
+            and not (
+                key in {"rgb", "depth"}
+                and not isinstance(item, (int, float, str, bool, type(None)))
+            )
+        }
+    if isinstance(value, (list, tuple)):
+        return [_compact(item) for item in value]
+    return value
+
+
+def _versions() -> dict[str, str]:
+    packages = {
+        "ros_gz": "ros-jazzy-ros-gz",
+        "moveit": "ros-jazzy-moveit",
+        "ros2_control": "ros-jazzy-ros2-control",
+        "ros2_controllers": "ros-jazzy-ros2-controllers",
+    }
+    result: dict[str, str] = {}
+    for label, package in packages.items():
+        completed = subprocess.run(
+            ["dpkg-query", "-W", "-f=${Version}", package],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        result[label] = completed.stdout.strip() if completed.returncode == 0 else "unavailable"
+    gazebo = subprocess.run(
+        ["gz", "sim", "--force-version", "8", "--versions"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    result["gazebo_sim"] = gazebo.stdout.strip() if gazebo.returncode == 0 else "unavailable"
+    return result
+
+
+def _base(path: Path) -> dict[str, Any]:
+    report = _load(path)
+    report.setdefault("schema_version", REPORT_VERSION)
+    report.setdefault("started_at_utc", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    report.setdefault("gates", {})
+    report["documentation"] = DOCUMENTATION
+    report["installed_versions"] = _versions()
+    with suppress(Exception):
+        report["git_commit"] = subprocess.check_output(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
+        ).strip()
+    return report
+
+
+def _process_row(pid: int) -> dict[str, Any] | None:
+    try:
+        stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        pgid = int(stat.rsplit(")", 1)[1].split()[2])
+        command = (Path("/proc") / str(pid) / "cmdline").read_bytes().replace(
+            b"\0", b" "
+        ).decode(errors="replace")
+        return {"pid": pid, "pgid": pgid, "command": command[:500]}
+    except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
+        return None
+
+
+def _ancestors() -> set[int]:
+    result: set[int] = set()
+    pid = os.getpid()
+    while pid > 1 and pid not in result:
+        result.add(pid)
+        try:
+            status = (Path("/proc") / str(pid) / "status").read_text().splitlines()
+            pid = int(next(line for line in status if line.startswith("PPid:")).split()[1])
+        except (FileNotFoundError, PermissionError, StopIteration, ValueError):
+            break
+    return result
+
+
+def _ancestor_process_groups() -> set[int]:
+    """Return process groups that the acceptance cleanup must never signal."""
+    groups: set[int] = set()
+    for pid in _ancestors():
+        row = _process_row(pid)
+        if row is not None:
+            groups.add(int(row["pgid"]))
+    return groups
+
+
+def _isolated_processes(partition: str) -> list[dict[str, Any]]:
+    expected = f"GZ_PARTITION={partition}".encode()
+    excluded = _ancestors()
+    excluded_groups = _ancestor_process_groups()
+    rows: list[dict[str, Any]] = []
+    for item in Path("/proc").iterdir():
+        if not item.name.isdigit() or int(item.name) in excluded:
+            continue
+        try:
+            environment = (item / "environ").read_bytes().split(b"\0")
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        row = _process_row(int(item.name)) if expected in environment else None
+        # A short-lived helper may inherit both the partition and the invoking
+        # shell's process group.  Killing that group would terminate the
+        # acceptance harness before it can finalize the report and unlock its
+        # resources.  Only independently managed groups are cleanup targets.
+        if row is not None and int(row["pgid"]) not in excluded_groups:
+            rows.append(row)
+    return rows
+
+
+def _preexisting_processes() -> list[dict[str, Any]]:
+    tokens = ("gz sim", "sim.mcp_server", "bench_worker.py --bench gazebo", "move_group")
+    rows: list[dict[str, Any]] = []
+    for item in Path("/proc").iterdir():
+        if not item.name.isdigit():
+            continue
+        row = _process_row(int(item.name))
+        if row is not None and any(token in row["command"] for token in tokens):
+            rows.append(row)
+    return rows
+
+
+def _ros_nodes(domain: int) -> list[str]:
+    environment = dict(os.environ, ROS_DOMAIN_ID=str(domain), ROS2CLI_DISABLE_DAEMON="1")
+    try:
+        result = subprocess.run(
+            ["ros2", "node", "list"], capture_output=True, text=True,
+            timeout=8.0, env=environment, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ["<unavailable>"]
+    return sorted(line for line in result.stdout.splitlines() if line.strip())
+
+
+def _port_free(port: int) -> bool:
+    sock = socket.socket()
+    try:
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def init_report(path: Path, domain: int, original_domain: int, partition: str, port: int) -> None:
+    report = _base(path)
+    report["isolation"] = {
+        "ros_domain_id": domain,
+        "original_ros_domain_id": original_domain,
+        "gz_partition": partition,
+        "mcp_port": port,
+        "preexisting_processes": _preexisting_processes(),
+        "preexisting_default_domain_nodes": _ros_nodes(original_domain),
+    }
+    report["gates"]["isolation_cleanup"] = {"status": "running"}
+    _write(path, report)
+
+
+def finalize_report(path: Path, domain: int, partition: str, port: int, exit_code: int) -> bool:
+    report = _base(path)
+    deadline = time.monotonic() + 20.0
+    nodes: list[str] = []
+    while time.monotonic() < deadline:
+        nodes = _ros_nodes(domain)
+        if not nodes:
+            break
+        time.sleep(0.5)
+    isolated = _isolated_processes(partition)
+    try:
+        topics = subprocess.run(
+            ["gz", "topic", "-l"], capture_output=True, text=True,
+            timeout=8.0, check=False,
+        ).stdout.splitlines()
+    except (OSError, subprocess.TimeoutExpired):
+        topics = ["<unavailable>"]
+    world_topics = [item for item in topics if f"/world/{WORLD_NAME}" in item]
+    checks = {
+        "isolated_processes_gone": {"ok": not isolated, "residual": isolated},
+        "test_domain_empty": {"ok": not nodes, "nodes": nodes},
+        "test_partition_empty": {"ok": not world_topics, "world_topics": world_topics},
+        "mcp_port_rebind": {"ok": _port_free(port)},
+    }
+    preexisting = report.get("isolation", {}).get("preexisting_processes", [])
+    vanished = [item for item in preexisting if not (Path("/proc") / str(item["pid"])).exists()]
+    checks["preexisting_processes_alive"] = {"ok": not vanished, "vanished": vanished}
+    original_domain = int(report.get("isolation", {}).get("original_ros_domain_id", domain))
+    before_nodes = set(report.get("isolation", {}).get("preexisting_default_domain_nodes", []))
+    after_nodes = set(_ros_nodes(original_domain))
+    checks["preexisting_default_domain_healthy"] = {
+        "ok": not (before_nodes - after_nodes),
+        "missing": sorted(before_nodes - after_nodes),
+    }
+    cleanup_ok = all(item["ok"] for item in checks.values())
+    report["gates"]["isolation_cleanup"] = {
+        "status": "passed" if cleanup_ok else "failed",
+        "checks": checks,
+        "main_exit_code": exit_code,
+    }
+    report["overall_status"] = (
+        "passed"
+        if exit_code == 0 and cleanup_ok
+        else "blocked" if report.get("gates", {}).get("direct_live", {}).get("status") == "blocked"
+        else "failed"
+    )
+    report["finished_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    _write(path, report)
+    return cleanup_ok
+
+
+def _q_multiply(a: Sequence[float], b: Sequence[float]) -> tuple[float, float, float, float]:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
+def _q_axis(axis: Sequence[float], angle: float) -> tuple[float, float, float, float]:
+    scale = math.sin(angle / 2.0)
+    return axis[0] * scale, axis[1] * scale, axis[2] * scale, math.cos(angle / 2.0)
+
+
+def _q_euler(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    return _q_multiply(
+        _q_axis((0, 0, 1), yaw),
+        _q_multiply(_q_axis((0, 1, 0), pitch), _q_axis((1, 0, 0), roll)),
+    )
+
+
+def _q_rotate(q: Sequence[float], value: Sequence[float]) -> tuple[float, float, float]:
+    x, y, z, w = q
+    vx, vy, vz = value
+    tx, ty, tz = 2 * (y * vz - z * vy), 2 * (z * vx - x * vz), 2 * (x * vy - y * vx)
+    return (
+        vx + w * tx + y * tz - z * ty,
+        vy + w * ty + z * tx - x * tz,
+        vz + w * tz + x * ty - y * tx,
+    )
+
+
+def _stl_center(path: Path) -> tuple[float, float, float]:
+    data = path.read_bytes()
+    triangles = struct.unpack_from("<I", data, 80)[0]
+    _assert(len(data) == 84 + triangles * 50, f"invalid frozen STL: {path}")
+    vertices = [
+        struct.unpack_from("<fff", data, 84 + triangle * 50 + 12 + vertex * 12)
+        for triangle in range(triangles)
+        for vertex in range(3)
+    ]
+    return tuple(
+        (min(item[index] for item in vertices) + max(item[index] for item in vertices)) / 2
+        for index in range(3)
+    )
+
+
+def _grasp_center_offset(environment: Any) -> tuple[float, float, float]:
+    from rclpy.time import Time
+
+    buffer = environment.controller.runtime.state_source.tf_buffer
+    asset = ROOT / "extensions/gazebo/assets/robotiq_2f85_vendor/meshes/collision/2f_85"
+    centers = []
+    for side, link in zip(("left", "right"), environment._m3_config.fingertip_links):
+        transform = buffer.lookup_transform("gripper_mount_link", link, Time()).transform
+        translation = (transform.translation.x, transform.translation.y, transform.translation.z)
+        rotation = (
+            transform.rotation.x, transform.rotation.y,
+            transform.rotation.z, transform.rotation.w,
+        )
+        local = _stl_center(asset / f"{side}_finger_tip.stl")
+        rotated = _q_rotate(rotation, local)
+        centers.append(tuple(translation[index] + rotated[index] for index in range(3)))
+    return tuple(sum(item[index] for item in centers) / 2 for index in range(3))
+
+
+def _mount_pose(
+    grasp_center: Sequence[float],
+    orientation: Sequence[float],
+    offset: Sequence[float],
+) -> dict[str, list[float]]:
+    rotated = _q_rotate(orientation, offset)
+    return {
+        "xyz": [float(grasp_center[index] - rotated[index]) for index in range(3)],
+        "quat_xyzw": [float(item) for item in orientation],
+    }
+
+
+def _target(observation: Mapping[str, Any], object_id: str = "m3_target") -> Mapping[str, Any]:
+    return next(item for item in observation["objects"] if item["id"] == object_id)
+
+
+def _orientation_error(a: Iterable[float], b: Iterable[float]) -> float:
+    qa, qb = list(map(float, a)), list(map(float, b))
+    dot = abs(sum(x * y for x, y in zip(qa, qb)))
+    norms = math.sqrt(sum(x * x for x in qa) * sum(x * x for x in qb))
+    return 2 * math.acos(max(-1.0, min(1.0, dot / norms)))
+
+
+def _validate_move(observation: Mapping[str, Any], target_pose: Mapping[str, Any]) -> dict[str, float]:
+    actual = observation["robot"]["end_effector_pose"]
+    position_error = math.dist(actual["xyz"], target_pose["xyz"])
+    orientation_error = _orientation_error(actual["quat_xyzw"], target_pose["quat_xyzw"])
+    _assert(position_error <= POSITION_TOLERANCE_M, f"position error {position_error:.6f} m")
+    _assert(orientation_error <= ORIENTATION_TOLERANCE_RAD, f"orientation error {orientation_error:.6f} rad")
+    return {"position_error_m": position_error, "orientation_error_rad": orientation_error}
+
+
+def _physical(observation: Mapping[str, Any]) -> Mapping[str, Any]:
+    record = observation.get("metadata", {}).get("physical_verification")
+    _assert(isinstance(record, Mapping), "physical verification record missing")
+    _assert(record.get("schema_version") == "m3_physical_verification_v1", "schema mismatch")
+    return record
+
+
+def _step(environment: Any, action: Mapping[str, Any], gate: dict[str, Any]) -> Mapping[str, Any]:
+    observation, _, _, _, receipt = environment.step(dict(action))
+    row = {"action": dict(action), "receipt": _compact(receipt)}
+    if action.get("action_type") == "move_to" and receipt.get("ok"):
+        row["pose_error"] = _validate_move(observation, action["target_pose"])
+    gate["actions"].append(row)
+    _assert(receipt.get("observation") is observation, "receipt does not reference fresh observation")
+    return observation
+
+
+def _joint_inventory() -> dict[str, Any]:
+    completed = subprocess.run(
+        ["gz", "model", "-m", MODEL_ID, "-j"], capture_output=True,
+        text=True, timeout=10.0, check=False,
+    )
+    _assert(completed.returncode == 0, f"Gazebo joint inventory failed: {completed.stderr}")
+    output = completed.stdout
+    names = sorted(set(re.findall(r"(?m)^\s*- Name:\s*(\S+)\s*$", output)))
+    _assert(bool(names), f"Gazebo joint inventory contained no joint identities: {output}")
+    return {
+        "sha256": hashlib.sha256("\n".join(names).encode()).hexdigest(),
+        "joint_names": names,
+    }
+
+
+def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: Sequence[float], gate: dict[str, Any]) -> dict[str, Any]:
+    target = _target(observation)["position"]
+    candidates = ((60, 180), (60, 135), (-60, 0), (-60, -45))
+    for pitch_degrees, yaw_degrees in candidates:
+        orientation = _q_euler(
+            math.pi, math.radians(pitch_degrees), math.radians(yaw_degrees)
+        )
+        pregrasp = _mount_pose(
+            (target[0], target[1], target[2] + 0.080), orientation, offset
+        )
+        result = environment.controller.plan_pose(pregrasp, timeout_s=12.0)
+        row = {
+            "pitch_degrees": pitch_degrees,
+            "yaw_degrees": yaw_degrees,
+            "pregrasp": pregrasp,
+            "result": _compact(result),
+        }
+        gate["plan_only_candidates"].append(row)
+        if result.get("ok") is True:
+            return {**row, "orientation": list(orientation)}
+    raise AssertionError("no collision-aware M3 pregrasp candidate")
+
+
+def _positive_round(environment: Any, gate: dict[str, Any], candidate: Mapping[str, Any], offset: Sequence[float]) -> None:
+    observation, _ = environment.reset()
+    orientation = candidate["orientation"]
+    target = _target(observation)["position"]
+    pregrasp = _mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": pregrasp, "timeout_s": 60.0}, gate)
+    _assert(gate["actions"][-1]["receipt"].get("ok") is True, "pregrasp motion failed")
+    target = _target(observation)["position"]
+    contact = _mount_pose(target, orientation, offset)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0}, gate)
+    _assert(gate["actions"][-1]["receipt"].get("ok") is True, "contact motion failed")
+    observation = _step(environment, {"action_type": "gripper_close", "timeout_s": 30.0}, gate)
+    _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "close did not produce a bilateral stall candidate")
+    target = _target(observation)["position"]
+    lift = _mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0}, gate)
+    _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "80 mm lift did not prove target held")
+    destination = environment._m3_config.destination_center_xy
+    transport = _mount_pose((destination[0], destination[1], target[2] + 0.080), orientation, offset)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": transport, "timeout_s": 60.0}, gate)
+    _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "transport lost target")
+    lower = _mount_pose(
+        (destination[0], destination[1], environment._m3_config.table_top_z_m + environment._m3_config.target_size_m[2] / 2),
+        orientation,
+        offset,
+    )
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lower, "timeout_s": 60.0}, gate)
+    observation = _step(environment, {"action_type": "gripper_open", "timeout_s": 30.0}, gate)
+    _assert(_physical(observation).get("reason_code") == "TARGET_PLACED", "release did not prove target placed")
+
+
+def _approach_and_close(
+    environment: Any,
+    gate: dict[str, Any],
+    candidate: Mapping[str, Any],
+    offset: Sequence[float],
+    grasp_center: Sequence[float],
+) -> Mapping[str, Any]:
+    orientation = candidate["orientation"]
+    pregrasp = _mount_pose(
+        (grasp_center[0], grasp_center[1], grasp_center[2] + 0.080),
+        orientation,
+        offset,
+    )
+    observation = _step(
+        environment,
+        {"action_type": "move_to", "target_pose": pregrasp, "timeout_s": 60.0},
+        gate,
+    )
+    _assert(gate["actions"][-1]["receipt"].get("ok") is True, "negative pregrasp failed")
+    contact = _mount_pose(grasp_center, orientation, offset)
+    observation = _step(
+        environment,
+        {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0},
+        gate,
+    )
+    _assert(gate["actions"][-1]["receipt"].get("ok") is True, "negative contact motion failed")
+    return _step(
+        environment,
+        {"action_type": "gripper_close", "timeout_s": 30.0},
+        gate,
+    )
+
+
+def _negative_cases(
+    environment: Any,
+    gate: dict[str, Any],
+    candidate: Mapping[str, Any],
+    offset: Sequence[float],
+) -> None:
+    cases: list[dict[str, Any]] = []
+
+    environment.reset(seed=51)
+    empty_center = (0.48, 0.12, environment._m3_config.table_top_z_m + 0.030)
+    observation = _approach_and_close(environment, gate, candidate, offset, empty_center)
+    reason = _physical(observation).get("reason_code")
+    cases.append({"name": "empty_grasp", "reason_code": reason})
+    _assert(reason == "EMPTY_GRASP", f"empty grasp returned {reason}")
+
+    observation, _ = environment.reset(seed=52)
+    distractor = _target(observation, "m3_distractor")["position"]
+    observation = _approach_and_close(environment, gate, candidate, offset, distractor)
+    reason = _physical(observation).get("reason_code")
+    cases.append({"name": "wrong_object", "reason_code": reason})
+    _assert(reason == "WRONG_OBJECT", f"wrong-object grasp returned {reason}")
+
+    # Establish a fresh proven grasp, then release with the target airborne.
+    observation, _ = environment.reset(seed=53)
+    target = _target(observation)["position"]
+    observation = _approach_and_close(environment, gate, candidate, offset, target)
+    _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "drop setup close failed")
+    target = _target(observation)["position"]
+    lift = _mount_pose(
+        (target[0], target[1], target[2] + 0.080), candidate["orientation"], offset
+    )
+    observation = _step(
+        environment,
+        {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0},
+        gate,
+    )
+    _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "drop setup lift failed")
+    observation = _step(
+        environment, {"action_type": "gripper_open", "timeout_s": 30.0}, gate
+    )
+    reason = _physical(observation).get("reason_code")
+    cases.append({"name": "airborne_drop", "reason_code": reason})
+    _assert(reason == "OBJECT_DROPPED", f"airborne release returned {reason}")
+
+    # Repeat the proven grasp and release on the table outside the marker.
+    observation, _ = environment.reset(seed=54)
+    target = _target(observation)["position"]
+    observation = _approach_and_close(environment, gate, candidate, offset, target)
+    _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "outside setup close failed")
+    target = _target(observation)["position"]
+    lift = _mount_pose(
+        (target[0], target[1], target[2] + 0.080), candidate["orientation"], offset
+    )
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0}, gate)
+    _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "outside setup lift failed")
+    outside = (0.48, 0.08)
+    lower = _mount_pose(
+        (outside[0], outside[1], environment._m3_config.table_top_z_m + environment._m3_config.target_size_m[2] / 2),
+        candidate["orientation"],
+        offset,
+    )
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lower, "timeout_s": 60.0}, gate)
+    observation = _step(environment, {"action_type": "gripper_open", "timeout_s": 30.0}, gate)
+    reason = _physical(observation).get("reason_code")
+    cases.append({"name": "outside_destination", "reason_code": reason})
+    _assert(reason == "OUTSIDE_DESTINATION", f"outside release returned {reason}")
+    gate["negative_cases"] = {"status": "passed", "cases": cases}
+
+
+def run_direct(path: Path) -> None:
+    from extensions.gazebo.worker import GazeboM3WorkerEnv
+
+    report = _base(path)
+    gate: dict[str, Any] = {"status": "running", "actions": [], "plan_only_candidates": [], "positive_rounds": []}
+    report["gates"]["direct_live"] = gate
+    _write(path, report)
+    environment = None
+    try:
+        environment = GazeboM3WorkerEnv(task="M3 physical acceptance", seed=31)
+        observation, _ = environment.reset(seed=31)
+        _assert(environment.openeta_control_spec.get("physical_verification") is True, "wrong worker profile")
+        _physical(observation)
+        offset = _grasp_center_offset(environment)
+        gate["grasp_center_offset_mount_m"] = list(offset)
+        candidate = _select_candidate(environment, observation, offset, gate)
+        gate["frozen_candidate"] = candidate
+        before = _joint_inventory()
+        for round_number in range(1, 6):
+            start = len(gate["actions"])
+            _positive_round(environment, gate, candidate, offset)
+            gate["positive_rounds"].append(
+                {"round": round_number, "actions": list(range(start, len(gate["actions"]))), "status": "passed"}
+            )
+        after = _joint_inventory()
+        gate["gazebo_joint_inventory"] = {"before": before, "after": after}
+        _assert(before["sha256"] == after["sha256"], "Gazebo joint topology changed during grasp")
+        _negative_cases(environment, gate, candidate, offset)
+        gate["status"] = "passed"
+    except Exception as exc:
+        if gate.get("status") == "running":
+            gate["status"] = "blocked"
+            gate["blocker"] = f"{type(exc).__name__}: {exc}"
+        gate["traceback"] = traceback.format_exc()
+        raise
+    finally:
+        if environment is not None:
+            with suppress(Exception):
+                environment.close()
+        _write(path, report)
+
+
+def _quat_to_euler(quaternion: Sequence[float]) -> tuple[float, float, float]:
+    x, y, z, w = quaternion
+    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+    sine = 2 * (w * y - z * x)
+    pitch = math.copysign(math.pi / 2, sine) if abs(sine) >= 1 else math.asin(sine)
+    yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    return tuple(math.degrees(item) for item in (roll, pitch, yaw))
+
+
+def run_mcp(path: Path, url: str) -> None:
+    from agent.tools.sim_mcp import SseSimulatorMcpTransport
+
+    report = _base(path)
+    direct = report["gates"].get("direct_live", {})
+    _assert(direct.get("status") == "passed", "direct gate must pass before MCP")
+    gate: dict[str, Any] = {"status": "running", "actions": []}
+    report["gates"]["mcp_live"] = gate
+    _write(path, report)
+    transport = SseSimulatorMcpTransport(url)
+    handle = session_id = ""
+    try:
+        deadline = time.monotonic() + 60.0
+        while True:
+            try:
+                names = {item["name"] for item in transport.list_tools(timeout_s=10)["tools"]}
+                _assert({"create_env", "reset_env", "observe_env", "move_to", "gripper_open", "gripper_close", "close_env"}.issubset(names), "MCP catalogue incomplete")
+                break
+            except Exception:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(1.0)
+        created = transport.call_tool("create_env", {"env_id": ENV_ID, "seed": 41, "task": "M3 MCP acceptance"}, timeout_s=180)
+        handle, session_id = created["handle"], created["session_id"]
+        _assert(created.get("control_spec", {}).get("m3") is True, "MCP selected wrong profile")
+        common = {"handle": handle, "session_id": session_id}
+        gate["create_env"] = _compact(created)
+        reset = transport.call_tool("reset_env", {**common, "seed": 41}, timeout_s=180)
+        gate["reset_env"] = _compact(reset)
+        # Direct acceptance freezes exact collision-aware poses for the MCP
+        # replay; MCP deliberately exposes no second TF or planning API.
+        candidate = direct["frozen_candidate"]
+        orientation = candidate["orientation"]
+        offset = direct["grasp_center_offset_mount_m"]
+
+        def observation_of(receipt: Mapping[str, Any]) -> Mapping[str, Any]:
+            observation = receipt.get("observation", receipt)
+            _physical(observation)
+            _assert(len(observation.get("cameras", [])) == 2, "MCP RGB-D observation incomplete")
+            _assert({item.get("id") for item in observation.get("objects", [])} == {"m3_target", "m3_distractor"}, "MCP Gazebo objects incomplete")
+            return observation
+
+        def action(name: str, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+            receipt = transport.call_tool(name, {**common, **arguments}, timeout_s=180)
+            observation_of(receipt)
+            gate["actions"].append({"name": name, "receipt": _compact(receipt)})
+            return receipt
+
+        def move(pose: Mapping[str, Any]) -> Mapping[str, Any]:
+            roll, pitch, yaw = _quat_to_euler(pose["quat_xyzw"])
+            return action(
+                "move_to",
+                {
+                    "x": pose["xyz"][0], "y": pose["xyz"][1], "z": pose["xyz"][2],
+                    "roll": roll, "pitch": pitch, "yaw": yaw,
+                    "tolerance": 0.002, "ori_tolerance": 0.05,
+                },
+            )
+
+        def reset_round(seed: int) -> Mapping[str, Any]:
+            return observation_of(
+                transport.call_tool("reset_env", {**common, "seed": seed}, timeout_s=180)
+            )
+
+        def approach_close(center: Sequence[float]) -> Mapping[str, Any]:
+            move(_mount_pose((center[0], center[1], center[2] + 0.080), orientation, offset))
+            move(_mount_pose(center, orientation, offset))
+            return action("gripper_close", {})
+
+        for round_number in range(2):
+            observation = reset_round(42 + round_number)
+            target = _target(observation)["position"]
+            close = approach_close(target)
+            _assert(_physical(observation_of(close)).get("reason_code") == "LIFT_REQUIRED", "MCP close candidate failed")
+            target = _target(observation_of(close))["position"]
+            lift = _mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset)
+            lifted = move(lift)
+            _assert(_physical(observation_of(lifted)).get("reason_code") == "TARGET_HELD", "MCP lift failed")
+            destination = (0.48, -0.10)
+            move(_mount_pose((destination[0], destination[1], target[2] + 0.080), orientation, offset))
+            move(_mount_pose((destination[0], destination[1], 0.430), orientation, offset))
+            opened = action("gripper_open", {})
+            _assert(_physical(observation_of(opened)).get("reason_code") == "TARGET_PLACED", "MCP placement failed")
+
+        negative: list[dict[str, Any]] = []
+        reset_round(61)
+        empty = approach_close((0.48, 0.12, 0.430))
+        negative.append({"name": "empty_grasp", "reason_code": _physical(observation_of(empty)).get("reason_code")})
+        _assert(negative[-1]["reason_code"] == "EMPTY_GRASP", "MCP empty-grasp mismatch")
+
+        observation = reset_round(62)
+        distractor = _target(observation, "m3_distractor")["position"]
+        wrong = approach_close(distractor)
+        negative.append({"name": "wrong_object", "reason_code": _physical(observation_of(wrong)).get("reason_code")})
+        _assert(negative[-1]["reason_code"] == "WRONG_OBJECT", "MCP wrong-object mismatch")
+
+        for seed, name, destination in (
+            (63, "airborne_drop", None),
+            (64, "outside_destination", (0.48, 0.08)),
+        ):
+            observation = reset_round(seed)
+            target = _target(observation)["position"]
+            closed = approach_close(target)
+            _assert(_physical(observation_of(closed)).get("reason_code") == "LIFT_REQUIRED", f"MCP {name} setup close failed")
+            target = _target(observation_of(closed))["position"]
+            lifted = move(_mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset))
+            _assert(_physical(observation_of(lifted)).get("reason_code") == "TARGET_HELD", f"MCP {name} setup lift failed")
+            if destination is not None:
+                move(_mount_pose((destination[0], destination[1], 0.430), orientation, offset))
+            opened = action("gripper_open", {})
+            reason = _physical(observation_of(opened)).get("reason_code")
+            expected = "OBJECT_DROPPED" if destination is None else "OUTSIDE_DESTINATION"
+            negative.append({"name": name, "reason_code": reason})
+            _assert(reason == expected, f"MCP {name} returned {reason}")
+        gate["negative_cases"] = negative
+        observed = transport.call_tool("observe_env", common, timeout_s=60)
+        _physical(observed.get("observation", observed))
+        gate["observe_env"] = _compact(observed)
+        first = transport.call_tool("close_env", common, timeout_s=60)
+        second = transport.call_tool("close_env", common, timeout_s=60)
+        _assert(first.get("already_closed") is False and second.get("already_closed") is True, "close is not idempotent")
+        gate["close_env"] = [_compact(first), _compact(second)]
+        gate["status"] = "passed"
+    except Exception as exc:
+        gate.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()})
+        raise
+    finally:
+        if handle and gate.get("status") != "passed":
+            with suppress(Exception):
+                transport.call_tool("close_env", {"handle": handle, "session_id": session_id}, timeout_s=60)
+        _write(path, report)
+
+
+def record_gate(path: Path, name: str, status: str, details: str) -> None:
+    report = _base(path)
+    report["gates"][name] = {"status": status, "details": details}
+    _write(path, report)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=("init", "direct", "mcp", "processes", "finalize", "gate"))
+    parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--domain", type=int, default=0)
+    parser.add_argument("--original-domain", type=int, default=0)
+    parser.add_argument("--partition", default="")
+    parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--exit-code", type=int, default=0)
+    parser.add_argument("--mcp-url", default="http://127.0.0.1:8765/sse")
+    parser.add_argument("--gate", default="")
+    parser.add_argument("--status", choices=("passed", "failed", "skipped"), default="passed")
+    parser.add_argument("--details", default="")
+    arguments = parser.parse_args()
+    path = arguments.report.resolve()
+    if arguments.mode == "init":
+        init_report(path, arguments.domain, arguments.original_domain, arguments.partition, arguments.port)
+    elif arguments.mode == "direct":
+        run_direct(path)
+    elif arguments.mode == "mcp":
+        run_mcp(path, arguments.mcp_url)
+    elif arguments.mode == "processes":
+        for pgid in sorted({item["pgid"] for item in _isolated_processes(arguments.partition)}):
+            print(pgid)
+    elif arguments.mode == "gate":
+        _assert(bool(arguments.gate), "--gate is required")
+        record_gate(path, arguments.gate, arguments.status, arguments.details)
+    else:
+        return 0 if finalize_report(path, arguments.domain, arguments.partition, arguments.port, arguments.exit_code) else 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
