@@ -1,5 +1,85 @@
 # Project memory
 
+## 2026-08-09 — M2 Robotiq 2F-85 local checkpoint verification
+
+- The production M2 profile is now
+  `openeta/gazebo_rm75_robotiq2f85-v0` / `rm75_robotiq_2f85_sim_v1`; the old
+  70 mm parallel fixture remains a buildable offline compatibility profile.
+- The repository-owned Jazzy/Harmonic launch, `RosM2ControllerFactory`, MoveIt
+  action path, dual live RGB-D source, worker routing, and real SSE MCP
+  lifecycle are integrated. Mutating actions consume strictly newer RGB and
+  depth samples and a JointState received after the action result; CameraInfo
+  is reusable.
+- Gazebo's imported Robotiq linkage is driven by a simulation-only adapter
+  that expands the standard active-joint `ParallelGripperCommand` into the six
+  vendor multiplier targets. The planner-facing MCP and ROS action schemas did
+  not change.
+- `run_m2_robotiq2f85_smoke.sh` locks an unused ROS domain in `100..199`, a
+  unique Gazebo partition, and an MCP port. Cleanup targets only owned handles,
+  PIDs, and process groups; normal, startup-failure, action-failure, and signal
+  paths all passed while the pre-existing domain 42 stack remained healthy.
+- Local development verification based on commit
+  `9bc2a2c67c3881b8c687182de341cc1a8bf7c503` passed build and asset checks,
+  `scripts/check_openeta_m2.sh`, 34 focused offline contracts, direct live ROS,
+  real MCP live, isolation cleanup, and the non-optional repository regression
+  (`1202 passed, 14 skipped`). This evidence is a checkpoint and does not
+  constitute formal M2 acceptance. Optional BEHAVIOR/RoboCasa `torch` suites
+  are outside the checkpoint gate.
+- Direct live evidence: two `open -> close -> open` cycles, maximum active
+  error 0.000164 rad, maximum mimic error 0.0166 rad, and apertures near
+  85/0/85 mm. Dynamic targets were 60 mm apart; four arm motions remained
+  within 3.46 mm and 0.054 rad.
+- MCP evidence: `create -> reset -> close/open -> A/B/A/B -> observe ->
+  unreachable -> close -> close` passed with a fresh complete observation on
+  each world-changing action. The unreachable pose returned
+  `MOTION_PLAN_FAILED` with MoveIt code `-27`; the second close returned
+  `already_closed=true`.
+- The ignored evidence report is
+  `.cache/reports/m2-robotiq2f85-acceptance-20260808T180318Z-74215.json`
+  (UTC filename, local checkpoint date 2026-08-09). Frozen asset manifest
+  digests are `3b920b22...e9b824` for RM75-6FB-V and
+  `c80c6db6...31f86` for the Robotiq closure.
+
+## 2026-08-08 — M2 RM75 parallel-gripper contract
+
+- Registered `openeta/gazebo_rm75_parallel-v0` without changing the M1 ID or
+  read-only class. The model contract is `rm75_parallel_gripper_sim_v1`,
+  `base_link -> link_7`, group `rm_group`, fixed child
+  `gripper_mount_link`, and joints `joint_1..joint_7` plus active/mimic fingers.
+- The standard two-finger fixture is simulation-only: active travel 0.035 m,
+  total aperture 0.070 m. Only exact integer 0/1 commands are accepted; the
+  mimic finger has no command mapping.
+- The dependency-light adapter builds link_7 goals by inverting the configured
+  fixed mount, and builds RobotState only from complete JointState plus TF.
+  Missing state/action dependencies return the planned structured error codes.
+- Worker M2 structured results retain StepResult compatibility and additionally
+  promote `ok`/`error_code` to the top level. Every successful controller
+  result includes a post-action state observation. Unknown motion outcome sets
+  `reconciliation_required=true`.
+- Official-interface decision: live deployments must use MoveGroup and
+  ParallelGripperCommand actions and Gazebo Sim gz_ros2_control plugin/system;
+  no direct Gazebo or trajectory-topic LLM control was added.
+- Blocker: no explicit vendor RM75 Jazzy asset/package path is configured, so
+  a live launch/action client was not guessed from the Humble/Classic user
+  material. The SDF checked into M2 is fixture metadata, not a fabricated RM75
+  arm model. Live launch/controller verification remains opt-in and blocked.
+- Production M2 creation therefore requires both `OPENETA_RM75_MODEL_PATH` and
+  an explicit `OPENETA_GAZEBO_M2_CONTROLLER_FACTORY`; absent either, creation
+  fails with `MODEL_ASSET_NOT_FOUND` or `ROS_NOT_READY` instead of launching
+  the M1 demo under a false RM75 identity.
+- OpenETA MCP worker smoke uncovered and fixed duplicate runtime `task`
+  forwarding in `sim/env_registry.make_env`; the sourced M1 worker lifecycle
+  then passed end-to-end (`1 passed, 11.31s`) with no residual processes.
+- Direct M2 MCP create attempt correctly returned `create_env failed:
+  MODEL_ASSET_NOT_FOUND`; no move/gripper command was issued against an
+  unverified model.
+- Focused contract/M1 regression: `6 passed, 1 skipped` in the isolated project
+  environment.
+- Broader unsourced Gazebo runs reached `16 passed, 2 skipped` and `18 passed,
+  4 skipped`; the existing live world-control and RGB-D bridge topic checks
+  time out when Gazebo resources are not sourced. This matches the recorded M1
+  prerequisite and does not exercise M2 code.
+
 ## 2026-08-08 — M0/M1 baseline
 
 - `plan.md` is the authoritative implementation plan. The first assignment is
@@ -137,8 +217,16 @@
 - Oracle MCP episode test passes (`5 passed` across the two Gazebo test files)
   and confirms the handle is released in `finally`.
 
-## Open questions / blockers
+## Resolved M2 blockers and deferred scope
 
-- A real Gazebo process/ROS 2 transport and MCP registry entry require the
-  deployment environment and must be implemented only after its documented
-  process/topic contract is available.
+- The neighbouring `/home/yyysaiko/workstation` was audited. Its
+  `/home/yyysaiko/workstation/external/rm75_ros2_ws` overlay sources cleanly
+  under Jazzy and `ros2 pkg prefix` resolves `rm_description`, `rm_75_config`,
+  `rm_gazebo`, and `rm_bringup`; pinned source commits are
+  `5fc226e...` (`ros2_rm_robot`) and `bdb12c...` (`rm_models`). M2 asset
+  validation accepts this explicit workspace path. That backend remains
+  plan-only and was not reused. The former `ROS_NOT_READY` blocker is resolved
+  by the repository-owned Robotiq profile and `RosM2ControllerFactory`.
+
+- M3 contact, grasp, attachment, and placement physics remain deferred; the M2
+  result establishes motion/gripper/observation/control lifecycle only.

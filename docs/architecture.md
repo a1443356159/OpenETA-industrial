@@ -28,8 +28,11 @@ Current remote simulator MCP mappings used by the agent runtime:
 - `close_simulator_env` -> `close_env`
 - `observe` -> `render_env`
 - `move_to` -> `move_to`
-- `gripper_control(position >= 0.5)` -> `gripper_open`
-- `gripper_control(position < 0.5)` -> `gripper_close`
+- `gripper_control(position=1)` -> `gripper_open`
+- `gripper_control(position=0)` -> `gripper_close`
+
+The gripper value is a type-strict JSON integer. Floats and booleans are
+rejected even when their numeric value compares equal to 0 or 1.
 
 MCP `isError` envelopes preserve their original text so remote failures remain
 diagnosable instead of being collapsed into a generic invalid response.

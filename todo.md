@@ -55,10 +55,42 @@ when work advances; do not start later milestones early.
 
 ## Deferred by plan
 
-- [ ] M2 robot control / MoveIt.
+- [x] M2 dependency-light RM75/parallel-gripper configuration, state adapter,
+      structured action routing, worker profile registration, and contract tests.
+- [x] M2 live ROS action client/launch verification using the repository-owned
+      Jazzy/Harmonic RM75 + Robotiq 2F-85 profile and frozen vendor assets.
 - [ ] M3 physical grasp and placement verification.
 - [ ] M4 oracle pick/place.
 - [ ] M5+ SAM3 integration and industrial benchmark.
+
+## M2 verification
+
+- [x] Preserve the legacy fixture contract: fixed RM75 names, binary 0/1
+      gripper mapping, 35 mm active travel / 70 mm aperture, mimic state-only
+      behavior, and model metadata.
+- [x] Convert tool-frame targets through the inverse fixed mount into `link_7`
+      MoveGroup goals with the specified tolerances.
+- [x] Build fresh RobotState from complete JointState + TF only and surface
+      structured M2 errors at the worker step top level.
+- [x] Preserve M1 registration and read-only behavior (focused suite: 6 passed,
+      1 skipped).
+- [x] Fix OpenETA MCP runtime-task forwarding for Gazebo workers (avoid
+      duplicate `task` keyword); sourced live M1 worker MCP lifecycle passes
+      (`1 passed`).
+- [x] Run the sourced unified Gazebo regression and M2 checkpoint verification
+      on the Ubuntu 24.04/Jazzy/Harmonic baseline. The recorded non-optional
+      repository regression reports **1202 passed, 14 skipped**; this local
+      development evidence does not constitute formal acceptance.
+- [x] Locate and preflight the neighbouring workstation's verified Jazzy RM75
+      workspace (`/home/yyysaiko/workstation/external/rm75_ros2_ws`); asset
+      validation passes for all four required installed packages.
+- [x] Integrate the execution-capable repository-owned `RosM2ControllerFactory`
+      and pass the real SSE MCP create/reset/gripper/A-B/observe/unreachable/
+      idempotent-close lifecycle.
+- [ ] Pass the formal Robotiq 2F-85 direct and MCP live acceptance. The
+      2026-08-09 local checkpoint covered fresh post-action JointState/RGB-D
+      timestamps, structured planning rejection, isolation, and all four
+      cleanup paths, but has not been designated a formal acceptance run.
 
 ## Runtime configuration
 
