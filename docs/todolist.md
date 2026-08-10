@@ -123,6 +123,27 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
   - Note: remote MCP does not currently expose `observe_env`; `render_env` is
     used as the observe substitute.
 
+## Gazebo Milestones
+
+- [ ] M4 (revised, 2026-08-10): oracle perception as a SAM3-shaped perception
+  module for `openeta/gazebo_rm75_robotiq2f85_pickplace-v0`.
+  - [x] `oracle_perceive` reuses the SAM3 handler/contract/selection flow end
+    to end (agent tool -> sim MCP -> bench_worker -> pure geometric projection
+    in `extensions/gazebo/oracle_perception.py`).
+  - [x] `OPENETA_PERCEPTION_PROFILE=sam3|oracle` (default `sam3`); exactly one
+    segmenter tool is exposed to the planner per profile, with provenance
+    marked in response metadata, artifacts, and Working Memory facts.
+  - [x] Phased MoveIt primitives (`move_to` / `gripper_control`) instead of a
+    `pick_place` orchestration tool (waived by user).
+  - [x] Offline tests: 39 new (worker 16+13, agent contract 10) + 5
+    execution-link patch tests; full offline suite 1320 passed, 0 failed.
+  - [ ] Live acceptance (`tests/test_gazebo_m4_oracle_pick_chain.py`,
+    `OPENETA_RUN_LIVE_ROS_TEST=1`): blocked on the known M3 contact-pose
+    `MOTION_PLAN_FAILED` blocker; the test xfails when it hits it.
+  - Out of scope: wrist projection, pick_place NOT_READY gate, unified object
+    summary schema (plan.md §17), SAM3-side changes, M6 fine-tuning.
+  - Details: `docs/gazebo-m4-oracle-perception.md`.
+
 ## RFC And Review
 
 - [x] Review section 5 schema with collaborators.

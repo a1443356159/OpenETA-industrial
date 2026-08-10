@@ -1,5 +1,9 @@
 # Gazebo adapter design (M1)
 
+For the M4 oracle perception module built on this adapter (SAM3-shaped
+`oracle_perceive` tool, projection core, and perception profile switch), see
+`docs/gazebo-m4-oracle-perception.md`.
+
 ## Lifecycle
 
 `GazeboEnvironment.create()` establishes one isolated world and immediately
