@@ -141,8 +141,14 @@ class GazeboProcess:
         if process.stderr is not None:
             process.stderr.close()
 
-    def wait_for_topics(self, topics: tuple[str, ...], *, timeout_s: float = 15.0) -> None:
-        """Wait until Gazebo's transport advertises every requested topic."""
+    def wait_for_topics(self, topics: tuple[str, ...], *, timeout_s: float = 30.0) -> None:
+        """Wait until Gazebo's transport advertises every requested topic.
+
+        The default budget doubles the original 15 s allowance: on WSL2 a
+        cold ``gz sim`` start plus transport discovery can exceed 15 s even
+        though discovery itself is healthy, so the readiness gate polls for
+        longer instead of reporting a false discovery failure.
+        """
 
         if not self.running:
             raise GazeboProcessError("Gazebo must be running before waiting for topics")
