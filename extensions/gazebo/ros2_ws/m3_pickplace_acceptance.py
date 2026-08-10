@@ -38,8 +38,6 @@ WORLD_NAME = "m3_rm75_robotiq2f85_pickplace"
 POSITION_TOLERANCE_M = 0.005
 ORIENTATION_TOLERANCE_RAD = 0.08
 DOCUMENTATION = {
-    "gazebo_contact_sensor": "https://gazebosim.org/docs/harmonic/sensors/",
-    "gazebo_contact_system": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1Contact.html",
     "gazebo_odometry_publisher": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1OdometryPublisher.html",
     "ros_gz_bridge_mappings": "https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md",
     "moveit_planning_scene": "https://moveit.picknik.ai/main/doc/tutorials/planning_around_objects/planning_around_objects.html",
@@ -247,7 +245,10 @@ def finalize_report(path: Path, domain: int, partition: str, port: int, world: s
         isolation.get("mcp_port"), isolation.get("world"),
     ) != (domain, partition, port, world):
         raise ValueError("FINALIZE_ARGUMENT_MISMATCH")
-    deadline = time.monotonic() + 20.0
+    # DDS discovery can retain departed participants beyond process teardown.
+    # Reuse the existing two-snapshot empty-domain probe for up to one lease
+    # interval before classifying cleanup as a confirmed residual.
+    deadline = time.monotonic() + 60.0
     domain_evidence: dict[str, Any] = {"state": INCONCLUSIVE, "ok": None, "reason_code": "ROS_GRAPH_UNAVAILABLE"}
     while time.monotonic() < deadline:
         domain_evidence = empty_domain_evidence(domain)
@@ -399,7 +400,8 @@ def _physical(observation: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _step(environment: Any, action: Mapping[str, Any], gate: dict[str, Any]) -> Mapping[str, Any]:
-    observation, _, _, _, receipt = environment.step(dict(action))
+    observation, _, _, _, info = environment.step(dict(action))
+    receipt = info.get("_openeta_receipt", info)
     row = {"action": dict(action), "receipt": _compact(receipt)}
     if action.get("action_type") == "move_to" and receipt.get("ok"):
         row["pose_error"] = _validate_move(observation, action["target_pose"])
@@ -424,26 +426,110 @@ def _joint_inventory() -> dict[str, Any]:
 
 
 def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: Sequence[float], gate: dict[str, Any]) -> dict[str, Any]:
-    target = _target(observation)["position"]
+    del observation
     candidates = ((60, 180), (60, 135), (-60, 0), (-60, -45))
     for pitch_degrees, yaw_degrees in candidates:
+        observation, _ = environment.reset()
+        target = _target(observation)["position"]
         orientation = _q_euler(
             math.pi, math.radians(pitch_degrees), math.radians(yaw_degrees)
         )
         pregrasp = _mount_pose(
             (target[0], target[1], target[2] + 0.080), orientation, offset
         )
-        result = environment.controller.plan_pose(pregrasp, timeout_s=12.0)
+        try:
+            result = environment.controller.plan_pose(pregrasp, timeout_s=12.0)
+        except Exception as exc:
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         row = {
             "pitch_degrees": pitch_degrees,
             "yaw_degrees": yaw_degrees,
             "pregrasp": pregrasp,
             "result": _compact(result),
+            "stages": [],
         }
         gate["plan_only_candidates"].append(row)
-        if result.get("ok") is True:
+        if result.get("ok") is not True:
+            row["blocker_stage"] = "pregrasp_plan"
+            continue
+        try:
+            observation = _step(
+                environment,
+                {"action_type": "move_to", "target_pose": pregrasp, "timeout_s": 60.0},
+                gate,
+            )
+        except Exception as exc:
+            row["blocker_stage"] = "pregrasp_execute"
+            row["error"] = f"{type(exc).__name__}: {exc}"
+            continue
+        row["stages"].append("pregrasp")
+        if gate["actions"][-1]["receipt"].get("ok") is not True:
+            row["blocker_stage"] = "pregrasp_execute"
+            continue
+        target = _target(observation)["position"]
+        contact_pose = _mount_pose(target, orientation, offset)
+        try:
+            observation = _step(
+                environment,
+                {"action_type": "move_to", "target_pose": contact_pose, "timeout_s": 60.0},
+                gate,
+            )
+        except Exception as exc:
+            row["blocker_stage"] = "contact_execute"
+            row["error"] = f"{type(exc).__name__}: {exc}"
+            continue
+        row["contact_pose"] = contact_pose
+        row["stages"].append("contact")
+        if gate["actions"][-1]["receipt"].get("ok") is not True:
+            row["blocker_stage"] = "contact_execute"
+            continue
+        try:
+            observation = _step(
+                environment, {"action_type": "gripper_close", "timeout_s": 30.0}, gate
+            )
+        except Exception as exc:
+            row["blocker_stage"] = "close_stall"
+            row["error"] = f"{type(exc).__name__}: {exc}"
+            continue
+        close_reason = _physical(observation).get("reason_code")
+        row["close_reason_code"] = close_reason
+        row["stages"].append("close")
+        if close_reason != "LIFT_REQUIRED":
+            row["blocker_stage"] = "close_stall"
+            continue
+        target = _target(observation)["position"]
+        lift = _mount_pose(
+            (target[0], target[1], target[2] + 0.080), orientation, offset
+        )
+        try:
+            observation = _step(
+                environment,
+                {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0},
+                gate,
+            )
+        except Exception as exc:
+            row["blocker_stage"] = "lift_comovement"
+            row["error"] = f"{type(exc).__name__}: {exc}"
+            continue
+        lift_reason = _physical(observation).get("reason_code")
+        row["lift_pose"] = lift
+        row["lift_reason_code"] = lift_reason
+        row["stages"].append("lift")
+        if lift_reason == "TARGET_HELD":
+            row["status"] = "passed"
             return {**row, "orientation": list(orientation)}
-    raise AssertionError("no collision-aware M3 pregrasp candidate")
+        row["blocker_stage"] = "lift_comovement"
+    blockers = [
+        {
+            "pitch_degrees": row["pitch_degrees"],
+            "yaw_degrees": row["yaw_degrees"],
+            "blocker_stage": row.get("blocker_stage"),
+            "close_reason_code": row.get("close_reason_code"),
+            "lift_reason_code": row.get("lift_reason_code"),
+        }
+        for row in gate["plan_only_candidates"]
+    ]
+    raise AssertionError(f"no complete M3 grasp candidate: {blockers}")
 
 
 def _positive_round(environment: Any, gate: dict[str, Any], candidate: Mapping[str, Any], offset: Sequence[float]) -> None:
@@ -528,6 +614,18 @@ def _negative_cases(
     observation, _ = environment.reset(seed=52)
     distractor = _target(observation, "m3_distractor")["position"]
     observation = _approach_and_close(environment, gate, candidate, offset, distractor)
+    _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "wrong-object close did not stall")
+    distractor = _target(observation, "m3_distractor")["position"]
+    wrong_lift = _mount_pose(
+        (distractor[0], distractor[1], distractor[2] + 0.080),
+        candidate["orientation"],
+        offset,
+    )
+    observation = _step(
+        environment,
+        {"action_type": "move_to", "target_pose": wrong_lift, "timeout_s": 60.0},
+        gate,
+    )
     reason = _physical(observation).get("reason_code")
     cases.append({"name": "wrong_object", "reason_code": reason})
     _assert(reason == "WRONG_OBJECT", f"wrong-object grasp returned {reason}")
@@ -727,6 +825,15 @@ def run_mcp(path: Path, url: str) -> None:
         observation = reset_round(62)
         distractor = _target(observation, "m3_distractor")["position"]
         wrong = approach_close(distractor)
+        _assert(_physical(observation_of(wrong)).get("reason_code") == "LIFT_REQUIRED", "MCP wrong-object close did not stall")
+        distractor = _target(observation_of(wrong), "m3_distractor")["position"]
+        wrong = move(
+            _mount_pose(
+                (distractor[0], distractor[1], distractor[2] + 0.080),
+                orientation,
+                offset,
+            )
+        )
         negative.append({"name": "wrong_object", "reason_code": _physical(observation_of(wrong)).get("reason_code")})
         _assert(negative[-1]["reason_code"] == "WRONG_OBJECT", "MCP wrong-object mismatch")
 

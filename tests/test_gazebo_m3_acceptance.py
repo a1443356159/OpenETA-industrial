@@ -74,6 +74,81 @@ def test_acceptance_mount_pose_places_live_collision_center_at_requested_point()
     assert [pose["xyz"][index] + recovered_offset[index] for index in range(3)] == pytest.approx(center)
 
 
+def test_candidate_selection_continues_after_reachable_pregrasp_fails_contact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Controller:
+        @staticmethod
+        def plan_pose(_pose, *, timeout_s):
+            assert timeout_s == 12.0
+            return {"ok": True}
+
+    class Environment:
+        controller = Controller()
+
+        def __init__(self) -> None:
+            self.attempt = 0
+            self.moves = 0
+
+        def reset(self):
+            self.attempt += 1
+            self.moves = 0
+            return observation("READY"), {}
+
+    def observation(reason: str):
+        return {
+            "objects": [
+                {"id": "m3_target", "position": [0.28, -0.10, 0.43]},
+                {"id": "m3_distractor", "position": [0.28, 0.12, 0.44]},
+            ],
+            "metadata": {
+                "physical_verification": {
+                    "schema_version": "m3_physical_verification_v1",
+                    "reason_code": reason,
+                }
+            },
+        }
+
+    environment = Environment()
+
+    def fake_step(env, action, gate):
+        ok = True
+        reason = "READY"
+        if action["action_type"] == "move_to":
+            env.moves += 1
+            ok = not (env.attempt == 1 and env.moves == 2)
+            if env.attempt == 2 and env.moves == 3:
+                reason = "TARGET_HELD"
+        elif action["action_type"] == "gripper_close":
+            reason = "LIFT_REQUIRED"
+        gate["actions"].append({"action": dict(action), "receipt": {"ok": ok}})
+        return observation(reason)
+
+    monkeypatch.setattr(acceptance, "_step", fake_step)
+    gate = {"actions": [], "plan_only_candidates": []}
+    selected = acceptance._select_candidate(environment, observation("READY"), (0, 0, 0), gate)
+
+    assert (selected["pitch_degrees"], selected["yaw_degrees"]) == (60, 135)
+    assert gate["plan_only_candidates"][0]["blocker_stage"] == "contact_execute"
+    assert gate["plan_only_candidates"][1]["status"] == "passed"
+
+
+def test_acceptance_step_reads_direct_env_namespaced_receipt() -> None:
+    observation = {"robot": {"end_effector_pose": {"xyz": [0, 0, 0], "quat_xyzw": [0, 0, 0, 1]}}}
+    receipt = {"ok": True, "observation": observation}
+
+    class Environment:
+        @staticmethod
+        def step(_action):
+            return observation, 0.0, False, False, {"_openeta_receipt": receipt}
+
+    gate = {"actions": []}
+    returned = acceptance._step(Environment(), {"action_type": "gripper_close"}, gate)
+
+    assert returned is observation
+    assert gate["actions"][0]["receipt"]["ok"] is True
+
+
 def test_acceptance_shell_owns_isolation_without_broad_process_kills() -> None:
     script = (
         ROOT / "extensions/gazebo/ros2_ws/run_m3_pickplace_acceptance.sh"
