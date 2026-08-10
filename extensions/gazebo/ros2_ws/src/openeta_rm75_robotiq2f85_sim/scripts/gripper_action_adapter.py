@@ -48,7 +48,18 @@ ACTION_TIMEOUT_S: Final = 20.0
 # step-commanding the full stroke.  A step command slams the pads into a
 # grasped object at full PID authority and the impact ejects light targets
 # before the stall detector can settle.
-RAMP_S: Final = 1.5
+RAMP_S: Final = 1.0
+# While the active joint is blocked the ramp does not stop; it creeps at this
+# fraction of the normal rate so a deterministic, gentle contact force builds
+# during the stall-detection window instead of an impact-then-release.
+BLOCKED_RAMP_FACTOR: Final = 0.0
+# Extra closing stroke (active joint, rad) commanded per joint when a stall is
+# held.  Each joint keeps its own measured position plus at most this offset,
+# so a stressed four-bar linkage is never forced back into the nominal mimic
+# relation (which ejects a held object).  Live sweeps found no positive value
+# that reliably survives the lift (0.01-0.02 slips, 0.03 can eject), so the
+# default is a pure freeze; the parameter remains for physics tuning.
+STALL_HOLD_EXTRA_RAD: Final = 0.0
 
 
 def expanded_targets(active_position: float) -> dict[str, float]:
@@ -66,6 +77,9 @@ class RobotiqGripperActionAdapter(Node):
         self.declare_parameter("allow_stalling", False)
         self.declare_parameter("stall_velocity_threshold", 0.001)
         self.declare_parameter("stall_timeout", 1.0)
+        self.declare_parameter("ramp_s", RAMP_S)
+        self.declare_parameter("blocked_ramp_factor", BLOCKED_RAMP_FACTOR)
+        self.declare_parameter("stall_hold_extra_rad", STALL_HOLD_EXTRA_RAD)
         self._allow_stalling = bool(self.get_parameter("allow_stalling").value)
         self._stall_velocity_threshold = float(
             self.get_parameter("stall_velocity_threshold").value
@@ -153,10 +167,15 @@ class RobotiqGripperActionAdapter(Node):
         active_position = float(goal_handle.request.command.position[0])
         targets = expanded_targets(active_position)
         start_positions, _, _ = self._snapshot()
-        started = time.monotonic()
         result = ParallelGripperCommand.Result()
         deadline = time.monotonic() + ACTION_TIMEOUT_S
         last_movement_time = time.monotonic()
+        ramp_s = float(self.get_parameter("ramp_s").value)
+        blocked_ramp_factor = float(self.get_parameter("blocked_ramp_factor").value)
+        stall_hold_extra = float(self.get_parameter("stall_hold_extra_rad").value)
+        ramp_clock = 0.0
+        last_tick = time.monotonic()
+        has_moved = False
 
         while rclpy.ok() and time.monotonic() < deadline:
             positions, velocities, state = self._snapshot()
@@ -169,10 +188,32 @@ class RobotiqGripperActionAdapter(Node):
                 goal_handle.canceled()
                 return result
 
+            now = time.monotonic()
+            dt = now - last_tick
+            last_tick = now
+            active_velocity_now = abs(float(velocities.get(ACTIVE_JOINT, 0.0)))
+            if active_velocity_now > self._stall_velocity_threshold:
+                has_moved = True
+            errors_now = (
+                {name: abs(positions[name] - target) for name, target in targets.items()}
+                if set(targets).issubset(positions)
+                else None
+            )
+            blocked = bool(
+                has_moved
+                and errors_now is not None
+                and max(errors_now.values()) > GOAL_TOLERANCE_RAD
+                and active_velocity_now <= self._stall_velocity_threshold
+            )
+            if not blocked:
+                ramp_clock += dt
+            else:
+                ramp_clock += dt * blocked_ramp_factor
+
             # Re-publishing makes startup deterministic even if the bridge is
             # still establishing its Gazebo publisher on the first sample.
             if set(JOINT_MULTIPLIERS).issubset(start_positions):
-                alpha = min(1.0, (time.monotonic() - started) / RAMP_S)
+                alpha = min(1.0, ramp_clock / ramp_s)
                 published = {
                     name: start_positions[name] + (target - start_positions[name]) * alpha
                     for name, target in targets.items()
@@ -201,12 +242,25 @@ class RobotiqGripperActionAdapter(Node):
                     # Match the documented ros2_control stall-success result:
                     # the action terminal state is successful, while physical
                     # grasp success remains exclusively the M3 verifier's job.
-                    # Hold the stalled positions as the new targets: leaving
-                    # the unreachable full-stroke target commanded would keep
-                    # the Gazebo position systems squeezing until a grasped
-                    # object is ejected.
+                    # Hold every joint at its own measured position plus at
+                    # most a small per-joint offset toward its target.  Snapping
+                    # the stressed four-bar linkage back to the nominal mimic
+                    # vector (or keeping the unreachable full-stroke target)
+                    # ejects a held object; a pure freeze can be too weak to
+                    # survive the lift, so the offset stays tunable.
                     if positions:
-                        self._publish_targets(positions)
+                        hold = {
+                            name: position
+                            + max(
+                                -stall_hold_extra * abs(JOINT_MULTIPLIERS[name]),
+                                min(
+                                    stall_hold_extra * abs(JOINT_MULTIPLIERS[name]),
+                                    targets[name] - position,
+                                ),
+                            )
+                            for name, position in positions.items()
+                        }
+                        self._publish_targets(hold)
                     result.state = self._result_state(positions, velocities, state)
                     result.stalled = True
                     result.reached_goal = False

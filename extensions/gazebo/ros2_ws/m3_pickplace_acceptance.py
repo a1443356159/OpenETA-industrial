@@ -490,15 +490,24 @@ def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: 
         pregrasp = _mount_pose(
             (target[0], target[1], target[2] + 0.080), orientation, offset
         )
-        try:
-            result = environment.controller.plan_pose(pregrasp, timeout_s=12.0)
-        except Exception as exc:
-            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        # OMPL goal sampling is stochastic: the same pose can fail one call
+        # and succeed on the next.  Probe the pregrasp with bounded retries
+        # before declaring the candidate unreachable.
+        result: Mapping[str, Any] = {"ok": False}
+        plan_attempts = 0
+        for plan_attempts in range(1, 4):
+            try:
+                result = environment.controller.plan_pose(pregrasp, timeout_s=12.0)
+            except Exception as exc:
+                result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            if result.get("ok") is True:
+                break
         row = {
             "pitch_degrees": pitch_degrees,
             "yaw_degrees": yaw_degrees,
             "pregrasp": pregrasp,
             "result": _compact(result),
+            "plan_attempts": plan_attempts,
             "stages": [],
         }
         gate["plan_only_candidates"].append(row)
