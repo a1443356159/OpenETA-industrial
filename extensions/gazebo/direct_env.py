@@ -140,12 +140,7 @@ class GazeboDirectEnv(Env):
             )
             raw["objects"] = []
         physical = record.to_dict()
-        contacts = snapshot.contacts if snapshot is not None else None
-        common = set(contacts.left_object_ids).intersection(contacts.right_object_ids) if contacts else set()
         raw.setdefault("robot", {}).setdefault("gripper_state", {}).update({
-            "contact_left": bool(contacts and contacts.left_object_ids),
-            "contact_right": bool(contacts and contacts.right_object_ids),
-            "contact_object_id": next(iter(common)) if len(common) == 1 else None,
             "object_detection": record.object_detection,
             "grasp_confirmed": record.grasp_confirmed,
             "slip_detected": record.slip_detected,
@@ -222,6 +217,10 @@ class GazeboDirectEnv(Env):
                 if target is not None and not planning.attached:
                     planning.release(target.pose)
         self._latest = raw
+        # The Direct/Gym boundary owns the public unified observation.  Keep
+        # the structured receipt anchored to that exact post-action object so
+        # Direct acceptance and the MCP codec share the same freshness proof.
+        receipt["observation"] = raw
         # Receipt is deliberately namespaced inside Gym info.  The generic MCP
         # control codec restores the established top-level wire fields.
         info = {"_openeta_receipt": receipt} if STRUCTURED_RECEIPT in self.profile.capabilities else {}

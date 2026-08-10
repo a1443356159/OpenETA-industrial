@@ -1,8 +1,8 @@
-"""Dependency-light contracts for M3 contact-only pick/place verification.
+"""Dependency-light contracts for M3 physical pick/place verification.
 
 This module intentionally imports neither ROS nor Gazebo.  The live adapter
-normalizes official ``Contacts`` and ``Odometry`` messages into the immutable
-types below; the verifier then decides from physical evidence only.  A MoveIt
+normalizes official ``Odometry`` messages and existing robot state into the
+immutable types below; the verifier then decides from physical evidence only.  A MoveIt
 attached collision object is represented as a planning command and never as a
 Gazebo joint or kinematic attachment.
 """
@@ -36,13 +36,11 @@ class ReasonCode(StrEnum):
     WRONG_OBJECT = "WRONG_OBJECT"
     TARGET_HELD = "TARGET_HELD"
     TARGET_NOT_LIFTED = "TARGET_NOT_LIFTED"
-    CONTACT_LOST = "CONTACT_LOST"
     RELATIVE_POSE_DRIFT = "RELATIVE_POSE_DRIFT"
     OBJECT_DROPPED = "OBJECT_DROPPED"
     TARGET_PLACED = "TARGET_PLACED"
     OUTSIDE_DESTINATION = "OUTSIDE_DESTINATION"
     NOT_SETTLED = "NOT_SETTLED"
-    CONTACT_NOT_STABLE = "CONTACT_NOT_STABLE"
     STALL_STATUS_MISSING = "STALL_STATUS_MISSING"
     DATA_MISSING = "DATA_MISSING"
     DATA_STALE = "DATA_STALE"
@@ -76,8 +74,6 @@ class M3Config(M2Config):
     destination_center_xy: tuple[float, float] = (0.48, -0.10)
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
     destination_margin_m: float = 0.005
-    stable_contact_s: float = 0.20
-    candidate_aperture_range_m: tuple[float, float] = (0.032, 0.048)
     empty_aperture_m: float = 0.006
     lift_probe_m: float = 0.080
     minimum_lift_m: float = 0.060
@@ -174,46 +170,11 @@ class ObjectState:
 
 
 @dataclass(frozen=True, slots=True)
-class ContactState:
-    left_object_ids: tuple[str, ...]
-    right_object_ids: tuple[str, ...]
-    target_support_ids: tuple[str, ...]
-    left_durations_s: tuple[tuple[str, float], ...]
-    right_durations_s: tuple[tuple[str, float], ...]
-    timestamps_s: tuple[tuple[str, float], ...]
-    identities_complete: bool = True
-
-    def duration(self, side: str, object_id: str) -> float:
-        values = self.left_durations_s if side == "left" else self.right_durations_s
-        return dict(values).get(object_id, 0.0)
-
-    def bilateral(self, object_id: str, minimum_s: float) -> bool:
-        return (
-            object_id in self.left_object_ids
-            and object_id in self.right_object_ids
-            and self.duration("left", object_id) >= minimum_s
-            and self.duration("right", object_id) >= minimum_s
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "left_object_ids": list(self.left_object_ids),
-            "right_object_ids": list(self.right_object_ids),
-            "target_support_ids": list(self.target_support_ids),
-            "left_durations_s": dict(self.left_durations_s),
-            "right_durations_s": dict(self.right_durations_s),
-            "timestamps_s": dict(self.timestamps_s),
-            "identities_complete": self.identities_complete,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class PhysicsSnapshot:
     timestamp_s: float
     received_monotonic_s: float
     eef_pose: Pose
     aperture_m: float
-    contacts: ContactState
     objects: tuple[ObjectState, ...]
     stream_timestamps_s: tuple[tuple[str, float], ...]
     gripper_stalled: bool | None = None
@@ -286,6 +247,8 @@ class M3Verifier:
         self.held = False
         self._candidate_target_pose: Pose | None = None
         self._candidate_relative_pose: Pose | None = None
+        self._candidate_distractor_pose: Pose | None = None
+        self._candidate_distractor_relative_pose: Pose | None = None
         self._settle_since_s: float | None = None
         self._release_mode: str | None = None
         self._last_target_z: float | None = None
@@ -314,7 +277,7 @@ class M3Verifier:
             return self._remember(self._record(snapshot, Verdict.UNKNOWN, ReasonCode.DATA_MISSING))
 
         if action_type == "gripper_close":
-            return self._remember(self._verify_close(snapshot, target))
+            return self._remember(self._verify_close(snapshot, target, distractor))
 
         if action_type == "gripper_open" and self.held:
             self.held = False
@@ -325,7 +288,7 @@ class M3Verifier:
             self._release_mode = (
                 "placing"
                 if self._inside_destination(target)
-                or target.support == self.config.table_id
+                or self._support(target) == self.config.table_id
                 or near_table
                 else "drop_monitoring"
             )
@@ -353,9 +316,6 @@ class M3Verifier:
             "tf",
             "rgb",
             "depth",
-            "contact_left",
-            "contact_right",
-            "contact_target",
             "odometry_target",
             "odometry_distractor",
         }
@@ -376,25 +336,27 @@ class M3Verifier:
             return self._record(
                 snapshot, Verdict.UNKNOWN, ReasonCode.DATA_STALE, extra={"stale_streams": stale}
             )
-        if not snapshot.contacts.identities_complete:
-            return self._record(snapshot, Verdict.UNKNOWN, ReasonCode.IDENTITY_INCOMPLETE)
-        return None
-
-    def _verify_close(self, snapshot: PhysicsSnapshot, target: ObjectState) -> VerificationRecord:
-        contacts = snapshot.contacts
-        cfg = self.config
-        if contacts.bilateral(cfg.distractor_id, cfg.stable_contact_s):
-            self.phase = "failed"
-            self._clear_grasp()
+        if (
+            not math.isfinite(snapshot.aperture_m)
+            or snapshot.aperture_m < 0.0
+            or snapshot.aperture_m > self.config.maximum_aperture_m + 1e-6
+        ):
             return self._record(
                 snapshot,
-                Verdict.FAIL,
-                ReasonCode.WRONG_OBJECT,
-                object_detection="wrong_object_detected",
+                Verdict.UNKNOWN,
+                ReasonCode.STALL_STATUS_MISSING,
+                extra={"invalid_aperture_m": snapshot.aperture_m},
             )
+        return None
+
+    def _verify_close(
+        self, snapshot: PhysicsSnapshot, target: ObjectState, distractor: ObjectState
+    ) -> VerificationRecord:
+        cfg = self.config
         if (
             snapshot.aperture_m <= cfg.empty_aperture_m
-            and not set(contacts.left_object_ids).intersection(contacts.right_object_ids)
+            and snapshot.gripper_reached_goal is True
+            and snapshot.gripper_stalled is False
         ):
             self.phase = "failed"
             self._clear_grasp()
@@ -404,15 +366,18 @@ class M3Verifier:
                 ReasonCode.EMPTY_GRASP,
                 object_detection="at_position_no_object",
             )
-        if contacts.bilateral(cfg.target_id, cfg.stable_contact_s):
-            low, high = cfg.candidate_aperture_range_m
-            if not low <= snapshot.aperture_m <= high:
-                return self._record(snapshot, Verdict.UNKNOWN, ReasonCode.CONTACT_NOT_STABLE)
-            if snapshot.gripper_stalled is not True or snapshot.gripper_reached_goal is not False:
-                return self._record(snapshot, Verdict.UNKNOWN, ReasonCode.STALL_STATUS_MISSING)
+        if (
+            snapshot.aperture_m > cfg.empty_aperture_m
+            and snapshot.gripper_stalled is True
+            and snapshot.gripper_reached_goal is False
+        ):
             self.phase = "lift_required"
             self._candidate_target_pose = target.pose
             self._candidate_relative_pose = relative_pose(snapshot.eef_pose, target.pose)
+            self._candidate_distractor_pose = distractor.pose
+            self._candidate_distractor_relative_pose = relative_pose(
+                snapshot.eef_pose, distractor.pose
+            )
             self._last_target_z = target.pose.position[2]
             return self._record(
                 snapshot,
@@ -421,40 +386,44 @@ class M3Verifier:
                 object_detection="object_detected_closing",
             )
         self.phase = "closing"
-        return self._record(snapshot, Verdict.UNKNOWN, ReasonCode.CONTACT_NOT_STABLE)
+        return self._record(snapshot, Verdict.UNKNOWN, ReasonCode.STALL_STATUS_MISSING)
 
     def _verify_lift(self, snapshot: PhysicsSnapshot, target: ObjectState) -> VerificationRecord:
         assert self._candidate_target_pose is not None
         assert self._candidate_relative_pose is not None
-        dz = target.pose.position[2] - self._candidate_target_pose.position[2]
-        drift_m, drift_rad = pose_distance(
-            self._candidate_relative_pose, relative_pose(snapshot.eef_pose, target.pose)
+        assert self._candidate_distractor_pose is not None
+        assert self._candidate_distractor_relative_pose is not None
+        distractor = snapshot.object(self.config.distractor_id)
+        assert distractor is not None
+        target_match = self._comovement(
+            snapshot, target, self._candidate_target_pose, self._candidate_relative_pose
         )
-        bilateral = snapshot.contacts.bilateral(
-            self.config.target_id, self.config.stable_contact_s
+        distractor_match = self._comovement(
+            snapshot,
+            distractor,
+            self._candidate_distractor_pose,
+            self._candidate_distractor_relative_pose,
         )
         evidence = {
-            "target_lift_m": dz,
-            "relative_translation_drift_m": drift_m,
-            "relative_rotation_drift_rad": drift_rad,
+            "target_comovement": target_match,
+            "distractor_comovement": distractor_match,
         }
-        if not bilateral:
-            self.phase = "failed"
-            self._clear_grasp()
+        if target_match["matches"] and distractor_match["matches"]:
+            self.phase = "lift_required"
             return self._record(
-                snapshot, Verdict.FAIL, ReasonCode.CONTACT_LOST, slip=True, extra=evidence
+                snapshot, Verdict.UNKNOWN, ReasonCode.IDENTITY_INCOMPLETE, extra=evidence
             )
-        if drift_m > self.config.translation_drift_m or drift_rad > self.config.rotation_drift_rad:
+        if distractor_match["matches"]:
             self.phase = "failed"
             self._clear_grasp()
             return self._record(
                 snapshot,
                 Verdict.FAIL,
-                ReasonCode.RELATIVE_POSE_DRIFT,
-                slip=True,
+                ReasonCode.WRONG_OBJECT,
+                object_detection="wrong_object_detected",
                 extra=evidence,
             )
-        if dz < self.config.minimum_lift_m or target.support == self.config.table_id:
+        if not target_match["matches"]:
             self.phase = "lift_required"
             return self._record(
                 snapshot, Verdict.UNKNOWN, ReasonCode.TARGET_NOT_LIFTED, extra=evidence
@@ -475,9 +444,6 @@ class M3Verifier:
         assert self._candidate_relative_pose is not None
         current_relative = relative_pose(snapshot.eef_pose, target.pose)
         drift_m, drift_rad = pose_distance(self._candidate_relative_pose, current_relative)
-        bilateral = snapshot.contacts.bilateral(
-            self.config.target_id, self.config.stable_contact_s
-        )
         falling = (
             self._last_target_z is not None
             and target.pose.position[2] < self._last_target_z - 0.005
@@ -488,19 +454,18 @@ class M3Verifier:
             "relative_rotation_drift_rad": drift_rad,
             "falling": falling,
         }
-        if not bilateral and (falling or target.support is not None):
+        supported = self._support(target)
+        drifted = (
+            drift_m > self.config.translation_drift_m
+            or drift_rad > self.config.rotation_drift_rad
+        )
+        if drifted and (falling or supported is not None):
             self.phase = "failed"
             self._clear_grasp()
             return self._record(
                 snapshot, Verdict.FAIL, ReasonCode.OBJECT_DROPPED, slip=True, extra=evidence
             )
-        if not bilateral:
-            self.phase = "failed"
-            self._clear_grasp()
-            return self._record(
-                snapshot, Verdict.FAIL, ReasonCode.CONTACT_LOST, slip=True, extra=evidence
-            )
-        if drift_m > self.config.translation_drift_m or drift_rad > self.config.rotation_drift_rad:
+        if drifted:
             self.phase = "failed"
             self._clear_grasp()
             return self._record(
@@ -521,16 +486,13 @@ class M3Verifier:
         )
 
     def _verify_drop(self, snapshot: PhysicsSnapshot, target: ObjectState) -> VerificationRecord:
-        no_contact = not (
-            self.config.target_id in snapshot.contacts.left_object_ids
-            or self.config.target_id in snapshot.contacts.right_object_ids
-        )
         falling = target.linear_velocity[2] < -0.02 or (
             self._last_target_z is not None
             and target.pose.position[2] < self._last_target_z - 0.005
         )
         self._last_target_z = target.pose.position[2]
-        if no_contact and (falling or target.support is not None):
+        support = self._support(target)
+        if falling or support is not None:
             self.phase = "failed"
             self._release_mode = None
             return self._record(
@@ -538,22 +500,18 @@ class M3Verifier:
                 Verdict.FAIL,
                 ReasonCode.OBJECT_DROPPED,
                 slip=True,
-                extra={"falling": falling, "support": target.support},
+                extra={"falling": falling, "support": support},
             )
         return self._record(snapshot, Verdict.UNKNOWN, ReasonCode.NOT_SETTLED)
 
     def _verify_place(self, snapshot: PhysicsSnapshot, target: ObjectState) -> VerificationRecord:
         inside = self._inside_destination(target)
-        no_contact = not (
-            self.config.target_id in snapshot.contacts.left_object_ids
-            or self.config.target_id in snapshot.contacts.right_object_ids
-        )
-        supported = target.support == self.config.table_id
+        support = self._support(target)
+        supported = support == self.config.table_id
         linear_speed = vector_norm(target.linear_velocity)
         angular_speed = vector_norm(target.angular_velocity)
         stable = (
-            no_contact
-            and supported
+            supported
             and linear_speed <= self.config.settled_linear_speed_m_s
             and angular_speed <= self.config.settled_angular_speed_rad_s
         )
@@ -569,8 +527,7 @@ class M3Verifier:
         )
         evidence = {
             "inside_destination": inside,
-            "no_fingertip_contact": no_contact,
-            "support": target.support,
+            "support": support,
             "linear_speed_m_s": linear_speed,
             "angular_speed_rad_s": angular_speed,
             "stable_duration_s": stable_duration,
@@ -605,6 +562,43 @@ class M3Verifier:
             and y + hy <= cy + sy / 2 - margin
         )
 
+    def _support(self, item: ObjectState) -> str | None:
+        size = (
+            self.config.target_size_m
+            if item.object_id == self.config.target_id
+            else (
+                self.config.distractor_size_m[0],
+                self.config.distractor_size_m[0],
+                self.config.distractor_size_m[1],
+            )
+        )
+        return geometric_table_support(item.pose, size, self.config)
+
+    def _comovement(
+        self,
+        snapshot: PhysicsSnapshot,
+        item: ObjectState,
+        baseline_pose: Pose,
+        baseline_relative_pose: Pose,
+    ) -> dict[str, Any]:
+        lift = item.pose.position[2] - baseline_pose.position[2]
+        drift_m, drift_rad = pose_distance(
+            baseline_relative_pose, relative_pose(snapshot.eef_pose, item.pose)
+        )
+        support = self._support(item)
+        return {
+            "matches": (
+                lift >= self.config.minimum_lift_m
+                and support != self.config.table_id
+                and drift_m <= self.config.translation_drift_m
+                and drift_rad <= self.config.rotation_drift_rad
+            ),
+            "lift_m": lift,
+            "support": support,
+            "relative_translation_drift_m": drift_m,
+            "relative_rotation_drift_rad": drift_rad,
+        }
+
     def _record(
         self,
         snapshot: PhysicsSnapshot,
@@ -619,7 +613,6 @@ class M3Verifier:
         target = snapshot.object(self.config.target_id)
         evidence: dict[str, Any] = {
             "stream_timestamps_s": snapshot.stream_timestamps(),
-            "contacts": snapshot.contacts.to_dict(),
             "aperture_m": snapshot.aperture_m,
             "eef_pose": snapshot.eef_pose.to_dict(),
             "target": target.to_dict() if target else None,
@@ -650,6 +643,8 @@ class M3Verifier:
         self.held = False
         self._candidate_target_pose = None
         self._candidate_relative_pose = None
+        self._candidate_distractor_pose = None
+        self._candidate_distractor_relative_pose = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -793,14 +788,42 @@ def pose_distance(a: Pose, b: Pose) -> tuple[float, float]:
 def oriented_box_xy_half_extents(
     dimensions: Sequence[float], quaternion: Sequence[float]
 ) -> tuple[float, float]:
+    return oriented_box_half_extents(dimensions, quaternion)[:2]
+
+
+def oriented_box_half_extents(
+    dimensions: Sequence[float], quaternion: Sequence[float]
+) -> tuple[float, float, float]:
     q = Pose((0.0, 0.0, 0.0), tuple(map(float, quaternion))).normalized().orientation
     x, y, z, w = q
     rotation = (
         (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
         (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+        (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
     )
     half = tuple(float(value) / 2 for value in dimensions)
     return tuple(sum(abs(row[index]) * half[index] for index in range(3)) for row in rotation)  # type: ignore[return-value]
+
+
+def geometric_table_support(
+    pose: Pose, dimensions: Sequence[float], config: M3Config
+) -> str | None:
+    """Infer tabletop support from authoritative pose and known geometry."""
+
+    hx, hy, hz = oriented_box_half_extents(dimensions, pose.orientation)
+    x, y, z = pose.position
+    table_x, table_y, _ = config.table_pose_xyz
+    table_hx, table_hy = config.table_size_m[0] / 2, config.table_size_m[1] / 2
+    footprint_on_table = (
+        x - hx >= table_x - table_hx
+        and x + hx <= table_x + table_hx
+        and y - hy >= table_y - table_hy
+        and y + hy <= table_y + table_hy
+    )
+    bottom_distance = z - hz - config.table_top_z_m
+    if footprint_on_table and abs(bottom_distance) <= 0.005:
+        return config.table_id
+    return None
 
 
 def namespaced_entity_id(name: str, known_ids: Iterable[str]) -> str | None:

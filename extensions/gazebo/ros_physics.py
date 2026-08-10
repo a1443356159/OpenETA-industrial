@@ -1,4 +1,4 @@
-"""Official ROS / Gazebo message sources for the M3 physical verifier."""
+"""Official ROS / Gazebo odometry source for the M3 physical verifier."""
 
 from __future__ import annotations
 
@@ -9,23 +9,17 @@ import time
 from typing import Any, Callable, Mapping
 
 from .m3 import (
-    ContactState,
     M3Config,
     M3PlanningSceneModel,
     ObjectState,
     PhysicsSnapshot,
     PlanningSceneCommand,
     Pose,
-    namespaced_entity_id,
+    geometric_table_support,
     quaternion_rotate,
 )
 
 
-CONTACT_TOPICS = {
-    "left": "/m3/contact/left_fingertip",
-    "right": "/m3/contact/right_fingertip",
-    "target": "/m3/contact/target",
-}
 ODOMETRY_TOPICS = {
     "m3_target": "/m3/target/odometry",
     "m3_distractor": "/m3/distractor/odometry",
@@ -68,37 +62,6 @@ def message_timestamp_s(message: Any) -> float | None:
         int(getattr(stamp, "nanosec", 0))
     ) * 1e-9
     return value if math.isfinite(value) and value > 0 else None
-
-
-def contact_object_ids(
-    message: Any,
-    *,
-    known_ids: tuple[str, ...],
-    sensor_owner_id: str | None = None,
-) -> tuple[tuple[str, ...], bool]:
-    """Extract exact model identities from ``ros_gz_interfaces/Contacts``."""
-
-    found: set[str] = set()
-    complete = True
-    for contact in getattr(message, "contacts", ()):  # one entry per collision pair
-        names = (
-            str(getattr(getattr(contact, "collision1", None), "name", "")),
-            str(getattr(getattr(contact, "collision2", None), "name", "")),
-        )
-        if not all(names):
-            complete = False
-            continue
-        pair_ids = {
-            item
-            for item in (namespaced_entity_id(name, known_ids) for name in names)
-            if item is not None
-        }
-        if sensor_owner_id is not None:
-            pair_ids.discard(sensor_owner_id)
-        if not pair_ids:
-            complete = False
-        found.update(pair_ids)
-    return tuple(sorted(found)), complete
 
 
 def parse_odometry_message(
@@ -151,7 +114,7 @@ def parse_odometry_message(
 
 
 class RosM3PhysicsSource:
-    """Own subscriptions to official bridged Contact and Odometry streams."""
+    """Own subscriptions to official bridged Odometry streams."""
 
     def __init__(
         self,
@@ -165,7 +128,6 @@ class RosM3PhysicsSource:
         self.config = config or M3Config()
         self.robot_state_provider = robot_state_provider
         self._lock = threading.Lock()
-        self._contacts: dict[str, dict[str, Any]] = {}
         self._odometry: dict[str, ObjectState] = {}
         self._closed = False
         self._thread: threading.Thread | None = None
@@ -174,7 +136,6 @@ class RosM3PhysicsSource:
             from nav_msgs.msg import Odometry
             from rclpy.executors import MultiThreadedExecutor
             from rclpy.parameter import Parameter
-            from ros_gz_interfaces.msg import Contacts
         except ImportError as exc:
             raise RuntimeError("ROS_NOT_READY") from exc
         self._rclpy = rclpy
@@ -188,15 +149,6 @@ class RosM3PhysicsSource:
         )
         self._subscriptions = [
             self._node.create_subscription(
-                Contacts,
-                topic,
-                lambda message, channel=channel: self._contact_callback(channel, message),
-                20,
-            )
-            for channel, topic in CONTACT_TOPICS.items()
-        ]
-        self._subscriptions.extend(
-            self._node.create_subscription(
                 Odometry,
                 topic,
                 lambda message, object_id=object_id: self._odometry_callback(
@@ -205,7 +157,7 @@ class RosM3PhysicsSource:
                 20,
             )
             for object_id, topic in ODOMETRY_TOPICS.items()
-        )
+        ]
         self._shared_executor = executor is not None
         self._executor = executor or MultiThreadedExecutor(num_threads=2, context=context)
         self._executor.add_node(self._node)
@@ -217,42 +169,6 @@ class RosM3PhysicsSource:
         self.planning_scene = planning_scene or RosM3PlanningScene(
             node=self._node, config=self.config
         )
-
-    def _contact_callback(self, channel: str, message: Any) -> None:
-        stamp = message_timestamp_s(message)
-        if stamp is None:
-            return
-        known = (
-            self.config.target_id,
-            self.config.distractor_id,
-            self.config.table_id,
-            "ground",
-            self.config.model_id,
-        )
-        owner = self.config.target_id if channel == "target" else self.config.model_id
-        object_ids, complete = contact_object_ids(
-            message, known_ids=known, sensor_owner_id=owner
-        )
-        received = time.monotonic()
-        with self._lock:
-            previous = self._contacts.get(channel, {})
-            previous_ids = set(previous.get("object_ids", ()))
-            previous_since = dict(previous.get("since", {}))
-            since = {
-                object_id: (
-                    previous_since.get(object_id, stamp)
-                    if object_id in previous_ids and stamp >= float(previous.get("stamp", 0.0))
-                    else stamp
-                )
-                for object_id in object_ids
-            }
-            self._contacts[channel] = {
-                "object_ids": object_ids,
-                "complete": complete,
-                "stamp": stamp,
-                "received": received,
-                "since": since,
-            }
 
     def _odometry_callback(self, object_id: str, message: Any) -> None:
         try:
@@ -269,7 +185,6 @@ class RosM3PhysicsSource:
 
     def clear(self) -> None:
         with self._lock:
-            self._contacts.clear()
             self._odometry.clear()
 
     def capture(
@@ -283,42 +198,16 @@ class RosM3PhysicsSource:
         gripper_reached_goal: bool | None = None,
     ) -> PhysicsSnapshot:
         deadline = time.monotonic() + timeout_s
-        partial: PhysicsSnapshot | None = None
-        partial_ready_at: float | None = None
         while time.monotonic() < deadline:
             snapshot = self._try_snapshot(
                 robot=robot,
                 camera_timestamp_s=camera_timestamp_s,
                 gripper_stalled=gripper_stalled,
                 gripper_reached_goal=gripper_reached_goal,
-                allow_missing_contacts=False,
             )
-            if snapshot is not None and (
-                min_timestamp_s is None
-                or all(value > min_timestamp_s for _, value in snapshot.stream_timestamps_s)
-            ):
+            if snapshot is not None and self._base_streams_after(snapshot, min_timestamp_s):
                 return snapshot
-            candidate = self._try_snapshot(
-                robot=robot,
-                camera_timestamp_s=camera_timestamp_s,
-                gripper_stalled=gripper_stalled,
-                gripper_reached_goal=gripper_reached_goal,
-                allow_missing_contacts=True,
-            )
-            if candidate is not None and self._base_streams_after(candidate, min_timestamp_s):
-                partial = candidate
-                partial_ready_at = partial_ready_at or (
-                    time.monotonic() + self.config.stable_contact_s + 0.05
-                )
-                if time.monotonic() >= partial_ready_at:
-                    # Gazebo contact sensors publish while contacts exist, but
-                    # do not emit empty heartbeat messages in Harmonic.  Keep
-                    # the stream absent (or stale) so the verifier reports
-                    # UNKNOWN; never synthesize evidence for "no contact".
-                    return partial
             time.sleep(0.02)
-        if partial is not None:
-            return partial
         raise RuntimeError("M3_PHYSICS_TIMEOUT")
 
     @staticmethod
@@ -347,14 +236,10 @@ class RosM3PhysicsSource:
         camera_timestamp_s: float,
         gripper_stalled: bool | None,
         gripper_reached_goal: bool | None,
-        allow_missing_contacts: bool,
     ) -> PhysicsSnapshot | None:
         with self._lock:
-            contacts = {key: dict(value) for key, value in self._contacts.items()}
             odometry = dict(self._odometry)
         if set(odometry) != set(ODOMETRY_TOPICS):
-            return None
-        if not allow_missing_contacts and set(contacts) != set(CONTACT_TOPICS):
             return None
         metadata = dict(robot.get("metadata", {}))
         joint_stamp = metadata.get("joint_state_timestamp_s")
@@ -368,46 +253,27 @@ class RosM3PhysicsSource:
             aperture = float(gripper["aperture_m"])
         except (KeyError, TypeError, ValueError):
             return None
-        target_contact = contacts.get("target", {})
-        target_supports = tuple(target_contact.get("object_ids", ()))
+        raw_target = odometry[self.config.target_id]
         target = replace(
-            odometry[self.config.target_id],
-            support=(self.config.table_id if self.config.table_id in target_supports else None),
-        )
-        objects = (target, odometry[self.config.distractor_id])
-        contact_state = ContactState(
-            left_object_ids=tuple(contacts.get("left", {}).get("object_ids", ())),
-            right_object_ids=tuple(contacts.get("right", {}).get("object_ids", ())),
-            target_support_ids=target_supports,
-            left_durations_s=tuple(
-                sorted(
-                    (
-                        object_id,
-                        max(0.0, float(contacts["left"]["stamp"]) - float(since)),
-                    )
-                    for object_id, since in contacts.get("left", {}).get("since", {}).items()
-                )
-            ),
-            right_durations_s=tuple(
-                sorted(
-                    (
-                        object_id,
-                        max(0.0, float(contacts["right"]["stamp"]) - float(since)),
-                    )
-                    for object_id, since in contacts.get("right", {}).get("since", {}).items()
-                )
-            ),
-            timestamps_s=tuple(
-                sorted(
-                    (f"contact_{channel}", float(value["stamp"]))
-                    for channel, value in contacts.items()
-                )
-            ),
-            identities_complete=(
-                set(contacts) == set(CONTACT_TOPICS)
-                and all(bool(value["complete"]) for value in contacts.values())
+            raw_target,
+            support=geometric_table_support(
+                raw_target.pose, self.config.target_size_m, self.config
             ),
         )
+        raw_distractor = odometry[self.config.distractor_id]
+        distractor = replace(
+            raw_distractor,
+            support=geometric_table_support(
+                raw_distractor.pose,
+                (
+                    self.config.distractor_size_m[0],
+                    self.config.distractor_size_m[0],
+                    self.config.distractor_size_m[1],
+                ),
+                self.config,
+            ),
+        )
+        objects = (target, distractor)
         stream_timestamps = {
             "joint_state": float(joint_stamp),
             "tf": float(tf_stamp),
@@ -416,18 +282,11 @@ class RosM3PhysicsSource:
             "odometry_target": float(target.timestamp_s),
             "odometry_distractor": float(odometry[self.config.distractor_id].timestamp_s),
         }
-        stream_timestamps.update(
-            {
-                f"contact_{channel}": float(value["stamp"])
-                for channel, value in contacts.items()
-            }
-        )
         return PhysicsSnapshot(
             timestamp_s=max(stream_timestamps.values()),
             received_monotonic_s=time.monotonic(),
             eef_pose=eef_pose,
             aperture_m=aperture,
-            contacts=contact_state,
             objects=objects,
             stream_timestamps_s=tuple(sorted(stream_timestamps.items())),
             gripper_stalled=gripper_stalled,
@@ -483,6 +342,12 @@ class RosM3PlanningScene:
         self._apply_commands(self.model.release(world_pose))
 
     def clear(self) -> None:
+        # A newly started MoveIt scene has no M3 objects to remove.  Some
+        # MoveIt versions reject a REMOVE diff for a non-existent attached
+        # object, so keep reset cleanup idempotent by reusing the local scene
+        # model's state instead of sending a speculative clear.
+        if not self.model.initialized and not self.model.attached:
+            return
         self._apply_commands(self.model.clear(), allow_unavailable=True)
 
     def _apply_commands(

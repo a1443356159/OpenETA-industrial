@@ -6,7 +6,6 @@ import math
 import pytest
 
 from extensions.gazebo.m3 import (
-    ContactState,
     M3Config,
     M3PlanningSceneModel,
     M3Verifier,
@@ -26,9 +25,6 @@ STREAMS = (
     "tf",
     "rgb",
     "depth",
-    "contact_left",
-    "contact_right",
-    "contact_target",
     "odometry_target",
     "odometry_distractor",
 )
@@ -61,17 +57,15 @@ def _snapshot(
     *,
     target_xyz: tuple[float, float, float] = (0.28, -0.10, 0.43),
     eef_xyz: tuple[float, float, float] = (0.28, -0.10, 0.55),
+    distractor_xyz: tuple[float, float, float] = (0.28, 0.12, 0.44),
     aperture: float = 0.04,
-    left: tuple[str, ...] = (),
-    right: tuple[str, ...] = (),
-    contact_duration: float = 0.25,
     support: str | None = "m3_table",
     velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
     angular: tuple[float, float, float] = (0.0, 0.0, 0.0),
     stalled: bool | None = None,
     reached: bool | None = None,
-    identities_complete: bool = True,
     stream_stamp: float | None = None,
+    streams: tuple[str, ...] = STREAMS,
 ) -> PhysicsSnapshot:
     stream_stamp = stamp if stream_stamp is None else stream_stamp
     return PhysicsSnapshot(
@@ -79,15 +73,6 @@ def _snapshot(
         received_monotonic_s=100.0,
         eef_pose=Pose(eef_xyz, (0.0, 0.0, 0.0, 1.0)),
         aperture_m=aperture,
-        contacts=ContactState(
-            left_object_ids=left,
-            right_object_ids=right,
-            target_support_ids=(support,) if support else (),
-            left_durations_s=tuple((item, contact_duration) for item in left),
-            right_durations_s=tuple((item, contact_duration) for item in right),
-            timestamps_s=(("left", stamp), ("right", stamp), ("target", stamp)),
-            identities_complete=identities_complete,
-        ),
         objects=(
             _object(
                 "m3_target",
@@ -97,9 +82,9 @@ def _snapshot(
                 angular=angular,
                 support=support,
             ),
-            _object("m3_distractor", xyz=(0.28, 0.12, 0.44), stamp=stamp),
+            _object("m3_distractor", xyz=distractor_xyz, stamp=stamp),
         ),
-        stream_timestamps_s=tuple((name, stream_stamp) for name in STREAMS),
+        stream_timestamps_s=tuple((name, stream_stamp) for name in streams),
         gripper_stalled=stalled,
         gripper_reached_goal=reached,
     )
@@ -109,8 +94,6 @@ def _candidate(verifier: M3Verifier, stamp: float = 10.0):
     record = verifier.verify(
         _snapshot(
             stamp,
-            left=("m3_target",),
-            right=("m3_target",),
             stalled=True,
             reached=False,
         ),
@@ -131,8 +114,6 @@ def _held(verifier: M3Verifier, stamp: float = 10.0):
             stamp + 1,
             target_xyz=(0.28, -0.10, 0.50),
             eef_xyz=(0.28, -0.10, 0.62),
-            left=("m3_target",),
-            right=("m3_target",),
             support=None,
         ),
         action_type="move_to",
@@ -152,7 +133,7 @@ def test_close_candidate_never_claims_final_grasp_success() -> None:
 
 def test_empty_grasp_and_wrong_object_are_structured_failures() -> None:
     empty = M3Verifier().verify(
-        _snapshot(10.0, aperture=0.005, support="m3_table"),
+        _snapshot(10.0, aperture=0.005, support="m3_table", stalled=False, reached=True),
         action_type="gripper_close",
         action_timestamp_s=9.0,
     )
@@ -161,43 +142,77 @@ def test_empty_grasp_and_wrong_object_are_structured_failures() -> None:
         ReasonCode.EMPTY_GRASP,
         "at_position_no_object",
     )
-    wrong = M3Verifier().verify(
+    verifier = M3Verifier()
+    candidate = verifier.verify(
         _snapshot(
             10.0,
-            left=("m3_distractor",),
-            right=("m3_distractor",),
+            eef_xyz=(0.28, 0.12, 0.56),
             stalled=True,
             reached=False,
         ),
         action_type="gripper_close",
         action_timestamp_s=9.0,
+    )
+    assert candidate.reason_code == ReasonCode.LIFT_REQUIRED
+    wrong = verifier.verify(
+        _snapshot(
+            11.0,
+            eef_xyz=(0.28, 0.12, 0.64),
+            distractor_xyz=(0.28, 0.12, 0.52),
+        ),
+        action_type="move_to",
+        action_timestamp_s=10.5,
     )
     assert (wrong.verdict, wrong.reason_code) == (Verdict.FAIL, ReasonCode.WRONG_OBJECT)
 
 
-def test_candidate_requires_stall_result_and_stable_bilateral_contact() -> None:
+def test_lift_reports_identity_incomplete_when_both_objects_comove() -> None:
+    verifier = M3Verifier()
+    _candidate(verifier)
+    ambiguous = verifier.verify(
+        _snapshot(
+            11.0,
+            target_xyz=(0.28, -0.10, 0.51),
+            distractor_xyz=(0.28, 0.12, 0.52),
+            eef_xyz=(0.28, -0.10, 0.63),
+        ),
+        action_type="move_to",
+        action_timestamp_s=10.5,
+    )
+    assert (ambiguous.verdict, ambiguous.reason_code) == (
+        Verdict.UNKNOWN,
+        ReasonCode.IDENTITY_INCOMPLETE,
+    )
+
+
+def test_close_uses_robotiq_result_and_fails_closed_on_other_states() -> None:
     missing_stall = M3Verifier().verify(
-        _snapshot(10.0, left=("m3_target",), right=("m3_target",)),
+        _snapshot(10.0),
         action_type="gripper_close",
         action_timestamp_s=9.0,
     )
     assert missing_stall.reason_code == ReasonCode.STALL_STATUS_MISSING
-    unstable = M3Verifier().verify(
-        _snapshot(
-            10.0,
-            left=("m3_target",),
-            right=("m3_target",),
-            contact_duration=0.19,
-            stalled=True,
-            reached=False,
-        ),
+    contradictory = M3Verifier().verify(
+        _snapshot(10.0, aperture=0.005, stalled=True, reached=False),
         action_type="gripper_close",
         action_timestamp_s=9.0,
     )
-    assert unstable.reason_code == ReasonCode.CONTACT_NOT_STABLE
+    assert (contradictory.verdict, contradictory.reason_code) == (
+        Verdict.UNKNOWN,
+        ReasonCode.STALL_STATUS_MISSING,
+    )
+    out_of_bounds = M3Verifier().verify(
+        _snapshot(10.0, aperture=0.09, stalled=True, reached=False),
+        action_type="gripper_close",
+        action_timestamp_s=9.0,
+    )
+    assert (out_of_bounds.verdict, out_of_bounds.reason_code) == (
+        Verdict.UNKNOWN,
+        ReasonCode.STALL_STATUS_MISSING,
+    )
 
 
-def test_lift_requires_height_contact_support_release_and_relative_pose() -> None:
+def test_lift_requires_height_support_release_and_relative_pose() -> None:
     verifier = M3Verifier()
     _candidate(verifier)
     not_lifted = verifier.verify(
@@ -205,8 +220,6 @@ def test_lift_requires_height_contact_support_release_and_relative_pose() -> Non
             11.0,
             target_xyz=(0.28, -0.10, 0.48),
             eef_xyz=(0.28, -0.10, 0.60),
-            left=("m3_target",),
-            right=("m3_target",),
         ),
         action_type="move_to",
         action_timestamp_s=10.5,
@@ -218,8 +231,6 @@ def test_lift_requires_height_contact_support_release_and_relative_pose() -> Non
             12.0,
             target_xyz=(0.28, -0.10, 0.50),
             eef_xyz=(0.28, -0.10, 0.62),
-            left=("m3_target",),
-            right=("m3_target",),
             support=None,
         ),
         action_type="move_to",
@@ -229,34 +240,18 @@ def test_lift_requires_height_contact_support_release_and_relative_pose() -> Non
     assert held.grasp_confirmed is True
 
 
-def test_contact_loss_and_relative_drift_fail_closed() -> None:
-    contact_loss = M3Verifier()
-    _candidate(contact_loss)
-    lost = contact_loss.verify(
-        _snapshot(
-            11.0,
-            target_xyz=(0.28, -0.10, 0.50),
-            eef_xyz=(0.28, -0.10, 0.62),
-            support=None,
-        ),
-        action_type="move_to",
-        action_timestamp_s=10.5,
-    )
-    assert (lost.verdict, lost.reason_code) == (Verdict.FAIL, ReasonCode.CONTACT_LOST)
-
+def test_relative_drift_fails_closed_after_grasp_is_proven() -> None:
     drift = M3Verifier()
-    _candidate(drift)
+    _held(drift)
     drifted = drift.verify(
         _snapshot(
-            11.0,
-            target_xyz=(0.30, -0.10, 0.50),
-            eef_xyz=(0.28, -0.10, 0.62),
-            left=("m3_target",),
-            right=("m3_target",),
+            12.0,
+            target_xyz=(0.28, -0.10, 0.50),
+            eef_xyz=(0.28, -0.10, 0.64),
             support=None,
         ),
         action_type="move_to",
-        action_timestamp_s=10.5,
+        action_timestamp_s=11.5,
     )
     assert (drifted.verdict, drifted.reason_code) == (
         Verdict.FAIL,
@@ -287,7 +282,7 @@ def test_open_in_air_detects_physical_drop() -> None:
     )
 
 
-def test_place_requires_full_bbox_support_no_contact_and_one_second_settle() -> None:
+def test_place_requires_full_bbox_geometric_support_and_one_second_settle() -> None:
     verifier = M3Verifier()
     _held(verifier)
     first = verifier.verify(
@@ -353,10 +348,10 @@ def test_outside_destination_and_unsettled_are_not_success() -> None:
     ("mutation", "reason"),
     [
         ({"stream_stamp": 8.0}, ReasonCode.DATA_STALE),
-        ({"identities_complete": False}, ReasonCode.IDENTITY_INCOMPLETE),
+        ({"streams": ("joint_state", "tf", "rgb", "depth", "odometry_target")}, ReasonCode.DATA_MISSING),
     ],
 )
-def test_stale_or_identity_incomplete_data_is_unknown(mutation, reason) -> None:
+def test_stale_or_missing_base_data_is_unknown(mutation, reason) -> None:
     record = M3Verifier().verify(
         _snapshot(10.0, **mutation),
         action_type="gripper_close",

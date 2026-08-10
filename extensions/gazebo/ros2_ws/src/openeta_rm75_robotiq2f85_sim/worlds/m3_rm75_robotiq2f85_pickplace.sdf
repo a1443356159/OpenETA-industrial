@@ -12,7 +12,6 @@
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
-    <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
 
     <light name="sun" type="directional">
       <pose>0 0 10 0 0 0</pose>
@@ -79,14 +78,6 @@
           <geometry><box><size>0.04 0.04 0.06</size></box></geometry>
           <material><ambient>0.80 0.12 0.08 1</ambient><diffuse>0.95 0.18 0.10 1</diffuse></material>
         </visual>
-        <sensor name="m3_target_contact" type="contact">
-          <contact>
-            <collision>target_collision</collision>
-            <topic>/m3/contact/target</topic>
-          </contact>
-          <always_on>true</always_on>
-          <update_rate>100</update_rate>
-        </sensor>
       </link>
       <plugin filename="gz-sim-odometry-publisher-system" name="gz::sim::systems::OdometryPublisher">
         <dimensions>3</dimensions>

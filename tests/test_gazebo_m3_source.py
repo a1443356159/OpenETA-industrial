@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import threading
 
 import pytest
 
+from extensions.gazebo.m3 import M3Config, M3PlanningSceneModel, ObjectState, Pose
 from extensions.gazebo.ros_physics import (
-    contact_object_ids,
+    RosM3PhysicsSource,
+    RosM3PlanningScene,
     extend_allowed_collision_matrix,
     message_timestamp_s,
     parse_odometry_message,
@@ -15,59 +18,6 @@ from extensions.gazebo.ros_physics import (
 def _stamp(value: float):
     seconds = int(value)
     return SimpleNamespace(sec=seconds, nanosec=int((value - seconds) * 1e9))
-
-
-def _entity(name: str):
-    return SimpleNamespace(name=name)
-
-
-def test_contact_parser_preserves_exact_gazebo_collision_identity() -> None:
-    message = SimpleNamespace(
-        header=SimpleNamespace(stamp=_stamp(10.25)),
-        contacts=[
-            SimpleNamespace(
-                collision1=_entity(
-                    "rm75_robotiq_2f85_pickplace_sim_v1::robotiq_85_left_finger_tip_link::collision"
-                ),
-                collision2=_entity("m3_target::target_link::target_collision"),
-            )
-        ],
-    )
-    ids, complete = contact_object_ids(
-        message,
-        known_ids=("rm75_robotiq_2f85_pickplace_sim_v1", "m3_target", "m3_distractor"),
-        sensor_owner_id="rm75_robotiq_2f85_pickplace_sim_v1",
-    )
-    assert ids == ("m3_target",)
-    assert complete is True
-    assert message_timestamp_s(message) == pytest.approx(10.25)
-
-
-def test_contact_parser_marks_missing_collision_identity_incomplete() -> None:
-    message = SimpleNamespace(
-        contacts=[SimpleNamespace(collision1=_entity("m3_target::link::collision"), collision2=_entity(""))]
-    )
-    ids, complete = contact_object_ids(
-        message, known_ids=("m3_target", "m3_table"), sensor_owner_id="m3_target"
-    )
-    assert ids == ()
-    assert complete is False
-
-
-def test_contact_parser_marks_unknown_partner_identity_incomplete() -> None:
-    message = SimpleNamespace(
-        contacts=[
-            SimpleNamespace(
-                collision1=_entity("rm75::finger::collision"),
-                collision2=_entity("unregistered_object::link::collision"),
-            )
-        ]
-    )
-    ids, complete = contact_object_ids(
-        message, known_ids=("rm75", "m3_target"), sensor_owner_id="rm75"
-    )
-    assert ids == ()
-    assert complete is False
 
 
 def test_allowed_collision_extension_preserves_srdf_and_only_adds_fingertip_target_pairs() -> None:
@@ -122,3 +72,54 @@ def test_odometry_parser_rejects_wrong_or_missing_identity_and_stamp() -> None:
         parse_odometry_message(
             message, object_id="m3_target", label="target block", role="target"
         )
+
+
+def test_physics_source_builds_fresh_snapshot_without_contact_streams() -> None:
+    source = object.__new__(RosM3PhysicsSource)
+    source.config = M3Config()
+    source._lock = threading.Lock()
+
+    def state(object_id: str, xyz: tuple[float, float, float]) -> ObjectState:
+        return ObjectState(
+            object_id=object_id,
+            name=object_id,
+            label=object_id,
+            role="target" if object_id == "m3_target" else "distractor",
+            pose=Pose(xyz, (0.0, 0.0, 0.0, 1.0)),
+            linear_velocity=(0.0, 0.0, 0.0),
+            angular_velocity=(0.0, 0.0, 0.0),
+            support=None,
+            timestamp_s=10.0,
+        )
+
+    source._odometry = {
+        "m3_target": state("m3_target", (0.28, -0.10, 0.43)),
+        "m3_distractor": state("m3_distractor", (0.28, 0.12, 0.44)),
+    }
+    snapshot = source._try_snapshot(
+        robot={
+            "metadata": {"joint_state_timestamp_s": 10.0, "tf_timestamp_s": 10.0},
+            "end_effector_pose": {"xyz": [0.28, -0.10, 0.55], "quat_xyzw": [0, 0, 0, 1]},
+            "gripper_state": {"aperture_m": 0.04},
+        },
+        camera_timestamp_s=10.0,
+        gripper_stalled=True,
+        gripper_reached_goal=False,
+    )
+
+    assert snapshot is not None
+    assert set(snapshot.stream_timestamps()) == {
+        "joint_state", "tf", "rgb", "depth", "odometry_target", "odometry_distractor"
+    }
+    assert [item.support for item in snapshot.objects] == ["m3_table", "m3_table"]
+
+
+def test_new_planning_scene_clear_is_idempotent() -> None:
+    scene = object.__new__(RosM3PlanningScene)
+    scene.model = M3PlanningSceneModel()
+    calls = []
+    scene._apply_commands = lambda *args, **kwargs: calls.append((args, kwargs))
+
+    scene.clear()
+
+    assert calls == []
