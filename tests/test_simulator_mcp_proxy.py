@@ -892,6 +892,91 @@ def test_move_to_preserves_anyplace_orientation_when_grasp_forwarding_enabled() 
     assert result.details["outputs"]["mcp"]["target_orientation_mode"] == ("preserve_current")
 
 
+def _grasp_pose_estimate_world_pose() -> JsonDict:
+    """camera_pose_to_world output shape for a grasp_pose_estimate candidate."""
+
+    return {
+        "id": "gpe-0123456789abcdef-000",
+        "frame": "world",
+        "grasp_frame": "graspnet",
+        "source_tool": "grasp_pose_estimate",
+        "source_backend": "graspgenx",
+        "rank": 0,
+        "score": 0.87,
+        "translation_xyz": [0.28, -0.1, 0.46],
+        "rotation_matrix": [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        "gripper_tip_position_xyz": [0.28, -0.1, 0.5],
+    }
+
+
+def test_move_to_preserves_orientation_for_grasp_pose_estimate_candidate() -> None:
+    transport = FakeSimulatorMcpTransport({"success": True, "reached_target": True})
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-1", handle="env-1"),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call("move_to", {"target_pose": _grasp_pose_estimate_world_pose()})
+
+    assert result.success is True
+    arguments = transport.calls[0]["arguments"]
+    assert [arguments["x"], arguments["y"], arguments["z"]] == [0.28, -0.1, 0.46]
+    assert {"roll", "pitch", "yaw"}.isdisjoint(arguments)
+    assert result.details["outputs"]["mcp"]["target_orientation_mode"] == ("preserve_current")
+
+
+def test_move_to_recognizes_graspnet_frame_marker_without_model_provenance() -> None:
+    transport = FakeSimulatorMcpTransport({"success": True, "reached_target": True})
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-1", handle="env-1"),
+        tool_names=("move_to",),
+    )
+    pose = _grasp_pose_estimate_world_pose()
+    pose.pop("source_tool")
+    pose.pop("source_backend")
+
+    result = tools.call("move_to", {"target_pose": pose})
+
+    assert result.success is True
+    assert {"roll", "pitch", "yaw"}.isdisjoint(transport.calls[0]["arguments"])
+    assert result.details["outputs"]["mcp"]["target_orientation_mode"] == ("preserve_current")
+
+
+def test_move_to_grasp_pose_estimate_candidate_uses_calibrated_mapping_when_enabled() -> None:
+    transport = FakeSimulatorMcpTransport({"success": True, "reached_target": True})
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-1",
+            handle="env-1",
+            forward_grasp_candidate_orientation=True,
+        ),
+        tool_names=("move_to",),
+    )
+    pose = _grasp_pose_estimate_world_pose()
+    pose["rotation_matrix"] = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+
+    result = tools.call("move_to", {"target_pose": pose})
+
+    assert result.success is True
+    arguments = transport.calls[0]["arguments"]
+    assert [arguments[axis] for axis in ("roll", "pitch", "yaw")] == [90.0, 0.0, 90.0]
+    assert result.details["outputs"]["mcp"]["target_orientation_mode"] == ("graspnet_to_panda_eef")
+
+
 def test_move_to_proxy_preserves_motion_summary_without_overriding_remote_outcome(
     tmp_path: Path,
 ) -> None:

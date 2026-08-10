@@ -2072,12 +2072,22 @@ def _extract_orientation_arguments(
     return {"roll": roll, "pitch": pitch, "yaw": yaw}
 
 
+_GRASP_ESTIMATOR_PROVENANCE = frozenset(
+    {"grasp_pose_estimate", "anygrasp", "contact_graspnet", "graspgenx"}
+)
+
+
 def _is_ranked_grasp_candidate_pose(parameters: JsonDict) -> bool:
     """Return whether target_pose carries normalized grasp-candidate provenance.
 
     GraspNet-family rotation matrices describe a grasp frame, not the simulator
     controller's EEF frame. The compatibility default preserves the current EEF
     orientation until a deployment explicitly enables its calibrated mapping.
+
+    ``grasp_pose_estimate`` re-ids backend candidates (``gpe-*``) and records
+    provenance in ``source_tool``/``source_backend``/``grasp_frame`` rather than
+    ``source_model``; those markers must also count as grasp candidates so their
+    grasp-frame orientation is never forwarded as a raw EEF orientation.
     """
 
     pose = parameters.get("target_pose") or parameters.get("pose")
@@ -2091,8 +2101,17 @@ def _is_ranked_grasp_candidate_pose(parameters: JsonDict) -> bool:
         pose.get("source_grasp_id") or ""
     ).startswith("grasp_"):
         return True
-    return candidate_id.startswith("grasp_") and any(
+    if candidate_id.startswith("grasp_") and any(
         key in pose for key in ("rank", "backend_index", "score", "gripper_tip_position_xyz")
+    ):
+        return True
+    if str(pose.get("grasp_frame") or "").strip().lower() == "graspnet":
+        return True
+    source_tool = str(pose.get("source_tool") or "").strip().lower()
+    source_backend = str(pose.get("source_backend") or "").strip().lower()
+    return (
+        source_tool in _GRASP_ESTIMATOR_PROVENANCE
+        or source_backend in _GRASP_ESTIMATOR_PROVENANCE
     )
 
 

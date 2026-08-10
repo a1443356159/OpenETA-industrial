@@ -144,6 +144,47 @@ def test_camera_pose_to_world_can_override_pos_mat_layout_and_frame() -> None:
     assert outputs["world_pose"]["translation_xyz"] == [0.8, 2.1, 3.3]
 
 
+def test_camera_pose_to_world_accepts_gazebo_pos_quat_extrinsics() -> None:
+    tools = bind_dummy_tool_handlers(build_default_tool_registry())
+    result = tools.call(
+        "camera_pose_to_world",
+        {
+            "camera_pose": _candidate(rotation_matrix=None, gripper_tip_position_xyz=None),
+            "camera_extrinsics": {
+                "frame_transform": "camera_to_world",
+                "camera_frame": "opencv",
+                "pos": [0.0, 0.0, 1.8],
+                "quat_xyzw": [0.7071067812, -0.7071067812, 0.0, 0.0],
+            },
+        },
+    )
+
+    assert result.success is True
+    outputs = result.details["outputs"]
+    assert outputs["camera_to_world_format"] == "pos_mat"
+    assert outputs["camera_to_world_frame"] == "opencv"
+    assert outputs["world_pose"]["translation_xyz"] == [-0.2, -0.1, 1.5]
+
+
+def test_camera_pose_to_world_rejects_zero_norm_quat_extrinsics() -> None:
+    tools = bind_dummy_tool_handlers(build_default_tool_registry())
+    result = tools.call(
+        "camera_pose_to_world",
+        {
+            "camera_pose": _candidate(rotation_matrix=None, gripper_tip_position_xyz=None),
+            "camera_extrinsics": {
+                "frame_transform": "camera_to_world",
+                "camera_frame": "opencv",
+                "pos": [0.0, 0.0, 1.8],
+                "quat_xyzw": [0.0, 0.0, 0.0, 0.0],
+            },
+        },
+    )
+
+    assert result.success is False
+    assert "camera_to_world" in result.content
+
+
 def test_camera_pose_to_world_accepts_explicit_convention_aliases() -> None:
     tools = bind_dummy_tool_handlers(build_default_tool_registry())
     result = tools.call(

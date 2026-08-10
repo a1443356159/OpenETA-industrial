@@ -5688,6 +5688,13 @@ def _parse_camera_extrinsics(value: Any) -> tuple[list[list[float]], list[float]
         )
         if pos is not None and mat is not None:
             return mat, pos, "pos_mat", "opengl"
+        # Gazebo profiles publish camera_to_world as pos + quat_xyzw instead
+        # of a flattened mat; accept it with the same camera->world semantics.
+        quat = _finite_vector(value.get("quat_xyzw"), length=4)
+        if pos is not None and quat is not None:
+            mat = _quat_xyzw_to_matrix3(quat)
+            if mat is not None:
+                return mat, pos, "pos_mat", "opengl"
         matrix_value = None
         source_format = "matrix4"
         for key in ("camera_to_world", "pose_mat", "matrix", "transform", "T"):
@@ -5716,6 +5723,21 @@ def _matrix_layout_from_extrinsics(value: Any) -> str:
         if raw in {"column_major", "col_major", "column", "col"}:
             return "column_major"
     return "row_major"
+
+
+def _quat_xyzw_to_matrix3(quat: Sequence[float]) -> list[list[float]] | None:
+    """Convert a normalized xyzw quaternion to a row-major 3x3 rotation."""
+
+    qx, qy, qz, qw = (float(value) for value in quat)
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm <= 1e-9:
+        return None
+    qx, qy, qz, qw = (value / norm for value in (qx, qy, qz, qw))
+    return [
+        [1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy - qz * qw), 2.0 * (qx * qz + qy * qw)],
+        [2.0 * (qx * qy + qz * qw), 1.0 - 2.0 * (qx * qx + qz * qz), 2.0 * (qy * qz - qx * qw)],
+        [2.0 * (qx * qz - qy * qw), 2.0 * (qy * qz + qx * qw), 1.0 - 2.0 * (qx * qx + qy * qy)],
+    ]
 
 
 def _camera_frame_from_extrinsics(value: Any) -> str:
