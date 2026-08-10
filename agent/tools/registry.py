@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 from contextlib import contextmanager
@@ -9,12 +10,41 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 from typing import Callable
+from typing import Mapping
 
 from adapter.protocol import EnvObservation, JsonDict
 
 TOOL_RESULT_SCHEMA_VERSION = "openeta.tool_result.v1"
 TOOL_RESULT_PROVENANCE_SCHEMA_VERSION = "openeta.tool_result_provenance.v1"
 ENVIRONMENT_AUTHORITY = "environment"
+
+PERCEPTION_PROFILE_ENV_VAR = "OPENETA_PERCEPTION_PROFILE"
+PERCEPTION_PROFILE_SAM3 = "sam3"
+PERCEPTION_PROFILE_ORACLE = "oracle"
+DEFAULT_PERCEPTION_PROFILE = PERCEPTION_PROFILE_SAM3
+_PROFILE_SEGMENTER_TOOLS = {
+    PERCEPTION_PROFILE_SAM3: "sam3",
+    PERCEPTION_PROFILE_ORACLE: "oracle_perceive",
+}
+
+
+def resolve_perception_profile(environ: Mapping[str, str] | None = None) -> str:
+    """Resolve the active perception profile; unknown values fall back to sam3."""
+
+    source = os.environ if environ is None else environ
+    profile = str(source.get(PERCEPTION_PROFILE_ENV_VAR, "") or "").strip().lower()
+    if profile in _PROFILE_SEGMENTER_TOOLS:
+        return profile
+    return DEFAULT_PERCEPTION_PROFILE
+
+
+def perception_segmenter_tool_name(profile: str) -> str:
+    """Return the planner-visible segmentation tool for one perception profile."""
+
+    return _PROFILE_SEGMENTER_TOOLS.get(
+        profile,
+        _PROFILE_SEGMENTER_TOOLS[DEFAULT_PERCEPTION_PROFILE],
+    )
 
 
 class ToolEffect(str, Enum):
@@ -721,9 +751,12 @@ def _cancelled_tool_result(
     )
 
 
-def build_default_tool_registry() -> ToolRegistry:
+def build_default_tool_registry(*, perception_profile: str | None = None) -> ToolRegistry:
     """Create the initial OpenETA tool catalog from the architecture notes."""
 
+    active_segmenter = perception_segmenter_tool_name(
+        resolve_perception_profile() if perception_profile is None else perception_profile
+    )
     registry = ToolRegistry()
     for spec in [
         ToolSpec(
@@ -948,6 +981,25 @@ def build_default_tool_registry() -> ToolRegistry:
                     "{x, y, label}; label=1 is foreground and label=0 is background; "
                     "use the exact points returned by retrieve_asset_reference"
                 ),
+            },
+            effect=ToolEffect.READ_ONLY,
+        ),
+        ToolSpec(
+            name="oracle_perceive",
+            category="perception",
+            description=(
+                "Simulator-only oracle (Gazebo ground truth): segment objects from "
+                "RGB observations using a text prompt by projecting known simulator "
+                "object poses into the camera frame. Available only in the oracle "
+                "perception profile, where it replaces sam3; detections follow the "
+                "same ranking and explicit VLM selection flow."
+            ),
+            parameters={
+                "image": (
+                    "exact local RGB image path (preferred), or a frame id present in the "
+                    "current observation's image_artifacts"
+                ),
+                "prompt": "concise visual object phrase, preferably English",
             },
             effect=ToolEffect.READ_ONLY,
         ),
@@ -1611,5 +1663,10 @@ def build_default_tool_registry() -> ToolRegistry:
             batchable=False,
         ),
     ]:
+        if (
+            spec.name in _PROFILE_SEGMENTER_TOOLS.values()
+            and spec.name != active_segmenter
+        ):
+            continue
         registry.register(spec)
     return registry

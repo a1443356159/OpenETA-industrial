@@ -30,7 +30,7 @@ from agent.tools.registry import (
     ToolResult,
     make_tool_result,
 )
-from agent.tools.sim_mcp import SseSimulatorMcpTransport
+from agent.tools.sim_mcp import SimulatorMcpTransport, SseSimulatorMcpTransport
 
 
 ApprovalCallback = Callable[[ToolExecutionContext], bool]
@@ -151,7 +151,10 @@ def bind_dummy_tool_handlers(
                 "obstacle_avoidance": _obstacle_avoidance_handler,
             }
         )
+    registered = {spec.name for spec in tools.list()}
     for name, handler in handlers.items():
+        if name not in registered:
+            continue
         if tools.can_execute(name) and not replace:
             continue
         tools.bind_handler(name, handler, replace=replace)
@@ -165,8 +168,14 @@ def build_sam3_handler(
     depth_prior_prefetch: DepthPriorPrefetchCallable | None = None,
     output_root: str | Path | None = None,
     result_output_root: str | Path | None = None,
+    tool_name: str = "sam3",
 ) -> ToolHandler:
-    """Build a SAM3 handler backed by text and optional point MCP callables."""
+    """Build a SAM3 handler backed by text and optional point MCP callables.
+
+    ``tool_name`` relabels result/artifact provenance when the same handler
+    pipeline serves an interchangeable segmentation backend (for example the
+    simulator-only ``oracle_perceive`` tool).
+    """
 
     image_output_root = (
         Path(output_root) if output_root is not None else DEFAULT_SAM3_IMAGE_OUTPUT_ROOT
@@ -515,6 +524,7 @@ def build_sam3_handler(
             prompt=prompt,
             points=points,
             source_image=image,
+            tool_name=tool_name,
             request={
                 "image": image,
                 "mode": mode,
@@ -680,6 +690,32 @@ def build_sse_sam3_mcp_segmenter(
 
     def segment(request: JsonDict) -> JsonDict:
         return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+
+    return segment
+
+
+def build_oracle_perceive_segmenter(
+    transport: SimulatorMcpTransport,
+    *,
+    tool_name: str = "oracle_perceive",
+    timeout_seconds: float = 600.0,
+) -> Sam3SegmentCallable:
+    """Build a simulator-oracle segmenter over the existing simulator MCP transport.
+
+    The SAM3 handler pipeline already encodes the source image, so the oracle
+    MCP tool receives the ``{image_base64, prompt}`` contract directly and
+    returns the same response shape as the SAM3 MCP server.
+    """
+
+    def segment(request: JsonDict) -> JsonDict:
+        return transport.call_tool(
+            tool_name,
+            {
+                "image_base64": request.get("image_base64"),
+                "prompt": _string_param(request.get("prompt")),
+            },
+            timeout_s=timeout_seconds,
+        )
 
     return segment
 
@@ -2910,6 +2946,7 @@ def _normalise_sam3_response(
     roi_bbox_xyxy: object = None,
     extra_artifacts: Sequence[JsonDict] = (),
     output_metadata: JsonDict | None = None,
+    tool_name: str = "sam3",
 ) -> ToolResult:
     if not isinstance(response, dict):
         return _sam3_failure(
@@ -3058,7 +3095,7 @@ def _normalise_sam3_response(
             {
                 "type": "segmentation_mask",
                 "kind": "mask",
-                "tool": "sam3",
+                "tool": tool_name,
                 "index": detection_id,
                 "label": label,
                 "mode": mode,
@@ -3132,6 +3169,7 @@ def _normalise_sam3_response(
                 detections=detections,
                 output_dir=artifacts_dir,
                 prompt=prompt or "point_prompt",
+                tool_name=tool_name,
             )
             artifacts.extend(selection_artifacts)
         except Exception as exc:  # noqa: BLE001 - required selection evidence failed.
@@ -3159,9 +3197,9 @@ def _normalise_sam3_response(
         True,
         content=content,
         details={
-            "tool": "sam3",
-            "backend": _string_param(details.get("backend")) or "sam3_mcp",
-            "model": _string_param(details.get("model")) or "sam3",
+            "tool": tool_name,
+            "backend": _string_param(details.get("backend")) or f"{tool_name}_mcp",
+            "model": _string_param(details.get("model")) or tool_name,
             "mode": mode,
             "prompt_type": _string_param(details.get("prompt_type")) or mode,
             "prompt": prompt,
@@ -3384,6 +3422,7 @@ def _build_sam3_selection_artifacts(
     output_dir: Path,
     prompt: str,
     visual_limit: int = DEFAULT_SAM3_SELECTION_VISUAL_LIMIT,
+    tool_name: str = "sam3",
 ) -> tuple[JsonDict, list[JsonDict]]:
     from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
@@ -3438,14 +3477,14 @@ def _build_sam3_selection_artifacts(
                 {
                     "type": "sam3_candidate_overlay",
                     "kind": "image",
-                    "tool": "sam3",
+                    "tool": tool_name,
                     "index": detection_id,
                     "path": str(overlay_ref),
                 },
                 {
                     "type": "sam3_candidate_crop",
                     "kind": "image",
-                    "tool": "sam3",
+                    "tool": tool_name,
                     "index": detection_id,
                     "path": str(crop_ref),
                 },
@@ -3493,7 +3532,7 @@ def _build_sam3_selection_artifacts(
         {
             "type": "sam3_selection_contact_sheet",
             "kind": "image",
-            "tool": "sam3",
+            "tool": tool_name,
             "index": "selection",
             "path": str(contact_sheet_ref),
         }

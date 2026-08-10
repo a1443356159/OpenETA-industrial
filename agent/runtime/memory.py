@@ -26,6 +26,10 @@ from agent.runtime.calibration_registry import (
 
 PENDING_SAM3_SELECTION_KEY = "pending_sam3_selection"
 SELECTED_SAM3_DETECTION_KEY = "selected_sam3_detection"
+# Segmentation tools whose successful results feed the shared selection flow.
+# oracle_perceive (simulator-only Gazebo ground truth) is contract-identical
+# to sam3 and is captured through the same pending-selection memory keys.
+SELECTION_CAPTURE_TOOL_NAMES = frozenset({"sam3", "oracle_perceive"})
 PENDING_REFERENCE_LOCALIZATION_KEY = "pending_reference_localization"
 REFERENCE_LOCALIZATION_FAILURE_KEY = "reference_localization_failure"
 TARGET_LOCALIZATION_BUDGET_KEY = "target_localization_budget"
@@ -1381,7 +1385,10 @@ class AgentMemory:
     def _capture_sam3_selection_state(self, action: EnvAction) -> None:
         command = action.command if isinstance(action.command, dict) else {}
         for call in command.get("tool_calls", []) or []:
-            if not isinstance(call, dict) or str(call.get("name") or "") != "sam3":
+            if not isinstance(call, dict):
+                continue
+            segmenter_tool_name = str(call.get("name") or "")
+            if segmenter_tool_name not in SELECTION_CAPTURE_TOOL_NAMES:
                 continue
             result = call.get("result")
             if not isinstance(result, dict) or not bool(result.get("success")):
@@ -1401,7 +1408,7 @@ class AgentMemory:
             ]
             result_id = str(outputs.get("result_id") or "")
             if not result_id:
-                result_id = f"sam3-{int(time.time() * 1000)}"
+                result_id = f"{segmenter_tool_name}-{int(time.time() * 1000)}"
             selection_bundle = outputs.get("selection_bundle")
             if not isinstance(selection_bundle, dict):
                 selection_bundle = {}
@@ -1455,7 +1462,7 @@ class AgentMemory:
                 self.facts.pop(SAM3_NO_DETECTION_KEY, None)
                 self.facts[PENDING_SAM3_SELECTION_KEY] = _memory_fact_entry(
                     base,
-                    source="sam3",
+                    source=segmenter_tool_name,
                 )
                 self.record(
                     "sam3_detection_selection_required",
@@ -1470,7 +1477,7 @@ class AgentMemory:
             else:
                 self.facts[SAM3_NO_DETECTION_KEY] = _memory_fact_entry(
                     base,
-                    source="sam3",
+                    source=segmenter_tool_name,
                 )
                 self._capture_grasp_fallback_segmentation_failure(base)
                 self.record("sam3_no_detection", {"result_id": result_id})

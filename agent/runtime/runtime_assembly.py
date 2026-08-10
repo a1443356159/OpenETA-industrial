@@ -69,6 +69,7 @@ from agent.tools.handlers import (
     build_grasp_pose_estimate_handler,
     build_graspgenx_handler,
     build_molmopoint_handler,
+    build_oracle_perceive_segmenter,
     build_sam3_handler,
     build_sse_anygrasp_mcp_grasper,
     build_sse_anyplace_mcp_placer,
@@ -93,6 +94,8 @@ from agent.tools.registry import (
     ToolResult,
     ToolSpec,
     build_default_tool_registry,
+    perception_segmenter_tool_name,
+    resolve_perception_profile,
 )
 from agent.tools.sim_mcp import (
     SimulatorMcpResponseCallback,
@@ -223,8 +226,10 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         build_default_tool_registry(),
         include_dummy_safety=False,
     )
+    registered_tool_names = {spec.name for spec in tools.list()}
     for name in REMOTE_PLACEHOLDER_TOOLS:
-        tools.unbind_handler(name)
+        if name in registered_tool_names:
+            tools.unbind_handler(name)
     if config.simulator_transport is None:
         for name in ENVIRONMENT_PLACEHOLDER_TOOLS:
             tools.unbind_handler(name)
@@ -333,6 +338,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         endpoints=config.endpoints,
         backend_factory=config.backend_factory,
         artifact_root=artifact_root,
+        simulator_transport=config.simulator_transport,
     )
 
     planner = ToolCallingPlanner(
@@ -428,7 +434,14 @@ def bind_runtime_perception_tools(
     endpoints: RuntimeMcpEndpoints,
     backend_factory: BackendFactory,
     artifact_root: Path,
+    perception_profile: str | None = None,
+    simulator_transport: SimulatorMcpTransport | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
+    segmenter_tool = perception_segmenter_tool_name(
+        resolve_perception_profile()
+        if perception_profile is None
+        else perception_profile
+    )
     object_memory_configuration_error = ""
     try:
         object_memory_config = load_configured_object_memory_bank()
@@ -484,7 +497,22 @@ def bind_runtime_perception_tools(
             depth_prefetch.handler,
             replace=True,
         )
-    if endpoints.sam3_url:
+    if segmenter_tool == "oracle_perceive":
+        # Simulator-only oracle (Gazebo ground truth) reuses the SAM3 handler
+        # pipeline over the existing simulator MCP transport; it is exposed
+        # instead of sam3, never alongside it.
+        if simulator_transport is not None:
+            tools.bind_handler(
+                "oracle_perceive",
+                build_sam3_handler(
+                    build_oracle_perceive_segmenter(simulator_transport),
+                    tool_name="oracle_perceive",
+                    output_root=artifact_root / "oracle_perceive_images",
+                    result_output_root=artifact_root / "oracle_perceive_results",
+                ),
+                replace=True,
+            )
+    elif endpoints.sam3_url:
         tools.bind_handler(
             "sam3",
             build_sam3_handler(
