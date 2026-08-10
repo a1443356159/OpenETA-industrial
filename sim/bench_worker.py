@@ -600,8 +600,11 @@ def _oracle_perceive_frame(env, handle: str, body: dict) -> dict:
             content=f"Oracle perception failed: image decode failed: {exc}")
     query = np.asarray(image, dtype=np.uint8)
 
+    # UnifiedEnv wraps the profile-owning GazeboDirectEnv; unwrap like the
+    # create_env control_spec path does.
+    direct_env = getattr(env, "_env", env)
     registry = oracle.oracle_registry_from_model_config(
-        getattr(getattr(env, "profile", None), "model_config", None))
+        getattr(getattr(direct_env, "profile", None), "model_config", None))
     if not registry:
         return oracle.oracle_failure_result(
             prompt=prompt, reason="oracle_unsupported_env",
