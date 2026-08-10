@@ -106,6 +106,14 @@ class M3Config(M2Config):
     allow_stalling: bool = True
 
     @property
+    def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
+        """World objects restored explicitly on reset (model_only does not)."""
+        return {
+            self.target_id: tuple(self.target_initial_xyz),
+            self.distractor_id: tuple(self.distractor_initial_xyz),
+        }
+
+    @property
     def ros_package_name(self) -> str:
         return "openeta_rm75_robotiq2f85_sim"
 

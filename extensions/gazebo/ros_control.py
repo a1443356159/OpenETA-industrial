@@ -173,6 +173,17 @@ class RosM2Controller(M2Controller):
         goal["plan_only"] = True
         return dict(self.runtime.move(goal, timeout_s))
 
+    def return_home(self, timeout_s: float = 15.0):
+        """Drive the arm back to the zero (spawn) joint configuration.
+
+        A model-only world reset restores entity poses but leaves the arm at
+        whatever configuration the last action ended in, with the trajectory
+        controller still holding the stale setpoint.  M3 resets once per
+        candidate/round and needs every round to start from the same state.
+        """
+
+        return dict(self.runtime.return_home(timeout_s))
+
 
 @dataclass(slots=True)
 class RosM2ControllerFactory:
@@ -493,6 +504,28 @@ class _RosRuntime:
                 trajectory_result_code=result_code,
             ),
         }
+
+    def return_home(self, timeout_s: float) -> Mapping[str, Any]:
+        """Command all arm joints to zero through the trajectory controller."""
+
+        goal = self.follow_trajectory_action_type.Goal()
+        point = self.trajectory_point_type()
+        duration_ns = int(2.0 * 1_000_000_000)
+        duration = self.duration_type(
+            sec=duration_ns // 1_000_000_000,
+            nanosec=duration_ns % 1_000_000_000,
+        )
+        _populate_recovery_trajectory_goal(
+            goal, point, duration, [0.0] * len(ARM_JOINTS)
+        )
+        handle = self._await(self.trajectory_client.send_goal_async(goal), min(5.0, timeout_s))
+        if not handle.accepted:
+            raise RuntimeError("HOME_TRAJECTORY_REJECTED")
+        wrapped = self._await(handle.get_result_async(), timeout_s)
+        self.state_source.clear()
+        if int(wrapped.result.error_code) != int(self.follow_trajectory_action_type.Result.SUCCESSFUL):
+            raise RuntimeError("HOME_TRAJECTORY_FAILED")
+        return {"ok": True, "trajectory_result_code": int(wrapped.result.error_code)}
 
     def move(self, goal: dict, timeout_s: float) -> Mapping[str, Any]:
         from geometry_msgs.msg import Pose

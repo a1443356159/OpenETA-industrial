@@ -192,6 +192,21 @@ class GazeboRuntime:
                 reset_sources()
         # Preserve /clock after the ROS action stack has started.
         self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
+        if PHYSICS in self.profile.capabilities and self.controller is not None:
+            # A model-only world reset restores entity poses but leaves the
+            # arm wherever the last action ended, with the trajectory
+            # controller still holding the stale setpoint.  M3 resets once
+            # per candidate/round and needs a deterministic start state.
+            return_home = getattr(self.controller, "return_home", None)
+            if callable(return_home):
+                return_home()
+            # Harmonic's model_only reset does not restore free objects
+            # either; teleport the manipulated objects to their documented
+            # initial poses instead of rewinding the simulation clock.
+            reset_object_poses = getattr(self.profile.model_config, "reset_object_poses", None)
+            if reset_object_poses:
+                for model_name, xyz in reset_object_poses.items():
+                    self._world.set_model_pose(model_name, xyz)
         self.scene_epoch += 1
         barrier: float | None = None
         if self.controller is not None:

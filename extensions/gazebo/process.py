@@ -208,6 +208,34 @@ class GazeboWorldControl:
                 f"Gazebo world reset failed for {self.world_name}: {result.stdout[-500:]} {result.stderr[-500:]}"
             )
 
+    def set_model_pose(self, model_name: str, xyz: tuple[float, float, float]) -> None:
+        """Teleport one model through the documented ``set_pose`` service.
+
+        Harmonic's ``model_only`` world reset restores neither free-object
+        poses nor robot joint states (verified live on gz-sim 8.11), so M3
+        restores its manipulated objects explicitly without rewinding the
+        monotonic simulation clock.
+        """
+
+        if not model_name.strip() or "/" in model_name:
+            raise ValueError("model_name must be a non-empty model identifier")
+        executable = shutil.which(self.gz_executable) or self.gz_executable
+        request = (
+            f'name: "{model_name}", position: {{x: {float(xyz[0])}, y: {float(xyz[1])}, '
+            f"z: {float(xyz[2])}}}, orientation: {{w: 1.0}}"
+        )
+        result = subprocess.run(
+            [executable, "service", "-s", f"/world/{self.world_name}/set_pose",
+             "--reqtype", "gz.msgs.Pose", "--reptype", "gz.msgs.Boolean",
+             "--timeout", str(self.timeout_ms), "--req", request],
+            capture_output=True, text=True, timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
+            env=self.environment,
+        )
+        if result.returncode != 0 or "data: true" not in result.stdout.lower():
+            raise GazeboProcessError(
+                f"Gazebo set_pose failed for {model_name}: {result.stdout[-500:]} {result.stderr[-500:]}"
+            )
+
     def __enter__(self) -> "GazeboProcess":
         self.start()
         return self
