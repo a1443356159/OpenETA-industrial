@@ -11,9 +11,9 @@ M3 的场景、正式 ROS/Gazebo 数据路径、MoveIt PlanningScene、无 ROS �
 1. **原阻塞（接触位 `MOTION_PLAN_FAILED`）根因是 PlanningScene ACM 过窄**：四个固定候选的接触位目标都被 MoveIt 判为 `GOAL_STATE_INVALID`（-27）。逐对豁免实验证明阻塞对是**工作台与夹爪远端连杆**（指尖/指节/掌关节），而非目标物。`M3PlanningSceneModel.initialize` 现在额外放行 `table_touch_links`（八个远端连杆）与桌面、以及 `grasp_touch_links` 与目标/干扰物——持握态的 `/check_state_validity` 实测接触对为 `finger_link`/`inner_knuckle_link ↔ m3_target`，且世界对象 ACM 行在 reset 清除周期中会被裁剪，因此所有豁免必须在 initialize 内重放。
 2. **原四候选姿态族（`_q_euler(π, ±60°, yaw)`）物理上不可能完成抓取**：该族的闭合轴随 pitch 倾斜 60°，实测接触下降过程中低位指尖在抓心到达前 ~5 cm 处就把盒子推倒（目标被推走 5 cm 并翻倒）。驱动改用水平闭合轴姿态族 `_grasp_orientation(tilt, azimuth)`；全网格扫掠（tilt 15–90° × 方位角 24 点）证明机械臂在该桌型布局下只能到达 tilt≈55–75°、azimuth≈0° 附近的窄带，候选更新为 `(65,0) (70,0) (75,0) (60,15)`。`(65,0)` 实测接触零扰动、闭合稳定 stall（aperture≈41 mm > 6 mm 门槛）。
 3. **夹爪适配器两个物理修复**：stall 成功后保持当前位置（原先继续向全闭合命令推压，把已夹住的盒子挤出）——闭合后目标保持在位已验证；闭合/张开改为 1.5 s 斜坡（降低首触冲击）。
-4. **当前剩余阻塞 = 闭合/抬升阶段的物理方差**：同样的 `(65,0)` 序列在探针中两次干净持握、两次空抓（首触动力学把盒子弹开或 reset 后落点翻倒）；正式运行 `.cache/reports/m3-pickplace-20260810T194127Z-540487.json` 中 `(65,0)` 走到 `close_stall`（`EMPTY_GRASP`），其余候选随机 `pregrasp_plan` 失败（99999 目标采样失败，同一姿态在扫掠中可规划）。持握态 lift 规划所需的 ACM 豁免已按实测接触对补齐，但尚未来得及端到端验证 lift/共动。
+4. **2026-08-10/11 第二轮（本结论的现行状态）**：两轮正式运行（`.cache/reports/m3-pickplace-20260810T223312Z-564675.json`、`...T224016Z-566616.json`）确认规划层已收敛——pregrasp/contact 规划 8 次候选尝试 7 次成功（plan 重试 3 次消除了 99999 采样抖动；reset 现在通过 `return_home` 关节回零 + `set_pose` 显式还原目标/干扰物，因为实测 gz-sim 8.11 的 `model_only` reset **既不还原自由物体位姿也不还原机械臂关节**）。剩余阻塞是**夹爪连杆的仿真保真度**：六个独立位置系统驱动的 2F-85 闭环连杆在闭合时不确定性失步——实测垫面（TF+STL 测量）在早期卡死（假 stall，aperture≈8.1 cm）、全闭但不收敛（横向错开 2-4 cm，`EMPTY_GRASP` 而盒未动）、持握后零力滑脱（lift 时 `rose=0`）与过压弹出之间随机分布。挤压参数扫掠（stall 保持偏移 0/0.01/0.02/0.025/0.03/0.05/0.08 rad，逐关节保持）未找到稳定窗口：正式两轮中闭合结果分别为 `LIFT_REQUIRED`（随后 lift 因盒被挤出后目标位姿垃圾而失败）与 3×`EMPTY_GRASP`。持握成功率估计 ≤1/3，不满足 5/5 正轮的验收门槛。
 
-清理 gate 方面，分区探针获得与 domain 探针相同的有界重试（WSL2 上 Gazebo Transport 发现滞后于进程退出），不再把单纯的发现滞后误报为残留。
+清理 gate 方面，分区探针获得与 domain 探针相同的有界重试（WSL2 上 Gazebo Transport 发现滞后于进程退出），不再把单纯的发现滞后误报为残留。已知缺口：Direct 驱动进程内启动的 launch 栈与驱动同进程组，驱动异常退出时清理路径按设计不信号自身组，孤立的 gz/bridge/move_group 需按 partition 手动回收（本轮两轮正式运行后均如此清理）。
 
 ## 实现边界
 
@@ -91,6 +91,6 @@ Direct 驱动从 live TF 和冻结 STL 包围盒计算指尖碰撞中心。四�
 
 ## 下一步解除阻塞
 
-1. 降低闭合首触方差：评估更慢的闭合斜坡、更软的接触参数或闭合前重读目标位姿；目标是 `(65,0)` 的 close-stall 成功率接近 1。任何改动只许动仿真模型/适配器，不改校验语义。
-2. 端到端验证持握 lift：ACM 豁免已按实测接触对补齐（`grasp_touch_links`），需一次干净 close 后的 lift 共动证明（`TARGET_HELD`）。
+1. 解决 2F-85 闭环连杆的 Gazebo 保真度（当前唯一卡点）。候选方向：gz 侧用关节约束/闭环耦合替代六独立位置驱动；或适配器改为垫面反馈闭合（按 TF 实测两垫间距收敛到目标宽度为止）；或软化目标接触参数（kp=1e5 对 100 g 轻物过硬）。任选其一都需保持 M2 的 reached-goal 契约与既有验收证据不破（需要时重跑 M2 正式验收）。
+2. 连杆闭合可靠后，用 `/tmp` 探针（`m3_squeeze_probe.py`/`m3_geometry_probe.py` 模式）量化闭合成功率 ≥90% 再跑正式验收。
 3. 只有 Direct `5/5`、四负例、SSE `2/2`、清理 gate 都通过，才更新 M3 milestone checkbox。M2 正式验收已于 2026-08-10 通过（见 `docs/gazebo-m2-rm75-robotiq2f85.md`）。

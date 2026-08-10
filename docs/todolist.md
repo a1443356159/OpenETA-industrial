@@ -138,15 +138,12 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
   - [x] Offline tests: 39 new (worker 16+13, agent contract 10) + 5
     execution-link patch tests; full offline suite 1320 passed, 0 failed.
   - [ ] Live acceptance (`tests/test_gazebo_m4_oracle_pick_chain.py`,
-    `OPENETA_RUN_LIVE_ROS_TEST=1`): re-run on 2026-08-10 after the M3
-    planning fixes. The chain now passes create/reset/observe and
-    `oracle_perceive` live (a UnifiedEnv unwrap gap in the worker route was
-    fixed for this), and fails at the pregrasp `move_to`: the test's
-    hardcoded gripper-up (preserve-current from home) target above the box is
-    unreachable without the forearm crossing the planning-scene table. The
-    test's grasp orientation family needs the same reachable-pose treatment
-    as the M3 driver; M3 itself is still not formally accepted (grasp
-    close/lift physics variance, see
+    `OPENETA_RUN_LIVE_ROS_TEST=1`): test poses fixed on 2026-08-11 to the
+    reachable M3 grasp-orientation family (orient via absolute-pose move,
+    then position-level candidate moves with preserve_current and the
+    grasp-centre→mount offset); close/lift stages xfail on the known M3
+    gripper-linkage physics blocker.  A worker-route unwrap gap was fixed for
+    the live oracle path.  Full live pass remains gated on M3 (see
     `docs/gazebo-m3-physical-verification.md`).
   - Out of scope: wrist projection, pick_place NOT_READY gate, unified object
     summary schema (plan.md §17), SAM3-side changes, M6 fine-tuning.
