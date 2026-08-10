@@ -56,7 +56,12 @@ Exit codes are `0` for all deterministic gates passed, `1` for deterministic
 failure, `2` for blocked/inconclusive infrastructure, and `130` for operator
 interrupt. On WSL2, an M1 topic-discovery timeout is reported as blocked and
 stops the formal chain; do not reuse domains 42/100, the ros2cli daemon, or an
-old ROS graph, and do not substitute synthetic observations.
+old ROS graph, and do not substitute synthetic observations. As of 2026-08-10
+the two M1 live tests (`tests/test_gazebo_rgbd_bridge.py`,
+`tests/test_gazebo_world_control.py`) pass on the WSL2 host (7/7 consecutive
+runs): the historical timeout was reproduced as cold-start discovery exceeding
+the old 15 s readiness budget under a leftover CPU-bound `gz sim`, and
+`GazeboProcess.wait_for_topics` now defaults to 30 s.
 
 For evidence review without starting processes:
 

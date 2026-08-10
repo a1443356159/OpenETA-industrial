@@ -72,3 +72,26 @@ evidence is written under `.cache/reports/`; the checkpoint run is
 These results are development evidence and do not constitute formal M2
 acceptance. Any legacy report that was manually finalized after its original
 run is untrusted cleanup evidence and is not a release gate.
+
+## Formal acceptance
+
+**M2 formal acceptance PASSED on 2026-08-10** (WSL2 host, report
+`.cache/reports/m2-robotiq2f85-acceptance-20260810T194732Z-542318.json`,
+`overall_status=passed`). All gates passed: `ros_workspace_build`,
+`m2_runtime_check`, `offline_contract_regression`, `direct_live`,
+`mcp_live`, `repository_regression`, and `isolation_cleanup`. Direct motion
+stayed within 3.73 mm and 0.069 rad over the ten z-round moves; the SSE MCP
+lifecycle (`create -> reset -> observe -> move_to x2 -> observe -> close`)
+passed with `backend=gazebo`.
+
+The 2026-08-10 session fixed four live blockers to get there: the UnifiedEnv
+backend name regression (`gazebodirectenv` -> `gazebo`), the missing gazebo
+observation normaliser (MCP observations lost their cameras), the structured
+receipt's raw observation clobbering the MCP-wire observation, and the Jazzy
+`ros2 control` readiness probe leaking a detached ros2-daemon into the
+acceptance process group (cleanup gate). Two robustness fixes landed as well:
+`num_planning_attempts=1 -> 3` (MoveIt executes the shortest plan, avoiding
+random joint-space windup onto joint limits) and SRDF `FourBar` exemptions for
+`finger_link <-> inner_knuckle_link` (the six independent Gazebo position
+systems can briefly desynchronise the closed linkage and report a spurious
+self-contact that previously aborted planning with `START_STATE_IN_COLLISION`).

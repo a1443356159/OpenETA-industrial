@@ -234,5 +234,15 @@
   fingertip contact or a stall in the 32–48 mm aperture band, and Harmonic did
   not publish empty Contact heartbeats for non-contacting fingertips. The
   fail-closed verifier therefore returned `UNKNOWN` rather than claiming a
-  grasp. See `docs/gazebo-m3-physical-verification.md`; neither the M2 nor M3
-  milestone checkbox is accepted.
+  grasp. See `docs/gazebo-m3-physical-verification.md`.
+
+- 2026-08-10 update: **M2 formal acceptance PASSED** (report
+  `m2-robotiq2f85-acceptance-20260810T194732Z-542318.json`, all gates including
+  isolation cleanup). M3's original contact-pose planning blocker is root-caused
+  and fixed (PlanningScene ACM now covers measured table/grasp contact pairs;
+  the driver uses a reachable horizontal-closing-axis orientation family; the
+  gripper adapter holds at stall and ramps the stroke). M3 remains NOT formally
+  accepted: the close/lift physics still shows ~50% first-touch variance
+  (EMPTY_GRASP vs clean stall). The M1 WSL2 topic-discovery timeout is resolved
+  (cold-start budget 15 s -> 30 s; stale CPU-bound gz processes were the
+  environmental trigger); both M1 live tests pass repeatedly.
