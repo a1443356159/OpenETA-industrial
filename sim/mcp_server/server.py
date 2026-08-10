@@ -39,6 +39,7 @@ from sim.mcp_server.session import (
 from sim.mcp_server.worker_mgr import (
     _forget_obs_dirty,
     _proxy_observe,
+    _proxy_oracle_perceive,
     _proxy_render,
     _proxy_reset,
     _proxy_step,
@@ -1327,6 +1328,49 @@ def observe_env(handle: str, *, session_id: str = "") -> dict:
     if not meta:
         return {"error": f"Unknown: {handle}"}
     return _proxy_observe(meta)
+
+
+@_blocking_tool
+def oracle_perceive(handle: str, image_base64: str, prompt: str, *, session_id: str = "") -> dict:
+    """Segment prompt-matched objects using simulator ground truth (Gazebo oracle).
+
+    Simulator-only perception oracle: instead of running a learned segmentation
+    model, the worker projects the environment's ground-truth object poses
+    (odometry bridge) through the calibrated camera model and returns masks in
+    exactly the same response contract as the ``sam3`` tool — ``success``,
+    ``content`` and ``details`` with ``detections[]`` items of
+    ``{label, score, bbox_xyxy, mask:{format:"png",base64}, area_px,
+    backend_index, rank}``.  ``details.metadata.perception_source`` is
+    ``"gazebo_oracle"`` so oracle output is never silently mixed with learned
+    perception.
+
+    Limitations: Gazebo M3 envs only; the static top camera only — wrist
+    camera frames fail explicitly with reason ``ORACLE_FRAME_UNSUPPORTED``
+    because their ``tf_dynamic`` extrinsics are never numerically resolved.
+    Occlusion is ignored (oracle is ground truth).
+
+    Args:
+        handle: Environment handle from create_env.
+        image_base64: Base64-encoded PNG of the camera image to perceive,
+            typically the RGB frame returned by observe_env/reset_env.  The
+            worker matches it against its cached observation frames
+            (pixel-exact, or unique-size fallback reported as
+            ``metadata.frame_match == "fallback_size"``).
+        prompt: Text prompt naming the target object(s); matched
+            case-insensitively as a substring of each oracle object's
+            id/name/label (e.g. ``"target block"``, ``"distractor"``).
+        session_id: Optional session id to reuse an existing session.
+
+    Returns:
+        SAM3-shaped dict; on failure ``success`` is False and
+        ``details.reason`` carries a structured reason code.
+    """
+    sid = session_id or _current_session.get() or ""
+    _touch_session(sid)
+    meta = _session_envs.get(sid, {}).get(handle)
+    if not meta:
+        return {"error": f"Unknown: {handle}"}
+    return _proxy_oracle_perceive(meta, image_base64=image_base64, prompt=prompt)
 
 
 @_blocking_tool
