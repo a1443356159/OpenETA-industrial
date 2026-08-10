@@ -516,7 +516,13 @@ class _RosRuntime:
         self.state_source.clear()
         request = MoveGroup.Goal()
         request.request.group_name = goal["group_name"]
-        request.request.num_planning_attempts = 1
+        # OMPL is stochastic: a single attempt can return a needlessly long
+        # joint-space excursion (winding the redundant wrist onto its limits,
+        # or swinging the open gripper into a grasp target mid-path), or fail
+        # outright on an unlucky sample.  MoveGroup evaluates several attempts
+        # and executes the shortest solution, which keeps both Cartesian hops
+        # and physical approaches tidy without changing the goal contract.
+        request.request.num_planning_attempts = 3
         # Keep the action client's deadline strictly outside MoveIt's own
         # planning deadline. Equal deadlines race cancellation against a
         # terminal result and can trigger an invalid goal-state transition in

@@ -29,5 +29,10 @@
   <disable_collisions link1="robotiq_85_right_finger_link" link2="robotiq_85_right_finger_tip_link" reason="Adjacent"/>
   <disable_collisions link1="robotiq_85_left_inner_knuckle_link" link2="robotiq_85_left_finger_tip_link" reason="FourBar"/>
   <disable_collisions link1="robotiq_85_right_inner_knuckle_link" link2="robotiq_85_right_finger_tip_link" reason="FourBar"/>
+  <!-- The closed four-bar loop keeps each finger clear of its inner knuckle
+       on the real gripper; the six independent Gazebo position systems can
+       briefly desynchronise the loop and report a spurious contact here. -->
+  <disable_collisions link1="robotiq_85_left_finger_link" link2="robotiq_85_left_inner_knuckle_link" reason="FourBar"/>
+  <disable_collisions link1="robotiq_85_right_finger_link" link2="robotiq_85_right_inner_knuckle_link" reason="FourBar"/>
   <disable_collisions link1="robotiq_85_left_finger_tip_link" link2="robotiq_85_right_finger_tip_link" reason="Gripper"/>
 </robot>

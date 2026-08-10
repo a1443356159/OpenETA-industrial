@@ -185,6 +185,9 @@ cleanup() {
   current_pgid="$(ps -o pgid= -p "$$" | tr -d '[:space:]')"
   terminate_group "${DIRECT_PID:-}"
   terminate_group "${MCP_PID:-}"
+  # Failure paths can exit before the post-readiness daemon stop; a detached
+  # ros2-daemon shares this script's process group, so stop it by RPC instead.
+  ros2 daemon stop >/dev/null 2>&1 || true
 
   # Nested bench workers and Ros2LaunchProcess instances intentionally create
   # their own sessions. Resolve only processes carrying this run's unique
@@ -296,6 +299,11 @@ if [[ "${ready}" != 1 ]]; then
   tail -120 "${DIRECT_LOG}" >&2
   exit 5
 fi
+# Jazzy ros2cli has no --no-daemon flag for `ros2 control` and ignores
+# ROS2CLI_DISABLE_DAEMON, so the readiness loop above spawned a detached
+# ros2-daemon in this script's own process group.  Stop it explicitly: the
+# cleanup gate cannot signal its own group and would report it as residual.
+ros2 daemon stop >/dev/null 2>&1 || true
 command_limits="$(timeout 10 ros2 param get --no-daemon /controller_manager enforce_command_limits 2>/dev/null || true)"
 if ! grep -Eqi 'true' <<<"${command_limits}"; then
   echo "ROS_NOT_READY: controller_manager enforce_command_limits is not true" >&2
