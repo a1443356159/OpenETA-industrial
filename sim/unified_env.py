@@ -103,6 +103,11 @@ class UnifiedEnv(gym.Env):
             return "calvin"
         if cls == "D4RLEnv":
             return "d4rl"
+        if cls == "GazeboDirectEnv":
+            # The pre-UnifiedEnv Gazebo worker envs reported "gazebo"; keep the
+            # established MCP wire value so backend routing and acceptance
+            # gates stay compatible.
+            return "gazebo"
         # MetaWorld direct envs: class name varies per task
         if "MetaWorld" in cls or "metaworld" in str(type(env).__module__):
             return "metaworld"
@@ -696,6 +701,16 @@ class UnifiedEnv(gym.Env):
         return obs
 
     # ── per-backend normalisers ──────────────────────────────────
+
+    def _normalise_gazebo(self, raw: dict) -> dict:
+        """GazeboDirectEnv already emits the established unified packet.
+
+        Cameras stay keyed by frame_id with numpy rgb/depth arrays; robot,
+        objects and metadata pass through unchanged so
+        ``EnvObservation.from_dict`` sees the same shape the pre-UnifiedEnv
+        Gazebo workers returned directly.
+        """
+        return raw
 
     def _normalise_dummy(self, raw: dict) -> dict:
         """DummySimEnv provides CameraFrame, RobotState, and objects."""

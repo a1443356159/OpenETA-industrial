@@ -18,3 +18,28 @@ def test_m1_registration_resolves_the_single_direct_env_profile() -> None:
     assert GazeboDirectEnv.__name__ == "GazeboDirectEnv"
     assert "fresh_observation" in profile.capabilities
     assert "authoritative_camera" in profile.capabilities
+
+
+def test_gazebo_unified_env_reports_the_established_backend_name() -> None:
+    # The MCP wire contract and the M2/M3 acceptance gates expect the
+    # historical "gazebo" backend string from the pre-UnifiedEnv workers.
+    import gymnasium as gym
+
+    env = gym.make(
+        "openeta/gazebo_rm75_robotiq2f85-v0", task="backend", seed=0,
+        render_mode="rgb_array",
+    )
+    try:
+        assert getattr(env, "_backend", "") == "gazebo"
+        raw = {
+            "task": "t",
+            "cameras": {"top_camera_optical_frame": {"rgb": "pixels"}},
+            "robot": {"joint_positions": []},
+            "objects": [],
+            "metadata": {},
+        }
+        # The direct env already emits the established unified packet; the
+        # normaliser must pass it through instead of dropping cameras.
+        assert env._normalise_obs(raw) is raw
+    finally:
+        env.close()

@@ -484,7 +484,11 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
     # Generic control codec: DirectEnv receipts are internal Gym info fields;
     # the established MCP wire contract exposes their fields at top level.
     if receipt:
-        payload.update(receipt)
+        # StepResult above already converted the authoritative observation to
+        # the MCP wire form.  DirectEnv receipts anchor the same observation
+        # in raw unified form (numpy arrays, cameras keyed by frame_id); never
+        # let that copy overwrite the converted top-level observation.
+        payload.update({k: v for k, v in receipt.items() if k != "observation"})
     return payload
 
 

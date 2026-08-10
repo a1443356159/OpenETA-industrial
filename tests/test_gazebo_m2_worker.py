@@ -28,3 +28,25 @@ def test_generic_worker_codec_restores_internal_receipt_without_observation_clob
     assert payload["ok"] is True
     assert payload["observation"]["metadata"]["model_id"] == "m2"
     assert "_openeta_receipt" not in payload["info"]
+
+
+def test_structured_receipt_raw_observation_never_clobbers_the_mcp_observation() -> None:
+    # GazeboDirectEnv anchors the raw unified observation (numpy arrays,
+    # cameras keyed by frame_id) inside its receipt.  The wire contract keeps
+    # the StepResult-converted MCP observation at the top level.
+    raw_cameras = {
+        "top_camera_optical_frame": {"rgb": np.zeros((2, 2, 3), dtype=np.uint8)},
+    }
+    observation = {"task": "", "cameras": {}, "robot": {}, "objects": [], "metadata": {}}
+    receipt_observation = {"task": "", "cameras": raw_cameras, "robot": {}, "objects": []}
+
+    class Environment:
+        def step(self, _action):
+            return observation, 0.0, False, False, {
+                "_openeta_receipt": {"ok": True, "observation": receipt_observation}
+            }
+
+    payload = bench_worker._step_with_image(Environment(), {}, render=False)
+    assert payload["ok"] is True
+    assert isinstance(payload["observation"]["cameras"], list)
+    assert payload["observation"]["cameras"] == []
