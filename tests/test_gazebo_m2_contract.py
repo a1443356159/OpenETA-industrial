@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from extensions.gazebo.m2 import (
     JOINT_NAMES,
+    START_STATE_BOUNDS_TOLERANCE_RAD,
     M2Config,
     M2Controller,
-    ROBOTIQ2F85_MODEL_ID,
-    Robotiq2F85Config,
+    MODEL_ID,
+    assess_start_state_bounds,
     gripper_state,
     make_move_group_goal,
     robot_state_from_sources,
@@ -15,11 +18,96 @@ from extensions.gazebo.m2 import (
 from sim.env_registry import get_env_spec
 
 
-def _state(active=0.035):
+def _state(active=0.0):
+    gripper = [active] + [0.0] * (len(JOINT_NAMES) - 8)
     return robot_state_from_sources(
-        {"name": JOINT_NAMES, "position": [0] * 7 + [active, active], "velocity": [0] * 9},
+        {"name": JOINT_NAMES, "position": [0] * 7 + gripper, "velocity": [0] * len(JOINT_NAMES)},
         {"base_link->gripper_mount_link": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]}},
     )
+
+
+def _bounded_state(arm_positions=None):
+    state = _state()
+    state.joint_positions[:7] = list(arm_positions or [0.0] * 7)
+    state.metadata.update(
+        {
+            "joint_state_timestamp_s": 42.0,
+            "joint_state_received_monotonic_s": time.monotonic(),
+        }
+    )
+    return state
+
+
+@pytest.mark.parametrize(
+    ("joint_3", "classification"),
+    [
+        (0.0, "WITHIN_BOUNDS"),
+        (3.106, "WITHIN_BOUNDS"),
+        (3.106 + 4.5e-13, "RECOVERABLE"),
+        (3.106 + START_STATE_BOUNDS_TOLERANCE_RAD, "RECOVERABLE"),
+        (3.106 + 1.1e-6, "INVALID"),
+    ],
+)
+def test_start_state_bounds_classifies_numeric_boundary_cases(
+    joint_3, classification
+) -> None:
+    positions = [0.0] * 7
+    positions[2] = joint_3
+    assessment = assess_start_state_bounds(_bounded_state(positions))
+
+    assert assessment["classification"] == classification
+    if classification == "RECOVERABLE":
+        assert assessment["candidate_positions"][2] == pytest.approx(3.105)
+        assert assessment["joints"][0]["name"] == "joint_3"
+
+
+def test_start_state_bounds_recovers_only_affected_joints() -> None:
+    positions = [0.0] * 7
+    positions[0] = -3.106 - 4.5e-13
+    positions[4] = 3.106 + 4.5e-13
+
+    assessment = assess_start_state_bounds(_bounded_state(positions))
+
+    assert assessment["classification"] == "RECOVERABLE"
+    assert assessment["candidate_positions"] == pytest.approx(
+        [-3.105, 0.0, 0.0, 0.0, 3.105, 0.0, 0.0]
+    )
+    assert [item["name"] for item in assessment["joints"]] == [
+        "joint_1",
+        "joint_5",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason_code"),
+    [
+        ("missing", "ARM_JOINT_MISSING"),
+        ("nan", "ARM_JOINT_NONFINITE"),
+        ("stale", "JOINT_STATE_STALE"),
+        ("timestamp_missing", "JOINT_STATE_TIMESTAMP_MISSING"),
+        ("names_missing", "ARM_JOINT_NAMES_MISSING"),
+    ],
+)
+def test_start_state_bounds_rejects_untrustworthy_state(
+    mutation, reason_code
+) -> None:
+    state = _bounded_state()
+    if mutation == "missing":
+        state.metadata["joint_names"] = list(JOINT_NAMES[1:])
+        state.joint_positions = state.joint_positions[1:]
+    elif mutation == "nan":
+        state.joint_positions[3] = float("nan")
+    elif mutation == "stale":
+        state.metadata["joint_state_received_monotonic_s"] -= 3.0
+    elif mutation == "names_missing":
+        state.metadata.pop("joint_names")
+    else:
+        state.metadata.pop("joint_state_received_monotonic_s")
+
+    assessment = assess_start_state_bounds(state)
+
+    assert assessment["classification"] == "INVALID"
+    assert assessment["reason_code"] == reason_code
 
 
 def test_gazebo_environment_uses_canonical_display_name() -> None:
@@ -31,9 +119,10 @@ def test_gazebo_environment_uses_canonical_display_name() -> None:
 def test_m2_names_opening_and_binary_command():
     cfg = M2Config()
     cfg.validate_assets()
-    assert cfg.maximum_aperture_m == 0.070
-    assert gripper_state(0.035)["aperture_m"] == 0.070
-    assert cfg.gripper_position(0) == 0 and cfg.gripper_position(1) == 0.035
+    assert cfg.maximum_aperture_m == 0.085
+    assert gripper_state(0.0)["aperture_m"] == 0.085
+    assert cfg.gripper_position(0) == pytest.approx(0.7929)
+    assert cfg.gripper_position(1) == 0.0
     for invalid in (False, 0.5, 1.0, -1, 2):
         with pytest.raises(ValueError):
             cfg.gripper_position(invalid)
@@ -73,9 +162,168 @@ def test_controller_routes_actions_and_unknown_outcome():
     assert ctl.execute({"action_type": "other"}).error_code == "INVALID_CONTROL_ACTION"
 
 
+def test_controller_runs_one_recovery_then_submits_the_original_target_once() -> None:
+    move_calls = []
+    recovery_calls = []
+    target = {
+        "xyz": [0.1, -0.2, 0.5],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+
+    def recover(state, timeout_s):
+        recovery_calls.append((state, timeout_s))
+        return {
+            "ok": True,
+            "action_started_ros_time_s": 10.0,
+            "action_completed_ros_time_s": 11.0,
+            "start_state_recovery": {
+                "schema_version": "m2_start_state_recovery_v1",
+                "status": "RECOVERED",
+                "attempted": True,
+            },
+        }
+
+    controller = M2Controller(
+        state_provider=_bounded_state,
+        start_state_recovery=recover,
+        move_action=lambda goal, timeout: move_calls.append((goal, timeout))
+        or {
+            "ok": True,
+            "action_started_ros_time_s": 12.0,
+            "action_completed_ros_time_s": 20.0,
+        },
+    )
+    receipt = controller.execute(
+        {"action_type": "move_to", "target_pose": target, "timeout_s": 30.0}
+    ).to_dict()
+
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0][1] == 5.0
+    assert len(move_calls) == 1
+    assert move_calls[0][0]["requested_tool_pose"]["xyz"] == target["xyz"]
+    assert move_calls[0][0]["requested_tool_pose"]["quat_xyzw"] == target["quat_xyzw"]
+    assert receipt["target"]["xyz"] == target["xyz"]
+    assert receipt["start_state_recovery"]["status"] == "RECOVERED"
+    assert receipt["action_started_ros_time_s"] == 10.0
+    assert receipt["action_completed_ros_time_s"] == 20.0
+
+
+@pytest.mark.parametrize(
+    ("recovery_result", "expected_code", "expected_status", "unknown"),
+    [
+        (
+            {
+                "ok": False,
+                "error_code": "START_STATE_INVALID",
+                "motion_outcome": "failed",
+                "start_state_recovery": {
+                    "schema_version": "m2_start_state_recovery_v1",
+                    "status": "REJECTED",
+                    "attempted": False,
+                },
+            },
+            "START_STATE_INVALID",
+            "REJECTED",
+            False,
+        ),
+        (
+            {
+                "ok": False,
+                "error_code": "START_STATE_RECOVERY_FAILED",
+                "motion_outcome": "failed",
+                "start_state_recovery": {
+                    "schema_version": "m2_start_state_recovery_v1",
+                    "status": "FAILED",
+                    "attempted": True,
+                },
+            },
+            "START_STATE_RECOVERY_FAILED",
+            "FAILED",
+            False,
+        ),
+        (
+            {
+                "ok": False,
+                "error_code": "MOTION_OUTCOME_UNKNOWN",
+                "motion_outcome": "unknown",
+                "reconciliation_required": True,
+                "start_state_recovery": {
+                    "schema_version": "m2_start_state_recovery_v1",
+                    "status": "UNKNOWN",
+                    "attempted": True,
+                },
+            },
+            "MOTION_OUTCOME_UNKNOWN",
+            "UNKNOWN",
+            True,
+        ),
+    ],
+)
+def test_controller_recovery_failure_never_submits_user_target(
+    recovery_result, expected_code, expected_status, unknown
+) -> None:
+    move_calls = []
+    controller = M2Controller(
+        state_provider=_bounded_state,
+        start_state_recovery=lambda state, timeout: recovery_result,
+        move_action=lambda goal, timeout: move_calls.append(goal) or {"ok": True},
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
+        }
+    ).to_dict()
+
+    assert move_calls == []
+    assert receipt["error_code"] == expected_code
+    assert receipt["start_state_recovery"]["status"] == expected_status
+    assert receipt.get("reconciliation_required", False) is unknown
+
+
+def test_moveit_start_state_invalid_after_preflight_does_not_loop_recovery() -> None:
+    calls = {"recovery": 0, "move": 0}
+
+    def recovery(state, timeout):
+        calls["recovery"] += 1
+        return {
+            "ok": True,
+            "start_state_recovery": {
+                "schema_version": "m2_start_state_recovery_v1",
+                "status": "NOT_REQUIRED",
+                "attempted": False,
+            },
+        }
+
+    def move(goal, timeout):
+        calls["move"] += 1
+        return {
+            "ok": False,
+            "error_code": "MOTION_PLAN_FAILED",
+            "moveit_error_code": -26,
+        }
+
+    receipt = M2Controller(
+        state_provider=_bounded_state,
+        start_state_recovery=recovery,
+        move_action=move,
+    ).execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
+        }
+    ).to_dict()
+
+    assert calls == {"recovery": 1, "move": 1}
+    assert receipt["error_code"] == "MOTION_PLAN_FAILED"
+    assert receipt["moveit_error_code"] == -26
+    assert receipt["start_state_recovery"]["status"] == "NOT_REQUIRED"
+
+
 def test_robotiq_binary_mapping_and_calibrated_aperture() -> None:
-    config = Robotiq2F85Config()
-    assert config.model_id == ROBOTIQ2F85_MODEL_ID
+    config = M2Config()
+    assert config.model_id == MODEL_ID
     assert config.gripper_position(1) == 0.0
     assert config.gripper_position(0) == pytest.approx(0.7929)
     open_state = gripper_state(0.0, config=config)

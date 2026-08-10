@@ -102,6 +102,7 @@ def _install_fixed_panda_compat() -> None:
 
 
 class RoboCasaDirectEnv(gym.Env):
+    openeta_capabilities = frozenset({"authoritative_camera"})
     """Single-scenario RoboCasa365 environment with official success checks.
 
     Parameters mirror the official benchmark variables.  ``seed`` identifies

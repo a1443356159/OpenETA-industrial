@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 from contextlib import suppress
 import hashlib
-import itertools
 import json
 import math
 import os
@@ -23,16 +22,28 @@ import time
 import traceback
 from typing import Any, Iterable, Mapping
 
+try:  # package import for tests; script import for the live runner
+    from .acceptance_isolation import (
+        FAILED, INCONCLUSIVE, PASSED, aggregate_cleanup, candidate_domain_evidence, empty_domain_evidence,
+        node_multiset, probe_ros_graph, world_partition_evidence,
+    )
+except ImportError:
+    from acceptance_isolation import (
+        FAILED, INCONCLUSIVE, PASSED, aggregate_cleanup, candidate_domain_evidence, empty_domain_evidence,
+        node_multiset, probe_ros_graph, world_partition_evidence,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[3]
-REPORT_VERSION = "openeta.m2_acceptance.v1"
+REPORT_VERSION = "openeta.m2_start_state_recovery_acceptance.v2"
 ENV_ID = "openeta/gazebo_rm75_robotiq2f85-v0"
 MODEL_ID = "rm75_robotiq_2f85_sim_v1"
 POSITION_TOLERANCE_M = 0.005
 ORIENTATION_TOLERANCE_RAD = 0.08
 MIMIC_TOLERANCE_RAD = 0.035
-TARGET_OFFSET_M = 0.030
-MIN_TARGET_SEPARATION_M = 0.040
+DOWN_OFFSET_M = 0.050
+UP_AFTER_DOWN_M = 0.020
+DIRECT_Z_ROUNDS = 5
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -92,11 +103,16 @@ def _write_report(path: Path, report: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _assert_report_mutable(path: Path) -> None:
+    if _load_report(path).get("finished_at_utc"):
+        raise RuntimeError("REPORT_ALREADY_FINALIZED")
+
+
 def _asset_evidence() -> dict[str, Any]:
     from extensions.gazebo.asset_preflight import validate_asset_root
-    from extensions.gazebo.m2 import Robotiq2F85Config
+    from extensions.gazebo.m2 import M2Config
 
-    config = Robotiq2F85Config()
+    config = M2Config()
     roots = (config.asset_root, config.gripper_asset_root)
     evidence: dict[str, Any] = {}
     for root in roots:
@@ -118,7 +134,8 @@ def _process_row(pid: int) -> dict[str, Any] | None:
         command = (Path("/proc") / str(pid) / "cmdline").read_bytes().replace(b"\0", b" ").decode(
             "utf-8", errors="replace"
         ).strip()
-        return {"pid": pid, "pgid": pgid, "command": command[:500]}
+        start_ticks = int(tail[19])
+        return {"pid": pid, "pgid": pgid, "start_ticks": start_ticks, "command": command[:500]}
     except (FileNotFoundError, ProcessLookupError, PermissionError, ValueError):
         return None
 
@@ -177,28 +194,9 @@ def _preexisting_processes() -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: item["pid"])
 
 
-def _ros_nodes(domain: int) -> list[str]:
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "ROS_DOMAIN_ID": str(domain),
-            "ROS2CLI_DISABLE_DAEMON": "1",
-            "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
-            "ROS_LOCALHOST_ONLY": "1",
-        }
-    )
-    try:
-        result = subprocess.run(
-            ["ros2", "node", "list"],
-            capture_output=True,
-            text=True,
-            timeout=8.0,
-            env=environment,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ["<node-list-unavailable>"]
-    return sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
+def _process_still_matches(item: Mapping[str, Any]) -> bool:
+    current = _process_row(int(item["pid"]))
+    return bool(current and current.get("start_ticks") == item.get("start_ticks") and current.get("command") == item.get("command"))
 
 
 def init_isolation_report(
@@ -208,15 +206,27 @@ def init_isolation_report(
     original_domain: int,
     partition: str,
     port: int,
+    world: str,
 ) -> None:
+    _assert_report_mutable(report_path)
+    if not world:
+        raise ValueError("WORLD_REQUIRED")
     report = _base_report(report_path)
+    selections = []
+    selection_log = os.environ.get("OPENETA_ISOLATION_SELECTION_LOG", "")
+    if selection_log:
+        with suppress(OSError, json.JSONDecodeError):
+            selections = [json.loads(line) for line in Path(selection_log).read_text(encoding="utf-8").splitlines() if line]
     report["isolation"] = {
         "ros_domain_id": domain,
         "original_ros_domain_id": original_domain,
         "gz_partition": partition,
         "mcp_port": port,
+        "world": world,
         "preexisting_processes": _preexisting_processes(),
-        "preexisting_default_domain_nodes": _ros_nodes(original_domain),
+        "preexisting_default_domain_graph": probe_ros_graph(original_domain),
+        "isolation_evidence_version": "openeta.acceptance_isolation.v2",
+        "domain_selection": selections,
         "cleanup_path_self_tests": {
             "normal": True,
             "startup_failure": True,
@@ -234,23 +244,34 @@ def finalize_isolation_report(
     domain: int,
     partition: str,
     port: int,
+    world: str,
     exit_code: int,
 ) -> bool:
     report = _load_report(report_path)
+    if report.get("finished_at_utc"):
+        raise RuntimeError("REPORT_ALREADY_FINALIZED")
+    if not world:
+        raise ValueError("WORLD_REQUIRED")
     isolation = report.setdefault("isolation", {})
+    expected = (
+        isolation.get("ros_domain_id"), isolation.get("gz_partition"),
+        isolation.get("mcp_port"), isolation.get("world"),
+    )
+    if expected != (domain, partition, port, world):
+        raise ValueError("FINALIZE_ARGUMENT_MISMATCH")
     checks: dict[str, Any] = {}
     residual = _isolated_processes(partition)
-    checks["isolated_processes_gone"] = {"ok": not residual, "residual": residual}
+    checks["isolated_processes_gone"] = {"state": PASSED if not residual else FAILED, "ok": not bool(residual), "reason_code": "PROCESSES_GONE" if not residual else "ISOLATED_PROCESSES_REMAIN", "residual": residual}
     # Fast DDS discovery participants can remain visible briefly after their
     # processes exit. Allow the graph lease to expire before declaring a leak.
     deadline = time.monotonic() + 45.0
-    nodes: list[str] = []
+    domain_evidence: dict[str, Any] = {"state": INCONCLUSIVE, "ok": None, "reason_code": "ROS_GRAPH_UNAVAILABLE"}
     while time.monotonic() < deadline:
-        nodes = _ros_nodes(domain)
-        if not nodes:
+        domain_evidence = empty_domain_evidence(domain)
+        if domain_evidence["state"] != FAILED:
             break
         time.sleep(0.5)
-    checks["test_domain_empty"] = {"ok": not nodes, "nodes": nodes}
+    checks["test_domain_empty"] = domain_evidence
     port_deadline = time.monotonic() + 10.0
     port_error = ""
     port_free = False
@@ -267,42 +288,36 @@ def finalize_isolation_report(
         finally:
             sock.close()
     checks["mcp_port_rebind"] = {
-        "ok": port_free,
+        "state": PASSED if port_free else FAILED, "ok": port_free, "reason_code": "MCP_PORT_REBIND" if port_free else "MCP_PORT_STILL_BOUND",
         **({"error": port_error} if not port_free else {}),
     }
-    try:
-        topics = subprocess.run(
-            ["gz", "topic", "-l"], capture_output=True, text=True, timeout=8.0, check=False
-        ).stdout.splitlines()
-    except (OSError, subprocess.TimeoutExpired):
-        topics = ["<topic-list-unavailable>"]
-    world_topics = sorted(topic for topic in topics if "/world/m2_rm75_robotiq2f85" in topic)
-    checks["test_partition_empty"] = {"ok": not world_topics, "world_topics": world_topics}
+    checks["test_partition_empty"] = world_partition_evidence(world)
     preexisting = isolation.get("preexisting_processes", [])
-    vanished = [item for item in preexisting if not (Path("/proc") / str(item["pid"])).exists()]
-    checks["preexisting_processes_alive"] = {"ok": not vanished, "vanished": vanished}
+    vanished = [item for item in preexisting if not _process_still_matches(item)]
+    checks["preexisting_processes_alive"] = {"state": PASSED if not vanished else FAILED, "ok": not bool(vanished), "reason_code": "PREEXISTING_PROCESSES_ALIVE" if not vanished else "PREEXISTING_PROCESS_CHANGED", "vanished": vanished}
     original_domain = int(isolation.get("original_ros_domain_id", domain))
-    before_nodes = set(isolation.get("preexisting_default_domain_nodes", []))
-    after_nodes = set(_ros_nodes(original_domain))
-    missing_nodes = sorted(before_nodes - after_nodes)
-    checks["preexisting_default_domain_healthy"] = {
-        "ok": not missing_nodes,
-        "before": sorted(before_nodes),
-        "after": sorted(after_nodes),
-        "missing": missing_nodes,
-    }
-    all_ok = exit_code == 0 and all(bool(item.get("ok")) for item in checks.values())
+    before = isolation.get("preexisting_default_domain_graph", {})
+    after = probe_ros_graph(original_domain)
+    if before.get("availability") != "AVAILABLE" or after.get("availability") != "AVAILABLE":
+        checks["preexisting_default_domain_healthy"] = {"state": INCONCLUSIVE, "ok": None, "reason_code": "DEFAULT_GRAPH_UNAVAILABLE", "before": before, "after": after}
+    else:
+        missing = node_multiset(before) - node_multiset(after)
+        checks["preexisting_default_domain_healthy"] = {"state": PASSED if not missing else FAILED, "ok": not bool(missing), "reason_code": "DEFAULT_GRAPH_HEALTHY" if not missing else "DEFAULT_GRAPH_NODES_MISSING", "before": before, "after": after, "missing": [{"namespace": key[0], "name": key[1], "count": value} for key, value in sorted(missing.items())]}
+    cleanup_status = aggregate_cleanup(checks)
+    all_ok = exit_code == 0 and cleanup_status == "passed"
     report["gates"]["isolation_cleanup"] = {
-        "status": "passed" if all_ok else "failed",
+        "status": cleanup_status,
         "main_exit_code": exit_code,
         "checks": checks,
     }
     report["finished_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    report["overall_status"] = "passed" if all_ok else (cleanup_status if exit_code == 0 else "failed")
     _write_report(report_path, report)
     return all_ok
 
 
 def record_gate(report_path: Path, name: str, status: str, details: str) -> None:
+    _assert_report_mutable(report_path)
     report = _base_report(report_path)
     report["gates"][name] = {"status": status, "details": details}
     _write_report(report_path, report)
@@ -387,6 +402,48 @@ def _assert_action_timing(receipt: Mapping[str, Any], observation: Mapping[str, 
         _assert(float(stamp) > float(completed), f"camera {frame_id} is not post-action")
 
 
+def _validate_start_state_recovery(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    evidence = receipt.get("start_state_recovery")
+    _assert(isinstance(evidence, Mapping), "start-state recovery evidence is missing")
+    required = {
+        "schema_version",
+        "status",
+        "reason_code",
+        "attempted",
+        "tolerance_rad",
+        "inset_rad",
+        "joints",
+        "pre_joint_state_timestamp_s",
+        "post_joint_state_timestamp_s",
+        "trajectory_result_code",
+    }
+    _assert(required.issubset(evidence), "start-state recovery evidence is incomplete")
+    _assert(
+        evidence["schema_version"] == "m2_start_state_recovery_v1",
+        "start-state recovery schema mismatch",
+    )
+    _assert(
+        evidence["status"] in {"NOT_REQUIRED", "RECOVERED"},
+        f"successful motion has invalid recovery status: {evidence['status']}",
+    )
+    _assert(float(evidence["tolerance_rad"]) == 1e-6, "recovery tolerance mismatch")
+    _assert(float(evidence["inset_rad"]) == 1e-3, "recovery inset mismatch")
+    if evidence["status"] == "RECOVERED":
+        _assert(evidence["attempted"] is True, "recovery was not marked attempted")
+        _assert(bool(evidence["joints"]), "recovered receipt has no affected joints")
+        _assert(
+            evidence["trajectory_result_code"] == 0,
+            "recovery trajectory did not report success",
+        )
+        _assert(
+            isinstance(evidence["post_joint_state_timestamp_s"], (int, float)),
+            "recovered receipt has no post-state timestamp",
+        )
+    else:
+        _assert(evidence["attempted"] is False, "unneeded recovery was attempted")
+    return dict(evidence)
+
+
 def _direct_observation(controller: Any, cameras: list[Any], barrier_s: float | None = None):
     boundary = time.monotonic()
     frames = [
@@ -436,10 +493,11 @@ def _validate_gripper_state(state: Any, expected: str) -> dict[str, Any]:
 
 
 def run_direct(report_path: Path) -> None:
-    from extensions.gazebo.m2 import Robotiq2F85Config
+    _assert_report_mutable(report_path)
+    from extensions.gazebo.m2 import M2Config
     from extensions.gazebo.observation import RosRgbdCameraSource
     from extensions.gazebo.ros_control import RosM2ControllerFactory
-    from extensions.gazebo.worker import m2_live_session_config_from_env
+    from extensions.gazebo.profiles import gazebo_profile
 
     report = _base_report(report_path)
     gate: dict[str, Any] = {"status": "running", "actions": [], "ik_prechecks": []}
@@ -448,14 +506,13 @@ def run_direct(report_path: Path) -> None:
     controller = None
     cameras: list[Any] = []
     try:
-        config = Robotiq2F85Config()
+        config = M2Config()
         controller = RosM2ControllerFactory(readiness_timeout_s=90.0).create(config)
-        live_config = m2_live_session_config_from_env(robotiq=True)
-        cameras = [RosRgbdCameraSource(live_config.camera, node_name="openeta_accept_top")]
-        cameras.extend(
+        camera_configs = gazebo_profile("m2_robotiq2f85").cameras
+        cameras = [
             RosRgbdCameraSource(item, node_name=f"openeta_accept_camera_{index}")
-            for index, item in enumerate(live_config.additional_cameras, 1)
-        )
+            for index, item in enumerate(camera_configs)
+        ]
         for camera in cameras:
             camera.start()
 
@@ -496,77 +553,73 @@ def run_direct(report_path: Path) -> None:
                     }
                 )
 
-        offsets = (
-            (TARGET_OFFSET_M, 0.0, 0.0),
-            (-TARGET_OFFSET_M, 0.0, 0.0),
-            (0.0, TARGET_OFFSET_M, 0.0),
-            (0.0, -TARGET_OFFSET_M, 0.0),
-            (0.0, 0.0, -TARGET_OFFSET_M),
-            (0.0, 0.0, TARGET_OFFSET_M),
-        )
-        reachable: list[dict[str, Any]] = []
-        for offset in offsets:
-            target = {
-                "xyz": [reset_pose["xyz"][index] + offset[index] for index in range(3)],
-                "quat_xyzw": list(reset_pose["quat_xyzw"]),
-            }
-            planned = controller.plan_pose(target, timeout_s=30.0)
-            gate["ik_prechecks"].append(
-                {"offset_xyz_m": list(offset), "target": target, "result": _compact(planned)}
-            )
-            if planned.get("ok") is True:
-                reachable.append(target)
-                if any(
-                    _distance(first["xyz"], second["xyz"])
-                    >= MIN_TARGET_SEPARATION_M
-                    for first, second in itertools.combinations(reachable, 2)
-                ):
-                    break
-        pair = next(
-            (
-                (first, second)
-                for first, second in itertools.combinations(reachable, 2)
-                if _distance(first["xyz"], second["xyz"]) >= MIN_TARGET_SEPARATION_M
-            ),
-            None,
-        )
-        _assert(pair is not None, "fewer than two separated collision-aware IK targets")
-        target_a, target_b = pair
-        gate["targets"] = {"A": target_a, "B": target_b}
+        target_down = {
+            "xyz": [*reset_pose["xyz"][:2], reset_pose["xyz"][2] - DOWN_OFFSET_M],
+            "quat_xyzw": list(reset_pose["quat_xyzw"]),
+        }
+        target_up = {
+            "xyz": [
+                *target_down["xyz"][:2],
+                target_down["xyz"][2] + UP_AFTER_DOWN_M,
+            ],
+            "quat_xyzw": list(reset_pose["quat_xyzw"]),
+        }
+        gate["targets"] = {"down": target_down, "up": target_up}
 
-        for name, target in (("A", target_a), ("B", target_b), ("A", target_a), ("reset", reset_pose)):
-            receipt = controller.execute(
-                {
-                    "action_type": "move_to",
-                    "target_pose": target,
-                    "position_tolerance_m": 0.002,
-                    "orientation_tolerance_rad": 0.05,
-                    "timeout_s": 60.0,
+        for round_index in range(1, DIRECT_Z_ROUNDS + 1):
+            for name, target in (("down", target_down), ("up", target_up)):
+                receipt = controller.execute(
+                    {
+                        "action_type": "move_to",
+                        "target_pose": target,
+                        "position_tolerance_m": 0.002,
+                        "orientation_tolerance_rad": 0.05,
+                        "timeout_s": 60.0,
+                    }
+                ).to_dict()
+                _assert(
+                    receipt.get("error_code") != "START_STATE_INVALID",
+                    f"round {round_index} reproduced START_STATE_INVALID: {receipt}",
+                )
+                _assert(
+                    receipt.get("ok") is True,
+                    f"move_to({name}, round={round_index}) failed: {receipt}",
+                )
+                _assert(receipt.get("motion_outcome") == "completed", "motion was not completed")
+                _assert(receipt.get("reached_target") is True, "motion receipt did not reach target")
+                _assert(
+                    _distance(receipt.get("target", {}).get("xyz", []), target["xyz"])
+                    <= 1e-12
+                    and _orientation_error(
+                        receipt.get("target", {}).get("quat_xyzw", []),
+                        target["quat_xyzw"],
+                    )
+                    <= 1e-9,
+                    "controller rewrote the user Cartesian target",
+                )
+                recovery = _validate_start_state_recovery(receipt)
+                barrier = float(receipt["action_completed_ros_time_s"])
+                frames, state = _direct_observation(controller, cameras, barrier)
+                camera_timestamps = _camera_timestamps(frames)
+                _assert_new_timestamps(camera_timestamps, previous_camera_timestamps)
+                previous_camera_timestamps = camera_timestamps
+                observation = {
+                    "cameras": [frame.to_dict() for frame in frames],
+                    "robot": state.to_dict(),
                 }
-            ).to_dict()
-            _assert(receipt.get("ok") is True, f"move_to({name}) failed: {receipt}")
-            _assert(receipt.get("motion_outcome") == "completed", "motion was not completed")
-            _assert(receipt.get("reached_target") is True, "motion receipt did not reach target")
-            barrier = float(receipt["action_completed_ros_time_s"])
-            frames, state = _direct_observation(controller, cameras, barrier)
-            camera_timestamps = _camera_timestamps(frames)
-            _assert_new_timestamps(camera_timestamps, previous_camera_timestamps)
-            previous_camera_timestamps = camera_timestamps
-            observation = {
-                "cameras": [frame.to_dict() for frame in frames],
-                "robot": state.to_dict(),
-            }
-            _assert_action_timing(receipt, observation)
-            errors = _validate_pose(receipt, target)
-            gate["actions"].append(
-                {
-                    "name": f"move_to_{name}",
-                    "target": target,
-                    "receipt": _compact(receipt),
-                    "errors": errors,
-                    "camera_timestamps": camera_timestamps,
-                }
-            )
+                _assert_action_timing(receipt, observation)
+                errors = _validate_pose(receipt, target)
+                gate["actions"].append(
+                    {
+                        "name": f"move_to_{name}",
+                        "round": round_index,
+                        "target": target,
+                        "receipt": _compact(receipt),
+                        "start_state_recovery": recovery,
+                        "errors": errors,
+                        "camera_timestamps": camera_timestamps,
+                    }
+                )
         gate["status"] = "passed"
     except Exception as exc:
         gate.update(
@@ -603,6 +656,7 @@ def _mcp_observation(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def run_mcp(report_path: Path, url: str) -> None:
+    _assert_report_mutable(report_path)
     from agent.tools.sim_mcp import SseSimulatorMcpTransport
 
     report = _base_report(report_path)
@@ -670,16 +724,34 @@ def run_mcp(report_path: Path, url: str) -> None:
                 _assert(receipt.get("ok") is True, f"{name} action failed: {receipt}")
                 _assert(receipt.get("motion_outcome") == "completed", "MCP motion incomplete")
                 _assert(receipt.get("reached_target") is True, "MCP target was not reached")
+                _assert(
+                    _distance(receipt.get("target", {}).get("xyz", []), target["xyz"])
+                    <= 1e-12
+                    and _orientation_error(
+                        receipt.get("target", {}).get("quat_xyzw", []),
+                        target["quat_xyzw"],
+                    )
+                    <= 1e-7,
+                    "MCP rewrote the user Cartesian target",
+                )
                 record["target"] = target
+                record["start_state_recovery"] = _validate_start_state_recovery(
+                    receipt
+                )
                 record["errors"] = _validate_pose(receipt, target)
             else:
                 _assert(receipt.get("ok") is True, f"{name} action failed: {receipt}")
             gate["actions"].append(record)
             return receipt
 
-        action("gripper_close", {})
-        action("gripper_open", {})
-        for label in ("A", "B", "A", "B"):
+        observed_before = transport.call_tool("observe_env", common, timeout_s=60.0)
+        before_observation = _mcp_observation(observed_before)
+        before_timestamps = _camera_timestamps(before_observation["cameras"])
+        _assert_new_timestamps(before_timestamps, previous_timestamps)
+        previous_timestamps = before_timestamps
+        gate["observe_before"] = _compact(observed_before)
+
+        for label in ("down", "up"):
             target = targets[label]
             roll, pitch, yaw = _quat_to_euler_degrees(target["quat_xyzw"])
             action(
@@ -697,40 +769,12 @@ def run_mcp(report_path: Path, url: str) -> None:
                 target,
             )
 
-        observed = transport.call_tool("observe_env", common, timeout_s=60.0)
-        observation = _mcp_observation(observed)
+        observed_after = transport.call_tool("observe_env", common, timeout_s=60.0)
+        observation = _mcp_observation(observed_after)
         timestamps = _camera_timestamps(observation["cameras"])
         _assert_new_timestamps(timestamps, previous_timestamps)
         previous_timestamps = timestamps
-        gate["observe_env"] = _compact(observed)
-
-        unreachable_target = {
-            "xyz": [100.0, 100.0, 100.0],
-            "quat_xyzw": targets["B"]["quat_xyzw"],
-        }
-        roll, pitch, yaw = _quat_to_euler_degrees(unreachable_target["quat_xyzw"])
-        rejected = transport.call_tool(
-            "move_to",
-            {
-                **common,
-                "x": 100.0,
-                "y": 100.0,
-                "z": 100.0,
-                "roll": roll,
-                "pitch": pitch,
-                "yaw": yaw,
-                "tolerance": 0.002,
-                "ori_tolerance": 0.05,
-            },
-            timeout_s=180.0,
-        )
-        _assert(rejected.get("ok") is False, "unreachable motion was reported successful")
-        _assert(rejected.get("error_code") == "MOTION_PLAN_FAILED", f"wrong rejection: {rejected}")
-        rejected_observation = _mcp_observation(rejected)
-        rejected_timestamps = _camera_timestamps(rejected_observation["cameras"])
-        _assert_new_timestamps(rejected_timestamps, previous_timestamps)
-        _assert_action_timing(rejected, rejected_observation)
-        gate["unreachable"] = _compact(rejected)
+        gate["observe_after"] = _compact(observed_after)
 
         first_close = transport.call_tool("close_env", common, timeout_s=60.0)
         close_count += 1
@@ -767,7 +811,7 @@ def run_mcp(report_path: Path, url: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "mode", choices=("init", "direct", "mcp", "processes", "gate", "finalize")
+        "mode", choices=("init", "direct", "mcp", "processes", "gate", "finalize", "probe", "graph")
     )
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8765/sse")
@@ -775,6 +819,7 @@ def main() -> int:
     parser.add_argument("--original-domain", type=int, default=0)
     parser.add_argument("--partition", default="")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--world", default="")
     parser.add_argument("--exit-code", type=int, default=0)
     parser.add_argument("--gate", default="")
     parser.add_argument("--status", choices=("passed", "failed", "skipped"), default="passed")
@@ -787,11 +832,20 @@ def main() -> int:
             original_domain=args.original_domain,
             partition=args.partition,
             port=args.port,
+            world=args.world,
         )
     elif args.mode == "direct":
         run_direct(args.report.resolve())
     elif args.mode == "mcp":
         run_mcp(args.report.resolve(), args.mcp_url)
+    elif args.mode == "graph":
+        evidence = probe_ros_graph(args.domain)
+        print(json.dumps(evidence, sort_keys=True))
+        return 0 if evidence.get("availability") == "AVAILABLE" else 1
+    elif args.mode == "probe":
+        evidence = candidate_domain_evidence(args.domain)
+        print(json.dumps(evidence, sort_keys=True))
+        return 0 if evidence.get("state") == PASSED else 1
     elif args.mode == "processes":
         for pgid in sorted({item["pgid"] for item in _isolated_processes(args.partition)}):
             print(pgid)
@@ -799,13 +853,16 @@ def main() -> int:
         _assert(bool(args.gate), "--gate is required for gate mode")
         record_gate(args.report.resolve(), args.gate, args.status, args.details)
     else:
-        return 0 if finalize_isolation_report(
-            args.report.resolve(),
-            domain=args.domain,
-            partition=args.partition,
-            port=args.port,
-            exit_code=args.exit_code,
-        ) else 1
+        try:
+            finalize_isolation_report(
+                args.report.resolve(), domain=args.domain, partition=args.partition,
+                port=args.port, world=args.world, exit_code=args.exit_code,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(str(exc), file=os.sys.stderr)
+            return 11
+        gate = _load_report(args.report.resolve()).get("gates", {}).get("isolation_cleanup", {})
+        return 0 if gate.get("status") == "passed" else 9 if gate.get("status") == "failed" else 10
     return 0
 
 

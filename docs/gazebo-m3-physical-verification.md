@@ -56,7 +56,9 @@ reset 后加入工作台、目标和干扰物。完整 SRDF AllowedCollisionMatr
 bash extensions/gazebo/ros2_ws/run_m3_pickplace_acceptance.sh
 ```
 
-驱动锁定 `ROS_DOMAIN_ID=100..199`、独立 `GZ_PARTITION` 和 MCP 端口，按自身 partition 精确清理进程组，不调用宽泛 `pkill`。报告写入忽略提交的 `.cache/reports/m3-pickplace-<timestamp>-<pid>.json`。
+驱动锁定 `ROS_DOMAIN_ID=80..101`、独立 `GZ_PARTITION` 和 MCP 端口，按自身 partition 精确清理进程组，不调用宽泛 `pkill`。候选域须无既有 ros2cli daemon，且由短生命周期 rclpy Context 连续两次直接 graph 观测为空；探针不使用 ros2cli daemon。报告写入忽略提交的 `.cache/reports/m3-pickplace-<timestamp>-<pid>.json`，终结后不可再次写入。
+
+清理证据为三态：`passed` 表示所有查询成功且资源满足预期，`failed` 表示确认有残留，`inconclusive` 表示 ROS 或 Gazebo graph 查询不可用。后者绝不伪作通过；其退出码为 10（确认残留为 9，报告参数/重复终结错误为 11）。
 
 Direct 驱动从 live TF 和冻结 STL 包围盒计算指尖碰撞中心，以固定 pitch/yaw 顺序执行 MoveIt plan-only 并冻结首个候选；随后要求 5/5 正向流程、四个结构化负例、Gazebo joint inventory 前后一致。只有 Direct 全部通过才会启动真实 SSE MCP 的两轮正向流程和四个负例。任一物理 gate 失败，报告标为 `blocked`，脚本非零退出。
 

@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 DRIVER="${SCRIPT_DIR}/m2_robotiq2f85_acceptance.py"
 PYTHON_BIN="${REPO_DIR}/.venv/bin/python"
-LOCK_DIR="/tmp/openeta-m2-acceptance-locks"
+LOCK_DIR="/tmp/openeta-acceptance-locks"
 mkdir -p "${LOCK_DIR}" "${REPO_DIR}/.cache/logs" "${REPO_DIR}/.cache/reports"
 
 # shellcheck source=../../../config/runtime/m0_m2.env
@@ -25,6 +25,14 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "PYTHON_NOT_READY: ${PYTHON_BIN} is unavailable" >&2
   exit 3
 fi
+
+# Establish a private ROS home before *any* graph observation.  Do not inherit
+# deprecated localhost/static-peer settings from an interactive shell.
+unset ROS_LOCALHOST_ONLY ROS_STATIC_PEERS ROS2CLI_DISABLE_DAEMON
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+export ROS_HOME="${REPO_DIR}/.cache/ros/m2-acceptance-select-$$"
+mkdir -p "${ROS_HOME}"
+DOMAIN_SELECTION_LOG="${ROS_HOME}/domain-selection.jsonl"
 
 terminate_group() {
   local leader="${1:-}"
@@ -103,28 +111,20 @@ run_cleanup_path_self_tests() {
   rmdir -- "${scratch}"
 }
 
-domain_is_empty() {
-  local candidate="$1"
-  local nodes
-  nodes="$(ROS_DOMAIN_ID="${candidate}" ROS2CLI_DISABLE_DAEMON=1 \
-    ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ROS_LOCALHOST_ONLY=1 \
-    timeout 8 ros2 node list 2>/dev/null || true)"
-  [[ -z "${nodes//[[:space:]]/}" ]]
-}
-
 DOMAIN_LOCK_FD=""
-for candidate in $(seq 100 199); do
+for candidate in $(seq 80 101); do
   exec {candidate_fd}>"${LOCK_DIR}/ros-domain-${candidate}.lock"
-  if flock -n "${candidate_fd}" && domain_is_empty "${candidate}"; then
+  if flock -n "${candidate_fd}" && "${PYTHON_BIN}" "${DRIVER}" probe --report /dev/null --domain "${candidate}" >>"${DOMAIN_SELECTION_LOG}"; then
     DOMAIN_LOCK_FD="${candidate_fd}"
     ROS_DOMAIN_ID="${candidate}"
     break
   fi
+  echo "{\"domain\":${candidate},\"state\":\"FAILED\",\"reason_code\":\"LOCK_UNAVAILABLE_OR_NOT_EMPTY\"}" >>"${DOMAIN_SELECTION_LOG}"
   flock -u "${candidate_fd}" 2>/dev/null || true
   eval "exec ${candidate_fd}>&-"
 done
 if [[ -z "${DOMAIN_LOCK_FD}" ]]; then
-  echo "ISOLATION_UNAVAILABLE: no empty locked ROS domain in 100..199" >&2
+  echo "ISOLATION_UNAVAILABLE: no empty locked ROS domain in 80..101" >&2
   exit 6
 fi
 
@@ -158,9 +158,9 @@ fi
 export ROS_DOMAIN_ID OPENETA_MCP_PORT
 export ROS2CLI_DISABLE_DAEMON=1
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-export ROS_LOCALHOST_ONLY=1
 export GZ_PARTITION="openeta_m2_acceptance_${ROS_DOMAIN_ID}_$$"
 export ROS_HOME="${REPO_DIR}/.cache/ros/m2-acceptance-${ROS_DOMAIN_ID}-$$"
+export OPENETA_ISOLATION_SELECTION_LOG="${DOMAIN_SELECTION_LOG}"
 export OPENETA_WORKER_LOG_DIR="${REPO_DIR}/.cache/logs/m2-acceptance-${ROS_DOMAIN_ID}-$$"
 mkdir -p "${ROS_HOME}" "${OPENETA_WORKER_LOG_DIR}"
 
@@ -169,15 +169,20 @@ REPORT="${REPO_DIR}/.cache/reports/m2-robotiq2f85-acceptance-${RUN_STAMP}-$$.jso
 DIRECT_LOG="${REPO_DIR}/.cache/logs/m2-robotiq2f85-direct-${RUN_STAMP}-$$.log"
 MCP_LOG="${REPO_DIR}/.cache/logs/m2-robotiq2f85-mcp-${RUN_STAMP}-$$.log"
 REGRESSION_LOG="${REPO_DIR}/.cache/logs/m2-regression-${RUN_STAMP}-$$.log"
+TEST_WORLD="${SCRIPT_DIR}/src/openeta_rm75_robotiq2f85_sim/worlds/m2_rm75_robotiq2f85_z_test.sdf"
+export OPENETA_GAZEBO_LAUNCH_ARGUMENTS="[\"world:=${TEST_WORLD}\"]"
+export OPENETA_GAZEBO_WORLD="m2_rm75_robotiq2f85_z_test"
 
 run_cleanup_path_self_tests
 "${PYTHON_BIN}" "${DRIVER}" init --report "${REPORT}" \
   --domain "${ROS_DOMAIN_ID}" --original-domain "${ORIGINAL_ROS_DOMAIN_ID}" \
-  --partition "${GZ_PARTITION}" --port "${OPENETA_MCP_PORT}"
+  --partition "${GZ_PARTITION}" --port "${OPENETA_MCP_PORT}" \
+  --world "${OPENETA_GAZEBO_WORLD}"
 
 cleanup() {
-  local main_exit=$? final_exit=0 pgid
+  local main_exit=$? final_exit=0 pgid current_pgid
   trap - EXIT INT TERM
+  current_pgid="$(ps -o pgid= -p "$$" | tr -d '[:space:]')"
   terminate_group "${DIRECT_PID:-}"
   terminate_group "${MCP_PID:-}"
 
@@ -189,8 +194,8 @@ cleanup() {
       --partition "${GZ_PARTITION}" 2>/dev/null || true
   )
   for pgid in "${isolated_groups[@]}"; do
-    [[ "${pgid}" =~ ^[0-9]+$ ]] || continue
-    kill -TERM -- "-${pgid}" 2>/dev/null || true
+    [[ "${pgid}" =~ ^[0-9]+$ && "${pgid}" != "${current_pgid}" ]] && \
+      kill -TERM -- "-${pgid}" 2>/dev/null || true
   done
   for _ in $(seq 1 30); do
     mapfile -t isolated_groups < <(
@@ -201,18 +206,19 @@ cleanup() {
     sleep 0.2
   done
   for pgid in "${isolated_groups[@]}"; do
-    [[ "${pgid}" =~ ^[0-9]+$ ]] || continue
-    kill -KILL -- "-${pgid}" 2>/dev/null || true
+    [[ "${pgid}" =~ ^[0-9]+$ && "${pgid}" != "${current_pgid}" ]] && \
+      kill -KILL -- "-${pgid}" 2>/dev/null || true
   done
 
   set +e
   "${PYTHON_BIN}" "${DRIVER}" finalize --report "${REPORT}" \
     --domain "${ROS_DOMAIN_ID}" --partition "${GZ_PARTITION}" \
-    --port "${OPENETA_MCP_PORT}" --exit-code "${main_exit}"
+    --port "${OPENETA_MCP_PORT}" --world "${OPENETA_GAZEBO_WORLD}" \
+    --exit-code "${main_exit}"
   final_exit=$?
   set -e
   if [[ "${final_exit}" != 0 ]]; then
-    [[ "${main_exit}" == 0 ]] && main_exit=9
+    [[ "${main_exit}" == 0 ]] && main_exit="${final_exit}"
   fi
   flock -u "${DOMAIN_LOCK_FD}" 2>/dev/null || true
   flock -u "${PORT_LOCK_FD}" 2>/dev/null || true
@@ -237,7 +243,8 @@ bash "${REPO_DIR}/scripts/check_openeta_m2.sh"
 "${PYTHON_BIN}" "${DRIVER}" gate --report "${REPORT}" --gate m2_runtime_check \
   --details "scripts/check_openeta_m2.sh passed"
 
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "${PYTHON_BIN}" -m pytest -q \
+env -u OPENETA_GAZEBO_WORLD -u OPENETA_GAZEBO_LAUNCH_ARGUMENTS \
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "${PYTHON_BIN}" -m pytest -q \
   tests/test_gazebo_m2_assets.py \
   tests/test_gazebo_m2_contract.py \
   tests/test_gazebo_m2_worker.py \
@@ -248,6 +255,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "${PYTHON_BIN}" -m pytest -q \
   --details "M2 assets/control/freshness/MCP routing contracts passed"
 
 setsid ros2 launch openeta_rm75_robotiq2f85_sim m2_gazebo_moveit.launch.py \
+  "world:=${TEST_WORLD}" \
   >"${DIRECT_LOG}" 2>&1 &
 DIRECT_PID=$!
 if [[ "${OPENETA_M2_ACCEPTANCE_INJECT_FAILURE:-}" == startup ]]; then
@@ -263,14 +271,15 @@ required_topics=(
 )
 ready=0
 for _ in $(seq 1 150); do
-  actions="$(ros2 action list 2>/dev/null || true)"
-  topics="$(ros2 topic list 2>/dev/null || true)"
+  graph="$("${PYTHON_BIN}" "${DRIVER}" graph --report /dev/null --domain "${ROS_DOMAIN_ID}" 2>/dev/null || true)"
   controllers="$(ros2 control list_controllers 2>/dev/null || true)"
   ready=1
-  grep -qx /move_action <<<"${actions}" || ready=0
-  grep -qx /parallel_gripper_controller/gripper_cmd <<<"${actions}" || ready=0
+  grep -q '"/move_action"' <<<"${graph}" || ready=0
+  grep -q '"/parallel_gripper_controller/gripper_cmd"' <<<"${graph}" || ready=0
+  grep -q '"/rm_group_controller/follow_joint_trajectory"' <<<"${graph}" || ready=0
+  grep -q '"/check_state_validity"' <<<"${graph}" || ready=0
   for topic in "${required_topics[@]}"; do
-    grep -qx "${topic}" <<<"${topics}" || ready=0
+    grep -q "\"${topic}\"" <<<"${graph}" || ready=0
   done
   for controller in joint_state_broadcaster rm_group_controller parallel_gripper_controller; do
     grep -Eq "^${controller}[[:space:]].*active" <<<"${controllers}" || ready=0
@@ -284,6 +293,17 @@ for _ in $(seq 1 150); do
 done
 if [[ "${ready}" != 1 ]]; then
   echo "ROS_NOT_READY: direct Robotiq profile timed out" >&2
+  tail -120 "${DIRECT_LOG}" >&2
+  exit 5
+fi
+command_limits="$(timeout 10 ros2 param get --no-daemon /controller_manager enforce_command_limits 2>/dev/null || true)"
+if ! grep -Eqi 'true' <<<"${command_limits}"; then
+  echo "ROS_NOT_READY: controller_manager enforce_command_limits is not true" >&2
+  tail -120 "${DIRECT_LOG}" >&2
+  exit 5
+fi
+if ! grep -q 'Using JointLimiter' "${DIRECT_LOG}"; then
+  echo "ROS_NOT_READY: official JointLimiter startup record is missing" >&2
   tail -120 "${DIRECT_LOG}" >&2
   exit 5
 fi
@@ -303,7 +323,8 @@ MCP_PID=$!
 terminate_group "${MCP_PID}"
 unset MCP_PID
 
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "${PYTHON_BIN}" -m pytest -q \
+env -u OPENETA_GAZEBO_WORLD -u OPENETA_GAZEBO_LAUNCH_ARGUMENTS \
+  PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "${PYTHON_BIN}" -m pytest -q \
   --ignore=tests/test_behavior_vector_contract.py \
   --ignore=tests/test_robocasa_legacy_contract.py \
   >"${REGRESSION_LOG}" 2>&1

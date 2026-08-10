@@ -3,8 +3,6 @@ profile:
   display_name: Gazebo 仿真环境
   environment_id: openeta/gazebo_rm75_robotiq2f85-v0
   model_id: rm75_robotiq_2f85_sim_v1
-  compatibility_environment_ids:
-    - openeta/gazebo_rm75_parallel-v0
 platform:
   os: Ubuntu
   os_version: "24.04"

@@ -338,9 +338,9 @@ def _inject_render_frame(env, obs: dict) -> None:
     MujocoRenderer's ``rgbd_tuple`` render mode.
     """
     existing_cameras = obs.get("cameras")
-    backend = str(getattr(env, "_backend", "") or "")
+    capabilities = frozenset(getattr(env, "openeta_capabilities", ()))
     if (
-        backend in {"behavior", "robocasa", "gazebo"}
+        "authoritative_camera" in capabilities
         and isinstance(existing_cameras, dict)
         and existing_cameras
     ):
@@ -459,14 +459,12 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
                 _done_handles.add(handle)
         env_obs = EnvObservation.from_dict(obs)
     # Sanitise info: drop non-serialisable values
-    direct_env = getattr(env, "_env", env)
-    structured_actions = bool(
-        getattr(direct_env, "_openeta_structured_actions", False)
-    )
     safe_info: dict = {}
+    receipt: dict = {}
     if isinstance(info, dict):
         for k, v in info.items():
-            if structured_actions and k == "observation":
+            if k == "_openeta_receipt" and isinstance(v, dict):
+                receipt = v
                 continue
             try:
                 json.dumps({k: v})
@@ -482,13 +480,10 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
         truncated=bool(trunc),
         info=safe_info,
     ).to_mcp_dict()
-    if structured_actions:
-        # The authoritative observation has already been converted by
-        # StepResult above. M2 also carries the same raw observation inside
-        # its structured receipt; that copy may contain numpy arrays and the
-        # generic sanitizer turns it into a string. Never let it overwrite the
-        # complete MCP observation at the top level.
-        payload.update(safe_info)
+    # Generic control codec: DirectEnv receipts are internal Gym info fields;
+    # the established MCP wire contract exposes their fields at top level.
+    if receipt:
+        payload.update(receipt)
     return payload
 
 
@@ -518,10 +513,9 @@ def _observe_with_image(env, handle: str = "") -> dict:
     """
     from adapter.protocol import EnvObservation
 
-    if str(getattr(env, "_backend", "") or "") == "gazebo":
-        # Gazebo's camera is an external ROS subscription, not a gym render
-        # buffer.  Ask the adapter for a fresh packet before serialisation.
-        obs = env.refresh_observation()
+    capabilities = frozenset(getattr(env, "openeta_capabilities", ()))
+    if "fresh_observation" in capabilities:
+        obs = env.observe()
         if handle:
             _last_obs[handle] = obs
         return EnvObservation.from_dict(obs).to_mcp_dict()
@@ -768,6 +762,7 @@ async def create_env(request):
         "name": spec.display_name if spec is not None else "",
         "action_low": alo, "action_high": ahi, "backend": be, "action_hint": hints,
         "robot": body.get("robot"), "control_spec": control_spec,
+        "capabilities": sorted(getattr(env, "openeta_capabilities", ())),
     })
 
 
@@ -789,9 +784,20 @@ async def close_env(request):
             else:
                 try:
                     await _run_sim_call(env.close)
-                except Exception:
-                    pass
-                result = {"ok": True, "worker_retire_required": False}
+                except Exception as exc:
+                    result = {
+                        "ok": False,
+                        "worker_retire_required": False,
+                        "cleanup_errors": [
+                            f"env_close: {type(exc).__name__}: {exc}"
+                        ],
+                    }
+                else:
+                    result = {
+                        "ok": True,
+                        "worker_retire_required": False,
+                        "cleanup_errors": [],
+                    }
         else:
             result = {"ok": False, "worker_retire_required": False}
     # Drop the now-unused lock (a late concurrent caller just gets a fresh one).
@@ -1001,6 +1007,12 @@ if __name__ == "__main__":
     _old_stdout = sys.stdout
     sys.stdout = _io.StringIO()
     _init_bench(args.bench)
+    if args.bench == "gazebo":
+        # Freeze ROS/Gazebo deployment settings before serving requests.  A
+        # later mutation of process-global environment variables cannot alter
+        # the active graph or launch command.
+        from extensions.gazebo.deployment import worker_deployment_config
+        worker_deployment_config()
     sys.stdout = _old_stdout
 
     # Store bench name on app state

@@ -125,6 +125,7 @@ def _require_rgbd_modalities(sensor_config: dict[str, Any]) -> None:
 
 
 class BehaviorDirectEnv(gym.Env):
+    openeta_capabilities = frozenset({"authoritative_camera"})
     """Official OmniGibson single-environment BEHAVIOR task adapter."""
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}

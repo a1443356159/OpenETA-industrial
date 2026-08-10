@@ -12,7 +12,8 @@ import math
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -104,7 +105,7 @@ def camera_info_intrinsics(message: Any) -> dict[str, float | int]:
             "width": int(message.width), "height": int(message.height)}
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class RosRgbdCameraConfig:
     """ROS topic/calibration settings required for a live camera packet."""
 
@@ -112,19 +113,25 @@ class RosRgbdCameraConfig:
     depth_topic: str
     camera_info_topic: str
     frame_id: str
-    extrinsics: dict[str, Any]
+    extrinsics: Mapping[str, Any]
     depth_units_per_metre: float = 1000.0
     role: str = "scene_primary"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "extrinsics", MappingProxyType(dict(self.extrinsics)))
 
 
 class RosRgbdCameraSource:
     """Optional rclpy subscriber producing one OpenETA ``CameraFrame``."""
 
-    def __init__(self, config: RosRgbdCameraConfig, *, node_name: str = "openeta_rgbd_camera") -> None:
+    def __init__(self, config: RosRgbdCameraConfig, *, node_name: str = "openeta_rgbd_camera",
+                 context: Any | None = None, executor: Any | None = None) -> None:
         self.config = config
         self.node_name = node_name
         self._node: Any | None = None
         self._owns_context = False
+        self._context = context
+        self._executor = executor
         self._rgb: Any | None = None
         self._depth: Any | None = None
         self._info: Any | None = None
@@ -164,15 +171,17 @@ class RosRgbdCameraSource:
             from sensor_msgs.msg import CameraInfo, Image
         except ImportError as exc:
             raise GazeboObservationError("rclpy and sensor_msgs are required for live observation") from exc
-        if not rclpy.ok():
+        if self._context is None and not rclpy.ok():
             rclpy.init()
             self._owns_context = True
-        self._node = rclpy.create_node(self.node_name)
+        self._node = rclpy.create_node(self.node_name, context=self._context)
         self._node.create_subscription(Image, self.config.rgb_topic, self._rgb_callback, 10)
         self._node.create_subscription(Image, self.config.depth_topic, self._depth_callback, 10)
         self._node.create_subscription(
             CameraInfo, self.config.camera_info_topic, self._info_callback, 10
         )
+        if self._executor is not None:
+            self._executor.add_node(self._node)
 
     def capture(
         self,
@@ -194,7 +203,11 @@ class RosRgbdCameraSource:
         import rclpy
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            rclpy.spin_once(self._node, timeout_sec=min(0.1, max(0.0, deadline - time.monotonic())))
+            if self._executor is None:
+                rclpy.spin_once(self._node, timeout_sec=min(0.1, max(0.0, deadline - time.monotonic())))
+            else:
+                # The runtime-owned executor is already spinning this node.
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
             with self._lock:
                 rgb, depth, info = self._rgb, self._depth, self._info
                 rgb_sequence, depth_sequence = self._rgb_sequence, self._depth_sequence
@@ -249,6 +262,8 @@ class RosRgbdCameraSource:
 
     def close(self) -> None:
         if self._node is not None:
+            if self._executor is not None:
+                self._executor.remove_node(self._node)
             self._node.destroy_node()
             self._node = None
         if self._owns_context:

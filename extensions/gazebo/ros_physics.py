@@ -159,6 +159,8 @@ class RosM3PhysicsSource:
         robot_state_provider: Callable[[], Any],
         config: M3Config | None = None,
         planning_scene: "RosM3PlanningScene | None" = None,
+        context: Any | None = None,
+        executor: Any | None = None,
     ) -> None:
         self.config = config or M3Config()
         self.robot_state_provider = robot_state_provider
@@ -176,12 +178,13 @@ class RosM3PhysicsSource:
         except ImportError as exc:
             raise RuntimeError("ROS_NOT_READY") from exc
         self._rclpy = rclpy
-        self._owns_context = not rclpy.ok()
+        self._owns_context = context is None and not rclpy.ok()
         if self._owns_context:
             rclpy.init(args=None)
         self._node = rclpy.create_node(
             "openeta_m3_physics_source",
             parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)],
+            context=context,
         )
         self._subscriptions = [
             self._node.create_subscription(
@@ -203,12 +206,14 @@ class RosM3PhysicsSource:
             )
             for object_id, topic in ODOMETRY_TOPICS.items()
         )
-        self._executor = MultiThreadedExecutor(num_threads=2)
+        self._shared_executor = executor is not None
+        self._executor = executor or MultiThreadedExecutor(num_threads=2, context=context)
         self._executor.add_node(self._node)
-        self._thread = threading.Thread(
-            target=self._executor.spin, name="openeta-m3-physics", daemon=True
-        )
-        self._thread.start()
+        if not self._shared_executor:
+            self._thread = threading.Thread(
+                target=self._executor.spin, name="openeta-m3-physics", daemon=True
+            )
+            self._thread.start()
         self.planning_scene = planning_scene or RosM3PlanningScene(
             node=self._node, config=self.config
         )
@@ -437,7 +442,10 @@ class RosM3PhysicsSource:
             self.planning_scene.clear()
         except Exception:
             pass
-        self._executor.shutdown(timeout_sec=2.0)
+        if self._shared_executor:
+            self._executor.remove_node(self._node)
+        else:
+            self._executor.shutdown(timeout_sec=2.0)
         if self._thread is not None:
             self._thread.join(timeout=2.0)
         self._node.destroy_node()
@@ -633,8 +641,11 @@ class RosM3PlanningScene:
 
 
 class RosM3PhysicsSourceFactory:
-    def create(self, controller: Any, config: M3Config) -> RosM3PhysicsSource:
+    def create(self, controller: Any, config: M3Config, *, context: Any | None = None,
+               executor: Any | None = None) -> RosM3PhysicsSource:
         return RosM3PhysicsSource(
             robot_state_provider=controller.state_provider,
             config=config,
+            context=context,
+            executor=executor,
         )

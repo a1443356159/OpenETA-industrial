@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 DRIVER="${SCRIPT_DIR}/m3_pickplace_acceptance.py"
 PYTHON_BIN="${REPO_DIR}/.venv/bin/python"
-LOCK_DIR="/tmp/openeta-m3-acceptance-locks"
+LOCK_DIR="/tmp/openeta-acceptance-locks"
 mkdir -p "${LOCK_DIR}" "${REPO_DIR}/.cache/logs" "${REPO_DIR}/.cache/reports"
 
 ORIGINAL_ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"
@@ -22,6 +22,12 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "PYTHON_NOT_READY: ${PYTHON_BIN} is unavailable" >&2
   exit 3
 fi
+
+unset ROS_LOCALHOST_ONLY ROS_STATIC_PEERS ROS2CLI_DISABLE_DAEMON
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+export ROS_HOME="${REPO_DIR}/.cache/ros/m3-acceptance-select-$$"
+mkdir -p "${ROS_HOME}"
+DOMAIN_SELECTION_LOG="${ROS_HOME}/domain-selection.jsonl"
 
 terminate_group() {
   local leader="${1:-}"
@@ -88,22 +94,15 @@ run_cleanup_path_self_tests() {
   rmdir -- "${scratch}"
 }
 
-domain_is_empty() {
-  local candidate="$1" nodes
-  nodes="$(ROS_DOMAIN_ID="${candidate}" ROS2CLI_DISABLE_DAEMON=1 \
-    ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ROS_LOCALHOST_ONLY=1 \
-    timeout 8 ros2 node list 2>/dev/null || true)"
-  [[ -z "${nodes//[[:space:]]/}" ]]
-}
-
 DOMAIN_LOCK_FD=""
-for candidate in $(seq 100 199); do
+for candidate in $(seq 80 101); do
   exec {candidate_fd}>"${LOCK_DIR}/ros-domain-${candidate}.lock"
-  if flock -n "${candidate_fd}" && domain_is_empty "${candidate}"; then
+  if flock -n "${candidate_fd}" && "${PYTHON_BIN}" "${DRIVER}" probe --report /dev/null --domain "${candidate}" >>"${DOMAIN_SELECTION_LOG}"; then
     DOMAIN_LOCK_FD="${candidate_fd}"
     ROS_DOMAIN_ID="${candidate}"
     break
   fi
+  echo "{\"domain\":${candidate},\"state\":\"FAILED\",\"reason_code\":\"LOCK_UNAVAILABLE_OR_NOT_EMPTY\"}" >>"${DOMAIN_SELECTION_LOG}"
   flock -u "${candidate_fd}" 2>/dev/null || true
   eval "exec ${candidate_fd}>&-"
 done
@@ -134,9 +133,10 @@ done
 [[ -n "${PORT_LOCK_FD}" ]] || { echo "ISOLATION_UNAVAILABLE: no MCP port" >&2; exit 7; }
 
 export ROS_DOMAIN_ID OPENETA_MCP_PORT
-export ROS2CLI_DISABLE_DAEMON=1 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ROS_LOCALHOST_ONLY=1
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 export GZ_PARTITION="openeta_m3_acceptance_${ROS_DOMAIN_ID}_$$"
 export ROS_HOME="${REPO_DIR}/.cache/ros/m3-acceptance-${ROS_DOMAIN_ID}-$$"
+export OPENETA_ISOLATION_SELECTION_LOG="${DOMAIN_SELECTION_LOG}"
 export OPENETA_WORKER_LOG_DIR="${REPO_DIR}/.cache/logs/m3-acceptance-${ROS_DOMAIN_ID}-$$"
 mkdir -p "${ROS_HOME}" "${OPENETA_WORKER_LOG_DIR}"
 
@@ -147,7 +147,8 @@ MCP_LOG="${REPO_DIR}/.cache/logs/m3-mcp-${RUN_STAMP}-$$.log"
 run_cleanup_path_self_tests
 "${PYTHON_BIN}" "${DRIVER}" init --report "${REPORT}" \
   --domain "${ROS_DOMAIN_ID}" --original-domain "${ORIGINAL_ROS_DOMAIN_ID}" \
-  --partition "${GZ_PARTITION}" --port "${OPENETA_MCP_PORT}"
+  --partition "${GZ_PARTITION}" --port "${OPENETA_MCP_PORT}" \
+  --world "m3_rm75_robotiq2f85_pickplace"
 
 cleanup() {
   local main_exit=$? final_exit=0 pgid current_pgid
@@ -177,9 +178,13 @@ cleanup() {
   set +e
   "${PYTHON_BIN}" "${DRIVER}" finalize --report "${REPORT}" \
     --domain "${ROS_DOMAIN_ID}" --partition "${GZ_PARTITION}" \
-    --port "${OPENETA_MCP_PORT}" --exit-code "${main_exit}"
+    --port "${OPENETA_MCP_PORT}" --world "m3_rm75_robotiq2f85_pickplace" \
+    --exit-code "${main_exit}"
   final_exit=$?
   set -e
+  if [[ "${main_exit}" == 0 && "${final_exit}" != 0 ]]; then
+    main_exit="${final_exit}"
+  fi
   flock -u "${DOMAIN_LOCK_FD}" 2>/dev/null || true
   flock -u "${PORT_LOCK_FD}" 2>/dev/null || true
   eval "exec ${DOMAIN_LOCK_FD}>&-"

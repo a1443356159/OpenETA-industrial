@@ -5,11 +5,11 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler, SetEnvironmentVariable
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable
+from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -29,6 +29,8 @@ def _after_success(target, actions, label):
 def generate_launch_description():
     share = Path(get_package_share_directory("openeta_rm75_robotiq2f85_sim"))
     description_share = Path(get_package_share_directory("openeta_rm75_v_description"))
+    default_world = str(share / "worlds/m2_rm75_robotiq2f85.sdf")
+    world_file = LaunchConfiguration("world")
     xacro_file = share / "urdf/rm75_robotiq2f85.urdf.xacro"
     robot_description_command = Command([FindExecutable(name="xacro"), " ", str(xacro_file)])
     robot_description = ParameterValue(robot_description_command, value_type=str)
@@ -49,7 +51,7 @@ def generate_launch_description():
             str(Path(get_package_share_directory("ros_gz_sim")) / "launch/gz_sim.launch.py")
         ),
         launch_arguments={
-            "gz_args": f"-r -s {share / 'worlds/m2_rm75_robotiq2f85.sdf'} --physics-engine gz-physics-dartsim-plugin"
+            "gz_args": ["-r -s ", world_file, " --physics-engine gz-physics-dartsim-plugin"]
         }.items(),
     )
     common = [{"use_sim_time": True}]
@@ -94,6 +96,11 @@ def generate_launch_description():
         parameters=[{"use_sim_time": True}],
     )
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "world",
+            default_value=default_world,
+            description="Absolute SDF world path; production defaults to the M2 world",
+        ),
         SetEnvironmentVariable(
             "GZ_SIM_RESOURCE_PATH",
             os.pathsep.join(

@@ -14,6 +14,66 @@ class GazeboProcessError(RuntimeError):
     """Raised when the configured Gazebo process cannot be managed."""
 
 
+def _process_group_exists(pgid: int) -> bool:
+    """Return whether an owned POSIX process group still has members."""
+
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(
+    process: subprocess.Popen,
+    pgid: int,
+    *,
+    timeout_s: float,
+) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while True:
+        # Reap the launch leader as soon as it exits.  Its exit alone is not a
+        # cleanup result: Gazebo descendants can remain in the same group.
+        process.poll()
+        if not _process_group_exists(pgid):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _terminate_process_group(
+    process: subprocess.Popen,
+    *,
+    terminate_timeout_s: float,
+    kill_timeout_s: float,
+) -> None:
+    """Stop every member of a process group before reporting success."""
+
+    pgid = process.pid  # every owned process is created with start_new_session
+    if not _process_group_exists(pgid):
+        process.poll()
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        process.poll()
+        return
+    if _wait_for_process_group_exit(process, pgid, timeout_s=terminate_timeout_s):
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        process.poll()
+        return
+    if not _wait_for_process_group_exit(process, pgid, timeout_s=kill_timeout_s):
+        raise GazeboProcessError(
+            f"process group {pgid} still exists after SIGTERM and SIGKILL"
+        )
+
+
 class GazeboProcess:
     """Own one headless ``gz sim`` process and clean it up deterministically.
 
@@ -71,20 +131,13 @@ class GazeboProcess:
         raise GazeboProcessError("Gazebo did not stay running before startup timeout")
 
     def close(self) -> None:
-        process, self._process = self._process, None
+        process = self._process
         if process is None:
             return
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5.0)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=2.0)
+        _terminate_process_group(
+            process, terminate_timeout_s=5.0, kill_timeout_s=2.0
+        )
+        self._process = None
         if process.stderr is not None:
             process.stderr.close()
 
@@ -114,12 +167,14 @@ class GazeboProcess:
 class GazeboWorldControl:
     """Invoke Gazebo's documented ``/world/<name>/control`` reset service."""
 
-    def __init__(self, *, world_name: str, gz_executable: str = "gz", timeout_ms: int = 3000) -> None:
+    def __init__(self, *, world_name: str, gz_executable: str = "gz", timeout_ms: int = 3000,
+                 environment: dict[str, str] | None = None) -> None:
         if not world_name.strip() or "/" in world_name:
             raise ValueError("world_name must be a non-empty Gazebo world identifier")
         self.world_name = world_name
         self.gz_executable = gz_executable
         self.timeout_ms = int(timeout_ms)
+        self.environment = dict(environment) if environment is not None else None
 
     def reset_all(self, *, seed: int | None = None) -> None:
         self._reset("all", seed=seed)
@@ -140,6 +195,7 @@ class GazeboWorldControl:
              "--reqtype", "gz.msgs.WorldControl", "--reptype", "gz.msgs.Boolean",
              "--timeout", str(self.timeout_ms), "--req", request],
             capture_output=True, text=True, timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
+            env=self.environment,
         )
         if result.returncode != 0 or "data: true" not in result.stdout.lower():
             raise GazeboProcessError(
@@ -211,20 +267,13 @@ class RosGzBridgeProcess:
         raise GazeboProcessError("ROS-Gazebo bridge did not stay running")
 
     def close(self) -> None:
-        process, self._process = self._process, None
+        process = self._process
         if process is None:
             return
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-                process.wait(timeout=5.0)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=2.0)
+        _terminate_process_group(
+            process, terminate_timeout_s=5.0, kill_timeout_s=2.0
+        )
+        self._process = None
         if process.stderr is not None:
             process.stderr.close()
 
@@ -240,12 +289,14 @@ class Ros2LaunchProcess:
         arguments: tuple[str, ...] = (),
         ros2_executable: str = "ros2",
         startup_timeout_s: float = 5.0,
+        environment: dict[str, str] | None = None,
     ) -> None:
         self.package = package
         self.launch_file = launch_file
         self.arguments = tuple(arguments)
         self.ros2_executable = ros2_executable
         self.startup_timeout_s = float(startup_timeout_s)
+        self.environment = dict(environment) if environment is not None else None
         self._process: subprocess.Popen | None = None
 
     @property
@@ -263,8 +314,10 @@ class Ros2LaunchProcess:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            start_new_session=True,
+            # The bench worker is the only process-group/session owner.
+            start_new_session=False,
             text=True,
+            env=self.environment,
         )
         deadline = time.monotonic() + self.startup_timeout_s
         while time.monotonic() < deadline:
@@ -276,19 +329,23 @@ class Ros2LaunchProcess:
         raise GazeboProcessError("ROS 2 launch did not stay running")
 
     def close(self) -> None:
-        process, self._process = self._process, None
+        process = self._process
         if process is None:
             return
-        if process.poll() is None:
+        # A standalone launch created as a session leader owns its group (the
+        # low-level class remains useful in isolation).  Production launch is
+        # a member of the bench worker group and must never signal that group.
+        if os.getpgid(process.pid) == process.pid:
+            _terminate_process_group(
+                process, terminate_timeout_s=8.0, kill_timeout_s=3.0
+            )
+        else:
+            process.terminate()
             try:
-                os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=8.0)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3.0)
+        self._process = None
         if process.stderr is not None:
             process.stderr.close()

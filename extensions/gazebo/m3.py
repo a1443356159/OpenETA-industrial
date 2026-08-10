@@ -14,7 +14,7 @@ from enum import StrEnum
 import math
 from typing import Any, Iterable, Mapping, Sequence
 
-from .m2 import Robotiq2F85Config
+from .m2 import M2Config
 
 
 M3_ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
@@ -50,7 +50,7 @@ class ReasonCode(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class M3Config(Robotiq2F85Config):
+class M3Config(M2Config):
     model_id: str = M3_MODEL_ID
     env_id: str = M3_ENV_ID
     display_name: str = M3_DISPLAY_NAME

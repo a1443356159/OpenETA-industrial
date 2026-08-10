@@ -40,10 +40,10 @@
   digests are `3b920b22...e9b824` for RM75-6FB-V and
   `c80c6db6...31f86` for the Robotiq closure.
 
-## 2026-08-08 — M2 RM75 parallel-gripper contract
+## 2026-08-08 — superseded M2 prototype notes
 
-- Registered `openeta/gazebo_rm75_parallel-v0` without changing the M1 ID or
-  read-only class. The model contract is `rm75_parallel_gripper_sim_v1`,
+- Registered an early simulation-only gripper prototype without changing the
+  M1 ID or read-only class. Its superseded model contract used
   `base_link -> link_7`, group `rm_group`, fixed child
   `gripper_mount_link`, and joints `joint_1..joint_7` plus active/mimic fingers.
 - The standard two-finger fixture is simulation-only: active travel 0.035 m,

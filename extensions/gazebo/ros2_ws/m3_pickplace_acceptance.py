@@ -18,9 +18,20 @@ import time
 import traceback
 from typing import Any, Iterable, Mapping, Sequence
 
+try:  # package import for tests; script import for the live runner
+    from .acceptance_isolation import (
+        FAILED, INCONCLUSIVE, PASSED, aggregate_cleanup, candidate_domain_evidence, empty_domain_evidence,
+        node_multiset, probe_ros_graph, world_partition_evidence,
+    )
+except ImportError:
+    from acceptance_isolation import (
+        FAILED, INCONCLUSIVE, PASSED, aggregate_cleanup, candidate_domain_evidence, empty_domain_evidence,
+        node_multiset, probe_ros_graph, world_partition_evidence,
+    )
+
 
 ROOT = Path(__file__).resolve().parents[3]
-REPORT_VERSION = "openeta.m3_physical_acceptance.v1"
+REPORT_VERSION = "openeta.m3_physical_acceptance.v2"
 ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
 MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
 WORLD_NAME = "m3_rm75_robotiq2f85_pickplace"
@@ -50,6 +61,11 @@ def _write(path: Path, report: Mapping[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _assert_report_mutable(path: Path) -> None:
+    if _load(path).get("finished_at_utc"):
+        raise RuntimeError("REPORT_ALREADY_FINALIZED")
 
 
 def _compact(value: Any) -> Any:
@@ -115,7 +131,8 @@ def _process_row(pid: int) -> dict[str, Any] | None:
         command = (Path("/proc") / str(pid) / "cmdline").read_bytes().replace(
             b"\0", b" "
         ).decode(errors="replace")
-        return {"pid": pid, "pgid": pgid, "command": command[:500]}
+        start_ticks = int(stat.rsplit(")", 1)[1].split()[19])
+        return {"pid": pid, "pgid": pgid, "start_ticks": start_ticks, "command": command[:500]}
     except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError):
         return None
 
@@ -177,16 +194,9 @@ def _preexisting_processes() -> list[dict[str, Any]]:
     return rows
 
 
-def _ros_nodes(domain: int) -> list[str]:
-    environment = dict(os.environ, ROS_DOMAIN_ID=str(domain), ROS2CLI_DISABLE_DAEMON="1")
-    try:
-        result = subprocess.run(
-            ["ros2", "node", "list"], capture_output=True, text=True,
-            timeout=8.0, env=environment, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ["<unavailable>"]
-    return sorted(line for line in result.stdout.splitlines() if line.strip())
+def _process_still_matches(item: Mapping[str, Any]) -> bool:
+    current = _process_row(int(item["pid"]))
+    return bool(current and current.get("start_ticks") == item.get("start_ticks") and current.get("command") == item.get("command"))
 
 
 def _port_free(port: int) -> bool:
@@ -200,69 +210,85 @@ def _port_free(port: int) -> bool:
         sock.close()
 
 
-def init_report(path: Path, domain: int, original_domain: int, partition: str, port: int) -> None:
+def init_report(path: Path, domain: int, original_domain: int, partition: str, port: int, world: str) -> None:
+    _assert_report_mutable(path)
+    if not world:
+        raise ValueError("WORLD_REQUIRED")
     report = _base(path)
+    selections = []
+    selection_log = os.environ.get("OPENETA_ISOLATION_SELECTION_LOG", "")
+    if selection_log:
+        with suppress(OSError, json.JSONDecodeError):
+            selections = [json.loads(line) for line in Path(selection_log).read_text(encoding="utf-8").splitlines() if line]
     report["isolation"] = {
         "ros_domain_id": domain,
         "original_ros_domain_id": original_domain,
         "gz_partition": partition,
         "mcp_port": port,
+        "world": world,
         "preexisting_processes": _preexisting_processes(),
-        "preexisting_default_domain_nodes": _ros_nodes(original_domain),
+        "preexisting_default_domain_graph": probe_ros_graph(original_domain),
+        "isolation_evidence_version": "openeta.acceptance_isolation.v2",
+        "domain_selection": selections,
     }
     report["gates"]["isolation_cleanup"] = {"status": "running"}
     _write(path, report)
 
 
-def finalize_report(path: Path, domain: int, partition: str, port: int, exit_code: int) -> bool:
+def finalize_report(path: Path, domain: int, partition: str, port: int, world: str, exit_code: int) -> bool:
     report = _base(path)
+    if report.get("finished_at_utc"):
+        raise RuntimeError("REPORT_ALREADY_FINALIZED")
+    if not world:
+        raise ValueError("WORLD_REQUIRED")
+    isolation = report.get("isolation", {})
+    if (
+        isolation.get("ros_domain_id"), isolation.get("gz_partition"),
+        isolation.get("mcp_port"), isolation.get("world"),
+    ) != (domain, partition, port, world):
+        raise ValueError("FINALIZE_ARGUMENT_MISMATCH")
     deadline = time.monotonic() + 20.0
-    nodes: list[str] = []
+    domain_evidence: dict[str, Any] = {"state": INCONCLUSIVE, "ok": None, "reason_code": "ROS_GRAPH_UNAVAILABLE"}
     while time.monotonic() < deadline:
-        nodes = _ros_nodes(domain)
-        if not nodes:
+        domain_evidence = empty_domain_evidence(domain)
+        if domain_evidence["state"] != FAILED:
             break
         time.sleep(0.5)
     isolated = _isolated_processes(partition)
-    try:
-        topics = subprocess.run(
-            ["gz", "topic", "-l"], capture_output=True, text=True,
-            timeout=8.0, check=False,
-        ).stdout.splitlines()
-    except (OSError, subprocess.TimeoutExpired):
-        topics = ["<unavailable>"]
-    world_topics = [item for item in topics if f"/world/{WORLD_NAME}" in item]
+    port_free = _port_free(port)
     checks = {
-        "isolated_processes_gone": {"ok": not isolated, "residual": isolated},
-        "test_domain_empty": {"ok": not nodes, "nodes": nodes},
-        "test_partition_empty": {"ok": not world_topics, "world_topics": world_topics},
-        "mcp_port_rebind": {"ok": _port_free(port)},
+        "isolated_processes_gone": {"state": PASSED if not isolated else FAILED, "ok": not bool(isolated), "reason_code": "PROCESSES_GONE" if not isolated else "ISOLATED_PROCESSES_REMAIN", "residual": isolated},
+        "test_domain_empty": domain_evidence,
+        "test_partition_empty": world_partition_evidence(world),
+        "mcp_port_rebind": {"state": PASSED if port_free else FAILED, "ok": port_free, "reason_code": "MCP_PORT_REBIND" if port_free else "MCP_PORT_STILL_BOUND"},
     }
     preexisting = report.get("isolation", {}).get("preexisting_processes", [])
-    vanished = [item for item in preexisting if not (Path("/proc") / str(item["pid"])).exists()]
-    checks["preexisting_processes_alive"] = {"ok": not vanished, "vanished": vanished}
+    vanished = [item for item in preexisting if not _process_still_matches(item)]
+    checks["preexisting_processes_alive"] = {"state": PASSED if not vanished else FAILED, "ok": not bool(vanished), "reason_code": "PREEXISTING_PROCESSES_ALIVE" if not vanished else "PREEXISTING_PROCESS_CHANGED", "vanished": vanished}
     original_domain = int(report.get("isolation", {}).get("original_ros_domain_id", domain))
-    before_nodes = set(report.get("isolation", {}).get("preexisting_default_domain_nodes", []))
-    after_nodes = set(_ros_nodes(original_domain))
-    checks["preexisting_default_domain_healthy"] = {
-        "ok": not (before_nodes - after_nodes),
-        "missing": sorted(before_nodes - after_nodes),
-    }
-    cleanup_ok = all(item["ok"] for item in checks.values())
+    before = isolation.get("preexisting_default_domain_graph", {})
+    after = probe_ros_graph(original_domain)
+    if before.get("availability") != "AVAILABLE" or after.get("availability") != "AVAILABLE":
+        checks["preexisting_default_domain_healthy"] = {"state": INCONCLUSIVE, "ok": None, "reason_code": "DEFAULT_GRAPH_UNAVAILABLE", "before": before, "after": after}
+    else:
+        missing = node_multiset(before) - node_multiset(after)
+        checks["preexisting_default_domain_healthy"] = {"state": PASSED if not missing else FAILED, "ok": not bool(missing), "reason_code": "DEFAULT_GRAPH_HEALTHY" if not missing else "DEFAULT_GRAPH_NODES_MISSING", "missing": [{"namespace": key[0], "name": key[1], "count": value} for key, value in sorted(missing.items())]}
+    cleanup_status = aggregate_cleanup(checks)
     report["gates"]["isolation_cleanup"] = {
-        "status": "passed" if cleanup_ok else "failed",
+        "status": cleanup_status,
         "checks": checks,
         "main_exit_code": exit_code,
     }
     report["overall_status"] = (
         "passed"
-        if exit_code == 0 and cleanup_ok
+        if exit_code == 0 and cleanup_status == "passed"
+        else "inconclusive" if exit_code == 0 and cleanup_status == "inconclusive"
         else "blocked" if report.get("gates", {}).get("direct_live", {}).get("status") == "blocked"
         else "failed"
     )
     report["finished_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     _write(path, report)
-    return cleanup_ok
+    return cleanup_status == "passed"
 
 
 def _q_multiply(a: Sequence[float], b: Sequence[float]) -> tuple[float, float, float, float]:
@@ -554,7 +580,8 @@ def _negative_cases(
 
 
 def run_direct(path: Path) -> None:
-    from extensions.gazebo.worker import GazeboM3WorkerEnv
+    _assert_report_mutable(path)
+    from extensions.gazebo.direct_env import GazeboDirectEnv
 
     report = _base(path)
     gate: dict[str, Any] = {"status": "running", "actions": [], "plan_only_candidates": [], "positive_rounds": []}
@@ -562,7 +589,9 @@ def run_direct(path: Path) -> None:
     _write(path, report)
     environment = None
     try:
-        environment = GazeboM3WorkerEnv(task="M3 physical acceptance", seed=31)
+        environment = GazeboDirectEnv(
+            profile="m3_pickplace", task="M3 physical acceptance", seed=31
+        )
         observation, _ = environment.reset(seed=31)
         _assert(environment.openeta_control_spec.get("physical_verification") is True, "wrong worker profile")
         _physical(observation)
@@ -605,6 +634,7 @@ def _quat_to_euler(quaternion: Sequence[float]) -> tuple[float, float, float]:
 
 
 def run_mcp(path: Path, url: str) -> None:
+    _assert_report_mutable(path)
     from agent.tools.sim_mcp import SseSimulatorMcpTransport
 
     report = _base(path)
@@ -738,6 +768,7 @@ def run_mcp(path: Path, url: str) -> None:
 
 
 def record_gate(path: Path, name: str, status: str, details: str) -> None:
+    _assert_report_mutable(path)
     report = _base(path)
     report["gates"][name] = {"status": status, "details": details}
     _write(path, report)
@@ -745,12 +776,13 @@ def record_gate(path: Path, name: str, status: str, details: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("init", "direct", "mcp", "processes", "finalize", "gate"))
+    parser.add_argument("mode", choices=("init", "direct", "mcp", "processes", "finalize", "gate", "probe", "graph"))
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--domain", type=int, default=0)
     parser.add_argument("--original-domain", type=int, default=0)
     parser.add_argument("--partition", default="")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--world", default="")
     parser.add_argument("--exit-code", type=int, default=0)
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8765/sse")
     parser.add_argument("--gate", default="")
@@ -759,11 +791,22 @@ def main() -> int:
     arguments = parser.parse_args()
     path = arguments.report.resolve()
     if arguments.mode == "init":
-        init_report(path, arguments.domain, arguments.original_domain, arguments.partition, arguments.port)
+        init_report(
+            path, arguments.domain, arguments.original_domain,
+            arguments.partition, arguments.port, arguments.world,
+        )
     elif arguments.mode == "direct":
         run_direct(path)
     elif arguments.mode == "mcp":
         run_mcp(path, arguments.mcp_url)
+    elif arguments.mode == "graph":
+        evidence = probe_ros_graph(arguments.domain)
+        print(json.dumps(evidence, sort_keys=True))
+        return 0 if evidence.get("availability") == "AVAILABLE" else 1
+    elif arguments.mode == "probe":
+        evidence = candidate_domain_evidence(arguments.domain)
+        print(json.dumps(evidence, sort_keys=True))
+        return 0 if evidence.get("state") == PASSED else 1
     elif arguments.mode == "processes":
         for pgid in sorted({item["pgid"] for item in _isolated_processes(arguments.partition)}):
             print(pgid)
@@ -771,7 +814,16 @@ def main() -> int:
         _assert(bool(arguments.gate), "--gate is required")
         record_gate(path, arguments.gate, arguments.status, arguments.details)
     else:
-        return 0 if finalize_report(path, arguments.domain, arguments.partition, arguments.port, arguments.exit_code) else 1
+        try:
+            finalize_report(
+                path, arguments.domain, arguments.partition, arguments.port,
+                arguments.world, arguments.exit_code,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(str(exc), file=os.sys.stderr)
+            return 11
+        status = _load(path).get("gates", {}).get("isolation_cleanup", {}).get("status")
+        return 0 if status == "passed" else 9 if status == "failed" else 10
     return 0
 
 

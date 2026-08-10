@@ -40,7 +40,6 @@ def validate_asset_root(root: Path) -> dict:
         raise ValueError(f"manifest file set mismatch: missing={set(expected)-actual}, extra={actual-set(expected)}")
     package_roots = {
         "openeta_rm75_v_description": root,
-        "openeta_rm75_parallel_sim": root,
         "openeta_rm75_robotiq2f85_sim": root,
         # Kept for validating unmodified upstream descriptions if present.
         "rm_description": root,

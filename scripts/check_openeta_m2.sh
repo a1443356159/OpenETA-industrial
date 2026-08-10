@@ -112,7 +112,7 @@ if [[ "${CHECK_ROS}" == 1 ]]; then
     # shellcheck disable=SC1090
     source "${OVERLAY_SETUP}"
     set -u
-    for package_name in openeta_rm75_v_description openeta_rm75_parallel_sim openeta_rm75_robotiq2f85_sim; do
+    for package_name in openeta_rm75_v_description openeta_rm75_robotiq2f85_sim; do
       if ! ros2 pkg prefix "${package_name}" >/dev/null 2>&1; then
         record_failure WORKSPACE_NOT_BUILT "overlay package ${package_name} is unavailable"
       fi

@@ -5,7 +5,7 @@ machine-facing environment ID remains `openeta/gazebo_rm75_robotiq2f85-v0`,
 and `Robotiq 2F-85` refers only to the gripper/profile. User interfaces and
 operator instructions use the canonical display name above.
 
-The recommended M2 profile is `openeta/gazebo_rm75_robotiq2f85-v0` with model
+The sole M2 profile is `openeta/gazebo_rm75_robotiq2f85-v0` with model
 `rm75_robotiq_2f85_sim_v1`.  It uses the BSD-3-Clause PickNik Robotics asset
 closure frozen at commit `2c047340aeb2440f7a60e429264221aab9658707`.
 
@@ -22,9 +22,7 @@ MCP callers still use the standard one-joint
 is exposed in the planner-facing schema.
 
 The `link_7 -> gripper_mount_link` plate is explicitly a simulation fixture
-parameter for RM75; it is not presented as a real Robotiq/UR adapter.  The
-legacy `openeta/gazebo_rm75_parallel-v0` 70 mm fixture remains available for
-backward compatibility.
+parameter for RM75; it is not presented as a real Robotiq/UR adapter.
 
 The profile publishes two RGB-D views.  `top_camera_optical_frame` is the
 parameterized overhead scene camera (edit the `<pose>` in
@@ -55,8 +53,11 @@ the unified live acceptance check with:
 bash extensions/gazebo/ros2_ws/run_m2_robotiq2f85_smoke.sh
 ```
 
-The command selects and locks an unused ROS domain in `100..199`, an isolated
-Gazebo partition, and a locked MCP port. It builds both M2 profiles, runs the
+The command selects and locks an unused ROS domain in `80..101`, an isolated
+Gazebo partition, and a locked MCP port. Candidate availability is established
+with two direct rclpy graph samples (never a ros2cli daemon); an unavailable
+ROS or Gazebo observation is recorded as `inconclusive`, not clean. The JSON
+report is immutable after finalization. It builds both M2 profiles, runs the
 offline contracts, exercises direct ROS actions, then executes the real SSE
 MCP `create -> reset -> gripper -> move_to -> observe -> close` lifecycle. It
 also verifies normal, startup-failure, action-failure, and signal cleanup
@@ -69,4 +70,5 @@ the MCP unreachable target returned `MOTION_PLAN_FAILED`. The ignored JSON
 evidence is written under `.cache/reports/`; the checkpoint run is
 `m2-robotiq2f85-acceptance-20260808T180318Z-74215.json` (the filename is UTC).
 These results are development evidence and do not constitute formal M2
-acceptance.
+acceptance. Any legacy report that was manually finalized after its original
+run is untrusted cleanup evidence and is not a release gate.

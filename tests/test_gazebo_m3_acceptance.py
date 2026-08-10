@@ -1,13 +1,44 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import pytest
 
 from extensions.gazebo.ros2_ws import m3_pickplace_acceptance as acceptance
+from extensions.gazebo.ros2_ws import m2_robotiq2f85_acceptance as m2_acceptance
+from extensions.gazebo.ros2_ws import acceptance_isolation
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        [("worker", "/openeta"), ("camera", "/")],
+        (["worker", "camera"], ["/openeta", "/"]),
+    ),
+)
+def test_isolation_node_snapshot_accepts_rclpy_shapes(raw: object) -> None:
+    assert acceptance_isolation._normalise_node_names(raw) == [
+        {"name": "camera", "namespace": "/"},
+        {"name": "worker", "namespace": "/openeta"},
+    ]
+
+
+def test_isolation_snapshot_removes_only_its_own_probe_instance() -> None:
+    nodes = [
+        {"name": "openeta_acceptance_probe", "namespace": "/"},
+        {"name": "openeta_acceptance_probe", "namespace": "/"},
+        {"name": "worker", "namespace": "/openeta"},
+    ]
+    assert acceptance_isolation._remove_own_node(
+        nodes, name="openeta_acceptance_probe", namespace="/"
+    ) == [
+        {"name": "openeta_acceptance_probe", "namespace": "/"},
+        {"name": "worker", "namespace": "/openeta"},
+    ]
 
 
 def test_acceptance_uses_frozen_fingertip_collision_mesh_centers() -> None:
@@ -53,6 +84,66 @@ def test_acceptance_shell_owns_isolation_without_broad_process_kills() -> None:
     assert "kill -TERM -- \"-${pgid}\"" in script
     assert '"${pgid}" != "${current_pgid}"' in script
     assert "pkill" not in script
+
+
+def test_m2_and_m3_share_locks_and_m2_records_actual_test_world() -> None:
+    m2_script = (
+        ROOT / "extensions/gazebo/ros2_ws/run_m2_robotiq2f85_smoke.sh"
+    ).read_text(encoding="utf-8")
+    m3_script = (
+        ROOT / "extensions/gazebo/ros2_ws/run_m3_pickplace_acceptance.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'LOCK_DIR="/tmp/openeta-acceptance-locks"' in m2_script
+    assert 'LOCK_DIR="/tmp/openeta-acceptance-locks"' in m3_script
+    assert '--world "${OPENETA_GAZEBO_WORLD}"' in m2_script
+    assert 'OPENETA_GAZEBO_WORLD="m2_rm75_robotiq2f85_z_test"' in m2_script
+    assert '"${pgid}" != "${current_pgid}"' in m2_script
+    assert m2_script.count(
+        "env -u OPENETA_GAZEBO_WORLD -u OPENETA_GAZEBO_LAUNCH_ARGUMENTS"
+    ) == 2
+    assert "export ROS2CLI_DISABLE_DAEMON=1" in m2_script
+
+
+@pytest.mark.parametrize("driver", (m2_acceptance, acceptance))
+def test_finalized_acceptance_report_is_immutable(
+    tmp_path: Path, driver: object
+) -> None:
+    report = tmp_path / "report.json"
+    original = {"finished_at_utc": "2026-08-09T00:00:00Z", "sentinel": 1}
+    report.write_text(json.dumps(original), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="REPORT_ALREADY_FINALIZED"):
+        driver.record_gate(report, "late_gate", "passed", "must be rejected")
+
+    assert json.loads(report.read_text(encoding="utf-8")) == original
+
+
+def test_m2_finalize_rejects_world_mismatch_before_cleanup(tmp_path: Path) -> None:
+    report = tmp_path / "m2.json"
+    report.write_text(
+        json.dumps(
+            {
+                "isolation": {
+                    "ros_domain_id": 88,
+                    "gz_partition": "partition",
+                    "mcp_port": 18800,
+                    "world": "m2_rm75_robotiq2f85_z_test",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="FINALIZE_ARGUMENT_MISMATCH"):
+        m2_acceptance.finalize_isolation_report(
+            report,
+            domain=88,
+            partition="partition",
+            port=18800,
+            world="m2_rm75_robotiq2f85",
+            exit_code=0,
+        )
 
 
 def test_partition_scan_never_returns_an_ancestor_process_group(

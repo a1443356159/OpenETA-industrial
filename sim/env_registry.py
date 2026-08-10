@@ -324,12 +324,14 @@ def make_env(
         ue._include_objects = include_objects
         return ue
     if env_type == "gazebo":
-        from extensions.gazebo.worker import GazeboM2WorkerEnv, GazeboM3WorkerEnv, GazeboRobotiq2F85WorkerEnv, GazeboWorkerEnv
+        from extensions.gazebo.direct_env import GazeboDirectEnv
 
         profile = overrides.pop("gazebo_profile", "m1")
         runtime_task = overrides.pop("task", task_name)
-        cls = (GazeboM3WorkerEnv if profile == "m3_pickplace" else GazeboRobotiq2F85WorkerEnv if profile == "m2_robotiq2f85" else GazeboM2WorkerEnv if profile == "m2" else GazeboWorkerEnv)
-        return cls(task=runtime_task, seed=seed, **overrides)
+        raw = GazeboDirectEnv(
+            profile=profile, task=runtime_task, seed=seed, **overrides
+        )
+        return UnifiedEnv(raw, render_mode=render_mode)
 
     # ── RLinf-backed env ───────────────────────────────────────
     from sim.envs import get_env_cls
@@ -849,15 +851,6 @@ def _register_gazebo_envs() -> None:
         ),
         env_type="gazebo",
         task_name="live_rgbd",
-    )
-    _register_one(
-        "openeta/gazebo_rm75_parallel-v0",
-        EnvSpec(
-            id="openeta/gazebo_rm75_parallel-v0", env_type="gazebo", task_slug="rm75_parallel",
-            task_description="Gazebo Sim Jazzy RM75 arm with simulation-only 70 mm parallel gripper (M2).",
-            display_name="Gazebo 仿真环境",
-            max_episode_steps=1_000_000, requires_gpu=False, requires_sim_install=True,
-        ), env_type="gazebo", task_name="rm75_parallel", gazebo_profile="m2",
     )
     _register_one(
         "openeta/gazebo_rm75_robotiq2f85-v0",

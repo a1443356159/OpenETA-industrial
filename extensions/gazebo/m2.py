@@ -1,4 +1,4 @@
-"""M2 RM75 + parallel gripper control contracts.
+"""M2 RM75 + Robotiq 2F-85 control contracts.
 
 The module deliberately contains no ROS imports.  ROS action clients and TF/
 joint-state subscriptions are injected by the deployment adapter, which keeps
@@ -10,17 +10,37 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 from pathlib import Path
+import time
 from typing import Any, Callable, Mapping, Sequence
 
 from adapter.protocol import RobotState
 
-M2_ENV_ID = "openeta/gazebo_rm75_parallel-v0"
-MODEL_ID = "rm75_parallel_gripper_sim_v1"
-ROBOTIQ2F85_ENV_ID = "openeta/gazebo_rm75_robotiq2f85-v0"
-ROBOTIQ2F85_MODEL_ID = "rm75_robotiq_2f85_sim_v1"
+M2_ENV_ID = "openeta/gazebo_rm75_robotiq2f85-v0"
+MODEL_ID = "rm75_robotiq_2f85_sim_v1"
 ARM_JOINTS = tuple(f"joint_{i}" for i in range(1, 8))
-GRIPPER_JOINTS = ("gripper_left_finger_joint", "gripper_right_finger_joint")
+GRIPPER_JOINTS = (
+    "gripper_left_finger_joint",
+    "gripper_right_finger_joint",
+    "gripper_left_inner_knuckle_joint",
+    "gripper_right_inner_knuckle_joint",
+    "gripper_left_finger_tip_joint",
+    "gripper_right_finger_tip_joint",
+)
 JOINT_NAMES = ARM_JOINTS + GRIPPER_JOINTS
+ARM_JOINT_BOUNDS = (
+    ("joint_1", -3.106, 3.106),
+    ("joint_2", -2.2689, 2.2689),
+    ("joint_3", -3.106, 3.106),
+    ("joint_4", -2.356, 2.356),
+    ("joint_5", -3.106, 3.106),
+    ("joint_6", -2.234, 2.234),
+    ("joint_7", -6.28, 6.28),
+)
+START_STATE_RECOVERY_SCHEMA_VERSION = "m2_start_state_recovery_v1"
+START_STATE_BOUNDS_TOLERANCE_RAD = 1e-6
+START_STATE_RECOVERY_INSET_RAD = 1e-3
+START_STATE_RECOVERY_TRAJECTORY_S = 1.0
+START_STATE_RECOVERY_TIMEOUT_S = 5.0
 
 ERROR_CODES = frozenset(
     {
@@ -29,6 +49,8 @@ ERROR_CODES = frozenset(
         "JOINT_STATE_TIMEOUT",
         "TF_TIMEOUT",
         "MOVE_GROUP_UNAVAILABLE",
+        "START_STATE_INVALID",
+        "START_STATE_RECOVERY_FAILED",
         "MOTION_PLAN_FAILED",
         "MOTION_EXECUTION_FAILED",
         "MOTION_EXECUTION_TIMEOUT",
@@ -42,6 +64,175 @@ ERROR_CODES = frozenset(
 )
 
 
+def assess_start_state_bounds(
+    state: RobotState,
+    *,
+    tolerance_rad: float = START_STATE_BOUNDS_TOLERANCE_RAD,
+    inset_rad: float = START_STATE_RECOVERY_INSET_RAD,
+    freshness_s: float = 2.0,
+    now_monotonic_s: float | None = None,
+) -> dict[str, Any]:
+    """Classify the seven RM75 joints without importing ROS or MoveIt."""
+
+    if tolerance_rad < 0 or inset_rad <= 0 or freshness_s <= 0:
+        raise ValueError("invalid start-state bounds policy")
+    timestamp = state.metadata.get("joint_state_timestamp_s")
+    received = state.metadata.get("joint_state_received_monotonic_s")
+    base = {
+        "tolerance_rad": float(tolerance_rad),
+        "inset_rad": float(inset_rad),
+        "pre_joint_state_timestamp_s": (
+            float(timestamp)
+            if isinstance(timestamp, (int, float)) and math.isfinite(float(timestamp))
+            else None
+        ),
+    }
+    if not isinstance(received, (int, float)) or not math.isfinite(float(received)):
+        return {
+            **base,
+            "classification": "INVALID",
+            "reason_code": "JOINT_STATE_TIMESTAMP_MISSING",
+            "joints": [],
+            "candidate_positions": None,
+        }
+    now = time.monotonic() if now_monotonic_s is None else float(now_monotonic_s)
+    age = now - float(received)
+    if not math.isfinite(age) or age < 0 or age > freshness_s:
+        return {
+            **base,
+            "classification": "INVALID",
+            "reason_code": "JOINT_STATE_STALE",
+            "joints": [],
+            "candidate_positions": None,
+        }
+
+    names = state.metadata.get("joint_names")
+    if not isinstance(names, (list, tuple)):
+        return {
+            **base,
+            "classification": "INVALID",
+            "reason_code": "ARM_JOINT_NAMES_MISSING",
+            "joints": [],
+            "candidate_positions": None,
+        }
+    index = {str(name): offset for offset, name in enumerate(names)}
+    missing = [name for name in ARM_JOINTS if name not in index]
+    if missing or any(index[name] >= len(state.joint_positions) for name in ARM_JOINTS):
+        missing.extend(
+            name
+            for name in ARM_JOINTS
+            if name in index and index[name] >= len(state.joint_positions)
+        )
+        return {
+            **base,
+            "classification": "INVALID",
+            "reason_code": "ARM_JOINT_MISSING",
+            "joints": [{"name": name} for name in dict.fromkeys(missing)],
+            "candidate_positions": None,
+        }
+
+    positions = [float(state.joint_positions[index[name]]) for name in ARM_JOINTS]
+    non_finite = [
+        {"name": name, "position_rad": None}
+        for name, position in zip(ARM_JOINTS, positions)
+        if not math.isfinite(position)
+    ]
+    if non_finite:
+        return {
+            **base,
+            "classification": "INVALID",
+            "reason_code": "ARM_JOINT_NONFINITE",
+            "joints": non_finite,
+            "candidate_positions": None,
+        }
+
+    affected: list[dict[str, Any]] = []
+    candidate = list(positions)
+    outside_tolerance = False
+    for offset, ((name, lower, upper), position) in enumerate(
+        zip(ARM_JOINT_BOUNDS, positions)
+    ):
+        if lower <= position <= upper:
+            continue
+        if position < lower:
+            boundary = "lower"
+            violation = lower - position
+            target = lower + inset_rad
+        else:
+            boundary = "upper"
+            violation = position - upper
+            target = upper - inset_rad
+        candidate[offset] = target
+        outside_tolerance = outside_tolerance or (
+            violation > tolerance_rad
+            and not math.isclose(
+                violation, tolerance_rad, rel_tol=0.0, abs_tol=1e-15
+            )
+        )
+        affected.append(
+            {
+                "name": name,
+                "position_rad": position,
+                "lower_rad": lower,
+                "upper_rad": upper,
+                "boundary": boundary,
+                "violation_rad": violation,
+                "recovery_target_rad": target,
+            }
+        )
+
+    if not affected:
+        return {
+            **base,
+            "classification": "WITHIN_BOUNDS",
+            "reason_code": "START_STATE_WITHIN_BOUNDS",
+            "joints": [],
+            "candidate_positions": positions,
+        }
+    if outside_tolerance:
+        return {
+            **base,
+            "classification": "INVALID",
+            "reason_code": "BOUNDS_VIOLATION_EXCEEDS_TOLERANCE",
+            "joints": affected,
+            "candidate_positions": None,
+        }
+    return {
+        **base,
+        "classification": "RECOVERABLE",
+        "reason_code": "NUMERIC_BOUNDS_VIOLATION",
+        "joints": affected,
+        "candidate_positions": candidate,
+    }
+
+
+def start_state_recovery_record(
+    assessment: Mapping[str, Any],
+    *,
+    status: str,
+    reason_code: str | None = None,
+    attempted: bool = False,
+    post_joint_state_timestamp_s: float | None = None,
+    trajectory_result_code: int | None = None,
+) -> dict[str, Any]:
+    """Build the stable, JSON-safe M2/M3 recovery evidence envelope."""
+
+    return {
+        "schema_version": START_STATE_RECOVERY_SCHEMA_VERSION,
+        "status": status,
+        "reason_code": reason_code or str(assessment["reason_code"]),
+        "attempted": bool(attempted),
+        "tolerance_rad": float(assessment["tolerance_rad"]),
+        "inset_rad": float(assessment["inset_rad"]),
+        "joints": [dict(item) for item in assessment.get("joints", ())],
+        "pre_joint_state_timestamp_s": assessment.get(
+            "pre_joint_state_timestamp_s"
+        ),
+        "post_joint_state_timestamp_s": post_joint_state_timestamp_s,
+        "trajectory_result_code": trajectory_result_code,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class M2Config:
     model_id: str = MODEL_ID
@@ -53,11 +244,14 @@ class M2Config:
     active_joint: str = GRIPPER_JOINTS[0]
     mimic_joint: str = GRIPPER_JOINTS[1]
     closed_position_m: float = 0.0
-    active_open_position_m: float = 0.035
-    maximum_aperture_m: float = 0.070
+    active_open_position_m: float = 0.0425
+    maximum_aperture_m: float = 0.085
     mount_xyz: tuple[float, float, float] = (0.0, 0.0, 0.025)
     mount_quat_xyzw: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     asset_root_override: str | None = None
+    calibration: "Robotiq2F85Calibration" = field(
+        default_factory=lambda: Robotiq2F85Calibration()
+    )
 
     def __post_init__(self) -> None:
         if self.maximum_aperture_m != 2 * self.active_open_position_m:
@@ -69,8 +263,8 @@ class M2Config:
 
     def gripper_position(self, position: int) -> float:
         if type(position) is not int or position not in (0, 1):
-            raise ValueError("gripper position must be exactly 0 (closed) or 1 (open)")
-        return self.closed_position_m if position == 0 else self.active_open_position_m
+            raise ValueError("gripper position must be exactly 0 or 1")
+        return self.calibration.angles_rad[-1] if position == 0 else self.calibration.angles_rad[0]
 
     @property
     def asset_root(self) -> Path:
@@ -85,6 +279,14 @@ class M2Config:
     def ros_workspace(self) -> Path:
         return Path(__file__).parent / "ros2_ws"
 
+    @property
+    def gripper_asset_root(self) -> Path:
+        return Path(__file__).parent / "assets" / "robotiq_2f85_vendor"
+
+    @property
+    def joint_names(self) -> tuple[str, ...]:
+        return JOINT_NAMES
+
     def validate_assets(self, *, require_vendor: bool = True) -> None:
         del require_vendor  # Compatibility with the early M2 contract.
         try:
@@ -95,13 +297,11 @@ class M2Config:
             raise RuntimeError("MODEL_ASSET_NOT_FOUND") from exc
         if manifest.get("description_id") != "RM75-6FB-V":
             raise RuntimeError("MODEL_ASSET_NOT_FOUND")
-        if isinstance(self, Robotiq2F85Config):
-            try:
-                validate_asset_root(self.gripper_asset_root)
-            except Exception as exc:
-                raise RuntimeError("MODEL_ASSET_NOT_FOUND") from exc
-        package_name = "openeta_rm75_robotiq2f85_sim" if self.model_id == ROBOTIQ2F85_MODEL_ID else "openeta_rm75_parallel_sim"
-        package = self.ros_workspace / "src" / package_name
+        try:
+            validate_asset_root(self.gripper_asset_root)
+        except Exception as exc:
+            raise RuntimeError("MODEL_ASSET_NOT_FOUND") from exc
+        package = self.ros_workspace / "src" / "openeta_rm75_robotiq2f85_sim"
         if not (package / "package.xml").is_file():
             raise RuntimeError("MODEL_ASSET_NOT_FOUND")
 
@@ -144,31 +344,6 @@ class Robotiq2F85Calibration:
         return self.angles_rad[0]
 
 
-@dataclass(frozen=True, slots=True)
-class Robotiq2F85Config(M2Config):
-    model_id: str = ROBOTIQ2F85_MODEL_ID
-    active_joint: str = "gripper_left_finger_joint"
-    mimic_joint: str = "gripper_right_finger_joint"
-    closed_position_m: float = 0.0
-    active_open_position_m: float = 0.0425
-    maximum_aperture_m: float = 0.085
-    calibration: Robotiq2F85Calibration = field(default_factory=Robotiq2F85Calibration)
-
-    @property
-    def gripper_asset_root(self) -> Path:
-        return Path(__file__).parent / "assets" / "robotiq_2f85_vendor"
-
-    @property
-    def joint_names(self) -> tuple[str, ...]:
-        return ARM_JOINTS + (self.active_joint, self.mimic_joint, "gripper_left_inner_knuckle_joint", "gripper_right_inner_knuckle_joint", "gripper_left_finger_tip_joint", "gripper_right_finger_tip_joint")
-
-    def gripper_position(self, position: int) -> float:
-        # Public binary command maps to the active knuckle's radians.
-        if type(position) is not int or position not in (0, 1):
-            raise ValueError("gripper position must be exactly 0 or 1")
-        return self.calibration.angles_rad[-1] if position == 0 else self.calibration.angles_rad[0]
-
-
 def robotiq_aperture_to_angle(aperture_m: float, *, calibration: Robotiq2F85Calibration | None = None) -> float:
     return (calibration or Robotiq2F85Calibration()).angle_from_aperture(aperture_m)
 
@@ -186,11 +361,8 @@ def gripper_state(
     config: M2Config | None = None,
 ) -> dict[str, Any]:
     cfg = config or M2Config()
-    if isinstance(cfg, Robotiq2F85Config):
-        aperture = cfg.calibration.aperture_from_angle(float(active_position_m))
-        p = max(cfg.closed_position_m, min(cfg.active_open_position_m, aperture / 2.0))
-    else:
-        p = max(cfg.closed_position_m, min(cfg.active_open_position_m, float(active_position_m)))
+    aperture = cfg.calibration.aperture_from_angle(float(active_position_m))
+    p = max(cfg.closed_position_m, min(cfg.active_open_position_m, aperture / 2.0))
     openness = p / cfg.active_open_position_m
     return {
         # RobotState defines the compatibility boolean as a 0.5 threshold;
@@ -334,6 +506,7 @@ class M2Controller:
         state_provider: Callable[[], RobotState],
         move_action: Callable[[dict, float], Mapping[str, Any]] | None = None,
         gripper_action: Callable[[float, float], Mapping[str, Any]] | None = None,
+        start_state_recovery: Callable[[RobotState, float], Mapping[str, Any]] | None = None,
         cancel_pending: Callable[[], None] | None = None,
         close_source: Callable[[], None] | None = None,
         config: M2Config | None = None,
@@ -341,6 +514,7 @@ class M2Controller:
         self.config = config or M2Config()
         self.state_provider = state_provider
         self.move_action, self.gripper_action = move_action, gripper_action
+        self.start_state_recovery = start_state_recovery
         self.cancel_pending, self.close_source = cancel_pending, close_source
         self._closed = False
 
@@ -363,27 +537,200 @@ class M2Controller:
                 goal = make_move_group_goal(
                     action["target_pose"], config=self.config, tolerances=action
                 )
+                timeout_s = float(action.get("timeout_s", 30.0))
+                recovery_result: dict[str, Any] | None = None
+                recovery_evidence: dict[str, Any] | None = None
+                if self.start_state_recovery is not None:
+                    try:
+                        recovery_result = dict(
+                            self.start_state_recovery(
+                                start, START_STATE_RECOVERY_TIMEOUT_S
+                            )
+                        )
+                    except TimeoutError:
+                        recovery_result = {
+                            "ok": False,
+                            "error_code": "MOTION_OUTCOME_UNKNOWN",
+                            "motion_outcome": "unknown",
+                            "reconciliation_required": True,
+                        }
+                    evidence = recovery_result.get("start_state_recovery")
+                    if not isinstance(evidence, Mapping):
+                        assessment = assess_start_state_bounds(start)
+                        recovery_evidence = start_state_recovery_record(
+                            assessment,
+                            status="UNKNOWN",
+                            reason_code="RECOVERY_RESULT_INVALID",
+                            attempted=bool(recovery_result.get("attempted", False)),
+                        )
+                        recovery_result = {
+                            "ok": False,
+                            "error_code": "MOTION_OUTCOME_UNKNOWN",
+                            "motion_outcome": "unknown",
+                            "reconciliation_required": True,
+                            "start_state_recovery": recovery_evidence,
+                        }
+                    else:
+                        recovery_evidence = dict(evidence)
+                    if type(recovery_result.get("ok")) is not bool:
+                        recovery_result.update(
+                            {
+                                "ok": False,
+                                "error_code": "MOTION_OUTCOME_UNKNOWN",
+                                "motion_outcome": "unknown",
+                                "reconciliation_required": True,
+                            }
+                        )
+                    if not recovery_result["ok"]:
+                        unknown = (
+                            recovery_result.get("error_code")
+                            == "MOTION_OUTCOME_UNKNOWN"
+                        )
+                        end = start
+                        if not unknown:
+                            try:
+                                end = self.state_provider()
+                            except Exception:
+                                pass
+                        recovery_timing = {
+                            key: recovery_result[key]
+                            for key in (
+                                "action_started_ros_time_s",
+                                "action_completed_ros_time_s",
+                            )
+                            if key in recovery_result
+                        }
+                        return M2ControlResult(
+                            False,
+                            str(
+                                recovery_result.get("error_code")
+                                or "START_STATE_RECOVERY_FAILED"
+                            ),
+                            {
+                                "target": goal["requested_tool_pose"],
+                                "start": start.end_effector_pose,
+                                "end": end.end_effector_pose,
+                                "start_state": start.to_dict(),
+                                "end_state": end.to_dict(),
+                                "steps_executed": (
+                                    1
+                                    if recovery_evidence
+                                    and recovery_evidence.get("attempted")
+                                    else 0
+                                ),
+                                "reached_target": False,
+                                "terminated": False,
+                                "truncated": False,
+                                "motion_outcome": recovery_result.get(
+                                    "motion_outcome", "unknown" if unknown else "failed"
+                                ),
+                                "observation": {"robot": end.to_dict()},
+                                "start_state_recovery": recovery_evidence,
+                                **recovery_timing,
+                                **(
+                                    {"reconciliation_required": True}
+                                    if unknown
+                                    else {}
+                                ),
+                            },
+                        )
                 try:
-                    result = dict(self.move_action(goal, float(action.get("timeout_s", 30.0))))
+                    result = dict(self.move_action(goal, timeout_s))
                 except TimeoutError:
+                    recovery_timing = {
+                        key: recovery_result[key]
+                        for key in ("action_started_ros_time_s",)
+                        if recovery_result is not None and key in recovery_result
+                    }
                     return M2ControlResult(
                         False,
                         "MOTION_OUTCOME_UNKNOWN",
-                        {"motion_outcome": "unknown", "reconciliation_required": True},
+                        {
+                            "target": goal["requested_tool_pose"],
+                            "start": start.end_effector_pose,
+                            "end": start.end_effector_pose,
+                            "start_state": start.to_dict(),
+                            "end_state": start.to_dict(),
+                            "steps_executed": 1,
+                            "reached_target": False,
+                            "terminated": False,
+                            "truncated": False,
+                            "motion_outcome": "unknown",
+                            "reconciliation_required": True,
+                            "observation": {"robot": start.to_dict()},
+                            **(
+                                {"start_state_recovery": recovery_evidence}
+                                if recovery_evidence is not None
+                                else {}
+                            ),
+                            **recovery_timing,
+                        },
                     )
                 try:
                     end = self.state_provider()
                 except Exception:
+                    action_timing = {
+                        key: result[key]
+                        for key in (
+                            "action_started_ros_time_s",
+                            "action_completed_ros_time_s",
+                        )
+                        if key in result
+                    }
+                    if (
+                        recovery_result is not None
+                        and "action_started_ros_time_s" in recovery_result
+                    ):
+                        action_timing["action_started_ros_time_s"] = recovery_result[
+                            "action_started_ros_time_s"
+                        ]
                     return M2ControlResult(
                         False,
                         "MOTION_OUTCOME_UNKNOWN",
-                        {"motion_outcome": "unknown", "reconciliation_required": True},
+                        {
+                            "target": goal["requested_tool_pose"],
+                            "start": start.end_effector_pose,
+                            "end": start.end_effector_pose,
+                            "start_state": start.to_dict(),
+                            "end_state": start.to_dict(),
+                            "steps_executed": 1,
+                            "reached_target": False,
+                            "terminated": False,
+                            "truncated": False,
+                            "motion_outcome": "unknown",
+                            "reconciliation_required": True,
+                            "observation": {"robot": start.to_dict()},
+                            **(
+                                {"start_state_recovery": recovery_evidence}
+                                if recovery_evidence is not None
+                                else {}
+                            ),
+                            **action_timing,
+                        },
                     )
                 if type(result.get("ok")) is not bool:
                     return M2ControlResult(
                         False,
                         "MOTION_OUTCOME_UNKNOWN",
-                        {"motion_outcome": "unknown", "reconciliation_required": True},
+                        {
+                            "target": goal["requested_tool_pose"],
+                            "start": start.end_effector_pose,
+                            "end": end.end_effector_pose,
+                            "start_state": start.to_dict(),
+                            "end_state": end.to_dict(),
+                            "steps_executed": 1,
+                            "reached_target": False,
+                            "terminated": False,
+                            "truncated": False,
+                            "motion_outcome": "unknown",
+                            "reconciliation_required": True,
+                            "observation": {"robot": end.to_dict()},
+                            **(
+                                {"start_state_recovery": recovery_evidence}
+                                if recovery_evidence is not None
+                                else {}
+                            ),
+                        },
                     )
                 ok = result["ok"]
                 error = result.get("error_code") or (None if ok else "MOTION_EXECUTION_FAILED")
@@ -401,6 +748,13 @@ class M2Controller:
                     )
                     if key in result
                 }
+                recovery_started = (
+                    recovery_result.get("action_started_ros_time_s")
+                    if recovery_result is not None
+                    else None
+                )
+                if recovery_started is not None:
+                    action_evidence["action_started_ros_time_s"] = recovery_started
                 return M2ControlResult(
                     ok,
                     error,
@@ -418,6 +772,11 @@ class M2Controller:
                             "motion_outcome", "completed" if ok else "failed"
                         ),
                         "observation": {"robot": end.to_dict()},
+                        **(
+                            {"start_state_recovery": recovery_evidence}
+                            if recovery_evidence is not None
+                            else {}
+                        ),
                         **action_evidence,
                         **extra,
                     },

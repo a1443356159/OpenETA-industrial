@@ -191,6 +191,38 @@ def test_close_env_is_idempotent_and_releases_after_remote_error(monkeypatch) ->
     assert second == {"ok": True, "already_closed": True, "cleanup_errors": []}
 
 
+def test_close_env_propagates_worker_cleanup_failure(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Manager:
+        def proxy_handle_op(self, meta, path, method="GET"):
+            return {
+                "ok": False,
+                "cleanup_errors": ["env_close: GazeboProcessError: group remains"],
+            }
+
+        def release_worker(self, worker_url):
+            calls.append(("release", worker_url))
+
+    monkeypatch.setattr(server, "_get_mgr", lambda: Manager())
+    monkeypatch.setattr(server, "_touch_session", lambda sid: None)
+    monkeypatch.setattr(server, "remove_checker", lambda handle: None)
+    monkeypatch.setattr(
+        server,
+        "_session_envs",
+        {"sid": {"local": {"remote_handle": "remote", "worker_url": "worker"}}},
+    )
+    monkeypatch.setattr(server, "_session_last_obs", {"sid": {"local": {}}})
+
+    result = server.close_env.__wrapped__("local", session_id="sid")
+
+    assert result["ok"] is False
+    assert result["cleanup_errors"] == [
+        "remote_close: env_close: GazeboProcessError: group remains"
+    ]
+    assert ("release", "worker") in calls
+
+
 def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
     calls: list[tuple[dict, int]] = []
     meta = {
@@ -227,3 +259,52 @@ def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
         ({"action_type": "gripper_open"}, 1),
         ({"action_type": "gripper_close"}, 1),
     ]
+
+
+def test_m2_move_to_preserves_worker_start_state_recovery_receipt(monkeypatch) -> None:
+    recovery = {
+        "schema_version": "m2_start_state_recovery_v1",
+        "status": "RECOVERED",
+        "reason_code": "NUMERIC_BOUNDS_RECOVERED",
+        "attempted": True,
+        "tolerance_rad": 1e-6,
+        "inset_rad": 1e-3,
+        "joints": [{"name": "joint_3", "position_rad": 3.1060000000004537}],
+        "pre_joint_state_timestamp_s": 10.0,
+        "post_joint_state_timestamp_s": 11.0,
+        "trajectory_result_code": 0,
+    }
+    meta = {
+        "backend": "gazebo",
+        "control_spec": {"m2": True},
+    }
+    monkeypatch.setattr(server, "_session_envs", {"sid": {"local": meta}})
+    monkeypatch.setattr(server, "_touch_session", lambda _sid: None)
+    monkeypatch.setattr(
+        server,
+        "_proxy_step",
+        lambda _meta, action, num_steps=1: {
+            "ok": True,
+            "target": action["target_pose"],
+            "start_state_recovery": recovery,
+            "observation": {"robot": {"joint_positions": [0.0] * 7}},
+        },
+    )
+
+    result = server.move_to.__wrapped__(
+        "local",
+        0.1,
+        0.2,
+        0.3,
+        roll=0.0,
+        pitch=0.0,
+        yaw=0.0,
+        session_id="sid",
+    )
+
+    assert result["start_state_recovery"] == recovery
+    assert result["target"] == {
+        "xyz": [0.1, 0.2, 0.3],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+    assert result["observation"]["robot"]["joint_positions"] == [0.0] * 7

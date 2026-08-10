@@ -62,6 +62,9 @@ class UnifiedEnv(gym.Env):
         self._env = env
         self._render_mode = render_mode
         self._backend = self._detect_backend()
+        self.openeta_capabilities = frozenset(
+            getattr(env, "openeta_capabilities", ())
+        )
         self._include_objects: bool = False  # set by create_env via env_registry.make_env
         self._depth_znear: float = 0.0
         self._depth_zfar: float = 0.0
@@ -1533,6 +1536,17 @@ class UnifiedEnv(gym.Env):
             raw_obs, reward, terminated, truncated, info = raw[0], raw[1], raw[2], raw[3], raw[4]
         obs = self._normalise_obs(raw_obs)
         return obs, float(reward), bool(terminated), bool(truncated), info
+
+    def observe(self) -> dict[str, Any]:
+        """Return a backend-provided fresh observation when supported.
+
+        This is deliberately capability based; the common worker never needs
+        to know which simulator publishes the authoritative camera packet.
+        """
+        observe = getattr(self._env, "observe", None)
+        if not callable(observe) or "fresh_observation" not in self.openeta_capabilities:
+            raise RuntimeError("environment does not provide fresh observations")
+        return self._normalise_obs(observe())
 
     def render(self) -> np.ndarray | None:
         if self._render_mode == "human":

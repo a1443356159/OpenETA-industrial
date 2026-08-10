@@ -11,7 +11,16 @@ import threading
 import time
 from typing import Any, Mapping
 
-from .m2 import M2Config, M2Controller, make_move_group_goal, robot_state_from_sources
+from .m2 import (
+    ARM_JOINTS,
+    M2Config,
+    M2Controller,
+    START_STATE_RECOVERY_TRAJECTORY_S,
+    assess_start_state_bounds,
+    make_move_group_goal,
+    robot_state_from_sources,
+    start_state_recovery_record,
+)
 
 
 def _stamp_seconds(stamp: Any) -> float | None:
@@ -26,6 +35,27 @@ def gripper_action_success(*, reached_goal: bool, stalled: bool, allow_stalling:
     """Documented stall-success policy, kept pure for M2/M3 isolation tests."""
 
     return bool(reached_goal) or (bool(allow_stalling) and bool(stalled))
+
+
+def _populate_state_validity_request(
+    request: Any, candidate_positions: list[float], *, group_name: str
+) -> None:
+    request.group_name = group_name
+    request.robot_state.is_diff = True
+    request.robot_state.joint_state.name = list(ARM_JOINTS)
+    request.robot_state.joint_state.position = list(candidate_positions)
+
+
+def _populate_recovery_trajectory_goal(
+    goal: Any,
+    point: Any,
+    duration: Any,
+    candidate_positions: list[float],
+) -> None:
+    goal.trajectory.joint_names = list(ARM_JOINTS)
+    point.positions = list(candidate_positions)
+    point.time_from_start = duration
+    goal.trajectory.points = [point]
 
 
 class RosM2StateSource:
@@ -118,6 +148,7 @@ class RosM2Controller(M2Controller):
             state_provider=runtime.state_source.wait_fresh,
             move_action=runtime.move,
             gripper_action=runtime.gripper,
+            start_state_recovery=runtime.recover_start_state,
             cancel_pending=runtime.cancel_pending,
             close_source=runtime.close,
             config=config,
@@ -150,27 +181,33 @@ class RosM2ControllerFactory:
     def __call__(self, config: M2Config | None = None) -> RosM2Controller:
         return self.create(config)
 
-    def create(self, config: M2Config | None = None) -> RosM2Controller:
+    def create(self, config: M2Config | None = None, *, context: Any | None = None,
+               executor: Any | None = None) -> RosM2Controller:
         cfg = config or M2Config()
         cfg.validate_assets()
         try:
             import rclpy
-            from control_msgs.action import ParallelGripperCommand
+            from builtin_interfaces.msg import Duration
+            from control_msgs.action import FollowJointTrajectory, ParallelGripperCommand
             from moveit_msgs.action import MoveGroup
             from controller_manager_msgs.srv import ListControllers
+            from moveit_msgs.srv import GetStateValidity
+            from rcl_interfaces.srv import GetParameters
             from rclpy.action import ActionClient
             from rclpy.executors import MultiThreadedExecutor
             from sensor_msgs.msg import JointState
             from tf2_ros import Buffer, TransformListener
+            from trajectory_msgs.msg import JointTrajectoryPoint
         except ImportError as exc:
             raise RuntimeError("ROS_NOT_READY") from exc
-        owns_context = not rclpy.ok()
+        owns_context = context is None and not rclpy.ok()
         if owns_context:
             rclpy.init(args=None)
         from rclpy.parameter import Parameter
         node = rclpy.create_node(
             "openeta_m2_controller",
             parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)],
+            context=context,
         )
         tf_buffer = Buffer(node=node)
         listener = TransformListener(tf_buffer, node, spin_thread=False)
@@ -178,16 +215,39 @@ class RosM2ControllerFactory:
         subscription = node.create_subscription(JointState, "/joint_states", source.joint_state_callback, 10)
         move_client = ActionClient(node, MoveGroup, "/move_action")
         gripper_client = ActionClient(node, ParallelGripperCommand, "/parallel_gripper_controller/gripper_cmd")
+        trajectory_client = ActionClient(
+            node,
+            FollowJointTrajectory,
+            "/rm_group_controller/follow_joint_trajectory",
+        )
         controller_list_client = node.create_client(ListControllers, "/controller_manager/list_controllers")
-        executor = MultiThreadedExecutor(num_threads=2)
+        controller_parameter_client = node.create_client(
+            GetParameters, "/controller_manager/get_parameters"
+        )
+        state_validity_client = node.create_client(
+            GetStateValidity, "/check_state_validity"
+        )
+        shared_executor = executor is not None
+        executor = executor or MultiThreadedExecutor(num_threads=2, context=context)
         executor.add_node(node)
         runtime = _RosRuntime(
             rclpy=rclpy, node=node, executor=executor, state_source=source,
             move_client=move_client, gripper_client=gripper_client,
+            trajectory_client=trajectory_client,
             controller_list_client=controller_list_client,
+            controller_parameter_client=controller_parameter_client,
+            state_validity_client=state_validity_client,
             controller_service_type=ListControllers,
-            listener=listener, subscription=subscription, owns_context=owns_context,
+            controller_parameter_service_type=GetParameters,
+            state_validity_service_type=GetStateValidity,
+            follow_trajectory_action_type=FollowJointTrajectory,
+            duration_type=Duration,
+            trajectory_point_type=JointTrajectoryPoint,
+            listener=listener, subscription=subscription,
+            owns_context=owns_context,
+            config=cfg,
             allow_stalling=bool(getattr(cfg, "allow_stalling", False)),
+            shared_executor=shared_executor,
         )
         runtime.start()
         controller = RosM2Controller(runtime, config=cfg)
@@ -208,6 +268,8 @@ class _RosRuntime:
         self._closed = False
 
     def start(self) -> None:
+        if self.shared_executor:
+            return
         self._thread = threading.Thread(target=self.executor.spin, name="openeta-m2-ros", daemon=True)
         self._thread.start()
 
@@ -219,14 +281,42 @@ class _RosRuntime:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             remaining = max(0.0, deadline - time.monotonic())
-            if self.move_client.wait_for_server(timeout_sec=min(0.2, remaining)) and self.gripper_client.wait_for_server(timeout_sec=min(0.2, remaining)):
-                if not self.controller_list_client.wait_for_service(timeout_sec=min(0.2, remaining)):
+            actions_ready = (
+                self.move_client.wait_for_server(timeout_sec=min(0.2, remaining))
+                and self.gripper_client.wait_for_server(
+                    timeout_sec=min(0.2, remaining)
+                )
+                and self.trajectory_client.wait_for_server(
+                    timeout_sec=min(0.2, remaining)
+                )
+            )
+            if actions_ready:
+                services = (
+                    self.controller_list_client,
+                    self.controller_parameter_client,
+                    self.state_validity_client,
+                )
+                if not all(
+                    client.wait_for_service(timeout_sec=min(0.2, remaining))
+                    for client in services
+                ):
                     continue
                 request = self.controller_service_type.Request()
                 response = self._await(self.controller_list_client.call_async(request), min(0.5, remaining))
                 states = {item.name: item.state for item in response.controller}
                 required = {"joint_state_broadcaster", "rm_group_controller", "parallel_gripper_controller"}
                 if not required.issubset({name for name, state in states.items() if state == "active"}):
+                    continue
+                parameter_request = self.controller_parameter_service_type.Request()
+                parameter_request.names = ["enforce_command_limits"]
+                parameter_response = self._await(
+                    self.controller_parameter_client.call_async(parameter_request),
+                    min(0.5, remaining),
+                )
+                if (
+                    len(parameter_response.values) != 1
+                    or parameter_response.values[0].bool_value is not True
+                ):
                     continue
                 self.state_source.wait_fresh(min(5.0, remaining))
                 return
@@ -253,6 +343,156 @@ class _RosRuntime:
             with self._lock:
                 if future in self._pending:
                     self._pending.remove(future)
+
+    def recover_start_state(
+        self, state: Any, timeout_s: float
+    ) -> Mapping[str, Any]:
+        assessment = assess_start_state_bounds(state)
+        classification = assessment["classification"]
+        if classification == "WITHIN_BOUNDS":
+            return {
+                "ok": True,
+                "start_state_recovery": start_state_recovery_record(
+                    assessment, status="NOT_REQUIRED"
+                ),
+            }
+        if classification == "INVALID":
+            return {
+                "ok": False,
+                "error_code": "START_STATE_INVALID",
+                "motion_outcome": "failed",
+                "start_state_recovery": start_state_recovery_record(
+                    assessment, status="REJECTED"
+                ),
+            }
+
+        started = self.ros_time_s()
+        deadline = time.monotonic() + float(timeout_s)
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        def failed(reason_code: str, *, result_code: int | None = None):
+            return {
+                "ok": False,
+                "error_code": "START_STATE_RECOVERY_FAILED",
+                "motion_outcome": "failed",
+                "action_started_ros_time_s": started,
+                "action_completed_ros_time_s": self.ros_time_s(),
+                "start_state_recovery": start_state_recovery_record(
+                    assessment,
+                    status="FAILED",
+                    reason_code=reason_code,
+                    attempted=True,
+                    trajectory_result_code=result_code,
+                ),
+            }
+
+        def unknown(reason_code: str):
+            return {
+                "ok": False,
+                "error_code": "MOTION_OUTCOME_UNKNOWN",
+                "motion_outcome": "unknown",
+                "reconciliation_required": True,
+                "action_started_ros_time_s": started,
+                "action_completed_ros_time_s": self.ros_time_s(),
+                "start_state_recovery": start_state_recovery_record(
+                    assessment,
+                    status="UNKNOWN",
+                    reason_code=reason_code,
+                    attempted=True,
+                ),
+            }
+
+        candidate_positions = list(assessment["candidate_positions"])
+        try:
+            validity_request = self.state_validity_service_type.Request()
+            _populate_state_validity_request(
+                validity_request,
+                candidate_positions,
+                group_name=self.config.move_group,
+            )
+            validity_response = self._await(
+                self.state_validity_client.call_async(validity_request),
+                min(1.0, remaining()),
+            )
+        except Exception:
+            return failed("STATE_VALIDITY_CHECK_FAILED")
+        if not bool(validity_response.valid):
+            return failed("RECOVERY_STATE_INVALID_OR_IN_COLLISION")
+
+        goal = self.follow_trajectory_action_type.Goal()
+        point = self.trajectory_point_type()
+        duration_ns = int(START_STATE_RECOVERY_TRAJECTORY_S * 1_000_000_000)
+        duration = self.duration_type(
+            sec=duration_ns // 1_000_000_000,
+            nanosec=duration_ns % 1_000_000_000,
+        )
+        _populate_recovery_trajectory_goal(
+            goal, point, duration, candidate_positions
+        )
+        try:
+            handle = self._await(
+                self.trajectory_client.send_goal_async(goal), min(1.0, remaining())
+            )
+        except Exception:
+            return failed("RECOVERY_TRAJECTORY_SEND_FAILED")
+        if not handle.accepted:
+            return failed("RECOVERY_TRAJECTORY_REJECTED")
+
+        result_future = handle.get_result_async()
+        try:
+            wrapped = self._await(result_future, remaining())
+        except TimeoutError:
+            try:
+                self._await(handle.cancel_goal_async(), min(1.0, remaining()))
+            except Exception:
+                pass
+            self.state_source.clear()
+            return unknown("RECOVERY_TRAJECTORY_TIMEOUT_UNCONFIRMED")
+        except Exception:
+            self.state_source.clear()
+            return unknown("RECOVERY_TRAJECTORY_RESULT_UNAVAILABLE")
+
+        result_code = int(wrapped.result.error_code)
+        if result_code != int(self.follow_trajectory_action_type.Result.SUCCESSFUL):
+            self.state_source.clear()
+            return failed("RECOVERY_TRAJECTORY_FAILED", result_code=result_code)
+
+        self.state_source.clear()
+        try:
+            post_state = self.state_source.wait_fresh(remaining())
+        except Exception:
+            return failed("POST_RECOVERY_JOINT_STATE_MISSING", result_code=result_code)
+        post_assessment = assess_start_state_bounds(post_state, tolerance_rad=0.0)
+        post_timestamp = post_assessment.get("pre_joint_state_timestamp_s")
+        if post_assessment["classification"] != "WITHIN_BOUNDS":
+            return {
+                **failed(
+                    "POST_RECOVERY_STATE_OUT_OF_BOUNDS", result_code=result_code
+                ),
+                "start_state_recovery": start_state_recovery_record(
+                    assessment,
+                    status="FAILED",
+                    reason_code="POST_RECOVERY_STATE_OUT_OF_BOUNDS",
+                    attempted=True,
+                    post_joint_state_timestamp_s=post_timestamp,
+                    trajectory_result_code=result_code,
+                ),
+            }
+        return {
+            "ok": True,
+            "action_started_ros_time_s": started,
+            "action_completed_ros_time_s": self.ros_time_s(),
+            "start_state_recovery": start_state_recovery_record(
+                assessment,
+                status="RECOVERED",
+                reason_code="NUMERIC_BOUNDS_RECOVERED",
+                attempted=True,
+                post_joint_state_timestamp_s=post_timestamp,
+                trajectory_result_code=result_code,
+            ),
+        }
 
     def move(self, goal: dict, timeout_s: float) -> Mapping[str, Any]:
         from geometry_msgs.msg import Pose
@@ -437,7 +677,10 @@ class _RosRuntime:
         self._closed = True
         self.cancel_pending()
         try:
-            self.executor.shutdown(timeout_sec=2.0)
+            if self.shared_executor:
+                self.executor.remove_node(self.node)
+            else:
+                self.executor.shutdown(timeout_sec=2.0)
         finally:
             if self._thread is not None:
                 self._thread.join(timeout=2.0)

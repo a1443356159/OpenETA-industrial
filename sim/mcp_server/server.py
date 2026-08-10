@@ -228,8 +228,6 @@ def create_env(env_id: str, *, render_mode: str = "rgb_array", seed: int = 0,
     remote_handle = result["handle"]
     h = str(uuid.uuid4())[:12]
     display_name = str(result.get("name") or "")
-    if not display_name and result.get("backend") == "gazebo":
-        display_name = "Gazebo 仿真环境"
     meta = {
         "worker_url": worker.base_url,
         "remote_handle": remote_handle,
@@ -239,6 +237,7 @@ def create_env(env_id: str, *, render_mode: str = "rgb_array", seed: int = 0,
         "action_dim": result.get("action_dim"),
         "robot": result.get("robot") or robot,
         "control_spec": result.get("control_spec", {}),
+        "capabilities": result.get("capabilities", []),
         "_sid": sid,
     }
     _session_envs.setdefault(sid, {})[h] = meta
@@ -252,6 +251,7 @@ def create_env(env_id: str, *, render_mode: str = "rgb_array", seed: int = 0,
         "action_dim": result.get("action_dim"), "backend": result.get("backend"),
         "robot": result.get("robot") or robot,
         "control_spec": result.get("control_spec", {}),
+        "capabilities": result.get("capabilities", []),
         "action_hint": result.get("action_hint", ""),
     }
 
@@ -388,11 +388,9 @@ def reset_env(handle: str, *, seed: int | None = None, session_id: str = "") -> 
     reset_obs = _proxy_reset(meta, seed=seed)
     # Let physics settle before returning — objects can spawn hovering /
     # jittering right after reset; a few hold steps bring them to rest.
-    # Gazebo M1 is an observation-only adapter; it has no simulator-side hold
-    # action until the documented M2 control contract exists.
     settled = (
         {}
-        if meta.get("backend", "") == "gazebo"
+        if "fresh_observation" in meta.get("capabilities", [])
         else _settle_env(meta, meta.get("backend", ""))
     )
     settled_obs = settled.get("observation") if isinstance(settled, dict) else None
@@ -1375,6 +1373,14 @@ def close_env(handle: str, *, session_id: str = "") -> dict:
             remote_result = _get_mgr().proxy_handle_op(
                 meta, f"/env/{meta['remote_handle']}", method="DELETE"
             )
+            if remote_result.get("ok") is not True:
+                remote_errors = remote_result.get("cleanup_errors")
+                detail = (
+                    "; ".join(str(item) for item in remote_errors)
+                    if isinstance(remote_errors, list) and remote_errors
+                    else str(remote_result.get("error") or "worker close returned ok=false")
+                )
+                cleanup_errors.append(f"remote_close: {detail}")
         except Exception as exc:
             cleanup_errors.append(f"remote_close: {type(exc).__name__}: {exc}")
         finally:

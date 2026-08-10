@@ -1,9 +1,15 @@
 # OpenETA M0-M2 reproducible runtime
 
+> M2 live acceptance uses an evidence-only isolation observer: a private ROS
+> home, localhost discovery range, and direct rclpy graph snapshots rather
+> than ros2cli daemon output. Its safe candidate domain range is 80–101. ROS
+> and Gazebo cleanup is reported as passed / failed / inconclusive; an
+> inconclusive observation is never treated as a clean shutdown, and finalized
+> acceptance reports are immutable.
+
 The verification baseline is Ubuntu 24.04 amd64, Python 3.12, ROS 2 Jazzy and
-Gazebo Harmonic. The default environment is
-`openeta/gazebo_rm75_robotiq2f85-v0` (`rm75_robotiq_2f85_sim_v1`); the legacy
-`openeta/gazebo_rm75_parallel-v0` profile remains installed and buildable.
+Gazebo Harmonic. The M2 environment is
+`openeta/gazebo_rm75_robotiq2f85-v0` (`rm75_robotiq_2f85_sim_v1`).
 Its canonical user-facing name is **Gazebo 仿真环境**. `Robotiq
 2F-85` identifies the installed gripper/profile only and is not used as the
 environment's display name.

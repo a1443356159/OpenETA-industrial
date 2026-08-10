@@ -319,6 +319,19 @@ class BenchWorkerHandle:
                     self.process.kill()
                 except Exception:
                     pass
+        if wait:
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(self.process.pid, 0)
+                except ProcessLookupError:
+                    return
+                except PermissionError:
+                    pass
+                time.sleep(0.05)
+            raise RuntimeError(
+                f"worker process group {self.process.pid} did not exit completely"
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -501,6 +514,8 @@ class BenchWorkerManager:
                 pool.append(chosen)
             else:
                 chosen = min(pool, key=lambda w: w.env_count)
+                if bench == "gazebo" and chosen.env_count > 0:
+                    raise RuntimeError("GAZEBO_CAPACITY_EXHAUSTED")
                 # If the least-loaded worker already has an env and we have
                 # headroom, add a worker to spread the load.
                 if chosen.env_count > 0 and len(pool) < pool_max:
@@ -516,7 +531,7 @@ class BenchWorkerManager:
             for bench, pool in self._pools.items():
                 for w in pool:
                     if w.base_url == base_url:
-                        if bench == "behavior":
+                        if bench in {"behavior", "gazebo"}:
                             # Isaac Kit is process-global and cannot be cleanly
                             # re-created after og.shutdown(). A BEHAVIOR worker
                             # is deliberately single-environment / single-use.
@@ -613,7 +628,16 @@ class BenchWorkerManager:
         released so a failed create doesn't leak a slot.
         """
         bench = _bench_for_env_id(env_id)
-        wh = self.acquire_worker(bench)
+        try:
+            wh = self.acquire_worker(bench)
+        except RuntimeError as exc:
+            if str(exc) != "GAZEBO_CAPACITY_EXHAUSTED":
+                raise
+            with self._lock:
+                pool = self._pools.get("gazebo", [])
+                if not pool:
+                    raise
+                return {"error": "GAZEBO_CAPACITY_EXHAUSTED"}, pool[0]
         try:
             result = wh.proxy("POST", "/env", body)
         except Exception:
