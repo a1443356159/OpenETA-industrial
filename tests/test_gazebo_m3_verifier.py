@@ -368,8 +368,14 @@ def test_planning_scene_commands_never_describe_a_gazebo_attachment() -> None:
     assert [command.operation for command in initialized] == [
         "replace_world",
         "allow_target_touch",
+        "allow_distractor_touch",
+        "allow_table_touch",
     ]
-    assert initialized[1].payload["links"] == list(M3Config().fingertip_links)
+    assert initialized[1].payload["links"] == list(M3Config().grasp_touch_links)
+    assert initialized[2].payload["object_id"] == M3Config().distractor_id
+    assert initialized[2].payload["links"] == list(M3Config().grasp_touch_links)
+    assert initialized[3].payload["object_id"] == M3Config().table_id
+    assert initialized[3].payload["links"] == list(M3Config().table_touch_links)
     attached = model.attach(relative_pose(Pose((0, 0, 0), (0, 0, 0, 1)), target))
     assert attached[0].operation == "attach"
     assert all("gazebo" not in command.operation.lower() for command in (*initialized, *attached))

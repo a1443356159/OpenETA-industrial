@@ -247,7 +247,9 @@ def finalize_report(path: Path, domain: int, partition: str, port: int, world: s
         raise ValueError("FINALIZE_ARGUMENT_MISMATCH")
     # DDS discovery can retain departed participants beyond process teardown.
     # Reuse the existing two-snapshot empty-domain probe for up to one lease
-    # interval before classifying cleanup as a confirmed residual.
+    # interval before classifying cleanup as a confirmed residual.  Gazebo
+    # transport discovery lags the same way on WSL2, so the partition probe
+    # gets an identical bounded retry instead of a single sample.
     deadline = time.monotonic() + 60.0
     domain_evidence: dict[str, Any] = {"state": INCONCLUSIVE, "ok": None, "reason_code": "ROS_GRAPH_UNAVAILABLE"}
     while time.monotonic() < deadline:
@@ -255,12 +257,18 @@ def finalize_report(path: Path, domain: int, partition: str, port: int, world: s
         if domain_evidence["state"] != FAILED:
             break
         time.sleep(0.5)
+    partition_evidence: dict[str, Any] = {"state": INCONCLUSIVE, "ok": None, "reason_code": "GZ_GRAPH_UNAVAILABLE"}
+    while time.monotonic() < deadline:
+        partition_evidence = world_partition_evidence(world)
+        if partition_evidence["state"] != FAILED:
+            break
+        time.sleep(0.5)
     isolated = _isolated_processes(partition)
     port_free = _port_free(port)
     checks = {
         "isolated_processes_gone": {"state": PASSED if not isolated else FAILED, "ok": not bool(isolated), "reason_code": "PROCESSES_GONE" if not isolated else "ISOLATED_PROCESSES_REMAIN", "residual": isolated},
         "test_domain_empty": domain_evidence,
-        "test_partition_empty": world_partition_evidence(world),
+        "test_partition_empty": partition_evidence,
         "mcp_port_rebind": {"state": PASSED if port_free else FAILED, "ok": port_free, "reason_code": "MCP_PORT_REBIND" if port_free else "MCP_PORT_STILL_BOUND"},
     }
     preexisting = report.get("isolation", {}).get("preexisting_processes", [])
@@ -313,6 +321,50 @@ def _q_euler(roll: float, pitch: float, yaw: float) -> tuple[float, float, float
         _q_axis((0, 0, 1), yaw),
         _q_multiply(_q_axis((0, 1, 0), pitch), _q_axis((1, 0, 0), roll)),
     )
+
+
+def _grasp_orientation(tilt_deg: float, azimuth_deg: float) -> tuple[float, float, float, float]:
+    """Top-grasp orientation with a horizontal gripper closing axis.
+
+    The plain ``_q_euler(pi, pitch, yaw)`` family tilts the closing axis by
+    the same pitch: live probes showed the lower fingertip then sweeps through
+    a 4 cm table-top box during the descent and topples it before closing.
+    Keeping the closing axis horizontal (fingers pinch the box faces at equal
+    height) was measured to leave the box undisturbed at contact.
+    """
+
+    tilt = math.radians(tilt_deg)
+    azimuth = math.radians(azimuth_deg)
+    # Gripper local axes: +z is the finger (approach) direction, x the closing
+    # direction.  Map +z onto the tilted approach axis and x onto the
+    # horizontal perpendicular.
+    approach = (
+        math.sin(tilt) * math.cos(azimuth),
+        math.sin(tilt) * math.sin(azimuth),
+        -math.cos(tilt),
+    )
+    closing = (-math.sin(azimuth), math.cos(azimuth), 0.0)
+    third = (
+        approach[1] * closing[2] - approach[2] * closing[1],
+        approach[2] * closing[0] - approach[0] * closing[2],
+        approach[0] * closing[1] - approach[1] * closing[0],
+    )
+    # Rotation matrix with columns [closing, third, approach].
+    m00, m01, m02 = closing[0], third[0], approach[0]
+    m10, m11, m12 = closing[1], third[1], approach[1]
+    m20, m21, m22 = closing[2], third[2], approach[2]
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        return ((m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s)
+    if m00 > m11 and m00 > m22:
+        s = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+        return (0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s)
+    if m11 > m22:
+        s = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+        return ((m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s)
+    s = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+    return ((m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s)
 
 
 def _q_rotate(q: Sequence[float], value: Sequence[float]) -> tuple[float, float, float]:
@@ -427,13 +479,14 @@ def _joint_inventory() -> dict[str, Any]:
 
 def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: Sequence[float], gate: dict[str, Any]) -> dict[str, Any]:
     del observation
-    candidates = ((60, 180), (60, 135), (-60, 0), (-60, -45))
+    # Fixed (tilt, azimuth) candidates with a horizontal closing axis; live
+    # sweeps found the arm reaches only a narrow tilt band near 60-75 degrees
+    # around azimuth 0 for this table layout.
+    candidates = ((65, 0), (70, 0), (75, 0), (60, 15))
     for pitch_degrees, yaw_degrees in candidates:
         observation, _ = environment.reset()
         target = _target(observation)["position"]
-        orientation = _q_euler(
-            math.pi, math.radians(pitch_degrees), math.radians(yaw_degrees)
-        )
+        orientation = _grasp_orientation(float(pitch_degrees), float(yaw_degrees))
         pregrasp = _mount_pose(
             (target[0], target[1], target[2] + 0.080), orientation, offset
         )

@@ -427,7 +427,9 @@ class RosM3PlanningScene:
             scene.world.collision_objects = [
                 collision_object(item, CollisionObject.ADD) for item in payload["objects"]
             ]
-        elif command.operation == "allow_target_touch":
+        elif command.operation in (
+            "allow_target_touch", "allow_distractor_touch", "allow_table_touch"
+        ):
             # A PlanningScene diff containing a partial matrix replaces the
             # current ACM entries instead of merging them.  Fetch and extend
             # MoveIt's complete SRDF-derived matrix so M3 never erases the

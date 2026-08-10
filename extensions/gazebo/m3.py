@@ -59,6 +59,26 @@ class M3Config(M2Config):
         "robotiq_85_left_finger_tip_link",
         "robotiq_85_right_finger_tip_link",
     )
+    # Distal gripper links that may legitimately graze the tabletop while the
+    # gripper wraps a 6 cm target standing on it.  Live planning probes showed
+    # the contact pose is GOAL_STATE_INVALID unless the planning scene allows
+    # these pairs; base/mount links stay collision-checked against the table.
+    # The same set contacts a held object: validity queries at the stall-hold
+    # state reported the grasped target touching finger and inner-knuckle
+    # links, so target/distractor lifts need these exemptions as well.  The
+    # reset cycle prunes world-object ACM rows, so every exemption must be
+    # re-applied inside initialize().
+    table_touch_links: tuple[str, ...] = (
+        "robotiq_85_left_finger_tip_link",
+        "robotiq_85_right_finger_tip_link",
+        "robotiq_85_left_finger_link",
+        "robotiq_85_right_finger_link",
+        "robotiq_85_left_knuckle_link",
+        "robotiq_85_right_knuckle_link",
+        "robotiq_85_left_inner_knuckle_link",
+        "robotiq_85_right_inner_knuckle_link",
+    )
+    grasp_touch_links: tuple[str, ...] = table_touch_links
     table_size_m: tuple[float, float, float] = (0.70, 0.60, 0.04)
     # Keep the 0.70 m tabletop just clear of the RM75 base collision mesh.
     # x=0.35 places its edge through the base and makes every MoveIt start
@@ -692,7 +712,15 @@ class M3PlanningSceneModel:
             ),
             PlanningSceneCommand(
                 "allow_target_touch",
-                {"object_id": cfg.target_id, "links": list(cfg.fingertip_links)},
+                {"object_id": cfg.target_id, "links": list(cfg.grasp_touch_links)},
+            ),
+            PlanningSceneCommand(
+                "allow_distractor_touch",
+                {"object_id": cfg.distractor_id, "links": list(cfg.grasp_touch_links)},
+            ),
+            PlanningSceneCommand(
+                "allow_table_touch",
+                {"object_id": cfg.table_id, "links": list(cfg.table_touch_links)},
             ),
         )
 

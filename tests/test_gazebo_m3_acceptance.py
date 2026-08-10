@@ -128,7 +128,7 @@ def test_candidate_selection_continues_after_reachable_pregrasp_fails_contact(
     gate = {"actions": [], "plan_only_candidates": []}
     selected = acceptance._select_candidate(environment, observation("READY"), (0, 0, 0), gate)
 
-    assert (selected["pitch_degrees"], selected["yaw_degrees"]) == (60, 135)
+    assert (selected["pitch_degrees"], selected["yaw_degrees"]) == (70, 0)
     assert gate["plan_only_candidates"][0]["blocker_stage"] == "contact_execute"
     assert gate["plan_only_candidates"][1]["status"] == "passed"
 

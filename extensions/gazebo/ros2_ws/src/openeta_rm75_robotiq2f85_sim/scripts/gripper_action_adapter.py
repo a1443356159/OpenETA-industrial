@@ -44,6 +44,11 @@ MIN_POSITION_RAD: Final = 0.0
 MAX_POSITION_RAD: Final = 0.8
 GOAL_TOLERANCE_RAD: Final = 0.02
 ACTION_TIMEOUT_S: Final = 20.0
+# Servo the six Gazebo position systems through a short ramp instead of
+# step-commanding the full stroke.  A step command slams the pads into a
+# grasped object at full PID authority and the impact ejects light targets
+# before the stall detector can settle.
+RAMP_S: Final = 1.5
 
 
 def expanded_targets(active_position: float) -> dict[str, float]:
@@ -147,6 +152,8 @@ class RobotiqGripperActionAdapter(Node):
     def _execute(self, goal_handle):
         active_position = float(goal_handle.request.command.position[0])
         targets = expanded_targets(active_position)
+        start_positions, _, _ = self._snapshot()
+        started = time.monotonic()
         result = ParallelGripperCommand.Result()
         deadline = time.monotonic() + ACTION_TIMEOUT_S
         last_movement_time = time.monotonic()
@@ -164,7 +171,15 @@ class RobotiqGripperActionAdapter(Node):
 
             # Re-publishing makes startup deterministic even if the bridge is
             # still establishing its Gazebo publisher on the first sample.
-            self._publish_targets(targets)
+            if set(JOINT_MULTIPLIERS).issubset(start_positions):
+                alpha = min(1.0, (time.monotonic() - started) / RAMP_S)
+                published = {
+                    name: start_positions[name] + (target - start_positions[name]) * alpha
+                    for name, target in targets.items()
+                }
+            else:
+                published = targets
+            self._publish_targets(published)
             if set(targets).issubset(positions):
                 errors = {
                     name: abs(positions[name] - target)
@@ -186,6 +201,12 @@ class RobotiqGripperActionAdapter(Node):
                     # Match the documented ros2_control stall-success result:
                     # the action terminal state is successful, while physical
                     # grasp success remains exclusively the M3 verifier's job.
+                    # Hold the stalled positions as the new targets: leaving
+                    # the unreachable full-stroke target commanded would keep
+                    # the Gazebo position systems squeezing until a grasped
+                    # object is ejected.
+                    if positions:
+                        self._publish_targets(positions)
                     result.state = self._result_state(positions, velocities, state)
                     result.stalled = True
                     result.reached_goal = False
