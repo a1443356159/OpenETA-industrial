@@ -1,4 +1,4 @@
-# M3 真实接触抓放物理验证施工计划
+# M3 Robotiq 语义抓放物理验证施工计划
 
 M2 baseline SHA: `3ace2b5c97516adda2f56c214e1afa80e43e75fc`
 
@@ -6,7 +6,7 @@ M2 baseline SHA: `3ace2b5c97516adda2f56c214e1afa80e43e75fc`
 
 在 `main` 上先把当前 M2 开发整理为三个本地提交，但将其状态明确保留为“实现完成、正式验收未通过”。随后从该提交创建 `dev-M3`，把本计划原文写入仓库根目录 `plan-M3.plan` 并单独提交。
 
-M3 新增独立 Gazebo 拾放环境，通过真实碰撞、摩擦、双指接触和物体运动验证抓取、抬升、搬运、掉落及放置。禁止使用 Gazebo detachable joint、固定关节或隐藏吸附模拟成功；纯接触物理不稳定时，M3 保持未完成并记录阻塞。
+M3 新增独立 Gazebo 拾放环境，通过 Robotiq 闭合受阻回执和物体共动验证抓取、抬升、搬运、掉落及放置。禁止使用 Gazebo detachable joint、固定关节或隐藏吸附模拟成功；物理夹持不稳定时，M3 保持未完成并记录阻塞。
 
 M3 只负责确定性物理执行与可信校验。LLM/VLM、SAM3、AnyGrasp、AnyPlace 和完整智能抓放流程仍属于 M4/M5。
 
@@ -61,8 +61,8 @@ M3 只负责确定性物理执行与可信校验。LLM/VLM、SAM3、AnyGrasp、A
 
 采用的正式接口：
 
-- 使用 Gazebo Harmonic 官方 Contact system 和 `<sensor type="contact">` 获取真实碰撞身份及接触数据。[Gazebo Contact sensor 文档](https://gazebosim.org/docs/harmonic/sensors/)、[Contact system API](https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1Contact.html)
-- 使用 `ros_gz_bridge` 已支持的 `gz.msgs.Contacts ↔ ros_gz_interfaces/msg/Contacts` 和 `gz.msgs.Odometry ↔ nav_msgs/msg/Odometry` 映射，不自定义传输协议。[ros_gz bridge 支持列表](https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md)
+- 使用现有 Robotiq gripper action 的 `stalled/reached_goal` 回执判断闭合是否提前受阻。
+- 使用 `ros_gz_bridge` 已支持的 `gz.msgs.Odometry ↔ nav_msgs/msg/Odometry` 映射，不自定义传输协议。[ros_gz bridge 支持列表](https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md)
 - 使用 MoveIt PlanningScene、CollisionObject、AttachedCollisionObject 和 AllowedCollisionMatrix 表达工作台、物体及规划碰撞关系。[MoveIt Planning Around Objects](https://moveit.picknik.ai/main/doc/tutorials/planning_around_objects/planning_around_objects.html)
 - M3 夹爪允许采用 ros2_control 文档定义的 stall-success 语义：物体阻挡闭合时动作可以成功结束，但必须返回 `stalled=true`、`reached_goal=false`，物理抓取成功仍由校验器决定。[ros2_control Gripper Action Controller](https://control.ros.org/jazzy/doc/ros2_controllers/gripper_controllers/doc/userdoc.html)
 - MoveIt 中的 AttachedCollisionObject 仅用于后续轨迹规划；Gazebo 中不得创建附着关节或改变物体运动学关系。
@@ -92,7 +92,7 @@ M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
 - 放置区：中心约 `[0.48, -0.10]`，`120 × 120 mm`，只有视觉标记，不增加承托或吸附功能。
 - 延续当前 Gazebo 物理引擎和重力配置；摩擦、接触刚度等参数只使用 SDF/Gazebo 文档支持的字段，并在报告中记录具体值。
 
-在左右指尖碰撞体上配置 Contact sensor，在目标物碰撞体上配置用于判定工作台支撑的 Contact sensor。目标物和干扰物使用官方 OdometryPublisher 输出世界位姿和速度。
+目标物和干扰物使用官方 OdometryPublisher 输出世界位姿和速度；不配置 Contact sensor 或 Contact bridge。支撑由已知包围盒、Odometry 和桌面几何计算。
 
 ### MoveIt 场景
 
@@ -108,17 +108,17 @@ M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
 在现有 observation 上做向后兼容的增量扩展：
 
 - `objects[]`：`id/name/label/role`、世界 `position/orientation`、线速度、角速度、支撑物、Gazebo 时间戳和 `provenance=gazebo_truth`。
-- `robot.gripper_state`：增加 `contact_left`、`contact_right`、`contact_object_id`、`object_detection`、`grasp_confirmed`、`slip_detected`。
+- `robot.gripper_state`：增加 `object_detection`、`grasp_confirmed`、`slip_detected`。
 - `metadata.physical_verification`：
   - `schema_version=m3_physical_verification_v1`
   - `phase`
   - `verdict=PASS|FAIL|UNKNOWN`
   - `reason_code`
   - `target_id`
-  - 接触、位姿、速度、相对变换、支撑及时间戳证据。
+  - 夹爪回执、位姿、速度、相对变换、几何支撑及时间戳证据。
 - 世界变更动作的 `StepResult.info.physical_verification` 引用同一份可信记录，且动作回执仍必须包含完整 fresh observation。
 
-所有 JointState、TF、RGB-D、Contact 和 Odometry 数据缺失、过期、对象身份不完整或时间戳早于动作时，一律返回 `UNKNOWN`，不得推断成功。
+所有 JointState、TF、RGB-D 和两物体 Odometry 数据缺失、过期或时间戳早于动作时，一律返回 `UNKNOWN`，不得推断成功。
 
 ### 校验状态机
 
@@ -126,38 +126,37 @@ M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
 
 1. 闭合候选：
 
-   - 同一目标物连续至少 `0.20 s` 接触左右指尖。
-   - 夹爪受到目标阻挡，开口约在 `32–48 mm`。
+   - `stalled=true`、`reached_goal=false` 且 aperture `>6 mm`。
    - 返回 `UNKNOWN/LIFT_REQUIRED` 和兼容字段 `object_detection=object_detected_closing`。
    - 闭合动作本身永远不能产生最终抓取 PASS。
 
 2. 空抓：
 
-   - aperture `≤6 mm` 且无双侧对象接触。
+   - `reached_goal=true`、`stalled=false` 且 aperture `≤6 mm`。
    - 返回 `FAIL/EMPTY_GRASP`、`object_detection=at_position_no_object`。
 
 3. 抓错物体：
 
-   - 左右指尖稳定接触 `m3_distractor`。
-   - 返回 `FAIL/WRONG_OBJECT`，不得用几何邻近替代对象身份。
+   - 闭合后执行相同 `80 mm` lift probe，仅干扰物满足共动条件。
+   - 返回 `FAIL/WRONG_OBJECT`，不得用闭合受阻或几何邻近替代对象身份。
 
 4. 抬升确认：
 
-   - 保存闭合时目标和 EEF 相对变换。
+   - 保存闭合时目标、干扰物分别相对 EEF 的变换。
    - 执行 `80 mm` 世界 Z 正方向 lift probe。
-   - 目标上升至少 `60 mm`、脱离工作台、双侧接触保持、EEF—目标平移漂移 `≤10 mm`、旋转漂移 `≤0.15 rad`。
-   - 全部成立返回 `PASS/TARGET_HELD`，否则按证据返回 `FAIL` 或 `UNKNOWN`。
+   - 目标上升至少 `60 mm`、脱离工作台、EEF—目标平移漂移 `≤10 mm`、旋转漂移 `≤0.15 rad`。
+   - 仅目标成立返回 `PASS/TARGET_HELD`；仅干扰物成立返回 `FAIL/WRONG_OBJECT`；两者同时成立返回 `UNKNOWN/IDENTITY_INCOMPLETE`；均不成立返回 `UNKNOWN/TARGET_NOT_LIFTED`。
 
 5. 搬运与掉落：
 
-   - 持续监测接触、相对变换和目标高度。
-   - 接触丢失并出现目标下落或重新落到非目标区域时，撤销 held 状态并返回 `FAIL/OBJECT_DROPPED`。
+   - 持续监测相对变换、目标高度、速度和几何支撑。
+   - 目标失去共动并出现下落或落桌时，撤销 held 状态并返回 `FAIL/OBJECT_DROPPED`。
    - 掉落实测通过在空中完全打开夹爪触发，不使用外力插件或隐藏 detach 命令。
 
 6. 放置：
 
    - 目标完整包围盒位于放置区内，并保留 `5 mm` 边界余量。
-   - 无指尖接触、目标由工作台支撑。
+   - 目标包围盒底面距桌面不超过 `5 mm` 且完整位于桌面范围。
    - 连续 `1.0 s` 满足线速度 `≤0.02 m/s`、角速度 `≤0.10 rad/s`。
    - 返回 `PASS/TARGET_PLACED`。
    - 区域外落定返回 `FAIL/OUTSIDE_DESTINATION`；尚未落定或数据不新鲜返回 `UNKNOWN/NOT_SETTLED`。
@@ -167,8 +166,8 @@ M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
 1. M3 profile 与场景：
 
    - 新增 M3 world、launch 和环境注册。
-   - 加入工作台、双物体、放置区、Contact/OdometryPublisher 及 ros_gz bridge。
-   - 验证 Gazebo GUI、双 RGB-D、Contact、Odometry、JointState、TF 和三个 controller 就绪。
+   - 加入工作台、双物体、放置区、OdometryPublisher 及 ros_gz bridge。
+   - 验证 Gazebo GUI、双 RGB-D、Odometry、JointState、TF 和三个 controller 就绪。
 
 2. 夹爪及 PlanningScene：
 
@@ -179,14 +178,14 @@ M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
 3. 物理状态源与校验器：
 
    - 新增 dependency-light `extensions/gazebo/m3.py`，包含配置、不可变数据类型、状态转换和 reason codes。
-   - 新增 ROS Contact/Odometry source，统一 Gazebo 名称、单位、时间戳及 freshness。
+   - 新增 ROS Odometry source，统一 Gazebo 名称、单位、时间戳及 freshness。
    - reset 清除缓存和历史基线；关闭订阅器必须幂等。
 
 4. Worker/MCP 集成：
 
    - `GazeboM3WorkerEnv` 复用 M2 controller 和 fresh camera barrier。
-   - 合并 objects、gripper contact 和 physical verification。
-   - 每个世界变更动作等待动作后的 JointState、RGB、depth、Contact 和 Odometry。
+   - 合并 objects、Robotiq 状态和 physical verification。
+   - 每个世界变更动作等待动作后的 JointState、TF、RGB、depth 和 Odometry。
    - 不进入旧模拟器插值控制，不修改 Planner runtime 或 Tool schema。
 
 5. M3 acceptance driver：
@@ -210,8 +209,8 @@ M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
 覆盖：
 
 - M3 环境 ID、model ID、display name、control spec 与 M2 隔离。
-- Contact/Odometry 消息解析、对象身份、单位、时间戳和 stale fail-closed。
-- 闭合候选、空抓、抓错、成功抬升、接触丢失、掉落、成功放置、区域外放置及未落定。
+- Odometry 消息解析、对象身份、单位、时间戳和 stale fail-closed。
+- 闭合候选、空抓、目标/干扰物共动、双物体歧义、未抬起、相对漂移、掉落、成功放置、区域外放置及未落定。
 - M3 stall-success 与 M2 reached-goal 行为互不影响。
 - PlanningScene 添加、允许碰撞、规划附着、释放、reset 和失败清理。
 - worker 每次动作只返回动作后的完整 observation。
@@ -220,11 +219,12 @@ M3 world 复用 M2 机器人、双 RGB-D 相机和控制器，新增：
 
 ### Direct ROS/Gazebo live
 
+- 四个固定姿态逐个独立 reset，依次验证 pregrasp、接触位、闭合受阻和 lift 共动；冻结首个完整通过的姿态。单个阶段失败必须继续后续候选，全部失败时记录逐阶段 blocker。
 - 五次连续 reset 后的成功 `approach → close → lift → transport → lower → open → settle`，必须 `5/5` 得到 `TARGET_HELD` 和 `TARGET_PLACED`。
 - 每次运动保持 M2 位姿门限：平移误差 `≤5 mm`、旋转误差 `≤0.08 rad`。
 - 负例分别验证：
   - 空抓。
-  - 抓取干扰物。
+  - 闭合并 lift 干扰物，再由共动身份返回 `WRONG_OBJECT`。
   - 抬升后主动打开导致掉落。
   - 放置区外释放。
 - 所有负例必须得到对应结构化 FAIL，不得误报成功。
@@ -251,7 +251,7 @@ create_env
 
 - 正向流程连续两轮通过。
 - 四个负例各执行一次。
-- 每次动作包含 fresh RGB-D、机器人、Contact、Odometry 和 verifier 记录。
+- 每次动作包含 fresh RGB-D、机器人、Odometry 和 verifier 记录。
 - 第二次 close 返回 `already_closed=true`。
 - 不依赖 LLM provider，不把 DeepSeek 输出稳定性纳入 M3 物理 gate。
 
