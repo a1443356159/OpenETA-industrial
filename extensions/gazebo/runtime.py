@@ -264,14 +264,12 @@ class GazeboRuntime:
             # Harmonic's model_only reset does not restore free objects
             # either; teleport the manipulated objects to their documented
             # initial poses instead of rewinding the simulation clock.  The
-            # restore runs twice: right after the detach (so a box held at the
-            # lift/place pose does not drop far) and again after re-home, so
-            # any drop-in flight is cancelled before the gripper opens and the
-            # box settles during the open stroke.
+            # restore runs only AFTER re-home: teleporting while the arm is
+            # still at the lift/carry pose can materialise the box inside the
+            # closed fingers, and the interpenetration punts it off the
+            # table.  A box dropped by the detach simply falls a few
+            # centimetres and is then restored exactly.
             reset_object_poses = getattr(self.profile.model_config, "reset_object_poses", None)
-            if reset_object_poses:
-                for model_name, xyz in reset_object_poses.items():
-                    self._world.set_model_pose(model_name, xyz)
             return_home = getattr(self.controller, "return_home", None)
             if callable(return_home):
                 return_home()

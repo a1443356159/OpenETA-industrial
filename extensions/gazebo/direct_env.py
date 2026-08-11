@@ -254,10 +254,20 @@ class GazeboDirectEnv(Env):
                     config=self._m3_config,
                 )
                 if selected is not None:
-                    attachment.attach(
-                        "target" if selected == self._m3_config.target_id else "distractor"
-                    )
-                    self._attached_object = selected
+                    # gz-sim's DetachableJoint cannot (re)attach while the
+                    # child model touches the parent model (documented DART
+                    # limitation): the joint then never becomes rigid and the
+                    # object is only cage-carried until the first horizontal
+                    # move drops it.  Back the pads off FIRST so the attach
+                    # happens out of contact; the object rests on the table
+                    # during the backoff, so its pose is unchanged.  If the
+                    # backoff cannot be confirmed, skip the attach and let the
+                    # round fail honestly instead of faking a rigid joint.
+                    if self._release_gripper_squeeze(receipt):
+                        attachment.attach(
+                            "target" if selected == self._m3_config.target_id else "distractor"
+                        )
+                        self._attached_object = selected
         self._latest = raw
         # The Direct/Gym boundary owns the public unified observation.  Keep
         # the structured receipt anchored to that exact post-action object so
@@ -267,6 +277,35 @@ class GazeboDirectEnv(Env):
         # control codec restores the established top-level wire fields.
         info = {"_openeta_receipt": receipt} if STRUCTURED_RECEIPT in self.profile.capabilities else {}
         return raw, 0.0, False, False, info
+
+    def _release_gripper_squeeze(self, receipt: Mapping[str, Any]) -> bool:
+        """Back the pads a few millimetres off a freshly grasped object.
+
+        Detachable-mode prerequisite: gz-sim's DetachableJoint cannot attach
+        while the child model is in contact with the parent model (documented
+        DART limitation), so the squeezed pads must break contact before the
+        attach is published.  As a side benefit the position-controlled
+        fingers no longer double-constrain the jointed object during carries.
+        Returns True when the backoff goal completed.
+        """
+
+        controller = getattr(self.runtime, "controller", None)
+        gripper_action = getattr(controller, "gripper_action", None)
+        calibration = getattr(getattr(controller, "config", None), "calibration", None)
+        gripper_state = receipt.get("gripper_state") or {}
+        aperture = gripper_state.get("aperture_m")
+        if gripper_action is None or calibration is None or not isinstance(aperture, (int, float)):
+            return False
+        # Open to a fixed wide aperture (~8 cm): the 2F-85 fingertip hooks
+        # curve ~1 cm inwards, so a few-millimetre backoff still leaves the
+        # hooks embracing the box and the attach stays "in contact".
+        open_angle = min(max(calibration.angles_rad[0], 0.15), calibration.angles_rad[-1])
+        if calibration.angle_from_aperture(float(aperture)) <= open_angle:
+            return True  # already clear
+        with suppress(Exception):
+            result = gripper_action(open_angle, 15.0)
+            return bool(result.get("ok"))
+        return False
 
     def render(self):
         if self._latest is None:
