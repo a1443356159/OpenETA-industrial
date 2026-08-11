@@ -66,6 +66,25 @@ COMMAND_TOPICS: Final = {
     "gripper_left_finger_tip_joint": "/openeta/gripper/left_tip",
     "gripper_right_finger_tip_joint": "/openeta/gripper/right_tip",
 }
+# Each finger is an independent four-bar side.  Contact is watched per side
+# (through its finger joint) so the first pad to touch the target freezes in
+# place instead of carrying the object across the rest of the closing stroke.
+SIDE_JOINTS: Final = {
+    "left": (
+        "gripper_left_finger_joint",
+        "gripper_left_inner_knuckle_joint",
+        "gripper_left_finger_tip_joint",
+    ),
+    "right": (
+        "gripper_right_finger_joint",
+        "gripper_right_inner_knuckle_joint",
+        "gripper_right_finger_tip_joint",
+    ),
+}
+SIDE_WATCH_JOINTS: Final = {
+    "left": "gripper_left_finger_joint",
+    "right": "gripper_right_finger_joint",
+}
 MIN_POSITION_RAD: Final = 0.0
 MAX_POSITION_RAD: Final = 0.8
 GOAL_TOLERANCE_RAD: Final = 0.02
@@ -91,9 +110,10 @@ MAX_LEAD_RAD: Final = 0.06
 # Extra closing stroke (active joint, rad) commanded per joint when a stall is
 # held.  Each joint keeps its own measured position plus at most this offset,
 # so a stressed four-bar linkage is never forced back into the nominal mimic
-# relation (which ejects a held object).  Live sweeps found no positive value
-# that reliably survives the lift (0.01-0.02 slips, 0.03 can eject), so the
-# default is a pure freeze; the parameter remains for physics tuning.
+# relation (which ejects a held object).  The default stays a pure freeze for
+# the generic contract; the M3 profile layers a positive offset on top of its
+# per-side freeze and anti-slip scene to keep a sustained pinch through the
+# carry, and the parameter remains for physics tuning.
 STALL_HOLD_EXTRA_RAD: Final = 0.0
 
 
@@ -213,12 +233,22 @@ class RobotiqGripperActionAdapter(Node):
         start_positions, _, _ = self._snapshot()
         result = ParallelGripperCommand.Result()
         deadline = time.monotonic() + ACTION_TIMEOUT_S
-        last_movement_time = time.monotonic()
         ramp_s = float(self.get_parameter("ramp_s").value)
         stall_hold_extra = float(self.get_parameter("stall_hold_extra_rad").value)
         max_lead = float(self.get_parameter("max_lead_rad").value)
         alpha = 0.0
         last_tick = time.monotonic()
+        # Per-side contact freeze: a side only becomes freeze-eligible after
+        # its watch joint has demonstrably moved under this goal (otherwise
+        # startup latency would read as a stall), and from then on a watch
+        # joint that stays below the velocity threshold for stall_timeout is
+        # treated as contact.  The frozen side holds its own measured
+        # positions while the other side keeps closing, so a grasped object
+        # is squeezed between the pads instead of carried by the first pad
+        # to touch it.
+        side_last_movement = {side: time.monotonic() for side in SIDE_JOINTS}
+        side_moved = {side: False for side in SIDE_JOINTS}
+        side_holds: dict[str, dict[str, float]] = {}
 
         while rclpy.ok() and time.monotonic() < deadline:
             positions, velocities, state = self._snapshot()
@@ -238,14 +268,25 @@ class RobotiqGripperActionAdapter(Node):
             # the contact tail.
             alpha += dt / ramp_s * (1.0 if alpha < SLOW_TAIL_FRACTION else SLOW_TAIL_FACTOR)
             # Lead limit: the published target never runs more than
-            # max_lead_rad (active joint) ahead of the measured position.  A
-            # genuinely blocked joint therefore feels a bounded squeeze instead
-            # of full-stroke pressure, without any pause/deadlock state.
+            # max_lead_rad (watch joint) ahead of the measured position on any
+            # unfrozen side.  A genuinely blocked joint therefore feels a
+            # bounded squeeze instead of full-stroke pressure, without any
+            # pause/deadlock state.  Frozen sides drop out of the cap so the
+            # other side can finish its stroke.
             if set(JOINT_MULTIPLIERS).issubset(start_positions) and set(targets).issubset(positions):
-                stroke = targets[ACTIVE_JOINT] - start_positions[ACTIVE_JOINT]
-                if abs(stroke) > 1e-9:
-                    progress = (positions[ACTIVE_JOINT] - start_positions[ACTIVE_JOINT]) / stroke
-                    alpha = min(alpha, max(progress, 0.0) + max_lead / abs(stroke))
+                cap: float | None = None
+                for side, joints in SIDE_JOINTS.items():
+                    if side in side_holds:
+                        continue
+                    watch = SIDE_WATCH_JOINTS[side]
+                    stroke = targets[watch] - start_positions[watch]
+                    if abs(stroke) <= 1e-9:
+                        continue
+                    progress = (positions[watch] - start_positions[watch]) / stroke
+                    side_cap = max(progress, 0.0) + max_lead / abs(stroke)
+                    cap = side_cap if cap is None else min(cap, side_cap)
+                if cap is not None:
+                    alpha = min(alpha, cap)
             alpha = min(1.0, max(alpha, 0.0))
 
             # Re-publishing makes startup deterministic even if the bridge is
@@ -256,7 +297,9 @@ class RobotiqGripperActionAdapter(Node):
                     for name, target in targets.items()
                 }
             else:
-                published = targets
+                published = dict(targets)
+            for hold in side_holds.values():
+                published.update(hold)
             self._publish_targets(published)
             if set(targets).issubset(positions):
                 errors = {
@@ -269,40 +312,49 @@ class RobotiqGripperActionAdapter(Node):
                     result.reached_goal = True
                     goal_handle.succeed()
                     return result
-                active_velocity = abs(float(velocities.get(ACTIVE_JOINT, 0.0)))
-                if active_velocity > self._stall_velocity_threshold:
-                    last_movement_time = time.monotonic()
-                elif (
-                    self._allow_stalling
-                    and time.monotonic() - last_movement_time >= self._stall_timeout
-                ):
-                    # Match the documented ros2_control stall-success result:
-                    # the action terminal state is successful, while physical
-                    # grasp success remains exclusively the M3 verifier's job.
-                    # Hold every joint at its own measured position plus at
-                    # most a small per-joint offset toward its target.  Snapping
-                    # the stressed four-bar linkage back to the nominal mimic
-                    # vector (or keeping the unreachable full-stroke target)
-                    # ejects a held object; a pure freeze can be too weak to
-                    # survive the lift, so the offset stays tunable.
-                    if positions:
-                        hold = {
-                            name: position
-                            + max(
-                                -stall_hold_extra * abs(JOINT_MULTIPLIERS[name]),
-                                min(
-                                    stall_hold_extra * abs(JOINT_MULTIPLIERS[name]),
-                                    targets[name] - position,
-                                ),
-                            )
-                            for name, position in positions.items()
-                        }
-                        self._publish_targets(hold)
-                    result.state = self._result_state(positions, velocities, state)
-                    result.stalled = True
-                    result.reached_goal = False
-                    goal_handle.succeed()
-                    return result
+                if self._allow_stalling:
+                    for side, joints in SIDE_JOINTS.items():
+                        if side in side_holds:
+                            continue
+                        watch = SIDE_WATCH_JOINTS[side]
+                        if abs(float(velocities.get(watch, 0.0))) > self._stall_velocity_threshold:
+                            side_moved[side] = True
+                            side_last_movement[side] = now
+                        elif (
+                            side_moved[side]
+                            and now - side_last_movement[side] >= self._stall_timeout
+                        ):
+                            # Match the documented ros2_control stall-success
+                            # result: the action terminal state is successful,
+                            # while physical grasp success remains exclusively
+                            # the M3 verifier's job.  Hold every joint of the
+                            # contacted side at its own measured position plus
+                            # at most a small per-joint offset toward its
+                            # target.  Snapping the stressed four-bar linkage
+                            # back to the nominal mimic vector (or keeping the
+                            # unreachable full-stroke target) ejects a held
+                            # object; a pure freeze can be too weak to survive
+                            # the lift, so the offset stays tunable.
+                            side_holds[side] = {
+                                name: positions[name]
+                                + max(
+                                    -stall_hold_extra * abs(JOINT_MULTIPLIERS[name]),
+                                    min(
+                                        stall_hold_extra * abs(JOINT_MULTIPLIERS[name]),
+                                        targets[name] - positions[name],
+                                    ),
+                                )
+                                for name in joints
+                            }
+                    if len(side_holds) == len(SIDE_JOINTS):
+                        for hold in side_holds.values():
+                            published.update(hold)
+                        self._publish_targets(published)
+                        result.state = self._result_state(positions, velocities, state)
+                        result.stalled = True
+                        result.reached_goal = False
+                        goal_handle.succeed()
+                        return result
             time.sleep(0.05)
 
         positions, velocities, state = self._snapshot()

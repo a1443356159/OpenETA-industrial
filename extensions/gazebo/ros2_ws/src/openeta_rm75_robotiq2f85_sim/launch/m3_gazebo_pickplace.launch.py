@@ -105,7 +105,22 @@ def generate_launch_description():
                 "use_sim_time": True,
                 "allow_stalling": True,
                 "stall_velocity_threshold": 0.001,
-                "stall_timeout": 1.0,
+                # Short contact window: with per-side freeze the first pad to
+                # touch the target locks in ~0.3 s instead of pushing it
+                # across the table for a full second.  Free-space speeds in
+                # the two-speed ramp stay orders of magnitude above the
+                # threshold, so false stalls are not a concern.
+                "stall_timeout": 0.3,
+                # A pure freeze holds each joint at its measured position, so
+                # the PID error (and therefore the pinch force) collapses to
+                # zero and the caged target slides out as soon as the lift
+                # breaks stiction.  A small per-joint offset toward the close
+                # target keeps a sustained squeeze through the carry.  Earlier
+                # sweeps that rejected 0.01-0.03 ran before the anti-slip
+                # table (mu 1.5) and the per-side contact freeze stabilised
+                # the close geometry; with a centred pinch 0.03 just adds
+                # normal force.
+                "stall_hold_extra_rad": 0.03,
                 # M3 drives the exact four-bar solution; M2 keeps the legacy
                 # multiplier vector its mimic contract is certified against.
                 "drive_mode": "four_bar",
