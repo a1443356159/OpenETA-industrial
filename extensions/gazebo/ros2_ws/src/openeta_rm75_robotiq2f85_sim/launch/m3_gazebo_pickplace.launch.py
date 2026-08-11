@@ -5,11 +5,11 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler, SetEnvironmentVariable
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable
+from launch.substitutions import Command, FindExecutable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -29,7 +29,10 @@ def generate_launch_description():
     share = Path(get_package_share_directory("openeta_rm75_robotiq2f85_sim"))
     description_share = Path(get_package_share_directory("openeta_rm75_v_description"))
     xacro_file = share / "urdf/rm75_robotiq2f85_m3.urdf.xacro"
-    robot_description_command = Command([FindExecutable(name="xacro"), " ", str(xacro_file)])
+    attachment_mode = LaunchConfiguration("attachment_mode", default="physics")
+    robot_description_command = Command(
+        [FindExecutable(name="xacro"), " ", str(xacro_file), " attachment_mode:=", attachment_mode]
+    )
     robot_description = ParameterValue(robot_description_command, value_type=str)
     moveit = (
         MoveItConfigsBuilder(
@@ -137,6 +140,11 @@ def generate_launch_description():
     )
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "attachment_mode",
+                default_value="physics",
+                description="M3 grasp mechanism: physics friction or the user-approved detachable fallback",
+            ),
             SetEnvironmentVariable(
                 "GZ_SIM_RESOURCE_PATH",
                 os.pathsep.join(

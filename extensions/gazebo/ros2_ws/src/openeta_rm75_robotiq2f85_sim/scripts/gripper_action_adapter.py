@@ -47,11 +47,14 @@ ACTION_TIMEOUT_S: Final = 20.0
 # Servo the six Gazebo position systems through a short ramp instead of
 # step-commanding the full stroke.  A step command slams the pads into a
 # grasped object at full PID authority and the impact ejects light targets
-# before the stall detector can settle.
+# before the stall detector can settle.  The stroke runs fast across the
+# free-space part and slows for the final part where contact happens; a
+# uniformly slow ramp lets the linkage bind and produces false stalls.
 RAMP_S: Final = 1.0
-# While the active joint is blocked the ramp does not stop; it creeps at this
-# fraction of the normal rate so a deterministic, gentle contact force builds
-# during the stall-detection window instead of an impact-then-release.
+SLOW_TAIL_FRACTION: Final = 0.55
+SLOW_TAIL_FACTOR: Final = 0.25
+# While the active joint is blocked the ramp pauses (factor 0), so the
+# position error (and therefore the squeeze force) never grows past contact.
 BLOCKED_RAMP_FACTOR: Final = 0.0
 # Extra closing stroke (active joint, rad) commanded per joint when a stall is
 # held.  Each joint keeps its own measured position plus at most this offset,
@@ -173,7 +176,7 @@ class RobotiqGripperActionAdapter(Node):
         ramp_s = float(self.get_parameter("ramp_s").value)
         blocked_ramp_factor = float(self.get_parameter("blocked_ramp_factor").value)
         stall_hold_extra = float(self.get_parameter("stall_hold_extra_rad").value)
-        ramp_clock = 0.0
+        alpha = 0.0
         last_tick = time.monotonic()
         has_moved = False
 
@@ -206,14 +209,16 @@ class RobotiqGripperActionAdapter(Node):
                 and active_velocity_now <= self._stall_velocity_threshold
             )
             if not blocked:
-                ramp_clock += dt
+                alpha += dt / ramp_s * (
+                    1.0 if alpha < SLOW_TAIL_FRACTION else SLOW_TAIL_FACTOR
+                )
             else:
-                ramp_clock += dt * blocked_ramp_factor
+                alpha += dt / ramp_s * blocked_ramp_factor
+            alpha = min(1.0, alpha)
 
             # Re-publishing makes startup deterministic even if the bridge is
             # still establishing its Gazebo publisher on the first sample.
             if set(JOINT_MULTIPLIERS).issubset(start_positions):
-                alpha = min(1.0, ramp_clock / ramp_s)
                 published = {
                     name: start_positions[name] + (target - start_positions[name]) * alpha
                     for name, target in targets.items()

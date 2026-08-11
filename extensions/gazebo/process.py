@@ -244,6 +244,41 @@ class GazeboWorldControl:
         self.close()
 
 
+class GazeboDetachableJointControl:
+    """Drive the official ``DetachableJoint`` plugin topics for M3's fallback.
+
+    The fallback was re-approved by the user on 2026-08-10 as a controlled
+    mechanism: the OpenETA side publishes ``gz.msgs.Empty`` to the plugin's
+    attach/detach topics only after the verifier's own contact and geometry
+    conditions hold, so the joint never fabricates grasp evidence on its own.
+    """
+
+    def __init__(self, *, gz_executable: str = "gz", timeout_ms: int = 3000,
+                 environment: dict[str, str] | None = None) -> None:
+        self.gz_executable = gz_executable
+        self.timeout_ms = int(timeout_ms)
+        self.environment = dict(environment) if environment is not None else None
+
+    def _publish(self, topic: str) -> None:
+        executable = shutil.which(self.gz_executable) or self.gz_executable
+        result = subprocess.run(
+            [executable, "topic", "-t", topic, "-m", "gz.msgs.Empty", "-p", ""],
+            capture_output=True, text=True,
+            timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
+            env=self.environment,
+        )
+        if result.returncode != 0:
+            raise GazeboProcessError(
+                f"detachable joint publish failed for {topic}: {result.stderr[-500:]}"
+            )
+
+    def attach(self, object_label: str) -> None:
+        self._publish(f"/m3/detachable_joint/{object_label}/attach")
+
+    def detach(self, object_label: str) -> None:
+        self._publish(f"/m3/detachable_joint/{object_label}/detach")
+
+
 class RosGzBridgeProcess:
     """Own an official ``ros_gz_bridge parameter_bridge`` process.
 

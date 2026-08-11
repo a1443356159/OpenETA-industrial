@@ -104,6 +104,11 @@ class M3Config(M2Config):
     settled_angular_speed_rad_s: float = 0.10
     freshness_s: float = 2.0
     allow_stalling: bool = True
+    # Detachable-fallback geometry gate: after a verified close stall, only
+    # the object whose centre lies within this distance band of the EEF mount
+    # origin may be attached (the grasp centre sits ~0.127 m out).
+    attach_gate_min_m: float = 0.09
+    attach_gate_max_m: float = 0.17
 
     @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
@@ -673,6 +678,38 @@ class M3Verifier:
         self._candidate_relative_pose = None
         self._candidate_distractor_pose = None
         self._candidate_distractor_relative_pose = None
+
+
+def select_attachment_object(
+    *,
+    reason_code: str,
+    eef_pose: Pose,
+    objects: Sequence[ObjectState],
+    config: M3Config | None = None,
+) -> str | None:
+    """Return which manipulated object is geometrically at the gripper pads.
+
+    The user-approved detachable fallback may only attach an object after the
+    verifier's own close evidence (``LIFT_REQUIRED``: stall inside the
+    aperture hold window) AND with the object centre inside the grasp
+    workspace band of the EEF mount.  Empty spots and objects away from the
+    pads return ``None``, so the empty-grasp and wrong-object scenarios keep
+    their honest negative verdicts.  Verdict computation never reads this.
+    """
+
+    cfg = config or M3Config()
+    if reason_code != ReasonCode.LIFT_REQUIRED.value:
+        return None
+    best: tuple[float, str] | None = None
+    for item in objects:
+        if item.object_id not in (cfg.target_id, cfg.distractor_id):
+            continue
+        distance = math.dist(item.pose.position, eef_pose.position)
+        if cfg.attach_gate_min_m <= distance <= cfg.attach_gate_max_m and (
+            best is None or distance < best[0]
+        ):
+            best = (distance, item.object_id)
+    return best[1] if best is not None else None
 
 
 @dataclass(frozen=True, slots=True)

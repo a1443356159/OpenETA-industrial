@@ -115,6 +115,7 @@ def _base(path: Path) -> dict[str, Any]:
     report.setdefault("gates", {})
     report["documentation"] = DOCUMENTATION
     report["installed_versions"] = _versions()
+    report["attachment_mode"] = os.environ.get("OPENETA_M3_ATTACHMENT_MODE", "physics")
     with suppress(Exception):
         report["git_commit"] = subprocess.check_output(
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
@@ -396,7 +397,14 @@ def _stl_center(path: Path) -> tuple[float, float, float]:
 def _grasp_center_offset(environment: Any) -> tuple[float, float, float]:
     from rclpy.time import Time
 
-    buffer = environment.controller.runtime.state_source.tf_buffer
+    # Measure at the aperture the pads will actually have when they close onto
+    # the 4 cm target: the four-bar linkage carries the fingertip collision
+    # centres ~1 cm forward as the gripper closes, so an open-aperture
+    # measurement systematically misses the box on one side.
+    runtime = environment.controller.runtime
+    mid = runtime.gripper(0.41, 15.0)
+    _assert(mid.get("ok") is True, f"mid-aperture grip for offset measurement failed: {mid}")
+    buffer = runtime.state_source.tf_buffer
     asset = ROOT / "extensions/gazebo/assets/robotiq_2f85_vendor/meshes/collision/2f_85"
     centers = []
     for side, link in zip(("left", "right"), environment._m3_config.fingertip_links):
@@ -409,8 +417,8 @@ def _grasp_center_offset(environment: Any) -> tuple[float, float, float]:
         local = _stl_center(asset / f"{side}_finger_tip.stl")
         rotated = _q_rotate(rotation, local)
         centers.append(tuple(translation[index] + rotated[index] for index in range(3)))
+    runtime.gripper(0.0, 15.0)
     return tuple(sum(item[index] for item in centers) / 2 for index in range(3))
-
 
 def _mount_pose(
     grasp_center: Sequence[float],

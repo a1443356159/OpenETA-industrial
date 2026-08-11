@@ -12,7 +12,12 @@ from adapter.protocol import EnvObservation, RobotState
 from .deployment import GazeboDeploymentConfig
 from .m3 import M3Config
 from .observation import RosRgbdCameraConfig, RosRgbdCameraSource
-from .process import GazeboProcessError, GazeboWorldControl, Ros2LaunchProcess
+from .process import (
+    GazeboDetachableJointControl,
+    GazeboProcessError,
+    GazeboWorldControl,
+    Ros2LaunchProcess,
+)
 from .profiles import CONTROL, PHYSICS, GazeboProfile
 from .ros_control import RosM2ControllerFactory
 from .ros_physics import RosM3PhysicsSourceFactory
@@ -52,6 +57,19 @@ class GazeboRuntime:
             gz_executable=deployment.gz_executable,
             environment=deployment.process_environment,
         )
+        # The detachable fallback is active only when the deployment opts in
+        # AND the profile carries M3 physics; the default physics mode never
+        # creates the actuator and the launched model has no such plugins.
+        self.attachment: Any | None = None
+        if (
+            deployment.m3_attachment_mode == "detachable"
+            and PHYSICS in profile.capabilities
+            and world_control is None
+        ):
+            self.attachment = GazeboDetachableJointControl(
+                gz_executable=deployment.gz_executable,
+                environment=deployment.process_environment,
+            )
         self._launch: Any | None = None
         self._cameras: list[Any] = []
         self.controller: Any | None = None
@@ -112,6 +130,10 @@ class GazeboRuntime:
             for camera in self._cameras:
                 camera.start()
             arguments = (*self.deployment.launch_arguments,)
+            if self.attachment is not None:
+                # The M3 URDF only emits the DetachableJoint plugins when the
+                # launch asks for them; physics mode launches stay identical.
+                arguments = (*arguments, "attachment_mode:=detachable")
             self._launch = self._launch_factory(
                 package=self.profile.launch_package,
                 launch_file=self.profile.launch_file,
@@ -193,6 +215,12 @@ class GazeboRuntime:
         # Preserve /clock after the ROS action stack has started.
         self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
         if PHYSICS in self.profile.capabilities and self.controller is not None:
+            # The DetachableJoint plugins attach both objects at spawn; detach
+            # them before any motion or object restore so the joint never
+            # fights the reset.
+            if self.attachment is not None:
+                for label in ("target", "distractor"):
+                    self.attachment.detach(label)
             # A model-only world reset restores entity poses but leaves the
             # arm wherever the last action ended, with the trajectory
             # controller still holding the stale setpoint.  M3 resets once

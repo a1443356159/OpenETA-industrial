@@ -1,6 +1,7 @@
 <?xml version="1.0"?>
 <robot name="rm75_robotiq_2f85_pickplace_sim_v1" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="controller_config" default="$(find openeta_rm75_robotiq2f85_sim)/config/controllers.yaml"/>
+  <xacro:arg name="attachment_mode" default="physics"/>
   <xacro:include filename="$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/rm75_robotiq2f85.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/urdf/ros2_control.xacro"/>
@@ -32,4 +33,31 @@
     <mu1>1.5</mu1><mu2>1.5</mu2><kp>100000</kp><kd>10</kd>
   </gazebo>
   <gazebo reference="rm75_to_gripper_mount"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
+
+  <!-- User-approved (2026-08-10) controlled fallback: fixed joints between
+       the gripper mount and each manipulated object, created only on an
+       explicit attach topic after verified contact evidence.  The default
+       physics mode omits these plugins entirely. -->
+  <xacro:if value="${'$(arg attachment_mode)' == 'detachable'}">
+    <gazebo>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>gripper_mount_link</parent_link>
+        <child_model>m3_target</child_model>
+        <child_link>target_link</child_link>
+        <attach_topic>/m3/detachable_joint/target/attach</attach_topic>
+        <detach_topic>/m3/detachable_joint/target/detach</detach_topic>
+        <output_topic>/m3/detachable_joint/target/state</output_topic>
+        <suppress_child_warning>true</suppress_child_warning>
+      </plugin>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>gripper_mount_link</parent_link>
+        <child_model>m3_distractor</child_model>
+        <child_link>distractor_link</child_link>
+        <attach_topic>/m3/detachable_joint/distractor/attach</attach_topic>
+        <detach_topic>/m3/detachable_joint/distractor/detach</detach_topic>
+        <output_topic>/m3/detachable_joint/distractor/state</output_topic>
+        <suppress_child_warning>true</suppress_child_warning>
+      </plugin>
+    </gazebo>
+  </xacro:if>
 </robot>

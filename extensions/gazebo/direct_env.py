@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import time
 from typing import Any, Mapping
 
@@ -12,7 +13,7 @@ from adapter.protocol import EnvObservation
 
 from .deployment import GazeboDeploymentConfig, worker_deployment_config
 from .m2 import JOINT_NAMES
-from .m3 import M3Config, M3Verifier, ReasonCode, relative_pose, unknown_record
+from .m3 import M3Config, M3Verifier, ReasonCode, relative_pose, select_attachment_object, unknown_record
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .runtime import GazeboRuntime
 
@@ -58,6 +59,7 @@ class GazeboDirectEnv(Env):
         self._m3_config = self.profile.model_config if isinstance(self.profile.model_config, M3Config) else None
         self._verifier = M3Verifier(self._m3_config) if self._m3_config is not None else None
         self._last_snapshot: Any | None = None
+        self._attached_object: str | None = None
 
     @property
     def controller(self) -> Any | None:
@@ -93,6 +95,12 @@ class GazeboDirectEnv(Env):
                 "joint_names": list(getattr(config, "joint_names", JOINT_NAMES)),
                 "camera_frames": [item.frame_id for item in self.profile.cameras],
             })
+        if self._m3_config is not None:
+            # Rollout metadata must state which attachment mechanism produced
+            # any grasp evidence (physics friction vs the detachable fallback).
+            raw.setdefault("metadata", {})["attachment_mode"] = getattr(
+                self.runtime.deployment, "m3_attachment_mode", "physics"
+            )
         return raw
 
     def _camera_timestamp(self, raw: Mapping[str, Any]) -> float:
@@ -161,6 +169,7 @@ class GazeboDirectEnv(Env):
         if self._verifier is not None:
             self._verifier.reset()
             self._last_snapshot = None
+            self._attached_object = None
         observation = self.runtime.reset(seed=self._seed)
         raw = self._decorate_robot(self._as_unified(observation))
         raw, snapshot = self._merge_physics(raw, action_type="gripper_open", require=PHYSICS in self.profile.capabilities)
@@ -177,6 +186,7 @@ class GazeboDirectEnv(Env):
         raw_action = action if isinstance(action, Mapping) else {}
         action_type = raw_action.get("action_type")
         planning = getattr(self.runtime.physics_source, "planning_scene", None)
+        attachment = getattr(self.runtime, "attachment", None)
         if (
             action_type == "gripper_open" and planning is not None
             and planning.attached and self._m3_config is not None
@@ -184,6 +194,18 @@ class GazeboDirectEnv(Env):
             target = self._last_snapshot.object(self._m3_config.target_id) if self._last_snapshot is not None else None
             if target is not None:
                 planning.release(target.pose)
+        if (
+            action_type == "gripper_open"
+            and self._attached_object is not None
+            and attachment is not None
+            and self._m3_config is not None
+        ):
+            # The detachable fallback releases the joint exactly when the
+            # gripper is asked to open, so drop/place physics stay honest.
+            attachment.detach(
+                "target" if self._attached_object == self._m3_config.target_id else "distractor"
+            )
+            self._attached_object = None
         observation, receipt = self.runtime.execute(raw_action)
         raw = self._decorate_robot(self._as_unified(observation))
         barrier_value = receipt.get("action_completed_ros_time_s")
@@ -216,6 +238,26 @@ class GazeboDirectEnv(Env):
                 target = snapshot.object(self._m3_config.target_id)
                 if target is not None and not planning.attached:
                     planning.release(target.pose)
+            if (
+                action_type == "gripper_close"
+                and attachment is not None
+                and snapshot is not None
+                and physical["reason_code"] == ReasonCode.LIFT_REQUIRED.value
+            ):
+                # Fallback attach only after the verifier's own stall/aperture
+                # evidence AND with an object geometrically at the pads; the
+                # verifier never learns whether a joint was created.
+                selected = select_attachment_object(
+                    reason_code=physical["reason_code"],
+                    eef_pose=snapshot.eef_pose,
+                    objects=snapshot.objects,
+                    config=self._m3_config,
+                )
+                if selected is not None:
+                    attachment.attach(
+                        "target" if selected == self._m3_config.target_id else "distractor"
+                    )
+                    self._attached_object = selected
         self._latest = raw
         # The Direct/Gym boundary owns the public unified observation.  Keep
         # the structured receipt anchored to that exact post-action object so
@@ -233,5 +275,12 @@ class GazeboDirectEnv(Env):
         return camera.get("rgb")
 
     def close(self) -> None:
+        attachment = getattr(self.runtime, "attachment", None)
+        if self._attached_object is not None and attachment is not None:
+            with suppress(Exception):
+                attachment.detach(
+                    "target" if self._attached_object == self._m3_config.target_id else "distractor"
+                )
+        self._attached_object = None
         self.runtime.close()
         self._latest = None
