@@ -1,0 +1,277 @@
+{
+  "episodes": [
+    {
+      "episode_id": "gazebo-industrial-single-grasp-seed0",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "grasp the red box on the workbench and lift it",
+      "seed": 0,
+      "max_turns": 100,
+      "max_tool_calls": 200,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "single_grasp",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.28, -0.10, 0.43]}
+          ],
+          "destinations": [],
+          "goal": {"target_id": "m3_target", "destination_id": null},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-single-grasp-seed1",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "grasp the red box on the workbench and lift it",
+      "seed": 1,
+      "max_turns": 100,
+      "max_tool_calls": 200,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "single_grasp",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.30, -0.05, 0.43]}
+          ],
+          "destinations": [],
+          "goal": {"target_id": "m3_target", "destination_id": null},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-pick-place-seed0",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "pick up the red box and place it in the marked zone",
+      "seed": 0,
+      "max_turns": 100,
+      "max_tool_calls": 200,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "pick_place",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.28, -0.10, 0.43]}
+          ],
+          "destinations": [
+            {"id": "m3_zone", "label": "marked zone", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"target_id": "m3_target", "destination_id": "m3_zone"},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-pick-place-seed1",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "pick up the red box and place it in the marked zone",
+      "seed": 1,
+      "max_turns": 100,
+      "max_tool_calls": 200,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "pick_place",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.32, -0.14, 0.43]}
+          ],
+          "destinations": [
+            {"id": "m3_zone", "label": "marked zone", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"target_id": "m3_target", "destination_id": "m3_zone"},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-sort-to-bin-seed0",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "sort the red box into bin A and leave the cylinder where it is",
+      "seed": 0,
+      "max_turns": 100,
+      "max_tool_calls": 200,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "sort_to_bin",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.28, -0.10, 0.43]},
+            {"id": "m3_distractor", "label": "cylinder", "role": "distractor", "kind": "cylinder", "size_m": [0.05, 0.08], "mass_kg": 0.12, "initial_xyz": [0.28, 0.12, 0.44]}
+          ],
+          "destinations": [
+            {"id": "bin_a", "label": "bin A", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"target_id": "m3_target", "destination_id": "bin_a"},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-sort-to-bin-seed1",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "sort the cylinder into bin A and leave the red box where it is",
+      "seed": 1,
+      "max_turns": 100,
+      "max_tool_calls": 200,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "sort_to_bin",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "distractor", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.28, -0.10, 0.43]},
+            {"id": "m3_distractor", "label": "cylinder", "role": "target", "kind": "cylinder", "size_m": [0.05, 0.08], "mass_kg": 0.12, "initial_xyz": [0.28, 0.12, 0.44]}
+          ],
+          "destinations": [
+            {"id": "bin_a", "label": "bin A", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"target_id": "m3_distractor", "destination_id": "bin_a"},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-multi-sort-seed0",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "put the red box into bin A and the cylinder into bin B",
+      "seed": 0,
+      "max_turns": 150,
+      "max_tool_calls": 300,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "multi_sort",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.28, -0.10, 0.43]},
+            {"id": "m3_distractor", "label": "cylinder", "role": "target", "kind": "cylinder", "size_m": [0.05, 0.08], "mass_kg": 0.12, "initial_xyz": [0.28, 0.12, 0.44]}
+          ],
+          "destinations": [
+            {"id": "bin_a", "label": "bin A", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]},
+            {"id": "bin_b", "label": "bin B", "center_xy": [0.48, 0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"assignments": [{"target_id": "m3_target", "destination_id": "bin_a"}, {"target_id": "m3_distractor", "destination_id": "bin_b"}]},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-multi-sort-seed1",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "put the red box into bin A and the cylinder into bin B",
+      "seed": 1,
+      "max_turns": 150,
+      "max_tool_calls": 300,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "multi_sort",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.26, -0.12, 0.43]},
+            {"id": "m3_distractor", "label": "cylinder", "role": "target", "kind": "cylinder", "size_m": [0.05, 0.08], "mass_kg": 0.12, "initial_xyz": [0.30, 0.10, 0.44]},
+            {"id": "m7_clutter_0", "label": "green box", "role": "clutter", "kind": "box", "size_m": [0.04, 0.04, 0.04], "mass_kg": 0.08, "initial_xyz": [0.34, 0.0, 0.42]}
+          ],
+          "destinations": [
+            {"id": "bin_a", "label": "bin A", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]},
+            {"id": "bin_b", "label": "bin B", "center_xy": [0.48, 0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"assignments": [{"target_id": "m3_target", "destination_id": "bin_a"}, {"target_id": "m3_distractor", "destination_id": "bin_b"}]},
+          "variation": {"occlusion": "partial", "lighting": "default", "clutter": "low"}
+        },
+        "failure_injection": null
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-grasp-recovery-seed0",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "pick up the red box and place it in the marked zone",
+      "seed": 0,
+      "max_turns": 150,
+      "max_tool_calls": 300,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "grasp_recovery",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.28, -0.10, 0.43]}
+          ],
+          "destinations": [
+            {"id": "m3_zone", "label": "marked zone", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"target_id": "m3_target", "destination_id": "m3_zone"},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": {"kind": "grasp_pose_offset", "offset_m": [0.03, 0.0, 0.0], "max_injections": 1}
+      }
+    },
+    {
+      "episode_id": "gazebo-industrial-grasp-recovery-seed1",
+      "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+      "task": "pick up the red box and place it in the marked zone",
+      "seed": 1,
+      "max_turns": 150,
+      "max_tool_calls": 300,
+      "timeout_s": 3600,
+      "max_total_tokens": 5000000,
+      "metadata": {
+        "suite": "gazebo_industrial",
+        "benchmark_version": "v0",
+        "task_class": "grasp_recovery",
+        "split": "canary",
+        "scene": {
+          "objects": [
+            {"id": "m3_target", "label": "red box", "role": "target", "kind": "box", "size_m": [0.04, 0.04, 0.06], "mass_kg": 0.10, "initial_xyz": [0.28, -0.10, 0.43]}
+          ],
+          "destinations": [
+            {"id": "m3_zone", "label": "marked zone", "center_xy": [0.48, -0.10], "size_xy_m": [0.12, 0.12]}
+          ],
+          "goal": {"target_id": "m3_target", "destination_id": "m3_zone"},
+          "variation": {"occlusion": "none", "lighting": "default", "clutter": "none"}
+        },
+        "failure_injection": {"kind": "drop_after_lift", "max_injections": 1}
+      }
+    }
+  ]
+}
