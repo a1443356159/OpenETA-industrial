@@ -27,7 +27,18 @@ plan-M3.plan 曾显式禁止 detachable joint 等附着机制；用户 2026-08-1
 **验收结果（2026-08-11，detachable 模式三轮正式运行）**：
 `...T034841Z-576217.json`、`...T035724Z-578522.json`、`...T040543Z-580628.json`，均 `blocked`。几何门按设计工作：run 2 中 `(65,0)` 的 close 弹出盒子后，门正确判定垫区无物体而**未** attach（target 已被弹到 0.82 m 外）。三轮中闭合结果分布：stall 2/9、空抓 5/9、弹出 1/9、pregrasp 规划失败 2/12。即使 fallback 就位，**触点事件本身（垫面命中 4 cm 盒面）的可靠性不足**——六根失步使垫面落点逐次漂移 1-2 cm，与盒体 ±2 cm 净空同量级。因此六场景未跑通，milestone 保持 blocked。
 
-**下一步（按优先级）**：① gz 侧闭环连杆保真：用关节耦合约束（或单主动关节+位置约束）替代六独立位置系统，使垫面收敛可复现——该改动影响 M2 认证模型，需重跑 M2 正式验收；② 或垫面反馈闭合（按实测垫间距闭环到目标宽度）；③ 二者之一落地后先探针量化命中率 ≥90%，再跑本验收。
+## 统一驱动攻关（2026-08-11，用户拍板方向 ①）
+
+- **四连杆闭式解**（`extensions/gazebo/robotiq_kinematics.py`，纯 Python）：A/B/C 枢轴取 vendor URDF 精确值，耦合点 D 由碰撞网格镗孔圆拟合（std≤0.55 mm），|BD| 取零位精确闭环。数值结论：**vendor 的常量 mimic 与精确解全行程闭环误差 <0.03 mm**——六关节目标本就几何一致，失步不是目标不一致导致的。单测 `tests/test_gazebo_robotiq_kinematics.py`（闭环误差、端点开度与 FK 表一致、单调性、限位）。适配器 `drive_mode=four_bar|multiplier`：M3 launch 用 four_bar，M2 launch 固定 multiplier（其 mimic 合同 0.035 rad 容差与四活塞偏差叠加会越界）。
+- **适配器斜坡改 lead-limit**（`max_lead_rad=0.06`）：目标最多领先实测 0.06 rad——消除均匀慢速斜坡的卡死假 stall（8.1 cm 假 stall 根因是 blocked-pause 死锁），同时避免全行程过压。两段速保留。
+- **MoveIt attach 修复**：attach diff 里显式 world REMOVE 与 attach 自动移除世界对象重复，导致 `ApplyPlanningScene` 返回 `success=False`——去掉显式 REMOVE 后 attach/release/clear 全链路 live 验证通过。
+- **接触位 +9 mm 偏置**（驱动常量 `GRASP_CENTER_Z_BIAS_M`）：相机实况显示中心高度接触让盒子被垫面从下方挤出；上移后垫面咬在盒体上三分之一。探针最好成绩 **8/8 连续干净持握**（contact_moved=0、stall、attach、lift `TARGET_HELD`）。
+- **逐 reset 抓心校准**：实测闭合中线相对盒心偏移以每轮 3-10 mm 累积（连杆失步漂移），`GazeboRuntime.reset` 现在在每次 reset 于接触孔径（0.41 rad）处重测抓心偏移（`grasp_center_offset_m`），驱动每个候选/正轮/负例 reset 后取新值。
+- **reset 确定性与串行化**：`set_pose` 加重试；还原改为 detach→set_pose→回零→set_pose 双段（持盒 reset 不再掉落级联）；M3 run 脚本 direct 驱动改 setsid，堵上同组 launch 泄漏缺口；探针包装器按 partition 强制清场。
+- **剩余失效模式（当前状态）**：近 boot 间方差仍大——同一构建在不同 boot 下探针分布从 8/8 到 1/8 摆动，正式运行（physics：`...T065939Z`、`...T071311Z`；detachable：`...T073755Z`、`...T091952Z`）均止步于闭合命中率（候选冻结成功率约 50-75%，单轮成功率更高但 5/5 连过仍不足）。最新两轮 detachable 首次走通 **lift→TARGET_HELD→transport→lower→release** 全链：`...T091952Z-628664.json` 止于放置（附着体 touch_links 过窄致 transport/lower 规划 99999）；`...T092725Z-630483.json`（touch_links=`grasp_touch_links` + 目标/干扰物↔桌面 ACM 修复后）正轮 1 走到 transport 仍遇一次 99999 目标采样抖动，随后序列为 OBJECT_DROPPED 收场。规划采样抖动（OMPL/KDL 目标采样在高负载下偶发 30s 无解）是当前最后一层非物理阻塞。
+- **M2 复验通过**：`m2-robotiq2f85-acceptance-20260811T073214Z-611375.json`（统一驱动适配器 + multiplier 模式），七 gate 全绿。
+
+**下一步（按优先级）**：① 用最后一轮修复（attach touch_links=grasp_touch_links + 目标/干扰物↔桌面 ACM）完整复跑 detachable 验收，期望走到六场景；② 闭合命中率对 boot 仍敏感（疑似 spawn 落定态差异），若仍不足 90%，按文档方向 ② 叠加垫面反馈闭合；③ physics 模式的摩擦持握在 +9 mm 偏置下未再复测，需一轮正式运行数据。
 
 ## 实现边界
 
