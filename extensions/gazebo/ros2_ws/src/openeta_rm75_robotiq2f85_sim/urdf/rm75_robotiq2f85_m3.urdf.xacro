@@ -25,12 +25,15 @@
   <xacro:gz_gripper_position_controller joint="gripper_left_finger_tip_joint" topic="/openeta/gripper/left_tip"/>
   <xacro:gz_gripper_position_controller joint="gripper_right_finger_tip_joint" topic="/openeta/gripper/right_tip"/>
 
-  <!-- M3-only friction settings.  M2's frozen behavior is unchanged. -->
+  <!-- M3-only friction settings.  M2's frozen behavior is unchanged.
+       mu 2.0: the reachable grasp band tilts the pads ~25 deg off vertical,
+       so the pads meet the box faces along an edge line — a hinge the block
+       pivots around during the lift unless the contact resists sliding. -->
   <gazebo reference="robotiq_85_left_finger_tip_link">
-    <mu1>1.5</mu1><mu2>1.5</mu2><kp>100000</kp><kd>10</kd>
+    <mu1>2.0</mu1><mu2>2.0</mu2><kp>100000</kp><kd>10</kd>
   </gazebo>
   <gazebo reference="robotiq_85_right_finger_tip_link">
-    <mu1>1.5</mu1><mu2>1.5</mu2><kp>100000</kp><kd>10</kd>
+    <mu1>2.0</mu1><mu2>2.0</mu2><kp>100000</kp><kd>10</kd>
   </gazebo>
   <gazebo reference="rm75_to_gripper_mount"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
 
