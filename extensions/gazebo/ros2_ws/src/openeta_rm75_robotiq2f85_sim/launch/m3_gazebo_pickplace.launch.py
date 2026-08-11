@@ -106,6 +106,9 @@ def generate_launch_description():
                 "allow_stalling": True,
                 "stall_velocity_threshold": 0.001,
                 "stall_timeout": 1.0,
+                # M3 drives the exact four-bar solution; M2 keeps the legacy
+                # multiplier vector its mimic contract is certified against.
+                "drive_mode": "four_bar",
             }
         ],
     )

@@ -3,12 +3,18 @@
 
 Gazebo Harmonic's URDF importer does not propagate all five Robotiq mimic
 joints when only the outer knuckle is commanded.  The robot-local Gazebo
-position systems therefore receive the complete vendor multiplier vector,
-while callers retain the standard one-joint ROS action contract.
+position systems therefore receive per-joint targets computed from the
+one-DOF four-bar closed-form solution (``extensions.gazebo.robotiq_kinematics``),
+keeping the six commanded positions geometrically consistent with the closed
+linkage; the legacy constant-multiplier expansion stays available behind the
+``drive_mode`` parameter for rollback comparison.  Callers retain the
+standard one-joint ROS action contract.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 import threading
 import time
 from typing import Final
@@ -21,6 +27,26 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64
+
+
+def _load_six_joint_positions():
+    """Import the repository's pure four-bar solver (no ROS dependency)."""
+
+    try:
+        from extensions.gazebo.robotiq_kinematics import six_joint_positions
+
+        return six_joint_positions
+    except ImportError:
+        pass
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "extensions" / "gazebo" / "robotiq_kinematics.py").is_file():
+            sys.path.insert(0, str(parent))
+            from extensions.gazebo.robotiq_kinematics import six_joint_positions
+
+            return six_joint_positions
+    raise RuntimeError(
+        "extensions/gazebo/robotiq_kinematics.py not found relative to the adapter"
+    )
 
 
 ACTIVE_JOINT: Final = "gripper_left_finger_joint"
@@ -55,7 +81,13 @@ SLOW_TAIL_FRACTION: Final = 0.55
 SLOW_TAIL_FACTOR: Final = 0.25
 # While the active joint is blocked the ramp pauses (factor 0), so the
 # position error (and therefore the squeeze force) never grows past contact.
+# Retained for rollback comparison; superseded by the max_lead_rad lead limit
+# (a pure pause can deadlock into a false stall when a velocity sample dips).
 BLOCKED_RAMP_FACTOR: Final = 0.0
+# Lead limit for the command ramp: the published active-joint target stays at
+# most this far ahead of the measured position, bounding the squeeze force on
+# contact while always pulling the joint forward (no deadlock).
+MAX_LEAD_RAD: Final = 0.06
 # Extra closing stroke (active joint, rad) commanded per joint when a stall is
 # held.  Each joint keeps its own measured position plus at most this offset,
 # so a stressed four-bar linkage is never forced back into the nominal mimic
@@ -83,6 +115,12 @@ class RobotiqGripperActionAdapter(Node):
         self.declare_parameter("ramp_s", RAMP_S)
         self.declare_parameter("blocked_ramp_factor", BLOCKED_RAMP_FACTOR)
         self.declare_parameter("stall_hold_extra_rad", STALL_HOLD_EXTRA_RAD)
+        self.declare_parameter("max_lead_rad", MAX_LEAD_RAD)
+        # "four_bar" (default) drives the six joints with the geometrically
+        # consistent closed-form solution; "multiplier" reproduces the legacy
+        # constant-mimic expansion for rollback comparison.
+        self.declare_parameter("drive_mode", "four_bar")
+        self._six_joint_positions = _load_six_joint_positions()
         self._allow_stalling = bool(self.get_parameter("allow_stalling").value)
         self._stall_velocity_threshold = float(
             self.get_parameter("stall_velocity_threshold").value
@@ -168,17 +206,19 @@ class RobotiqGripperActionAdapter(Node):
 
     def _execute(self, goal_handle):
         active_position = float(goal_handle.request.command.position[0])
-        targets = expanded_targets(active_position)
+        if str(self.get_parameter("drive_mode").value) == "multiplier":
+            targets = expanded_targets(active_position)
+        else:
+            targets = dict(self._six_joint_positions(active_position))
         start_positions, _, _ = self._snapshot()
         result = ParallelGripperCommand.Result()
         deadline = time.monotonic() + ACTION_TIMEOUT_S
         last_movement_time = time.monotonic()
         ramp_s = float(self.get_parameter("ramp_s").value)
-        blocked_ramp_factor = float(self.get_parameter("blocked_ramp_factor").value)
         stall_hold_extra = float(self.get_parameter("stall_hold_extra_rad").value)
+        max_lead = float(self.get_parameter("max_lead_rad").value)
         alpha = 0.0
         last_tick = time.monotonic()
-        has_moved = False
 
         while rclpy.ok() and time.monotonic() < deadline:
             positions, velocities, state = self._snapshot()
@@ -194,27 +234,19 @@ class RobotiqGripperActionAdapter(Node):
             now = time.monotonic()
             dt = now - last_tick
             last_tick = now
-            active_velocity_now = abs(float(velocities.get(ACTIVE_JOINT, 0.0)))
-            if active_velocity_now > self._stall_velocity_threshold:
-                has_moved = True
-            errors_now = (
-                {name: abs(positions[name] - target) for name, target in targets.items()}
-                if set(targets).issubset(positions)
-                else None
-            )
-            blocked = bool(
-                has_moved
-                and errors_now is not None
-                and max(errors_now.values()) > GOAL_TOLERANCE_RAD
-                and active_velocity_now <= self._stall_velocity_threshold
-            )
-            if not blocked:
-                alpha += dt / ramp_s * (
-                    1.0 if alpha < SLOW_TAIL_FRACTION else SLOW_TAIL_FACTOR
-                )
-            else:
-                alpha += dt / ramp_s * blocked_ramp_factor
-            alpha = min(1.0, alpha)
+            # Time-based two-speed ramp: fast across free space, slow through
+            # the contact tail.
+            alpha += dt / ramp_s * (1.0 if alpha < SLOW_TAIL_FRACTION else SLOW_TAIL_FACTOR)
+            # Lead limit: the published target never runs more than
+            # max_lead_rad (active joint) ahead of the measured position.  A
+            # genuinely blocked joint therefore feels a bounded squeeze instead
+            # of full-stroke pressure, without any pause/deadlock state.
+            if set(JOINT_MULTIPLIERS).issubset(start_positions) and set(targets).issubset(positions):
+                stroke = targets[ACTIVE_JOINT] - start_positions[ACTIVE_JOINT]
+                if abs(stroke) > 1e-9:
+                    progress = (positions[ACTIVE_JOINT] - start_positions[ACTIVE_JOINT]) / stroke
+                    alpha = min(alpha, max(progress, 0.0) + max_lead / abs(stroke))
+            alpha = min(1.0, max(alpha, 0.0))
 
             # Re-publishing makes startup deterministic even if the bridge is
             # still establishing its Gazebo publisher on the first sample.

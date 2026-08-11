@@ -70,7 +70,9 @@ def generate_launch_description():
         package="openeta_rm75_robotiq2f85_sim",
         executable="gripper_action_adapter.py",
         output="screen",
-        parameters=[{"use_sim_time": True}],
+        # M2's certified mimic-relation contract is checked against the legacy
+        # constant-multiplier drive; M3 uses the exact four-bar drive.
+        parameters=[{"use_sim_time": True, "drive_mode": "multiplier"}],
     )
     move_group = Node(
         package="moveit_ros_move_group", executable="move_group", output="screen",
