@@ -6,7 +6,7 @@ M2 baseline SHA: `3ace2b5c97516adda2f56c214e1afa80e43e75fc`
 
 在 `main` 上先把当前 M2 开发整理为三个本地提交，但将其状态明确保留为“实现完成、正式验收未通过”。随后从该提交创建 `dev-M3`，把本计划原文写入仓库根目录 `plan-M3.plan` 并单独提交。
 
-M3 新增独立 Gazebo 拾放环境，通过 Robotiq 闭合受阻回执和物体共动验证抓取、抬升、搬运、掉落及放置。禁止使用 Gazebo detachable joint、固定关节或隐藏吸附模拟成功；物理夹持不稳定时，M3 保持未完成并记录阻塞。
+M3 新增独立 Gazebo 拾放环境，通过 Robotiq 闭合受阻回执和物体共动验证抓取、抬升、搬运、掉落及放置。~~禁止使用 Gazebo detachable joint、固定关节或隐藏吸附模拟成功；物理夹持不稳定时，M3 保持未完成并记录阻塞。~~ **用户 2026-08-10 决策修订**：detachable joint 解禁为受控 fallback——仅允许在验证器自身接触/几何证据成立后经显式 topic 触发，且不得改变验证语义（详见 `docs/gazebo-m3-physical-verification.md` 的 Detachable-joint fallback 一节）；隐藏吸附与任何绕过验证的做法仍然禁止。
 
 M3 只负责确定性物理执行与可信校验。LLM/VLM、SAM3、AnyGrasp、AnyPlace 和完整智能抓放流程仍属于 M4/M5。
 
@@ -65,7 +65,7 @@ M3 只负责确定性物理执行与可信校验。LLM/VLM、SAM3、AnyGrasp、A
 - 使用 `ros_gz_bridge` 已支持的 `gz.msgs.Odometry ↔ nav_msgs/msg/Odometry` 映射，不自定义传输协议。[ros_gz bridge 支持列表](https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md)
 - 使用 MoveIt PlanningScene、CollisionObject、AttachedCollisionObject 和 AllowedCollisionMatrix 表达工作台、物体及规划碰撞关系。[MoveIt Planning Around Objects](https://moveit.picknik.ai/main/doc/tutorials/planning_around_objects/planning_around_objects.html)
 - M3 夹爪允许采用 ros2_control 文档定义的 stall-success 语义：物体阻挡闭合时动作可以成功结束，但必须返回 `stalled=true`、`reached_goal=false`，物理抓取成功仍由校验器决定。[ros2_control Gripper Action Controller](https://control.ros.org/jazzy/doc/ros2_controllers/gripper_controllers/doc/userdoc.html)
-- MoveIt 中的 AttachedCollisionObject 仅用于后续轨迹规划；Gazebo 中不得创建附着关节或改变物体运动学关系。
+- MoveIt 中的 AttachedCollisionObject 仅用于后续轨迹规划；~~Gazebo 中不得创建附着关节或改变物体运动学关系。~~ **2026-08-10 用户修订**：允许 `gz::sim::systems::DetachableJoint` 作为受控 fallback（默认 `physics` 模式不加载；attach 仅由验证接触证据触发，open 时 detach；详见 M3 文档）。
 
 每份 M3 报告记录采用的文档 URL、仓库 commit/tag、已安装包版本及对应实现位置，避免后续升级时失去可追溯性。
 

@@ -15,6 +15,20 @@ M3 的场景、正式 ROS/Gazebo 数据路径、MoveIt PlanningScene、无 ROS �
 
 清理 gate 方面，分区探针获得与 domain 探针相同的有界重试（WSL2 上 Gazebo Transport 发现滞后于进程退出），不再把单纯的发现滞后误报为残留。已知缺口：Direct 驱动进程内启动的 launch 栈与驱动同进程组，驱动异常退出时清理路径按设计不信号自身组，孤立的 gz/bridge/move_group 需按 partition 手动回收（本轮两轮正式运行后均如此清理）。
 
+## Detachable-joint fallback（用户 2026-08-10 解禁）
+
+plan-M3.plan 曾显式禁止 detachable joint 等附着机制；用户 2026-08-10 拍板将其解禁为**受控 fallback**。机制与语义边界：
+
+- **机制**：`gz::sim::systems::DetachableJoint` 插件（两个实例，`gripper_mount_link ↔ m3_target` 与 `↔ m3_distractor`），通过 xacro 参数 `attachment_mode` 仅在其为 `detachable` 时注入机器人模型；launch 同名参数透传。OpenETA 侧由 `GazeboDetachableJointControl`（`process.py`）向 `/m3/detachable_joint/<label>/attach|detach` 发布 `gz.msgs.Empty`。MoveIt `AttachedCollisionObject` 的分工不变：它只在 `TARGET_HELD` 有物理证据后参与后续**规划**碰撞语义，不产生任何 Gazebo entity/joint 变化。
+- **开关**：`GazeboDeploymentConfig.m3_attachment_mode` 由 `OPENETA_M3_ATTACHMENT_MODE` 读取，`physics`（默认）完全不加载插件、不创建执行器——现状行为零影响；验收报告与观测 metadata 均标注 `attachment_mode`。
+- **诚实语义（红线）**：attach 只在 close 产生 `LIFT_REQUIRED`（stall + aperture 在持握窗口）**且**目标/干扰物中心位于 EEF 距离带 `[0.09, 0.17] m`（`select_attachment_object`，几何门）时触发；`gripper_open` 先 detach 再执行。验证器语义零改动——lift 共动、三态 verdict、六场景判定照旧读取 odometry，attach 本身不构成证据。
+- **离线合同**：`tests/test_gazebo_m3_attachment.py`（门逻辑：无 stall 不 attach、空位不 attach、错物选 distractor、模式默认/校验、runtime 执行器开关）。
+
+**验收结果（2026-08-11，detachable 模式三轮正式运行）**：
+`...T034841Z-576217.json`、`...T035724Z-578522.json`、`...T040543Z-580628.json`，均 `blocked`。几何门按设计工作：run 2 中 `(65,0)` 的 close 弹出盒子后，门正确判定垫区无物体而**未** attach（target 已被弹到 0.82 m 外）。三轮中闭合结果分布：stall 2/9、空抓 5/9、弹出 1/9、pregrasp 规划失败 2/12。即使 fallback 就位，**触点事件本身（垫面命中 4 cm 盒面）的可靠性不足**——六根失步使垫面落点逐次漂移 1-2 cm，与盒体 ±2 cm 净空同量级。因此六场景未跑通，milestone 保持 blocked。
+
+**下一步（按优先级）**：① gz 侧闭环连杆保真：用关节耦合约束（或单主动关节+位置约束）替代六独立位置系统，使垫面收敛可复现——该改动影响 M2 认证模型，需重跑 M2 正式验收；② 或垫面反馈闭合（按实测垫间距闭环到目标宽度）；③ 二者之一落地后先探针量化命中率 ≥90%，再跑本验收。
+
 ## 实现边界
 
 - 环境 ID：`openeta/gazebo_rm75_robotiq2f85_pickplace-v0`
