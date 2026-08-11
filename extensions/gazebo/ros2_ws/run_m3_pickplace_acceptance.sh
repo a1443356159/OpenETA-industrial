@@ -222,7 +222,10 @@ bash "${REPO_DIR}/scripts/check_openeta_m2.sh"
 "${PYTHON_BIN}" "${DRIVER}" gate --report "${REPORT}" --gate m2_checkpoint_regression \
   --details "scripts/check_openeta_m2.sh passed; this is not formal M2 acceptance"
 
-"${PYTHON_BIN}" "${DRIVER}" direct --report "${REPORT}"
+# The direct driver owns its launch stack in-process; give it its own session
+# so the partition-scoped cleanup below can reap the whole tree (the cleanup
+# deliberately never signals its own/ancestor groups).
+setsid "${PYTHON_BIN}" "${DRIVER}" direct --report "${REPORT}"
 
 setsid "${PYTHON_BIN}" -m sim.mcp_server --port "${OPENETA_MCP_PORT}" >"${MCP_LOG}" 2>&1 &
 MCP_PID=$!

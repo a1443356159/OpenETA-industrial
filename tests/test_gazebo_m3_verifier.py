@@ -375,7 +375,9 @@ def test_planning_scene_commands_never_describe_a_gazebo_attachment() -> None:
     assert initialized[2].payload["object_id"] == M3Config().distractor_id
     assert initialized[2].payload["links"] == list(M3Config().grasp_touch_links)
     assert initialized[3].payload["object_id"] == M3Config().table_id
-    assert initialized[3].payload["links"] == list(M3Config().table_touch_links)
+    assert initialized[3].payload["links"] == list(
+        M3Config().table_touch_links
+    ) + [M3Config().target_id, M3Config().distractor_id]
     attached = model.attach(relative_pose(Pose((0, 0, 0), (0, 0, 0, 1)), target))
     assert attached[0].operation == "attach"
     assert all("gazebo" not in command.operation.lower() for command in (*initialized, *attached))

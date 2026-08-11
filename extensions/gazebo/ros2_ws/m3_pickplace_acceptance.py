@@ -36,6 +36,11 @@ ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
 MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
 WORLD_NAME = "m3_rm75_robotiq2f85_pickplace"
 POSITION_TOLERANCE_M = 0.005
+# Contact poses aim the pad line at the target's upper third: camera evidence
+# showed centre-height contact lets the closing fingers wedge the box up and
+# out, while a small upward bias presses it onto the table during the pinch.
+# 9 mm scored 8/8 clean hold-and-lift cycles in the close-statistics probe.
+GRASP_CENTER_Z_BIAS_M = 0.009
 ORIENTATION_TOLERANCE_RAD = 0.08
 DOCUMENTATION = {
     "gazebo_odometry_publisher": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1OdometryPublisher.html",
@@ -395,6 +400,14 @@ def _stl_center(path: Path) -> tuple[float, float, float]:
 
 
 def _grasp_center_offset(environment: Any) -> tuple[float, float, float]:
+    # The runtime re-measures the offset at the contact aperture on every
+    # reset (the linkage drifts a few millimetres per open/close cycle);
+    # prefer that fresh value and fall back to a direct measurement only when
+    # the runtime does not provide one.
+    fresh = getattr(getattr(environment, "runtime", None), "grasp_center_offset_m", None)
+    if fresh is not None:
+        return tuple(fresh)
+
     from rclpy.time import Time
 
     # Measure at the aperture the pads will actually have when they close onto
@@ -419,6 +432,13 @@ def _grasp_center_offset(environment: Any) -> tuple[float, float, float]:
         centers.append(tuple(translation[index] + rotated[index] for index in range(3)))
     runtime.gripper(0.0, 15.0)
     return tuple(sum(item[index] for item in centers) / 2 for index in range(3))
+
+def _fresh_offset(environment: Any, fallback: Sequence[float]) -> tuple[float, float, float]:
+    """Return the runtime's per-reset grasp-centre measurement when present."""
+
+    fresh = getattr(getattr(environment, "runtime", None), "grasp_center_offset_m", None)
+    return tuple(fresh) if fresh is not None else tuple(float(v) for v in fallback)
+
 
 def _mount_pose(
     grasp_center: Sequence[float],
@@ -493,6 +513,7 @@ def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: 
     candidates = ((65, 0), (70, 0), (75, 0), (60, 15))
     for pitch_degrees, yaw_degrees in candidates:
         observation, _ = environment.reset()
+        offset = _fresh_offset(environment, offset)
         target = _target(observation)["position"]
         orientation = _grasp_orientation(float(pitch_degrees), float(yaw_degrees))
         pregrasp = _mount_pose(
@@ -537,7 +558,9 @@ def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: 
             row["blocker_stage"] = "pregrasp_execute"
             continue
         target = _target(observation)["position"]
-        contact_pose = _mount_pose(target, orientation, offset)
+        contact_pose = _mount_pose(
+            (target[0], target[1], target[2] + GRASP_CENTER_Z_BIAS_M), orientation, offset
+        )
         try:
             observation = _step(
                 environment,
@@ -604,13 +627,16 @@ def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: 
 
 def _positive_round(environment: Any, gate: dict[str, Any], candidate: Mapping[str, Any], offset: Sequence[float]) -> None:
     observation, _ = environment.reset()
+    offset = _fresh_offset(environment, offset)
     orientation = candidate["orientation"]
     target = _target(observation)["position"]
     pregrasp = _mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset)
     observation = _step(environment, {"action_type": "move_to", "target_pose": pregrasp, "timeout_s": 60.0}, gate)
     _assert(gate["actions"][-1]["receipt"].get("ok") is True, "pregrasp motion failed")
     target = _target(observation)["position"]
-    contact = _mount_pose(target, orientation, offset)
+    contact = _mount_pose(
+        (target[0], target[1], target[2] + GRASP_CENTER_Z_BIAS_M), orientation, offset
+    )
     observation = _step(environment, {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0}, gate)
     _assert(gate["actions"][-1]["receipt"].get("ok") is True, "contact motion failed")
     observation = _step(environment, {"action_type": "gripper_close", "timeout_s": 30.0}, gate)
@@ -652,7 +678,11 @@ def _approach_and_close(
         gate,
     )
     _assert(gate["actions"][-1]["receipt"].get("ok") is True, "negative pregrasp failed")
-    contact = _mount_pose(grasp_center, orientation, offset)
+    contact = _mount_pose(
+        (grasp_center[0], grasp_center[1], grasp_center[2] + GRASP_CENTER_Z_BIAS_M),
+        orientation,
+        offset,
+    )
     observation = _step(
         environment,
         {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0},
@@ -675,6 +705,7 @@ def _negative_cases(
     cases: list[dict[str, Any]] = []
 
     environment.reset(seed=51)
+    offset = _fresh_offset(environment, offset)
     empty_center = (0.48, 0.12, environment._m3_config.table_top_z_m + 0.030)
     observation = _approach_and_close(environment, gate, candidate, offset, empty_center)
     reason = _physical(observation).get("reason_code")
@@ -682,6 +713,7 @@ def _negative_cases(
     _assert(reason == "EMPTY_GRASP", f"empty grasp returned {reason}")
 
     observation, _ = environment.reset(seed=52)
+    offset = _fresh_offset(environment, offset)
     distractor = _target(observation, "m3_distractor")["position"]
     observation = _approach_and_close(environment, gate, candidate, offset, distractor)
     _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "wrong-object close did not stall")
@@ -702,6 +734,7 @@ def _negative_cases(
 
     # Establish a fresh proven grasp, then release with the target airborne.
     observation, _ = environment.reset(seed=53)
+    offset = _fresh_offset(environment, offset)
     target = _target(observation)["position"]
     observation = _approach_and_close(environment, gate, candidate, offset, target)
     _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "drop setup close failed")
@@ -724,6 +757,7 @@ def _negative_cases(
 
     # Repeat the proven grasp and release on the table outside the marker.
     observation, _ = environment.reset(seed=54)
+    offset = _fresh_offset(environment, offset)
     target = _target(observation)["position"]
     observation = _approach_and_close(environment, gate, candidate, offset, target)
     _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "outside setup close failed")
@@ -763,7 +797,9 @@ def run_direct(path: Path) -> None:
         observation, _ = environment.reset(seed=31)
         _assert(environment.openeta_control_spec.get("physical_verification") is True, "wrong worker profile")
         _physical(observation)
-        offset = _grasp_center_offset(environment)
+        offset = getattr(environment.runtime, "grasp_center_offset_m", None)
+        _assert(offset is not None, "runtime did not measure a grasp-centre offset at reset")
+        offset = tuple(offset)
         gate["grasp_center_offset_mount_m"] = list(offset)
         candidate = _select_candidate(environment, observation, offset, gate)
         gate["frozen_candidate"] = candidate
@@ -868,7 +904,7 @@ def run_mcp(path: Path, url: str) -> None:
 
         def approach_close(center: Sequence[float]) -> Mapping[str, Any]:
             move(_mount_pose((center[0], center[1], center[2] + 0.080), orientation, offset))
-            move(_mount_pose(center, orientation, offset))
+            move(_mount_pose((center[0], center[1], center[2] + GRASP_CENTER_Z_BIAS_M), orientation, offset))
             return action("gripper_close", {})
 
         for round_number in range(2):

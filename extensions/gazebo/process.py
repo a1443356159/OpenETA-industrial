@@ -214,7 +214,8 @@ class GazeboWorldControl:
         Harmonic's ``model_only`` world reset restores neither free-object
         poses nor robot joint states (verified live on gz-sim 8.11), so M3
         restores its manipulated objects explicitly without rewinding the
-        monotonic simulation clock.
+        monotonic simulation clock.  The control-plane service can stall
+        briefly under simulator load, so one bounded retry is allowed.
         """
 
         if not model_name.strip() or "/" in model_name:
@@ -224,17 +225,26 @@ class GazeboWorldControl:
             f'name: "{model_name}", position: {{x: {float(xyz[0])}, y: {float(xyz[1])}, '
             f"z: {float(xyz[2])}}}, orientation: {{w: 1.0}}"
         )
-        result = subprocess.run(
-            [executable, "service", "-s", f"/world/{self.world_name}/set_pose",
-             "--reqtype", "gz.msgs.Pose", "--reptype", "gz.msgs.Boolean",
-             "--timeout", str(self.timeout_ms), "--req", request],
-            capture_output=True, text=True, timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
-            env=self.environment,
+        last_error = ""
+        for _attempt in range(2):
+            try:
+                result = subprocess.run(
+                    [executable, "service", "-s", f"/world/{self.world_name}/set_pose",
+                     "--reqtype", "gz.msgs.Pose", "--reptype", "gz.msgs.Boolean",
+                     "--timeout", str(self.timeout_ms), "--req", request],
+                    capture_output=True, text=True,
+                    timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0) * 2.0,
+                    env=self.environment,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = "service call timed out"
+                continue
+            if result.returncode == 0 and "data: true" in result.stdout.lower():
+                return
+            last_error = f"{result.stdout[-500:]} {result.stderr[-500:]}"
+        raise GazeboProcessError(
+            f"Gazebo set_pose failed for {model_name}: {last_error}"
         )
-        if result.returncode != 0 or "data: true" not in result.stdout.lower():
-            raise GazeboProcessError(
-                f"Gazebo set_pose failed for {model_name}: {result.stdout[-500:]} {result.stderr[-500:]}"
-            )
 
     def __enter__(self) -> "GazeboProcess":
         self.start()
@@ -258,6 +268,11 @@ class GazeboDetachableJointControl:
         self.gz_executable = gz_executable
         self.timeout_ms = int(timeout_ms)
         self.environment = dict(environment) if environment is not None else None
+        # The plugin attaches every child at spawn (attachRequested defaults
+        # true), so each joint starts attached; transitions we drive are
+        # confirmed on the state topic, and redundant transitions are skipped
+        # because the plugin drops them silently.
+        self._attached = {"target": True, "distractor": True}
 
     def _publish(self, topic: str) -> None:
         executable = shutil.which(self.gz_executable) or self.gz_executable
@@ -272,11 +287,48 @@ class GazeboDetachableJointControl:
                 f"detachable joint publish failed for {topic}: {result.stderr[-500:]}"
             )
 
+    def _confirmed_state(self, object_label: str, expected: str) -> bool:
+        del object_label, expected
+        raise NotImplementedError
+
+    def _drive(self, object_label: str, action: str) -> None:
+        want = action == "attach"
+        if self._attached.get(object_label) == want:
+            return  # redundant transitions are silently dropped by the plugin
+        expected = "attached" if want else "detached"
+        executable = shutil.which(self.gz_executable) or self.gz_executable
+        for _attempt in range(3):
+            # Subscribe BEFORE publishing: the plugin publishes its state once
+            # per transition, so a listener started after the publish can miss
+            # it.
+            echo = subprocess.Popen(
+                [executable, "topic", "-e", "-t", f"/m3/detachable_joint/{object_label}/state",
+                 "-n", "1"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                env=self.environment,
+            )
+            try:
+                time.sleep(0.5)  # let the CLI subscription establish
+                self._publish(f"/m3/detachable_joint/{object_label}/{action}")
+                out, _ = echo.communicate(timeout=5.0)
+                if expected in out:
+                    self._attached[object_label] = want
+                    return
+            except subprocess.TimeoutExpired:
+                pass
+            finally:
+                if echo.poll() is None:
+                    echo.kill()
+                    echo.wait()
+        raise GazeboProcessError(
+            f"detachable joint {action} for {object_label} was not confirmed by the plugin"
+        )
+
     def attach(self, object_label: str) -> None:
-        self._publish(f"/m3/detachable_joint/{object_label}/attach")
+        self._drive(object_label, "attach")
 
     def detach(self, object_label: str) -> None:
-        self._publish(f"/m3/detachable_joint/{object_label}/detach")
+        self._drive(object_label, "detach")
 
 
 class RosGzBridgeProcess:

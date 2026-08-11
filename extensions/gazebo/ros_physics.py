@@ -456,11 +456,10 @@ class RosM3PlanningScene:
                 matrix.entry_values.append(row)
             scene.allowed_collision_matrix = matrix
         elif command.operation == "attach":
-            remove = CollisionObject()
-            remove.header.frame_id = self.config.base_link
-            remove.id = payload["object_id"]
-            remove.operation = CollisionObject.REMOVE
-            scene.world.collision_objects = [remove]
+            # No explicit world REMOVE here: MoveIt's attach processing removes
+            # the world object itself, so a second remove in the same diff
+            # fails the whole ApplyPlanningScene call ("does not exist in this
+            # scene").
             attached = AttachedCollisionObject()
             attached.link_name = payload["link_name"]
             attached.touch_links = list(payload["touch_links"])

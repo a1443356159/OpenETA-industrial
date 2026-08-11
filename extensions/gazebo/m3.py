@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 import math
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .m2 import M2Config
@@ -765,7 +766,18 @@ class M3PlanningSceneModel:
             ),
             PlanningSceneCommand(
                 "allow_table_touch",
-                {"object_id": cfg.table_id, "links": list(cfg.table_touch_links)},
+                {
+                    "object_id": cfg.table_id,
+                    # Attached bodies are checked against the world through the
+                    # ACM under their object id, so the target/distractor names
+                    # ride along: lowering a held object onto the table is a
+                    # legitimate contact during placement.
+                    "links": [
+                        *cfg.table_touch_links,
+                        cfg.target_id,
+                        cfg.distractor_id,
+                    ],
+                },
             ),
         )
 
@@ -779,7 +791,11 @@ class M3PlanningSceneModel:
                 {
                     "object_id": self.config.target_id,
                     "link_name": self.config.mount_child,
-                    "touch_links": list(self.config.fingertip_links),
+                    # The held object physically touches the whole distal
+                    # linkage (measured contact pairs), not only the pads;
+                    # with fingertip-only touch links every sampled goal is
+                    # collision-invalid once the object is attached.
+                    "touch_links": list(self.config.grasp_touch_links),
                     "dimensions": list(self.config.target_size_m),
                     "relative_pose": relative_pose_value.to_dict(),
                 },
@@ -905,3 +921,23 @@ def namespaced_entity_id(name: str, known_ids: Iterable[str]) -> str | None:
     components = tuple(part for part in str(name).split("::") if part)
     matches = [item for item in known_ids if item in components]
     return matches[0] if len(matches) == 1 else None
+
+
+def fingertip_collision_center_m(path: Path) -> tuple[float, float, float]:
+    """Bounding-box centre of a frozen binary STL (vendor fingertip mesh)."""
+
+    import struct
+
+    data = Path(path).read_bytes()
+    triangles = struct.unpack_from("<I", data, 80)[0]
+    if len(data) != 84 + triangles * 50:
+        raise ValueError(f"invalid frozen STL: {path}")
+    vertices = [
+        struct.unpack_from("<fff", data, 84 + triangle * 50 + 12 + vertex * 12)
+        for triangle in range(triangles)
+        for vertex in range(3)
+    ]
+    return tuple(
+        (min(v[index] for v in vertices) + max(v[index] for v in vertices)) / 2
+        for index in range(3)
+    )
