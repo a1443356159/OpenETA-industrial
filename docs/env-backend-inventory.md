@@ -1,7 +1,8 @@
 # RLinf Environment Backend Inventory
 
 This document summarizes the simulator/runtime backends used by the
-RLinf-derived environment wrappers under `sim/envs`.
+RLinf-derived environment wrappers under `sim/envs`, plus the
+OpenETA-native Gazebo backend under `extensions/gazebo`.
 
 ## Summary
 
@@ -35,6 +36,7 @@ device placement, and process lifecycle differ significantly.
 | `robotwin` | External RobotWin vector env | `sim/envs/robotwin/robotwin_env.py` imports RobotWin. | The physics backend is hidden behind the external package. |
 | `roboverse` | MetaSim abstraction | `sim/envs/roboverse/roboverse_env.py` delegates to MetaSim. | Backend is selected by config. |
 | `embodichain` | External EmbodiChain env | `sim/envs/embodichain/embodichain_env.py` resolves an EmbodiChain config. | The concrete simulator backend is external. |
+| `gazebo` | Gazebo Sim (Harmonic) / ROS 2 Jazzy + MoveIt 2 | `sim/env_registry.py:_register_gazebo_envs` registers three env ids that construct `extensions/gazebo/direct_env.py:GazeboDirectEnv` (wrapped in `UnifiedEnv`): `openeta/gazebo_live_rgbd-v0`, `openeta/gazebo_rm75_robotiq2f85-v0`, `openeta/gazebo_rm75_robotiq2f85_pickplace-v0`. | OpenETA-native, not RLinf-derived. Profile-driven (`m1`, `m2_robotiq2f85`, `m3_pickplace`); a lazy-start `GazeboRuntime` owns the ROS 2 launch, RGB-D cameras, controller, and physics source inside the dedicated `--bench gazebo` worker. See `docs/gazebo-adapter-design.md`. |
 
 ## Gym Unification Assessment
 
