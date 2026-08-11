@@ -143,10 +143,10 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
     then position-level candidate moves with preserve_current and the
     grasp-centre→mount offset); close/lift stages xfail on the known M3
     gripper-linkage physics blocker.  A worker-route unwrap gap was fixed for
-    the live oracle path.  Full live pass remains gated on M3, whose grasp
-    chain now works end to end when contact lands (unified four-bar drive,
-    per-reset grasp-centre calibration, detachable fallback verified through
-    `TARGET_HELD` and placement stages); see
+    the live oracle path.  Full live pass remains gated on M3: the grasp
+    chain reaches `TARGET_HELD` but retention is still marginal (lift-time
+    slip/tilt at ~50-75% per grasp), and the detachable fallback is blocked
+    on gz-sim 8.11 dartsim never forming the physical fixed joint; see
     `docs/gazebo-m3-physical-verification.md`.
   - Out of scope: wrist projection, pick_place NOT_READY gate, unified object
     summary schema (plan.md §17), SAM3-side changes, M6 fine-tuning.

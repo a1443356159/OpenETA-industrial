@@ -27,6 +27,8 @@ plan-M3.plan 曾显式禁止 detachable joint 等附着机制；用户 2026-08-1
 **验收结果（2026-08-11，detachable 模式三轮正式运行）**：
 `...T034841Z-576217.json`、`...T035724Z-578522.json`、`...T040543Z-580628.json`，均 `blocked`。几何门按设计工作：run 2 中 `(65,0)` 的 close 弹出盒子后，门正确判定垫区无物体而**未** attach（target 已被弹到 0.82 m 外）。三轮中闭合结果分布：stall 2/9、空抓 5/9、弹出 1/9、pregrasp 规划失败 2/12。即使 fallback 就位，**触点事件本身（垫面命中 4 cm 盒面）的可靠性不足**——六根失步使垫面落点逐次漂移 1-2 cm，与盒体 ±2 cm 净空同量级。因此六场景未跑通，milestone 保持 blocked。
 
+**验收结果（2026-08-11 下午，detachable 八轮正式运行）**：`...T124633Z`、`...T125911Z`、`...T130907Z`、`...T131703Z`、`...T132600Z`、`...T134340Z`、`...T135938Z`、`...T140751Z`，均 `blocked`。在逐侧 stall 冻结 + 摩擦/加持力调参（见下节）之后，闭合与 lift 已稳定（8/8 轮候选冻结与正轮 1 的 close→lift 全部 `LIFT_REQUIRED`→`TARGET_HELD`），失败全部后移到 **transport 段掉盒**。逐轮定位与处置：① `+30 mm` 低位搬运行进中吊盒/指尖擦桌（甩飞 1 m 级）；② `+50 mm` 仍掉；③ reset 双段还原的第一段 set_pose 会把盒子**实体化进尚未张开的闭合指间**弹射——`runtime.py` 还原顺序改为 detach→回零→set_pose 单段；④ `+60 mm` 仍掉；⑤ 指尖回退 0.04 rad（解除指-关节双约束）仍掉；⑥ 轨迹缩放 0.1 后不再暴力甩出，但盒在目的区旁平稳落桌——证明 **DetachableJoint 从未形成刚性约束**。源码级根因（`gz-sim8` `DetachableJoint.cc`）：插件在 PreUpdate 创建 DetachableJoint 组件后**立即**发布 `attached`，不等 dartsim 物理关节落地；且官方文档明确"**child 与 parent 接触中不可 (re)attach**"。⑦ 改为先回退（断接触）后 attach，仍掉——`gz model -j` 实测闭合后模型关节清单中**不存在**任何新建固定关节，此前全部"持握"均为张开指尖构成的叉笼携带（垂直 lift 干净、水平运输即漏）。⑧ 大开度回退（0.15 rad，钩尖彻底脱离）后 lift 仍 `TARGET_HELD`，transport 以执行偏差 0.10 m 收场（未再深查）。**结论：dartsim 的 DetachableJoint 关节创建在本 URDF 机器人 + 自由盒组合下未生效，非参数问题；detachable fallback 当前不可用**，需最小复现（spawn 态 attach 是否刚性）确认是 gz 8.11 缺陷还是模型配置问题。
+
 ## 统一驱动攻关（2026-08-11，用户拍板方向 ①）
 
 - **四连杆闭式解**（`extensions/gazebo/robotiq_kinematics.py`，纯 Python）：A/B/C 枢轴取 vendor URDF 精确值，耦合点 D 由碰撞网格镗孔圆拟合（std≤0.55 mm），|BD| 取零位精确闭环。数值结论：**vendor 的常量 mimic 与精确解全行程闭环误差 <0.03 mm**——六关节目标本就几何一致，失步不是目标不一致导致的。单测 `tests/test_gazebo_robotiq_kinematics.py`（闭环误差、端点开度与 FK 表一致、单调性、限位）。适配器 `drive_mode=four_bar|multiplier`：M3 launch 用 four_bar，M2 launch 固定 multiplier（其 mimic 合同 0.035 rad 容差与四活塞偏差叠加会越界）。
@@ -34,11 +36,20 @@ plan-M3.plan 曾显式禁止 detachable joint 等附着机制；用户 2026-08-1
 - **MoveIt attach 修复**：attach diff 里显式 world REMOVE 与 attach 自动移除世界对象重复，导致 `ApplyPlanningScene` 返回 `success=False`——去掉显式 REMOVE 后 attach/release/clear 全链路 live 验证通过。
 - **接触位 +9 mm 偏置**（驱动常量 `GRASP_CENTER_Z_BIAS_M`）：相机实况显示中心高度接触让盒子被垫面从下方挤出；上移后垫面咬在盒体上三分之一。探针最好成绩 **8/8 连续干净持握**（contact_moved=0、stall、attach、lift `TARGET_HELD`）。
 - **逐 reset 抓心校准**：实测闭合中线相对盒心偏移以每轮 3-10 mm 累积（连杆失步漂移），`GazeboRuntime.reset` 现在在每次 reset 于接触孔径（0.41 rad）处重测抓心偏移（`grasp_center_offset_m`），驱动每个候选/正轮/负例 reset 后取新值。
-- **reset 确定性与串行化**：`set_pose` 加重试；还原改为 detach→set_pose→回零→set_pose 双段（持盒 reset 不再掉落级联）；M3 run 脚本 direct 驱动改 setsid，堵上同组 launch 泄漏缺口；探针包装器按 partition 强制清场。
+- **reset 确定性与串行化**：`set_pose` 加重试；还原为 detach→回零→set_pose 单段（曾用双段：第一段会在持盒 reset 时把盒子实体化进闭合指间弹射，2026-08-11 下午改序，见 detachable 验收记录）；M3 run 脚本 direct 驱动改 setsid，堵上同组 launch 泄漏缺口；探针包装器按 partition 强制清场。
 - **剩余失效模式（当前状态）**：近 boot 间方差仍大——同一构建在不同 boot 下探针分布从 8/8 到 1/8 摆动，正式运行（physics：`...T065939Z`、`...T071311Z`；detachable：`...T073755Z`、`...T091952Z`）均止步于闭合命中率（候选冻结成功率约 50-75%，单轮成功率更高但 5/5 连过仍不足）。最新两轮 detachable 首次走通 **lift→TARGET_HELD→transport→lower→release** 全链：`...T091952Z-628664.json` 止于放置（附着体 touch_links 过窄致 transport/lower 规划 99999）；`...T092725Z-630483.json`（touch_links=`grasp_touch_links` + 目标/干扰物↔桌面 ACM 修复后）正轮 1 走到 transport 仍遇一次 99999 目标采样抖动，随后序列为 OBJECT_DROPPED 收场。规划采样抖动（OMPL/KDL 目标采样在高负载下偶发 30s 无解）是当前最后一层非物理阻塞。
 - **M2 复验通过**：`m2-robotiq2f85-acceptance-20260811T073214Z-611375.json`（统一驱动适配器 + multiplier 模式），七 gate 全绿。
 
-**下一步（按优先级）**：① 用最后一轮修复（attach touch_links=grasp_touch_links + 目标/干扰物↔桌面 ACM）完整复跑 detachable 验收，期望走到六场景；② 闭合命中率对 boot 仍敏感（疑似 spawn 落定态差异），若仍不足 90%，按文档方向 ② 叠加垫面反馈闭合；③ physics 模式的摩擦持握在 +9 mm 偏置下未再复测，需一轮正式运行数据。
+### 收官轮攻关（2026-08-11 下午，physics 三轮 + detachable 八轮正式运行）
+
+- **规划层 99999 根因与修复**：扫掠探针（plan_only ×12/姿态）证明 pregrasp/contact/lower 全 12/12（0.03-0.05 s），而 transport（tilt 65°、+80 mm、mount x≈0.355）**系统性 0/12**（每次耗尽 8 s 预算）——不是随机抖动。修复：`config/kinematics.yaml` 的 `kinematics_solver_timeout: 0.05 → 0.2`（WSL2 负载下 KDL 50 ms 解不完导致目标采样全灭）；搬运高度 `CARRY_HEIGHT_M` 定为 `0.060`（+80 mm 不可采样；+30 mm 可规划但吊盒/指尖擦桌甩盒；高度扫掠 +40/50/60/70 mm 全 6/6，+60 mm p50≈0.85 s 为安全边际最高点）。此后 99999 未再出现。
+- **抓取关键 move 目标域收紧**（驱动常量 `GRASP_MOVE_PARAMS`：1 mm / 0.01 rad，轨迹缩放 0.1）：实测同一接触位姿两轮执行落点相差 ~4 mm / ~3°（默认 2 mm/0.05 rad 目标域各吃满所致），足以翻转边际抓取的成败；收紧后接触位姿复现到 ~1 mm / ~0.6°。慢速缩放同时消除 OMPL 关节空间路径的腕部急转对持握/附着载荷的扰动。`make_move_group_goal` 与 MCP `move_to` 新增 scaling 透传（默认 0.3 不变，M2 契约不受影响）。
+- **抓取物理调参链**（每步均有探针/正式报告证据）：① 桌面 mu 1.0→1.5——首触垫面在 stall 判定前的 1 s 窗口内持续推盒 7-11 mm；② 适配器**逐侧 stall 冻结**——原实现只盯主动关节速度，先接触一侧的指垫在 lead-limit 下持续推压造成"携带"（盒在闭合中位移最高 31 mm），改为左右两侧各自监测冻结（`stall_timeout` 0.3 s，`side_moved` 门防启动假 stall）；③ `stall_hold_extra_rad=0.03`——纯冻结把各关节保持于实测位，PID 误差归零即**加持力为零**，盒子只是被"关笼"而非"夹紧"，lift 打破静摩擦即滑脱；④ 盒 mu 1.2→2.0、指尖 mu 1.5→2.0——可达抓取带 tilt 60-75° 使垫面相对盒面倾斜 ~25°，接触为垫缘线接触（铰链），高摩擦抑制绕铰链翻转。探针最好成绩 3/3 连续干净 TARGET_HELD。
+- **physics 模式残余失效**（`...T121707Z`、`...T122641Z`、`...T123942Z`，均 blocked）：单次 close→lift 成功率约 50-75%，失败签名为 lift 中盒沿垫面**侧向滑脱或绕垫缘翻转 20-40°**（相对漂移超 0.15 rad 容差），距 Direct 5/5 连过门槛仍不足。正式轮中观察到失败集中于 reset 后的第二轮抓取，但探针三轮连测（含首轮即失败样本）证明这是边际抓取的统计涨落而非 reset 状态污染。
+- **GPU 渲染评估（WSL2）**：本机 RTX 4060 Laptop；默认 GL 栈为 Mesa llvmpipe（纯软件渲染，RGB-D 相机负载使 sim 低于实时，是既有时序压力背景）。`GALLIUM_DRIVER=d3d12 glxinfo -B` 实测显示 "D3D12 (NVIDIA GeForce RTX 4060 Laptop GPU)"——Mesa dzn 路径可启用 GPU 加速。**未用于正式验收**：观测契约（相机分辨率/频率/时间戳语义）不变性优先，且规划/物理阻塞与渲染端无关；验收脚本在 GPU 可用时记录 `INFO RENDERER NVIDIA_GPU_AVAILABLE`。GPU 卸载作为后续可选优化记录。
+- **当前唯一未试手段**：垫面反馈闭环闭合（按 TF 实测两垫间距收敛到目标宽度并维持微压力，取代开环位置斜坡）——直接消除"冻结点随机→加持力随机"的残余方差；detachable 方向需先做最小复现确认 dartsim 关节创建（见上节结论）。
+
+**下一步（按优先级）**：① physics 模式的残余失效是 lift 中侧滑/翻转（单次成功率 50-75%），按文档方向 ② 实现**垫面反馈闭环闭合**（TF 实测垫间距收敛 + 微压力保持），这是当前唯一未试且直接对症的手段；② detachable 方向先做最小复现（spawn 态 attach 是否刚性）确认 gz-sim 8.11 dartsim 的 DetachableJoint 关节创建是否对本 URDF 机器人 + 自由盒组合生效——当前结论是该关节从未物理形成，fallback 不可用；③ 两者任一收敛后完整复跑 physics 与 detachable 验收，并复验 M2（本轮适配器/launch/kinematics.yaml 均有改动，M2 live 复验尚未执行）。
 
 ## 实现边界
 
@@ -59,8 +70,9 @@ plan-M3.plan 曾显式禁止 detachable joint 等附着机制；用户 2026-08-1
 | 目标物 | `0.04 × 0.04 × 0.06 m`, `0.10 kg`, 初始中心 `[0.28, -0.10, 0.43]` |
 | 干扰物 | 直径 `0.05 m`, 高 `0.08 m`, `0.12 kg`, 初始中心 `[0.28, 0.12, 0.44]` |
 | 放置区 | 中心 `[0.48, -0.10]`, `0.12 × 0.12 m`, 纯视觉、无 collision |
-| 目标摩擦 | ODE `mu=mu2=1.2` |
-| 指尖摩擦 | `mu1=mu2=1.5` |
+| 目标摩擦 | ODE `mu=mu2=2.0`（1.2 起调：垫面倾斜线接触铰链抑制） |
+| 桌面摩擦 | ODE `mu=mu2=1.5`（1.0 起调：防滑工作台面，抑制闭合期推盒） |
+| 指尖摩擦 | `mu1=mu2=2.0`（1.5 起调，同上铰链抑制） |
 | 接触参数 | `kp=100000`, `kd=10` |
 | 物理步长 | `0.001 s`, DART, 重力 `-9.81 m/s²` |
 | Odometry | `100 Hz` 配置 |
@@ -116,6 +128,6 @@ Direct 驱动从 live TF 和冻结 STL 包围盒计算指尖碰撞中心。四�
 
 ## 下一步解除阻塞
 
-1. 解决 2F-85 闭环连杆的 Gazebo 保真度（当前唯一卡点）。候选方向：gz 侧用关节约束/闭环耦合替代六独立位置驱动；或适配器改为垫面反馈闭合（按 TF 实测两垫间距收敛到目标宽度为止）；或软化目标接触参数（kp=1e5 对 100 g 轻物过硬）。任选其一都需保持 M2 的 reached-goal 契约与既有验收证据不破（需要时重跑 M2 正式验收）。
-2. 连杆闭合可靠后，用 `/tmp` 探针（`m3_squeeze_probe.py`/`m3_geometry_probe.py` 模式）量化闭合成功率 ≥90% 再跑正式验收。
-3. 只有 Direct `5/5`、四负例、SSE `2/2`、清理 gate 都通过，才更新 M3 milestone checkbox。M2 正式验收已于 2026-08-10 通过（见 `docs/gazebo-m2-rm75-robotiq2f85.md`）。
+1. 解决 2F-85 闭环连杆的 Gazebo 保真度（当前唯一卡点）。收官轮已把失效收敛到 lift 持握边际（侧滑/翻转），下一步即**垫面反馈闭合**（按 TF 实测两垫间距收敛到目标宽度并维持微压力）；备选：gz 侧用关节约束/闭环耦合替代六独立位置驱动；或软化目标接触参数（kp=1e5 对 100 g 轻物过硬）。任选其一都需保持 M2 的 reached-goal 契约与既有验收证据不破（需要时重跑 M2 正式验收）。
+2. 连杆闭合可靠后，用 `/tmp` 探针（`m3_visual_probe.py` 模式）量化闭合成功率 ≥90% 再跑正式验收。
+3. 只有 Direct `5/5`、四负例、SSE `2/2`、清理 gate 都通过，才更新 M3 milestone checkbox。M2 正式验收已于 2026-08-10 通过（见 `docs/gazebo-m2-rm75-robotiq2f85.md`）；注意收官轮改动了适配器/launch/kinematics.yaml，M2 live 复验待执行。
