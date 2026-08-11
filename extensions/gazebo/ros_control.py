@@ -570,9 +570,15 @@ class _RosRuntime:
         # exceed the public action deadline on a software-rendered simulator
         # (which commonly runs below real time).  Thirty percent remains a
         # conservative MoveIt limit while keeping every valid planned path
-        # inside the control contract's timeout.
-        request.request.max_velocity_scaling_factor = 0.3
-        request.request.max_acceleration_scaling_factor = 0.3
+        # inside the control contract's timeout.  Grasp-critical carry moves
+        # may lower the scaling further through the goal to keep a jointed or
+        # caged payload quiet.
+        request.request.max_velocity_scaling_factor = float(
+            goal.get("max_velocity_scaling_factor", 0.3)
+        )
+        request.request.max_acceleration_scaling_factor = float(
+            goal.get("max_acceleration_scaling_factor", 0.3)
+        )
         request.request.start_state.is_diff = True
         pose = Pose()
         pose.position.x, pose.position.y, pose.position.z = goal["target_pose"]["xyz"]

@@ -41,7 +41,33 @@ POSITION_TOLERANCE_M = 0.005
 # out, while a small upward bias presses it onto the table during the pinch.
 # 9 mm scored 8/8 clean hold-and-lift cycles in the close-statistics probe.
 GRASP_CENTER_Z_BIAS_M = 0.009
+# Horizontal carries run lower than the 80 mm pick lift: the planning sweep
+# showed the tilt-65 transport at +80 mm is unsamplable (0/12, every other
+# tilt/height 6/6).  +30 mm plans instantly but rides so low that the
+# hanging box/fingertips clip the tabletop mid-carry (detachable run flung
+# the target off the table); +50 mm still dropped the box with the generic
+# 0.05 rad goal slack dipping the fingers.  +60 mm plans in ~1 s (sweep 6/6)
+# and, together with the tightened carry-move goal region below, keeps the
+# whole gripper assembly clear of the table.
+CARRY_HEIGHT_M = 0.060
 ORIENTATION_TOLERANCE_RAD = 0.08
+# Grasp-critical moves (the contact approach and the verification lift) must
+# land on the aimed pose, not merely inside the generic goal region: the
+# default 2 mm / 0.05 rad slack lets two rounds execute the same contact pose
+# ~4 mm and ~3 deg apart, and the tilted-pad edge pinch is marginal enough
+# that this slack alone flips TARGET_HELD to a hinge-slip.
+GRASP_POSITION_TOLERANCE_M = 0.001
+GRASP_ORIENTATION_TOLERANCE_RAD = 0.01
+GRASP_MOVE_PARAMS = {
+    "position_tolerance_m": GRASP_POSITION_TOLERANCE_M,
+    "orientation_tolerance_rad": GRASP_ORIENTATION_TOLERANCE_RAD,
+    # Gentle trajectory scaling for grasp-critical moves: OMPL joint-space
+    # carries can whip the redundant wrist, and at the default 0.3 scaling the
+    # resulting payload acceleration rattles a caged box out of the pads (and
+    # stresses a jointed one off the mount).  0.1 keeps carries quasi-static.
+    "max_velocity_scaling_factor": 0.1,
+    "max_acceleration_scaling_factor": 0.1,
+}
 DOCUMENTATION = {
     "gazebo_odometry_publisher": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1OdometryPublisher.html",
     "ros_gz_bridge_mappings": "https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md",
@@ -564,7 +590,7 @@ def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: 
         try:
             observation = _step(
                 environment,
-                {"action_type": "move_to", "target_pose": contact_pose, "timeout_s": 60.0},
+                {"action_type": "move_to", "target_pose": contact_pose, "timeout_s": 60.0, **GRASP_MOVE_PARAMS},
                 gate,
             )
         except Exception as exc:
@@ -597,7 +623,7 @@ def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: 
         try:
             observation = _step(
                 environment,
-                {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0},
+                {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0, **GRASP_MOVE_PARAMS},
                 gate,
             )
         except Exception as exc:
@@ -637,24 +663,24 @@ def _positive_round(environment: Any, gate: dict[str, Any], candidate: Mapping[s
     contact = _mount_pose(
         (target[0], target[1], target[2] + GRASP_CENTER_Z_BIAS_M), orientation, offset
     )
-    observation = _step(environment, {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0}, gate)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
     _assert(gate["actions"][-1]["receipt"].get("ok") is True, "contact motion failed")
     observation = _step(environment, {"action_type": "gripper_close", "timeout_s": 30.0}, gate)
     _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "close did not produce a bilateral stall candidate")
     target = _target(observation)["position"]
     lift = _mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset)
-    observation = _step(environment, {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0}, gate)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
     _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "80 mm lift did not prove target held")
     destination = environment._m3_config.destination_center_xy
-    transport = _mount_pose((destination[0], destination[1], target[2] + 0.080), orientation, offset)
-    observation = _step(environment, {"action_type": "move_to", "target_pose": transport, "timeout_s": 60.0}, gate)
+    transport = _mount_pose((destination[0], destination[1], target[2] + CARRY_HEIGHT_M), orientation, offset)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": transport, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
     _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "transport lost target")
     lower = _mount_pose(
         (destination[0], destination[1], environment._m3_config.table_top_z_m + environment._m3_config.target_size_m[2] / 2),
         orientation,
         offset,
     )
-    observation = _step(environment, {"action_type": "move_to", "target_pose": lower, "timeout_s": 60.0}, gate)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lower, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
     observation = _step(environment, {"action_type": "gripper_open", "timeout_s": 30.0}, gate)
     _assert(_physical(observation).get("reason_code") == "TARGET_PLACED", "release did not prove target placed")
 
@@ -685,7 +711,7 @@ def _approach_and_close(
     )
     observation = _step(
         environment,
-        {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0},
+        {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0, **GRASP_MOVE_PARAMS},
         gate,
     )
     _assert(gate["actions"][-1]["receipt"].get("ok") is True, "negative contact motion failed")
@@ -744,7 +770,7 @@ def _negative_cases(
     )
     observation = _step(
         environment,
-        {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0},
+        {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0, **GRASP_MOVE_PARAMS},
         gate,
     )
     _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "drop setup lift failed")
@@ -765,7 +791,7 @@ def _negative_cases(
     lift = _mount_pose(
         (target[0], target[1], target[2] + 0.080), candidate["orientation"], offset
     )
-    observation = _step(environment, {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0}, gate)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
     _assert(_physical(observation).get("reason_code") == "TARGET_HELD", "outside setup lift failed")
     outside = (0.48, 0.08)
     lower = _mount_pose(
@@ -773,7 +799,7 @@ def _negative_cases(
         candidate["orientation"],
         offset,
     )
-    observation = _step(environment, {"action_type": "move_to", "target_pose": lower, "timeout_s": 60.0}, gate)
+    observation = _step(environment, {"action_type": "move_to", "target_pose": lower, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
     observation = _step(environment, {"action_type": "gripper_open", "timeout_s": 30.0}, gate)
     reason = _physical(observation).get("reason_code")
     cases.append({"name": "outside_destination", "reason_code": reason})
@@ -886,14 +912,27 @@ def run_mcp(path: Path, url: str) -> None:
             gate["actions"].append({"name": name, "receipt": _compact(receipt)})
             return receipt
 
-        def move(pose: Mapping[str, Any]) -> Mapping[str, Any]:
+        def move(pose: Mapping[str, Any], *, grasp_critical: bool = False) -> Mapping[str, Any]:
             roll, pitch, yaw = _quat_to_euler(pose["quat_xyzw"])
+            # Grasp-critical moves (contact approach, verification lift, carry)
+            # need the same tight goal region and gentle trajectory scaling as
+            # the direct gate; see GRASP_MOVE_PARAMS.
+            tolerance = GRASP_POSITION_TOLERANCE_M if grasp_critical else 0.002
+            ori_tolerance = GRASP_ORIENTATION_TOLERANCE_RAD if grasp_critical else 0.05
             return action(
                 "move_to",
                 {
                     "x": pose["xyz"][0], "y": pose["xyz"][1], "z": pose["xyz"][2],
                     "roll": roll, "pitch": pitch, "yaw": yaw,
-                    "tolerance": 0.002, "ori_tolerance": 0.05,
+                    "tolerance": tolerance, "ori_tolerance": ori_tolerance,
+                    **(
+                        {
+                            "velocity_scaling": GRASP_MOVE_PARAMS["max_velocity_scaling_factor"],
+                            "acceleration_scaling": GRASP_MOVE_PARAMS["max_acceleration_scaling_factor"],
+                        }
+                        if grasp_critical
+                        else {}
+                    ),
                 },
             )
 
@@ -904,7 +943,7 @@ def run_mcp(path: Path, url: str) -> None:
 
         def approach_close(center: Sequence[float]) -> Mapping[str, Any]:
             move(_mount_pose((center[0], center[1], center[2] + 0.080), orientation, offset))
-            move(_mount_pose((center[0], center[1], center[2] + GRASP_CENTER_Z_BIAS_M), orientation, offset))
+            move(_mount_pose((center[0], center[1], center[2] + GRASP_CENTER_Z_BIAS_M), orientation, offset), grasp_critical=True)
             return action("gripper_close", {})
 
         for round_number in range(2):
@@ -914,11 +953,11 @@ def run_mcp(path: Path, url: str) -> None:
             _assert(_physical(observation_of(close)).get("reason_code") == "LIFT_REQUIRED", "MCP close candidate failed")
             target = _target(observation_of(close))["position"]
             lift = _mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset)
-            lifted = move(lift)
+            lifted = move(lift, grasp_critical=True)
             _assert(_physical(observation_of(lifted)).get("reason_code") == "TARGET_HELD", "MCP lift failed")
             destination = (0.48, -0.10)
-            move(_mount_pose((destination[0], destination[1], target[2] + 0.080), orientation, offset))
-            move(_mount_pose((destination[0], destination[1], 0.430), orientation, offset))
+            move(_mount_pose((destination[0], destination[1], target[2] + CARRY_HEIGHT_M), orientation, offset), grasp_critical=True)
+            move(_mount_pose((destination[0], destination[1], 0.430), orientation, offset), grasp_critical=True)
             opened = action("gripper_open", {})
             _assert(_physical(observation_of(opened)).get("reason_code") == "TARGET_PLACED", "MCP placement failed")
 
@@ -952,10 +991,10 @@ def run_mcp(path: Path, url: str) -> None:
             closed = approach_close(target)
             _assert(_physical(observation_of(closed)).get("reason_code") == "LIFT_REQUIRED", f"MCP {name} setup close failed")
             target = _target(observation_of(closed))["position"]
-            lifted = move(_mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset))
+            lifted = move(_mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset), grasp_critical=True)
             _assert(_physical(observation_of(lifted)).get("reason_code") == "TARGET_HELD", f"MCP {name} setup lift failed")
             if destination is not None:
-                move(_mount_pose((destination[0], destination[1], 0.430), orientation, offset))
+                move(_mount_pose((destination[0], destination[1], 0.430), orientation, offset), grasp_critical=True)
             opened = action("gripper_open", {})
             reason = _physical(observation_of(opened)).get("reason_code")
             expected = "OBJECT_DROPPED" if destination is None else "OUTSIDE_DESTINATION"

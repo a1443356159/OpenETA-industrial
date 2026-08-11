@@ -451,6 +451,14 @@ def make_move_group_goal(
         "orientation_tolerance_rad": float(
             (tolerances or {}).get("orientation_tolerance_rad", 0.05)
         ),
+        # Carrying moves may request gentler trajectory scaling; the default
+        # preserves the long-standing M2/M3 motion contract.
+        "max_velocity_scaling_factor": float(
+            (tolerances or {}).get("max_velocity_scaling_factor", 0.3)
+        ),
+        "max_acceleration_scaling_factor": float(
+            (tolerances or {}).get("max_acceleration_scaling_factor", 0.3)
+        ),
     }
 
 

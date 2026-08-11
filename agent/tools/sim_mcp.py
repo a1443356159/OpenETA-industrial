@@ -652,7 +652,8 @@ class SimulatorMcpToolProxy:
         for key in ("handle", "session_id"):
             if key in parameters:
                 arguments[key] = parameters[key]
-        for key in ("num_steps", "tolerance", "ori_tolerance", "enable_collision_check"):
+        for key in ("num_steps", "tolerance", "ori_tolerance", "enable_collision_check",
+                    "velocity_scaling", "acceleration_scaling"):
             if key in parameters:
                 arguments[key] = parameters[key]
         return self._with_session(arguments)

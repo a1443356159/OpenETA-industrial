@@ -253,6 +253,8 @@ def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
                 "position_tolerance_m": 0.002,
                 "orientation_tolerance_rad": 0.05,
                 "timeout_s": 60.0,
+                "max_velocity_scaling_factor": 0.3,
+                "max_acceleration_scaling_factor": 0.3,
             },
             1,
         ),

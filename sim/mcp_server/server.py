@@ -576,7 +576,8 @@ def move_to(handle: str, x: float, y: float, z: float, *,
             roll: float | None = None, pitch: float | None = None, yaw: float | None = None,
             num_steps: int = 100, tolerance: float = 0.002, ori_tolerance: float = 0.05,
             session_id: str = "",
-            enable_collision_check: bool = True) -> dict:
+            enable_collision_check: bool = True,
+            velocity_scaling: float = 0.3, acceleration_scaling: float = 0.3) -> dict:
     """Move the end-effector to an absolute pose using closed-loop interpolation.
 
     Re-observes the EE pose from the step result every 10 steps for
@@ -638,7 +639,9 @@ def move_to(handle: str, x: float, y: float, z: float, *,
             # The conservative RM75 trajectory scaling can require slightly
             # over 30 seconds for a 30 mm Cartesian offset after gripper
             # reaction forces have perturbed the reset pose.
-            "orientation_tolerance_rad": ori_tolerance, "timeout_s": 60.0}, num_steps=1)
+            "orientation_tolerance_rad": ori_tolerance, "timeout_s": 60.0,
+            "max_velocity_scaling_factor": velocity_scaling,
+            "max_acceleration_scaling_factor": acceleration_scaling}, num_steps=1)
 
     if use_ori and backend == "metaworld":
         return {"error": "Orientation control is not supported on MetaWorld (4D action, no rotation)"}
