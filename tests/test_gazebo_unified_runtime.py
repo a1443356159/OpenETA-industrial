@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -10,7 +11,11 @@ from extensions.gazebo.deployment import GazeboDeploymentConfig
 from extensions.gazebo.direct_env import GazeboDirectEnv
 from extensions.gazebo.profiles import gazebo_profile, gazebo_profiles
 from extensions.gazebo.runtime import GazeboRuntime
-from sim.mcp_server.worker_mgr import BenchWorkerHandle, BenchWorkerManager
+from sim.mcp_server.worker_mgr import (
+    BenchWorkerHandle,
+    BenchWorkerManager,
+    _gazebo_ros_abi_environment,
+)
 
 
 def _deployment() -> GazeboDeploymentConfig:
@@ -313,6 +318,58 @@ def test_deployment_sanitizes_host_ruby_for_the_vendor_gz_wrapper() -> None:
     assert child["GZ_SIM_RESOURCE_PATH"] == source["GZ_SIM_RESOURCE_PATH"]
     assert child["ROS_DOMAIN_ID"] == "24"
     assert child["GZ_PARTITION"] == "ruby-isolated"
+
+
+def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
+    tmp_path: Path,
+) -> None:
+    """A host Python's second ROS build must not mix with /opt ROS ABI libs."""
+
+    active = tmp_path / "opt" / "ros" / "jazzy"
+    overlay = tmp_path / "workspace" / "install"
+    foreign = tmp_path / "host-python" / "ros2_jazzy"
+    active_python = active / "lib" / "python3.12" / "site-packages"
+    overlay_python = overlay / "lib" / "python3.12" / "site-packages"
+    foreign_python = foreign / "lib" / "python3.12" / "site-packages"
+    for path in (
+        active_python / "rclpy",
+        active_python / "sensor_msgs",
+        overlay_python / "rclpy",
+        overlay_python / "sensor_msgs",
+        foreign_python / "rclpy",
+        foreign_python / "sensor_msgs",
+        active / "lib",
+        overlay / "lib",
+        foreign / "lib",
+        foreign / "opt" / "rviz_ogre_vendor" / "lib",
+    ):
+        path.mkdir(parents=True, exist_ok=True)
+    environment = _gazebo_ros_abi_environment(
+        {
+            "ROS_DISTRO": "jazzy",
+            "OPENETA_GAZEBO_SYSTEM_ROS_PREFIX": str(active),
+            "OPENETA_GAZEBO_OVERLAY": str(overlay),
+            "PYTHONPATH": os.pathsep.join(
+                (str(overlay_python), str(active_python), str(foreign_python))
+            ),
+            "LD_LIBRARY_PATH": os.pathsep.join(
+                (
+                    str(foreign / "opt" / "rviz_ogre_vendor" / "lib"),
+                    str(foreign / "lib"),
+                    str(overlay / "lib"),
+                    str(active / "lib"),
+                    "/usr/local/cuda/lib64",
+                )
+            ),
+            "AMENT_PREFIX_PATH": os.pathsep.join((str(overlay), str(active), str(foreign))),
+        }
+    )
+
+    assert environment["PYTHONPATH"] == os.pathsep.join((str(overlay_python), str(active_python)))
+    assert environment["LD_LIBRARY_PATH"] == os.pathsep.join(
+        (str(overlay / "lib"), str(active / "lib"), "/usr/local/cuda/lib64")
+    )
+    assert environment["AMENT_PREFIX_PATH"] == os.pathsep.join((str(overlay), str(active)))
 
 
 def test_manager_rejects_second_gazebo_and_retires_worker_on_release() -> None:

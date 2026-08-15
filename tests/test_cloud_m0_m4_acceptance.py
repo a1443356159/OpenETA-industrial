@@ -98,3 +98,10 @@ def test_tui_runner_uses_explicit_interpreter_for_help() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "--scripted-tui" in result.stdout
+
+
+def test_tui_runner_declares_the_vendor_ros_and_clean_clone_overlay_prefixes() -> None:
+    source = TUI_RUNNER.read_text(encoding="utf-8")
+
+    assert 'OPENETA_GAZEBO_SYSTEM_ROS_PREFIX="/opt/ros/jazzy"' in source
+    assert 'OPENETA_GAZEBO_OVERLAY="${REPO_DIR}/extensions/gazebo/ros2_ws/install"' in source

@@ -19,6 +19,7 @@ import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
+from pathlib import Path
 
 from sim.mcp_server.session import (
     _get_mgr,
@@ -48,6 +49,110 @@ def _bench_for_env_id(env_id: str) -> str:
     part = env_id.split("/")[1] if "/" in env_id else env_id
     bench = part.split("_")[0]
     return _BENCH_MAP.get(bench, bench)
+
+
+def _is_under(path: str, root: str) -> bool:
+    """Return whether a path belongs to one resolved prefix."""
+
+    try:
+        return os.path.commonpath((os.path.realpath(path), os.path.realpath(root))) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
+def _ros_prefix_for_python_path(path: str) -> str | None:
+    """Return the ROS prefix for ``<prefix>/lib/python*/site-packages``."""
+
+    parts = Path(os.path.realpath(path)).parts
+    for index, part in enumerate(parts[:-1]):
+        if part == "lib" and parts[index + 1].startswith("python"):
+            return str(Path(*parts[:index]))
+    return None
+
+
+def _gazebo_ros_abi_environment(source: dict[str, str]) -> dict[str, str]:
+    """Keep the one sourced ROS ABI stack for the Gazebo worker.
+
+    The acceptance runner deliberately creates its application virtualenv from
+    a host Python.  Some hosts also place a second ROS build under that host
+    prefix.  Leaving both generated ROS Python packages and native libraries
+    in the worker environment can import `/opt/ros` modules against the host
+    prefix's typesupport library, yielding an undefined-symbol error only when
+    rclpy creates a node.  Formal TUI runs source `/opt/ros/<distro>` first;
+    retain that stack and the configured active overlay, while dropping only
+    conflicting ROS paths derived from another generated-Python prefix.
+    Non-ROS runtime, GPU, and transport paths are untouched.
+    """
+
+    child_env = dict(source)
+    distro = child_env.get("ROS_DISTRO", "jazzy").strip() or "jazzy"
+    system_prefix = child_env.get("OPENETA_GAZEBO_SYSTEM_ROS_PREFIX", "").strip()
+    system_prefix = system_prefix or f"/opt/ros/{distro}"
+    overlay = child_env.get("OPENETA_GAZEBO_OVERLAY", "").strip()
+    trusted_prefixes = [system_prefix, *([overlay] if overlay else [])]
+    python_paths = [
+        path
+        for path in child_env.get("PYTHONPATH", "").split(os.pathsep)
+        if path
+    ]
+    generated_ros_paths = [
+        path
+        for path in python_paths
+        if os.path.isdir(os.path.join(path, "rclpy"))
+        or os.path.isdir(os.path.join(path, "sensor_msgs"))
+    ]
+    active_ros_paths = [
+        path
+        for path in generated_ros_paths
+        if any(_is_under(path, prefix) for prefix in trusted_prefixes)
+    ]
+    if not active_ros_paths:
+        # Do not invent a ROS prefix when callers have not sourced one.  The
+        # existing runtime will then fail closed with ROS_NOT_READY.
+        return child_env
+
+    foreign_prefixes = {
+        prefix
+        for path in generated_ros_paths
+        if not any(_is_under(path, prefix) for prefix in trusted_prefixes)
+        for prefix in (_ros_prefix_for_python_path(path),)
+        if prefix is not None
+    }
+    child_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(active_ros_paths))
+    library_paths = [
+        path
+        for path in child_env.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+        if path and not any(_is_under(path, prefix) for prefix in foreign_prefixes)
+    ]
+    # Make trusted ROS libraries win even if an activation script supplied
+    # them later than a generic system/GPU path.  The active overlay retains
+    # its source order relative to the system prefix.
+    native_ros = [
+        path for path in library_paths
+        if any(_is_under(path, prefix) for prefix in trusted_prefixes)
+    ]
+    others = [
+        path for path in library_paths
+        if not any(_is_under(path, prefix) for prefix in trusted_prefixes)
+    ]
+    child_env["LD_LIBRARY_PATH"] = os.pathsep.join(dict.fromkeys([*native_ros, *others]))
+    ament_paths = [
+        path
+        for path in child_env.get("AMENT_PREFIX_PATH", "").split(os.pathsep)
+        if path and not any(_is_under(path, prefix) for prefix in foreign_prefixes)
+    ]
+    trusted_ament = [
+        path for path in ament_paths
+        if any(_is_under(path, prefix) for prefix in trusted_prefixes)
+    ]
+    other_ament = [
+        path for path in ament_paths
+        if not any(_is_under(path, prefix) for prefix in trusted_prefixes)
+    ]
+    child_env["AMENT_PREFIX_PATH"] = os.pathsep.join(
+        dict.fromkeys([*trusted_ament, *other_ament])
+    )
+    return child_env
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -395,17 +500,10 @@ class BenchWorkerManager:
         # package").  Drop it so the worker's own path setup is authoritative.
         inherited_python_paths = child_env.pop("PYTHONPATH", "").split(os.pathsep)
         if bench == "gazebo":
-            # Preserve only ROS-generated Python paths from the sourced target
-            # overlay.  Do not encode a distro prefix or developer machine
-            # path: relocated OpenETA deployments may install ROS elsewhere.
-            ros_paths = [
-                path for path in inherited_python_paths
-                if path and os.path.isdir(path)
-                and (os.path.isdir(os.path.join(path, "rclpy"))
-                     or os.path.isdir(os.path.join(path, "sensor_msgs")))
-            ]
-            if ros_paths:
-                child_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(ros_paths))
+            child_env["PYTHONPATH"] = os.pathsep.join(
+                path for path in inherited_python_paths if path
+            )
+            child_env = _gazebo_ros_abi_environment(child_env)
         if bench == "behavior":
             behavior_root = os.path.join(str(_SIM_DIR), "venvs", "behavior")
             child_env.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")

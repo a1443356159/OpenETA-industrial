@@ -56,4 +56,10 @@ source /opt/ros/jazzy/setup.bash
 source "${REPO_DIR}/extensions/gazebo/ros2_ws/install/setup.bash"
 set -u
 
+# The Python used for the isolated acceptance venv can itself be hosted under
+# another ROS prefix.  Gazebo workers must import and dynamically link one
+# coherent stack: this vendor Jazzy installation plus this clean-clone overlay.
+export OPENETA_GAZEBO_SYSTEM_ROS_PREFIX="/opt/ros/jazzy"
+export OPENETA_GAZEBO_OVERLAY="${REPO_DIR}/extensions/gazebo/ros2_ws/install"
+
 exec "${PYTHON_BIN}" "${SCRIPT_DIR}/tui_gazebo_acceptance.py" "$@"
