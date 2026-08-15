@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -195,6 +196,16 @@ def test_mcp_server_command_sources_the_built_overlay(
     command = captured["command"]
     assert command[:5] == ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(setup)]
     assert command[5:] == ["/venv/bin/python", "-m", "sim.mcp_server", "--port", "19001"]
+
+
+def test_port_probe_rejects_an_active_listener() -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        assert not m0_m1._port_is_free(listener.getsockname()[1])
+    finally:
+        listener.close()
 
 
 def test_m1_live_rgbd_validator_rejects_stale_or_nonlive_observations() -> None:

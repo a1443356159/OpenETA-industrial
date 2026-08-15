@@ -108,7 +108,13 @@ def _write_final(path: Path, payload: Mapping[str, Any]) -> None:
 def _port_is_free(port: int) -> bool:
     with socket.socket() as sock:
         try:
+            # A completed localhost MCP/SSE connection may leave TCP state
+            # briefly behind after its listener is gone.  Reusing the address
+            # avoids treating that harmless state as a live server; listen()
+            # still rejects any process actively owning the endpoint.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("127.0.0.1", port))
+            sock.listen(1)
         except OSError:
             return False
     return True
