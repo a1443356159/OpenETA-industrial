@@ -29,7 +29,7 @@ def test_m1_launch_is_server_only_and_preserves_official_rgbd_bridge() -> None:
     root = Path(__file__).parents[1]
     launch = root / "extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/launch/m1_gazebo_rgbd.launch.py"
     text = launch.read_text(encoding="utf-8")
-    assert '"-r -s sensors_demo.sdf"' in text
+    assert '"-r -s --headless-rendering sensors_demo.sdf"' in text
     assert "rgbd_camera/depth_image" in text
 
 

@@ -14,8 +14,10 @@ def generate_launch_description() -> LaunchDescription:
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(ros_gz_sim / "launch" / "gz_sim.launch.py")),
         # The installed sensors_demo.sdf declares the ``lidar_sensor`` world.
-        # ``-s`` prevents a Qt GUI process from aborting headless cloud runs.
-        launch_arguments={"gz_args": "-r -s sensors_demo.sdf"}.items(),
+        # ``-s --headless-rendering`` keeps the RGB-D renderer alive without
+        # starting Qt; plain server-only mode segfaults remotely during EGL
+        # initialization before the world-control service is advertised.
+        launch_arguments={"gz_args": "-r -s --headless-rendering sensors_demo.sdf"}.items(),
     )
     bridge = Node(
         package="ros_gz_bridge", executable="parameter_bridge", output="screen",
