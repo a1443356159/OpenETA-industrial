@@ -55,6 +55,7 @@ def test_m3_native_adhesion_uses_contact_gated_force_carry() -> None:
     assert "EnableVelocityChecks" in source
     assert "kLiftEngageHeightM" in source
     assert "adhesionForceEngaged_" in source
+    assert "_params.torsionalFrictionCoeff = this->adhesionForceEngaged_" in source
 
 
 def test_m3_native_adhesion_softens_only_post_capture_transport_contacts() -> None:

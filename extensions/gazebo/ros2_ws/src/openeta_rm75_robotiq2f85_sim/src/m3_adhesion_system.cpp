@@ -142,10 +142,12 @@ class M3AdhesionSystem final
               this->carrierCollisionEntities_.count(_first) != 0;
           const bool carrierSecond =
               this->carrierCollisionEntities_.count(_second) != 0;
-          // Do not alter the live pad contacts while a close is establishing
-          // its evidence window.  The stronger tangential/torsional material
-          // applies only after the captured body has begun the proof lift.
-          if (!this->captured_ || !this->adhesionForceEngaged_ ||
+          // Capture is set only after the bilateral contact window has been
+          // accepted, so tangential pad friction can immediately retain that
+          // proven contact without influencing the evidence itself.  Delay
+          // the torsional term until lift: applying it while the fingers are
+          // still settling creates an avoidable spin impulse.
+          if (!this->captured_ ||
               !((targetFirst && carrierSecond) ||
                 (targetSecond && carrierFirst)))
           {
@@ -155,11 +157,13 @@ class M3AdhesionSystem final
           _params.secondaryFrictionCoeff = kAdhesionFriction;
           _params.rollingFrictionCoeff = 0.0;
           _params.secondaryRollingFrictionCoeff = 0.0;
-          // The two captured pad contacts must resist spin about their
-          // normals as well as tangential translation.  This is applied only
-          // to target/carrier pairs after the physical contact window passed;
-          // table support remains unchanged.
-          _params.torsionalFrictionCoeff = kAdhesionTorsionalFriction;
+          // The two captured pad contacts resist tangential translation as
+          // soon as their bilateral evidence is accepted.  Spin resistance
+          // joins only after the proof lift starts; table support is never
+          // changed because this callback only matches target/carrier pairs.
+          _params.torsionalFrictionCoeff = this->adhesionForceEngaged_
+              ? kAdhesionTorsionalFriction
+              : 0.0;
           _params.restitutionCoeff = 0.0;
         });
   }
