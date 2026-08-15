@@ -151,9 +151,10 @@ a deployment must re-calibrate, and the worker fails closed when explicit
 camera-to-world calibration is absent from both profile and deployment.
 The remaining `OPENETA_GAZEBO_*` variables select ROS 2/Gazebo executables,
 the workspace overlay, extra launch arguments, a world override, and the
-startup/observation deadlines.  `OPENETA_M3_ATTACHMENT_MODE` selects the M3
-grasp mechanism: `physics` (default, pure friction grasp) or `detachable`
-(opt-in controlled DetachableJoint fallback).
+startup/observation deadlines. M3's grasp mechanism is fixed to
+`bilateral_contact_adhesion_v1`: native left/right Gazebo contact sensors gate
+repository-owned kinematic capture. Legacy attachment-mode environment values
+are rejected rather than silently selecting a fallback.
 
 ## Module naming vs plan.md §6
 

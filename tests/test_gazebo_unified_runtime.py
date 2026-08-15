@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 from adapter.protocol import CameraFrame, RobotState
 from extensions.gazebo.deployment import GazeboDeploymentConfig
 from extensions.gazebo.direct_env import GazeboDirectEnv
@@ -117,6 +119,13 @@ def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit
     assert config.gz_partition == "locked"
     assert config.launch_arguments == ("rviz:=false",)
     assert config.process_environment["ROS2CLI_NO_DAEMON"] == "1"
+
+
+def test_deployment_rejects_retired_m3_attachment_mode() -> None:
+    with pytest.raises(ValueError, match="OPENETA_M3_ATTACHMENT_MODE is retired"):
+        GazeboDeploymentConfig.from_environment({
+            "OPENETA_M3_ATTACHMENT_MODE": "detachable",
+        })
 
 
 def test_manager_rejects_second_gazebo_and_retires_worker_on_release() -> None:

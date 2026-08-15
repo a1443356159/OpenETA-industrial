@@ -1,6 +1,8 @@
-# Gazebo unified runtime acceptance
+# Gazebo unified runtime and formal acceptance
 
-Date: 2026-08-10 (Asia/Shanghai)
+The dated entries below are implementation history. Current formal evidence is
+always produced by the clean-SHA cloud M0–M4 coordinator described at the end
+of this document; historical local runs cannot mark a milestone complete.
 
 ## Implemented boundary
 
@@ -58,3 +60,29 @@ WSL2 remains best-effort. A formal WSL2 run must record the WSL version, RMW,
 domain, partition, overlay, missing readiness items and worker PGID. Discovery
 failure is reported as blocked/inconclusive and must not fall back to domain 42
 or a long-lived daemon.
+
+## Current M3 and cloud acceptance contract
+
+M3 is a profile of the same runtime, but its carry mechanism is deliberately
+deterministic: native Gazebo left/right fingertip contact sensors must provide
+fresh evidence for the same known object before `M3AdhesionSystem` captures it.
+The physics engine remains responsible for contact and release settling; held
+motion is labelled `grasp_mechanism=bilateral_contact_adhesion_v1`. Plugin
+state alone cannot prove a grasp: target lift, stable target-relative pose and
+non-moving distractor remain verifier gates before MoveIt attachment changes.
+
+The formal entry point is:
+
+```bash
+OPENETA_CLOUD_ACCEPTANCE_ROOT=/data/openeta-cloud-acceptance \
+  bash scripts/run_cloud_m0_m4_acceptance.sh
+```
+
+It rejects a dirty source or a commit not reachable from `origin`, makes a
+fresh detached clone on the data disk, records OS/GPU/disk/vendor/Gazebo and
+overlay evidence, builds once, then runs M0–M4 serially. Every live segment
+receives its own ROS domain, Gazebo partition and MCP port; cleanup targets
+only processes carrying that unique partition. The immutable root report,
+milestone JSON, stdout, build/launch/MCP logs and cleanup evidence reside in
+the SHA-specific `.cache/cloud-m0-m4-<UTC>-<SHA>/` directory. M4 is skipped
+after any preceding failure or inconclusive result.

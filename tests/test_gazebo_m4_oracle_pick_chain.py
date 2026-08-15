@@ -187,18 +187,30 @@ def _fake_camera_frame_grasp_candidate(
     }
 
 
+def _oracle_seeds() -> tuple[int, ...]:
+    """Let the cloud formal runner declare three independent M4 episodes."""
+    raw = os.environ.get("OPENETA_M4_ORACLE_SEEDS", "41")
+    try:
+        seeds = tuple(int(item.strip()) for item in raw.split(",") if item.strip())
+    except ValueError as exc:
+        raise RuntimeError("OPENETA_M4_ORACLE_SEEDS must be comma-separated integers") from exc
+    if not seeds:
+        raise RuntimeError("OPENETA_M4_ORACLE_SEEDS must not be empty")
+    return seeds
+
+
 @pytest.mark.skipif(
     os.environ.get("OPENETA_RUN_LIVE_ROS_TEST") != "1",
     reason="opt-in: set OPENETA_RUN_LIVE_ROS_TEST=1 for the live M4 oracle pick chain",
 )
-def test_gazebo_m4_oracle_pick_chain_live() -> None:
+@pytest.mark.parametrize("seed", _oracle_seeds())
+def test_gazebo_m4_oracle_pick_chain_live(seed: int) -> None:
     url = os.environ.get("OPENETA_SIM_MCP_URL", DEFAULT_MCP_URL)
     transport = SseSimulatorMcpTransport(url)
     handle = session_id = ""
     try:
         created = transport.call_tool(
-            "create_env",
-            {"env_id": ENV_ID, "seed": 41, "task": "M4 oracle pick chain"},
+            "create_env", {"env_id": ENV_ID, "seed": seed, "task": "M4 oracle pick chain"},
             timeout_s=180,
         )
         handle = str(created.get("handle") or "")
@@ -206,7 +218,7 @@ def test_gazebo_m4_oracle_pick_chain_live() -> None:
         assert handle, "create_env returned no handle"
         assert created.get("control_spec", {}).get("m3") is True, "wrong gazebo profile"
         common = {"handle": handle, "session_id": session_id}
-        transport.call_tool("reset_env", {**common, "seed": 41}, timeout_s=180)
+        transport.call_tool("reset_env", {**common, "seed": seed}, timeout_s=180)
 
         # Agent-side proxy handlers bound to the live handle: move_to and
         # gripper_control exercise the sim_mcp -> gazebo action mapping.
@@ -280,8 +292,6 @@ def test_gazebo_m4_oracle_pick_chain_live() -> None:
             assert mcp.get("target_orientation_mode") == "preserve_current"
             if not result.success:
                 message = f"{result.content} {result.details.get('diagnostics')}"
-                if stage == "grasp" and "MOTION_PLAN_FAILED" in message:
-                    pytest.xfail("M3 known live blocker: contact-pose MOTION_PLAN_FAILED")
                 raise AssertionError(f"{stage} move_to failed: {message}")
 
         # 6. orient + pregrasp: drive the EEF to the reachable grasp
@@ -325,8 +335,7 @@ def test_gazebo_m4_oracle_pick_chain_live() -> None:
             transport.call_tool("observe_env", common, timeout_s=60)
         )
         close_reason = _physical_reason_code(observation)
-        if close_reason != "LIFT_REQUIRED":
-            pytest.xfail(f"M3 known live blocker: close did not stall on the target ({close_reason})")
+        assert close_reason == "LIFT_REQUIRED", close_reason
 
         # 10. lift
         candidate_move(
@@ -339,8 +348,7 @@ def test_gazebo_m4_oracle_pick_chain_live() -> None:
             transport.call_tool("observe_env", common, timeout_s=60)
         )
         held_reason = _physical_reason_code(observation)
-        if held_reason != "TARGET_HELD":
-            pytest.xfail(f"M3 known live blocker: lift comovement unproven ({held_reason})")
+        assert held_reason == "TARGET_HELD", held_reason
     finally:
         if handle:
             with contextlib.suppress(Exception):

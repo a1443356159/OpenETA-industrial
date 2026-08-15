@@ -735,31 +735,29 @@ Do not force uncertainty into success/failure.
 
 ---
 
-## 11.3 Optional controlled attachment
+## 11.3 Bilateral-contact kinematic adhesion
 
-If pure contact physics is too unstable for V1, Gazebo detachable-joint style attachment is allowed.
-
-Policy:
-
-```text
-valid grasp configuration
-+
-gripper close
-+
-contact/geometric condition
-→ attach
-```
-
-and:
+M3 uses repository-owned kinematic adhesion after Gazebo's two real fingertip
+contact sensors prove the same known object is simultaneously present at both
+pads. The physics engine remains authoritative for contact and post-release
+settling, not for holding the object.
 
 ```text
+fresh left-pad contact window
++
+fresh right-pad contact window
++
+same target or distractor identity
+→ capture with bilateral_contact_adhesion_v1
+
 gripper open
-→ detach
+→ open, release, restore dynamics, settle
 ```
 
-Keep this mechanism isolated in the Gazebo embodiment layer.
-
-Do not leak simulator-only attachment semantics into OpenETA Planner logic.
+The plugin is isolated in the Gazebo embodiment layer and its state alone is
+never a task-success proof: `TARGET_HELD` still requires stable relative pose,
+actual target lift, and no distractor co-motion. Do not leak this
+simulator-only mechanism into Planner logic.
 
 ---
 

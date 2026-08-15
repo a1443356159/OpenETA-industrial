@@ -32,6 +32,9 @@ _CONFIG_ENV_NAMES = (
     "OPENETA_GAZEBO_WORLD",
     "OPENETA_GAZEBO_STARTUP_TIMEOUT_S",
     "OPENETA_GAZEBO_OBSERVATION_TIMEOUT_S",
+    # Deliberately keep this retired name in the environment snapshot so an
+    # old worker fails loudly instead of silently selecting an obsolete M3
+    # grasp implementation.
     "OPENETA_M3_ATTACHMENT_MODE",
 )
 
@@ -61,10 +64,6 @@ class GazeboDeploymentConfig:
     world_override: str | None = None
     startup_timeout_s: float = 30.0
     observation_timeout_s: float = 30.0
-    # M3 grasp fallback: "physics" keeps the pure friction-grasp behavior;
-    # "detachable" enables the controlled gz DetachableJoint attach/detach
-    # path.  Only ever set through OPENETA_M3_ATTACHMENT_MODE.
-    m3_attachment_mode: str = "physics"
     process_environment: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -76,8 +75,6 @@ class GazeboDeploymentConfig:
             raise ValueError("Gazebo deadlines must be positive")
         if any(not isinstance(item, str) for item in self.launch_arguments):
             raise ValueError("Gazebo launch arguments must be strings")
-        if self.m3_attachment_mode not in {"physics", "detachable"}:
-            raise ValueError("OPENETA_M3_ATTACHMENT_MODE must be 'physics' or 'detachable'")
         object.__setattr__(self, "camera_extrinsics", MappingProxyType(dict(self.camera_extrinsics)))
         object.__setattr__(self, "process_environment", MappingProxyType(dict(self.process_environment)))
 
@@ -85,6 +82,11 @@ class GazeboDeploymentConfig:
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> "GazeboDeploymentConfig":
         source = os.environ if environment is None else environment
         snapshot = {name: str(source[name]) for name in _CONFIG_ENV_NAMES if name in source}
+        if "OPENETA_M3_ATTACHMENT_MODE" in snapshot:
+            raise ValueError(
+                "OPENETA_M3_ATTACHMENT_MODE is retired; M3 always uses "
+                "bilateral_contact_adhesion_v1"
+            )
         launch_arguments = _json_value(snapshot, "OPENETA_GAZEBO_LAUNCH_ARGUMENTS", [])
         extrinsics = _json_value(snapshot, "OPENETA_GAZEBO_CAMERA_EXTRINSICS", {})
         if not isinstance(launch_arguments, list):
@@ -113,7 +115,6 @@ class GazeboDeploymentConfig:
             world_override=snapshot.get("OPENETA_GAZEBO_WORLD") or None,
             startup_timeout_s=float(snapshot.get("OPENETA_GAZEBO_STARTUP_TIMEOUT_S", "30")),
             observation_timeout_s=float(snapshot.get("OPENETA_GAZEBO_OBSERVATION_TIMEOUT_S", "30")),
-            m3_attachment_mode=snapshot.get("OPENETA_M3_ATTACHMENT_MODE", "physics").strip() or "physics",
             process_environment=child_env,
         )
 

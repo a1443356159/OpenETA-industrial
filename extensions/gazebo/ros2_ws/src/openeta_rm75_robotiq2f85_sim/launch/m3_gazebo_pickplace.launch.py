@@ -2,34 +2,17 @@
 
 import os
 from pathlib import Path
-import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, LogInfo, OpaqueFunction, RegisterEventHandler, SetEnvironmentVariable
-from launch.event_handlers import OnProcessExit, OnShutdown
+from launch.actions import EmitEvent, IncludeLaunchDescription, LogInfo, RegisterEventHandler, SetEnvironmentVariable
+from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, FindExecutable, LaunchConfiguration
+from launch.substitutions import Command, FindExecutable
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
-
-# The renderer is installed next to this launch file so ``ros2 launch`` works
-# from an installed overlay as well as from the repository checkout.  The
-# fallback keeps direct source-tree launches convenient for development.
-_launch_dirs = (
-    Path(get_package_share_directory("openeta_rm75_robotiq2f85_sim")) / "launch",
-    Path(__file__).resolve().parent,
-)
-for _launch_dir in _launch_dirs:
-    if str(_launch_dir) not in sys.path:
-        sys.path.insert(0, str(_launch_dir))
-try:
-    from detachable_sdf import render_detachable_sdf
-except ModuleNotFoundError:
-    from extensions.gazebo.detachable_sdf import render_detachable_sdf
-
 
 def _after_success(target, actions, label):
     def on_exit(event, _context):
@@ -41,51 +24,15 @@ def _after_success(target, actions, label):
     return RegisterEventHandler(OnProcessExit(target_action=target, on_exit=on_exit))
 
 
-def _unlink_generated_sdf(paths):
-    def cleanup(_event, _context):
-        for path in tuple(paths):
-            Path(path).unlink(missing_ok=True)
-            paths.remove(path)
-        return []
-
-    return cleanup
-
-
-def _spawn_robot(
-    context,
-    *,
-    xacro_file,
-    robot_description_command,
-    generated_sdfs,
-    post_spawn_actions,
-):
-    """Keep physics on URDF spawn; render only detachable's fixed-root SDF."""
-
-    mode = LaunchConfiguration("attachment_mode").perform(context)
-    if mode == "detachable":
-        fixed_root = LaunchConfiguration("detachable_fixed_root").perform(context).lower() == "true"
-        path = render_detachable_sdf(
-            xacro_file=xacro_file,
-            environment=os.environ.copy(),
-            fixed_root=fixed_root,
-            parent_link=LaunchConfiguration("detachable_parent_link").perform(context),
-        )
-        generated_sdfs.append(path)
-        arguments = [
-            "-name",
-            "rm75_robotiq_2f85_pickplace_sim_v1",
-            "-file",
-            str(path),
-        ]
-    else:
-        arguments = [
-            "-name",
-            "rm75_robotiq_2f85_pickplace_sim_v1",
-            "-string",
-            robot_description_command,
-            "-z",
-            "0.0",
-        ]
+def _spawn_robot(*, robot_description_command, post_spawn_actions):
+    arguments = [
+        "-name",
+        "rm75_robotiq_2f85_pickplace_sim_v1",
+        "-string",
+        robot_description_command,
+        "-z",
+        "0.0",
+    ]
     spawn = Node(
         package="ros_gz_sim",
         executable="create",
@@ -99,10 +46,7 @@ def generate_launch_description():
     share = Path(get_package_share_directory("openeta_rm75_robotiq2f85_sim"))
     description_share = Path(get_package_share_directory("openeta_rm75_v_description"))
     xacro_file = share / "urdf/rm75_robotiq2f85_m3.urdf.xacro"
-    attachment_mode = LaunchConfiguration("attachment_mode", default="physics")
-    robot_description_command = Command(
-        [FindExecutable(name="xacro"), " ", str(xacro_file), " attachment_mode:=", attachment_mode]
-    )
+    robot_description_command = Command([FindExecutable(name="xacro"), " ", str(xacro_file)])
     robot_description = ParameterValue(robot_description_command, value_type=str)
     moveit = (
         MoveItConfigsBuilder(
@@ -160,26 +104,10 @@ def generate_launch_description():
         parameters=[
             {
                 "use_sim_time": True,
+                # Contact can end the actuator stroke, but it never proves a
+                # grasp. M3AdhesionSystem independently requires two native
+                # contact streams before it will capture an object.
                 "allow_stalling": True,
-                "stall_velocity_threshold": 0.001,
-                # Short contact window: with per-side freeze the first pad to
-                # touch the target locks in ~0.3 s instead of pushing it
-                # across the table for a full second.  Free-space speeds in
-                # the two-speed ramp stay orders of magnitude above the
-                # threshold, so false stalls are not a concern.
-                "stall_timeout": 0.3,
-                # A pure freeze holds each joint at its measured position, so
-                # the PID error (and therefore the pinch force) collapses to
-                # zero and the caged target slides out as soon as the lift
-                # breaks stiction.  A small per-joint offset toward the close
-                # target keeps a sustained squeeze through the carry.  Earlier
-                # sweeps that rejected 0.01-0.03 ran before the anti-slip
-                # table (mu 1.5) and the per-side contact freeze stabilised
-                # the close geometry; with a centred pinch 0.03 just adds
-                # normal force.
-                "stall_hold_extra_rad": 0.03,
-                # M3 drives the exact four-bar solution; M2 keeps the legacy
-                # multiplier vector its mimic contract is certified against.
                 "drive_mode": "four_bar",
             }
         ],
@@ -213,33 +141,12 @@ def generate_launch_description():
         ],
         parameters=[{"use_sim_time": True}],
     )
-    generated_sdfs: list[Path] = []
-    spawn = OpaqueFunction(
-        function=_spawn_robot,
-        kwargs={
-            "xacro_file": xacro_file,
-            "robot_description_command": robot_description_command,
-            "generated_sdfs": generated_sdfs,
-            "post_spawn_actions": [jsb, bridge],
-        },
+    spawn = _spawn_robot(
+        robot_description_command=robot_description_command,
+        post_spawn_actions=[jsb, bridge],
     )
     return LaunchDescription(
         [
-            DeclareLaunchArgument(
-                "attachment_mode",
-                default_value="physics",
-                description="M3 grasp mechanism: physics friction or the user-approved detachable fallback",
-            ),
-            DeclareLaunchArgument(
-                "detachable_fixed_root",
-                default_value="true",
-                description="Anchor detachable-only RM75 base to world; diagnostic override only",
-            ),
-            DeclareLaunchArgument(
-                "detachable_parent_link",
-                default_value="gripper_mount_link",
-                description="Detachable-only parent link; link_7 is a diagnostic control",
-            ),
             SetEnvironmentVariable(
                 "GZ_SIM_RESOURCE_PATH",
                 os.pathsep.join(
@@ -250,10 +157,18 @@ def generate_launch_description():
                     ]
                 ),
             ),
+            SetEnvironmentVariable(
+                "GZ_SIM_SYSTEM_PLUGIN_PATH",
+                os.pathsep.join(
+                    [
+                        str(share.parents[1] / "lib"),
+                        os.environ.get("GZ_SIM_SYSTEM_PLUGIN_PATH", ""),
+                    ]
+                ),
+            ),
             gz_launch,
             rsp,
             spawn,
-            RegisterEventHandler(OnShutdown(on_shutdown=_unlink_generated_sdf(generated_sdfs))),
             _after_success(jsb, [arm], "joint_state_broadcaster activation"),
             _after_success(arm, [gripper], "RM75 controller activation"),
             _after_success(

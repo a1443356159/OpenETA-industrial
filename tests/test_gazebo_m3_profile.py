@@ -24,13 +24,15 @@ def test_m3_identity_registration_and_profile_are_isolated_from_m2() -> None:
     assert PHYSICS in profile.capabilities
 
 
-def test_m3_world_uses_official_odometry_without_contact_sensors() -> None:
+def test_m3_world_uses_official_odometry_and_native_pad_contact_sensors() -> None:
     world = PACKAGE / "worlds/m3_rm75_robotiq2f85_pickplace.sdf"
     root = ET.parse(world).getroot()
     text = world.read_text(encoding="utf-8")
     assert root.find(".//world[@name='m3_rm75_robotiq2f85_pickplace']") is not None
-    assert "gz-sim-contact-system" not in text
-    assert "/m3/contact/" not in text
+    assert "gz-sim-contact-system" in text
+    assert "openeta::gazebo::M3AdhesionSystem" in text
+    assert "/m3/contacts/left_pad" in text
+    assert "/m3/contacts/right_pad" in text
     assert text.count("gz-sim-odometry-publisher-system") == 2
     assert "detachable" not in text.lower()
     M3Config().validate_assets()

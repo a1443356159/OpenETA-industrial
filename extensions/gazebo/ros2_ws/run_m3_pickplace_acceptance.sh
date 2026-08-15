@@ -4,9 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 DRIVER="${SCRIPT_DIR}/m3_pickplace_acceptance.py"
-PYTHON_BIN="${REPO_DIR}/.venv/bin/python"
+PYTHON_BIN="${OPENETA_ACCEPTANCE_PYTHON:-${REPO_DIR}/.venv/bin/python}"
 LOCK_DIR="/tmp/openeta-acceptance-locks"
-mkdir -p "${LOCK_DIR}" "${REPO_DIR}/.cache/logs" "${REPO_DIR}/.cache/reports"
+ARTIFACT_DIR="${OPENETA_ACCEPTANCE_ARTIFACT_DIR:-${REPO_DIR}/.cache}"
+mkdir -p "${LOCK_DIR}" "${ARTIFACT_DIR}/logs" "${ARTIFACT_DIR}/reports"
 
 ORIGINAL_ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"
 set +u
@@ -134,15 +135,16 @@ done
 
 export ROS_DOMAIN_ID OPENETA_MCP_PORT
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-export GZ_PARTITION="openeta_m3_acceptance_${ROS_DOMAIN_ID}_$$"
+RUN_TAG="${OPENETA_ACCEPTANCE_RUN_TAG:-local}"
+export GZ_PARTITION="openeta_m3_acceptance_${RUN_TAG}_${ROS_DOMAIN_ID}_$$"
 export ROS_HOME="${REPO_DIR}/.cache/ros/m3-acceptance-${ROS_DOMAIN_ID}-$$"
 export OPENETA_ISOLATION_SELECTION_LOG="${DOMAIN_SELECTION_LOG}"
-export OPENETA_WORKER_LOG_DIR="${REPO_DIR}/.cache/logs/m3-acceptance-${ROS_DOMAIN_ID}-$$"
+export OPENETA_WORKER_LOG_DIR="${ARTIFACT_DIR}/logs/m3-acceptance-${ROS_DOMAIN_ID}-$$"
 mkdir -p "${ROS_HOME}" "${OPENETA_WORKER_LOG_DIR}"
 
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-REPORT="${REPO_DIR}/.cache/reports/m3-pickplace-${RUN_STAMP}-$$.json"
-MCP_LOG="${REPO_DIR}/.cache/logs/m3-mcp-${RUN_STAMP}-$$.log"
+REPORT="${ARTIFACT_DIR}/reports/m3-pickplace-${RUN_STAMP}-$$.json"
+MCP_LOG="${ARTIFACT_DIR}/logs/m3-mcp-${RUN_STAMP}-$$.log"
 
 run_cleanup_path_self_tests
 "${PYTHON_BIN}" "${DRIVER}" init --report "${REPORT}" \
@@ -198,7 +200,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 cd "${REPO_DIR}"
-OPENETA_SKIP_ROSDEP=1 "${SCRIPT_DIR}/build.sh"
+if [[ "${OPENETA_ACCEPTANCE_SKIP_BUILD:-0}" != 1 ]]; then
+  OPENETA_SKIP_ROSDEP=1 "${SCRIPT_DIR}/build.sh"
+fi
 set +u
 source "${SCRIPT_DIR}/install/setup.bash"
 set -u
@@ -211,7 +215,8 @@ trap 'exit 143' TERM
 
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "${PYTHON_BIN}" -m pytest -q \
   tests/test_gazebo_m3_profile.py tests/test_gazebo_m3_source.py \
-  tests/test_gazebo_m3_verifier.py tests/test_gazebo_m3_worker.py \
+  tests/test_gazebo_m3_verifier.py tests/test_gazebo_m3_adhesion.py \
+  tests/test_gazebo_m3_worker.py \
   tests/test_gazebo_m3_acceptance.py \
   tests/test_gazebo_m2_assets.py tests/test_gazebo_m2_contract.py \
   tests/test_gazebo_m2_worker.py tests/test_gazebo_ros_control.py

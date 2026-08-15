@@ -45,7 +45,7 @@ metadata
 `failure_injection` 语义（声明式，执行器属 runner follow-up）：
 
 - `grasp_pose_offset`：首个抓取候选在执行前平移 `offset_m`，制造一次 `EMPTY_GRASP`/`TARGET_NOT_LIFTED`；
-- `drop_after_lift`：首次验证持握后强制脱手一次（detachable 模式下 detach，physics 模式下张开夹爪），制造 `OBJECT_DROPPED`；
+- `drop_after_lift`：首次验证持握后执行张爪→运动学 release，制造 `OBJECT_DROPPED`；
 - `max_injections` 限定注入次数，防止 runner 把恢复循环本身当成注入。
 
 ## 指标采集：复用现有 rollout/eval 基础设施
@@ -62,12 +62,12 @@ metadata
 
 **false-success 率**是重点（plan.md §27）：定义为 episode 被 `classify_episode_result` 判为 success、但最终 M3 verifier verdict 非 PASS（FAIL 或 UNKNOWN）的比例。M3 的三态 verdict 与 fail-closed UNKNOWN 语义保证 planner 文本不能自证成功（plan.md §13），false success 只能在「环境 receipt 误报」路径上发生，因此该比率直接度量验证链路的诚实性。UNKNOWN 率单独报告，不并入 fail。
 
-复现性（plan.md §31）：manifest 的 `seed` + scene 声明 + 现有 episode metadata（commit、batch_id 等由 parallel runner 自动注入）构成完整 provenance；Gazebo world 版本与 `attachment_mode` 已在 M3 观测 metadata 中标注，无需新增记录通道。
+复现性（plan.md §31）：manifest 的 `seed` + scene 声明 + 现有 episode metadata（commit、batch_id 等由 parallel runner 自动注入）构成完整 provenance；Gazebo world 版本与 `grasp_mechanism=bilateral_contact_adhesion_v1` 已在 M3 观测 metadata 中标注，无需新增记录通道。
 
 ## 与 M3 验收报告的衔接
 
 - 场景、物体、校验器、reason code 全部继承 M3（`docs/gazebo-m3-physical-verification.md`）；v0 manifest 不引入 M3 verifier 无法判定的新真值来源。
-- M3 当前 **blocked**（2F-85 闭环连杆保真度；detachable fallback 三轮验收仍 blocked）。本基准的 live 运行继承该状态：manifest 与离线校验现在可用，正式 benchmark 结果等 M3 阻塞解除（闭环连杆约束或垫面反馈闭合）后再跑。
+- M3 live benchmark 仅在同 SHA M0–M4 正式验收通过后产出正式结果。manifest 与离线校验可独立运行；真实抓取依据双垫接触吸附收据和 M3 verifier，而非旧式物理保持方案。
 - `grasp_recovery` 类直接复用 M3 观察到的自然失败模式（`EMPTY_GRASP`、`OBJECT_DROPPED`）作为注入模型，注入是加速复现，不改变 verifier 语义。
 - `multi_sort` seed1 的 `bin_b`、clutter 物体和 `occlusion/lighting` 变化超出 M3 固定场景，需要 world 模板参数化（spawn 额外实体、移动光源），属 follow-up；manifest 只声明逻辑场景，M3 场景 natively 支撑其余 9 个 episode。
 

@@ -7,7 +7,9 @@ M4 已按 2026-08-10 的用户决策修订落地，与 plan.md 原 M4（Full Ora
 1. oracle 感知做成与 SAM3 **完全同形态**的感知模块——同一 MCP/工具契约、同一 selection flow、同一下游消费路径，按感知 profile 互换；plan.md §14 要求 oracle 不混入正式感知 profile，此处以显式 `OPENETA_PERCEPTION_PROFILE` 开关和三重 provenance 标注满足"preserve provenance"与"mark clearly as simulator-only"。
 2. **不做** `pick_place` 编排工具（plan.md §22 的宏编排与 NOT_READY 门由用户免除）；执行使用分阶段 MoveIt 原语（`move_to` / `gripper_control`）。
 
-目标环境：`openeta/gazebo_rm75_robotiq2f85_pickplace-v0`（M3 profile）。离线测试全绿；live 验收因 M3 已知接触位阻塞（`MOTION_PLAN_FAILED`）记为 **blocked**，live 测试遇该阻塞时 xfail。
+目标环境：`openeta/gazebo_rm75_robotiq2f85_pickplace-v0`（M3 profile）。live
+验收不再把 M3 失败转换为预期跳过：每个 seed 必须真实到达 `TARGET_HELD`，否则
+整条 M4 链 fail-closed。
 
 ## 架构与数据通路
 
@@ -77,9 +79,10 @@ SAM3 侧（`tools/sam3_core.py` 及其 MCP server）零改动。
 
 - 离线新增 39 项：worker 侧 29 项（`tests/test_gazebo_oracle_perception.py` 16 项 + `tests/test_gazebo_oracle_worker_route.py` 13 项）+ agent 契约 `tests/tools/test_oracle_perceive_tool.py` 10 项；另有执行链路补丁 5 项（`tests/test_simulator_mcp_proxy.py` 3 项、`tests/tools/test_camera_pose_transform_tool.py` 2 项），全部通过。
 - 全量离线回归：`1320 passed, 14 skipped, 0 failed`。
-- live：`tests/test_gazebo_m4_oracle_pick_chain.py`（`OPENETA_RUN_LIVE_ROS_TEST=1` 门控，默认 skip），完整链路 `observe → oracle_perceive → select → fake grasp 候选（真值反推相机系，免 GPU）→ camera_pose_to_world → move_to(pregrasp/grasp) → gripper_close → lift → M3 verdict`；接触位遇到已知 M3 阻塞（`MOTION_PLAN_FAILED`）时记为 xfail。
+- live：`tests/test_gazebo_m4_oracle_pick_chain.py`（`OPENETA_RUN_LIVE_ROS_TEST=1` 门控，默认 skip）完整链路为 `observe → oracle_perceive → select → fake grasp 候选（真值反推相机系，免 GPU）→ camera_pose_to_world → move_to(pregrasp/grasp) → gripper_close → lift → TARGET_HELD`。`OPENETA_M4_ORACLE_SEEDS` 可声明多个 seed；云端正式入口固定运行三个 seed。任何 motion、双垫接触或持物硬门失败都会失败，不再被预期跳过掩盖。
 
-M3 阻塞解除前，live 验收保持 blocked，milestone 不标记完成。
+Oracle 只证明 simulator ground truth 的感知与工具契约；fake candidate 只证明
+GraspNet-shaped 参数链路。两者不构成真实 SAM3 或 GraspNet 推理声明。
 
 ## 明确不做
 

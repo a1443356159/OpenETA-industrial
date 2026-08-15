@@ -138,16 +138,10 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
   - [x] Offline tests: 39 new (worker 16+13, agent contract 10) + 5
     execution-link patch tests; full offline suite 1320 passed, 0 failed.
   - [ ] Live acceptance (`tests/test_gazebo_m4_oracle_pick_chain.py`,
-    `OPENETA_RUN_LIVE_ROS_TEST=1`): test poses fixed on 2026-08-11 to the
-    reachable M3 grasp-orientation family (orient via absolute-pose move,
-    then position-level candidate moves with preserve_current and the
-    grasp-centre→mount offset); close/lift stages xfail on the known M3
-    gripper-linkage physics blocker.  A worker-route unwrap gap was fixed for
-    the live oracle path.  Full live pass remains gated on M3: the grasp
-    chain reaches `TARGET_HELD` but retention is still marginal (lift-time
-    slip/tilt at ~50-75% per grasp), and the detachable fallback is blocked
-    on gz-sim 8.11 dartsim never forming the physical fixed joint; see
-    `docs/gazebo-m3-physical-verification.md`.
+    `OPENETA_RUN_LIVE_ROS_TEST=1`): each declared seed must reach
+    `TARGET_HELD` through the M3 bilateral-contact-adhesion hard gate. The
+    cloud M0–M4 runner executes three seeds and rejects motion, contact, hold,
+    or cleanup failures; it does not use expected-failure exemptions.
   - Out of scope: wrist projection, pick_place NOT_READY gate, unified object
     summary schema (plan.md §17), SAM3-side changes, M6 fine-tuning.
   - Details: `docs/gazebo-m4-oracle-perception.md`.

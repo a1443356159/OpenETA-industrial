@@ -1,10 +1,11 @@
 """Dependency-light contracts for M3 physical pick/place verification.
 
 This module intentionally imports neither ROS nor Gazebo.  The live adapter
-normalizes official ``Odometry`` messages and existing robot state into the
-immutable types below; the verifier then decides from physical evidence only.  A MoveIt
-attached collision object is represented as a planning command and never as a
-Gazebo joint or kinematic attachment.
+normalizes official ``Odometry`` messages and the M3 adhesion plugin receipt
+into the immutable types below; the verifier then decides from physical
+evidence.  Native Gazebo contact sensors decide whether a capture is allowed.
+A MoveIt attached collision object is represented as a planning command; the
+Gazebo plugin remains the sole owner of its kinematic carry state.
 """
 
 from __future__ import annotations
@@ -42,25 +43,26 @@ class ReasonCode(StrEnum):
     TARGET_PLACED = "TARGET_PLACED"
     OUTSIDE_DESTINATION = "OUTSIDE_DESTINATION"
     NOT_SETTLED = "NOT_SETTLED"
+    # Kept for wire compatibility with historic M3 observations.  Bilateral
+    # contact adhesion no longer reads stall / squeeze-force evidence.
     STALL_STATUS_MISSING = "STALL_STATUS_MISSING"
+    CONTACT_REJECTED = "CONTACT_REJECTED"
+    ADHESION_RELEASE_REJECTED = "ADHESION_RELEASE_REJECTED"
     DATA_MISSING = "DATA_MISSING"
     DATA_STALE = "DATA_STALE"
     IDENTITY_INCOMPLETE = "IDENTITY_INCOMPLETE"
 
 
-class AttachmentLifecycle(StrEnum):
-    """Private lifecycle for the detachable fallback.
+class AdhesionState(StrEnum):
+    """Observable states emitted by the repository-owned M3 plugin."""
 
-    This deliberately is not a verifier verdict or a public reason code.  An
-    ``ATTACH_ACKED_UNPROVEN`` state means only that the DetachableJoint topic
-    accepted a request; a following Odometry co-motion check is still the
-    first point at which the object may become held.
-    """
-
+    UNKNOWN = "UNKNOWN"
+    ARMED = "ARMED"
+    CAPTURED = "CAPTURED"
+    REJECTED = "REJECTED"
+    RELEASE_PENDING = "RELEASE_PENDING"
+    RELEASED = "RELEASED"
     DETACHED = "DETACHED"
-    CONTACT_CONFIRMED = "CONTACT_CONFIRMED"
-    ATTACH_ACKED_UNPROVEN = "ATTACH_ACKED_UNPROVEN"
-    HELD_PROVEN = "HELD_PROVEN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,19 +122,6 @@ class M3Config(M2Config):
     settled_angular_speed_rad_s: float = 0.10
     freshness_s: float = 2.0
     allow_stalling: bool = True
-    # Detachable-fallback geometry gate: after a verified close stall, only
-    # the object whose centre lies within this distance band of the EEF mount
-    # origin may be attached (the grasp centre sits ~0.127 m out).
-    attach_gate_min_m: float = 0.09
-    attach_gate_max_m: float = 0.17
-    # Private detachable fallback feedback gate.  It is intentionally kept
-    # out of the public observation schema: these values establish whether a
-    # request may be sent, not whether a grasp succeeded.
-    pad_contact_gap_m: float = 0.004
-    pad_clearance_m: float = 0.005
-    pad_evidence_window_s: float = 0.10
-    pad_evidence_samples: int = 3
-    pad_max_object_speed_m_s: float = 0.03
 
     @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
@@ -245,45 +234,87 @@ class PhysicsSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class PadSurface:
-    """One frozen fingertip-pad surface expressed in the world frame."""
+class AdhesionReceipt:
+    """A native-contact capture or release result from ``M3AdhesionSystem``.
 
-    centre: tuple[float, float, float]
-    normal: tuple[float, float, float]
-    tangent_half_extent_m: float
+    This is deliberately a small receipt, rather than a contact geometry
+    model.  Python must not reinterpret TF, mesh, OBB, distance, or a single
+    contact sample as a grasp.  Only the Gazebo plugin can issue ``CAPTURED``
+    after its bilateral contact window has passed.
+    """
 
-    def __post_init__(self) -> None:
-        if self.tangent_half_extent_m <= 0 or not all(
-            math.isfinite(value) for value in (*self.centre, *self.normal)
-        ):
-            raise ValueError("pad surface must be finite")
-        if vector_norm(self.normal) <= 1e-9:
-            raise ValueError("pad normal must be non-zero")
+    state: AdhesionState
+    candidate_id: str | None = None
+    receipt_id: str | None = None
+    window_id: str | None = None
+    reason: str | None = None
+    timestamp_s: float | None = None
 
     @property
-    def unit_normal(self) -> tuple[float, float, float]:
-        length = vector_norm(self.normal)
-        return tuple(value / length for value in self.normal)  # type: ignore[return-value]
+    def capture_accepted(self) -> bool:
+        return (
+            self.state is AdhesionState.CAPTURED
+            and bool(self.candidate_id)
+            and bool(self.receipt_id)
+        )
+
+    @property
+    def release_accepted(self) -> bool:
+        return self.state in {AdhesionState.RELEASED, AdhesionState.DETACHED}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state.value,
+            "candidate_id": self.candidate_id,
+            "receipt_id": self.receipt_id,
+            "window_id": self.window_id,
+            "reason": self.reason,
+            "timestamp_s": self.timestamp_s,
+        }
 
 
-@dataclass(frozen=True, slots=True)
-class PadSnapshot:
-    """Internal dual-pad/odometry sample taken after a gripper action."""
+def coerce_adhesion_receipt(value: AdhesionReceipt | Mapping[str, Any] | None) -> AdhesionReceipt | None:
+    """Normalize a plugin-control result without inferring any contact data."""
 
-    timestamp_s: float
-    left: PadSurface
-    right: PadSurface
-    objects: tuple[ObjectState, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class PadGateResult:
-    """Result of private attach eligibility; never itself proves a grasp."""
-
-    candidate_id: str | None
-    accepted: bool
-    reason: str
-    sample_count: int
+    if value is None or isinstance(value, AdhesionReceipt):
+        return value
+    if not isinstance(value, Mapping):
+        return None
+    raw_state = str(
+        value.get("state", value.get("phase", value.get("status", "UNKNOWN")))
+    ).upper()
+    if raw_state == "IDLE":
+        raw_state = "DETACHED"
+    elif raw_state == "CAPTURE_PENDING":
+        raw_state = "ARMED"
+    try:
+        state = AdhesionState(raw_state)
+    except ValueError:
+        state = AdhesionState.UNKNOWN
+    candidate = value.get(
+        "candidate_id", value.get("object_id", value.get("model_name"))
+    )
+    candidate_id = str(candidate) if isinstance(candidate, str) and candidate else None
+    reason = value.get("reason")
+    timestamp = value.get("timestamp_s")
+    receipt_id = value.get("receipt_id")
+    window_id = value.get("window_id")
+    return AdhesionReceipt(
+        state=state,
+        candidate_id=candidate_id,
+        receipt_id=(
+            str(receipt_id)
+            if isinstance(receipt_id, str | int) and str(receipt_id)
+            else None
+        ),
+        window_id=(
+            str(window_id)
+            if isinstance(window_id, str | int) and str(window_id)
+            else None
+        ),
+        reason=str(reason) if reason is not None else None,
+        timestamp_s=float(timestamp) if isinstance(timestamp, int | float) else None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +375,7 @@ class M3Verifier:
     def reset(self) -> None:
         self.phase = "ready"
         self.held = False
+        self._capture_receipt: AdhesionReceipt | None = None
         self._candidate_target_pose: Pose | None = None
         self._candidate_relative_pose: Pose | None = None
         self._candidate_distractor_pose: Pose | None = None
@@ -365,6 +397,7 @@ class M3Verifier:
         *,
         action_type: str | None = None,
         action_timestamp_s: float | None = None,
+        adhesion_receipt: AdhesionReceipt | Mapping[str, Any] | None = None,
     ) -> VerificationRecord:
         invalid = self._validate_snapshot(snapshot, action_timestamp_s)
         if invalid is not None:
@@ -375,10 +408,23 @@ class M3Verifier:
         if target is None or distractor is None:
             return self._remember(self._record(snapshot, Verdict.UNKNOWN, ReasonCode.DATA_MISSING))
 
+        receipt = coerce_adhesion_receipt(adhesion_receipt)
+
         if action_type == "gripper_close":
-            return self._remember(self._verify_close(snapshot, target, distractor))
+            return self._remember(self._verify_close(snapshot, target, distractor, receipt))
 
         if action_type == "gripper_open" and self.held:
+            if receipt is None or not receipt.release_accepted:
+                self.phase = "transport"
+                return self._remember(
+                    self._record(
+                        snapshot,
+                        Verdict.FAIL,
+                        ReasonCode.ADHESION_RELEASE_REJECTED,
+                        grasp=True,
+                        extra={"adhesion_release": receipt.to_dict() if receipt else None},
+                    )
+                )
             self.held = False
             near_table = (
                 target.pose.position[2] - self.config.target_size_m[2] / 2
@@ -449,43 +495,65 @@ class M3Verifier:
         return None
 
     def _verify_close(
-        self, snapshot: PhysicsSnapshot, target: ObjectState, distractor: ObjectState
+        self,
+        snapshot: PhysicsSnapshot,
+        target: ObjectState,
+        distractor: ObjectState,
+        receipt: AdhesionReceipt | None,
     ) -> VerificationRecord:
-        cfg = self.config
-        if (
-            snapshot.aperture_m <= cfg.empty_aperture_m
-            and snapshot.gripper_reached_goal is True
-            and snapshot.gripper_stalled is False
-        ):
+        """Accept a candidate only from a native bilateral-contact receipt.
+
+        Gripper aperture, reached-goal, stall, force, TF, and mesh geometry
+        are intentionally absent from this gate.  They cannot distinguish a
+        true two-pad contact from a near miss or a one-sided pinch.
+        """
+
+        evidence = {"adhesion_capture": receipt.to_dict() if receipt else None}
+        if receipt is None or not receipt.capture_accepted:
             self.phase = "failed"
             self._clear_grasp()
             return self._record(
                 snapshot,
                 Verdict.FAIL,
-                ReasonCode.EMPTY_GRASP,
-                object_detection="at_position_no_object",
+                ReasonCode.CONTACT_REJECTED,
+                object_detection="no_bilateral_contact",
+                extra=evidence,
             )
-        if (
-            snapshot.aperture_m > cfg.empty_aperture_m
-            and snapshot.gripper_stalled is True
-            and snapshot.gripper_reached_goal is False
-        ):
-            self.phase = "lift_required"
-            self._candidate_target_pose = target.pose
-            self._candidate_relative_pose = relative_pose(snapshot.eef_pose, target.pose)
-            self._candidate_distractor_pose = distractor.pose
-            self._candidate_distractor_relative_pose = relative_pose(
-                snapshot.eef_pose, distractor.pose
-            )
-            self._last_target_z = target.pose.position[2]
+        if receipt.candidate_id not in {self.config.target_id, self.config.distractor_id}:
+            self.phase = "failed"
+            self._clear_grasp()
             return self._record(
                 snapshot,
-                Verdict.UNKNOWN,
-                ReasonCode.LIFT_REQUIRED,
-                object_detection="object_detected_closing",
+                Verdict.FAIL,
+                ReasonCode.CONTACT_REJECTED,
+                object_detection="unknown_contact_object",
+                extra=evidence,
             )
-        self.phase = "closing"
-        return self._record(snapshot, Verdict.UNKNOWN, ReasonCode.STALL_STATUS_MISSING)
+        if receipt.candidate_id != self.config.target_id:
+            self.phase = "failed"
+            self._clear_grasp()
+            return self._record(
+                snapshot,
+                Verdict.FAIL,
+                ReasonCode.WRONG_OBJECT,
+                object_detection="wrong_object_detected",
+                extra=evidence,
+            )
+
+        self.phase = "lift_required"
+        self._capture_receipt = receipt
+        self._candidate_target_pose = target.pose
+        self._candidate_relative_pose = relative_pose(snapshot.eef_pose, target.pose)
+        self._candidate_distractor_pose = distractor.pose
+        self._candidate_distractor_relative_pose = relative_pose(snapshot.eef_pose, distractor.pose)
+        self._last_target_z = target.pose.position[2]
+        return self._record(
+            snapshot,
+            Verdict.UNKNOWN,
+            ReasonCode.LIFT_REQUIRED,
+            object_detection="bilateral_contact_captured",
+            extra=evidence,
+        )
 
     def _verify_lift(self, snapshot: PhysicsSnapshot, target: ObjectState) -> VerificationRecord:
         assert self._candidate_target_pose is not None
@@ -504,6 +572,7 @@ class M3Verifier:
             self._candidate_distractor_relative_pose,
         )
         evidence = {
+            "adhesion_capture": self._capture_receipt.to_dict() if self._capture_receipt else None,
             "target_comovement": target_match,
             "distractor_comovement": distractor_match,
         }
@@ -549,6 +618,7 @@ class M3Verifier:
         ) or target.linear_velocity[2] < -0.02
         self._last_target_z = target.pose.position[2]
         evidence = {
+            "adhesion_capture": self._capture_receipt.to_dict() if self._capture_receipt else None,
             "relative_translation_drift_m": drift_m,
             "relative_rotation_drift_rad": drift_rad,
             "falling": falling,
@@ -740,147 +810,11 @@ class M3Verifier:
 
     def _clear_grasp(self) -> None:
         self.held = False
+        self._capture_receipt = None
         self._candidate_target_pose = None
         self._candidate_relative_pose = None
         self._candidate_distractor_pose = None
         self._candidate_distractor_relative_pose = None
-
-
-def select_attachment_object(
-    *,
-    reason_code: str,
-    eef_pose: Pose,
-    objects: Sequence[ObjectState],
-    config: M3Config | None = None,
-) -> str | None:
-    """Return which manipulated object is geometrically at the gripper pads.
-
-    The user-approved detachable fallback may only attach an object after the
-    verifier's own close evidence (``LIFT_REQUIRED``: stall inside the
-    aperture hold window) AND with the object centre inside the grasp
-    workspace band of the EEF mount.  Empty spots and objects away from the
-    pads return ``None``, so the empty-grasp and wrong-object scenarios keep
-    their honest negative verdicts.  Verdict computation never reads this.
-    """
-
-    cfg = config or M3Config()
-    if reason_code != ReasonCode.LIFT_REQUIRED.value:
-        return None
-    best: tuple[float, str] | None = None
-    for item in objects:
-        if item.object_id not in (cfg.target_id, cfg.distractor_id):
-            continue
-        distance = math.dist(item.pose.position, eef_pose.position)
-        if cfg.attach_gate_min_m <= distance <= cfg.attach_gate_max_m and (
-            best is None or distance < best[0]
-        ):
-            best = (distance, item.object_id)
-    return best[1] if best is not None else None
-
-
-def _object_dimensions(item: ObjectState, config: M3Config) -> tuple[float, float, float]:
-    if item.object_id == config.target_id:
-        return config.target_size_m
-    if item.object_id == config.distractor_id:
-        diameter, height = config.distractor_size_m
-        return (diameter, diameter, height)
-    raise ValueError(f"unsupported M3 attachment candidate: {item.object_id}")
-
-
-def _object_extent_along(
-    item: ObjectState, direction: Sequence[float], config: M3Config
-) -> float:
-    """Conservative OBB support distance of an M3 object along ``direction``."""
-
-    unit = tuple(float(value) / vector_norm(direction) for value in direction)
-    q = item.pose.normalized().orientation
-    inverse = (-q[0], -q[1], -q[2], q[3])
-    local = quaternion_rotate(inverse, unit)
-    dimensions = _object_dimensions(item, config)
-    return sum(abs(local[index]) * dimensions[index] / 2 for index in range(3))
-
-
-def _pad_object_contact(
-    pad: PadSurface, item: ObjectState, config: M3Config
-) -> tuple[bool, float]:
-    """Return pad/object normal-contact eligibility and signed surface gap."""
-
-    normal = pad.unit_normal
-    delta = tuple(item.pose.position[index] - pad.centre[index] for index in range(3))
-    normal_distance = sum(delta[index] * normal[index] for index in range(3))
-    # The object must lie in front of the pad, within its finite tangential
-    # face.  The object projection is deliberately conservative, so a mesh
-    # approximation cannot turn an off-pad near miss into an attach request.
-    extent = _object_extent_along(item, normal, config)
-    tangential_sq = max(0.0, sum(value * value for value in delta) - normal_distance**2)
-    tangential_limit = pad.tangent_half_extent_m + max(_object_dimensions(item, config)) / 2
-    gap = normal_distance - extent
-    normal_ok = normal_distance >= -config.pad_contact_gap_m
-    tangential_ok = math.sqrt(tangential_sq) <= tangential_limit
-    return normal_ok and tangential_ok and gap <= config.pad_contact_gap_m, gap
-
-
-def _pad_contact_candidates(sample: PadSnapshot, config: M3Config) -> tuple[str, ...]:
-    candidates: list[str] = []
-    for item in sample.objects:
-        if item.object_id not in (config.target_id, config.distractor_id):
-            continue
-        speed = vector_norm(item.linear_velocity)
-        left_ok, _ = _pad_object_contact(sample.left, item, config)
-        right_ok, _ = _pad_object_contact(sample.right, item, config)
-        if speed <= config.pad_max_object_speed_m_s and left_ok and right_ok:
-            candidates.append(item.object_id)
-    return tuple(candidates)
-
-
-def confirm_pad_contact(
-    samples: Sequence[PadSnapshot],
-    *,
-    action_timestamp_s: float | None,
-    config: M3Config | None = None,
-) -> PadGateResult:
-    """Require stable, bilateral, low-speed and unambiguous pad evidence.
-
-    Topic state, proximity to the EEF, and a single contact-ish sample are all
-    intentionally insufficient.  The gate accepts exactly one stable object
-    over a post-action 100 ms interval; zero or multiple candidates fail
-    closed.
-    """
-
-    cfg = config or M3Config()
-    ordered = tuple(sorted(samples, key=lambda sample: sample.timestamp_s))
-    if len(ordered) < cfg.pad_evidence_samples:
-        return PadGateResult(None, False, "INSUFFICIENT_PAD_SAMPLES", len(ordered))
-    if action_timestamp_s is not None and any(
-        sample.timestamp_s <= action_timestamp_s for sample in ordered
-    ):
-        return PadGateResult(None, False, "PAD_SAMPLE_BEFORE_ACTION", len(ordered))
-    if ordered[-1].timestamp_s - ordered[0].timestamp_s < cfg.pad_evidence_window_s:
-        return PadGateResult(None, False, "PAD_WINDOW_TOO_SHORT", len(ordered))
-    selected: str | None = None
-    for sample in ordered:
-        candidates = _pad_contact_candidates(sample, cfg)
-        if len(candidates) != 1:
-            return PadGateResult(None, False, "PAD_CANDIDATE_AMBIGUOUS", len(ordered))
-        if selected is None:
-            selected = candidates[0]
-        elif selected != candidates[0]:
-            return PadGateResult(None, False, "PAD_CANDIDATE_CHANGED", len(ordered))
-    return PadGateResult(selected, True, "CONTACT_CONFIRMED", len(ordered))
-
-
-def pads_are_clear(
-    sample: PadSnapshot, object_id: str, *, config: M3Config | None = None
-) -> bool:
-    """Require both pads to be clear before publishing a detachable attach."""
-
-    cfg = config or M3Config()
-    item = next((value for value in sample.objects if value.object_id == object_id), None)
-    if item is None:
-        return False
-    _, left_gap = _pad_object_contact(sample.left, item, cfg)
-    _, right_gap = _pad_object_contact(sample.right, item, cfg)
-    return left_gap >= cfg.pad_clearance_m and right_gap >= cfg.pad_clearance_m
 
 
 @dataclass(frozen=True, slots=True)

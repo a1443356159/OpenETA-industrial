@@ -1,6 +1,23 @@
-# TUI Gazebo M0–M3 acceptance
+# TUI Gazebo M0–M3 operator evidence
 
-The acceptance entry point is:
+The TUI coordinator remains useful for human-supervised exploratory evidence;
+it is not the formal cloud acceptance entry point. Formal M0–M4 runs are
+noninteractive and must use a clean same-SHA clone on the cloud data disk:
+
+```bash
+OPENETA_CLOUD_ACCEPTANCE_ROOT=/data/openeta-cloud-acceptance \
+  bash scripts/run_cloud_m0_m4_acceptance.sh
+```
+
+That coordinator builds once, runs M0–M4 serially, reuses the M2/M3 isolated
+drivers, gives each live segment a unique ROS domain/Gazebo partition/MCP
+port, and writes immutable reports plus complete logs under the clone's
+`.cache/cloud-m0-m4-<UTC>-<SHA>/`. It stops at the first non-passing
+predecessor; M4 is never reported as passed without M0–M3 evidence.
+
+## Human-supervised coordinator
+
+The human-supervised entry point is:
 
 ```bash
 bash scripts/run_tui_gazebo_acceptance.sh \
@@ -50,7 +67,8 @@ The verifier reads structured tool results and receipts, never the Planner's
 natural-language conclusion. Its immutable final report uses schema
 `openeta.tui_gazebo_acceptance.v1` and keeps `backend_chain_status` separate
 from `planner_autonomy_status`. A Planner failure cannot overwrite a backend
-gate. Formal M0→M3 execution stops at the first failed or blocked backend gate.
+gate. Human-supervised M0→M3 execution stops at the first failed or blocked
+backend gate; it is separate from the noninteractive formal cloud chain.
 
 Exit codes are `0` for all deterministic gates passed, `1` for deterministic
 failure, `2` for blocked/inconclusive infrastructure, and `130` for operator

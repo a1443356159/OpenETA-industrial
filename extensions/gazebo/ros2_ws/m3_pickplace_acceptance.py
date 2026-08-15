@@ -36,26 +36,17 @@ ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
 MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
 WORLD_NAME = "m3_rm75_robotiq2f85_pickplace"
 POSITION_TOLERANCE_M = 0.005
-# Contact poses aim the pad line at the target's upper third: camera evidence
-# showed centre-height contact lets the closing fingers wedge the box up and
-# out, while a small upward bias presses it onto the table during the pinch.
-# 9 mm scored 8/8 clean hold-and-lift cycles in the close-statistics probe.
+# Contact poses aim the two real pads at the target's upper third.  Native
+# Gazebo contact sensors, not the approach geometry, decide whether capture
+# is allowed; this small bias simply avoids grazing the tabletop.
 GRASP_CENTER_Z_BIAS_M = 0.009
-# Horizontal carries run lower than the 80 mm pick lift: the planning sweep
-# showed the tilt-65 transport at +80 mm is unsamplable (0/12, every other
-# tilt/height 6/6).  +30 mm plans instantly but rides so low that the
-# hanging box/fingertips clip the tabletop mid-carry (detachable run flung
-# the target off the table); +50 mm still dropped the box with the generic
-# 0.05 rad goal slack dipping the fingers.  +60 mm plans in ~1 s (sweep 6/6)
-# and, together with the tightened carry-move goal region below, keeps the
-# whole gripper assembly clear of the table.
+# Horizontal carries run lower than the 80 mm pick lift.  The attached object
+# is followed kinematically after capture, but the approach and release remain
+# collision-checked Gazebo motion.
 CARRY_HEIGHT_M = 0.060
 ORIENTATION_TOLERANCE_RAD = 0.08
-# Grasp-critical moves (the contact approach and the verification lift) must
-# land on the aimed pose, not merely inside the generic goal region: the
-# default 2 mm / 0.05 rad slack lets two rounds execute the same contact pose
-# ~4 mm and ~3 deg apart, and the tilted-pad edge pinch is marginal enough
-# that this slack alone flips TARGET_HELD to a hinge-slip.
+# Grasp-critical moves (the contact approach and verification lift) must land
+# on the aimed pose so both physical fingertip pads contact the same object.
 GRASP_POSITION_TOLERANCE_M = 0.001
 GRASP_ORIENTATION_TOLERANCE_RAD = 0.01
 GRASP_MOVE_PARAMS = {
@@ -72,7 +63,7 @@ DOCUMENTATION = {
     "gazebo_odometry_publisher": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1OdometryPublisher.html",
     "ros_gz_bridge_mappings": "https://github.com/gazebosim/ros_gz/blob/ros2/ros_gz_bridge/README.md",
     "moveit_planning_scene": "https://moveit.picknik.ai/main/doc/tutorials/planning_around_objects/planning_around_objects.html",
-    "ros2_control_gripper_stall": "https://control.ros.org/jazzy/doc/ros2_controllers/gripper_controllers/doc/userdoc.html",
+    "gazebo_contact_sensors": "https://gazebosim.org/docs/harmonic/sensors/",
 }
 
 
@@ -146,7 +137,7 @@ def _base(path: Path) -> dict[str, Any]:
     report.setdefault("gates", {})
     report["documentation"] = DOCUMENTATION
     report["installed_versions"] = _versions()
-    report["attachment_mode"] = os.environ.get("OPENETA_M3_ATTACHMENT_MODE", "physics")
+    report["grasp_mechanism"] = "bilateral_contact_adhesion_v1"
     with suppress(Exception):
         report["git_commit"] = subprocess.check_output(
             ["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True
@@ -607,14 +598,14 @@ def _select_candidate(environment: Any, observation: Mapping[str, Any], offset: 
                 environment, {"action_type": "gripper_close", "timeout_s": 30.0}, gate
             )
         except Exception as exc:
-            row["blocker_stage"] = "close_stall"
+            row["blocker_stage"] = "close_capture"
             row["error"] = f"{type(exc).__name__}: {exc}"
             continue
         close_reason = _physical(observation).get("reason_code")
         row["close_reason_code"] = close_reason
         row["stages"].append("close")
         if close_reason != "LIFT_REQUIRED":
-            row["blocker_stage"] = "close_stall"
+            row["blocker_stage"] = "close_capture"
             continue
         target = _target(observation)["position"]
         lift = _mount_pose(
@@ -666,7 +657,7 @@ def _positive_round(environment: Any, gate: dict[str, Any], candidate: Mapping[s
     observation = _step(environment, {"action_type": "move_to", "target_pose": contact, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
     _assert(gate["actions"][-1]["receipt"].get("ok") is True, "contact motion failed")
     observation = _step(environment, {"action_type": "gripper_close", "timeout_s": 30.0}, gate)
-    _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "close did not produce a bilateral stall candidate")
+    _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "close did not produce a bilateral capture receipt")
     target = _target(observation)["position"]
     lift = _mount_pose((target[0], target[1], target[2] + 0.080), orientation, offset)
     observation = _step(environment, {"action_type": "move_to", "target_pose": lift, "timeout_s": 60.0, **GRASP_MOVE_PARAMS}, gate)
@@ -736,27 +727,15 @@ def _negative_cases(
     observation = _approach_and_close(environment, gate, candidate, offset, empty_center)
     reason = _physical(observation).get("reason_code")
     cases.append({"name": "empty_grasp", "reason_code": reason})
-    _assert(reason == "EMPTY_GRASP", f"empty grasp returned {reason}")
+    _assert(reason == "CONTACT_REJECTED", f"empty grasp returned {reason}")
 
     observation, _ = environment.reset(seed=52)
     offset = _fresh_offset(environment, offset)
     distractor = _target(observation, "m3_distractor")["position"]
     observation = _approach_and_close(environment, gate, candidate, offset, distractor)
-    _assert(_physical(observation).get("reason_code") == "LIFT_REQUIRED", "wrong-object close did not stall")
-    distractor = _target(observation, "m3_distractor")["position"]
-    wrong_lift = _mount_pose(
-        (distractor[0], distractor[1], distractor[2] + 0.080),
-        candidate["orientation"],
-        offset,
-    )
-    observation = _step(
-        environment,
-        {"action_type": "move_to", "target_pose": wrong_lift, "timeout_s": 60.0},
-        gate,
-    )
     reason = _physical(observation).get("reason_code")
     cases.append({"name": "wrong_object", "reason_code": reason})
-    _assert(reason == "WRONG_OBJECT", f"wrong-object grasp returned {reason}")
+    _assert(reason == "WRONG_OBJECT", f"wrong-object capture returned {reason}")
 
     # Establish a fresh proven grasp, then release with the target airborne.
     observation, _ = environment.reset(seed=53)
@@ -965,22 +944,13 @@ def run_mcp(path: Path, url: str) -> None:
         reset_round(61)
         empty = approach_close((0.48, 0.12, 0.430))
         negative.append({"name": "empty_grasp", "reason_code": _physical(observation_of(empty)).get("reason_code")})
-        _assert(negative[-1]["reason_code"] == "EMPTY_GRASP", "MCP empty-grasp mismatch")
+        _assert(negative[-1]["reason_code"] == "CONTACT_REJECTED", "MCP empty-grasp mismatch")
 
         observation = reset_round(62)
         distractor = _target(observation, "m3_distractor")["position"]
         wrong = approach_close(distractor)
-        _assert(_physical(observation_of(wrong)).get("reason_code") == "LIFT_REQUIRED", "MCP wrong-object close did not stall")
-        distractor = _target(observation_of(wrong), "m3_distractor")["position"]
-        wrong = move(
-            _mount_pose(
-                (distractor[0], distractor[1], distractor[2] + 0.080),
-                orientation,
-                offset,
-            )
-        )
         negative.append({"name": "wrong_object", "reason_code": _physical(observation_of(wrong)).get("reason_code")})
-        _assert(negative[-1]["reason_code"] == "WRONG_OBJECT", "MCP wrong-object mismatch")
+        _assert(negative[-1]["reason_code"] == "WRONG_OBJECT", "MCP wrong-object capture mismatch")
 
         for seed, name, destination in (
             (63, "airborne_drop", None),

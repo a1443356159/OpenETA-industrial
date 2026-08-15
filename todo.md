@@ -59,12 +59,12 @@ when work advances; do not start later milestones early.
       structured action routing, worker profile registration, and contract tests.
 - [x] M2 live ROS action client/launch verification using the repository-owned
       Jazzy/Harmonic RM75 + Robotiq 2F-85 profile and frozen vendor assets.
-- [ ] M3 physical grasp and placement verification. The isolated profile,
-      trusted verifier, PlanningScene integration, worker/MCP route and
-      acceptance driver are implemented; formal gates remain blocked by the
-      live bilateral-contact result documented in
-      `docs/gazebo-m3-physical-verification.md`.
-- [ ] M4 oracle pick/place.
+- [ ] M3 bilateral-contact adhesion grasp and placement verification. The
+      native dual-pad contact gate, deterministic kinematic carry, verifier,
+      PlanningScene integration, worker/MCP route and acceptance driver are
+      implemented. Completion requires the clean-SHA cloud M0–M4 report.
+- [ ] M4 oracle pick/place. Completion requires three live Oracle seeds to
+      reach `TARGET_HELD` after the M0–M3 predecessor gates pass.
 - [ ] M5+ SAM3 integration and industrial benchmark.
 
 ## M2 verification
@@ -95,6 +95,16 @@ when work advances; do not start later milestones early.
       2026-08-09 local checkpoint covered fresh post-action JointState/RGB-D
       timestamps, structured planning rejection, isolation, and all four
       cleanup paths, but has not been designated a formal acceptance run.
+
+## Formal cloud acceptance
+
+- [ ] Run `bash scripts/run_cloud_m0_m4_acceptance.sh` with
+      `OPENETA_CLOUD_ACCEPTANCE_ROOT` set to a dedicated cloud data disk.
+      The entry point verifies a clean detached checkout at an `origin` SHA,
+      builds once, runs M0–M4 serially, and preserves its immutable report and
+      complete per-milestone logs under `.cache/cloud-m0-m4-<UTC>-<SHA>/`.
+- [ ] Update milestone completion only when that report records every M0–M4
+      gate as passed. A blocked or failed predecessor prevents M4 execution.
 
 ## Runtime configuration
 

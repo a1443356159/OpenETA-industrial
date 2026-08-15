@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping
 from adapter.protocol import EnvObservation, RobotState
 
 from .deployment import GazeboDeploymentConfig
+from .adhesion import GazeboM3AdhesionControl
 from .m3 import (
     M3Config,
     fingertip_collision_center_m,
@@ -17,7 +18,6 @@ from .m3 import (
 )
 from .observation import RosRgbdCameraConfig, RosRgbdCameraSource
 from .process import (
-    GazeboDetachableJointControl,
     GazeboProcessError,
     GazeboWorldControl,
     Ros2LaunchProcess,
@@ -61,19 +61,13 @@ class GazeboRuntime:
             gz_executable=deployment.gz_executable,
             environment=deployment.process_environment,
         )
-        # The detachable fallback is active only when the deployment opts in
-        # AND the profile carries M3 physics; the default physics mode never
-        # creates the actuator and the launched model has no such plugins.
-        self.attachment: Any | None = None
-        if (
-            deployment.m3_attachment_mode == "detachable"
-            and PHYSICS in profile.capabilities
-            and world_control is None
-        ):
-            self.attachment = GazeboDetachableJointControl(
+        # M3 has one grasp mechanism: the repository-owned native-contact
+        # adhesion plugin.  M2 never creates this control plane.
+        self.adhesion: Any | None = None
+        if PHYSICS in profile.capabilities and isinstance(profile.model_config, M3Config):
+            self.adhesion = GazeboM3AdhesionControl(
                 gz_executable=deployment.gz_executable,
                 environment=deployment.process_environment,
-                world_name=deployment.world_override or profile.world_name,
             )
         self._launch: Any | None = None
         self._cameras: list[Any] = []
@@ -136,10 +130,6 @@ class GazeboRuntime:
             for camera in self._cameras:
                 camera.start()
             arguments = (*self.deployment.launch_arguments,)
-            if self.attachment is not None:
-                # The M3 URDF only emits the DetachableJoint plugins when the
-                # launch asks for them; physics mode launches stay identical.
-                arguments = (*arguments, "attachment_mode:=detachable")
             self._launch = self._launch_factory(
                 package=self.profile.launch_package,
                 launch_file=self.profile.launch_file,
@@ -257,29 +247,25 @@ class GazeboRuntime:
             reset_sources = getattr(self.controller, "reset_sources", None)
             if callable(reset_sources):
                 reset_sources()
+        # Release a retained capture before reset / re-home can move either
+        # body.  Cleanup stays best effort because a dying Gazebo transport
+        # must not prevent the normal world restore.
+        if PHYSICS in self.profile.capabilities and self.adhesion is not None:
+            try:
+                self.adhesion.release()
+            except Exception:
+                pass
         # Preserve /clock after the ROS action stack has started.
         self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
         if PHYSICS in self.profile.capabilities and self.controller is not None:
-            # The DetachableJoint plugins attach both objects at spawn; detach
-            # them before any motion or object restore so the joint never
-            # fights the reset.
-            if self.attachment is not None:
-                for label in ("target", "distractor"):
-                    # Reset must not leave a stale fallback attachment behind,
-                    # but cleanup remains best effort: a dying Transport
-                    # endpoint must not prevent the normal world restore.
-                    try:
-                        self.attachment.ensure_detached(label)
-                    except Exception:
-                        pass
             # Harmonic's model_only reset does not restore free objects
             # either; teleport the manipulated objects to their documented
             # initial poses instead of rewinding the simulation clock.  The
             # restore runs only AFTER re-home: teleporting while the arm is
             # still at the lift/carry pose can materialise the box inside the
             # closed fingers, and the interpenetration punts it off the
-            # table.  A box dropped by the detach simply falls a few
-            # centimetres and is then restored exactly.
+            # table.  A released box may fall a few centimetres and is then
+            # restored exactly.
             reset_object_poses = getattr(self.profile.model_config, "reset_object_poses", None)
             return_home = getattr(self.controller, "return_home", None)
             if callable(return_home):
@@ -317,12 +303,11 @@ class GazeboRuntime:
         if self.closed:
             return
         errors: list[BaseException] = []
-        if self.attachment is not None:
-            for label in ("target", "distractor"):
-                try:
-                    self.attachment.ensure_detached(label)
-                except BaseException as exc:
-                    errors.append(exc)
+        if self.adhesion is not None:
+            try:
+                self.adhesion.release()
+            except BaseException as exc:
+                errors.append(exc)
         # Failures do not short-circuit reverse-order resource cleanup.
         for resource in (self.physics_source, self.controller, *reversed(self._cameras)):
             if resource is None:

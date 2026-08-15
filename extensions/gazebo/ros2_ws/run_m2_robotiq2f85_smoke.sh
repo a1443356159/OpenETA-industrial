@@ -4,9 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/../../.." && pwd)"
 DRIVER="${SCRIPT_DIR}/m2_robotiq2f85_acceptance.py"
-PYTHON_BIN="${REPO_DIR}/.venv/bin/python"
+PYTHON_BIN="${OPENETA_ACCEPTANCE_PYTHON:-${REPO_DIR}/.venv/bin/python}"
 LOCK_DIR="/tmp/openeta-acceptance-locks"
-mkdir -p "${LOCK_DIR}" "${REPO_DIR}/.cache/logs" "${REPO_DIR}/.cache/reports"
+ARTIFACT_DIR="${OPENETA_ACCEPTANCE_ARTIFACT_DIR:-${REPO_DIR}/.cache}"
+mkdir -p "${LOCK_DIR}" "${ARTIFACT_DIR}/logs" "${ARTIFACT_DIR}/reports"
 
 # shellcheck source=../../../config/runtime/m0_m2.env
 source "${REPO_DIR}/config/runtime/m0_m2.env"
@@ -158,17 +159,18 @@ fi
 export ROS_DOMAIN_ID OPENETA_MCP_PORT
 export ROS2CLI_DISABLE_DAEMON=1
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
-export GZ_PARTITION="openeta_m2_acceptance_${ROS_DOMAIN_ID}_$$"
+RUN_TAG="${OPENETA_ACCEPTANCE_RUN_TAG:-local}"
+export GZ_PARTITION="openeta_m2_acceptance_${RUN_TAG}_${ROS_DOMAIN_ID}_$$"
 export ROS_HOME="${REPO_DIR}/.cache/ros/m2-acceptance-${ROS_DOMAIN_ID}-$$"
 export OPENETA_ISOLATION_SELECTION_LOG="${DOMAIN_SELECTION_LOG}"
-export OPENETA_WORKER_LOG_DIR="${REPO_DIR}/.cache/logs/m2-acceptance-${ROS_DOMAIN_ID}-$$"
+export OPENETA_WORKER_LOG_DIR="${ARTIFACT_DIR}/logs/m2-acceptance-${ROS_DOMAIN_ID}-$$"
 mkdir -p "${ROS_HOME}" "${OPENETA_WORKER_LOG_DIR}"
 
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-REPORT="${REPO_DIR}/.cache/reports/m2-robotiq2f85-acceptance-${RUN_STAMP}-$$.json"
-DIRECT_LOG="${REPO_DIR}/.cache/logs/m2-robotiq2f85-direct-${RUN_STAMP}-$$.log"
-MCP_LOG="${REPO_DIR}/.cache/logs/m2-robotiq2f85-mcp-${RUN_STAMP}-$$.log"
-REGRESSION_LOG="${REPO_DIR}/.cache/logs/m2-regression-${RUN_STAMP}-$$.log"
+REPORT="${ARTIFACT_DIR}/reports/m2-robotiq2f85-acceptance-${RUN_STAMP}-$$.json"
+DIRECT_LOG="${ARTIFACT_DIR}/logs/m2-robotiq2f85-direct-${RUN_STAMP}-$$.log"
+MCP_LOG="${ARTIFACT_DIR}/logs/m2-robotiq2f85-mcp-${RUN_STAMP}-$$.log"
+REGRESSION_LOG="${ARTIFACT_DIR}/logs/m2-regression-${RUN_STAMP}-$$.log"
 TEST_WORLD="${SCRIPT_DIR}/src/openeta_rm75_robotiq2f85_sim/worlds/m2_rm75_robotiq2f85_z_test.sdf"
 export OPENETA_GAZEBO_LAUNCH_ARGUMENTS="[\"world:=${TEST_WORLD}\"]"
 export OPENETA_GAZEBO_WORLD="m2_rm75_robotiq2f85_z_test"
@@ -238,7 +240,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 cd "${REPO_DIR}"
-OPENETA_SKIP_ROSDEP=1 "${SCRIPT_DIR}/build.sh"
+if [[ "${OPENETA_ACCEPTANCE_SKIP_BUILD:-0}" != 1 ]]; then
+  OPENETA_SKIP_ROSDEP=1 "${SCRIPT_DIR}/build.sh"
+fi
 "${PYTHON_BIN}" "${DRIVER}" gate --report "${REPORT}" --gate ros_workspace_build \
   --details "colcon build completed for both M2 profiles"
 

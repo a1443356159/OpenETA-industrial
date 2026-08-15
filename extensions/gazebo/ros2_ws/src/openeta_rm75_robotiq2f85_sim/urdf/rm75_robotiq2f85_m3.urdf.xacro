@@ -1,8 +1,6 @@
 <?xml version="1.0"?>
 <robot name="rm75_robotiq_2f85_pickplace_sim_v1" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="controller_config" default="$(find openeta_rm75_robotiq2f85_sim)/config/controllers.yaml"/>
-  <xacro:arg name="attachment_mode" default="physics"/>
-  <xacro:arg name="detachable_parent_link" default="gripper_mount_link"/>
   <xacro:include filename="$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/rm75_robotiq2f85.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/urdf/ros2_control.xacro"/>
@@ -26,42 +24,27 @@
   <xacro:gz_gripper_position_controller joint="gripper_left_finger_tip_joint" topic="/openeta/gripper/left_tip"/>
   <xacro:gz_gripper_position_controller joint="gripper_right_finger_tip_joint" topic="/openeta/gripper/right_tip"/>
 
-  <!-- M3-only friction settings.  M2's frozen behavior is unchanged.
-       mu 2.0: the reachable grasp band tilts the pads ~25 deg off vertical,
-       so the pads meet the box faces along an edge line — a hinge the block
-       pivots around during the lift unless the contact resists sliding. -->
+  <!-- M3 accepts a grasp only from these two native Gazebo contact sensors.
+       The collision names are URDF-to-SDF's deterministic names for the
+       unnamed vendor fingertip collision elements.  They intentionally cover
+       the real vendor fingertip meshes, not proxy pad geometry. -->
   <gazebo reference="robotiq_85_left_finger_tip_link">
-    <mu1>2.0</mu1><mu2>2.0</mu2><kp>100000</kp><kd>10</kd>
+    <sensor name="openeta_m3_left_pad_contact" type="contact">
+      <always_on>true</always_on><update_rate>1000</update_rate>
+      <contact>
+        <collision>robotiq_85_left_finger_tip_link_collision</collision>
+        <topic>/m3/contacts/left_pad</topic>
+      </contact>
+    </sensor>
   </gazebo>
   <gazebo reference="robotiq_85_right_finger_tip_link">
-    <mu1>2.0</mu1><mu2>2.0</mu2><kp>100000</kp><kd>10</kd>
+    <sensor name="openeta_m3_right_pad_contact" type="contact">
+      <always_on>true</always_on><update_rate>1000</update_rate>
+      <contact>
+        <collision>robotiq_85_right_finger_tip_link_collision</collision>
+        <topic>/m3/contacts/right_pad</topic>
+      </contact>
+    </sensor>
   </gazebo>
   <gazebo reference="rm75_to_gripper_mount"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
-
-  <!-- User-approved (2026-08-10) controlled fallback: fixed joints between
-       the gripper mount and each manipulated object, created only on an
-       explicit attach topic after verified contact evidence.  The default
-       physics mode omits these plugins entirely. -->
-  <xacro:if value="${'$(arg attachment_mode)' == 'detachable'}">
-    <gazebo>
-      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
-        <parent_link>$(arg detachable_parent_link)</parent_link>
-        <child_model>m3_target</child_model>
-        <child_link>target_link</child_link>
-        <attach_topic>/m3/detachable_joint/target/attach</attach_topic>
-        <detach_topic>/m3/detachable_joint/target/detach</detach_topic>
-        <output_topic>/m3/detachable_joint/target/state</output_topic>
-        <suppress_child_warning>true</suppress_child_warning>
-      </plugin>
-      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
-        <parent_link>$(arg detachable_parent_link)</parent_link>
-        <child_model>m3_distractor</child_model>
-        <child_link>distractor_link</child_link>
-        <attach_topic>/m3/detachable_joint/distractor/attach</attach_topic>
-        <detach_topic>/m3/detachable_joint/distractor/detach</detach_topic>
-        <output_topic>/m3/detachable_joint/distractor/state</output_topic>
-        <suppress_child_warning>true</suppress_child_warning>
-      </plugin>
-    </gazebo>
-  </xacro:if>
 </robot>

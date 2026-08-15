@@ -30,6 +30,19 @@ STREAMS = (
 )
 
 
+def _capture(candidate_id: str = "m3_target") -> dict[str, object]:
+    return {
+        "phase": "CAPTURED",
+        "model_name": candidate_id,
+        "receipt_id": 7,
+        "window_id": 3,
+    }
+
+
+def _release() -> dict[str, object]:
+    return {"phase": "RELEASED"}
+
+
 def _object(
     object_id: str,
     *,
@@ -99,6 +112,7 @@ def _candidate(verifier: M3Verifier, stamp: float = 10.0):
         ),
         action_type="gripper_close",
         action_timestamp_s=stamp - 1.0,
+        adhesion_receipt=_capture(),
     )
     assert (record.verdict, record.reason_code) == (
         Verdict.UNKNOWN,
@@ -126,9 +140,9 @@ def _held(verifier: M3Verifier, stamp: float = 10.0):
 def test_close_candidate_never_claims_final_grasp_success() -> None:
     verifier = M3Verifier()
     record = _candidate(verifier)
-    assert record.object_detection == "object_detected_closing"
+    assert record.object_detection == "bilateral_contact_captured"
     assert record.grasp_confirmed is False
-    assert record.evidence["gripper_stalled"] is True
+    assert record.evidence["adhesion_capture"]["receipt_id"] == "7"
 
 
 def test_empty_grasp_and_wrong_object_are_structured_failures() -> None:
@@ -139,29 +153,17 @@ def test_empty_grasp_and_wrong_object_are_structured_failures() -> None:
     )
     assert (empty.verdict, empty.reason_code, empty.object_detection) == (
         Verdict.FAIL,
-        ReasonCode.EMPTY_GRASP,
-        "at_position_no_object",
+        ReasonCode.CONTACT_REJECTED,
+        "no_bilateral_contact",
     )
-    verifier = M3Verifier()
-    candidate = verifier.verify(
+    wrong = M3Verifier().verify(
         _snapshot(
             10.0,
             eef_xyz=(0.28, 0.12, 0.56),
-            stalled=True,
-            reached=False,
         ),
         action_type="gripper_close",
         action_timestamp_s=9.0,
-    )
-    assert candidate.reason_code == ReasonCode.LIFT_REQUIRED
-    wrong = verifier.verify(
-        _snapshot(
-            11.0,
-            eef_xyz=(0.28, 0.12, 0.64),
-            distractor_xyz=(0.28, 0.12, 0.52),
-        ),
-        action_type="move_to",
-        action_timestamp_s=10.5,
+        adhesion_receipt=_capture("m3_distractor"),
     )
     assert (wrong.verdict, wrong.reason_code) == (Verdict.FAIL, ReasonCode.WRONG_OBJECT)
 
@@ -185,31 +187,27 @@ def test_lift_reports_identity_incomplete_when_both_objects_comove() -> None:
     )
 
 
-def test_close_uses_robotiq_result_and_fails_closed_on_other_states() -> None:
-    missing_stall = M3Verifier().verify(
+def test_close_requires_a_complete_native_adhesion_receipt() -> None:
+    missing_receipt = M3Verifier().verify(
         _snapshot(10.0),
         action_type="gripper_close",
         action_timestamp_s=9.0,
     )
-    assert missing_stall.reason_code == ReasonCode.STALL_STATUS_MISSING
-    contradictory = M3Verifier().verify(
+    assert missing_receipt.reason_code == ReasonCode.CONTACT_REJECTED
+    rejected = M3Verifier().verify(
         _snapshot(10.0, aperture=0.005, stalled=True, reached=False),
         action_type="gripper_close",
         action_timestamp_s=9.0,
+        adhesion_receipt={"phase": "REJECTED", "reason": "ONE_SIDED"},
     )
-    assert (contradictory.verdict, contradictory.reason_code) == (
-        Verdict.UNKNOWN,
-        ReasonCode.STALL_STATUS_MISSING,
-    )
-    out_of_bounds = M3Verifier().verify(
-        _snapshot(10.0, aperture=0.09, stalled=True, reached=False),
+    assert rejected.reason_code == ReasonCode.CONTACT_REJECTED
+    incomplete = M3Verifier().verify(
+        _snapshot(10.0, aperture=0.04, stalled=True, reached=False),
         action_type="gripper_close",
         action_timestamp_s=9.0,
+        adhesion_receipt={"phase": "CAPTURED", "model_name": "m3_target"},
     )
-    assert (out_of_bounds.verdict, out_of_bounds.reason_code) == (
-        Verdict.UNKNOWN,
-        ReasonCode.STALL_STATUS_MISSING,
-    )
+    assert incomplete.reason_code == ReasonCode.CONTACT_REJECTED
 
 
 def test_lift_requires_height_support_release_and_relative_pose() -> None:
@@ -275,6 +273,7 @@ def test_open_in_air_detects_physical_drop() -> None:
         ),
         action_type="gripper_open",
         action_timestamp_s=11.5,
+        adhesion_receipt=_release(),
     )
     assert (dropped.verdict, dropped.reason_code) == (
         Verdict.FAIL,
@@ -297,6 +296,7 @@ def test_place_requires_full_bbox_geometric_support_and_one_second_settle() -> N
         ),
         action_type="gripper_open",
         action_timestamp_s=11.5,
+        adhesion_receipt=_release(),
     )
     assert first.reason_code == ReasonCode.NOT_SETTLED
     placed = verifier.verify(
@@ -327,6 +327,7 @@ def test_outside_destination_and_unsettled_are_not_success() -> None:
         ),
         action_type="gripper_open",
         action_timestamp_s=11.5,
+        adhesion_receipt=_release(),
     )
     assert first.reason_code == ReasonCode.NOT_SETTLED
     outside = verifier.verify(
