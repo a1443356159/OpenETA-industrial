@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - package execution compatibility
 SCHEMA_VERSION = "openeta.cloud_m0_m1_acceptance.v1"
 M0_ENV_ID = "openeta/dummy_sim-v0"
 M1_ENV_ID = "openeta/gazebo_live_rgbd-v0"
-M1_WORLD = "lidar_sensor"
+M1_WORLD = "sensors_demo"
 DOMAIN_CANDIDATES = tuple(range(110, 152))
 PORT_CANDIDATES = tuple(range(19000, 19100))
 LOCK_DIR = Path("/tmp/openeta-acceptance-locks")
@@ -415,6 +415,11 @@ def _m1_direct(_python: str, artifact_dir: Path) -> dict[str, Any]:
             os.environ.clear()
             os.environ.update(old)
         record["status"] = "passed"
+    except Exception as exc:
+        # Keep the segment allocation and cleanup evidence in the immutable
+        # milestone report even when the live runtime cannot become ready.
+        record["status"] = "failed"
+        record["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         if environment is not None:
             with suppress(Exception):
@@ -422,7 +427,8 @@ def _m1_direct(_python: str, artifact_dir: Path) -> dict[str, Any]:
         record["cleanup"] = _cleanup(allocation, None, world=M1_WORLD)
         allocation.close()
     if record["cleanup"]["status"] != "passed":
-        raise AcceptanceError("M1_DIRECT_CLEANUP_FAILED")
+        record["status"] = "failed"
+        record.setdefault("error", "M1_DIRECT_CLEANUP_FAILED")
     return record
 
 
@@ -460,6 +466,11 @@ def _m1_mcp(python: str, artifact_dir: Path) -> dict[str, Any]:
         record["close"] = _compact([first, second])
         handle = ""
         record["status"] = "passed"
+    except Exception as exc:
+        # See _m1_direct: a failed MCP segment still has valuable cleanup
+        # receipts and must not disappear behind the top-level error.
+        record["status"] = "failed"
+        record["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         if handle:
             with suppress(Exception):
@@ -467,7 +478,8 @@ def _m1_mcp(python: str, artifact_dir: Path) -> dict[str, Any]:
         record["cleanup"] = _cleanup(allocation, process, world=M1_WORLD)
         allocation.close()
     if record["cleanup"]["status"] != "passed":
-        raise AcceptanceError("M1_MCP_CLEANUP_FAILED")
+        record["status"] = "failed"
+        record.setdefault("error", "M1_MCP_CLEANUP_FAILED")
     return record
 
 
@@ -481,13 +493,16 @@ def run_milestone(milestone: str, *, python: str, artifact_dir: Path) -> dict[st
             report["segments"]["mcp"] = _m0_mcp(python, artifact_dir / "mcp")
         else:
             report["segments"]["direct"] = _m1_direct(python, artifact_dir / "direct")
+            if report["segments"]["direct"].get("status") != "passed":
+                raise AcceptanceError(str(report["segments"]["direct"].get("error") or "M1_DIRECT_FAILED"))
             report["segments"]["mcp"] = _m1_mcp(python, artifact_dir / "mcp")
+            if report["segments"]["mcp"].get("status") != "passed":
+                raise AcceptanceError(str(report["segments"]["mcp"].get("error") or "M1_MCP_FAILED"))
         report["status"] = "passed"
     except AcceptanceError as exc:
         text = str(exc)
         report["status"] = "blocked" if any(token in text for token in ("ISOLATION_", "MCP_NOT_READY", "ROS_", "GAZEBO_")) else "failed"
         report["error"] = text
-        raise
     finally:
         report["finished_at_utc"] = _now()
     return report
@@ -514,7 +529,9 @@ def main() -> int:
         print(report["error"], file=sys.stderr)
         return 2 if report["status"] == "blocked" else 1
     _write_final(args.report, report)
-    return 0
+    if report["status"] == "passed":
+        return 0
+    return 2 if report["status"] == "blocked" else 1
 
 
 if __name__ == "__main__":

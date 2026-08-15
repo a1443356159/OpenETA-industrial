@@ -135,6 +135,27 @@ def test_cloud_commands_keep_m2_m3_drivers_and_use_dedicated_m0_m1_m4_drivers(tm
     assert any(item.endswith("cloud_m4_oracle_acceptance.py") for item in commands["m4"])
 
 
+def test_m1_world_matches_the_installed_rgbd_bridge_demo() -> None:
+    assert m0_m1.M1_WORLD == "sensors_demo"
+
+
+def test_m1_failed_segment_is_retained_in_the_final_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    direct = {"status": "failed", "error": "GazeboProcessError: readiness"}
+    monkeypatch.setattr(m0_m1, "_m1_direct", lambda *_args, **_kwargs: direct)
+    monkeypatch.setattr(
+        m0_m1,
+        "_m1_mcp",
+        lambda *_args, **_kwargs: pytest.fail("MCP must not run after direct failure"),
+    )
+
+    report = m0_m1.run_milestone("m1", python="/python", artifact_dir=tmp_path)
+
+    assert report["status"] == "failed"
+    assert report["segments"]["direct"] is direct
+
+
 def test_m1_live_rgbd_validator_rejects_stale_or_nonlive_observations() -> None:
     observation = {
         "metadata": {"observation_provenance": "gazebo_ros_live"},

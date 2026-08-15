@@ -66,7 +66,10 @@ _BASE = frozenset({FRESH_OBSERVATION, AUTHORITATIVE_CAMERA})
 _PROFILES: Mapping[str, GazeboProfile] = MappingProxyType({
     "m1": GazeboProfile(
         name="m1", launch_package="ros_gz_sim_demos",
-        launch_file="rgbd_camera_bridge.launch.py", world_name="lidar_sensor",
+        # rgbd_camera_bridge.launch.py starts ros_gz_sim_demos'
+        # sensors_demo.sdf, whose Gazebo world is named ``sensors_demo``.
+        # World-control and cleanup must target that exact service namespace.
+        launch_file="rgbd_camera_bridge.launch.py", world_name="sensors_demo",
         cameras=(RosRgbdCameraConfig(
             rgb_topic="/rgbd_camera/image", depth_topic="/rgbd_camera/depth_image",
             camera_info_topic="/rgbd_camera/camera_info",
