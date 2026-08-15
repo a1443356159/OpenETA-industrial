@@ -2,10 +2,26 @@ from __future__ import annotations
 
 import os
 import shutil
+from types import SimpleNamespace
 
 import pytest
 
 from extensions.gazebo import GazeboProcess, GazeboWorldControl
+from extensions.gazebo import process as gazebo_process
+
+
+def test_world_reset_retries_a_cold_control_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = [
+        SimpleNamespace(returncode=1, stdout="", stderr="unavailable"),
+        SimpleNamespace(returncode=0, stdout="data: true", stderr=""),
+    ]
+    monkeypatch.setattr(gazebo_process.shutil, "which", lambda _name: "/usr/bin/gz")
+    monkeypatch.setattr(gazebo_process.subprocess, "run", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr(gazebo_process.time, "sleep", lambda _seconds: None)
+
+    GazeboWorldControl(world_name="lidar_sensor").reset_all(seed=7)
+
+    assert responses == []
 
 
 def test_gazebo_world_reset_service() -> None:
@@ -21,4 +37,3 @@ def test_gazebo_world_reset_service() -> None:
     finally:
         process.close()
     assert not process.running
-

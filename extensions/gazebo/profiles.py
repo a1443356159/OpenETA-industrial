@@ -65,11 +65,11 @@ def _camera(*, wrist: bool = False) -> RosRgbdCameraConfig:
 _BASE = frozenset({FRESH_OBSERVATION, AUTHORITATIVE_CAMERA})
 _PROFILES: Mapping[str, GazeboProfile] = MappingProxyType({
     "m1": GazeboProfile(
-        name="m1", launch_package="ros_gz_sim_demos",
-        # rgbd_camera_bridge.launch.py starts ros_gz_sim_demos'
-        # sensors_demo.sdf, whose Gazebo world is named ``sensors_demo``.
-        # World-control and cleanup must target that exact service namespace.
-        launch_file="rgbd_camera_bridge.launch.py", world_name="sensors_demo",
+        # The installed demo launch opens Gazebo's GUI, which aborts on
+        # headless workers.  The repository-owned equivalent starts the same
+        # RGB-D world server-only and keeps its official bridge contract.
+        name="m1", launch_package="openeta_rm75_robotiq2f85_sim",
+        launch_file="m1_gazebo_rgbd.launch.py", world_name="lidar_sensor",
         cameras=(RosRgbdCameraConfig(
             rgb_topic="/rgbd_camera/image", depth_topic="/rgbd_camera/depth_image",
             camera_info_topic="/rgbd_camera/camera_info",

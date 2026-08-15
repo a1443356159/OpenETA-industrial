@@ -196,17 +196,31 @@ class GazeboWorldControl:
         request = f"reset: {{{mode}: true}}"
         if seed is not None:
             request += f" seed: {int(seed)}"
-        result = subprocess.run(
-            [executable, "service", "-s", f"/world/{self.world_name}/control",
-             "--reqtype", "gz.msgs.WorldControl", "--reptype", "gz.msgs.Boolean",
-             "--timeout", str(self.timeout_ms), "--req", request],
-            capture_output=True, text=True, timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
-            env=self.environment,
+        last_error = ""
+        # ros2 launch is alive before Gazebo advertises its control service.
+        # One bounded retry covers that cold-start race without accepting a
+        # failed world reset later in the runtime lifecycle.
+        for attempt in range(2):
+            try:
+                result = subprocess.run(
+                    [executable, "service", "-s", f"/world/{self.world_name}/control",
+                     "--reqtype", "gz.msgs.WorldControl", "--reptype", "gz.msgs.Boolean",
+                     "--timeout", str(self.timeout_ms), "--req", request],
+                    capture_output=True, text=True,
+                    timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
+                    env=self.environment,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = "service call timed out"
+            else:
+                if result.returncode == 0 and "data: true" in result.stdout.lower():
+                    return
+                last_error = f"{result.stdout[-500:]} {result.stderr[-500:]}"
+            if attempt == 0:
+                time.sleep(0.2)
+        raise GazeboProcessError(
+            f"Gazebo world reset failed for {self.world_name}: {last_error}"
         )
-        if result.returncode != 0 or "data: true" not in result.stdout.lower():
-            raise GazeboProcessError(
-                f"Gazebo world reset failed for {self.world_name}: {result.stdout[-500:]} {result.stderr[-500:]}"
-            )
 
     def set_model_pose(self, model_name: str, xyz: tuple[float, float, float]) -> None:
         """Teleport one model through the documented ``set_pose`` service.
@@ -358,8 +372,10 @@ class Ros2LaunchProcess:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
-            # The bench worker is the only process-group/session owner.
-            start_new_session=False,
+            # A launch description can start Gazebo and bridge descendants.
+            # Give the runtime an owned session so close() reaps the complete
+            # tree without ever signalling the bench worker itself.
+            start_new_session=True,
             text=True,
             env=self.environment,
         )

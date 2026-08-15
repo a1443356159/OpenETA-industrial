@@ -45,7 +45,7 @@ except ImportError:  # pragma: no cover - package execution compatibility
 SCHEMA_VERSION = "openeta.cloud_m0_m1_acceptance.v1"
 M0_ENV_ID = "openeta/dummy_sim-v0"
 M1_ENV_ID = "openeta/gazebo_live_rgbd-v0"
-M1_WORLD = "sensors_demo"
+M1_WORLD = "lidar_sensor"
 DOMAIN_CANDIDATES = tuple(range(110, 152))
 PORT_CANDIDATES = tuple(range(19000, 19100))
 LOCK_DIR = Path("/tmp/openeta-acceptance-locks")
@@ -333,7 +333,9 @@ def _cleanup(allocation: Allocation, process: subprocess.Popen[Any] | None, *, w
         },
     }
     if world:
-        checks["gz_partition"] = world_partition_evidence(world)
+        environment = dict(os.environ)
+        environment["GZ_PARTITION"] = allocation.partition
+        checks["gz_partition"] = world_partition_evidence(world, environment=environment)
     return {
         "status": aggregate_cleanup(checks), "checks": checks,
         "reaped_partition_process_groups": reaped,

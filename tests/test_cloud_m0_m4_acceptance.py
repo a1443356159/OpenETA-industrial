@@ -135,8 +135,8 @@ def test_cloud_commands_keep_m2_m3_drivers_and_use_dedicated_m0_m1_m4_drivers(tm
     assert any(item.endswith("cloud_m4_oracle_acceptance.py") for item in commands["m4"])
 
 
-def test_m1_world_matches_the_installed_rgbd_bridge_demo() -> None:
-    assert m0_m1.M1_WORLD == "sensors_demo"
+def test_m1_world_matches_the_headless_rgbd_demo() -> None:
+    assert m0_m1.M1_WORLD == "lidar_sensor"
 
 
 def test_m1_failed_segment_is_retained_in_the_final_report(

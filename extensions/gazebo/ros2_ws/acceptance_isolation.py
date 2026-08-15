@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 import subprocess
 import time
-from typing import Any
+from typing import Any, Mapping
 
 PROBE_VERSION = "openeta.acceptance_isolation.v2"
 PASSED, FAILED, INCONCLUSIVE = "PASSED", "FAILED", "INCONCLUSIVE"
@@ -163,10 +163,13 @@ def candidate_domain_evidence(domain: int) -> dict[str, Any]:
     return empty_domain_evidence(domain)
 
 
-def gz_topics() -> dict[str, Any]:
+def gz_topics(*, environment: Mapping[str, str] | None = None) -> dict[str, Any]:
     started = time.monotonic()
     try:
-        result = subprocess.run(["gz", "topic", "-l"], capture_output=True, text=True, timeout=8.0, check=False)
+        result = subprocess.run(
+            ["gz", "topic", "-l"], capture_output=True, text=True, timeout=8.0,
+            check=False, env=dict(environment) if environment is not None else None,
+        )
     except FileNotFoundError as exc:
         return {"availability": "UNAVAILABLE", "error_type": type(exc).__name__, "error": str(exc), "duration_ms": round((time.monotonic()-started)*1000, 1)}
     except subprocess.TimeoutExpired:
@@ -176,8 +179,10 @@ def gz_topics() -> dict[str, Any]:
     return {"availability": "AVAILABLE", "topics": sorted(line.strip() for line in result.stdout.splitlines() if line.strip()), "duration_ms": round((time.monotonic()-started)*1000, 1)}
 
 
-def world_partition_evidence(world_name: str) -> dict[str, Any]:
-    result = gz_topics()
+def world_partition_evidence(
+    world_name: str, *, environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    result = gz_topics(environment=environment)
     if result["availability"] != "AVAILABLE":
         return {"state": INCONCLUSIVE, "ok": None, "reason_code": "GZ_GRAPH_UNAVAILABLE", "probe": result}
     topics = [item for item in result["topics"] if f"/world/{world_name}" in item]
