@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -169,6 +170,31 @@ def test_m1_direct_command_sources_the_built_overlay(tmp_path: Path) -> None:
 
     assert command[:5] == ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(setup)]
     assert command[5:8] == ["/venv/bin/python", str(_M0_M1_SCRIPT), "m1-direct"]
+
+
+def test_mcp_server_command_sources_the_built_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup = tmp_path / "overlay" / "setup.bash"
+    setup.parent.mkdir()
+    setup.write_text("# test overlay\n", encoding="utf-8")
+    allocation = SimpleNamespace(port=19001)
+    captured: dict[str, object] = {}
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace()
+
+    monkeypatch.setattr(m0_m1.subprocess, "Popen", fake_popen)
+    m0_m1._start_mcp(
+        "/venv/bin/python", allocation,
+        {"OPENETA_GAZEBO_OVERLAY": str(setup.parent)}, tmp_path / "mcp.log",
+    )
+
+    command = captured["command"]
+    assert command[:5] == ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(setup)]
+    assert command[5:] == ["/venv/bin/python", "-m", "sim.mcp_server", "--port", "19001"]
 
 
 def test_m1_live_rgbd_validator_rejects_stale_or_nonlive_observations() -> None:

@@ -224,6 +224,16 @@ def _terminate_partition_groups(partition: str) -> list[int]:
     return targets
 
 
+def _wait_for_free_port(port: int, *, timeout_s: float = 10.0) -> bool:
+    """Allow a just-terminated server a bounded interval to release its socket."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _port_is_free(port):
+            return True
+        time.sleep(0.1)
+    return _port_is_free(port)
+
+
 def _segment_env(allocation: Allocation) -> dict[str, str]:
     env = dict(os.environ)
     env.update({
@@ -319,7 +329,9 @@ def _start_mcp(python: str, allocation: Allocation, env: Mapping[str, str], log:
     stream = log.open("w", encoding="utf-8")
     try:
         process = subprocess.Popen(
-            [python, "-m", "sim.mcp_server", "--port", str(allocation.port)],
+            _source_overlay_command(
+                [python, "-m", "sim.mcp_server", "--port", str(allocation.port)], env,
+            ),
             stdout=stream, stderr=subprocess.STDOUT, cwd=Path.cwd(), env=dict(env),
             start_new_session=True, text=True,
         )
@@ -333,11 +345,12 @@ def _cleanup(allocation: Allocation, process: subprocess.Popen[Any] | None, *, w
         with suppress(Exception):
             _terminate_group(process)
     reaped = _terminate_partition_groups(allocation.partition)
+    port_free = _wait_for_free_port(allocation.port)
     checks: dict[str, dict[str, Any]] = {
         "ros_graph": empty_domain_evidence(allocation.domain),
         "mcp_port": {
-            "state": PASSED if _port_is_free(allocation.port) else FAILED,
-            "ok": _port_is_free(allocation.port),
+            "state": PASSED if port_free else FAILED,
+            "ok": port_free,
         },
     }
     if world:
@@ -440,21 +453,25 @@ def _m1_direct_child(report_path: Path) -> int:
     return 0 if record["status"] == "passed" else 1
 
 
+def _source_overlay_command(command: Sequence[str], environment: Mapping[str, str]) -> list[str]:
+    """Run a command under the clean checkout's freshly built ROS overlay."""
+    overlay = Path(environment.get("OPENETA_GAZEBO_OVERLAY", "")) / "setup.bash"
+    if not overlay.is_file():
+        return list(command)
+    # The coordinator builds in a subprocess.  Source the resulting setup in
+    # each fresh segment process so ament, Python and Gazebo paths match a
+    # normal ROS shell before rclpy initializes.
+    return ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(overlay), *command]
+
+
 def _m1_direct_command(
     *, python: str, report: Path, artifact_dir: Path, environment: Mapping[str, str],
 ) -> list[str]:
-    """Build a child command with the just-built ROS overlay sourced."""
-    command = [
+    """Build the isolated DirectEnv child command under that overlay."""
+    return _source_overlay_command([
         python, str(Path(__file__).resolve()), "m1-direct", "--report", str(report),
         "--artifact-dir", str(artifact_dir),
-    ]
-    overlay = Path(environment.get("OPENETA_GAZEBO_OVERLAY", "")) / "setup.bash"
-    if not overlay.is_file():
-        return command
-    # The coordinator builds in a subprocess.  Source the resulting setup in
-    # this dedicated segment process so ament, Python and Gazebo paths match
-    # a normal ROS shell before rclpy initializes.
-    return ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(overlay), *command]
+    ], environment)
 
 
 def _m1_direct(python: str, artifact_dir: Path) -> dict[str, Any]:
