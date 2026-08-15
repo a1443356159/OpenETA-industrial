@@ -390,42 +390,83 @@ def _m0_mcp(python: str, artifact_dir: Path) -> dict[str, Any]:
     return record
 
 
-def _m1_direct(_python: str, artifact_dir: Path) -> dict[str, Any]:
-    allocation = allocate("m1", "direct")
-    record: dict[str, Any] = {"allocation": allocation.evidence(), "observations": []}
+def _m1_direct_child(report_path: Path) -> int:
+    """Run DirectEnv after the OS-level segment environment is established.
+
+    rclpy and Gazebo's native libraries read process environment during their
+    first initialization.  Mutating ``os.environ`` inside an already-running
+    acceptance interpreter is not equivalent to starting a child with that
+    environment, so this helper is intentionally a separate CLI mode.
+    """
+    record: dict[str, Any] = {"observations": []}
     environment = None
     try:
-        env = _segment_env(allocation)
-        # GazeboDeploymentConfig snapshots process environment at construction.
-        old = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(env)
-        try:
-            from extensions.gazebo.direct_env import GazeboDirectEnv
-            environment = GazeboDirectEnv(profile="m1", task="M1 formal RGB-D", seed=201)
-            environment.reset(seed=201)
-            previous: dict[str, float] | None = None
-            for index in range(3):
-                # DirectEnv has no read-only step action.  Ask its runtime for
-                # a packet received after this monotonic barrier instead.
-                source = environment.runtime.observe(min_received_monotonic_s=time.monotonic())
-                observation = environment._decorate_robot(environment._as_unified(source))
-                timestamps = _validate_m1_observation(observation, previous=previous)
-                previous = timestamps
-                record["observations"].append({"sample": index + 1, "timestamps": timestamps, "observation": _compact(observation)})
-        finally:
-            os.environ.clear()
-            os.environ.update(old)
+        from extensions.gazebo.direct_env import GazeboDirectEnv
+
+        environment = GazeboDirectEnv(profile="m1", task="M1 formal RGB-D", seed=201)
+        environment.reset(seed=201)
+        previous: dict[str, float] | None = None
+        for index in range(3):
+            # DirectEnv has no read-only step action.  Ask its runtime for a
+            # packet received after this monotonic barrier instead.
+            source = environment.runtime.observe(min_received_monotonic_s=time.monotonic())
+            observation = environment._decorate_robot(environment._as_unified(source))
+            timestamps = _validate_m1_observation(observation, previous=previous)
+            previous = timestamps
+            record["observations"].append({
+                "sample": index + 1, "timestamps": timestamps,
+                "observation": _compact(observation),
+            })
         record["status"] = "passed"
     except Exception as exc:
-        # Keep the segment allocation and cleanup evidence in the immutable
-        # milestone report even when the live runtime cannot become ready.
         record["status"] = "failed"
         record["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         if environment is not None:
-            with suppress(Exception):
+            try:
                 environment.close()
+            except Exception as exc:
+                record["status"] = "failed"
+                record.setdefault("error", f"RUNTIME_CLOSE_FAILED: {type(exc).__name__}: {exc}")
+        _write_final(report_path, record)
+    return 0 if record["status"] == "passed" else 1
+
+
+def _m1_direct(python: str, artifact_dir: Path) -> dict[str, Any]:
+    allocation = allocate("m1", "direct")
+    record: dict[str, Any] = {"allocation": allocation.evidence(), "observations": []}
+    child_report = artifact_dir / "direct.json"
+    child_log = artifact_dir / "direct.log"
+    child_log.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        completed = subprocess.run(
+            [python, str(Path(__file__).resolve()), "m1-direct", "--report", str(child_report),
+             "--artifact-dir", str(artifact_dir)],
+            cwd=Path.cwd(), env=_segment_env(allocation), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
+            timeout=180, start_new_session=True,
+        )
+        child_log.write_text(completed.stdout or "", encoding="utf-8")
+        try:
+            child = json.loads(child_report.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            record["status"] = "failed"
+            record["error"] = f"M1_DIRECT_REPORT_INVALID: {type(exc).__name__}"
+        else:
+            record["child"] = child
+            record["observations"] = list(child.get("observations", []))
+            if completed.returncode == 0 and child.get("status") == "passed":
+                record["status"] = "passed"
+            else:
+                record["status"] = "failed"
+                record["error"] = str(child.get("error") or f"M1_DIRECT_EXIT_{completed.returncode}")
+    except subprocess.TimeoutExpired:
+        record["status"] = "failed"
+        record["error"] = "M1_DIRECT_TIMEOUT"
+    finally:
+        # Let the child finish its rclpy teardown before proving the selected
+        # ROS domain and Gazebo partition are empty.
+        time.sleep(0.5)
         record["cleanup"] = _cleanup(allocation, None, world=M1_WORLD)
         allocation.close()
     if record["cleanup"]["status"] != "passed":
@@ -512,10 +553,12 @@ def run_milestone(milestone: str, *, python: str, artifact_dir: Path) -> dict[st
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("milestone", choices=("m0", "m1"))
+    parser.add_argument("milestone", choices=("m0", "m1", "m1-direct"))
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--artifact-dir", required=True, type=Path)
     args = parser.parse_args()
+    if args.milestone == "m1-direct":
+        return _m1_direct_child(args.report)
     try:
         report = run_milestone(args.milestone, python=sys.executable, artifact_dir=args.artifact_dir)
     except Exception as exc:
