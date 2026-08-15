@@ -41,7 +41,11 @@ MODEL_ID = "rm75_robotiq_2f85_sim_v1"
 POSITION_TOLERANCE_M = 0.005
 ORIENTATION_TOLERANCE_RAD = 0.08
 MIMIC_TOLERANCE_RAD = 0.035
-DOWN_OFFSET_M = 0.050
+# A 50 mm vertical probe reaches joint_3's hard limit for some valid RM75
+# IK branches.  Keep a 40 mm live descent so the five-round acceptance still
+# proves bidirectional Cartesian control without manufacturing a boundary
+# start state for the following upward plan.
+DOWN_OFFSET_M = 0.040
 UP_AFTER_DOWN_M = 0.020
 DIRECT_Z_ROUNDS = 5
 

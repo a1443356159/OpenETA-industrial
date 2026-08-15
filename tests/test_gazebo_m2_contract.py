@@ -15,6 +15,7 @@ from extensions.gazebo.m2 import (
     make_move_group_goal,
     robot_state_from_sources,
 )
+from extensions.gazebo.ros2_ws import m2_robotiq2f85_acceptance as m2_acceptance
 from sim.env_registry import get_env_spec
 
 
@@ -76,6 +77,10 @@ def test_start_state_bounds_recovers_only_affected_joints() -> None:
         "joint_1",
         "joint_5",
     ]
+
+
+def test_m2_live_z_probe_keeps_clear_of_the_joint_limit_branch() -> None:
+    assert 0.0 < m2_acceptance.UP_AFTER_DOWN_M < m2_acceptance.DOWN_OFFSET_M < 0.050
 
 
 @pytest.mark.parametrize(
