@@ -273,14 +273,6 @@ class GazeboRuntime:
             if reset_object_poses:
                 for model_name, xyz in reset_object_poses.items():
                     self._world.set_model_pose(model_name, xyz)
-            # A previous positive M3 round leaves the physical gripper near
-            # its closed hold setpoint.  Re-open it before commanding the
-            # mid-aperture measurement, otherwise the next goal can be
-            # rejected while the ros2_control action server is still
-            # reconciling that retained hold.
-            pre_measure_open = self.controller.execute({"action_type": "gripper_open"}).to_dict()
-            if not pre_measure_open.get("ok"):
-                raise GazeboProcessError(pre_measure_open.get("error_code") or "GRIPPER_FAILED")
             self._measure_grasp_center_offset()
         self.scene_epoch += 1
         barrier: float | None = None

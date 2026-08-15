@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -147,6 +149,46 @@ def test_acceptance_step_reads_direct_env_namespaced_receipt() -> None:
 
     assert returned is observation
     assert gate["actions"][0]["receipt"]["ok"] is True
+
+
+def test_direct_acceptance_restarts_after_held_candidate_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    instances = []
+
+    class Environment:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.openeta_control_spec = {"physical_verification": True}
+            self.runtime = SimpleNamespace(grasp_center_offset_m=(0.0, 0.0, 0.1))
+            self.closed = 0
+            instances.append(self)
+
+        def reset(self, *, seed):
+            return {"objects": []}, {}
+
+        def close(self):
+            self.closed += 1
+
+    module = SimpleNamespace(GazeboDirectEnv=Environment)
+    monkeypatch.setitem(sys.modules, "extensions.gazebo.direct_env", module)
+    monkeypatch.setattr(acceptance, "_base", lambda _path: {"gates": {}})
+    monkeypatch.setattr(acceptance, "_write", lambda *_args: None)
+    monkeypatch.setattr(acceptance, "_joint_inventory", lambda: {"sha256": "stable"})
+    monkeypatch.setattr(acceptance, "_physical", lambda _observation: {})
+    monkeypatch.setattr(
+        acceptance,
+        "_select_candidate",
+        lambda *_args: {"orientation": (0.0, 0.0, 0.0, 1.0)},
+    )
+    monkeypatch.setattr(acceptance, "_positive_round", lambda *_args: None)
+    monkeypatch.setattr(acceptance, "_negative_cases", lambda *_args: None)
+
+    acceptance.run_direct(tmp_path / "m3.json")
+
+    assert [instance.kwargs["seed"] for instance in instances] == [31, 32]
+    assert instances[0].closed == 1
+    assert instances[1].closed == 1
 
 
 def test_acceptance_shell_owns_isolation_without_broad_process_kills() -> None:

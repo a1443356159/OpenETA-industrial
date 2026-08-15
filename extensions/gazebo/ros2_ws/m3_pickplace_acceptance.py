@@ -808,6 +808,22 @@ def run_direct(path: Path) -> None:
         gate["grasp_center_offset_mount_m"] = list(offset)
         candidate = _select_candidate(environment, observation, offset, gate)
         gate["frozen_candidate"] = candidate
+        # Candidate selection proves the orientation with a real held target,
+        # so it deliberately finishes with the six-joint linkage at its
+        # contact hold.  That is not a valid reset state for a subsequent
+        # contact-aperture probe.  Start the independent five-round physical
+        # validation in a fresh live Gazebo session instead of treating that
+        # held linkage as a release/reset result.
+        environment.close()
+        environment = None
+        environment = GazeboDirectEnv(
+            profile="m3_pickplace", task="M3 physical acceptance", seed=32
+        )
+        observation, _ = environment.reset(seed=32)
+        offset = getattr(environment.runtime, "grasp_center_offset_m", None)
+        _assert(offset is not None, "fresh runtime did not measure a grasp-centre offset")
+        offset = tuple(offset)
+        gate["execution_grasp_center_offset_mount_m"] = list(offset)
         before = _joint_inventory()
         for round_number in range(1, 6):
             start = len(gate["actions"])
