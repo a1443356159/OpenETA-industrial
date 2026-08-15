@@ -57,8 +57,8 @@ constexpr double kGravityMps2 = 9.81;
 // proof lift.  This pair is near critically damped for that mass, while the
 // delayed engagement below keeps the initial tabletop contact entirely
 // physical.
-constexpr double kAdhesionStiffnessNpm = 640.0;
-constexpr double kAdhesionDampingNsPm = 16.0;
+constexpr double kAdhesionStiffnessNpm = 80.0;
+constexpr double kAdhesionDampingNsPm = 6.0;
 constexpr double kMaximumAdhesionForceN = 15.0;
 constexpr double kLiftEngageHeightM = 0.003;
 
