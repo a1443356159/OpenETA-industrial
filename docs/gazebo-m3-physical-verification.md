@@ -19,15 +19,21 @@ M3 的场景、正式 ROS/Gazebo 数据路径、MoveIt PlanningScene、无 ROS �
 
 plan-M3.plan 曾显式禁止 detachable joint 等附着机制；用户 2026-08-10 拍板将其解禁为**受控 fallback**。机制与语义边界：
 
-- **机制**：`gz::sim::systems::DetachableJoint` 插件（两个实例，`gripper_mount_link ↔ m3_target` 与 `↔ m3_distractor`），通过 xacro 参数 `attachment_mode` 仅在其为 `detachable` 时注入机器人模型；launch 同名参数透传。OpenETA 侧由 `GazeboDetachableJointControl`（`process.py`）向 `/m3/detachable_joint/<label>/attach|detach` 发布 `gz.msgs.Empty`。MoveIt `AttachedCollisionObject` 的分工不变：它只在 `TARGET_HELD` 有物理证据后参与后续**规划**碰撞语义，不产生任何 Gazebo entity/joint 变化。
+- **机制**：`gz::sim::systems::DetachableJoint` 插件（两个实例，`gripper_mount_link ↔ m3_target` 与 `↔ m3_distractor`）仍由 xacro 参数控制，但 detachable launch 会将生产 xacro 渲染/转换为临时 SDF，验证两实例后仅添加 `world → base_link` 固定根；`self_collide` 显式为 `false`。physics launch 继续以原 URDF 字符串 spawn。OpenETA 侧由 `GazeboDetachableJointControl`（`process.py`）维护 `UNKNOWN/DETACHED/ATTACHED` 请求 ACK 状态；该状态不是物理成功证据。每个 attach ACK 还会记录真正 child link 的 Pose_V 相对基线；只有该 link 共动与既有 Odometry 同时通过，MoveIt `AttachedCollisionObject` 才可参与后续**规划**碰撞语义。
 - **开关**：`GazeboDeploymentConfig.m3_attachment_mode` 由 `OPENETA_M3_ATTACHMENT_MODE` 读取，`physics`（默认）完全不加载插件、不创建执行器——现状行为零影响；验收报告与观测 metadata 均标注 `attachment_mode`。
-- **诚实语义（红线）**：attach 只在 close 产生 `LIFT_REQUIRED`（stall + aperture 在持握窗口）**且**目标/干扰物中心位于 EEF 距离带 `[0.09, 0.17] m`（`select_attachment_object`，几何门）时触发；`gripper_open` 先 detach 再执行。验证器语义零改动——lift 共动、三态 verdict、六场景判定照旧读取 odometry，attach 本身不构成证据。
+- **诚实语义（红线）**：attach 只在 close 产生 `LIFT_REQUIRED` 后，双侧冻结指垫 STL/TF 在 action barrier 后持续至少 0.10 s（≥3 个样本）同时满足双侧间隙、切向重叠、法向方向、低速和唯一候选时触发。随后必须回退到 `0.15 rad` 并再次确认双侧净空；生命周期为 `DETACHED → CONTACT_CONFIRMED → ATTACH_ACKED_UNPROVEN → HELD_PROVEN`。`gripper_open` 严格先 detach ACK、再实际 open、再 fresh observation、最后 PlanningScene release。验证器的 lift 共动、三态 verdict、六场景判定仍只读取 Odometry，attach 本身不构成证据。
 - **离线合同**：`tests/test_gazebo_m3_attachment.py`（门逻辑：无 stall 不 attach、空位不 attach、错物选 distractor、模式默认/校验、runtime 执行器开关）。
 
 **验收结果（2026-08-11，detachable 模式三轮正式运行）**：
 `...T034841Z-576217.json`、`...T035724Z-578522.json`、`...T040543Z-580628.json`，均 `blocked`。几何门按设计工作：run 2 中 `(65,0)` 的 close 弹出盒子后，门正确判定垫区无物体而**未** attach（target 已被弹到 0.82 m 外）。三轮中闭合结果分布：stall 2/9、空抓 5/9、弹出 1/9、pregrasp 规划失败 2/12。即使 fallback 就位，**触点事件本身（垫面命中 4 cm 盒面）的可靠性不足**——六根失步使垫面落点逐次漂移 1-2 cm，与盒体 ±2 cm 净空同量级。因此六场景未跑通，milestone 保持 blocked。
 
-**验收结果（2026-08-11 下午，detachable 八轮正式运行）**：`...T124633Z`、`...T125911Z`、`...T130907Z`、`...T131703Z`、`...T132600Z`、`...T134340Z`、`...T135938Z`、`...T140751Z`，均 `blocked`。在逐侧 stall 冻结 + 摩擦/加持力调参（见下节）之后，闭合与 lift 已稳定（8/8 轮候选冻结与正轮 1 的 close→lift 全部 `LIFT_REQUIRED`→`TARGET_HELD`），失败全部后移到 **transport 段掉盒**。逐轮定位与处置：① `+30 mm` 低位搬运行进中吊盒/指尖擦桌（甩飞 1 m 级）；② `+50 mm` 仍掉；③ reset 双段还原的第一段 set_pose 会把盒子**实体化进尚未张开的闭合指间**弹射——`runtime.py` 还原顺序改为 detach→回零→set_pose 单段；④ `+60 mm` 仍掉；⑤ 指尖回退 0.04 rad（解除指-关节双约束）仍掉；⑥ 轨迹缩放 0.1 后不再暴力甩出，但盒在目的区旁平稳落桌——证明 **DetachableJoint 从未形成刚性约束**。源码级根因（`gz-sim8` `DetachableJoint.cc`）：插件在 PreUpdate 创建 DetachableJoint 组件后**立即**发布 `attached`，不等 dartsim 物理关节落地；且官方文档明确"**child 与 parent 接触中不可 (re)attach**"。⑦ 改为先回退（断接触）后 attach，仍掉——`gz model -j` 实测闭合后模型关节清单中**不存在**任何新建固定关节，此前全部"持握"均为张开指尖构成的叉笼携带（垂直 lift 干净、水平运输即漏）。⑧ 大开度回退（0.15 rad，钩尖彻底脱离）后 lift 仍 `TARGET_HELD`，transport 以执行偏差 0.10 m 收场（未再深查）。**结论：dartsim 的 DetachableJoint 关节创建在本 URDF 机器人 + 自由盒组合下未生效，非参数问题；detachable fallback 当前不可用**，需最小复现（spawn 态 attach 是否刚性）确认是 gz 8.11 缺陷还是模型配置问题。
+**历史排查结论已撤销（2026-08-15）**：此前把 `self_collide=true` 加到真实 RM75 的 URDF 导入模型，触发了 DART mesh 碰撞断言；未固定的机器人根又使跨模型固定关节随真实关节运动漂移。`gz model -j` 和插件 state topic 只显示请求/组件信息，不能证明物理刚性约束。detachable fallback 现在只在专用临时 SDF 中使用 `world → base_link` 固定根，显式保持 `self_collide=false`；physics 默认路径完全不变。真实 RM75 硬门改以生产 launch、`FollowJointTrajectory` 和 `Pose_V` 共动测量执行。
+
+**实现后隔离（2026-08-15，非正式验收）**：临时 SDF 的生产 launch 已成功 spawn，真实 `rm_group_controller` 以 `FollowJointTrajectory` 驱动 `joint_1` 的实测 `0.348–0.350 rad` 轨迹，且 `gripper_mount_link` 的世界姿态相应变化约 `0.350 rad`。同一安装上的 DART 控制组均连续 3/3 通过：单链、固定根动态关节链、以及“动态关节 → 固定末端”的 RM75 同构拓扑。故 `DetachableJoint`、固定根和固定末端都不是一般性阻塞。
+
+**真实 RM75 仍 fail-closed**：固定根下，`gripper_mount_link` 与真正渲染为 `link_7` 的插件父链接对照均出现相同的不一致。模型 `m3_target` 的 Pose_V 在 attach/detach 后仍随父链接；实际被 joint 指定的 `target_link` 却在 attach 期间相对父链接变化约 `0.350 rad`。即模型实体与 child link 的 Pose_V 对同一个物理 joint 给出互相矛盾的结果，state topic 同时仍回 `detached`。去掉世界固定根会使这两个证据部分变化，却立即产生 `0.17 rad / 6 mm` 级 attached 漂移。因而当前 `gz-sim 8.11 / gz-physics 7.6 DART` 与完整 RM75/ros2_control 图的跨模型实体同步不可作为物理证据；fallback 必须继续拒绝验收，不能依 topic、`gz model -j`、模型 pose 或链接 pose 的任一种单独放行。报告在 `.cache/detachable-dynamic-current2/`、`.cache/detachable-dynamic-fixed-terminal/`、`.cache/rm75-detachable-repro-positive/`、`.cache/rm75-detachable-repro-unfixed-root/` 和 `.cache/rm75-detachable-repro-link-posev/`；均为未清洁工作树的诊断，不能替代同 SHA clean-source 正式报告。
+
+**修复边界**：仓库侧已将 production SDF、真实 FJT、父链接/固定根对照和 model/link 双口径的矛盾复现固定下来；运行时也会在 child-link 共动缺失时将原有的 `TARGET_HELD` 回退为既有 `TARGET_NOT_LIFTED`，随后 detach。真正修复需要 Gazebo 上游在该完整 DART skeleton 上修正 detach 后的跨模型 link/model pose 同步（或提供经此 repro 验证的 vendor 更新）；在此之前不引入自定义吸附插件，也不把任何 ACK 扩写为物理成功。
 
 ## 统一驱动攻关（2026-08-11，用户拍板方向 ①）
 
@@ -49,14 +55,14 @@ plan-M3.plan 曾显式禁止 detachable joint 等附着机制；用户 2026-08-1
 - **GPU 渲染评估（WSL2）**：本机 RTX 4060 Laptop；默认 GL 栈为 Mesa llvmpipe（纯软件渲染，RGB-D 相机负载使 sim 低于实时，是既有时序压力背景）。`GALLIUM_DRIVER=d3d12 glxinfo -B` 实测显示 "D3D12 (NVIDIA GeForce RTX 4060 Laptop GPU)"——Mesa dzn 路径可启用 GPU 加速。**未用于正式验收**：观测契约（相机分辨率/频率/时间戳语义）不变性优先，且规划/物理阻塞与渲染端无关；验收脚本在 GPU 可用时记录 `INFO RENDERER NVIDIA_GPU_AVAILABLE`。GPU 卸载作为后续可选优化记录。
 - **当前唯一未试手段**：垫面反馈闭环闭合（按 TF 实测两垫间距收敛到目标宽度并维持微压力，取代开环位置斜坡）——直接消除"冻结点随机→加持力随机"的残余方差；detachable 方向需先做最小复现确认 dartsim 关节创建（见上节结论）。
 
-**下一步（按优先级）**：① physics 模式的残余失效是 lift 中侧滑/翻转（单次成功率 50-75%），按文档方向 ② 实现**垫面反馈闭环闭合**（TF 实测垫间距收敛 + 微压力保持），这是当前唯一未试且直接对症的手段；② detachable 方向先做最小复现（spawn 态 attach 是否刚性）确认 gz-sim 8.11 dartsim 的 DetachableJoint 关节创建是否对本 URDF 机器人 + 自由盒组合生效——当前结论是该关节从未物理形成，fallback 不可用；③ 两者任一收敛后完整复跑 physics 与 detachable 验收，并复验 M2（本轮适配器/launch/kinematics.yaml 均有改动，M2 live 复验尚未执行）。
+**下一步（当前范围）**：仅保留 detachable 隔离路径。先以本仓库的 RM75 Pose_V hard gate 验证 Gazebo vendor 更新或上游补丁；在 model/link 两口径连续通过 3× target、3× distractor 的 attach/detach 周期前，fallback 一律 fail-closed。physics 抓取与 M2 live 复验不属于本轮。
 
 ## 实现边界
 
 - 环境 ID：`openeta/gazebo_rm75_robotiq2f85_pickplace-v0`
 - 模型 ID：`rm75_robotiq_2f85_pickplace_sim_v1`
 - 使用现有 `create/reset/observe/move_to/gripper_open/gripper_close/close` 原子接口。
-- Gazebo 中只使用碰撞、重力、摩擦和 OdometryPublisher。没有 Contact sensor、detachable joint、目标固定关节、吸附命令、外力抓取插件或运动学附着。
+- physics 模式只使用碰撞、重力、摩擦和 OdometryPublisher；没有 Contact sensor、吸附命令、外力抓取插件或运动学附着。detachable 模式是受控 fallback：它只在经过双指垫几何门、0.15 rad 回退净空检查后发送 DetachableJoint 请求，并且仍须由下一次 lift/transport 的 Odometry 与真实 child-link Pose_V 共动共同产生 `TARGET_HELD`。
 - MoveIt AttachedCollisionObject 仅在 `TARGET_HELD` 得到物理证据后用于后续规划；它不会改变 Gazebo entity/joint 关系。
 - M3 允许标准 gripper stall-success 回执：动作可以 `ok=true`，但必须同时报告 `stalled=true`、`reached_goal=false`；最终抓取成败只由 M3 verifier 判定。M2 的 reached-goal 行为不变。
 - 任一 JointState、TF、RGB-D、目标/干扰物 Odometry 或动作后时间戳证据缺失/过期时，校验结果 fail-closed 为 `UNKNOWN`。

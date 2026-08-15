@@ -13,7 +13,21 @@ from adapter.protocol import EnvObservation
 
 from .deployment import GazeboDeploymentConfig, worker_deployment_config
 from .m2 import JOINT_NAMES
-from .m3 import M3Config, M3Verifier, ReasonCode, relative_pose, select_attachment_object, unknown_record
+from .m3 import (
+    AttachmentLifecycle,
+    M3Config,
+    M3Verifier,
+    PadSnapshot,
+    PadSurface,
+    ReasonCode,
+    confirm_pad_contact,
+    fingertip_collision_bounds_m,
+    pads_are_clear,
+    quaternion_rotate,
+    relative_pose,
+    unknown_record,
+    vector_norm,
+)
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .runtime import GazeboRuntime
 
@@ -60,6 +74,7 @@ class GazeboDirectEnv(Env):
         self._verifier = M3Verifier(self._m3_config) if self._m3_config is not None else None
         self._last_snapshot: Any | None = None
         self._attached_object: str | None = None
+        self._attachment_lifecycle = AttachmentLifecycle.DETACHED
 
     @property
     def controller(self) -> Any | None:
@@ -113,6 +128,118 @@ class GazeboDirectEnv(Env):
             raise RuntimeError("M3_CAMERA_TIMESTAMP_MISSING")
         return min(stamps)
 
+    def _pad_snapshot(self, snapshot: Any) -> PadSnapshot:
+        """Read both frozen fingertip meshes through live TF for M3 attach."""
+
+        config = self._m3_config
+        runtime = getattr(self.runtime.controller, "runtime", None)
+        if config is None or runtime is None:
+            raise RuntimeError("M3_PAD_FEEDBACK_UNAVAILABLE")
+        from rclpy.time import Time
+
+        mesh_dir = config.gripper_asset_root / "meshes" / "collision" / "2f_85"
+        values: dict[str, tuple[tuple[float, float, float], float]] = {}
+        for link in config.fingertip_links:
+            side = "left" if "left" in link else "right"
+            transform = runtime.state_source.tf_buffer.lookup_transform(
+                config.base_link, link, Time()
+            ).transform
+            translation = (
+                float(transform.translation.x),
+                float(transform.translation.y),
+                float(transform.translation.z),
+            )
+            rotation = (
+                float(transform.rotation.x),
+                float(transform.rotation.y),
+                float(transform.rotation.z),
+                float(transform.rotation.w),
+            )
+            minimum, maximum = fingertip_collision_bounds_m(
+                mesh_dir / f"{side}_finger_tip.stl"
+            )
+            local_centre = tuple((minimum[index] + maximum[index]) / 2 for index in range(3))
+            offset = quaternion_rotate(rotation, local_centre)
+            centre = tuple(translation[index] + offset[index] for index in range(3))
+            values[side] = (
+                centre,
+                max((maximum[index] - minimum[index]) / 2 for index in range(3)),
+            )
+        left_centre, left_extent = values["left"]
+        right_centre, right_extent = values["right"]
+        axis = tuple(right_centre[index] - left_centre[index] for index in range(3))
+        length = vector_norm(axis)
+        if length <= 1e-9:
+            raise RuntimeError("M3_PAD_FEEDBACK_DEGENERATE")
+        left_normal = tuple(value / length for value in axis)
+        return PadSnapshot(
+            timestamp_s=snapshot.timestamp_s,
+            left=PadSurface(left_centre, left_normal, left_extent),
+            right=PadSurface(right_centre, tuple(-value for value in left_normal), right_extent),
+            objects=snapshot.objects,
+        )
+
+    def _pad_feedback_samples(self, action_timestamp_s: float | None) -> tuple[PadSnapshot, ...]:
+        """Collect post-action dual-TF/Odometry geometry without contacts."""
+
+        config = self._m3_config
+        source, controller = self.runtime.physics_source, self.runtime.controller
+        if config is None or source is None or controller is None:
+            raise RuntimeError("M3_PAD_FEEDBACK_UNAVAILABLE")
+        samples: list[PadSnapshot] = []
+        for index in range(config.pad_evidence_samples):
+            if index:
+                time.sleep(config.pad_evidence_window_s / (config.pad_evidence_samples - 1))
+            robot = controller.state_provider().to_dict()
+            ros_runtime = getattr(controller, "runtime", None)
+            camera_stamp = (
+                float(ros_runtime.ros_time_s()) if ros_runtime is not None else time.monotonic()
+            )
+            snapshot = source.capture(
+                robot=robot,
+                camera_timestamp_s=camera_stamp,
+                min_timestamp_s=action_timestamp_s,
+                timeout_s=5.0,
+            )
+            samples.append(self._pad_snapshot(snapshot))
+        return tuple(samples)
+
+    def _require_detachable_child_link_evidence(self, record: Any) -> Any:
+        """Fail closed if model odometry disagrees with the joint child link.
+
+        Gazebo Sim's stock OdometryPublisher samples a model entity, whereas
+        DetachableJoint constrains the configured child link.  The two are
+        known to disagree on the current RM75/DART graph, so the existing M3
+        Odometry verdict cannot be accepted alone while detachable mode is
+        enabled.  This check remains private and reuses an existing verifier
+        reason instead of changing the observation or MCP contracts.
+        """
+
+        attachment = getattr(self.runtime, "attachment", None)
+        if (
+            attachment is None
+            or self._attached_object is None
+            or getattr(record, "reason_code", None) is not ReasonCode.TARGET_HELD
+        ):
+            return record
+        label = (
+            "target"
+            if self._attached_object == self._m3_config.target_id
+            else "distractor"
+        )
+        held_reader = getattr(attachment, "is_physically_held", None)
+        if callable(held_reader) and held_reader(label):
+            return record
+        # Do not let a stale model pose promote the PlanningScene or preserve
+        # a false held state.  The existing TARGET_NOT_LIFTED result already
+        # expresses the only supported public semantics: no physical proof.
+        self._verifier.reset()
+        return unknown_record(
+            ReasonCode.TARGET_NOT_LIFTED,
+            phase="failed",
+            target_id=self._m3_config.target_id,
+        )
+
     def _merge_physics(
         self,
         raw: dict[str, Any],
@@ -135,6 +262,7 @@ class GazeboDirectEnv(Env):
                 gripper_reached_goal=(bool(gripper_result["reached_goal"]) if gripper_result and "reached_goal" in gripper_result else None),
             )
             record = self._verifier.verify(snapshot, action_type=action_type, action_timestamp_s=action_timestamp_s)
+            record = self._require_detachable_child_link_evidence(record)
             self._last_snapshot = snapshot
             raw["objects"] = [item.to_dict() for item in snapshot.objects]
         except Exception as exc:
@@ -170,6 +298,7 @@ class GazeboDirectEnv(Env):
             self._verifier.reset()
             self._last_snapshot = None
             self._attached_object = None
+            self._attachment_lifecycle = AttachmentLifecycle.DETACHED
         observation = self.runtime.reset(seed=self._seed)
         raw = self._decorate_robot(self._as_unified(observation))
         raw, snapshot = self._merge_physics(raw, action_type="gripper_open", require=PHYSICS in self.profile.capabilities)
@@ -187,25 +316,11 @@ class GazeboDirectEnv(Env):
         action_type = raw_action.get("action_type")
         planning = getattr(self.runtime.physics_source, "planning_scene", None)
         attachment = getattr(self.runtime, "attachment", None)
-        if (
-            action_type == "gripper_open" and planning is not None
-            and planning.attached and self._m3_config is not None
-        ):
-            target = self._last_snapshot.object(self._m3_config.target_id) if self._last_snapshot is not None else None
-            if target is not None:
-                planning.release(target.pose)
-        if (
-            action_type == "gripper_open"
-            and self._attached_object is not None
-            and attachment is not None
-            and self._m3_config is not None
-        ):
-            # The detachable fallback releases the joint exactly when the
-            # gripper is asked to open, so drop/place physics stay honest.
-            attachment.detach(
-                "target" if self._attached_object == self._m3_config.target_id else "distractor"
-            )
-            self._attached_object = None
+        if action_type == "gripper_open" and attachment is not None:
+            # The release order is intentional: confirmed detach ACK first,
+            # then physically open, then obtain a fresh observation before
+            # releasing MoveIt's planning object.
+            self._ensure_detached(attachment)
         observation, receipt = self.runtime.execute(raw_action)
         raw = self._decorate_robot(self._as_unified(observation))
         barrier_value = receipt.get("action_completed_ros_time_s")
@@ -230,13 +345,30 @@ class GazeboDirectEnv(Env):
                 )
                 physical = raw["metadata"]["physical_verification"]
             receipt["physical_verification"] = physical
+            if (
+                attachment is not None
+                and self._attached_object is not None
+                and physical["reason_code"]
+                in {
+                    ReasonCode.WRONG_OBJECT.value,
+                    ReasonCode.TARGET_NOT_LIFTED.value,
+                    ReasonCode.RELATIVE_POSE_DRIFT.value,
+                    ReasonCode.OBJECT_DROPPED.value,
+                }
+            ):
+                # A joint topic ACK is not a held-object proof.  Any failed
+                # lift/identity result immediately returns the fallback to a
+                # known detached state.
+                self._ensure_detached(attachment)
             if snapshot is not None and planning is not None and physical["reason_code"] == ReasonCode.TARGET_HELD.value and not planning.attached:
                 target = snapshot.object(self._m3_config.target_id)
                 if target is not None:
                     planning.attach(relative_pose(snapshot.eef_pose, target.pose))
-            if action_type == "gripper_open" and planning is not None and snapshot is not None:
+                    if self._attachment_lifecycle is AttachmentLifecycle.ATTACH_ACKED_UNPROVEN:
+                        self._attachment_lifecycle = AttachmentLifecycle.HELD_PROVEN
+            if action_type == "gripper_open" and planning is not None and snapshot is not None and planning.attached:
                 target = snapshot.object(self._m3_config.target_id)
-                if target is not None and not planning.attached:
+                if target is not None:
                     planning.release(target.pose)
             if (
                 action_type == "gripper_close"
@@ -244,30 +376,38 @@ class GazeboDirectEnv(Env):
                 and snapshot is not None
                 and physical["reason_code"] == ReasonCode.LIFT_REQUIRED.value
             ):
-                # Fallback attach only after the verifier's own stall/aperture
-                # evidence AND with an object geometrically at the pads; the
-                # verifier never learns whether a joint was created.
-                selected = select_attachment_object(
-                    reason_code=physical["reason_code"],
-                    eef_pose=snapshot.eef_pose,
-                    objects=snapshot.objects,
+                # The previous EEF-centre band admitted off-pad objects.  A
+                # closed gripper now needs stable dual-pad geometry, a low
+                # object speed, and exactly one candidate for 100 ms.
+                gate = confirm_pad_contact(
+                    self._pad_feedback_samples(barrier),
+                    action_timestamp_s=barrier,
                     config=self._m3_config,
                 )
-                if selected is not None:
-                    # gz-sim's DetachableJoint cannot (re)attach while the
-                    # child model touches the parent model (documented DART
-                    # limitation): the joint then never becomes rigid and the
-                    # object is only cage-carried until the first horizontal
-                    # move drops it.  Back the pads off FIRST so the attach
-                    # happens out of contact; the object rests on the table
-                    # during the backoff, so its pose is unchanged.  If the
-                    # backoff cannot be confirmed, skip the attach and let the
-                    # round fail honestly instead of faking a rigid joint.
-                    if self._release_gripper_squeeze(receipt):
-                        attachment.attach(
-                            "target" if selected == self._m3_config.target_id else "distractor"
-                        )
-                        self._attached_object = selected
+                if gate.accepted and gate.candidate_id is not None:
+                    selected = gate.candidate_id
+                    self._attachment_lifecycle = AttachmentLifecycle.CONTACT_CONFIRMED
+                    backoff = self._release_gripper_squeeze()
+                    backoff_barrier = backoff.get("action_completed_ros_time_s") if backoff else None
+                    if backoff and backoff.get("ok") and isinstance(backoff_barrier, int | float):
+                        clear_samples = self._pad_feedback_samples(float(backoff_barrier))
+                        if clear_samples and pads_are_clear(
+                            clear_samples[-1], selected, config=self._m3_config
+                        ):
+                            label = (
+                                "target"
+                                if selected == self._m3_config.target_id
+                                else "distractor"
+                            )
+                            attachment.attach(label)
+                            capture = getattr(attachment, "capture_physical_baseline", None)
+                            if callable(capture) and capture(label):
+                                self._attached_object = selected
+                                self._attachment_lifecycle = AttachmentLifecycle.ATTACH_ACKED_UNPROVEN
+                            else:
+                                # A request ACK without a readable child-link
+                                # reference cannot be a detachable fallback.
+                                self._ensure_detached(attachment)
         self._latest = raw
         # The Direct/Gym boundary owns the public unified observation.  Keep
         # the structured receipt anchored to that exact post-action object so
@@ -278,7 +418,15 @@ class GazeboDirectEnv(Env):
         info = {"_openeta_receipt": receipt} if STRUCTURED_RECEIPT in self.profile.capabilities else {}
         return raw, 0.0, False, False, info
 
-    def _release_gripper_squeeze(self, receipt: Mapping[str, Any]) -> bool:
+    def _ensure_detached(self, attachment: Any) -> None:
+        """Detach both fallback plugins without relying on local assumptions."""
+
+        for label in ("target", "distractor"):
+            attachment.ensure_detached(label)
+        self._attached_object = None
+        self._attachment_lifecycle = AttachmentLifecycle.DETACHED
+
+    def _release_gripper_squeeze(self) -> Mapping[str, Any] | None:
         """Back the pads a few millimetres off a freshly grasped object.
 
         Detachable-mode prerequisite: gz-sim's DetachableJoint cannot attach
@@ -291,21 +439,13 @@ class GazeboDirectEnv(Env):
 
         controller = getattr(self.runtime, "controller", None)
         gripper_action = getattr(controller, "gripper_action", None)
-        calibration = getattr(getattr(controller, "config", None), "calibration", None)
-        gripper_state = receipt.get("gripper_state") or {}
-        aperture = gripper_state.get("aperture_m")
-        if gripper_action is None or calibration is None or not isinstance(aperture, (int, float)):
-            return False
-        # Open to a fixed wide aperture (~8 cm): the 2F-85 fingertip hooks
-        # curve ~1 cm inwards, so a few-millimetre backoff still leaves the
-        # hooks embracing the box and the attach stays "in contact".
-        open_angle = min(max(calibration.angles_rad[0], 0.15), calibration.angles_rad[-1])
-        if calibration.angle_from_aperture(float(aperture)) <= open_angle:
-            return True  # already clear
+        if gripper_action is None:
+            return None
+        # This is a deliberate 0.15 rad backoff, not a user-visible open.
+        # The following fresh dual-pad sample must prove both pads cleared.
         with suppress(Exception):
-            result = gripper_action(open_angle, 15.0)
-            return bool(result.get("ok"))
-        return False
+            return dict(gripper_action(0.15, 15.0))
+        return None
 
     def render(self):
         if self._latest is None:
@@ -315,11 +455,9 @@ class GazeboDirectEnv(Env):
 
     def close(self) -> None:
         attachment = getattr(self.runtime, "attachment", None)
-        if self._attached_object is not None and attachment is not None:
+        if attachment is not None:
             with suppress(Exception):
-                attachment.detach(
-                    "target" if self._attached_object == self._m3_config.target_id else "distractor"
-                )
+                self._ensure_detached(attachment)
         self._attached_object = None
         self.runtime.close()
         self._latest = None

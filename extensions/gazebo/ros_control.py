@@ -31,10 +31,27 @@ def _stamp_seconds(stamp: Any) -> float | None:
     ) * 1e-9
 
 
-def gripper_action_success(*, reached_goal: bool, stalled: bool, allow_stalling: bool) -> bool:
-    """Documented stall-success policy, kept pure for M2/M3 isolation tests."""
+def gripper_action_success(
+    *,
+    reached_goal: bool,
+    stalled: bool,
+    allow_stalling: bool,
+    terminal_succeeded: bool = True,
+) -> bool:
+    """Stall is success only when the ROS action terminal state succeeded."""
 
-    return bool(reached_goal) or (bool(allow_stalling) and bool(stalled))
+    return bool(terminal_succeeded) and (
+        bool(reached_goal) or (bool(allow_stalling) and bool(stalled))
+    )
+
+
+def gripper_terminal_succeeded(status: Any) -> bool:
+    """Accept only action_msgs GoalStatus.STATUS_SUCCEEDED (numeric 4)."""
+
+    try:
+        return int(status) == 4
+    except (TypeError, ValueError):
+        return False
 
 
 def _populate_state_validity_request(
@@ -688,16 +705,32 @@ class _RosRuntime:
         try:
             wrapped = self._await(handle.get_result_async(), timeout_s)
         except TimeoutError:
-            handle.cancel_goal_async()
-            self.state_source.clear()
-            raise
+            try:
+                self._await(handle.cancel_goal_async(), min(2.0, timeout_s))
+            except Exception:
+                pass
+            return finish({
+                "ok": False,
+                "reached_goal": False,
+                "stalled": False,
+                "error_code": "GRIPPER_TIMEOUT",
+            })
+        except Exception:
+            return finish({
+                "ok": False,
+                "reached_goal": False,
+                "stalled": False,
+                "error_code": "GRIPPER_FAILED",
+            })
         result = wrapped.result
         reached_goal = bool(result.reached_goal)
         stalled = bool(result.stalled)
+        terminal_succeeded = gripper_terminal_succeeded(getattr(wrapped, "status", None))
         ok = gripper_action_success(
             reached_goal=reached_goal,
             stalled=stalled,
             allow_stalling=bool(self.allow_stalling),
+            terminal_succeeded=terminal_succeeded,
         )
         return finish({
             "ok": ok,

@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!--
+  Positive control for an articulated parent.  terminal_link is intentionally
+  a non-canonical link reached through a fixed joint; this is the topology
+  used by the RM75 gripper mount.
+-->
+<sdf version="1.10">
+  <world name="detachable_articulated_repro">
+    <gravity>0 0 -9.81</gravity>
+    <physics name="dartsim" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+
+    <model name="ground"><static>true</static><link name="ground_link">
+      <collision name="ground_collision"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></collision>
+    </link></model>
+
+    <model name="articulated_parent">
+      <static>true</static><self_collide>false</self_collide>
+      <pose>0 0 0.80 0 0 0</pose>
+      <link name="base_link"><collision name="base_collision"><geometry><box><size>0.05 0.05 0.05</size></box></geometry></collision></link>
+      <link name="terminal_link"><pose relative_to="base_link">0.10 0 0 0 0 0</pose><collision name="terminal_collision"><geometry><box><size>0.04 0.04 0.04</size></box></geometry></collision></link>
+      <joint name="base_to_terminal" type="fixed"><parent>base_link</parent><child>terminal_link</child></joint>
+      <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+        <parent_link>terminal_link</parent_link>
+        <child_model>articulated_child</child_model><child_link>child_link</child_link>
+        <attach_topic>/repro/articulated/attach</attach_topic><detach_topic>/repro/articulated/detach</detach_topic>
+        <output_topic>/repro/articulated/state</output_topic><suppress_child_warning>true</suppress_child_warning>
+      </plugin>
+    </model>
+
+    <model name="articulated_child"><pose>0.25 0 0.80 0 0 0</pose><link name="child_link">
+      <inertial><mass>0.10</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+      <collision name="child_collision"><geometry><box><size>0.04 0.04 0.06</size></box></geometry></collision>
+    </link></model>
+  </world>
+</sdf>

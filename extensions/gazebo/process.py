@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -12,6 +15,10 @@ from pathlib import Path
 
 class GazeboProcessError(RuntimeError):
     """Raised when the configured Gazebo process cannot be managed."""
+
+
+DETACHABLE_MAX_RELATIVE_TRANSLATION_M = 0.001
+DETACHABLE_MAX_RELATIVE_ROTATION_RAD = math.radians(0.5)
 
 
 def _process_group_exists(pgid: int) -> bool:
@@ -254,6 +261,14 @@ class GazeboWorldControl:
         self.close()
 
 
+class DetachableJointState(StrEnum):
+    """What the plugin topic has acknowledged, never a physics proof."""
+
+    UNKNOWN = "UNKNOWN"
+    DETACHED = "DETACHED"
+    ATTACHED = "ATTACHED"
+
+
 class GazeboDetachableJointControl:
     """Drive the official ``DetachableJoint`` plugin topics for M3's fallback.
 
@@ -263,16 +278,35 @@ class GazeboDetachableJointControl:
     conditions hold, so the joint never fabricates grasp evidence on its own.
     """
 
-    def __init__(self, *, gz_executable: str = "gz", timeout_ms: int = 3000,
-                 environment: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        gz_executable: str = "gz",
+        timeout_ms: int = 3000,
+        environment: dict[str, str] | None = None,
+        world_name: str = "m3_rm75_robotiq2f85_pickplace",
+        parent_link: str = "gripper_mount_link",
+    ) -> None:
         self.gz_executable = gz_executable
         self.timeout_ms = int(timeout_ms)
         self.environment = dict(environment) if environment is not None else None
-        # The plugin attaches every child at spawn (attachRequested defaults
-        # true), so each joint starts attached; transitions we drive are
-        # confirmed on the state topic, and redundant transitions are skipped
-        # because the plugin drops them silently.
-        self._attached = {"target": True, "distractor": True}
+        self.world_name = world_name
+        self.parent_link = parent_link
+        self._child_links = {
+            "target": "target_link",
+            "distractor": "distractor_link",
+        }
+        self._physical_baselines: dict[str, tuple[
+            tuple[float, float, float], tuple[float, float, float, float]
+        ]] = {}
+        # Do not guess the initial state.  In particular, a state topic
+        # message only acknowledges a plugin request; it cannot show that a
+        # DART fixed joint was actually created.  The direct environment uses
+        # later Odometry co-motion as the sole held-object proof.
+        self._state = {
+            "target": DetachableJointState.UNKNOWN,
+            "distractor": DetachableJointState.UNKNOWN,
+        }
 
     def _publish(self, topic: str) -> None:
         executable = shutil.which(self.gz_executable) or self.gz_executable
@@ -287,15 +321,171 @@ class GazeboDetachableJointControl:
                 f"detachable joint publish failed for {topic}: {result.stderr[-500:]}"
             )
 
-    def _confirmed_state(self, object_label: str, expected: str) -> bool:
-        del object_label, expected
-        raise NotImplementedError
+    @staticmethod
+    def _field(block: str, name: str, *, default: float) -> float:
+        found = re.search(rf"\b{name}:\s*([-+0-9.eE]+)", block)
+        return float(found.group(1)) if found else default
 
-    def _drive(self, object_label: str, action: str) -> None:
-        want = action == "attach"
-        if self._attached.get(object_label) == want:
-            return  # redundant transitions are silently dropped by the plugin
-        expected = "attached" if want else "detached"
+    @staticmethod
+    def _normalised_quaternion(
+        value: tuple[float, float, float, float]
+    ) -> tuple[float, float, float, float]:
+        length = math.sqrt(sum(component * component for component in value))
+        if length <= 1e-12:
+            raise ValueError("Pose_V contained a zero quaternion")
+        return tuple(component / length for component in value)  # type: ignore[return-value]
+
+    @classmethod
+    def _relative_pose(
+        cls,
+        parent: tuple[tuple[float, float, float], tuple[float, float, float, float]],
+        child: tuple[tuple[float, float, float], tuple[float, float, float, float]],
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """Return child pose in the parent frame from Gazebo world poses."""
+
+        parent_position, parent_quaternion = parent
+        child_position, child_quaternion = child
+        px, py, pz, pw = cls._normalised_quaternion(parent_quaternion)
+        inverse = (-px, -py, -pz, pw)
+
+        def multiply(
+            left: tuple[float, float, float, float], right: tuple[float, float, float, float]
+        ) -> tuple[float, float, float, float]:
+            x1, y1, z1, w1 = left
+            x2, y2, z2, w2 = right
+            return (
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * z2 + z1 * w2,
+                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            )
+
+        delta = (
+            child_position[0] - parent_position[0],
+            child_position[1] - parent_position[1],
+            child_position[2] - parent_position[2],
+            0.0,
+        )
+        rotated = multiply(multiply(inverse, delta), (px, py, pz, pw))
+        orientation = cls._normalised_quaternion(multiply(inverse, child_quaternion))
+        return rotated[:3], orientation
+
+    def _world_poses(self) -> dict[
+        str, tuple[tuple[float, float, float], tuple[float, float, float, float]]
+    ]:
+        """Read physical link poses directly, never through model odometry."""
+
+        executable = shutil.which(self.gz_executable) or self.gz_executable
+        try:
+            result = subprocess.run(
+                [
+                    executable, "topic", "-e", "-n", "1", "-t",
+                    f"/world/{self.world_name}/pose/info",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+                check=False,
+                env=self.environment,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GazeboProcessError("unable to read detachable child Pose_V") from exc
+        if result.returncode != 0 or not result.stdout.strip():
+            raise GazeboProcessError("unable to read detachable child Pose_V")
+        blocks: list[str] = []
+        current: list[str] | None = None
+        depth = 0
+        for line in result.stdout.splitlines():
+            if current is None:
+                if line.strip() == "pose {":
+                    current, depth = [line], 1
+                continue
+            current.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth == 0:
+                blocks.append("\n".join(current))
+                current = None
+        poses: dict[str, tuple[tuple[float, float, float], tuple[float, float, float, float]]] = {}
+        for block in blocks:
+            name = re.search(r'\bname:\s*"([^"]+)"', block)
+            position = re.search(r"position\s*\{(.*?)\}", block, re.DOTALL)
+            orientation = re.search(r"orientation\s*\{(.*?)\}", block, re.DOTALL)
+            if not name or not position or not orientation:
+                continue
+            poses[name.group(1)] = (
+                tuple(self._field(position.group(1), axis, default=0.0) for axis in ("x", "y", "z")),
+                self._normalised_quaternion(tuple(
+                    self._field(orientation.group(1), axis, default=1.0 if axis == "w" else 0.0)
+                    for axis in ("x", "y", "z", "w")
+                )),
+            )
+        return poses
+
+    def capture_physical_baseline(self, object_label: str) -> bool:
+        """Record a post-ACK child-link reference without treating it as proof."""
+
+        child_link = self._child_links.get(object_label)
+        if child_link is None:
+            raise ValueError(f"unknown detachable object label: {object_label}")
+        try:
+            poses = self._world_poses()
+            self._physical_baselines[object_label] = self._relative_pose(
+                poses[self.parent_link], poses[child_link]
+            )
+        except (KeyError, ValueError, GazeboProcessError):
+            self._physical_baselines.pop(object_label, None)
+            return False
+        return True
+
+    def physical_relative_drift(self, object_label: str) -> tuple[float, float] | None:
+        """Return child-link drift from the post-ACK reference, if readable.
+
+        Gazebo Sim 8's OdometryPublisher reads the model entity.  Cross-model
+        DART detachable transitions can leave that entity and the constrained
+        child link inconsistent, so an Odometry-only held verdict is unsafe.
+        """
+
+        baseline = self._physical_baselines.get(object_label)
+        child_link = self._child_links.get(object_label)
+        if baseline is None or child_link is None:
+            return None
+        try:
+            poses = self._world_poses()
+            current = self._relative_pose(poses[self.parent_link], poses[child_link])
+        except (KeyError, ValueError, GazeboProcessError):
+            return None
+        translation = math.dist(baseline[0], current[0])
+        dot = abs(sum(left * right for left, right in zip(baseline[1], current[1])))
+        rotation = 2.0 * math.acos(min(1.0, max(-1.0, dot)))
+        return translation, rotation
+
+    def is_physically_held(self, object_label: str) -> bool:
+        """Apply the detachable-only `<1 mm / <0.5°` child-link hard gate."""
+
+        drift = self.physical_relative_drift(object_label)
+        return bool(
+            drift is not None
+            and drift[0] < DETACHABLE_MAX_RELATIVE_TRANSLATION_M
+            and drift[1] < DETACHABLE_MAX_RELATIVE_ROTATION_RAD
+        )
+
+    def state(self, object_label: str) -> DetachableJointState:
+        try:
+            return self._state[object_label]
+        except KeyError as exc:
+            raise ValueError(f"unknown detachable object label: {object_label}") from exc
+
+    def _drive(self, object_label: str, action: str) -> DetachableJointState:
+        if action not in {"attach", "detach"}:
+            raise ValueError(f"unsupported detachable action: {action}")
+        want = (
+            DetachableJointState.ATTACHED
+            if action == "attach"
+            else DetachableJointState.DETACHED
+        )
+        if self.state(object_label) is want:
+            return want
+        expected = want.value.lower()
         executable = shutil.which(self.gz_executable) or self.gz_executable
         for _attempt in range(3):
             # Subscribe BEFORE publishing: the plugin publishes its state once
@@ -312,8 +502,8 @@ class GazeboDetachableJointControl:
                 self._publish(f"/m3/detachable_joint/{object_label}/{action}")
                 out, _ = echo.communicate(timeout=5.0)
                 if expected in out:
-                    self._attached[object_label] = want
-                    return
+                    self._state[object_label] = want
+                    return want
             except subprocess.TimeoutExpired:
                 pass
             finally:
@@ -324,11 +514,25 @@ class GazeboDetachableJointControl:
             f"detachable joint {action} for {object_label} was not confirmed by the plugin"
         )
 
-    def attach(self, object_label: str) -> None:
-        self._drive(object_label, "attach")
+    def attach(self, object_label: str) -> DetachableJointState:
+        # Attach is only meaningful after an explicit detached ACK.  This
+        # avoids silently accepting a reattach request that the plugin drops.
+        if self.state(object_label) is not DetachableJointState.DETACHED:
+            raise GazeboProcessError(
+                f"detachable joint {object_label} is not confirmed detached before attach"
+            )
+        return self._drive(object_label, "attach")
 
-    def detach(self, object_label: str) -> None:
-        self._drive(object_label, "detach")
+    def ensure_detached(self, object_label: str) -> DetachableJointState:
+        """Best-effort-safe idempotent detach with no assumed initial state."""
+
+        self._physical_baselines.pop(object_label, None)
+        if self.state(object_label) is DetachableJointState.DETACHED:
+            return DetachableJointState.DETACHED
+        return self._drive(object_label, "detach")
+
+    def detach(self, object_label: str) -> DetachableJointState:
+        return self.ensure_detached(object_label)
 
 
 class RosGzBridgeProcess:

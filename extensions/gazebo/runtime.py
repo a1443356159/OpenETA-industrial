@@ -10,7 +10,11 @@ from typing import Any, Callable, Mapping
 from adapter.protocol import EnvObservation, RobotState
 
 from .deployment import GazeboDeploymentConfig
-from .m3 import M3Config, fingertip_collision_center_m, quaternion_rotate
+from .m3 import (
+    M3Config,
+    fingertip_collision_center_m,
+    quaternion_rotate,
+)
 from .observation import RosRgbdCameraConfig, RosRgbdCameraSource
 from .process import (
     GazeboDetachableJointControl,
@@ -69,6 +73,7 @@ class GazeboRuntime:
             self.attachment = GazeboDetachableJointControl(
                 gz_executable=deployment.gz_executable,
                 environment=deployment.process_environment,
+                world_name=deployment.world_override or profile.world_name,
             )
         self._launch: Any | None = None
         self._cameras: list[Any] = []
@@ -260,7 +265,13 @@ class GazeboRuntime:
             # fights the reset.
             if self.attachment is not None:
                 for label in ("target", "distractor"):
-                    self.attachment.detach(label)
+                    # Reset must not leave a stale fallback attachment behind,
+                    # but cleanup remains best effort: a dying Transport
+                    # endpoint must not prevent the normal world restore.
+                    try:
+                        self.attachment.ensure_detached(label)
+                    except Exception:
+                        pass
             # Harmonic's model_only reset does not restore free objects
             # either; teleport the manipulated objects to their documented
             # initial poses instead of rewinding the simulation clock.  The
@@ -306,6 +317,12 @@ class GazeboRuntime:
         if self.closed:
             return
         errors: list[BaseException] = []
+        if self.attachment is not None:
+            for label in ("target", "distractor"):
+                try:
+                    self.attachment.ensure_detached(label)
+                except BaseException as exc:
+                    errors.append(exc)
         # Failures do not short-circuit reverse-order resource cleanup.
         for resource in (self.physics_source, self.controller, *reversed(self._cameras)):
             if resource is None:

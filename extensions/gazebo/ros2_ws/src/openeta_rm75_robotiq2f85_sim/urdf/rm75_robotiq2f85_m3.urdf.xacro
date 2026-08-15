@@ -2,6 +2,7 @@
 <robot name="rm75_robotiq_2f85_pickplace_sim_v1" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="controller_config" default="$(find openeta_rm75_robotiq2f85_sim)/config/controllers.yaml"/>
   <xacro:arg name="attachment_mode" default="physics"/>
+  <xacro:arg name="detachable_parent_link" default="gripper_mount_link"/>
   <xacro:include filename="$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/rm75_robotiq2f85.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/urdf/ros2_control.xacro"/>
@@ -44,7 +45,7 @@
   <xacro:if value="${'$(arg attachment_mode)' == 'detachable'}">
     <gazebo>
       <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
-        <parent_link>gripper_mount_link</parent_link>
+        <parent_link>$(arg detachable_parent_link)</parent_link>
         <child_model>m3_target</child_model>
         <child_link>target_link</child_link>
         <attach_topic>/m3/detachable_joint/target/attach</attach_topic>
@@ -53,7 +54,7 @@
         <suppress_child_warning>true</suppress_child_warning>
       </plugin>
       <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
-        <parent_link>gripper_mount_link</parent_link>
+        <parent_link>$(arg detachable_parent_link)</parent_link>
         <child_model>m3_distractor</child_model>
         <child_link>distractor_link</child_link>
         <attach_topic>/m3/detachable_joint/distractor/attach</attach_topic>

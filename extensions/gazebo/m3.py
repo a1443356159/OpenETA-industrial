@@ -48,6 +48,21 @@ class ReasonCode(StrEnum):
     IDENTITY_INCOMPLETE = "IDENTITY_INCOMPLETE"
 
 
+class AttachmentLifecycle(StrEnum):
+    """Private lifecycle for the detachable fallback.
+
+    This deliberately is not a verifier verdict or a public reason code.  An
+    ``ATTACH_ACKED_UNPROVEN`` state means only that the DetachableJoint topic
+    accepted a request; a following Odometry co-motion check is still the
+    first point at which the object may become held.
+    """
+
+    DETACHED = "DETACHED"
+    CONTACT_CONFIRMED = "CONTACT_CONFIRMED"
+    ATTACH_ACKED_UNPROVEN = "ATTACH_ACKED_UNPROVEN"
+    HELD_PROVEN = "HELD_PROVEN"
+
+
 @dataclass(frozen=True, slots=True)
 class M3Config(M2Config):
     model_id: str = M3_MODEL_ID
@@ -110,6 +125,14 @@ class M3Config(M2Config):
     # origin may be attached (the grasp centre sits ~0.127 m out).
     attach_gate_min_m: float = 0.09
     attach_gate_max_m: float = 0.17
+    # Private detachable fallback feedback gate.  It is intentionally kept
+    # out of the public observation schema: these values establish whether a
+    # request may be sent, not whether a grasp succeeded.
+    pad_contact_gap_m: float = 0.004
+    pad_clearance_m: float = 0.005
+    pad_evidence_window_s: float = 0.10
+    pad_evidence_samples: int = 3
+    pad_max_object_speed_m_s: float = 0.03
 
     @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
@@ -219,6 +242,48 @@ class PhysicsSnapshot:
 
     def stream_timestamps(self) -> dict[str, float]:
         return dict(self.stream_timestamps_s)
+
+
+@dataclass(frozen=True, slots=True)
+class PadSurface:
+    """One frozen fingertip-pad surface expressed in the world frame."""
+
+    centre: tuple[float, float, float]
+    normal: tuple[float, float, float]
+    tangent_half_extent_m: float
+
+    def __post_init__(self) -> None:
+        if self.tangent_half_extent_m <= 0 or not all(
+            math.isfinite(value) for value in (*self.centre, *self.normal)
+        ):
+            raise ValueError("pad surface must be finite")
+        if vector_norm(self.normal) <= 1e-9:
+            raise ValueError("pad normal must be non-zero")
+
+    @property
+    def unit_normal(self) -> tuple[float, float, float]:
+        length = vector_norm(self.normal)
+        return tuple(value / length for value in self.normal)  # type: ignore[return-value]
+
+
+@dataclass(frozen=True, slots=True)
+class PadSnapshot:
+    """Internal dual-pad/odometry sample taken after a gripper action."""
+
+    timestamp_s: float
+    left: PadSurface
+    right: PadSurface
+    objects: tuple[ObjectState, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PadGateResult:
+    """Result of private attach eligibility; never itself proves a grasp."""
+
+    candidate_id: str | None
+    accepted: bool
+    reason: str
+    sample_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +778,111 @@ def select_attachment_object(
     return best[1] if best is not None else None
 
 
+def _object_dimensions(item: ObjectState, config: M3Config) -> tuple[float, float, float]:
+    if item.object_id == config.target_id:
+        return config.target_size_m
+    if item.object_id == config.distractor_id:
+        diameter, height = config.distractor_size_m
+        return (diameter, diameter, height)
+    raise ValueError(f"unsupported M3 attachment candidate: {item.object_id}")
+
+
+def _object_extent_along(
+    item: ObjectState, direction: Sequence[float], config: M3Config
+) -> float:
+    """Conservative OBB support distance of an M3 object along ``direction``."""
+
+    unit = tuple(float(value) / vector_norm(direction) for value in direction)
+    q = item.pose.normalized().orientation
+    inverse = (-q[0], -q[1], -q[2], q[3])
+    local = quaternion_rotate(inverse, unit)
+    dimensions = _object_dimensions(item, config)
+    return sum(abs(local[index]) * dimensions[index] / 2 for index in range(3))
+
+
+def _pad_object_contact(
+    pad: PadSurface, item: ObjectState, config: M3Config
+) -> tuple[bool, float]:
+    """Return pad/object normal-contact eligibility and signed surface gap."""
+
+    normal = pad.unit_normal
+    delta = tuple(item.pose.position[index] - pad.centre[index] for index in range(3))
+    normal_distance = sum(delta[index] * normal[index] for index in range(3))
+    # The object must lie in front of the pad, within its finite tangential
+    # face.  The object projection is deliberately conservative, so a mesh
+    # approximation cannot turn an off-pad near miss into an attach request.
+    extent = _object_extent_along(item, normal, config)
+    tangential_sq = max(0.0, sum(value * value for value in delta) - normal_distance**2)
+    tangential_limit = pad.tangent_half_extent_m + max(_object_dimensions(item, config)) / 2
+    gap = normal_distance - extent
+    normal_ok = normal_distance >= -config.pad_contact_gap_m
+    tangential_ok = math.sqrt(tangential_sq) <= tangential_limit
+    return normal_ok and tangential_ok and gap <= config.pad_contact_gap_m, gap
+
+
+def _pad_contact_candidates(sample: PadSnapshot, config: M3Config) -> tuple[str, ...]:
+    candidates: list[str] = []
+    for item in sample.objects:
+        if item.object_id not in (config.target_id, config.distractor_id):
+            continue
+        speed = vector_norm(item.linear_velocity)
+        left_ok, _ = _pad_object_contact(sample.left, item, config)
+        right_ok, _ = _pad_object_contact(sample.right, item, config)
+        if speed <= config.pad_max_object_speed_m_s and left_ok and right_ok:
+            candidates.append(item.object_id)
+    return tuple(candidates)
+
+
+def confirm_pad_contact(
+    samples: Sequence[PadSnapshot],
+    *,
+    action_timestamp_s: float | None,
+    config: M3Config | None = None,
+) -> PadGateResult:
+    """Require stable, bilateral, low-speed and unambiguous pad evidence.
+
+    Topic state, proximity to the EEF, and a single contact-ish sample are all
+    intentionally insufficient.  The gate accepts exactly one stable object
+    over a post-action 100 ms interval; zero or multiple candidates fail
+    closed.
+    """
+
+    cfg = config or M3Config()
+    ordered = tuple(sorted(samples, key=lambda sample: sample.timestamp_s))
+    if len(ordered) < cfg.pad_evidence_samples:
+        return PadGateResult(None, False, "INSUFFICIENT_PAD_SAMPLES", len(ordered))
+    if action_timestamp_s is not None and any(
+        sample.timestamp_s <= action_timestamp_s for sample in ordered
+    ):
+        return PadGateResult(None, False, "PAD_SAMPLE_BEFORE_ACTION", len(ordered))
+    if ordered[-1].timestamp_s - ordered[0].timestamp_s < cfg.pad_evidence_window_s:
+        return PadGateResult(None, False, "PAD_WINDOW_TOO_SHORT", len(ordered))
+    selected: str | None = None
+    for sample in ordered:
+        candidates = _pad_contact_candidates(sample, cfg)
+        if len(candidates) != 1:
+            return PadGateResult(None, False, "PAD_CANDIDATE_AMBIGUOUS", len(ordered))
+        if selected is None:
+            selected = candidates[0]
+        elif selected != candidates[0]:
+            return PadGateResult(None, False, "PAD_CANDIDATE_CHANGED", len(ordered))
+    return PadGateResult(selected, True, "CONTACT_CONFIRMED", len(ordered))
+
+
+def pads_are_clear(
+    sample: PadSnapshot, object_id: str, *, config: M3Config | None = None
+) -> bool:
+    """Require both pads to be clear before publishing a detachable attach."""
+
+    cfg = config or M3Config()
+    item = next((value for value in sample.objects if value.object_id == object_id), None)
+    if item is None:
+        return False
+    _, left_gap = _pad_object_contact(sample.left, item, cfg)
+    _, right_gap = _pad_object_contact(sample.right, item, cfg)
+    return left_gap >= cfg.pad_clearance_m and right_gap >= cfg.pad_clearance_m
+
+
 @dataclass(frozen=True, slots=True)
 class PlanningSceneCommand:
     operation: str
@@ -926,6 +1096,15 @@ def namespaced_entity_id(name: str, known_ids: Iterable[str]) -> str | None:
 def fingertip_collision_center_m(path: Path) -> tuple[float, float, float]:
     """Bounding-box centre of a frozen binary STL (vendor fingertip mesh)."""
 
+    minimum, maximum = fingertip_collision_bounds_m(path)
+    return tuple((minimum[index] + maximum[index]) / 2 for index in range(3))
+
+
+def fingertip_collision_bounds_m(
+    path: Path,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Bounding box of a frozen binary fingertip STL in its link frame."""
+
     import struct
 
     data = Path(path).read_bytes()
@@ -937,7 +1116,7 @@ def fingertip_collision_center_m(path: Path) -> tuple[float, float, float]:
         for triangle in range(triangles)
         for vertex in range(3)
     ]
-    return tuple(
-        (min(v[index] for v in vertices) + max(v[index] for v in vertices)) / 2
-        for index in range(3)
+    return (
+        tuple(min(vertex[index] for vertex in vertices) for index in range(3)),
+        tuple(max(vertex[index] for vertex in vertices) for index in range(3)),
     )
