@@ -432,6 +432,23 @@ def _m1_direct_child(report_path: Path) -> int:
     return 0 if record["status"] == "passed" else 1
 
 
+def _m1_direct_command(
+    *, python: str, report: Path, artifact_dir: Path, environment: Mapping[str, str],
+) -> list[str]:
+    """Build a child command with the just-built ROS overlay sourced."""
+    command = [
+        python, str(Path(__file__).resolve()), "m1-direct", "--report", str(report),
+        "--artifact-dir", str(artifact_dir),
+    ]
+    overlay = Path(environment.get("OPENETA_GAZEBO_OVERLAY", "")) / "setup.bash"
+    if not overlay.is_file():
+        return command
+    # The coordinator builds in a subprocess.  Source the resulting setup in
+    # this dedicated segment process so ament, Python and Gazebo paths match
+    # a normal ROS shell before rclpy initializes.
+    return ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(overlay), *command]
+
+
 def _m1_direct(python: str, artifact_dir: Path) -> dict[str, Any]:
     allocation = allocate("m1", "direct")
     record: dict[str, Any] = {"allocation": allocation.evidence(), "observations": []}
@@ -439,10 +456,13 @@ def _m1_direct(python: str, artifact_dir: Path) -> dict[str, Any]:
     child_log = artifact_dir / "direct.log"
     child_log.parent.mkdir(parents=True, exist_ok=True)
     try:
+        environment = _segment_env(allocation)
         completed = subprocess.run(
-            [python, str(Path(__file__).resolve()), "m1-direct", "--report", str(child_report),
-             "--artifact-dir", str(artifact_dir)],
-            cwd=Path.cwd(), env=_segment_env(allocation), text=True,
+            _m1_direct_command(
+                python=python, report=child_report, artifact_dir=artifact_dir,
+                environment=environment,
+            ),
+            cwd=Path.cwd(), env=environment, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
             timeout=180, start_new_session=True,
         )

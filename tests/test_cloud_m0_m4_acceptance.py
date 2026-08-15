@@ -156,6 +156,21 @@ def test_m1_failed_segment_is_retained_in_the_final_report(
     assert report["segments"]["direct"] is direct
 
 
+def test_m1_direct_command_sources_the_built_overlay(tmp_path: Path) -> None:
+    setup = tmp_path / "overlay" / "setup.bash"
+    setup.parent.mkdir()
+    setup.write_text("# test overlay\n", encoding="utf-8")
+
+    command = m0_m1._m1_direct_command(
+        python="/venv/bin/python", report=tmp_path / "direct.json",
+        artifact_dir=tmp_path / "artifacts",
+        environment={"OPENETA_GAZEBO_OVERLAY": str(setup.parent)},
+    )
+
+    assert command[:5] == ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(setup)]
+    assert command[5:8] == ["/venv/bin/python", str(_M0_M1_SCRIPT), "m1-direct"]
+
+
 def test_m1_live_rgbd_validator_rejects_stale_or_nonlive_observations() -> None:
     observation = {
         "metadata": {"observation_provenance": "gazebo_ros_live"},
