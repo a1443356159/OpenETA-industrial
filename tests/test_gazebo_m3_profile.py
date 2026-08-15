@@ -45,3 +45,12 @@ def test_m3_native_adhesion_refreshes_the_official_model_pose_command() -> None:
     # system; raw component assignment does not provide that lifecycle mark.
     assert "SetWorldPoseCmd(_ecm, pose)" in source
     assert "SetComponentData<gz::sim::components::WorldPoseCmd>" not in source
+
+
+def test_m3_native_adhesion_softens_only_post_capture_transport_contacts() -> None:
+    source = (PACKAGE / "src/m3_adhesion_system.cpp").read_text(encoding="utf-8")
+
+    assert "CollectContactSurfaceProperties" in source
+    assert "EnableContactSurfaceCustomization" in source
+    assert "SoftenCapturedContacts" in source
+    assert "DetachableJoint" not in source

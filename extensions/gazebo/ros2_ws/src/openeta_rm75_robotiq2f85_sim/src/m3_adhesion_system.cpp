@@ -14,6 +14,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #include <gz/msgs/boolean.pb.h>
 #include <gz/msgs/contacts.pb.h>
 #include <gz/msgs/stringmsg.pb.h>
+#include <gz/physics/ContactProperties.hh>
 #include <gz/plugin/Register.hh>
 #include <gz/sim/EntityComponentManager.hh>
 #include <gz/sim/Link.hh>
@@ -37,6 +39,7 @@
 #include <gz/sim/components/Model.hh>
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/PoseCmd.hh>
+#include <gz/sim/physics/Events.hh>
 #include <gz/transport/Node.hh>
 #include <sdf/Collision.hh>
 #include <sdf/Element.hh>
@@ -60,12 +63,6 @@ struct WindowVerdict
   bool accepted{false};
   std::string objectLabel;
   std::string reason;
-};
-
-struct SavedCollision
-{
-  gz::sim::Entity entity{gz::sim::kNullEntity};
-  sdf::Collision element;
 };
 
 void SetGravityEnabled(
@@ -115,7 +112,7 @@ class M3AdhesionSystem final
       const gz::sim::Entity &_entity,
       const std::shared_ptr<const sdf::Element> &_sdf,
       gz::sim::EntityComponentManager & /*_ecm*/,
-      gz::sim::EventManager & /*_eventMgr*/) override
+      gz::sim::EventManager &_eventMgr) override
   {
     this->worldEntity_ = _entity;
     this->robotModelName_ = this->Value(_sdf, "robot_model_name", this->robotModelName_);
@@ -139,6 +136,41 @@ class M3AdhesionSystem final
         "/m3/adhesion/release", &M3AdhesionSystem::OnRelease, this);
     this->transport_.Advertise(
         "/m3/adhesion/state", &M3AdhesionSystem::OnState, this);
+
+    // Keep the capture evidence native: this event only softens physical
+    // contacts *after* Capture has accepted a two-pad contact window.  It
+    // prevents an already kinematically carried object from injecting solver
+    // impulses back into the fingers during a horizontal transport.
+    this->contactSurfaceConnection_ = _eventMgr.Connect<
+        gz::sim::events::CollectContactSurfaceProperties>(
+        [this](
+            const gz::sim::Entity &_first,
+            const gz::sim::Entity &_second,
+            const gz::math::Vector3d & /*_point*/,
+            const std::optional<gz::math::Vector3d> /*_force*/,
+            const std::optional<gz::math::Vector3d> /*_normal*/,
+            const std::optional<double> /*_depth*/,
+            const std::size_t /*_count*/,
+            gz::physics::SetContactPropertiesCallbackFeature::
+                ContactSurfaceParams<gz::physics::FeaturePolicy3d> &_params)
+        {
+          std::lock_guard<std::mutex> lock(this->mutex_);
+          if (!this->captured_ ||
+              (this->capturedCollisionEntities_.count(_first) == 0 &&
+               this->capturedCollisionEntities_.count(_second) == 0))
+          {
+            return;
+          }
+          _params.frictionCoeff = 0.0;
+          _params.secondaryFrictionCoeff = 0.0;
+          _params.rollingFrictionCoeff = 0.0;
+          _params.secondaryRollingFrictionCoeff = 0.0;
+          _params.torsionalFrictionCoeff = 0.0;
+          _params.restitutionCoeff = 0.0;
+          _params.errorReductionParameter = 0.0;
+          _params.maxErrorReductionVelocity = 0.0;
+          _params.constraintForceMixing = 1.0;
+        });
   }
 
   void PreUpdate(
@@ -417,36 +449,26 @@ class M3AdhesionSystem final
     gz::sim::Model(this->capturedModel_).SetWorldPoseCmd(_ecm, pose);
 
     SetGravityEnabled(_ecm, this->capturedLink_, false);
-    this->DisableCollisions(_ecm);
+    this->SoftenCapturedContacts(_ecm);
     SetZeroVelocity(_ecm, this->capturedLink_);
   }
 
-  void DisableCollisions(gz::sim::EntityComponentManager &_ecm)
+  void SoftenCapturedContacts(gz::sim::EntityComponentManager &_ecm)
   {
-    if (this->collisionsSuppressed_)
-      return;
-
-    // gz-sim8's vendor API has no collision-enabled command.  Removing the
-    // collision marker and its SDF element is the supported ECS transition
-    // available to a system; retaining a copy lets release recreate the
-    // original collision entities exactly, rather than inventing geometry.
+    // In gz-sim8, deleting Collision components only changes the ECS view;
+    // its Physics system keeps the live shape until the entire model is
+    // removed.  Request contact-surface customization instead, which lets
+    // the native physics backend keep contact discovery but mute transport
+    // impulses after the evidence-bearing capture has completed.
     for (const auto link : gz::sim::Model(this->capturedModel_).Links(_ecm))
     {
       for (const auto collision : gz::sim::Link(link).Collisions(_ecm))
       {
-        const auto *element =
-            _ecm.Component<gz::sim::components::CollisionElement>(collision);
-        if (element == nullptr)
-          continue;
-        SavedCollision saved;
-        saved.entity = collision;
-        saved.element = element->Data();
-        this->suppressedCollisions_.push_back(std::move(saved));
-        _ecm.RemoveComponent<gz::sim::components::CollisionElement>(collision);
-        _ecm.RemoveComponent<gz::sim::components::Collision>(collision);
+        this->capturedCollisionEntities_.insert(collision);
+        _ecm.SetComponentData<
+            gz::sim::components::EnableContactSurfaceCustomization>(collision, true);
       }
     }
-    this->collisionsSuppressed_ = true;
   }
 
   void RestoreDynamics(gz::sim::EntityComponentManager &_ecm)
@@ -456,19 +478,6 @@ class M3AdhesionSystem final
       return;
     SetGravityEnabled(_ecm, this->capturedLink_, true);
     SetZeroVelocity(_ecm, this->capturedLink_);
-    for (const auto &collision : this->suppressedCollisions_)
-    {
-      if (_ecm.Component<gz::sim::components::CollisionElement>(collision.entity) == nullptr)
-      {
-        _ecm.CreateComponent(
-            collision.entity,
-            gz::sim::components::CollisionElement(collision.element));
-      }
-      if (_ecm.Component<gz::sim::components::Collision>(collision.entity) == nullptr)
-        _ecm.CreateComponent(collision.entity, gz::sim::components::Collision());
-    }
-    this->suppressedCollisions_.clear();
-    this->collisionsSuppressed_ = false;
   }
 
   void ClearCapture(const std::string &_reason)
@@ -481,8 +490,7 @@ class M3AdhesionSystem final
     this->mountLink_ = gz::sim::kNullEntity;
     this->capturedObjectLabel_.clear();
     this->capturedModelName_.clear();
-    this->suppressedCollisions_.clear();
-    this->collisionsSuppressed_ = false;
+    this->capturedCollisionEntities_.clear();
     this->reason_ = _reason;
   }
 
@@ -623,8 +631,8 @@ class M3AdhesionSystem final
   gz::sim::Entity capturedModel_{gz::sim::kNullEntity};
   gz::sim::Entity capturedLink_{gz::sim::kNullEntity};
   gz::sim::Entity mountLink_{gz::sim::kNullEntity};
-  bool collisionsSuppressed_{false};
-  std::vector<SavedCollision> suppressedCollisions_;
+  std::unordered_set<gz::sim::Entity> capturedCollisionEntities_;
+  gz::common::ConnectionPtr contactSurfaceConnection_;
   gz::math::Pose3d relativePose_;
 };
 }  // namespace openeta::gazebo
