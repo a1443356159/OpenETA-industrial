@@ -254,7 +254,15 @@ def _validate_m1_observation(
     raw_cameras = observation.get("cameras")
     cameras: Sequence[Mapping[str, Any]]
     if isinstance(raw_cameras, Mapping):
-        cameras = [item for item in raw_cameras.values() if isinstance(item, Mapping)]
+        # DirectEnv returns its unified representation keyed by frame ID; the
+        # wire representation instead carries ``frame_id`` inside every
+        # camera.  Accept both losslessly, deriving the latter only when it
+        # was intentionally encoded in the mapping key.
+        cameras = [
+            {**item, "frame_id": item.get("frame_id") or str(frame)}
+            for frame, item in raw_cameras.items()
+            if isinstance(item, Mapping)
+        ]
     elif isinstance(raw_cameras, list):
         cameras = [item for item in raw_cameras if isinstance(item, Mapping)]
     else:

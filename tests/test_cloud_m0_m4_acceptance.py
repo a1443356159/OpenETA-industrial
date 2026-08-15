@@ -183,6 +183,16 @@ def test_m1_live_rgbd_validator_rejects_stale_or_nonlive_observations() -> None:
     }
 
     assert m0_m1._validate_m1_observation(observation, previous=None) == {"top": 4.0}
+    mapped = {
+        "metadata": {"observation_provenance": "gazebo_ros_live"},
+        "cameras": {
+            "top": {
+                key: value for key, value in observation["cameras"][0].items()
+                if key != "frame_id"
+            },
+        },
+    }
+    assert m0_m1._validate_m1_observation(mapped, previous=None) == {"top": 4.0}
     with pytest.raises(m0_m1.AcceptanceError, match="M1_STALE_RGBD"):
         m0_m1._validate_m1_observation(observation, previous={"top": 4.0})
     observation["metadata"]["observation_provenance"] = "gazebo_oracle"
