@@ -34,6 +34,9 @@ _CONFIG_ENV_NAMES = (
     "OPENETA_GAZEBO_OBSERVATION_TIMEOUT_S",
 )
 
+_SYSTEM_RUBY_BIN = "/usr/bin"
+_RUBY_GEM_ENV_PREFIXES = ("RUBY", "GEM", "BUNDLE", "RBENV", "RVM")
+
 
 def _json_value(snapshot: Mapping[str, str], name: str, default: Any) -> Any:
     raw = snapshot.get(name, "").strip()
@@ -43,6 +46,31 @@ def _json_value(snapshot: Mapping[str, str], name: str, default: Any) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{name} must contain valid JSON") from exc
+
+
+def _gazebo_child_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Return a Gazebo-safe child environment without changing ROS settings.
+
+    The vendor ``gz`` entrypoint is a Ruby script with ``#!/usr/bin/env ruby``.
+    A host Ruby/Gem bundle can therefore make an otherwise valid `/opt/ros`
+    Gazebo launch fail before it creates the world.  Gazebo children must use
+    the system Ruby compatible with the vendor wrapper, while retaining all
+    sourced ROS overlay, Python, transport, and rendering variables.
+    """
+
+    if not os.path.isfile(f"{_SYSTEM_RUBY_BIN}/ruby"):
+        raise ValueError("GAZEBO_SYSTEM_RUBY_UNAVAILABLE")
+    child_env = dict(source)
+    for name in tuple(child_env):
+        if name.startswith(_RUBY_GEM_ENV_PREFIXES):
+            child_env.pop(name, None)
+    inherited_path = child_env.get("PATH", "")
+    path_parts = [
+        part for part in inherited_path.split(os.pathsep)
+        if part and os.path.normpath(part) != _SYSTEM_RUBY_BIN
+    ]
+    child_env["PATH"] = os.pathsep.join([_SYSTEM_RUBY_BIN, *path_parts])
+    return child_env
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +115,7 @@ class GazeboDeploymentConfig:
         domain = int(snapshot.get("ROS_DOMAIN_ID", "0"))
         partition = snapshot.get("GZ_PARTITION") or f"openeta-{os.getpid()}-{domain}"
         overlay = snapshot.get("OPENETA_GAZEBO_OVERLAY") or None
-        child_env = dict(source)
+        child_env = _gazebo_child_environment(source)
         child_env["ROS_DOMAIN_ID"] = str(domain)
         child_env["GZ_PARTITION"] = partition
         child_env["ROS2CLI_NO_DAEMON"] = "1"

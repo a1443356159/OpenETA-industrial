@@ -289,6 +289,32 @@ def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit
     assert config.process_environment["ROS2CLI_NO_DAEMON"] == "1"
 
 
+def test_deployment_sanitizes_host_ruby_for_the_vendor_gz_wrapper() -> None:
+    source = {
+        "ROS_DOMAIN_ID": "24",
+        "GZ_PARTITION": "ruby-isolated",
+        "GZ_SIM_RESOURCE_PATH": "/opt/ros/jazzy/share",
+        "PYTHONPATH": "/opt/ros/jazzy/lib/python3.12/site-packages",
+        "PATH": "/root/autodl-tmp/env/ros2_jazzy/bin:/opt/ros/jazzy/bin:/usr/bin",
+        "RUBYOPT": "-I/root/autodl-tmp/env/ros2_jazzy/gems",
+        "RUBYLIB": "/root/autodl-tmp/env/ros2_jazzy/gems",
+        "GEM_HOME": "/root/autodl-tmp/env/ros2_jazzy/gems",
+        "BUNDLE_GEMFILE": "/root/autodl-tmp/env/ros2_jazzy/Gemfile",
+    }
+
+    config = GazeboDeploymentConfig.from_environment(source)
+
+    child = config.process_environment
+    assert child["PATH"] == (
+        "/usr/bin:/root/autodl-tmp/env/ros2_jazzy/bin:/opt/ros/jazzy/bin"
+    )
+    assert not any(name.startswith(("RUBY", "GEM", "BUNDLE")) for name in child)
+    assert child["PYTHONPATH"] == source["PYTHONPATH"]
+    assert child["GZ_SIM_RESOURCE_PATH"] == source["GZ_SIM_RESOURCE_PATH"]
+    assert child["ROS_DOMAIN_ID"] == "24"
+    assert child["GZ_PARTITION"] == "ruby-isolated"
+
+
 def test_manager_rejects_second_gazebo_and_retires_worker_on_release() -> None:
     manager = object.__new__(BenchWorkerManager)
     import threading
