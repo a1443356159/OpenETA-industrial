@@ -97,6 +97,14 @@ def test_checkout_pythonpath_preserves_ros_setup_packages(
     )
 
 
+def test_resolve_python_keeps_the_explicit_venv_entrypoint(tmp_path: Path) -> None:
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(Path(sys.executable))
+
+    assert cloud._resolve_python(tmp_path, str(venv_python)) == str(venv_python)
+
+
 def test_report_selection_and_existing_gate_status(tmp_path: Path) -> None:
     root = tmp_path / "run"
     paths = cloud.RunPaths(root, root / "logs", root / "reports", root / "total.json", root / "stdout.log")

@@ -214,7 +214,10 @@ def _resolve_python(checkout: Path, supplied: str | None) -> str:
     candidate = Path(supplied).expanduser() if supplied else checkout / ".venv/bin/python"
     if not candidate.is_file() or not os.access(candidate, os.X_OK):
         raise CloudAcceptanceError("PYTHON_NOT_READY", str(candidate))
-    return str(candidate.resolve())
+    # Keep the venv entry point rather than resolving its interpreter symlink.
+    # Python derives ``sys.prefix`` from the invoked venv path; resolving it
+    # to /usr/bin/python drops the venv's third-party dependencies.
+    return str(candidate)
 
 
 def _checkout_pythonpath(checkout: Path) -> str:
