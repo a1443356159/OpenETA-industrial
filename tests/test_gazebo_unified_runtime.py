@@ -67,6 +67,15 @@ class _World:
         self.resets.append(("models", seed))
 
 
+class _M3World(_World):
+    def __init__(self):
+        super().__init__()
+        self.model_poses = []
+
+    def set_model_pose(self, model_name, xyz):
+        self.model_poses.append((model_name, xyz))
+
+
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:
     for profile in gazebo_profiles().values():
         runtime = SimpleNamespace(started=False, close=lambda: None)
@@ -105,6 +114,44 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
     runtime.close()
     assert made_launch[0].closed == 1
     assert made_cameras[0].closed == 1
+
+
+def test_m3_reset_opens_before_measuring_the_contact_aperture() -> None:
+    """A retained close from the previous round must not poison the probe."""
+
+    order = []
+
+    class _Controller:
+        runtime = SimpleNamespace(gripper=lambda *_args: {"ok": True})
+
+        def reset_sources(self):
+            order.append("reset_sources")
+
+        def return_home(self):
+            order.append("return_home")
+
+        def execute(self, action):
+            order.append(action["action_type"])
+            return SimpleNamespace(to_dict=lambda: {
+                "ok": True, "action_completed_ros_time_s": 1.0,
+            })
+
+        def state_provider(self):
+            return RobotState()
+
+    profile = gazebo_profile("m3_pickplace")
+    world = _M3World()
+    runtime = GazeboRuntime(_deployment(), profile, world_control=world)
+    runtime.started = True
+    runtime.controller = _Controller()
+    runtime._cameras = [_Camera(profile.cameras[0])]
+    runtime._measure_grasp_center_offset = lambda: order.append("measure")  # type: ignore[method-assign]
+
+    runtime.reset(seed=9)
+
+    assert world.resets == [("models", 9)]
+    assert order.index("return_home") < order.index("gripper_open") < order.index("measure")
+    assert order.count("gripper_open") == 2
 
 
 def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit() -> None:
