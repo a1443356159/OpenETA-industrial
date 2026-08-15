@@ -867,8 +867,12 @@ def _register_gazebo_envs() -> None:
             id="openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
             env_type="gazebo",
             task_slug="rm75_robotiq2f85_pickplace",
-            task_description="Disabled pending an approved native DetachableJoint implementation; cannot execute M3/M4 manipulation.",
-            display_name="Gazebo 仿真环境（M3 已禁用；DetachableJoint 待批准）",
+            task_description=(
+                "M3 native Gazebo contact pick/place with the stock fixed "
+                "DetachableJoint; attach and transport fail closed without "
+                "contact, ACK, and child-link lift evidence."
+            ),
+            display_name="Gazebo 仿真环境（M3 原生接触 DetachableJoint 拾放）",
             max_episode_steps=1_000_000,
             requires_gpu=False,
             requires_sim_install=True,

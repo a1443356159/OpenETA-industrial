@@ -443,6 +443,15 @@ def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Pa
         .parts[0]
         == "agent-session-1"
     )
+    rpc_evidence = result.details["outputs"]["mcp_calls"]
+    assert [entry["request"]["tool"] for entry in rpc_evidence] == [
+        "create_env", "reset_env"
+    ]
+    for entry in rpc_evidence:
+        request_id = entry["request"]["request_id"]
+        assert entry["response"]["request_id"] == request_id
+        assert entry["environment_receipt"]["mcp_request_id"] == request_id
+        assert Path(entry["response"]["response_path"]).is_file()
     assert result.details["state_delta"]["simulator_environment"]["handle"] == "env-1"
     assert [callback["name"] for callback in callbacks] == ["create_env", "reset_env"]
 
@@ -490,6 +499,15 @@ def test_close_simulator_env_closes_and_clears_bound_handle() -> None:
             "timeout_s": 30.0,
         }
     ]
+    evidence = result.details["outputs"]["mcp_calls"]
+    assert len(evidence) == 1
+    assert evidence[0]["request"]["tool"] == "close_env"
+    assert evidence[0]["response"]["request_id"] == evidence[0]["request"]["request_id"]
+    assert (
+        evidence[0]["environment_receipt"]["mcp_request_id"]
+        == evidence[0]["request"]["request_id"]
+    )
+    assert Path(evidence[0]["response"]["response_path"]).is_file()
 
 
 def test_create_simulator_env_rejects_invalid_dimensions() -> None:

@@ -7,7 +7,8 @@ M5 的目标是 plan.md §M5 的验收口径——"same manipulation flow works 
 - 新模块 `extensions/gazebo/perception_summary.py`（纯 Python，无 ROS import，numpy/PIL 懒加载，风格对齐 `oracle_perception.py`）；
 - 新测试 `tests/test_gazebo_perception_summary.py`（14 项，全离线）；
 - **不接线**到 agent 工具层/worker/MCP 面——接线属于后续 M5 任务；当前 M3/M4
-  manipulation 已 fail-closed，Oracle 离线契约不改变该状态。
+  manipulation 仍须经过 M3 的原生接触、joint ACK 和 child-link 物理证明；Oracle
+  离线契约不改变该边界。
 
 ## 管线定位
 

@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<robot name="rm75_robotiq_2f85_pickplace_sim_v1" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="controller_config" default="$(find openeta_rm75_robotiq2f85_sim)/config/controllers.yaml"/>
+  <xacro:include filename="$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro"/>
+  <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/rm75_robotiq2f85.urdf.xacro"/>
+  <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/urdf/ros2_control.xacro"/>
+  <xacro:rm75_robotiq2f85 parent="link_7"/>
+  <xacro:openeta_robotiq_ros2_control controller_config="$(arg controller_config)"/>
+
+  <xacro:macro name="gz_gripper_position_controller" params="joint topic">
+    <gazebo><plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+      <joint_name>${joint}</joint_name><topic>${topic}</topic>
+      <p_gain>12.0</p_gain><i_gain>0.0</i_gain><d_gain>0.4</d_gain>
+      <cmd_max>30.0</cmd_max><cmd_min>-30.0</cmd_min>
+    </plugin></gazebo>
+  </xacro:macro>
+  <xacro:gz_gripper_position_controller joint="gripper_left_finger_joint" topic="/openeta/gripper/left_outer"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_finger_joint" topic="/openeta/gripper/right_outer"/>
+  <xacro:gz_gripper_position_controller joint="gripper_left_inner_knuckle_joint" topic="/openeta/gripper/left_inner"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_inner_knuckle_joint" topic="/openeta/gripper/right_inner"/>
+  <xacro:gz_gripper_position_controller joint="gripper_left_finger_tip_joint" topic="/openeta/gripper/left_tip"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_finger_tip_joint" topic="/openeta/gripper/right_tip"/>
+
+  <!-- These are the only grasp-admission inputs: native Gazebo contact data
+       from the real vendor fingertip collision meshes. -->
+  <gazebo reference="robotiq_85_left_finger_tip_link">
+    <sensor name="openeta_m3_left_pad_contact" type="contact">
+      <always_on>true</always_on><update_rate>1000</update_rate>
+      <contact><collision>robotiq_85_left_finger_tip_link_collision</collision><topic>/m3/contacts/left_pad</topic></contact>
+    </sensor>
+  </gazebo>
+  <gazebo reference="robotiq_85_right_finger_tip_link">
+    <sensor name="openeta_m3_right_pad_contact" type="contact">
+      <always_on>true</always_on><update_rate>1000</update_rate>
+      <contact><collision>robotiq_85_right_finger_tip_link_collision</collision><topic>/m3/contacts/right_pad</topic></contact>
+    </sensor>
+  </gazebo>
+  <gazebo reference="rm75_to_gripper_mount"><preserveFixedJoint>true</preserveFixedJoint></gazebo>
+
+  <!-- Stock Gazebo Sim 8 fixed joint.  It is initially attached by Gazebo;
+       runtime preflight always obtains a detached ACK while the world is paused. -->
+  <gazebo><plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+    <parent_link>gripper_mount_link</parent_link>
+    <child_model>m3_target</child_model><child_link>target_link</child_link>
+    <attach_topic>/m3/detachable_joint/target/attach</attach_topic>
+    <detach_topic>/m3/detachable_joint/target/detach</detach_topic>
+    <output_topic>/m3/detachable_joint/target/state</output_topic>
+    <suppress_child_warning>true</suppress_child_warning>
+  </plugin></gazebo>
+</robot>

@@ -67,6 +67,20 @@ class _World:
         self.resets.append(("models", seed))
 
 
+class _M3World(_World):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+        self.poses = []
+
+    def set_paused(self, paused):
+        self.events.append(("paused", bool(paused)))
+
+    def set_model_pose(self, model_name, xyz):
+        self.events.append(("pose", model_name))
+        self.poses.append((model_name, xyz))
+
+
 class _Receipt:
     def __init__(self, payload):
         self.payload = dict(payload)
@@ -165,6 +179,65 @@ def test_runtime_reset_does_not_retry_non_transient_gripper_failure() -> None:
     with pytest.raises(RuntimeError, match="GRIPPER_FAILED"):
         runtime.reset(seed=7)
     assert controller.actions == [{"action_type": "gripper_open"}]
+
+
+def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_poses() -> None:
+    events = []
+
+    class Attachment:
+        def ensure_detached(self, *, require_ack):
+            assert require_ack is True
+            events.append(("detach_ack",))
+
+    class Controller(_ResetController):
+        def __init__(self):
+            super().__init__([{"ok": True, "action_completed_ros_time_s": 1.0}])
+
+        def wait_ready(self, _timeout):
+            events.append(("controller_ready",))
+
+        def close(self):
+            events.append(("controller_close",))
+
+    class ControllerFactory:
+        def create(self, *_args, **_kwargs):
+            events.append(("controller_create",))
+            return Controller()
+
+    class Launch(_Launch):
+        def start(self):
+            super().start()
+            events.append(("launch",))
+
+    world = _M3World(events)
+    runtime = GazeboRuntime(
+        _deployment(),
+        gazebo_profile("m3_pickplace"),
+        launch_factory=lambda **kwargs: Launch(**kwargs),
+        camera_factory=lambda config, **kwargs: _Camera(config, **kwargs),
+        controller_factory=ControllerFactory(),
+        world_control=world,
+        attachment_factory=lambda **_kwargs: Attachment(),
+    )
+
+    runtime.reset(seed=11)
+
+    first_detach = events.index(("detach_ack",))
+    assert events[:first_detach] == [("launch",), ("paused", True)]
+    assert events[first_detach + 1] == ("paused", False)
+    assert events.index(("controller_ready",)) > events.index(("paused", False))
+    assert world.resets == [("models", 11)]
+    reset_pause = events.index(("paused", True), first_detach + 2)
+    assert events[reset_pause:reset_pause + 5] == [
+        ("paused", True),
+        ("detach_ack",),
+        ("pose", "m3_target"),
+        ("pose", "m3_distractor"),
+        ("paused", False),
+    ]
+    # Close obtains another ACK before dropping resources.
+    runtime.close()
+    assert events.count(("detach_ack",)) == 3
 
 
 def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit() -> None:

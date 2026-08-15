@@ -16,6 +16,8 @@ from agent.runtime.memory import (
 )
 from agent.runtime.runtime_assembly import (
     RuntimeMcpEndpoints,
+    _M4OracleMcpEvidence,
+    _with_m4_contractual_fake_candidate,
     bind_runtime_perception_tools,
 )
 from agent.tools.handlers import (
@@ -29,6 +31,7 @@ from agent.tools.registry import (
     perception_segmenter_tool_name,
     resolve_perception_profile,
 )
+from agent.tools.sim_mcp import SimulatorMcpToolProxyConfig
 
 FIXTURE_IMAGE = Path(__file__).resolve().parents[1] / "fixtures" / "sam3" / "sam_test.png"
 
@@ -191,6 +194,57 @@ def test_oracle_response_flows_through_sam3_handler_pipeline(tmp_path: Path) -> 
         artifact.get("tool") for artifact in details["artifacts"] if isinstance(artifact, dict)
     }
     assert artifact_tools == {"oracle_perceive"}
+
+
+def test_m4_oracle_wrapper_marks_candidate_as_contractual_not_prediction(tmp_path: Path) -> None:
+    image_size = Image.open(FIXTURE_IMAGE).size
+    transport = FakeSimulatorTransport(
+        _oracle_response(image_size=image_size, prompt="red cube")
+    )
+    proxy_config = SimulatorMcpToolProxyConfig(
+        handle="oracle-handle",
+        session_id="oracle-session",
+        response_output_root=tmp_path / "responses",
+    )
+    mcp_evidence = _M4OracleMcpEvidence(
+        proxy_config=proxy_config,
+        response_output_root=tmp_path / "responses",
+    )
+
+    handler = _with_m4_contractual_fake_candidate(
+        build_sam3_handler(
+            build_oracle_perceive_segmenter(
+                transport,
+                handle_provider=lambda: proxy_config.handle,
+                session_id_provider=lambda: proxy_config.session_id,
+                response_callback=mcp_evidence.record,
+            ),
+            tool_name="oracle_perceive",
+            output_root=tmp_path / "images",
+            result_output_root=tmp_path / "results",
+        ),
+        mcp_evidence=mcp_evidence,
+    )
+    tools = build_default_tool_registry(perception_profile="oracle")
+    tools.bind_handler("oracle_perceive", handler, replace=True)
+    result = tools.call(
+        "oracle_perceive", {"image": str(FIXTURE_IMAGE), "prompt": "red cube"}
+    )
+
+    assert result.success is True
+    outputs = result.details["outputs"]
+    assert outputs["perception_source"] == "gazebo_oracle"
+    candidate = outputs["fake_grasp_candidate"]
+    assert candidate["kind"] == "contractual_fake_grasp_candidate"
+    assert candidate["is_model_prediction"] is False
+    assert candidate["perception_source"] == "gazebo_oracle"
+    assert transport.calls[0][0] == "oracle_perceive"
+    assert transport.calls[0][1]["handle"] == "oracle-handle"
+    evidence = outputs["mcp_calls"][0]
+    assert evidence["request"]["tool"] == "oracle_perceive"
+    assert evidence["response"]["request_id"] == evidence["request"]["request_id"]
+    assert evidence["environment_receipt"]["mcp_request_id"] == evidence["request"]["request_id"]
+    assert Path(evidence["response"]["response_path"]).is_file()
 
 
 def test_oracle_result_captured_into_pending_selection_and_gate(tmp_path: Path) -> None:

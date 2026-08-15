@@ -10,13 +10,15 @@ from typing import Any, Callable, Mapping
 from adapter.protocol import EnvObservation, RobotState
 
 from .deployment import GazeboDeploymentConfig
+from .m3 import M3Config
 from .observation import RosRgbdCameraConfig, RosRgbdCameraSource
 from .process import (
+    GazeboDetachableJointControl,
     GazeboProcessError,
     GazeboWorldControl,
     Ros2LaunchProcess,
 )
-from .profiles import CONTROL, GazeboProfile
+from .profiles import CONTROL, PHYSICS, GazeboProfile
 from .ros_control import RosM2ControllerFactory
 
 
@@ -38,6 +40,7 @@ class GazeboRuntime:
         camera_factory: Callable[..., Any] = RosRgbdCameraSource,
         controller_factory: Any | None = None,
         world_control: Any | None = None,
+        attachment_factory: Callable[..., Any] = GazeboDetachableJointControl,
     ) -> None:
         self.deployment = deployment
         self.profile = profile
@@ -52,6 +55,13 @@ class GazeboRuntime:
             gz_executable=deployment.gz_executable,
             environment=deployment.process_environment,
         )
+        self.attachment: Any | None = None
+        if PHYSICS in profile.capabilities:
+            self.attachment = attachment_factory(
+                gz_executable=deployment.gz_executable,
+                environment=deployment.process_environment,
+                world_name=deployment.world_override or profile.world_name,
+            )
         self._launch: Any | None = None
         self._cameras: list[Any] = []
         self.controller: Any | None = None
@@ -122,6 +132,15 @@ class GazeboRuntime:
                 environment=self.deployment.process_environment,
             )
             self._launch.start()
+            if PHYSICS in self.profile.capabilities:
+                # The launch omits -r, so this command is still before the
+                # first physics tick.  Do not resume for a missing stock-joint
+                # topic or detached ACK: M3 must fail closed at startup.
+                self._world.set_paused(True)
+                if self.attachment is None:
+                    raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+                self.attachment.ensure_detached(require_ack=True)
+                self._world.set_paused(False)
             if CONTROL in self.profile.capabilities:
                 self.controller = self._controller_factory.create(
                     self.profile.model_config,
@@ -177,8 +196,23 @@ class GazeboRuntime:
             reset_sources = getattr(self.controller, "reset_sources", None)
             if callable(reset_sources):
                 reset_sources()
-        # Preserve /clock after the ROS action stack has started.
-        self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
+        # M3's stock plugin starts attached.  Each reset pauses the world,
+        # resets the scene, gets a *fresh* detached ACK, then resumes.  A
+        # cached local detached state is not sufficient evidence.
+        if PHYSICS in self.profile.capabilities:
+            if self.attachment is None:
+                raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+            self._world.set_paused(True)
+            self._world.reset_models(seed=seed)
+            self.attachment.ensure_detached(require_ack=True)
+            config = self.profile.model_config
+            if isinstance(config, M3Config):
+                for model_name, xyz in config.reset_object_poses.items():
+                    self._world.set_model_pose(model_name, xyz)
+            self._world.set_paused(False)
+        else:
+            # Preserve /clock after the ROS action stack has started.
+            self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
         self.scene_epoch += 1
         barrier: float | None = None
         if self.controller is not None:
@@ -216,6 +250,11 @@ class GazeboRuntime:
         if self.closed:
             return
         errors: list[BaseException] = []
+        if self.attachment is not None and self.started:
+            try:
+                self.attachment.ensure_detached(require_ack=True)
+            except BaseException as exc:
+                errors.append(exc)
         # Failures do not short-circuit reverse-order resource cleanup.
         for resource in (self.controller, *reversed(self._cameras)):
             if resource is None:

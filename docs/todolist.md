@@ -126,7 +126,7 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
 ## Gazebo Milestones
 
 - [ ] M4: Oracle perception remains a SAM3-shaped simulator-only perception
-  module. M4 manipulation is disabled pending an approved DetachableJoint.
+  module. M4 candidates must use M3's native-contact DetachableJoint gate.
   - [x] `oracle_perceive` reuses the SAM3 handler/contract/selection flow end
     to end (agent tool -> sim MCP -> bench_worker -> pure geometric projection
     in `extensions/gazebo/oracle_perception.py`).
@@ -135,9 +135,9 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
     marked in response metadata, artifacts, and Working Memory facts.
   - [x] Offline tests: 39 new (worker 16+13, agent contract 10) + 5
     execution-link patch tests; full offline suite 1320 passed, 0 failed.
-  - [ ] Manipulation/live acceptance: fail-closed with
-    `DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`; historical results are not
-    acceptance evidence.
+  - [ ] Manipulation/live acceptance: require the guarded DetachableJoint
+    path and remote TUI/MCP evidence; historical results are not acceptance
+    evidence.
   - Out of scope: wrist projection, pick_place NOT_READY gate, unified object
     summary schema (plan.md §17), SAM3-side changes, M6 fine-tuning.
   - Details: `docs/gazebo-m4-oracle-perception.md`.

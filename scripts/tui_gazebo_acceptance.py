@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Human-operated TUI acceptance coordinator for the Gazebo M0--M2 chain.
+"""PTY TUI acceptance coordinator for the ordered Gazebo M0--M4 chain.
 
 The coordinator owns isolation, evidence locations, process groups and report
-assembly.  It intentionally does not impersonate the operator: all mutating
-AgentTool calls happen in the real TUI with the ``human_gated`` profile.
+assembly.  It uses the real PTY TUI for every case.  The default profile is
+``human_gated``; the explicitly selected ``scripted_tui`` profile records an
+automation approval rather than impersonating a human operator.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -26,10 +28,11 @@ from typing import Any, Iterable, Mapping, Sequence
 import uuid
 
 
-SCHEMA_VERSION = "openeta.tui_gazebo_acceptance.v1"
-MILESTONES = ("m0", "m1", "m2")
+SCHEMA_VERSION = "openeta.tui_gazebo_acceptance.v2"
+MILESTONES = ("m0", "m1", "m2", "m3", "m4")
 DETERMINISTIC = "deterministic"
 AUTONOMY = "planner_autonomy"
+SCRIPTED_TUI = "scripted_tui"
 PROTECTED_DOMAINS = frozenset({42, 100})
 DOMAIN_CANDIDATES = tuple(i for i in range(80, 102) if i not in PROTECTED_DOMAINS)
 MUTATING_TOOLS = frozenset(
@@ -55,6 +58,8 @@ ENV_IDS = {
     "m0": "openeta/dummy_sim-v0",
     "m1": "openeta/gazebo_live_rgbd-v0",
     "m2": "openeta/gazebo_rm75_robotiq2f85-v0",
+    "m3": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+    "m4": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
 }
 INFRA_CODES = frozenset(
     {
@@ -249,6 +254,8 @@ def instructions_for(milestone: str, mode: str) -> str:
         prompts = {
             "m1": "检查 Gazebo 现场，并基于传感器证据报告所见。完成后关闭环境。",
             "m2": "在碰撞安全的 A/B 位姿之间安全移动两次，并验证夹爪开合。完成后关闭环境。",
+            "m3": "完成真实 close、native-contact DetachableJoint attach ACK、80 mm lift 物理证明，然后 close。",
+            "m4": "使用 Oracle perception 和 contractual fake candidate；仍需通过 M3 的 contact、ACK 和 lift 证明，然后 close。",
         }
         return prompts.get(milestone, "M0 不运行 Planner 自主性 case。") + "\n"
     rows = {
@@ -259,12 +266,19 @@ def instructions_for(milestone: str, mode: str) -> str:
         "m1": """创建 openeta/gazebo_live_rgbd-v0，连续 observe 两次，然后 close。
 逐一批准 create/reset/close 的 human_gated 提示，确认关闭后用 /quit 退出。
 """,
-        "m2": """仅使用 direct-gate.json 冻结的 collision_checked poses A/B。
-执行两轮 A↔B、两轮 open→close→open、一次冻结的不可达目标、observe、close。
-不得改写任何目标。逐一批准所有 human_gated 提示，最后 /quit。
+        "m2": """仅使用真实 MCP/MoveIt 回执执行碰撞检查动作。
+执行两轮 A↔B、两轮 open→close→open、一次不可达目标（必须返回 MOTION_PLAN_FAILED）、observe、close。
+不得绕过 MoveIt 或把失败动作当作成功。逐一批准所有 human_gated 提示，最后 /quit。
+""",
+        "m3": """创建 M3 环境，先接近，再执行一次真实 close。
+只有回执显示双垫 native contact 与 attached ACK 后才能执行第一段 lift；记录 child-link 的 >=80 mm lift 和 <=10 mm 相对位移。最后 open、detach ACK、close。
+""",
+        "m4": """创建 M4 Oracle case，实际调用 oracle_perceive 并记录 perception_source=gazebo_oracle 与 contractual fake candidate。
+它不能替代 M3：执行真实 close、native contact、attached ACK 和 child-link lift 证明，最后 close。
 """,
     }
-    return rows[milestone]
+    prefix = "[automation=scripted_tui; this is not human approval]\n" if mode == SCRIPTED_TUI else ""
+    return prefix + rows[milestone]
 
 
 def prepare_case(
@@ -329,7 +343,19 @@ def _partition_cleanup(partition: str) -> dict[str, Any]:
     return {"state": "PASSED" if not topics else "FAILED", "topics": topics}
 
 
+def scripted_tui_input(paths: CasePaths) -> str:
+    """Return keystrokes forwarded to the real PTY for scripted automation."""
+
+    commands: list[str] = []
+    if paths.root.parent.name == "m0":
+        commands.extend(("/config", "/tools", "/session", "/memory all --json"))
+    commands.extend((paths.instructions.read_text(encoding="utf-8"), "/quit"))
+    return "\n".join(commands) + "\n"
+
+
 def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
+    milestone = paths.root.parent.name
+    scripted = paths.root.name == SCRIPTED_TUI
     env = os.environ.copy()
     env.update(
         {
@@ -338,7 +364,13 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
             "GZ_PARTITION": allocation.gz_partition,
             "MCP_PORT": str(allocation.port),
             "ROS_LOCALHOST_ONLY": "1",
-            "OPENETA_SUPERVISION_PROFILE": "human_gated",
+            "OPENETA_SUPERVISION_PROFILE": SCRIPTED_TUI if scripted else "human_gated",
+            "OPENETA_SCRIPTED_TUI": "1" if scripted else "0",
+            # M4 explicitly selects the existing Gazebo Oracle tool.  The
+            # candidate it emits is a contractual fixture, never a model
+            # prediction and never an alternative M3 grasp gate.
+            "OPENETA_PERCEPTION_PROFILE": "oracle" if milestone == "m4" else "",
+            "OPENETA_M4_CONTRACTUAL_FAKE_CANDIDATE": "1" if milestone == "m4" else "0",
             "RMW_IMPLEMENTATION": env.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         }
     )
@@ -365,14 +397,21 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
         _wait_ready(allocation.port, process)
         print(f"\n=== {paths.root.name} ===")
         print(paths.instructions.read_text(encoding="utf-8"))
-        command = f"{python} -m agent.cli.openeta_cli"
+        command = f"{shlex.quote(str(python))} -m agent.cli.openeta_cli"
         if shutil.which("script") is None:
             raise AcceptanceError("TUI_NOT_READY: util-linux script is missing")
+        scripted_input: str | None = None
+        if scripted:
+            # Feed these through the actual PTY TUI rather than shortcut mode,
+            # so M0's operator-console evidence lands in the transcript.
+            scripted_input = scripted_tui_input(paths)
         completed = subprocess.run(
             ["script", "--flush", "--return", "--command", command, str(paths.transcript)],
             cwd=paths.root,
             env=env,
             check=False,
+            input=scripted_input,
+            text=scripted_input is not None,
         )
         tui_code = int(completed.returncode)
     finally:
@@ -437,7 +476,7 @@ def _tool_calls(events: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
             if not isinstance(node, Mapping) or id(node) in seen:
                 continue
             name = str(node.get("name") or node.get("tool_name") or "")
-            if name in SIX_SIMULATOR_TOOLS and isinstance(node.get("result"), Mapping):
+            if name and isinstance(node.get("result"), Mapping):
                 calls.append(node)
                 seen.add(id(node))
     return calls
@@ -489,17 +528,50 @@ def _human_approved(call: Mapping[str, Any]) -> bool:
     for item in _walk(call):
         if not isinstance(item, Mapping):
             continue
+        nested = item.get("details")
+        nested_profile = nested.get("profile") if isinstance(nested, Mapping) else ""
         profile = str(
-            item.get("supervision_profile") or item.get("profile") or item.get("policy") or ""
+            item.get("supervision_profile")
+            or item.get("profile")
+            or item.get("policy")
+            or nested_profile
+            or ""
         ).lower()
+        source = str(item.get("source") or "").lower()
         decision = str(item.get("decision") or item.get("status") or "").lower()
         approved = (
             item.get("approved") is True
             or item.get("allowed") is True
             or decision in {"approved", "executed", "allow"}
         )
-        gated = profile == "human_gated" or _contains(item, "profile", "human_gated")
+        gated = (
+            profile == "human_gated"
+            or source == "human"
+            or _contains(item, "profile", "human_gated")
+        )
         if gated and approved:
+            return True
+    return False
+
+
+def _scripted_approved(call: Mapping[str, Any]) -> bool:
+    """Recognise automation honestly; it never counts as human approval."""
+
+    if str(call.get("name") or call.get("tool_name") or "") not in MUTATING_TOOLS:
+        return True
+    for item in _walk(call):
+        if not isinstance(item, Mapping):
+            continue
+        nested = item.get("details")
+        nested_profile = nested.get("profile") if isinstance(nested, Mapping) else ""
+        profile = str(
+            item.get("supervision_profile") or item.get("profile") or nested_profile or ""
+        ).lower()
+        source = str(item.get("source") or "").lower()
+        if (
+            (profile == SCRIPTED_TUI or source == SCRIPTED_TUI)
+            and (item.get("allowed") is True or item.get("approved") is True)
+        ):
             return True
     return False
 
@@ -617,10 +689,8 @@ def _verify_m1(calls: Sequence[Mapping[str, Any]]) -> list[str]:
     return errors
 
 
-def _verify_m2(calls: Sequence[Mapping[str, Any]], direct_gate: Mapping[str, Any]) -> list[str]:
+def _verify_m2(calls: Sequence[Mapping[str, Any]]) -> list[str]:
     errors: list[str] = []
-    if direct_gate.get("status") != "passed" or not direct_gate.get("collision_checked"):
-        errors.append("M2 direct fixture gate is not passed/collision-checked")
     moves = [call for call in calls if str(call.get("name") or call.get("tool_name")) == "move_to"]
     successes = [call for call in moves if _successful(call)]
     failures = [call for call in moves if _contains(_result(call), "error_code", "MOTION_PLAN_FAILED")]
@@ -659,12 +729,196 @@ def _verify_m2(calls: Sequence[Mapping[str, Any]], direct_gate: Mapping[str, Any
             cursor += 1
     if cursor != len(pattern):
         errors.append("M2 requires two open→close→open rounds")
-    frozen_targets = direct_gate.get("targets")
-    if isinstance(frozen_targets, Mapping):
-        submitted = [value for call in moves for value in _values(call, "target_pose")]
-        allowed = list(frozen_targets.values())
-        if any(target not in allowed for target in submitted):
-            errors.append("M2 submitted target differs from frozen direct-gate target")
+    return errors
+
+
+def _mapping_with(node: Any, key: str) -> Mapping[str, Any] | None:
+    """Return the first mapping that contains a mapping-valued ``key``."""
+
+    for item in _walk(node):
+        value = item.get(key) if isinstance(item, Mapping) else None
+        if isinstance(value, Mapping):
+            return value
+    return None
+
+
+def _mcp_response_payloads(
+    calls: Sequence[Mapping[str, Any]],
+    paths: CasePaths,
+    *,
+    required_tools: frozenset[str] = SIX_SIMULATOR_TOOLS,
+) -> tuple[list[Mapping[str, Any]], list[str]]:
+    """Validate every required simulator MCP call (including M4 Oracle).
+
+    The proxy emits a local MCP request descriptor, a response file rooted in
+    this case, and an environment receipt carrying the same request id.  A
+    create call contains two linked RPCs (``create_env`` then its automatic
+    ``reset_env``); all other simulator tools contain exactly one.  This is
+    intentionally strict: a formal case cannot pass with a raw response, a
+    trace-only request, or a receipt associated with a different RPC.
+    """
+
+    payloads: list[Mapping[str, Any]] = []
+    errors: list[str] = []
+    root = paths.root.resolve()
+    simulator_calls = [
+        call
+        for call in calls
+        if str(call.get("name") or call.get("tool_name") or "") in required_tools
+    ]
+    if not simulator_calls:
+        errors.append("formal case has no simulator tool calls")
+    for call in simulator_calls:
+        agent_tool = str(call.get("name") or call.get("tool_name") or "")
+        outputs = _mapping_with(_result(call), "outputs")
+        entries = outputs.get("mcp_calls") if isinstance(outputs, Mapping) else None
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
+            errors.append(f"{agent_tool} lacks MCP request/response/receipt evidence")
+            continue
+        expected_count = 2 if agent_tool == "create_simulator_env" else 1
+        if len(entries) != expected_count:
+            errors.append(
+                f"{agent_tool} requires {expected_count} correlated MCP RPC evidence entries"
+            )
+            continue
+        for index, entry in enumerate(entries, 1):
+            if not isinstance(entry, Mapping):
+                errors.append(f"{agent_tool} MCP evidence {index} is not an object")
+                continue
+            request = entry.get("request")
+            response = entry.get("response")
+            receipt = entry.get("environment_receipt")
+            if not isinstance(request, Mapping):
+                errors.append(f"{agent_tool} MCP evidence {index} lacks request descriptor")
+                continue
+            request_id = str(request.get("request_id") or "")
+            remote_tool = str(request.get("tool") or "")
+            arguments = request.get("arguments")
+            if not request_id or not remote_tool or not isinstance(arguments, Mapping):
+                errors.append(f"{agent_tool} MCP evidence {index} has malformed request descriptor")
+                continue
+            if not isinstance(response, Mapping) or not isinstance(response.get("response_path"), str):
+                errors.append(f"MCP {remote_tool} response artifact is missing")
+                continue
+            if str(response.get("request_id") or "") != request_id or str(response.get("tool") or "") != remote_tool:
+                errors.append(f"MCP {remote_tool} response is not correlated to its request")
+                continue
+            if not isinstance(receipt, Mapping):
+                errors.append(f"MCP {remote_tool} response has no correlated environment receipt")
+                continue
+            if (
+                str(receipt.get("mcp_request_id") or "") != request_id
+                or str(receipt.get("remote_tool") or "") != remote_tool
+            ):
+                errors.append(f"MCP {remote_tool} receipt is not correlated to its request")
+                continue
+            for key, receipt_key in (("handle", "handle"), ("session_id", "simulator_session_id")):
+                request_value = str(request.get("arguments", {}).get(key) or "")
+                response_value = str(response.get(key) or "")
+                receipt_value = str(receipt.get(receipt_key) or "")
+                if response_value != receipt_value:
+                    errors.append(f"MCP {remote_tool} {key} does not match response/receipt")
+                if request_value and (request_value != response_value or request_value != receipt_value):
+                    errors.append(f"MCP {remote_tool} {key} does not match request/response/receipt")
+            artifact = Path(response["response_path"]).resolve()
+            try:
+                artifact.relative_to(root)
+            except ValueError:
+                errors.append(f"MCP {remote_tool} response artifact escapes the case directory")
+                continue
+            try:
+                value = _json_load(artifact)
+            except (OSError, ValueError) as exc:
+                errors.append(f"MCP {remote_tool} response artifact is unreadable: {exc}")
+                continue
+            if not isinstance(value, Mapping):
+                errors.append(f"MCP {remote_tool} response artifact is not an object")
+                continue
+            payloads.append(value)
+    if not paths.mcp_log.is_file() or not paths.mcp_log.read_text(encoding="utf-8", errors="replace").strip():
+        errors.append("MCP server log is missing or empty")
+    return payloads, errors
+
+
+def _verify_m3(
+    calls: Sequence[Mapping[str, Any]],
+    payloads: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    errors: list[str] = []
+    if not any(_contains(call, "env_id", ENV_IDS["m3"]) for call in calls):
+        errors.append("M3 environment identity missing")
+    records = [
+        item for payload in payloads for item in _walk(payload)
+        if isinstance(item, Mapping) and item.get("schema_version") == "openeta.m3.detachable_joint.v1"
+    ]
+    if not any(item.get("reason_code") == "M3_TARGET_HELD" and item.get("grasp_confirmed") is True for item in records):
+        errors.append("M3 child-link held proof missing")
+    held = [item for item in records if item.get("reason_code") == "M3_TARGET_HELD"]
+    if not any(
+        isinstance(item.get("evidence"), Mapping)
+        and isinstance(item["evidence"].get("lift_m"), (int, float))
+        and float(item["evidence"]["lift_m"]) >= 0.080
+        and isinstance(item["evidence"].get("capture_relative_translation_m"), (int, float))
+        and float(item["evidence"]["capture_relative_translation_m"]) <= 0.010
+        for item in held
+    ):
+        errors.append("M3 numeric child-link lift/relative-translation proof missing")
+    gates = [
+        item for payload in payloads for item in _walk(payload)
+        if isinstance(item, Mapping) and "left_sample_count" in item and "right_sample_count" in item
+    ]
+    if not any(
+        item.get("accepted") is True
+        and isinstance(item.get("evidence"), Mapping)
+        and item["evidence"].get("target_id") == "m3_target"
+        and isinstance(item.get("left_sample_count"), int) and item["left_sample_count"] >= 3
+        and isinstance(item.get("right_sample_count"), int) and item["right_sample_count"] >= 3
+        and isinstance(item.get("left_span_s"), (int, float)) and float(item["left_span_s"]) >= 0.100
+        and isinstance(item.get("right_span_s"), (int, float)) and float(item["right_span_s"]) >= 0.100
+        for item in gates
+    ):
+        errors.append("M3 native bilateral contact evidence missing")
+    if not any(_contains(payload, "state", "attached") for payload in payloads):
+        errors.append("M3 attached ACK evidence missing")
+    if not any(_contains(payload, "state", "detached") for payload in payloads):
+        errors.append("M3 detached ACK evidence missing")
+    if not any(str(call.get("name") or call.get("tool_name")) == "close_simulator_env" for call in calls):
+        errors.append("M3 environment close missing")
+    return errors
+
+
+def _verify_m4(
+    calls: Sequence[Mapping[str, Any]],
+    payloads: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    errors = _verify_m3(calls, payloads)
+    oracle_calls = [
+        call
+        for call in calls
+        if str(call.get("name") or call.get("tool_name") or "") == "oracle_perceive"
+    ]
+    if not oracle_calls:
+        errors.append("M4 has no executed oracle_perceive tool output")
+        return errors
+    valid_oracle = False
+    for call in oracle_calls:
+        result = _result(call)
+        candidate_values = _values(result, "fake_grasp_candidate")
+        for candidate in candidate_values:
+            if not isinstance(candidate, Mapping):
+                continue
+            if (
+                _successful(call)
+                and _contains(result, "perception_source", "gazebo_oracle")
+                and candidate.get("schema_version")
+                == "openeta.m4.contractual_fake_grasp_candidate.v1"
+                and candidate.get("kind") == "contractual_fake_grasp_candidate"
+                and candidate.get("is_model_prediction") is False
+                and candidate.get("perception_source") == "gazebo_oracle"
+            ):
+                valid_oracle = True
+    if not valid_oracle:
+        errors.append("M4 Oracle output lacks a correctly labelled contractual fake candidate")
     return errors
 
 
@@ -672,17 +926,30 @@ def verify_case(
     paths: CasePaths,
     milestone: str,
     mode: str,
-    *,
-    direct_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         events, trace_paths = _load_trace_events(paths.trace_root)
         calls = _tool_calls(events)
         errors = _base_errors(paths, events)
+        payloads: list[Mapping[str, Any]] = []
+        if mode in {DETERMINISTIC, SCRIPTED_TUI}:
+            required_mcp_tools = (
+                SIX_SIMULATOR_TOOLS | frozenset({"oracle_perceive"})
+                if milestone == "m4"
+                else SIX_SIMULATOR_TOOLS
+            )
+            payloads, mcp_errors = _mcp_response_payloads(
+                calls,
+                paths,
+                required_tools=required_mcp_tools,
+            )
+            errors.extend(mcp_errors)
         for call in calls:
             name = str(call.get("name") or call.get("tool_name") or "")
-            if name in MUTATING_TOOLS and not _human_approved(call):
-                errors.append(f"{name} lacks explicit human_gated approval evidence")
+            approved = _scripted_approved(call) if mode == SCRIPTED_TUI else _human_approved(call)
+            if name in MUTATING_TOOLS and not approved:
+                profile = SCRIPTED_TUI if mode == SCRIPTED_TUI else "human_gated"
+                errors.append(f"{name} lacks explicit {profile} approval evidence")
         if mode == AUTONOMY:
             expected = ENV_IDS[milestone]
             if not any(_contains(call, "env_id", expected) for call in calls):
@@ -694,7 +961,11 @@ def verify_case(
         elif milestone == "m1":
             errors.extend(_verify_m1(calls))
         elif milestone == "m2":
-            errors.extend(_verify_m2(calls, direct_gate or {}))
+            errors.extend(_verify_m2(calls))
+        elif milestone == "m3":
+            errors.extend(_verify_m3(calls, payloads))
+        elif milestone == "m4":
+            errors.extend(_verify_m4(calls, payloads))
         error_codes = {str(value) for event in events for value in _values(event, "error_code")}
         infra = bool(error_codes & INFRA_CODES) or any(
             "inconclusive" in error for error in errors
@@ -717,7 +988,11 @@ def verify_case(
         }
 
 
-def assemble_report(run_root: Path, *, direct_gates: Mapping[str, Any]) -> dict[str, Any]:
+def assemble_report(
+    run_root: Path,
+    *,
+    formal_mode: str = DETERMINISTIC,
+) -> dict[str, Any]:
     milestones: dict[str, Any] = {}
     stop = False
     overall = "passed"
@@ -728,12 +1003,11 @@ def assemble_report(run_root: Path, *, direct_gates: Mapping[str, Any]) -> dict[
                 "planner_autonomy_status": {"status": "not_run", "errors": ["backend gate not passed"]},
             }
             continue
-        backend_paths = case_paths(run_root, milestone, DETERMINISTIC)
+        backend_paths = case_paths(run_root, milestone, formal_mode)
         backend = verify_case(
             backend_paths,
             milestone,
-            DETERMINISTIC,
-            direct_gate=direct_gates.get(milestone) if isinstance(direct_gates, Mapping) else None,
+            formal_mode,
         )
         if backend["status"] != "passed":
             stop = True
@@ -771,9 +1045,13 @@ def _new_run_root(repo: Path, requested: str) -> Path:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", default="")
-    parser.add_argument("--direct-gates", default="", help="JSON with frozen M2 direct gates")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--scripted-tui",
+        action="store_true",
+        help="Run real PTY TUI cases with explicit scripted_tui approvals, never human approval.",
+    )
     return parser
 
 
@@ -781,11 +1059,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
     run_root = _new_run_root(repo, args.run_root)
-    direct_gates: Mapping[str, Any] = {}
-    if args.direct_gates:
-        direct_gates = _json_load(Path(args.direct_gates))
+    formal_mode = SCRIPTED_TUI if args.scripted_tui else DETERMINISTIC
     if args.verify_only:
-        report = assemble_report(run_root, direct_gates=direct_gates)
+        report = assemble_report(run_root, formal_mode=formal_mode)
         report_path = run_root / "acceptance-report.json"
         if report_path.exists():
             raise AcceptanceError(f"immutable report already exists: {report_path}")
@@ -798,7 +1074,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     occupied: set[int] = set()
     try:
         for milestone in MILESTONES:
-            modes = (DETERMINISTIC,) if milestone == "m0" else (DETERMINISTIC, AUTONOMY)
+            modes = (
+                (SCRIPTED_TUI,)
+                if args.scripted_tui
+                else (DETERMINISTIC,)
+                if milestone in {"m0", "m3", "m4"}
+                else (DETERMINISTIC, AUTONOMY)
+            )
             for mode in modes:
                 allocation = allocate(f"{milestone}-{mode}", occupied)
                 occupied.add(allocation.ros_domain_id)
@@ -808,22 +1090,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 code = run_case(repo, paths, allocation)
                 if code == 130:
                     return 130
-                if mode == DETERMINISTIC:
+                if mode == formal_mode:
                     gate = verify_case(
                         paths,
                         milestone,
                         mode,
-                        direct_gate=direct_gates.get(milestone),
                     )
                     _json_dump(paths.root / "verification.json", gate)
                     if gate["status"] != "passed":
-                        report = assemble_report(run_root, direct_gates=direct_gates)
+                        report = assemble_report(
+                            run_root,
+                            formal_mode=formal_mode,
+                        )
                         _json_dump(run_root / "acceptance-report.json", report, exclusive=True)
                         return report_exit_code(report)
         if args.prepare_only:
             print(run_root)
             return 0
-        report = assemble_report(run_root, direct_gates=direct_gates)
+        report = assemble_report(run_root, formal_mode=formal_mode)
         report_path = run_root / "acceptance-report.json"
         _json_dump(report_path, report, exclusive=True)
         report_path.chmod(0o444)

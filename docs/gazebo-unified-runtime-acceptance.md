@@ -1,14 +1,14 @@
 # Gazebo unified runtime acceptance
 
-M1 和 M2 仍使用 profile 驱动的统一运行时：运行时负责 ROS 2 launch、相机、
-控制器、fresh-observation 和清理边界。M2 的夹爪保护及 articulated-handle
-资产不属于 M3 撤销范围，继续按各自契约维护。
+M1 and M2 use the profile-driven runtime for launch, cameras, controller
+readiness, fresh observations and cleanup. M3 adds only the guarded stock
+DetachableJoint path: paused preflight detach ACK, reset detach ACK, native
+dual-pad contact admission, attach ACK and native child-link physical proof.
 
-M3/M4 操控当前不在该运行时的可用能力集合中。M3 profile 的构造即返回
-`DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`；不会启动 Gazebo、ROS、
-MCP、规划附着或任何兼容回退。M4 的 Oracle 感知模块可继续做像素级契约
-测试，但不构成真实视觉推理或可执行抓取。
+M3 is fail-closed on contact, state ACK, DART, or proof errors. It has no
+compatibility mechanism. M4 Oracle data is marked simulator truth and does
+not relax these requirements.
 
-以往的 M3/M4 cloud、Direct 和 MCP 结果仅可用于定位被删除方案的问题，不能
-作为正式验收证据。后续正式验收的调用链、PTY transcript 和远端隔离规则须在
-获得 DetachableJoint 设计确认后重新定义。
+Formal M0–M4 acceptance is PTY TUI → MCP/SSE → Gazebo, with per-case ROS
+domain, Gazebo partition, loopback port, process-group logs and cleanup
+evidence. This source tree does not assert a completed remote acceptance.

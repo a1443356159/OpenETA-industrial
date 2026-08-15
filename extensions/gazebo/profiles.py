@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .m2 import M2Config
-from .m3 import M3Config, M3_UNAVAILABLE_REASON
+from .m3 import M3Config
 from .observation import RosRgbdCameraConfig
 
 
@@ -88,10 +88,10 @@ _PROFILES: Mapping[str, GazeboProfile] = MappingProxyType({
         capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT}, model_config=M2Config(),
     ),
     "m3_pickplace": GazeboProfile(
-        name="m3_pickplace", launch_package="", launch_file="", world_name="",
+        name="m3_pickplace", launch_package="openeta_rm75_robotiq2f85_sim",
+        launch_file="m3_gazebo_pickplace.launch.py", world_name="m3_rm75_robotiq2f85_pickplace",
         cameras=(_camera(), _camera(wrist=True)),
-        capabilities=_BASE, model_config=M3Config(),
-        unavailable_reason=M3_UNAVAILABLE_REASON,
+        capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT, PHYSICS}, model_config=M3Config(),
     ),
 })
 

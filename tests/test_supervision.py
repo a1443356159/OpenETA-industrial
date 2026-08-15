@@ -50,6 +50,24 @@ def test_human_gated_world_action_fails_closed_before_handler() -> None:
     assert called == []
 
 
+def test_scripted_tui_world_action_is_explicitly_automated_not_human() -> None:
+    tools = build_default_tool_registry()
+    gate = SupervisionGate(
+        SupervisionPolicy.for_profile(SupervisionProfile.SCRIPTED_TUI)
+    )
+    decision = gate.authorize(
+        ToolExecutionContext(
+            name="move_to",
+            spec=tools.get("move_to"),
+            parameters={"x": 0.1, "y": 0.2, "z": 0.3},
+        )
+    )
+
+    assert decision.allowed is True
+    assert decision.source == "scripted_tui"
+    assert decision.details == {"profile": "scripted_tui", "automation": True}
+
+
 def test_supervision_prompts_include_examples_for_every_output_label() -> None:
     for label in ("approve:", "reject:", "abstain:"):
         assert label in ACTION_REVIEW_SYSTEM_PROMPT

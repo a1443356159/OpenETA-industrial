@@ -1,8 +1,15 @@
-# TUI Gazebo 验收范围
+# TUI Gazebo acceptance scope
 
-现有 TUI 协调器仅覆盖 M0–M2。它不提供 M3/M4 的 Direct、MCP 或云端正式
-验收入口。
+The formal path is a real `openeta_cli` PTY TUI connected to MCP/SSE and then
+to the isolated Gazebo worker. M0–M4 evidence consists of the PTY transcript,
+MCP request/response trace, tool receipt and cleanup record for each case.
 
-M3/M4 在 DetachableJoint 实现和设计确认之前一律返回
-`DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`。历史 TUI 或云端报告是
-已撤销方案的诊断材料，不能声明任一操控 milestone 成功。
+M3 requires the stock DetachableJoint native-contact/ACK/child-link chain;
+M4 records `gazebo_oracle` and fake-candidate provenance while using that same
+chain. This includes the executed `oracle_perceive` MCP call: its request,
+case-local materialized response, and receipt must correlate. Scripted
+approvals are labelled `scripted_tui`, never `human_gated`.
+
+Remote formal runs use a SHA-specific clean clone and stop immediately after
+any failed predecessor. This document makes no claim that a remote run has
+passed.

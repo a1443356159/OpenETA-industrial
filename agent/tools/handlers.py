@@ -699,6 +699,9 @@ def build_oracle_perceive_segmenter(
     *,
     tool_name: str = "oracle_perceive",
     timeout_seconds: float = 600.0,
+    handle_provider: Callable[[], str] | None = None,
+    session_id_provider: Callable[[], str] | None = None,
+    response_callback: Callable[[str, JsonDict, JsonDict], None] | None = None,
 ) -> Sam3SegmentCallable:
     """Build a simulator-oracle segmenter over the existing simulator MCP transport.
 
@@ -708,14 +711,22 @@ def build_oracle_perceive_segmenter(
     """
 
     def segment(request: JsonDict) -> JsonDict:
-        return transport.call_tool(
-            tool_name,
-            {
-                "image_base64": request.get("image_base64"),
-                "prompt": _string_param(request.get("prompt")),
-            },
-            timeout_s=timeout_seconds,
-        )
+        arguments: JsonDict = {
+            "image_base64": request.get("image_base64"),
+            "prompt": _string_param(request.get("prompt")),
+        }
+        handle = str(handle_provider() if handle_provider is not None else "").strip()
+        session_id = str(
+            session_id_provider() if session_id_provider is not None else ""
+        ).strip()
+        if handle:
+            arguments["handle"] = handle
+        if session_id:
+            arguments["session_id"] = session_id
+        response = transport.call_tool(tool_name, arguments, timeout_s=timeout_seconds)
+        if response_callback is not None:
+            response_callback(tool_name, arguments, response)
+        return response
 
     return segment
 

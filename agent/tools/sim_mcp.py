@@ -103,6 +103,21 @@ def mcp_dashboard_url(server_url: str, session_id: object) -> str:
     return f"{base}/session/{session}"
 
 
+def _mcp_request_descriptor(mcp_tool: str, arguments: Mapping[str, object]) -> JsonDict:
+    """Return the local, immutable descriptor for one MCP RPC attempt.
+
+    The descriptor is evidence only: it is never added to the remote MCP
+    arguments.  A matching id is embedded in the materialized response and
+    environment receipt so formal TUI acceptance can prove the full chain.
+    """
+
+    return {
+        "request_id": uuid4().hex,
+        "tool": mcp_tool,
+        "arguments": dict(arguments),
+    }
+
+
 class SimulatorMcpTransport(Protocol):
     """Synchronous MCP tool transport used by simulator tool proxies."""
 
@@ -473,6 +488,8 @@ class SimulatorMcpToolProxy:
                 ),
             )
 
+        mcp_request = _mcp_request_descriptor(mcp_tool, arguments)
+
         try:
             raw_response = self.transport.call_tool(
                 mcp_tool,
@@ -498,6 +515,7 @@ class SimulatorMcpToolProxy:
                             "agent_tool": agent_tool,
                             "session_id": arguments.get("session_id", ""),
                             "handle": arguments.get("handle", ""),
+                            "request": mcp_request,
                         },
                         "motion_outcome": "unknown" if transport_unknown else "failed",
                         "reconciliation_required": transport_unknown,
@@ -532,6 +550,7 @@ class SimulatorMcpToolProxy:
             mcp_tool=mcp_tool,
             artifact_session_id=artifact_session_id(context.metadata),
             execution_metadata=context.metadata,
+            mcp_request=mcp_request,
         )
         if agent_tool == "move_to" and _is_anyplace_pose(context.parameters):
             normalized["outputs"]["mcp"]["target_orientation_mode"] = "preserve_current"
@@ -682,7 +701,18 @@ class SimulatorMcpToolProxy:
         mcp_tool: str,
         artifact_session_id: str = "",
         execution_metadata: JsonDict | None = None,
+        mcp_request: JsonDict | None = None,
+        receipt_session_id: str | None = None,
+        receipt_handle: str | None = None,
     ) -> JsonDict:
+        request = dict(mcp_request or _mcp_request_descriptor(mcp_tool, {}))
+        request_id = str(request.get("request_id") or "").strip()
+        if not request_id:
+            raise ValueError("MCP request descriptor requires a request_id.")
+        session_id = (
+            self.config.session_id if receipt_session_id is None else receipt_session_id
+        )
+        handle = self.config.handle if receipt_handle is None else receipt_handle
         payload = dict(response)
         bundle_id = self._next_artifact_bundle_id(mcp_tool)
         artifacts: list[JsonDict] = []
@@ -705,9 +735,10 @@ class SimulatorMcpToolProxy:
             observation_snapshot=observation_snapshot,
             agent_tool=agent_tool,
             mcp_tool=mcp_tool,
-            simulator_session_id=self.config.session_id,
-            handle=self.config.handle,
+            simulator_session_id=session_id,
+            handle=handle,
             execution_metadata=execution_metadata,
+            mcp_request_id=request_id,
         )
         response_artifact = materialize_json_response(
             payload,
@@ -721,16 +752,32 @@ class SimulatorMcpToolProxy:
             response_artifact,
             image_artifacts=artifacts,
         )
+        response_evidence: JsonDict = {
+            **response_ref,
+            "request_id": request_id,
+            "tool": mcp_tool,
+            "session_id": session_id,
+            "handle": handle,
+        }
         artifacts.append(response_artifact.to_dict())
 
         outputs: JsonDict = {
             "mcp": {
                 "tool": mcp_tool,
                 "agent_tool": agent_tool,
-                "session_id": self.config.session_id,
-                "handle": self.config.handle,
+                "session_id": session_id,
+                "handle": handle,
+                "request": request,
+                "response": response_evidence,
             },
-            "response": response_ref,
+            "response": response_evidence,
+            "mcp_calls": [
+                {
+                    "request": request,
+                    "response": response_evidence,
+                    "environment_receipt": environment_receipt,
+                }
+            ],
         }
         for key in ("observation_summary", "motion_summary"):
             summary = response_ref.get(key)
@@ -803,6 +850,7 @@ class SimulatorEnvironmentCreator:
                     }
                 ],
             )
+        create_request = _mcp_request_descriptor("create_env", create_args)
         try:
             create_response = self.transport.call_tool(
                 "create_env",
@@ -834,6 +882,11 @@ class SimulatorEnvironmentCreator:
             mcp_tool="create_env",
             artifact_session_id=artifact_session_id(context.metadata),
             execution_metadata=context.metadata,
+            mcp_request=create_request,
+            receipt_session_id=str(
+                create_response.get("session_id") or create_args.get("session_id") or ""
+            ).strip(),
+            receipt_handle=str(create_response.get("handle") or "").strip(),
         )
         create_ref = create_normalized["outputs"]["response"]
         self._notify("create_env", create_args, create_ref)
@@ -876,6 +929,7 @@ class SimulatorEnvironmentCreator:
         reset_args: JsonDict = {"handle": handle, "seed": create_args["seed"]}
         if session_id:
             reset_args["session_id"] = session_id
+        reset_request = _mcp_request_descriptor("reset_env", reset_args)
         try:
             reset_response = self.transport.call_tool(
                 "reset_env",
@@ -909,6 +963,7 @@ class SimulatorEnvironmentCreator:
             mcp_tool="reset_env",
             artifact_session_id=artifact_session_id(context.metadata),
             execution_metadata=context.metadata,
+            mcp_request=reset_request,
         )
         reset_ref = reset_normalized["outputs"]["response"]
         self._notify("reset_env", reset_args, reset_ref)
@@ -936,7 +991,13 @@ class SimulatorEnvironmentCreator:
                 "auto_reset_tool": "reset_env",
                 "handle": handle,
                 "session_id": session_id,
+                "request": create_normalized["outputs"]["mcp"]["request"],
+                "response": create_normalized["outputs"]["mcp"]["response"],
             },
+            "mcp_calls": [
+                *create_normalized["outputs"]["mcp_calls"],
+                *reset_normalized["outputs"]["mcp_calls"],
+            ],
             "environment": environment,
             "create_response": create_ref,
             "initial_observation": reset_ref,
@@ -1093,6 +1154,7 @@ class SimulatorEnvironmentCloser:
         self.transport = transport
         self.config = config
         self.response_callback = response_callback
+        self.proxy = SimulatorMcpToolProxy(transport=transport, config=config)
 
     def handler(self, context: ToolExecutionContext) -> ToolResult:
         with self.config.lifecycle_lock:
@@ -1123,6 +1185,7 @@ class SimulatorEnvironmentCloser:
         arguments: JsonDict = {"handle": handle}
         if session_id:
             arguments["session_id"] = session_id
+        mcp_request = _mcp_request_descriptor("close_env", arguments)
         try:
             response = self.transport.call_tool(
                 "close_env",
@@ -1154,6 +1217,16 @@ class SimulatorEnvironmentCloser:
                     self.config.handle = handle
         elif self.response_callback is not None:
             self.response_callback("close_env", arguments, response)
+        normalized = self.proxy._normalize_response(  # noqa: SLF001
+            response,
+            agent_tool="close_simulator_env",
+            mcp_tool="close_env",
+            artifact_session_id=artifact_session_id(context.metadata),
+            execution_metadata=context.metadata,
+            mcp_request=mcp_request,
+            receipt_session_id=session_id,
+            receipt_handle=handle,
+        )
         return make_tool_result(
             context,
             success=success,
@@ -1163,10 +1236,11 @@ class SimulatorEnvironmentCloser:
                 else _response_content(response, mcp_tool="close_env", success=False)
             ),
             outputs={
+                **normalized["outputs"],
                 "closed": success,
                 "environment": {"handle": handle, "session_id": session_id},
-                "response": response,
             },
+            artifacts=normalized["artifacts"],
             state_delta={
                 "simulator_environment": {
                     "handle": handle,
@@ -1175,16 +1249,7 @@ class SimulatorEnvironmentCloser:
                 }
             },
             environment_receipt={
-                "schema_version": ENVIRONMENT_RECEIPT_SCHEMA_VERSION,
-                "receipt_id": uuid4().hex,
-                "backend": "simulator_mcp",
-                "agent_tool": "close_simulator_env",
-                "remote_tool": "close_env",
-                "simulator_session_id": session_id,
-                "handle": handle,
-                "timestamp_s": time.time(),
-                "reward_present": False,
-                "observation_fresh": False,
+                **normalized["environment_receipt"],
                 "environment_closed": success,
             },
             diagnostics=[] if success else _response_diagnostics(response),
@@ -1984,6 +2049,7 @@ def _build_environment_receipt(
     simulator_session_id: str,
     handle: str,
     execution_metadata: JsonDict | None,
+    mcp_request_id: str,
 ) -> JsonDict:
     metadata = dict(execution_metadata or {})
     receipt: JsonDict = {
@@ -1992,6 +2058,7 @@ def _build_environment_receipt(
         "backend": "simulator_mcp",
         "agent_tool": agent_tool,
         "remote_tool": mcp_tool,
+        "mcp_request_id": mcp_request_id,
         "execution_id": str(metadata.get("execution_id") or ""),
         "agent_session_id": str(metadata.get("session_id") or ""),
         "simulator_session_id": simulator_session_id,

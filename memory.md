@@ -228,11 +228,11 @@
   plan-only and was not reused. The former `ROS_NOT_READY` blocker is resolved
   by the repository-owned Robotiq profile and `RosM2ControllerFactory`.
 
-- M3/M4 contact, grasp, attachment and placement work was removed after the
-  experiment proved invalid. Current M3/M4 requests fail closed with
-  `DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`. Earlier M3 reports are only
-  diagnostic evidence and cannot establish a milestone pass. See
-  `docs/gazebo-m3-physical-verification.md`.
+- The invalid soft-adhesion experiment was removed. Current M3 uses the
+  approved native-contact stock `DetachableJoint` implementation and fails
+  closed on missing contact, attach/detach ACK, DART child-link state, or lift
+  proof. Earlier soft-adhesion reports remain diagnostic evidence only and
+  cannot establish a milestone pass. See `docs/gazebo-m3-physical-verification.md`.
 
 - 2026-08-10 update: **M2 formal acceptance PASSED** (report
   `m2-robotiq2f85-acceptance-20260810T194732Z-542318.json`, all gates including

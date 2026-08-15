@@ -1,11 +1,11 @@
-"""Offline checks that Gazebo documentation matches the disabled M3 status."""
+"""Offline checks that Gazebo documentation matches the guarded M3 status."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-from extensions.gazebo.m3 import M3_UNAVAILABLE_REASON
+from extensions.gazebo.m3 import M3_SCHEMA_VERSION
 from extensions.gazebo.profiles import gazebo_profiles
 
 
@@ -30,17 +30,17 @@ def test_registered_gazebo_env_ids_match_documented_set() -> None:
     assert _registered_gazebo_env_ids() == GAZEBO_ENV_IDS
 
 
-def test_design_doc_marks_m3_profile_unavailable_and_preserves_m1_m2_runtime() -> None:
+def test_design_doc_marks_m3_contact_and_joint_guards_and_preserves_m1_m2_runtime() -> None:
     for profile_name in gazebo_profiles():
         assert profile_name in DESIGN_DOC
-    for symbol in ("GazeboDirectEnv", "GazeboRuntime", "UnifiedEnv", M3_UNAVAILABLE_REASON):
+    for symbol in ("GazeboDirectEnv", "GazeboRuntime", "UnifiedEnv", "DetachableJoint"):
         assert symbol in DESIGN_DOC
     assert "M2 gripper safeguards" in DESIGN_DOC
 
 
-def test_inventory_doc_lists_disabled_gazebo_environment_honestly() -> None:
+def test_inventory_doc_lists_guarded_gazebo_environment_honestly() -> None:
     assert "`gazebo`" in INVENTORY_DOC
     assert "_register_gazebo_envs" in INVENTORY_DOC
-    assert M3_UNAVAILABLE_REASON in INVENTORY_DOC
+    assert M3_SCHEMA_VERSION in INVENTORY_DOC
     for env_id in GAZEBO_ENV_IDS:
         assert env_id in INVENTORY_DOC

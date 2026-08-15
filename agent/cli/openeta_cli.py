@@ -157,7 +157,7 @@ SLASH_COMMANDS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec(
         "approvement",
         "select the active supervision profile",
-        "/approvement [human_gated|standard|reviewed_autonomy]",
+        "/approvement [human_gated|scripted_tui|standard|reviewed_autonomy]",
         aliases=("approval",),
         supports_inline_args=True,
     ),
@@ -888,7 +888,7 @@ class OpenEtaCli:
         except ValueError:
             print(
                 Theme.err(
-                    "Unknown supervision profile. Use human_gated, standard, or reviewed_autonomy."
+                    "Unknown supervision profile. Use human_gated, scripted_tui, standard, or reviewed_autonomy."
                 )
             )
             return

@@ -1,41 +1,44 @@
 # Gazebo adapter design
 
-## Current runtime boundary
+`GazeboDirectEnv` and `GazeboRuntime` own M1 live RGB-D, M2 RM75/Robotiq
+control, and M3's guarded pick/place profile. The production chain is:
 
-The executable Gazebo profiles are M1 (live RGB-D observation) and M2 (RM75 +
-Robotiq control with structured receipts). `GazeboDirectEnv` and
-`GazeboRuntime` own lazy startup, ROS 2 launch, camera freshness, controller
-access and reverse-order cleanup. The deployed path remains:
+`MCP/SSE → dedicated Gazebo bench worker → UnifiedEnv → GazeboDirectEnv → GazeboRuntime → ROS 2 / Gazebo Sim`
 
-The profile names are `m1`, `m2_robotiq2f85`, and the disabled
-`m3_pickplace`.
+M3 has one grasp mechanism only: the stock Gazebo Sim 8
+`gz::sim::systems::DetachableJoint` fixed joint from `gripper_mount_link` to
+`m3_target/target_link`. The M3 launch starts paused. Runtime must receive a
+fresh `detached` state ACK before unpausing or starting controller readiness.
+Every reset repeats pause → reset → detached ACK → object restore → unpause.
 
-`MCP → dedicated gazebo bench worker → UnifiedEnv → GazeboDirectEnv → GazeboRuntime → ROS/Gazebo adapters`
+`gripper_close` arms both native Gazebo fingertip contact streams before the
+real command. Attach is issued only when each stream has at least three fresh,
+post-close samples covering 100 ms and every sample identifies only
+`m3_target`. Unknown, mixed, stale, single-sided, or distractor contacts fail
+closed. An attach ACK permits transport but is not a grasp verdict. M3 passes
+only after native Gazebo child-link state proves at least 80 mm target lift
+and no more than 10 mm capture-relative translation.
 
-M3 is registered only to preserve its stable environment identifier and static
-scene dimensions for non-manipulation consumers. Its profile has no launch,
-world, control, physics or structured-receipt capability. Constructing it
-fails with `DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED` before any process,
-MCP call or action can start. M4 manipulation is blocked by the same boundary.
-No alternative holding, attachment, geometry, transform or distance mechanism
-is present.
+There is no force injection, compliance, gravity compensation, kinematic
+following, geometric/TF/distance admission, or alternate physics path. A
+missing state ACK or unreadable DART child-link state reports an explicit M3
+error and stops the chain.
 
 ## Oracle boundary
 
-`extensions/gazebo/oracle_perception.py` is a pure-Python projection utility.
-It can turn known static object declarations and cached observation poses into
-SAM3-shaped oracle detections for offline contract tests. It is explicitly
-simulator truth, not real visual inference. A fake grasp candidate only tests
-parameter shape; neither component authorizes a grasp or proves M4 execution.
+`oracle_perceive` remains simulator-truth projection, marked
+`perception_source="gazebo_oracle"`. M4's fake grasp candidate is contractual
+input-shape evidence only; it does not claim visual reasoning and cannot
+bypass M3's native-contact, ACK, or child-link proof gates.
 
-M2 gripper safeguards and articulated-handle support remain independent of
-this disabled M3/M4 work.
+M2 gripper safeguards and articulated-handle assets are independent of M3.
+The registered profile names are `m1`, `m2_robotiq2f85`, and `m3_pickplace`;
+the M3 receipt schema is `openeta.m3.detachable_joint.v1`.
 
 ## Acceptance status
 
-The current TUI coordinator covers M0–M2 only. The former cloud entry reports
-blocked status without building, launching or connecting to a worker. Historic
-M3/M4 results are diagnostic evidence for the removed implementation, not
-formal acceptance. A future approved DetachableJoint design must define the
-native topology, ACK semantics, evidence chain and remote isolation plan before
-new M3/M4 assets are created.
+Formal M0–M4 evidence must be captured through the real PTY TUI → MCP/SSE →
+Gazebo chain. Scripted approvals are labelled `scripted_tui`; they are never
+reported as human approval. A final pass additionally requires the remote
+clean-clone run and its isolation/cleanup evidence. No such remote result is
+claimed by this document.

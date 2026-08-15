@@ -59,10 +59,10 @@ when work advances; do not start later milestones early.
       structured action routing, worker profile registration, and contract tests.
 - [x] M2 live ROS action client/launch verification using the repository-owned
       Jazzy/Harmonic RM75 + Robotiq 2F-85 profile and frozen vendor assets.
-- [ ] M3/M4 manipulation is intentionally unavailable until an approved
-      DetachableJoint design and implementation exist. The current profile
-      fails closed with `DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`; old
-      reports are diagnostic evidence only.
+- [ ] M3/M4 remote formal acceptance remains pending. M3 now has the approved
+      native-contact stock `DetachableJoint` implementation; it fails closed
+      on missing contact, attach/detach ACK, DART child-link state, or physical
+      lift proof. Old soft-adhesion reports remain diagnostic evidence only.
 - [ ] M5+ SAM3 integration and industrial benchmark.
 
 ## M2 verification
@@ -96,9 +96,12 @@ when work advances; do not start later milestones early.
 
 ## Formal cloud acceptance
 
-- [ ] No M3/M4 cloud acceptance may run before DetachableJoint design approval.
-      The retained command is status-only and reports the blocked state; it
-      does not build, launch, connect to MCP or claim a pass.
+- [ ] M3/M4 remote formal acceptance remains pending. The approved local
+      coordinator prepares, but never executes, a SHA-specific detached clean
+      clone plan: build the ROS workspace, run the real PTY TUI → MCP/SSE →
+      Gazebo M0→M4 chain, and stop on a failed predecessor. The remote plan
+      may report a pass only when its `acceptance-report.json` has
+      `overall_status=passed`.
 
 ## Runtime configuration
 

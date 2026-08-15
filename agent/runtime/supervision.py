@@ -31,6 +31,7 @@ class SupervisionProfile(str, Enum):
     """Host-selected autonomy level; higher autonomy never disables safety checks."""
 
     HUMAN_GATED = "human_gated"
+    SCRIPTED_TUI = "scripted_tui"
     STANDARD = "standard"
     REVIEWED_AUTONOMY = "reviewed_autonomy"
 
@@ -49,6 +50,8 @@ class SupervisionPolicy:
         resolved = SupervisionProfile(profile)
         if resolved == SupervisionProfile.HUMAN_GATED:
             return cls(resolved, "human", "human", "human")
+        if resolved == SupervisionProfile.SCRIPTED_TUI:
+            return cls(resolved, "scripted_tui", "runtime_session_only", "none")
         if resolved == SupervisionProfile.REVIEWED_AUTONOMY:
             return cls(resolved, "independent_reviewer", "independent_reviewer", "guidance_agent")
         return cls(resolved, "runtime_checks", "runtime_session_only", "human")
@@ -129,6 +132,13 @@ class SupervisionGate:
                 "human",
                 "Approved by human operator." if approved else "Human approval was not granted.",
                 {"profile": self._policy.profile.value},
+            )
+        if mode == "scripted_tui":
+            return SupervisionDecision(
+                True,
+                "scripted_tui",
+                "Approved by the explicitly selected scripted TUI harness.",
+                {"profile": self._policy.profile.value, "automation": True},
             )
         if self.action_reviewer is None:
             return SupervisionDecision(

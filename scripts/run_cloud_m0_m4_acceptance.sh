@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Report the fail-closed status of the retired M3/M4 cloud acceptance path.
+# Prepare the fail-closed remote clean-clone PTY-TUI plan.  This wrapper never
+# opens SSH itself; an authorized operator executes the reported command.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

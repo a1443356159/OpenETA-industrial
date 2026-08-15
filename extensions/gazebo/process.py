@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import math
+import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -189,13 +192,21 @@ class GazeboWorldControl:
         """Reset world entities while preserving the monotonic simulation clock."""
         self._reset("model_only", seed=seed)
 
+    def set_paused(self, paused: bool) -> None:
+        """Pause or resume through Gazebo's documented WorldControl service."""
+
+        self._control(f"pause: {'true' if paused else 'false'}")
+
     def _reset(self, mode: str, *, seed: int | None = None) -> None:
-        executable = shutil.which(self.gz_executable) or self.gz_executable
         if mode not in {"all", "model_only"}:
             raise ValueError("unsupported Gazebo reset mode")
         request = f"reset: {{{mode}: true}}"
         if seed is not None:
             request += f" seed: {int(seed)}"
+        self._control(request)
+
+    def _control(self, request: str) -> None:
+        executable = shutil.which(self.gz_executable) or self.gz_executable
         last_error = ""
         # ros2 launch is alive before Gazebo advertises its control service.
         # One bounded retry covers that cold-start race without accepting a
@@ -219,7 +230,7 @@ class GazeboWorldControl:
             if attempt == 0:
                 time.sleep(0.2)
         raise GazeboProcessError(
-            f"Gazebo world reset failed for {self.world_name}: {last_error}"
+            f"Gazebo world control failed for {self.world_name}: {last_error}"
         )
 
     def set_model_pose(self, model_name: str, xyz: tuple[float, float, float]) -> None:
@@ -266,6 +277,333 @@ class GazeboWorldControl:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+
+
+class DetachableJointState:
+    """Acknowledged state of M3's one stock Gazebo joint."""
+
+    UNKNOWN = "unknown"
+    DETACHED = "detached"
+    ATTACHED = "attached"
+
+
+class GazeboDetachableJointControl:
+    """Request and prove M3's stock ``DetachableJoint`` without fallback.
+
+    The state topic is an ACK boundary only.  ``child_link_proof`` separately
+    reads the native world ``pose/info`` stream and is the only source for the
+    80 mm lift / 10 mm capture-relative proof.
+    """
+
+    def __init__(
+        self,
+        *,
+        gz_executable: str = "gz",
+        timeout_s: float = 5.0,
+        environment: dict[str, str] | None = None,
+        world_name: str = "m3_rm75_robotiq2f85_pickplace",
+        parent_link: str = "gripper_mount_link",
+        child_link: str = "target_link",
+    ) -> None:
+        self.gz_executable = gz_executable
+        self.timeout_s = float(timeout_s)
+        self.environment = dict(environment) if environment is not None else None
+        self.world_name = world_name
+        self.parent_link = parent_link
+        self.child_link = child_link
+        self._state = DetachableJointState.UNKNOWN
+        self._baseline: tuple[float, tuple[float, float, float]] | None = None
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @staticmethod
+    def _executable(value: str) -> str:
+        return shutil.which(value) or value
+
+    def _publish_empty(self, topic: str) -> None:
+        try:
+            result = subprocess.run(
+                [self._executable(self.gz_executable), "topic", "-t", topic, "-m", "gz.msgs.Empty", "-p", ""],
+                capture_output=True, text=True, check=False, env=self.environment,
+                timeout=self.timeout_s,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE") from exc
+        if result.returncode:
+            raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+
+    def _request(self, action: str) -> str:
+        if action not in {"attach", "detach"}:
+            raise ValueError("unsupported DetachableJoint action")
+        expected = action + "ed"
+        topic = f"/m3/detachable_joint/target/{action}"
+        # The plugin emits a transition message once.  Listener first avoids
+        # accepting a command for which the state ACK was missed.
+        try:
+            listener = subprocess.Popen(
+                [self._executable(self.gz_executable), "topic", "-e", "-n", "1", "-t", "/m3/detachable_joint/target/state"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=self.environment, start_new_session=True,
+            )
+        except OSError as exc:
+            raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE") from exc
+        try:
+            time.sleep(0.15)
+            self._publish_empty(topic)
+            output, _ = listener.communicate(timeout=self.timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise GazeboProcessError(
+                "M3_ATTACH_ACK_MISSING" if action == "attach" else "M3_DETACH_ACK_MISSING"
+            ) from exc
+        finally:
+            if listener.poll() is None:
+                listener.terminate()
+                try:
+                    listener.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    listener.kill()
+                    listener.wait(timeout=1.0)
+        if not re.search(rf'\bdata:\s*"?{expected}"?', output, flags=re.IGNORECASE):
+            raise GazeboProcessError(
+                "M3_ATTACH_ACK_MISSING" if action == "attach" else "M3_DETACH_ACK_MISSING"
+            )
+        self._state = DetachableJointState.ATTACHED if action == "attach" else DetachableJointState.DETACHED
+        if action == "detach":
+            self._baseline = None
+        return self._state
+
+    def ensure_detached(self, *, require_ack: bool = True) -> str:
+        """Always request a fresh detach ACK when ``require_ack`` is true."""
+
+        if not require_ack and self._state == DetachableJointState.DETACHED:
+            return self._state
+        return self._request("detach")
+
+    def attach(self) -> str:
+        if self._state != DetachableJointState.DETACHED:
+            raise GazeboProcessError("M3_DETACH_ACK_MISSING")
+        return self._request("attach")
+
+    @staticmethod
+    def _field(block: str, name: str, default: float = 0.0) -> float:
+        match = re.search(rf"\b{name}:\s*([-+0-9.eE]+)", block)
+        return float(match.group(1)) if match else default
+
+    @staticmethod
+    def _pose_blocks(text: str) -> dict[str, tuple[float, float, float]]:
+        blocks: list[str] = []
+        current: list[str] | None = None
+        depth = 0
+        for line in text.splitlines():
+            if current is None:
+                if line.strip() == "pose {":
+                    current, depth = [line], 1
+                continue
+            current.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth == 0:
+                blocks.append("\n".join(current))
+                current = None
+        poses: dict[str, tuple[float, float, float]] = {}
+        for block in blocks:
+            name = re.search(r'\bname:\s*"([^"]+)"', block)
+            position = re.search(r"position\s*\{(.*?)\}", block, re.DOTALL)
+            if name is None or position is None:
+                continue
+            poses[name.group(1)] = tuple(
+                GazeboDetachableJointControl._field(position.group(1), axis)
+                for axis in ("x", "y", "z")
+            )
+        return poses
+
+    def _world_link_positions(self) -> dict[str, tuple[float, float, float]]:
+        try:
+            result = subprocess.run(
+                [self._executable(self.gz_executable), "topic", "-e", "-n", "1", "-t", f"/world/{self.world_name}/pose/info"],
+                capture_output=True, text=True, check=False, env=self.environment,
+                timeout=self.timeout_s,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE") from exc
+        if result.returncode or not result.stdout.strip():
+            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
+        return self._pose_blocks(result.stdout)
+
+    @staticmethod
+    def _named_position(poses: dict[str, tuple[float, float, float]], link: str) -> tuple[float, float, float]:
+        if link in poses:
+            return poses[link]
+        matches = [value for name, value in poses.items() if name.endswith(f"::{link}")]
+        if len(matches) != 1:
+            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
+        return matches[0]
+
+    def capture_baseline(self) -> None:
+        """Record native target child-link state after the attach ACK."""
+
+        if self._state != DetachableJointState.ATTACHED:
+            raise GazeboProcessError("M3_ATTACH_ACK_MISSING")
+        poses = self._world_link_positions()
+        parent = self._named_position(poses, self.parent_link)
+        child = self._named_position(poses, self.child_link)
+        self._baseline = (child[2], tuple(child[index] - parent[index] for index in range(3)))
+
+    def child_link_proof(self):
+        """Return the approved child-link lift proof, or fail closed."""
+
+        if self._baseline is None:
+            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
+        try:
+            from .m3 import ChildLinkProof
+            poses = self._world_link_positions()
+            parent = self._named_position(poses, self.parent_link)
+            child = self._named_position(poses, self.child_link)
+            baseline_z, baseline_relative = self._baseline
+            relative = tuple(child[index] - parent[index] for index in range(3))
+            return ChildLinkProof(
+                baseline_target_z_m=baseline_z,
+                target_z_m=child[2],
+                capture_relative_translation_m=math.dist(baseline_relative, relative),
+            )
+        except GazeboProcessError:
+            raise
+        except Exception as exc:
+            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE") from exc
+
+
+class GazeboNativeContactWindow:
+    """Collect only raw Gazebo contact messages for an armed M3 close."""
+
+    def __init__(
+        self,
+        *,
+        gz_executable: str = "gz",
+        environment: dict[str, str] | None = None,
+        timeout_s: float = 3.0,
+    ) -> None:
+        self.gz_executable = gz_executable
+        self.environment = dict(environment) if environment is not None else None
+        self.timeout_s = float(timeout_s)
+        self._processes: list[subprocess.Popen] = []
+        self._threads: list[threading.Thread] = []
+        self._samples: list[object] = []
+        self._errors: list[str] = []
+        self._lock = threading.Lock()
+        self._armed = False
+
+    @staticmethod
+    def _contact_message(block: str, side: str):
+        from .m3 import NativeContactSample
+        stamp = re.search(r"stamp\s*\{(.*?)\}", block, re.DOTALL)
+        if stamp is None:
+            return None
+        seconds = GazeboDetachableJointControl._field(stamp.group(1), "sec")
+        nanoseconds = GazeboDetachableJointControl._field(stamp.group(1), "nanosec", GazeboDetachableJointControl._field(stamp.group(1), "nsec"))
+        collision_blocks = re.findall(r"collision[12]\s*\{(.*?)\}", block, re.DOTALL)
+        names = tuple(
+            match.group(1)
+            for collision in collision_blocks
+            for match in [re.search(r'\bname:\s*"([^"]+)"', collision)]
+            if match is not None
+        )
+        if not names:
+            return None
+        try:
+            return NativeContactSample(side, seconds + nanoseconds * 1e-9, time.monotonic(), names)
+        except ValueError:
+            return None
+
+    def _read(self, stream, side: str) -> None:
+        current: list[str] = []
+        for line in iter(stream.readline, ""):
+            # Every gz.msgs.Contacts begins with its Header.  Flush the prior
+            # message at the next Header so bracket depth inside repeated
+            # contacts cannot merge simulator samples.
+            if line.strip() == "header {" and current:
+                sample = self._contact_message("".join(current), side)
+                if sample is not None:
+                    with self._lock:
+                        self._samples.append(sample)
+                current = []
+            current.append(line)
+        if current:
+            sample = self._contact_message("".join(current), side)
+            if sample is not None:
+                with self._lock:
+                    self._samples.append(sample)
+
+    def arm(self) -> None:
+        if self._armed:
+            raise GazeboProcessError("M3_CONTACT_WINDOW_ALREADY_ARMED")
+        executable = GazeboDetachableJointControl._executable(self.gz_executable)
+        try:
+            for side, topic in (("left", "/m3/contacts/left_pad"), ("right", "/m3/contacts/right_pad")):
+                process = subprocess.Popen(
+                    [executable, "topic", "-e", "-t", topic], stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, env=self.environment,
+                    start_new_session=True, bufsize=1,
+                )
+                if process.stdout is None:
+                    raise OSError("contact subscription has no stdout")
+                thread = threading.Thread(target=self._read, args=(process.stdout, side), daemon=True)
+                thread.start()
+                self._processes.append(process)
+                self._threads.append(thread)
+            self._armed = True
+        except OSError as exc:
+            self.close()
+            raise GazeboProcessError("M3_NATIVE_CONTACT_UNAVAILABLE") from exc
+
+    def begin_post_close(self) -> None:
+        """Discard pre-close transport backlog while preserving subscriptions."""
+
+        if not self._armed:
+            raise GazeboProcessError("M3_CONTACT_WINDOW_NOT_ARMED")
+        with self._lock:
+            self._samples.clear()
+
+    def evaluate(self, *, close_completed_sim_time_s: float | None, config=None):
+        from .m3 import ReasonCode, confirm_native_bilateral_contact
+        deadline = time.monotonic() + self.timeout_s
+        result = None
+        while time.monotonic() < deadline:
+            with self._lock:
+                samples = tuple(self._samples)
+            result = confirm_native_bilateral_contact(
+                samples, close_completed_sim_time_s=close_completed_sim_time_s,
+                now_monotonic_s=time.monotonic(), config=config,
+            )
+            if result.accepted or result.reason_code not in {
+                ReasonCode.CONTACT_INSUFFICIENT_SAMPLES, ReasonCode.CONTACT_WINDOW_TOO_SHORT,
+            }:
+                return result
+            time.sleep(0.02)
+        return result or confirm_native_bilateral_contact(
+            (), close_completed_sim_time_s=close_completed_sim_time_s,
+            now_monotonic_s=time.monotonic(), config=config,
+        )
+
+    def close(self) -> None:
+        for process in self._processes:
+            if process.poll() is None:
+                process.terminate()
+        for process in self._processes:
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=1.0)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+        for thread in self._threads:
+            thread.join(timeout=1.0)
+        self._processes.clear()
+        self._threads.clear()
+        self._armed = False
 
 
 class RosGzBridgeProcess:

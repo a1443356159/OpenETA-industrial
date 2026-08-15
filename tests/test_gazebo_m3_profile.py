@@ -1,29 +1,51 @@
 from __future__ import annotations
 
-import pytest
+import xml.etree.ElementTree as ET
 
+from extensions.gazebo.detachable_sdf import prepare_detachable_sdf
 from extensions.gazebo.m2 import M2_ENV_ID, MODEL_ID, M2Config
 from extensions.gazebo.m3 import (
     M3_DISPLAY_NAME,
     M3_ENV_ID,
     M3_MODEL_ID,
-    M3_UNAVAILABLE_REASON,
     M3Config,
 )
 from extensions.gazebo.profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, gazebo_profile
 from sim.env_registry import get_env_spec
 
 
-def test_m3_registration_is_explicitly_disabled_pending_detachable_joint() -> None:
+def test_m3_registration_exposes_the_approved_detachable_joint_profile() -> None:
     m3, m2 = get_env_spec(M3_ENV_ID), get_env_spec(M2_ENV_ID)
     assert m3 is not None and m2 is not None and m3.display_name == M3_DISPLAY_NAME
     assert M3Config().model_id == M3_MODEL_ID
     assert M2Config().model_id == MODEL_ID
     profile = gazebo_profile("m3_pickplace")
-    assert profile.unavailable_reason == M3_UNAVAILABLE_REASON
-    assert not ({CONTROL, PHYSICS, STRUCTURED_RECEIPT} & profile.capabilities)
+    assert profile.unavailable_reason is None
+    assert {CONTROL, PHYSICS, STRUCTURED_RECEIPT} <= profile.capabilities
+    assert profile.launch_file == "m3_gazebo_pickplace.launch.py"
 
 
-def test_m3_scene_metadata_cannot_validate_or_start_manipulation_assets() -> None:
-    with pytest.raises(RuntimeError, match=M3_UNAVAILABLE_REASON):
-        M3Config().validate_assets()
+def test_m3_assets_are_required_before_manipulation_starts() -> None:
+    config = M3Config()
+    config.validate_assets()
+    package = config.ros_workspace / "src" / config.ros_package_name
+    assert (package / "worlds/m3_rm75_robotiq2f85_pickplace.sdf").is_file()
+
+
+def test_m3_sdf_renderer_allows_only_the_stock_fixed_joint_topology() -> None:
+    root = ET.fromstring(
+        """<sdf><model name="robot"><link name="base_link"/>
+        <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+          <parent_link>gripper_mount_link</parent_link><child_model>m3_target</child_model>
+          <child_link>target_link</child_link><attach_topic>/m3/detachable_joint/target/attach</attach_topic>
+          <detach_topic>/m3/detachable_joint/target/detach</detach_topic>
+          <output_topic>/m3/detachable_joint/target/state</output_topic>
+        </plugin></model></sdf>"""
+    )
+
+    prepared = prepare_detachable_sdf(root)
+    model = prepared.find("model")
+    assert model is not None
+    assert model.findtext("joint[@name='openeta_m3_world_to_base']/parent") == "world"
+    assert model.findtext("joint[@name='openeta_m3_world_to_base']/child") == "base_link"
+    assert model.findtext("self_collide") == "false"

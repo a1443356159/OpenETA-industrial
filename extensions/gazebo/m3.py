@@ -1,30 +1,59 @@
-"""Disabled M3 scene metadata and shared quaternion helpers.
+"""Fail-closed contracts for the M3 native-contact DetachableJoint path.
 
-M3 manipulation is deliberately unavailable until a separately approved
-native ``DetachableJoint`` implementation exists.  This module retains only
-static object declarations consumed by the Oracle-perception and benchmark
-metadata contracts; it contains no grasp, contact, attachment, force, motion,
-or verification implementation.
+M3 has exactly one grasp mechanism: Gazebo Sim's stock
+``gz::sim::systems::DetachableJoint`` fixed joint.  A request is allowed only
+after both *native Gazebo* fingertip contact streams identify ``m3_target``
+after a real close command.  This module deliberately contains neither ROS
+nor Gazebo imports so the admission and proof rules are testable offline.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 import math
-from typing import Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .m2 import M2Config
 
 
 M3_ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
 M3_MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
-M3_DISPLAY_NAME = "Gazebo 仿真环境（M3 已禁用；DetachableJoint 待批准）"
-M3_UNAVAILABLE_REASON = "DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED"
+M3_DISPLAY_NAME = "Gazebo 仿真环境（M3 原生接触 DetachableJoint 拾放）"
+M3_SCHEMA_VERSION = "openeta.m3.detachable_joint.v1"
+
+
+class Verdict(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    UNKNOWN = "UNKNOWN"
+
+
+class ReasonCode(StrEnum):
+    READY = "READY"
+    CONTACT_WINDOW_NOT_ARMED = "M3_CONTACT_WINDOW_NOT_ARMED"
+    CONTACT_INSUFFICIENT_SAMPLES = "M3_CONTACT_INSUFFICIENT_SAMPLES"
+    CONTACT_WINDOW_TOO_SHORT = "M3_CONTACT_WINDOW_TOO_SHORT"
+    CONTACT_SAMPLE_STALE = "M3_CONTACT_SAMPLE_STALE"
+    CONTACT_SAMPLE_BEFORE_CLOSE = "M3_CONTACT_SAMPLE_BEFORE_CLOSE"
+    CONTACT_UNKNOWN = "M3_CONTACT_UNKNOWN"
+    CONTACT_MIXED = "M3_CONTACT_MIXED"
+    CONTACT_DISTRACTOR = "M3_CONTACT_DISTRACTOR"
+    CONTACT_TARGET_CONFIRMED = "M3_CONTACT_TARGET_CONFIRMED"
+    DETACH_ACK_MISSING = "M3_DETACH_ACK_MISSING"
+    ATTACH_ACK_MISSING = "M3_ATTACH_ACK_MISSING"
+    ATTACH_ACKED_UNPROVEN = "M3_ATTACH_ACKED_UNPROVEN"
+    CHILD_LINK_STATE_UNAVAILABLE = "M3_CHILD_LINK_STATE_UNAVAILABLE"
+    DART_UNSUPPORTED = "M3_DART_UNSUPPORTED"
+    TARGET_NOT_LIFTED = "M3_TARGET_NOT_LIFTED"
+    RELATIVE_POSE_DRIFT = "M3_CAPTURE_RELATIVE_TRANSLATION_EXCEEDED"
+    TARGET_HELD = "M3_TARGET_HELD"
+    RELEASE_ACK_MISSING = "M3_RELEASE_DETACH_ACK_MISSING"
 
 
 @dataclass(frozen=True, slots=True)
 class M3Config(M2Config):
-    """Static scene declarations, not an executable manipulation profile."""
+    """Static M3 scene and non-negotiable native-contact thresholds."""
 
     model_id: str = M3_MODEL_ID
     env_id: str = M3_ENV_ID
@@ -32,6 +61,18 @@ class M3Config(M2Config):
     target_id: str = "m3_target"
     distractor_id: str = "m3_distractor"
     table_id: str = "m3_table"
+    target_link: str = "target_link"
+    parent_link: str = "gripper_mount_link"
+    left_contact_topic: str = "/m3/contacts/left_pad"
+    right_contact_topic: str = "/m3/contacts/right_pad"
+    attach_topic: str = "/m3/detachable_joint/target/attach"
+    detach_topic: str = "/m3/detachable_joint/target/detach"
+    state_topic: str = "/m3/detachable_joint/target/state"
+    contact_samples_required: int = 3
+    contact_span_s: float = 0.100
+    contact_freshness_s: float = 2.0
+    minimum_lift_m: float = 0.080
+    maximum_capture_relative_translation_m: float = 0.010
     table_size_m: tuple[float, float, float] = (0.70, 0.60, 0.04)
     table_pose_xyz: tuple[float, float, float] = (0.40, 0.0, 0.38)
     table_top_z_m: float = 0.40
@@ -44,15 +85,275 @@ class M3Config(M2Config):
     destination_center_xy: tuple[float, float] = (0.48, -0.10)
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
 
-    def validate_assets(self, *, require_vendor: bool = True) -> None:
-        """Fail closed before any M3/M4 manipulation runtime is started."""
+    @property
+    def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
+        return {
+            self.target_id: self.target_initial_xyz,
+            self.distractor_id: self.distractor_initial_xyz,
+        }
 
-        del require_vendor
-        raise RuntimeError(M3_UNAVAILABLE_REASON)
+    @property
+    def ros_package_name(self) -> str:
+        return "openeta_rm75_robotiq2f85_sim"
+
+    def validate_assets(self, *, require_vendor: bool = True) -> None:
+        """Validate only the approved M3 files before a worker starts."""
+
+        # ``dataclass(slots=True)`` creates a replacement class object on
+        # Python 3.11+, for which zero-argument ``super()`` can retain the
+        # pre-decoration class cell.  Name the inherited contract explicitly.
+        M2Config.validate_assets(self, require_vendor=require_vendor)
+        package = self.ros_workspace / "src" / self.ros_package_name
+        required = (
+            package / "config/rm75_robotiq2f85_m3.srdf",
+            package / "launch/m3_gazebo_pickplace.launch.py",
+            package / "urdf/rm75_robotiq2f85_m3.urdf.xacro",
+            package / "worlds/m3_rm75_robotiq2f85_pickplace.sdf",
+        )
+        if not all(path.is_file() for path in required):
+            raise RuntimeError("MODEL_ASSET_NOT_FOUND")
+
+
+@dataclass(frozen=True, slots=True)
+class NativeContactSample:
+    """One timestamped raw Gazebo ``gz.msgs.Contacts`` observation.
+
+    ``collision_names`` are identities read from Gazebo's contact message;
+    they are never inferred from transforms, distances, mesh bounds, or poses.
+    """
+
+    side: str
+    timestamp_s: float
+    received_monotonic_s: float
+    collision_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.side not in {"left", "right"}:
+            raise ValueError("native contact side must be left or right")
+        if not math.isfinite(self.timestamp_s) or self.timestamp_s < 0:
+            raise ValueError("native contact timestamp must be finite and non-negative")
+        if not math.isfinite(self.received_monotonic_s) or self.received_monotonic_s < 0:
+            raise ValueError("native contact receive time must be finite and non-negative")
+        if not self.collision_names:
+            raise ValueError("native contact must include collision identities")
+
+
+@dataclass(frozen=True, slots=True)
+class ContactGateResult:
+    accepted: bool
+    reason_code: ReasonCode
+    left_sample_count: int
+    right_sample_count: int
+    left_span_s: float | None = None
+    right_span_s: float | None = None
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "accepted": self.accepted,
+            "reason_code": self.reason_code.value,
+            "left_sample_count": self.left_sample_count,
+            "right_sample_count": self.right_sample_count,
+            "left_span_s": self.left_span_s,
+            "right_span_s": self.right_span_s,
+            "evidence": dict(self.evidence),
+        }
+
+
+def _identity_kind(
+    names: Sequence[str], config: M3Config, side: str
+) -> ReasonCode | None:
+    """Classify a raw contact message without accepting partial identities."""
+
+    joined = "\n".join(str(name) for name in names)
+    has_target = config.target_id in joined
+    has_distractor = config.distractor_id in joined
+    # The pad stream may only identify its own fingertip and the target.  A
+    # message carrying both objects or an unrelated collision is a mixed
+    # contact, which cannot be promoted by a later good sample.
+    if has_distractor:
+        return ReasonCode.CONTACT_DISTRACTOR
+    if not has_target:
+        return ReasonCode.CONTACT_UNKNOWN
+    expected_tip = f"robotiq_85_{side}_finger_tip_link"
+    opposite_tip = f"robotiq_85_{'right' if side == 'left' else 'left'}_finger_tip_link"
+    if not any(expected_tip in name for name in names) or any(
+        opposite_tip in name for name in names
+    ):
+        return ReasonCode.CONTACT_MIXED
+    recognised = (config.target_id, expected_tip)
+    if any(not any(token in name for token in recognised) for name in names):
+        return ReasonCode.CONTACT_MIXED
+    return None
+
+
+def confirm_native_bilateral_contact(
+    samples: Iterable[NativeContactSample],
+    *,
+    close_completed_sim_time_s: float | None,
+    now_monotonic_s: float,
+    config: M3Config | None = None,
+) -> ContactGateResult:
+    """Accept only stable, post-close, bilateral target contacts.
+
+    Every observed message in the armed window is inspected.  Therefore a
+    distractor, unknown, or mixed event rejects the entire request instead of
+    silently selecting the later target-looking contacts.
+    """
+
+    cfg = config or M3Config()
+    ordered = sorted(samples, key=lambda item: (item.timestamp_s, item.side))
+    by_side: dict[str, list[NativeContactSample]] = {"left": [], "right": []}
+    if close_completed_sim_time_s is None or not math.isfinite(close_completed_sim_time_s):
+        return ContactGateResult(False, ReasonCode.CONTACT_SAMPLE_BEFORE_CLOSE, 0, 0)
+    for sample in ordered:
+        if now_monotonic_s - sample.received_monotonic_s > cfg.contact_freshness_s:
+            return ContactGateResult(
+                False, ReasonCode.CONTACT_SAMPLE_STALE,
+                len(by_side["left"]), len(by_side["right"]),
+            )
+        if sample.timestamp_s <= close_completed_sim_time_s:
+            return ContactGateResult(
+                False, ReasonCode.CONTACT_SAMPLE_BEFORE_CLOSE,
+                len(by_side["left"]), len(by_side["right"]),
+            )
+        rejected = _identity_kind(sample.collision_names, cfg, sample.side)
+        if rejected is not None:
+            return ContactGateResult(
+                False, rejected, len(by_side["left"]), len(by_side["right"]),
+                evidence={"collision_names": list(sample.collision_names), "side": sample.side},
+            )
+        by_side[sample.side].append(sample)
+
+    left, right = by_side["left"], by_side["right"]
+    left_span = left[-1].timestamp_s - left[0].timestamp_s if len(left) > 1 else 0.0
+    right_span = right[-1].timestamp_s - right[0].timestamp_s if len(right) > 1 else 0.0
+    if len(left) < cfg.contact_samples_required or len(right) < cfg.contact_samples_required:
+        return ContactGateResult(False, ReasonCode.CONTACT_INSUFFICIENT_SAMPLES, len(left), len(right), left_span, right_span)
+    if left_span < cfg.contact_span_s or right_span < cfg.contact_span_s:
+        return ContactGateResult(False, ReasonCode.CONTACT_WINDOW_TOO_SHORT, len(left), len(right), left_span, right_span)
+    return ContactGateResult(
+        True, ReasonCode.CONTACT_TARGET_CONFIRMED, len(left), len(right), left_span, right_span,
+        evidence={"target_id": cfg.target_id, "source": "gazebo_native_contacts"},
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ChildLinkProof:
+    """Measured solely from Gazebo's parent/child link state."""
+
+    baseline_target_z_m: float
+    target_z_m: float
+    capture_relative_translation_m: float
+
+    def __post_init__(self) -> None:
+        values = (self.baseline_target_z_m, self.target_z_m, self.capture_relative_translation_m)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("child-link proof must be finite")
+        if self.capture_relative_translation_m < 0:
+            raise ValueError("relative translation cannot be negative")
+
+    @property
+    def lift_m(self) -> float:
+        return self.target_z_m - self.baseline_target_z_m
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationRecord:
+    phase: str
+    verdict: Verdict
+    reason_code: ReasonCode
+    target_id: str
+    grasp_confirmed: bool
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+    schema_version: str = M3_SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "phase": self.phase,
+            "verdict": self.verdict.value,
+            "reason_code": self.reason_code.value,
+            "target_id": self.target_id,
+            "grasp_confirmed": self.grasp_confirmed,
+            "evidence": dict(self.evidence),
+        }
+
+
+class M3Verifier:
+    """Record M3 attach and proof state without any alternate grasp path."""
+
+    def __init__(self, config: M3Config | None = None) -> None:
+        self.config = config or M3Config()
+        self.reset()
+
+    def reset(self) -> VerificationRecord:
+        self.phase = "ready"
+        self.attached = False
+        self._last_record = self._record(Verdict.UNKNOWN, ReasonCode.READY, False)
+        return self._last_record
+
+    @property
+    def last_record(self) -> VerificationRecord:
+        return self._last_record
+
+    def close_result(self, gate: ContactGateResult, *, attach_acked: bool) -> VerificationRecord:
+        if not gate.accepted:
+            self.phase = "contact_rejected"
+            self.attached = False
+            return self._remember(self._record(Verdict.FAIL, gate.reason_code, False, gate=gate.to_dict()))
+        if not attach_acked:
+            self.phase = "attach_unacknowledged"
+            self.attached = False
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False, gate=gate.to_dict()))
+        self.phase = "attach_acked_unproven"
+        self.attached = True
+        return self._remember(self._record(Verdict.UNKNOWN, ReasonCode.ATTACH_ACKED_UNPROVEN, False, gate=gate.to_dict()))
+
+    def prove_lift(self, proof: ChildLinkProof | None, *, dart_supported: bool = True) -> VerificationRecord:
+        if not self.attached:
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False))
+        if not dart_supported:
+            self.phase = "dart_unsupported"
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.DART_UNSUPPORTED, False))
+        if proof is None:
+            self.phase = "child_link_unavailable"
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.CHILD_LINK_STATE_UNAVAILABLE, False))
+        evidence = {
+            "source": "gazebo_pose_info_child_link",
+            "lift_m": proof.lift_m,
+            "capture_relative_translation_m": proof.capture_relative_translation_m,
+            "minimum_lift_m": self.config.minimum_lift_m,
+            "maximum_capture_relative_translation_m": self.config.maximum_capture_relative_translation_m,
+        }
+        if proof.lift_m < self.config.minimum_lift_m:
+            self.phase = "lift_failed"
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.TARGET_NOT_LIFTED, False, **evidence))
+        if proof.capture_relative_translation_m > self.config.maximum_capture_relative_translation_m:
+            self.phase = "relative_translation_failed"
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.RELATIVE_POSE_DRIFT, False, **evidence))
+        self.phase = "held_proven"
+        return self._remember(self._record(Verdict.PASS, ReasonCode.TARGET_HELD, True, **evidence))
+
+    def release_result(self, *, detached_acked: bool) -> VerificationRecord:
+        self.attached = False
+        self.phase = "released" if detached_acked else "release_unacknowledged"
+        return self._remember(self._record(
+            Verdict.UNKNOWN if detached_acked else Verdict.FAIL,
+            ReasonCode.READY if detached_acked else ReasonCode.RELEASE_ACK_MISSING,
+            False,
+        ))
+
+    def _record(self, verdict: Verdict, reason: ReasonCode, grasp: bool, **evidence: Any) -> VerificationRecord:
+        return VerificationRecord(self.phase, verdict, reason, self.config.target_id, grasp, evidence)
+
+    def _remember(self, record: VerificationRecord) -> VerificationRecord:
+        self._last_record = record
+        return record
 
 
 def quaternion_rotate(q: Sequence[float], v: Sequence[float]) -> tuple[float, float, float]:
-    """Rotate vector *v* by an xyzw quaternion without external dependencies."""
+    """Rotate a vector by an xyzw quaternion (retained for M2 callers)."""
 
     if len(q) != 4 or len(v) != 3:
         raise ValueError("quaternion/vector dimensions are invalid")
@@ -62,11 +363,5 @@ def quaternion_rotate(q: Sequence[float], v: Sequence[float]) -> tuple[float, fl
     if not math.isfinite(norm) or norm <= 1e-12:
         raise ValueError("quaternion must be finite and non-zero")
     x, y, z, w = x / norm, y / norm, z / norm, w / norm
-    tx = 2.0 * (y * vz - z * vy)
-    ty = 2.0 * (z * vx - x * vz)
-    tz = 2.0 * (x * vy - y * vx)
-    return (
-        vx + w * tx + (y * tz - z * ty),
-        vy + w * ty + (z * tx - x * tz),
-        vz + w * tz + (x * ty - y * tx),
-    )
+    tx, ty, tz = 2.0 * (y * vz - z * vy), 2.0 * (z * vx - x * vz), 2.0 * (x * vy - y * vx)
+    return (vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx)

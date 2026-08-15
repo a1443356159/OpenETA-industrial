@@ -737,12 +737,13 @@ Do not force uncertainty into success/failure.
 
 ## 11.3 M3 manipulation status
 
-M3 manipulation is disabled. Until an approved native DetachableJoint design
-is implemented, M3/M4 execution must return
-`DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED` before creating a simulator,
-starting a controller, or issuing an action. No compatibility mechanism may
-infer, carry, retain or report a grasp. Historic reports describe a removed
-experiment and cannot satisfy this plan.
+M3 manipulation uses only the approved native Gazebo `DetachableJoint` design.
+Launch begins paused, a fresh detached ACK is mandatory before the first
+physical tick, and post-close native bilateral contacts are mandatory before
+attach. No compatibility mechanism may infer, carry, retain or report a
+grasp. A missing ACK, DART child-link state, or physical proof fails closed.
+Historic soft-adhesion reports describe a removed experiment and cannot
+satisfy this plan.
 
 ---
 
@@ -1357,20 +1358,20 @@ repeatable controlled motion
 
 ## M3 — Physical Verification
 
-Status: disabled. No physical verification, hold, lift, placement or trusted
-result is currently implemented. M3 must fail closed with
-`DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED` until a separately approved
-native DetachableJoint design is implemented. Historic experiment results are
-not acceptance evidence.
+Status: implemented but not formally accepted. M3 admits attach only after
+native bilateral contact and attached ACK, then requires actual child-link
+state proof of >=80 mm lift and <=10 mm capture-relative translation. Missing
+contact/ACK/DART proof fails closed. Historic soft-adhesion results are not
+acceptance evidence.
 
 ---
 
 ## M4 — Full Oracle Pick/Place
 
-Oracle perception may be tested as simulator-only pixel-level output. M4
-manipulation is disabled with the same DetachableJoint error as M3; neither
-Oracle output nor a fake candidate proves a real visual inference or grasp.
-Do not use historic M4 reports as readiness evidence.
+Oracle perception may be tested as simulator-only pixel-level output. M4 uses
+the same M3 contact, ACK, and child-link gates; Oracle output and a fake
+candidate prove neither real visual inference nor a grasp. Do not use historic
+M4 reports as readiness evidence.
 
 ---
 

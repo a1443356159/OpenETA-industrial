@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import hashlib
+import os
 from pathlib import Path
+import time
 from typing import Callable
+from uuid import uuid4
 
 from adapter.protocol import JsonDict
+from agent.runtime.artifact_paths import artifact_session_id
+from agent.runtime.response_artifacts import materialize_json_response
 from agent.backends.planner import PlannerBackend
 from agent.backends.provider_config import PlannerProviderConfig
 from agent.runtime.calibration import (
@@ -111,6 +117,135 @@ McpUrlLoader = Callable[..., str]
 ApprovalCallback = Callable[[ToolExecutionContext], bool]
 PublicationApproval = Callable[[JsonDict], bool]
 SkillApproval = Callable[[str], bool]
+
+M4_CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR = "OPENETA_M4_CONTRACTUAL_FAKE_CANDIDATE"
+M4_CONTRACTUAL_FAKE_CANDIDATE_SCHEMA = "openeta.m4.contractual_fake_grasp_candidate.v1"
+
+
+@dataclass(slots=True)
+class _M4OracleMcpEvidence:
+    """One-use correlated evidence record for the Oracle simulator MCP RPC."""
+
+    proxy_config: SimulatorMcpToolProxyConfig
+    response_output_root: Path
+    pending: tuple[str, JsonDict, JsonDict] | None = None
+
+    def record(self, remote_tool: str, arguments: JsonDict, response: JsonDict) -> None:
+        descriptor_arguments = dict(arguments)
+        image_base64 = descriptor_arguments.pop("image_base64", None)
+        if isinstance(image_base64, str):
+            descriptor_arguments["image_base64_sha256"] = hashlib.sha256(
+                image_base64.encode("ascii", errors="ignore")
+            ).hexdigest()
+            descriptor_arguments["image_base64_chars"] = len(image_base64)
+        self.pending = (remote_tool, descriptor_arguments, dict(response))
+
+    def attach(self, result: ToolResult, context: ToolExecutionContext) -> ToolResult:
+        pending = self.pending
+        self.pending = None
+        if pending is None:
+            return result
+        remote_tool, arguments, response_payload = pending
+        request_id = uuid4().hex
+        session_id = str(self.proxy_config.session_id or "")
+        handle = str(self.proxy_config.handle or "")
+        artifact = materialize_json_response(
+            response_payload,
+            output_root=self.response_output_root,
+            bundle_id=f"m4-oracle-{request_id}",
+            name=f"{remote_tool}-response",
+            session_id=artifact_session_id(context.metadata),
+        )
+        response: JsonDict = {
+            "response_path": artifact.path,
+            "response_chars": artifact.chars,
+            "response_omitted": True,
+            "grep_hint": artifact.grep_hint,
+            "request_id": request_id,
+            "tool": remote_tool,
+            "session_id": session_id,
+            "handle": handle,
+        }
+        request: JsonDict = {
+            "request_id": request_id,
+            "tool": remote_tool,
+            "arguments": arguments,
+        }
+        receipt: JsonDict = {
+            "schema_version": "openeta.environment_receipt.v1",
+            "receipt_id": uuid4().hex,
+            "backend": "simulator_mcp",
+            "agent_tool": "oracle_perceive",
+            "remote_tool": remote_tool,
+            "mcp_request_id": request_id,
+            "execution_id": str(context.metadata.get("execution_id") or ""),
+            "agent_session_id": str(context.metadata.get("session_id") or ""),
+            "simulator_session_id": session_id,
+            "handle": handle,
+            "timestamp_s": time.time(),
+            "reward_present": "reward" in response_payload,
+            "observation_fresh": False,
+        }
+        details = dict(result.details)
+        artifacts = details.get("artifacts")
+        details["artifacts"] = [
+            *(artifacts if isinstance(artifacts, list) else []),
+            artifact.to_dict(),
+        ]
+        details["mcp"] = {
+            "tool": remote_tool,
+            "agent_tool": "oracle_perceive",
+            "session_id": session_id,
+            "handle": handle,
+            "request": request,
+            "response": response,
+        }
+        details["response"] = response
+        details["mcp_calls"] = [
+            {
+                "request": request,
+                "response": response,
+                "environment_receipt": receipt,
+            }
+        ]
+        result.details = details
+        return result
+
+
+def _with_m4_contractual_fake_candidate(
+    handler: Callable[[ToolExecutionContext], ToolResult],
+    *,
+    mcp_evidence: _M4OracleMcpEvidence | None = None,
+) -> Callable[[ToolExecutionContext], ToolResult]:
+    """Add the M4 fixture marker to a successful *Oracle* tool result only.
+
+    This is deliberately data-only: no pose is inferred or acted upon and the
+    marker is never read by the M3 attachment path.  It records that the M4
+    candidate is a contractual fake rather than a visual-model prediction.
+    """
+
+    def wrapped(context: ToolExecutionContext) -> ToolResult:
+        result = handler(context)
+        if not result.success:
+            return result
+        if mcp_evidence is not None:
+            result = mcp_evidence.attach(result, context)
+        details = dict(result.details)
+        result_id = str(details.get("result_id") or "oracle-result")
+        details["perception_source"] = "gazebo_oracle"
+        details["fake_grasp_candidate"] = {
+            "schema_version": M4_CONTRACTUAL_FAKE_CANDIDATE_SCHEMA,
+            "kind": "contractual_fake_grasp_candidate",
+            "candidate_id": f"m4-contractual-{result_id}",
+            "perception_source": "gazebo_oracle",
+            "is_model_prediction": False,
+            "provenance": "oracle_contract_fixture",
+            "oracle_result_id": result_id,
+        }
+        result.details = details
+        return result
+
+    return wrapped
 
 
 REMOTE_PLACEHOLDER_TOOLS = (
@@ -222,6 +357,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
     """Build one fail-closed runtime from shared host configuration."""
 
     workspace = config.workspace
+    simulator_proxy_config = config.simulator_proxy_config or SimulatorMcpToolProxyConfig()
     tools = bind_dummy_tool_handlers(
         build_default_tool_registry(),
         include_dummy_safety=False,
@@ -258,7 +394,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         bind_simulator_mcp_tool_handlers(
             tools,
             transport=config.simulator_transport,
-            config=config.simulator_proxy_config,
+            config=simulator_proxy_config,
             response_callback=config.mcp_response_callback,
             replace=True,
         )
@@ -339,6 +475,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         backend_factory=config.backend_factory,
         artifact_root=artifact_root,
         simulator_transport=config.simulator_transport,
+        simulator_proxy_config=simulator_proxy_config,
     )
 
     planner = ToolCallingPlanner(
@@ -436,6 +573,7 @@ def bind_runtime_perception_tools(
     artifact_root: Path,
     perception_profile: str | None = None,
     simulator_transport: SimulatorMcpTransport | None = None,
+    simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     segmenter_tool = perception_segmenter_tool_name(
         resolve_perception_profile()
@@ -502,14 +640,30 @@ def bind_runtime_perception_tools(
         # pipeline over the existing simulator MCP transport; it is exposed
         # instead of sam3, never alongside it.
         if simulator_transport is not None:
+            proxy_config = simulator_proxy_config or SimulatorMcpToolProxyConfig()
+            m4_mcp_evidence = _M4OracleMcpEvidence(
+                proxy_config=proxy_config,
+                response_output_root=Path(proxy_config.response_output_root),
+            )
+            oracle_handler = build_sam3_handler(
+                build_oracle_perceive_segmenter(
+                    simulator_transport,
+                    handle_provider=lambda: proxy_config.handle,
+                    session_id_provider=lambda: proxy_config.session_id,
+                    response_callback=m4_mcp_evidence.record,
+                ),
+                tool_name="oracle_perceive",
+                output_root=artifact_root / "oracle_perceive_images",
+                result_output_root=artifact_root / "oracle_perceive_results",
+            )
+            if os.environ.get(M4_CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR) == "1":
+                oracle_handler = _with_m4_contractual_fake_candidate(
+                    oracle_handler,
+                    mcp_evidence=m4_mcp_evidence,
+                )
             tools.bind_handler(
                 "oracle_perceive",
-                build_sam3_handler(
-                    build_oracle_perceive_segmenter(simulator_transport),
-                    tool_name="oracle_perceive",
-                    output_root=artifact_root / "oracle_perceive_images",
-                    result_output_root=artifact_root / "oracle_perceive_results",
-                ),
+                oracle_handler,
                 replace=True,
             )
     elif endpoints.sam3_url:
@@ -708,11 +862,11 @@ def _authorize_skill_change(
             "source": "human",
             "reason": "Approved by human operator." if approved else "Human approval denied.",
         }
-    if policy.profile == SupervisionProfile.STANDARD:
+    if policy.profile in {SupervisionProfile.STANDARD, SupervisionProfile.SCRIPTED_TUI}:
         return {
             "approved": True,
-            "source": "runtime_policy",
-            "reason": "Standard profile permits session-local registry changes.",
+            "source": "scripted_tui" if policy.profile == SupervisionProfile.SCRIPTED_TUI else "runtime_policy",
+            "reason": "Scripted TUI permits session-local registry changes." if policy.profile == SupervisionProfile.SCRIPTED_TUI else "Standard profile permits session-local registry changes.",
         }
     reviewed = BackendSkillChangeReviewer(backend_factory()).review(
         request=request,
