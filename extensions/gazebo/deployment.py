@@ -32,10 +32,6 @@ _CONFIG_ENV_NAMES = (
     "OPENETA_GAZEBO_WORLD",
     "OPENETA_GAZEBO_STARTUP_TIMEOUT_S",
     "OPENETA_GAZEBO_OBSERVATION_TIMEOUT_S",
-    # Deliberately keep this retired name in the environment snapshot so an
-    # old worker fails loudly instead of silently selecting an obsolete M3
-    # grasp implementation.
-    "OPENETA_M3_ATTACHMENT_MODE",
 )
 
 
@@ -82,11 +78,6 @@ class GazeboDeploymentConfig:
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> "GazeboDeploymentConfig":
         source = os.environ if environment is None else environment
         snapshot = {name: str(source[name]) for name in _CONFIG_ENV_NAMES if name in source}
-        if "OPENETA_M3_ATTACHMENT_MODE" in snapshot:
-            raise ValueError(
-                "OPENETA_M3_ATTACHMENT_MODE is retired; M3 always uses "
-                "bilateral_contact_adhesion_v1"
-            )
         launch_arguments = _json_value(snapshot, "OPENETA_GAZEBO_LAUNCH_ARGUMENTS", [])
         extrinsics = _json_value(snapshot, "OPENETA_GAZEBO_CAMERA_EXTRINSICS", {})
         if not isinstance(launch_arguments, list):

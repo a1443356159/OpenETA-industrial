@@ -735,29 +735,14 @@ Do not force uncertainty into success/failure.
 
 ---
 
-## 11.3 Bilateral-contact kinematic adhesion
+## 11.3 M3 manipulation status
 
-M3 uses repository-owned kinematic adhesion after Gazebo's two real fingertip
-contact sensors prove the same known object is simultaneously present at both
-pads. The physics engine remains authoritative for contact and post-release
-settling, not for holding the object.
-
-```text
-fresh left-pad contact window
-+
-fresh right-pad contact window
-+
-same target or distractor identity
-→ capture with bilateral_contact_adhesion_v1
-
-gripper open
-→ open, release, restore dynamics, settle
-```
-
-The plugin is isolated in the Gazebo embodiment layer and its state alone is
-never a task-success proof: `TARGET_HELD` still requires stable relative pose,
-actual target lift, and no distractor co-motion. Do not leak this
-simulator-only mechanism into Planner logic.
+M3 manipulation is disabled. Until an approved native DetachableJoint design
+is implemented, M3/M4 execution must return
+`DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED` before creating a simulator,
+starting a controller, or issuing an action. No compatibility mechanism may
+infer, carry, retain or report a grasp. Historic reports describe a removed
+experiment and cannot satisfy this plan.
 
 ---
 
@@ -1372,48 +1357,20 @@ repeatable controlled motion
 
 ## M3 — Physical Verification
 
-Implement:
-
-```text
-grasp verification
-placement verification
-trusted environment result
-```
-
-Acceptance:
-
-Positive and negative test scenes must both pass.
-
-Explicitly test:
-
-```text
-successful grasp
-empty gripper close
-wrong-object grasp
-object dropped during lift
-successful placement
-object outside destination
-```
+Status: disabled. No physical verification, hold, lift, placement or trusted
+result is currently implemented. M3 must fail closed with
+`DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED` until a separately approved
+native DetachableJoint design is implemented. Historic experiment results are
+not acceptance evidence.
 
 ---
 
 ## M4 — Full Oracle Pick/Place
 
-Use Gazebo ground truth perception.
-
-Goal:
-
-```text
-LLM
-→ grasp planning
-→ placement planning
-→ MoveIt
-→ Gazebo
-→ verifier
-→ fresh observation
-```
-
-Do not proceed to SAM3 until this path is reliable.
+Oracle perception may be tested as simulator-only pixel-level output. M4
+manipulation is disabled with the same DetachableJoint error as M3; neither
+Oracle output nor a fake candidate proves a real visual inference or grasp.
+Do not use historic M4 reports as readiness evidence.
 
 ---
 

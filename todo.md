@@ -59,12 +59,10 @@ when work advances; do not start later milestones early.
       structured action routing, worker profile registration, and contract tests.
 - [x] M2 live ROS action client/launch verification using the repository-owned
       Jazzy/Harmonic RM75 + Robotiq 2F-85 profile and frozen vendor assets.
-- [ ] M3 bilateral-contact adhesion grasp and placement verification. The
-      native dual-pad contact gate, deterministic kinematic carry, verifier,
-      PlanningScene integration, worker/MCP route and acceptance driver are
-      implemented. Completion requires the clean-SHA cloud M0–M4 report.
-- [ ] M4 oracle pick/place. Completion requires three live Oracle seeds to
-      reach `TARGET_HELD` after the M0–M3 predecessor gates pass.
+- [ ] M3/M4 manipulation is intentionally unavailable until an approved
+      DetachableJoint design and implementation exist. The current profile
+      fails closed with `DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`; old
+      reports are diagnostic evidence only.
 - [ ] M5+ SAM3 integration and industrial benchmark.
 
 ## M2 verification
@@ -98,13 +96,9 @@ when work advances; do not start later milestones early.
 
 ## Formal cloud acceptance
 
-- [ ] Run `bash scripts/run_cloud_m0_m4_acceptance.sh` with
-      `OPENETA_CLOUD_ACCEPTANCE_ROOT` set to a dedicated cloud data disk.
-      The entry point verifies a clean detached checkout at an `origin` SHA,
-      builds once, runs M0–M4 serially, and preserves its immutable report and
-      complete per-milestone logs under `.cache/cloud-m0-m4-<UTC>-<SHA>/`.
-- [ ] Update milestone completion only when that report records every M0–M4
-      gate as passed. A blocked or failed predecessor prevents M4 execution.
+- [ ] No M3/M4 cloud acceptance may run before DetachableJoint design approval.
+      The retained command is status-only and reports the blocked state; it
+      does not build, launch, connect to MCP or claim a pass.
 
 ## Runtime configuration
 

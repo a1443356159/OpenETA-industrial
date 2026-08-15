@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Human-operated TUI acceptance coordinator for the Gazebo M0--M3 chain.
+"""Human-operated TUI acceptance coordinator for the Gazebo M0--M2 chain.
 
 The coordinator owns isolation, evidence locations, process groups and report
 assembly.  It intentionally does not impersonate the operator: all mutating
@@ -27,7 +27,7 @@ import uuid
 
 
 SCHEMA_VERSION = "openeta.tui_gazebo_acceptance.v1"
-MILESTONES = ("m0", "m1", "m2", "m3")
+MILESTONES = ("m0", "m1", "m2")
 DETERMINISTIC = "deterministic"
 AUTONOMY = "planner_autonomy"
 PROTECTED_DOMAINS = frozenset({42, 100})
@@ -55,7 +55,6 @@ ENV_IDS = {
     "m0": "openeta/dummy_sim-v0",
     "m1": "openeta/gazebo_live_rgbd-v0",
     "m2": "openeta/gazebo_rm75_robotiq2f85-v0",
-    "m3": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
 }
 INFRA_CODES = frozenset(
     {
@@ -250,10 +249,6 @@ def instructions_for(milestone: str, mode: str) -> str:
         prompts = {
             "m1": "检查 Gazebo 现场，并基于传感器证据报告所见。完成后关闭环境。",
             "m2": "在碰撞安全的 A/B 位姿之间安全移动两次，并验证夹爪开合。完成后关闭环境。",
-            "m3": (
-                "依据 observation 的 object state 和 physical verification，"
-                "将 m3_target 放入 destination；不要使用 SAM3。完成后关闭环境。"
-            ),
         }
         return prompts.get(milestone, "M0 不运行 Planner 自主性 case。") + "\n"
     rows = {
@@ -267,10 +262,6 @@ def instructions_for(milestone: str, mode: str) -> str:
         "m2": """仅使用 direct-gate.json 冻结的 collision_checked poses A/B。
 执行两轮 A↔B、两轮 open→close→open、一次冻结的不可达目标、observe、close。
 不得改写任何目标。逐一批准所有 human_gated 提示，最后 /quit。
-""",
-        "m3": """direct gate 必须已是 5/5。正向拾放两次；再分别用 seed 51、52、53、54
-创建四个独立负例环境，得到 EMPTY_GRASP、WRONG_OBJECT、OBJECT_DROPPED、
-OUTSIDE_DESTINATION。每个环境均须 close；逐一批准 human_gated 提示，最后 /quit。
 """,
     }
     return rows[milestone]
@@ -677,50 +668,6 @@ def _verify_m2(calls: Sequence[Mapping[str, Any]], direct_gate: Mapping[str, Any
     return errors
 
 
-def _verify_m3(calls: Sequence[Mapping[str, Any]], direct_gate: Mapping[str, Any]) -> list[str]:
-    errors: list[str] = []
-    if (
-        direct_gate.get("status") != "passed"
-        or direct_gate.get("passes") != 5
-        or direct_gate.get("attempts") != 5
-        or direct_gate.get("collision_checked") is not True
-    ):
-        errors.append("M3 direct gate is not frozen at 5/5")
-    reasons = [str(value) for call in calls for value in _values(_result(call), "reason_code")]
-    for reason, count in (("LIFT_REQUIRED", 2), ("TARGET_HELD", 2), ("TARGET_PLACED", 2)):
-        if reasons.count(reason) < count:
-            errors.append(f"M3 positive path lacks two {reason} verdicts")
-    for reason in ("EMPTY_GRASP", "WRONG_OBJECT", "OBJECT_DROPPED", "OUTSIDE_DESTINATION"):
-        if reasons.count(reason) != 1:
-            errors.append(f"M3 requires exactly one {reason} negative verdict")
-    seeds = [value for call in calls for value in _values(call, "seed")]
-    if not all(seed in seeds for seed in (51, 52, 53, 54)):
-        errors.append("M3 negative environments do not use seeds 51–54")
-    physical = [
-        item for call in calls for item in _walk(_result(call))
-        if isinstance(item, Mapping) and item.get("schema_version") == "m3_physical_verification_v1"
-    ]
-    if not physical:
-        errors.append("M3 physical verification receipts missing")
-    for item in physical:
-        if not (_contains(item, "contacts") or _contains(item, "contact_evidence")):
-            errors.append("M3 receipt lacks real contact evidence")
-        if not (_contains(item, "objects") or _contains(item, "object_evidence")):
-            errors.append("M3 receipt lacks object evidence")
-    physical_calls = [
-        call
-        for call in calls
-        if _contains(_result(call), "schema_version", "m3_physical_verification_v1")
-    ]
-    for call in physical_calls:
-        result = _result(call)
-        if len(_camera_frames(result)) < 2 or not _contains(result, "observation_fresh", True):
-            errors.append("M3 physical verdict lacks fresh dual RGB-D")
-        if not _contains(result, "schema_version", "openeta.environment_receipt.v1"):
-            errors.append("M3 physical verdict lacks trusted environment receipt")
-    return errors
-
-
 def verify_case(
     paths: CasePaths,
     milestone: str,
@@ -748,8 +695,6 @@ def verify_case(
             errors.extend(_verify_m1(calls))
         elif milestone == "m2":
             errors.extend(_verify_m2(calls, direct_gate or {}))
-        elif milestone == "m3":
-            errors.extend(_verify_m3(calls, direct_gate or {}))
         error_codes = {str(value) for event in events for value in _values(event, "error_code")}
         infra = bool(error_codes & INFRA_CODES) or any(
             "inconclusive" in error for error in errors
@@ -826,7 +771,7 @@ def _new_run_root(repo: Path, requested: str) -> Path:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", default="")
-    parser.add_argument("--direct-gates", default="", help="JSON with frozen M2/M3 direct gates")
+    parser.add_argument("--direct-gates", default="", help="JSON with frozen M2 direct gates")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     return parser

@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .m2 import M2Config
-from .m3 import M3Config
+from .m3 import M3Config, M3_UNAVAILABLE_REASON
 from .observation import RosRgbdCameraConfig
 
 
@@ -35,10 +35,15 @@ class GazeboProfile:
     cameras: tuple[RosRgbdCameraConfig, ...]
     capabilities: frozenset[str]
     model_config: M2Config | None = None
+    unavailable_reason: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.name or not self.launch_package or not self.launch_file or not self.world_name:
-            raise ValueError("Gazebo profile identifiers must be non-empty")
+        if not self.name:
+            raise ValueError("Gazebo profile name must be non-empty")
+        if self.unavailable_reason is None and (
+            not self.launch_package or not self.launch_file or not self.world_name
+        ):
+            raise ValueError("available Gazebo profile identifiers must be non-empty")
         if not self.cameras:
             raise ValueError("Gazebo profile must declare at least one RGB-D camera")
         if PHYSICS in self.capabilities and CONTROL not in self.capabilities:
@@ -83,10 +88,10 @@ _PROFILES: Mapping[str, GazeboProfile] = MappingProxyType({
         capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT}, model_config=M2Config(),
     ),
     "m3_pickplace": GazeboProfile(
-        name="m3_pickplace", launch_package="openeta_rm75_robotiq2f85_sim",
-        launch_file="m3_gazebo_pickplace.launch.py", world_name="m3_rm75_robotiq2f85_pickplace",
+        name="m3_pickplace", launch_package="", launch_file="", world_name="",
         cameras=(_camera(), _camera(wrist=True)),
-        capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT, PHYSICS}, model_config=M3Config(),
+        capabilities=_BASE, model_config=M3Config(),
+        unavailable_reason=M3_UNAVAILABLE_REASON,
     ),
 })
 

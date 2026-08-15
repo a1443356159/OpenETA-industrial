@@ -1,237 +1,26 @@
-"""Offline contracts for the clean-SHA cloud acceptance coordinator."""
+"""The former cloud coordinator must remain unable to start M3/M4 work."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
-import socket
-import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
-
-import pytest
 
 
-_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "cloud_m0_m4_acceptance.py"
-_SPEC = importlib.util.spec_from_file_location("cloud_m0_m4_acceptance", _SCRIPT)
-assert _SPEC and _SPEC.loader
-cloud = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = cloud
-_SPEC.loader.exec_module(cloud)
-
-_M0_M1_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "cloud_m0_m1_acceptance.py"
-_M0_M1_SPEC = importlib.util.spec_from_file_location("cloud_m0_m1_acceptance", _M0_M1_SCRIPT)
-assert _M0_M1_SPEC and _M0_M1_SPEC.loader
-m0_m1 = importlib.util.module_from_spec(_M0_M1_SPEC)
-sys.modules[_M0_M1_SPEC.name] = m0_m1
-_M0_M1_SPEC.loader.exec_module(m0_m1)
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "cloud_m0_m4_acceptance.py"
+SPEC = importlib.util.spec_from_file_location("cloud_m0_m4_acceptance", SCRIPT)
+assert SPEC and SPEC.loader
+cloud = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = cloud
+SPEC.loader.exec_module(cloud)
 
 
-def _git(cwd: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", *args], cwd=cwd, text=True, capture_output=True, check=False
-    )
-    assert completed.returncode == 0, completed.stderr
-    return completed.stdout.strip()
-
-
-def _origin_backed_repo(tmp_path: Path) -> tuple[Path, Path]:
-    remote = tmp_path / "origin.git"
-    source = tmp_path / "source"
-    _git(tmp_path, "init", "--bare", str(remote))
-    _git(tmp_path, "init", str(source))
-    _git(source, "config", "user.email", "acceptance@example.test")
-    _git(source, "config", "user.name", "Acceptance Test")
-    (source / "tracked.txt").write_text("clean\n", encoding="utf-8")
-    _git(source, "add", "tracked.txt")
-    _git(source, "commit", "-m", "initial")
-    _git(source, "remote", "add", "origin", str(remote))
-    _git(source, "push", "origin", "HEAD:main")
-    return source, remote
-
-
-def test_clean_checkout_is_detached_clean_and_origin_backed(tmp_path: Path) -> None:
-    source, _remote = _origin_backed_repo(tmp_path)
-    work_root = tmp_path / "data-disk"
-
-    checkout = cloud.create_clean_checkout(source, work_root)
-
-    assert checkout.checkout.is_dir()
-    assert cloud._git(checkout.checkout, "rev-parse", "HEAD") == checkout.commit
-    assert cloud._git(checkout.checkout, "status", "--porcelain=v1") == ""
-    assert cloud._origin_refs(checkout.checkout)[checkout.origin_ref] == checkout.commit
-
-
-def test_dirty_source_is_rejected_before_clone(tmp_path: Path) -> None:
-    source, _remote = _origin_backed_repo(tmp_path)
-    (source / "uncommitted.txt").write_text("not clean\n", encoding="utf-8")
-
-    with pytest.raises(cloud.CloudAcceptanceError, match="SOURCE_WORKTREE_DIRTY"):
-        cloud.create_clean_checkout(source, tmp_path / "data-disk")
-
-
-def test_dry_run_writes_one_immutable_sha_specific_total_report(tmp_path: Path) -> None:
-    source, _remote = _origin_backed_repo(tmp_path)
-
-    code, report_path = cloud.orchestrate(
-        source_repo=source,
-        work_root=tmp_path / "data-disk",
-        python_arg=sys.executable,
-        dry_run=True,
-    )
-
-    assert code == cloud.SUCCESS
-    assert report_path is not None and report_path.is_file()
+def test_cloud_entry_reports_m3_blocked_and_never_schedules_m4(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    assert cloud.main(["--report", str(report_path)]) == 2
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["status"] == "dry_run"
-    assert report["checkout"]["commit"] == cloud._git(source, "rev-parse", "HEAD")
-    assert set(report["commands"]) == set(cloud.MILESTONES)
-
-
-def test_checkout_pythonpath_preserves_ros_setup_packages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("PYTHONPATH", "/opt/ros/jazzy/lib/python3.12/site-packages")
-
-    assert cloud._checkout_pythonpath(tmp_path) == (
-        f"{tmp_path}:/opt/ros/jazzy/lib/python3.12/site-packages"
-    )
-
-
-def test_resolve_python_keeps_the_explicit_venv_entrypoint(tmp_path: Path) -> None:
-    venv_python = tmp_path / "venv" / "bin" / "python"
-    venv_python.parent.mkdir(parents=True)
-    venv_python.symlink_to(Path(sys.executable))
-
-    assert cloud._resolve_python(tmp_path, str(venv_python)) == str(venv_python)
-
-
-def test_report_selection_and_existing_gate_status(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-    paths = cloud.RunPaths(root, root / "logs", root / "reports", root / "total.json", root / "stdout.log")
-    paths.reports.mkdir(parents=True)
-    m2 = paths.reports / "m2-robotiq2f85-acceptance.json"
-    m2.write_text(
-        '{"gates":{"direct_live":{"status":"passed"},"mcp_live":{"status":"passed"}}}',
-        encoding="utf-8",
-    )
-
-    assert cloud._report_for_milestone(paths, "m2") == m2
-    assert cloud._result_status(m2) == "passed"
-    assert cloud._final_status({"m0": {"status": "passed"}}) == ("failed", cloud.FAILED)
-    assert cloud._final_status({"m0": {"status": "blocked"}}) == ("blocked", cloud.BLOCKED)
-
-
-def test_cloud_commands_keep_m2_m3_drivers_and_use_dedicated_m0_m1_m4_drivers(tmp_path: Path) -> None:
-    paths = cloud.RunPaths(tmp_path, tmp_path / "logs", tmp_path / "reports", tmp_path / "total.json", tmp_path / "stdout.log")
-    commands = {
-        milestone: cloud._milestone_command(tmp_path, "/python", milestone, paths)
-        for milestone in cloud.MILESTONES
-    }
-
-    assert commands["m2"][-1].endswith("run_m2_robotiq2f85_smoke.sh")
-    assert commands["m3"][-1].endswith("run_m3_pickplace_acceptance.sh")
-    assert any(item.endswith("cloud_m0_m1_acceptance.py") for item in commands["m0"])
-    assert any(item.endswith("cloud_m0_m1_acceptance.py") for item in commands["m1"])
-    assert any(item.endswith("cloud_m4_oracle_acceptance.py") for item in commands["m4"])
-
-
-def test_m1_world_matches_the_headless_rgbd_demo() -> None:
-    assert m0_m1.M1_WORLD == "lidar_sensor"
-
-
-def test_m1_failed_segment_is_retained_in_the_final_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    direct = {"status": "failed", "error": "GazeboProcessError: readiness"}
-    monkeypatch.setattr(m0_m1, "_m1_direct", lambda *_args, **_kwargs: direct)
-    monkeypatch.setattr(
-        m0_m1,
-        "_m1_mcp",
-        lambda *_args, **_kwargs: pytest.fail("MCP must not run after direct failure"),
-    )
-
-    report = m0_m1.run_milestone("m1", python="/python", artifact_dir=tmp_path)
-
-    assert report["status"] == "failed"
-    assert report["segments"]["direct"] is direct
-
-
-def test_m1_direct_command_sources_the_built_overlay(tmp_path: Path) -> None:
-    setup = tmp_path / "overlay" / "setup.bash"
-    setup.parent.mkdir()
-    setup.write_text("# test overlay\n", encoding="utf-8")
-
-    command = m0_m1._m1_direct_command(
-        python="/venv/bin/python", report=tmp_path / "direct.json",
-        artifact_dir=tmp_path / "artifacts",
-        environment={"OPENETA_GAZEBO_OVERLAY": str(setup.parent)},
-    )
-
-    assert command[:5] == ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(setup)]
-    assert command[5:8] == ["/venv/bin/python", str(_M0_M1_SCRIPT), "m1-direct"]
-
-
-def test_mcp_server_command_sources_the_built_overlay(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    setup = tmp_path / "overlay" / "setup.bash"
-    setup.parent.mkdir()
-    setup.write_text("# test overlay\n", encoding="utf-8")
-    allocation = SimpleNamespace(port=19001)
-    captured: dict[str, object] = {}
-
-    def fake_popen(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        return SimpleNamespace()
-
-    monkeypatch.setattr(m0_m1.subprocess, "Popen", fake_popen)
-    m0_m1._start_mcp(
-        "/venv/bin/python", allocation,
-        {"OPENETA_GAZEBO_OVERLAY": str(setup.parent)}, tmp_path / "mcp.log",
-    )
-
-    command = captured["command"]
-    assert command[:5] == ["bash", "-c", 'source "$1"; shift; exec "$@"', "--", str(setup)]
-    assert command[5:] == ["/venv/bin/python", "-m", "sim.mcp_server", "--port", "19001"]
-
-
-def test_port_probe_rejects_an_active_listener() -> None:
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    try:
-        assert not m0_m1._port_is_free(listener.getsockname()[1])
-    finally:
-        listener.close()
-
-
-def test_m1_live_rgbd_validator_rejects_stale_or_nonlive_observations() -> None:
-    observation = {
-        "metadata": {"observation_provenance": "gazebo_ros_live"},
-        "cameras": [{
-            "frame_id": "top", "rgb_base64": "rgb", "depth_base64": "depth",
-            "timestamp_s": 4.0,
-            "intrinsics": {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5},
-            "extrinsics": {"frame_transform": "camera_to_world"},
-        }],
-    }
-
-    assert m0_m1._validate_m1_observation(observation, previous=None) == {"top": 4.0}
-    mapped = {
-        "metadata": {"observation_provenance": "gazebo_ros_live"},
-        "cameras": {
-            "top": {
-                key: value for key, value in observation["cameras"][0].items()
-                if key != "frame_id"
-            },
-        },
-    }
-    assert m0_m1._validate_m1_observation(mapped, previous=None) == {"top": 4.0}
-    with pytest.raises(m0_m1.AcceptanceError, match="M1_STALE_RGBD"):
-        m0_m1._validate_m1_observation(observation, previous={"top": 4.0})
-    observation["metadata"]["observation_provenance"] = "gazebo_oracle"
-    with pytest.raises(m0_m1.AcceptanceError, match="M1_NONLIVE_PROVENANCE"):
-        m0_m1._validate_m1_observation(observation, previous=None)
+    assert report["status"] == "blocked"
+    assert report["reason_code"] == cloud.UNAVAILABLE_REASON
+    assert report["milestones"]["m3"]["status"] == "blocked"
+    assert report["milestones"]["m4"]["status"] == "not_run"

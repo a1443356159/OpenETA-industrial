@@ -228,21 +228,15 @@
   plan-only and was not reused. The former `ROS_NOT_READY` blocker is resolved
   by the repository-owned Robotiq profile and `RosM2ControllerFactory`.
 
-- M3 contact, grasp, attachment, and placement physics are now implemented as
-  an isolated development checkpoint. Formal M3 acceptance remains pending:
-  the first live candidate reached pregrasp but did not establish bilateral
-  fingertip contact or a stall in the 32–48 mm aperture band, and Harmonic did
-  not publish empty Contact heartbeats for non-contacting fingertips. The
-  fail-closed verifier therefore returned `UNKNOWN` rather than claiming a
-  grasp. See `docs/gazebo-m3-physical-verification.md`.
+- M3/M4 contact, grasp, attachment and placement work was removed after the
+  experiment proved invalid. Current M3/M4 requests fail closed with
+  `DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`. Earlier M3 reports are only
+  diagnostic evidence and cannot establish a milestone pass. See
+  `docs/gazebo-m3-physical-verification.md`.
 
 - 2026-08-10 update: **M2 formal acceptance PASSED** (report
   `m2-robotiq2f85-acceptance-20260810T194732Z-542318.json`, all gates including
-  isolation cleanup). M3's original contact-pose planning blocker is root-caused
-  and fixed (PlanningScene ACM now covers measured table/grasp contact pairs;
-  the driver uses a reachable horizontal-closing-axis orientation family; the
-  gripper adapter holds at stall and ramps the stroke). M3 remains NOT formally
-  accepted: the close/lift physics still shows ~50% first-touch variance
-  (EMPTY_GRASP vs clean stall). The M1 WSL2 topic-discovery timeout is resolved
+  isolation cleanup). M2 remains separate from the removed M3/M4 experiment.
+  The M1 WSL2 topic-discovery timeout is resolved
   (cold-start budget 15 s -> 30 s; stale CPU-bound gz processes were the
   environmental trigger); both M1 live tests pass repeatedly.

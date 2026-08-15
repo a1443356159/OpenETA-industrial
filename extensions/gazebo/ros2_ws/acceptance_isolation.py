@@ -1,4 +1,4 @@
-"""Evidence-only isolation probes shared by the live M2 and M3 acceptances.
+"""Evidence-only isolation probes shared by live Gazebo diagnostics.
 
 This module deliberately avoids ros2cli graph listing.  ros2cli may start a
 daemon and consequently changes the thing an acceptance run is trying to

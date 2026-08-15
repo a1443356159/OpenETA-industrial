@@ -92,6 +92,10 @@ class _ResetController:
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:
     for profile in gazebo_profiles().values():
         runtime = SimpleNamespace(started=False, close=lambda: None)
+        if profile.unavailable_reason:
+            with pytest.raises(RuntimeError, match=profile.unavailable_reason):
+                GazeboDirectEnv(profile=profile, deployment=_deployment(), runtime=runtime)
+            continue
         env = GazeboDirectEnv(profile=profile, deployment=_deployment(), runtime=runtime)
         assert type(env) is GazeboDirectEnv
         assert runtime.started is False
@@ -175,13 +179,6 @@ def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit
     assert config.gz_partition == "locked"
     assert config.launch_arguments == ("rviz:=false",)
     assert config.process_environment["ROS2CLI_NO_DAEMON"] == "1"
-
-
-def test_deployment_rejects_retired_m3_attachment_mode() -> None:
-    with pytest.raises(ValueError, match="OPENETA_M3_ATTACHMENT_MODE is retired"):
-        GazeboDeploymentConfig.from_environment({
-            "OPENETA_M3_ATTACHMENT_MODE": "detachable",
-        })
 
 
 def test_manager_rejects_second_gazebo_and_retires_worker_on_release() -> None:

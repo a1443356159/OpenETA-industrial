@@ -327,7 +327,8 @@ class RobotiqGripperActionAdapter(Node):
                             # Match the documented ros2_control stall-success
                             # result: the action terminal state is successful,
                             # while physical grasp success remains exclusively
-                            # the M3 verifier's job.  Hold every joint of the
+                            # a higher-level manipulation verifier's job.
+                            # Hold every joint of the
                             # contacted side at its own measured position plus
                             # at most a small per-joint offset toward its
                             # target.  Snapping the stressed four-bar linkage

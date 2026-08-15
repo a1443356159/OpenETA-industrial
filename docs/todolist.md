@@ -125,23 +125,19 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
 
 ## Gazebo Milestones
 
-- [ ] M4 (revised, 2026-08-10): oracle perception as a SAM3-shaped perception
-  module for `openeta/gazebo_rm75_robotiq2f85_pickplace-v0`.
+- [ ] M4: Oracle perception remains a SAM3-shaped simulator-only perception
+  module. M4 manipulation is disabled pending an approved DetachableJoint.
   - [x] `oracle_perceive` reuses the SAM3 handler/contract/selection flow end
     to end (agent tool -> sim MCP -> bench_worker -> pure geometric projection
     in `extensions/gazebo/oracle_perception.py`).
   - [x] `OPENETA_PERCEPTION_PROFILE=sam3|oracle` (default `sam3`); exactly one
     segmenter tool is exposed to the planner per profile, with provenance
     marked in response metadata, artifacts, and Working Memory facts.
-  - [x] Phased MoveIt primitives (`move_to` / `gripper_control`) instead of a
-    `pick_place` orchestration tool (waived by user).
   - [x] Offline tests: 39 new (worker 16+13, agent contract 10) + 5
     execution-link patch tests; full offline suite 1320 passed, 0 failed.
-  - [ ] Live acceptance (`tests/test_gazebo_m4_oracle_pick_chain.py`,
-    `OPENETA_RUN_LIVE_ROS_TEST=1`): each declared seed must reach
-    `TARGET_HELD` through the M3 bilateral-contact-adhesion hard gate. The
-    cloud M0–M4 runner executes three seeds and rejects motion, contact, hold,
-    or cleanup failures; it does not use expected-failure exemptions.
+  - [ ] Manipulation/live acceptance: fail-closed with
+    `DETACHABLE_JOINT_UNIMPLEMENTED_OR_UNAPPROVED`; historical results are not
+    acceptance evidence.
   - Out of scope: wrist projection, pick_place NOT_READY gate, unified object
     summary schema (plan.md §17), SAM3-side changes, M6 fine-tuning.
   - Details: `docs/gazebo-m4-oracle-perception.md`.

@@ -10,21 +10,14 @@ from typing import Any, Callable, Mapping
 from adapter.protocol import EnvObservation, RobotState
 
 from .deployment import GazeboDeploymentConfig
-from .adhesion import GazeboM3AdhesionControl
-from .m3 import (
-    M3Config,
-    fingertip_collision_center_m,
-    quaternion_rotate,
-)
 from .observation import RosRgbdCameraConfig, RosRgbdCameraSource
 from .process import (
     GazeboProcessError,
     GazeboWorldControl,
     Ros2LaunchProcess,
 )
-from .profiles import CONTROL, PHYSICS, GazeboProfile
+from .profiles import CONTROL, GazeboProfile
 from .ros_control import RosM2ControllerFactory
-from .ros_physics import RosM3PhysicsSourceFactory
 
 
 class GazeboRuntime:
@@ -44,7 +37,6 @@ class GazeboRuntime:
         launch_factory: Callable[..., Any] = Ros2LaunchProcess,
         camera_factory: Callable[..., Any] = RosRgbdCameraSource,
         controller_factory: Any | None = None,
-        physics_factory: Any | None = None,
         world_control: Any | None = None,
     ) -> None:
         self.deployment = deployment
@@ -55,29 +47,18 @@ class GazeboRuntime:
         self._controller_factory = controller_factory or RosM2ControllerFactory(
             readiness_timeout_s=deployment.startup_timeout_s
         )
-        self._physics_factory = physics_factory or RosM3PhysicsSourceFactory()
         self._world = world_control or GazeboWorldControl(
             world_name=deployment.world_override or profile.world_name,
             gz_executable=deployment.gz_executable,
             environment=deployment.process_environment,
         )
-        # M3 has one grasp mechanism: the repository-owned native-contact
-        # adhesion plugin.  M2 never creates this control plane.
-        self.adhesion: Any | None = None
-        if PHYSICS in profile.capabilities and isinstance(profile.model_config, M3Config):
-            self.adhesion = GazeboM3AdhesionControl(
-                gz_executable=deployment.gz_executable,
-                environment=deployment.process_environment,
-            )
         self._launch: Any | None = None
         self._cameras: list[Any] = []
         self.controller: Any | None = None
-        self.physics_source: Any | None = None
         self.started = False
         self.closed = False
         self.start_count = 0
         self.scene_epoch = 0
-        self.grasp_center_offset_m: tuple[float, float, float] | None = None
         self._ros_context: Any | None = None
         self._ros_executor: Any | None = None
         self._ros_thread: threading.Thread | None = None
@@ -117,6 +98,8 @@ class GazeboRuntime:
             raise GazeboProcessError("Gazebo runtime is closed")
         if self.started:
             return
+        if self.profile.unavailable_reason:
+            raise GazeboProcessError(self.profile.unavailable_reason)
         deadline = time.monotonic() + self.deployment.startup_timeout_s
         try:
             self._start_ros_graph()
@@ -147,13 +130,6 @@ class GazeboRuntime:
                 wait_ready = getattr(self.controller, "wait_ready", None)
                 if callable(wait_ready):
                     wait_ready(self._remaining(deadline))
-            if PHYSICS in self.profile.capabilities:
-                if self.controller is None or not isinstance(self.profile.model_config, M3Config):
-                    raise GazeboProcessError("M3_RUNTIME_INCOMPLETE")
-                self.physics_source = self._physics_factory.create(
-                    self.controller, self.profile.model_config,
-                    context=self._ros_context, executor=self._ros_executor,
-                )
             self.started = True
             self.start_count += 1
         except Exception:
@@ -164,45 +140,6 @@ class GazeboRuntime:
         if self.controller is None:
             return RobotState()
         return self.controller.state_provider()
-
-    def _measure_grasp_center_offset(self) -> None:
-        """Refresh the grasp-centre offset at the contact aperture.
-
-        The six position-served linkage members drift a few millimetres per
-        open/close cycle, so a boot-time constant placement error grows into
-        pad-plane misses.  Measuring the fingertip collision centres through
-        live TF at the aperture the pads will have on the target keeps every
-        round's approach centred.
-        """
-
-        config = self.profile.model_config
-        if not isinstance(config, M3Config):
-            return
-        runtime = getattr(self.controller, "runtime", None)
-        if runtime is None:
-            return
-        probed = runtime.gripper(0.41, 15.0)
-        if not probed.get("ok"):
-            raise GazeboProcessError("grasp-centre measurement grip failed")
-        from rclpy.time import Time
-
-        buffer = runtime.state_source.tf_buffer
-        mesh_dir = config.gripper_asset_root / "meshes" / "collision" / "2f_85"
-        centers = []
-        for link in config.fingertip_links:
-            side = "left" if "left" in link else "right"
-            transform = buffer.lookup_transform(config.mount_child, link, Time()).transform
-            translation = (transform.translation.x, transform.translation.y, transform.translation.z)
-            rotation = (
-                transform.rotation.x, transform.rotation.y,
-                transform.rotation.z, transform.rotation.w,
-            )
-            local = fingertip_collision_center_m(mesh_dir / f"{side}_finger_tip.stl")
-            rotated = quaternion_rotate(rotation, local)
-            centers.append(tuple(translation[index] + rotated[index] for index in range(3)))
-        self.grasp_center_offset_m = tuple(
-            sum(item[index] for item in centers) / 2 for index in range(3)
-        )
 
     def observe(
         self,
@@ -236,44 +173,12 @@ class GazeboRuntime:
 
     def reset(self, *, seed: int | None = None) -> EnvObservation:
         self._start()
-        if self.physics_source is not None:
-            planning = getattr(self.physics_source, "planning_scene", None)
-            if planning is not None:
-                planning.clear()
-            clear = getattr(self.physics_source, "clear", None)
-            if callable(clear):
-                clear()
         if self.controller is not None:
             reset_sources = getattr(self.controller, "reset_sources", None)
             if callable(reset_sources):
                 reset_sources()
-        # Release a retained capture before reset / re-home can move either
-        # body.  Cleanup stays best effort because a dying Gazebo transport
-        # must not prevent the normal world restore.
-        if PHYSICS in self.profile.capabilities and self.adhesion is not None:
-            try:
-                self.adhesion.release()
-            except Exception:
-                pass
         # Preserve /clock after the ROS action stack has started.
         self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
-        if PHYSICS in self.profile.capabilities and self.controller is not None:
-            # Harmonic's model_only reset does not restore free objects
-            # either; teleport the manipulated objects to their documented
-            # initial poses instead of rewinding the simulation clock.  The
-            # restore runs only AFTER re-home: teleporting while the arm is
-            # still at the lift/carry pose can materialise the box inside the
-            # closed fingers, and the interpenetration punts it off the
-            # table.  A released box may fall a few centimetres and is then
-            # restored exactly.
-            reset_object_poses = getattr(self.profile.model_config, "reset_object_poses", None)
-            return_home = getattr(self.controller, "return_home", None)
-            if callable(return_home):
-                return_home()
-            if reset_object_poses:
-                for model_name, xyz in reset_object_poses.items():
-                    self._world.set_model_pose(model_name, xyz)
-            self._measure_grasp_center_offset()
         self.scene_epoch += 1
         barrier: float | None = None
         if self.controller is not None:
@@ -311,20 +216,14 @@ class GazeboRuntime:
         if self.closed:
             return
         errors: list[BaseException] = []
-        if self.adhesion is not None:
-            try:
-                self.adhesion.release()
-            except BaseException as exc:
-                errors.append(exc)
         # Failures do not short-circuit reverse-order resource cleanup.
-        for resource in (self.physics_source, self.controller, *reversed(self._cameras)):
+        for resource in (self.controller, *reversed(self._cameras)):
             if resource is None:
                 continue
             try:
                 resource.close()
             except BaseException as exc:  # cleanup must continue
                 errors.append(exc)
-        self.physics_source = None
         self.controller = None
         self._cameras = []
         if self._ros_executor is not None:
