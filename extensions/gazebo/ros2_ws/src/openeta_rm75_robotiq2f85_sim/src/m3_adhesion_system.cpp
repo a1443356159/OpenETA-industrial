@@ -3,9 +3,8 @@
 
 // The M3 grasp mechanism deliberately separates sensing from holding.  The
 // Gazebo Contact system is the sole source of grasp evidence; after a valid
-// bilateral contact window, this system retains the object with native
-// velocity commands. It never infers contact from poses, meshes, transforms,
-// or distances.
+// bilateral contact window, this system configures native contact adhesion.
+// It never infers contact from poses, meshes, transforms, or distances.
 
 #include <algorithm>
 #include <chrono>
@@ -32,11 +31,8 @@
 #include <gz/sim/System.hh>
 #include <gz/sim/Types.hh>
 #include <gz/sim/Util.hh>
-#include <gz/sim/components/AngularVelocityCmd.hh>
 #include <gz/sim/components/Collision.hh>
-#include <gz/sim/components/Gravity.hh>
 #include <gz/sim/components/Link.hh>
-#include <gz/sim/components/LinearVelocityCmd.hh>
 #include <gz/sim/components/Model.hh>
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/PoseCmd.hh>
@@ -52,8 +48,7 @@ namespace
 constexpr std::int64_t kMinimumContactSpanNs = 100'000'000;  // 100 ms
 constexpr std::int64_t kFreshContactNs = 250'000'000;        // 250 ms
 constexpr std::size_t kMaximumSamples = 512;
-constexpr double kCarryPositionGain = 25.0;
-constexpr double kMaximumCarrySpeedMps = 0.35;
+constexpr double kAdhesionFriction = 20.0;
 
 struct ContactSample
 {
@@ -68,48 +63,6 @@ struct WindowVerdict
   std::string reason;
 };
 
-void SetGravityEnabled(
-    gz::sim::EntityComponentManager &_ecm,
-    const gz::sim::Entity _link,
-    const bool _enabled)
-{
-  if (_link == gz::sim::kNullEntity)
-    return;
-  auto *gravity = _ecm.Component<gz::sim::components::GravityEnabled>(_link);
-  if (gravity == nullptr)
-    _ecm.CreateComponent(
-        _link, gz::sim::components::GravityEnabled(_enabled));
-  else
-    _ecm.SetComponentData<gz::sim::components::GravityEnabled>(_link, _enabled);
-}
-
-void SetCarrierVelocity(
-    gz::sim::EntityComponentManager &_ecm,
-    const gz::sim::Entity _model,
-    const gz::sim::Entity _link,
-    const gz::math::Vector3d &_worldLinearVelocity)
-{
-  if (_model == gz::sim::kNullEntity || _link == gz::sim::kNullEntity)
-    return;
-  const auto modelPose = gz::sim::worldPose(_model, _ecm);
-  const auto localLinearVelocity =
-      modelPose.Rot().RotateVectorReverse(_worldLinearVelocity);
-  auto *linear = _ecm.Component<gz::sim::components::LinearVelocityCmd>(_model);
-  if (linear == nullptr)
-    _ecm.CreateComponent(
-        _model, gz::sim::components::LinearVelocityCmd(localLinearVelocity));
-  else
-    _ecm.SetComponentData<gz::sim::components::LinearVelocityCmd>(
-        _model, localLinearVelocity);
-
-  auto *angular = _ecm.Component<gz::sim::components::AngularVelocityCmd>(_link);
-  if (angular == nullptr)
-    _ecm.CreateComponent(
-        _link, gz::sim::components::AngularVelocityCmd(gz::math::Vector3d::Zero));
-  else
-    _ecm.SetComponentData<gz::sim::components::AngularVelocityCmd>(
-        _link, gz::math::Vector3d::Zero);
-}
 }  // namespace
 
 /// \brief A world system implementing M3's bilateral-contact adhesion.
@@ -151,7 +104,7 @@ class M3AdhesionSystem final
     this->transport_.Advertise(
         "/m3/adhesion/state", &M3AdhesionSystem::OnState, this);
 
-    // Keep the capture evidence native: this event only softens contacts
+    // Keep the capture evidence native: this event strengthens only contacts
     // between the captured body and its carrying robot after Capture has
     // accepted a two-pad contact window. Table support keeps its ordinary
     // material parameters until the body is physically lifted.
@@ -183,15 +136,12 @@ class M3AdhesionSystem final
           {
             return;
           }
-          _params.frictionCoeff = 0.0;
-          _params.secondaryFrictionCoeff = 0.0;
+          _params.frictionCoeff = kAdhesionFriction;
+          _params.secondaryFrictionCoeff = kAdhesionFriction;
           _params.rollingFrictionCoeff = 0.0;
           _params.secondaryRollingFrictionCoeff = 0.0;
           _params.torsionalFrictionCoeff = 0.0;
           _params.restitutionCoeff = 0.0;
-          _params.errorReductionParameter = 0.0;
-          _params.maxErrorReductionVelocity = 0.0;
-          _params.constraintForceMixing = 0.1;
         });
   }
 
@@ -451,8 +401,8 @@ class M3AdhesionSystem final
     this->phase_ = "CAPTURED";
     this->reason_ = "bilateral_contact_adhesion_captured";
     // This one-time command registers the contact-proven initial pose through
-    // Gazebo's official model command. Continuous carrying below deliberately
-    // uses velocity rather than repeatedly teleporting a dynamic collision.
+    // Gazebo's official model command; native contact dynamics carry it after
+    // this point instead of a pose or velocity follower.
     gz::sim::Model(this->capturedModel_).SetWorldPoseCmd(_ecm, objectPose);
     this->FollowMount(_ecm);
   }
@@ -467,24 +417,14 @@ class M3AdhesionSystem final
       return;
     }
 
-    const auto desiredPose =
-        gz::sim::worldPose(this->mountLink_, _ecm) * this->relativePose_;
-    const auto currentPose = gz::sim::worldPose(this->capturedModel_, _ecm);
-    auto velocity = (desiredPose.Pos() - currentPose.Pos()) * kCarryPositionGain;
-    const auto speed = velocity.Length();
-    if (speed > kMaximumCarrySpeedMps)
-      velocity *= kMaximumCarrySpeedMps / speed;
-
-    this->SoftenCapturedContacts(_ecm);
-    SetCarrierVelocity(
-        _ecm, this->capturedModel_, this->capturedLink_, velocity);
+    this->ConfigureCapturedContacts(_ecm);
   }
 
-  void SoftenCapturedContacts(gz::sim::EntityComponentManager &_ecm)
+  void ConfigureCapturedContacts(gz::sim::EntityComponentManager &_ecm)
   {
     // In gz-sim8, deleting Collision components only changes the ECS view;
     // its Physics system keeps the live shape until the entire model is
-    // removed. Retain those shapes and soften only target/carrier contacts.
+    // removed. Retain those shapes and strengthen only target/carrier contacts.
     const auto rememberCollisions = [&_ecm](
         const gz::sim::Entity _model,
         std::unordered_set<gz::sim::Entity> &_collisions)
@@ -510,9 +450,8 @@ class M3AdhesionSystem final
     if (this->capturedModel_ == gz::sim::kNullEntity ||
         this->capturedLink_ == gz::sim::kNullEntity)
       return;
-    SetGravityEnabled(_ecm, this->capturedLink_, true);
-    SetCarrierVelocity(
-        _ecm, this->capturedModel_, this->capturedLink_, gz::math::Vector3d::Zero);
+    // Contact-surface customization is filtered by captured_ and its entity
+    // sets, so ClearCapture below returns the body to its ordinary materials.
   }
 
   void ClearCapture(const std::string &_reason)
