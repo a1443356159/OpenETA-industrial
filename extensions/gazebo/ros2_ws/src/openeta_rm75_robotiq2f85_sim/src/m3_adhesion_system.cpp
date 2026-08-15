@@ -49,6 +49,7 @@ constexpr std::int64_t kMinimumContactSpanNs = 100'000'000;  // 100 ms
 constexpr std::int64_t kFreshContactNs = 250'000'000;        // 250 ms
 constexpr std::size_t kMaximumSamples = 512;
 constexpr double kAdhesionFriction = 2.0;
+constexpr double kAdhesionTorsionalFriction = 1.0;
 constexpr double kTargetMassKg = 0.10;
 constexpr double kGravityMps2 = 9.81;
 // A 100 g target needs enough closed-loop authority to remain within the
@@ -150,7 +151,11 @@ class M3AdhesionSystem final
           _params.secondaryFrictionCoeff = kAdhesionFriction;
           _params.rollingFrictionCoeff = 0.0;
           _params.secondaryRollingFrictionCoeff = 0.0;
-          _params.torsionalFrictionCoeff = 0.0;
+          // The two captured pad contacts must resist spin about their
+          // normals as well as tangential translation.  This is applied only
+          // to target/carrier pairs after the physical contact window passed;
+          // table support remains unchanged.
+          _params.torsionalFrictionCoeff = kAdhesionTorsionalFriction;
           _params.restitutionCoeff = 0.0;
         });
   }
