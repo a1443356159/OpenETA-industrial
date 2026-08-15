@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from scripts.tui_gazebo_acceptance import (
@@ -146,6 +147,7 @@ def test_allocation_and_receipt_exclude_protected_domains() -> None:
         ROOT, allocation, case_name="unit", before=[], capture_protected=False
     )
     assert verify_receipt(receipt) == []
+    assert receipt["python_executable"] == str(Path(sys.executable).absolute())
     tampered = dict(receipt, ros_domain_id=42)
     assert verify_receipt(tampered)
 

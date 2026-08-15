@@ -34,6 +34,8 @@ def _report(
     detail: str = "",
     remote_command: str = "",
     remote_run_root: str = "",
+    remote_base_python: str = "",
+    remote_venv_python: str = "",
 ) -> dict[str, Any]:
     milestones: dict[str, Any] = {}
     stopped = False
@@ -61,6 +63,8 @@ def _report(
             "port": REMOTE_PORT,
             "acceptance_root": REMOTE_ROOT,
             "run_root": remote_run_root,
+            "base_python_executable": remote_base_python,
+            "python_executable": remote_venv_python,
             "execution": "not_started_by_local_coordinator",
         },
         "remote_command": remote_command,
@@ -78,11 +82,13 @@ def _write(path: Path | None, report: dict[str, Any]) -> None:
         print(f"CLOUD_M0_M4_ACCEPTANCE_REPORT={path}")
 
 
-def _remote_command(sha: str, origin: str) -> tuple[str, str]:
+def _remote_command(sha: str, origin: str, remote_python: str) -> tuple[str, str, str]:
     """Return the command an authorized remote operator may run over SSH."""
 
     clone = f"{REMOTE_ROOT}/{sha}"
     run_root = f"{REMOTE_ROOT}/runs/{sha}"
+    venv = f"{REMOTE_ROOT}/venvs/{sha}"
+    venv_python = f"{venv}/bin/python"
     report = f"{run_root}/acceptance-report.json"
     quote = shlex.quote
     command = " && ".join(
@@ -91,11 +97,25 @@ def _remote_command(sha: str, origin: str) -> tuple[str, str]:
             "set +u",
             f"mkdir -p {quote(REMOTE_ROOT)}",
             f"test ! -e {quote(clone)}",
+            f"test ! -e {quote(venv)}",
             f"git clone --no-checkout {quote(origin)} {quote(clone)}",
             f"git -C {quote(clone)} checkout --detach {quote(sha)}",
             f"test \"$(git -C {quote(clone)} rev-parse HEAD)\" = {quote(sha)}",
             f"test -z \"$(git -C {quote(clone)} status --porcelain)\"",
+            (
+                f"{quote(remote_python)} -c "
+                + quote("import sys; assert sys.version_info[:2] == (3, 12)")
+            ),
+            f"{quote(remote_python)} -m venv --system-site-packages {quote(venv)}",
             f"cd {quote(clone)}",
+            (
+                f"{quote(venv_python)} -m pip install --no-build-isolation . "
+                f"{quote('pytest>=8')}"
+            ),
+            (
+                f"{quote(venv_python)} -c "
+                + quote("import pytest, gymnasium, numpy, prompt_toolkit")
+            ),
             "source /opt/ros/jazzy/setup.bash",
             "set -u",
             "cd extensions/gazebo/ros2_ws",
@@ -105,11 +125,12 @@ def _remote_command(sha: str, origin: str) -> tuple[str, str]:
             "test -z \"$(git status --porcelain)\"",
             (
                 f"OPENETA_CLOUD_ACCEPTANCE_ROOT={quote(REMOTE_ROOT)} "
+                f"OPENETA_PYTHON_EXECUTABLE={quote(venv_python)} "
                 f"scripts/run_tui_gazebo_acceptance.sh --scripted-tui --run-root {quote(run_root)}"
             ),
             f"test -f {quote(report)}",
             (
-                "python3 -c "
+                f"{quote(venv_python)} -c "
                 + quote(
                     "import json,sys; "
                     f"data=json.load(open({report!r}, encoding='utf-8')); "
@@ -118,7 +139,7 @@ def _remote_command(sha: str, origin: str) -> tuple[str, str]:
             ),
         )
     )
-    return command, run_root
+    return command, run_root, venv_python
 
 
 def _origin(value: str) -> str:
@@ -134,6 +155,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", default="")
     parser.add_argument("--origin", default="origin")
+    parser.add_argument(
+        "--remote-python",
+        default="",
+        help="Verified absolute Python executable on the remote host.",
+    )
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
     sha = args.sha.strip()
@@ -145,6 +171,21 @@ def main(argv: list[str] | None = None) -> int:
                 status="blocked",
                 reason_code="REMOTE_SHA_REQUIRED",
                 detail="Push an immutable SHA before preparing remote TUI acceptance.",
+            ),
+        )
+        return 2
+    remote_python = args.remote_python.strip()
+    if not remote_python or not Path(remote_python).is_absolute():
+        _write(
+            args.report,
+            _report(
+                sha=sha,
+                status="blocked",
+                reason_code="REMOTE_PYTHON_REQUIRED",
+                detail=(
+                    "Provide --remote-python with the verified absolute interpreter "
+                    "for the detached clean clone."
+                ),
             ),
         )
         return 2
@@ -161,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         return 2
-    command, run_root = _remote_command(sha, origin)
+    command, run_root, venv_python = _remote_command(sha, origin, remote_python)
     _write(
         args.report,
         _report(
@@ -171,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
             detail="No SSH or remote command was run. An authorized operator must execute the plan and inspect its TUI report.",
             remote_command=command,
             remote_run_root=run_root,
+            remote_base_python=remote_python,
+            remote_venv_python=venv_python,
         ),
     )
     return 2

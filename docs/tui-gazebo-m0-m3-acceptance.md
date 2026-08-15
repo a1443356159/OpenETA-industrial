@@ -11,5 +11,9 @@ case-local materialized response, and receipt must correlate. Scripted
 approvals are labelled `scripted_tui`, never `human_gated`.
 
 Remote formal runs use a SHA-specific clean clone and stop immediately after
-any failed predecessor. This document makes no claim that a remote run has
-passed.
+any failed predecessor. The clone never supplies an untracked `.venv`: the
+approved remote plan creates a separate
+`OPENETA_CLOUD_ACCEPTANCE_ROOT/venvs/<SHA>` environment from an explicitly
+selected base Python, installs the project dependencies, verifies the runtime
+imports, and passes that venv executable to the TUI. This document makes no
+claim that a remote run has passed.

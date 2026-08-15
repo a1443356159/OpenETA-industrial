@@ -194,6 +194,13 @@ def environment_receipt(
         "overlay": str(overlay.resolve()),
         "overlay_present": overlay.is_file(),
         "platform": platform.platform(),
+        "python_executable": str(
+            Path(os.environ.get("OPENETA_PYTHON_EXECUTABLE") or sys.executable).absolute()
+        ),
+        "python_source": os.environ.get("OPENETA_PYTHON_SOURCE", "direct_python"),
+        "python_required_modules": os.environ.get(
+            "OPENETA_PYTHON_REQUIRED_MODULES", ""
+        ),
         "wsl_version": _command_output(["wsl.exe", "--version"]),
         "git_head": _command_output(["git", "-C", str(repo), "rev-parse", "HEAD"]),
         "git_dirty_summary": _command_output(
@@ -374,9 +381,9 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
             "RMW_IMPLEMENTATION": env.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         }
     )
-    python = repo / ".venv/bin/python"
-    if not python.is_file():
-        raise AcceptanceError("TUI_NOT_READY: repository .venv is missing")
+    python = Path(os.environ.get("OPENETA_PYTHON_EXECUTABLE") or sys.executable).absolute()
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise AcceptanceError("TUI_NOT_READY: selected Python executable is unavailable")
     log = paths.mcp_log.open("w", encoding="utf-8")
     process = subprocess.Popen(
         [str(python), "-m", "sim.mcp_server.server", "--transport", "sse", "--port", str(allocation.port)],
