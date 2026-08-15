@@ -4,6 +4,7 @@ import json
 import signal
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import scripts.tui_gazebo_acceptance as tui_acceptance
 from extensions.gazebo.ros2_ws.acceptance_isolation import _normalise_graph_rows
@@ -20,6 +21,7 @@ from scripts.tui_gazebo_acceptance import (
     environment_receipt,
     prepare_case,
     report_exit_code,
+    run_case,
     scripted_tui_input,
     main,
     verify_case,
@@ -166,6 +168,75 @@ def test_protected_graph_rows_are_json_native_before_baseline_comparison() -> No
     persisted = [["/parameter_events", ["rcl_interfaces/msg/ParameterEvent"]]]
 
     assert live == persisted
+
+
+def test_cleanup_waits_briefly_for_mcp_listener_release(monkeypatch) -> None:
+    """A just-reaped process must not make cleanup race its socket teardown."""
+
+    checks = iter((False, False, True))
+    monkeypatch.setattr(tui_acceptance, "_port_is_free", lambda _port: next(checks))
+    monkeypatch.setattr(tui_acceptance.time, "sleep", lambda _seconds: None)
+
+    assert tui_acceptance._wait_for_free_port(45678, timeout_s=1.0) is True
+
+
+def test_cleanup_port_wait_remains_fail_closed_for_a_bound_listener(monkeypatch) -> None:
+    clock = iter((0.0, 0.2))
+    monkeypatch.setattr(tui_acceptance, "_port_is_free", lambda _port: False)
+    monkeypatch.setattr(tui_acceptance.time, "monotonic", lambda: next(clock))
+
+    assert tui_acceptance._wait_for_free_port(45678, timeout_s=0.1) is False
+
+
+def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monkeypatch) -> None:
+    """Gazebo launch diagnostics must survive in the formal case directory."""
+
+    allocation = allocate("m1-worker-log")
+    paths = case_paths(tmp_path, "m1", SCRIPTED_TUI)
+    paths.root.mkdir(parents=True)
+    paths.instructions.write_text("scripted M1 task", encoding="utf-8")
+    _write_json(
+        paths.receipt,
+        {"preexisting_processes": [], "protected_ros_graphs": {}},
+    )
+    seen = {}
+
+    class Process:
+        pid = 12345
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    def popen(*_args, **kwargs):
+        seen["environment"] = kwargs["env"]
+        return Process()
+
+    monkeypatch.setattr(tui_acceptance.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        tui_acceptance.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
+    )
+    monkeypatch.setattr(tui_acceptance, "_wait_ready", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tui_acceptance, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(tui_acceptance, "_terminate_owned_worker_groups", lambda **_kwargs: [])
+    monkeypatch.setattr(tui_acceptance, "_wait_for_free_port", lambda _port: True)
+    monkeypatch.setattr(tui_acceptance, "_partition_cleanup", lambda _partition: {"state": "PASSED"})
+    monkeypatch.setattr(tui_acceptance.shutil, "which", lambda _name: "/usr/bin/script")
+    monkeypatch.setattr(tui_acceptance.os, "getpgid", lambda _pid: 12345)
+    from extensions.gazebo.ros2_ws import acceptance_isolation
+
+    monkeypatch.setattr(
+        acceptance_isolation, "candidate_domain_evidence", lambda _domain: {"state": "PASSED"}
+    )
+    monkeypatch.setattr(
+        acceptance_isolation,
+        "probe_ros_graph",
+        lambda _domain: {"availability": "AVAILABLE", "nodes": [], "topics": []},
+    )
+
+    assert run_case(ROOT, paths, allocation) == 0
+    assert seen["environment"]["OPENETA_WORKER_LOG_DIR"] == str(paths.root / "worker-logs")
 
 
 def test_owned_worker_cleanup_uses_only_matching_run_process_group(monkeypatch) -> None:

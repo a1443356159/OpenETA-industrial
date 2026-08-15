@@ -197,6 +197,64 @@ class GazeboWorldControl:
 
         self._control(f"pause: {'true' if paused else 'false'}")
 
+    def wait_ready(self, *, timeout_s: float) -> None:
+        """Wait for a responsive documented world-control service.
+
+        A live ``ros2 launch`` process only proves that the launch parent has
+        started.  In particular, a cold headless ``sensors_demo.sdf`` can
+        still be registering Gazebo transport services when M1 issues its
+        first reset.  Listing the exact documented service and sending an
+        empty ``WorldControl`` request proves that the server is responsive
+        without changing pause, reset, or model state.
+        """
+
+        if timeout_s <= 0:
+            raise ValueError("world-control readiness timeout must be positive")
+        executable = shutil.which(self.gz_executable) or self.gz_executable
+        service = f"/world/{self.world_name}/control"
+        deadline = time.monotonic() + float(timeout_s)
+        last_error = "service was not advertised"
+        while time.monotonic() < deadline:
+            try:
+                listed = subprocess.run(
+                    [executable, "service", "-l"], capture_output=True, text=True,
+                    timeout=min(5.0, max(0.1, deadline - time.monotonic())),
+                    env=self.environment,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = "service listing timed out"
+            else:
+                services = set(listed.stdout.splitlines())
+                if listed.returncode == 0 and service in services:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        # The default WorldControl message is a documented
+                        # no-op, unlike pause/reset.  Require its Boolean ACK
+                        # so discovery alone can never be mistaken for a
+                        # usable reset path.
+                        probe = self._service_request(
+                            executable,
+                            "",
+                            timeout_ms=max(1, min(self.timeout_ms, int(remaining * 1000))),
+                            command_timeout_s=remaining,
+                        )
+                    except subprocess.TimeoutExpired:
+                        last_error = "empty WorldControl probe timed out"
+                    else:
+                        if probe.returncode == 0 and "data: true" in probe.stdout.lower():
+                            return
+                        last_error = f"{probe.stdout[-500:]} {probe.stderr[-500:]}"
+                elif listed.returncode:
+                    last_error = f"{listed.stdout[-500:]} {listed.stderr[-500:]}"
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.1, remaining))
+        raise GazeboProcessError(
+            f"Gazebo world control not ready for {self.world_name}: {last_error}"
+        )
+
     def _reset(self, mode: str, *, seed: int | None = None) -> None:
         if mode not in {"all", "model_only"}:
             raise ValueError("unsupported Gazebo reset mode")
@@ -213,14 +271,7 @@ class GazeboWorldControl:
         # failed world reset later in the runtime lifecycle.
         for attempt in range(2):
             try:
-                result = subprocess.run(
-                    [executable, "service", "-s", f"/world/{self.world_name}/control",
-                     "--reqtype", "gz.msgs.WorldControl", "--reptype", "gz.msgs.Boolean",
-                     "--timeout", str(self.timeout_ms), "--req", request],
-                    capture_output=True, text=True,
-                    timeout=max(1.0, self.timeout_ms / 1000.0 + 2.0),
-                    env=self.environment,
-                )
+                result = self._service_request(executable, request)
             except subprocess.TimeoutExpired:
                 last_error = "service call timed out"
             else:
@@ -231,6 +282,33 @@ class GazeboWorldControl:
                 time.sleep(0.2)
         raise GazeboProcessError(
             f"Gazebo world control failed for {self.world_name}: {last_error}"
+        )
+
+    def _service_request(
+        self,
+        executable: str,
+        request: str,
+        *,
+        timeout_ms: int | None = None,
+        command_timeout_s: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """Call the documented WorldControl endpoint with the normal budget."""
+
+        effective_timeout_ms = self.timeout_ms if timeout_ms is None else int(timeout_ms)
+        if effective_timeout_ms <= 0:
+            raise ValueError("WorldControl timeout must be positive")
+        outer_timeout_s = (
+            max(0.1, float(command_timeout_s))
+            if command_timeout_s is not None
+            else max(1.0, effective_timeout_ms / 1000.0 + 2.0)
+        )
+        return subprocess.run(
+            [executable, "service", "-s", f"/world/{self.world_name}/control",
+             "--reqtype", "gz.msgs.WorldControl", "--reptype", "gz.msgs.Boolean",
+             "--timeout", str(effective_timeout_ms), "--req", request],
+            capture_output=True, text=True,
+            timeout=outer_timeout_s,
+            env=self.environment,
         )
 
     def set_model_pose(self, model_name: str, xyz: tuple[float, float, float]) -> None:

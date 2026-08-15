@@ -128,6 +128,27 @@ def _port_is_free(port: int) -> bool:
     return True
 
 
+def _wait_for_free_port(port: int, *, timeout_s: float = 5.0) -> bool:
+    """Bound cleanup on actual listener release, not process-exit timing.
+
+    A terminated MCP process can be reaped marginally before its listening
+    socket is released.  Polling the same bind check for a small bounded
+    interval avoids recording that kernel teardown race as a false residual;
+    a port which remains bound is still an acceptance failure.
+    """
+
+    if timeout_s <= 0:
+        raise ValueError("port-release timeout must be positive")
+    deadline = time.monotonic() + float(timeout_s)
+    while True:
+        if _port_is_free(port):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+
+
 def allocate(case_name: str, occupied_domains: Iterable[int] = ()) -> Allocation:
     occupied = set(occupied_domains) | set(PROTECTED_DOMAINS)
     domain = next((item for item in DOMAIN_CANDIDATES if item not in occupied), None)
@@ -511,6 +532,11 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
             # sessioned children and is the only ownership marker accepted by
             # runner-side worker cleanup.
             "OPENETA_TUI_RUN_ID": allocation.run_id,
+            # BenchWorkerManager drains the Gazebo worker's stdout/stderr to
+            # this case-local directory.  Without this explicit path, MCP
+            # server logs omit launch/ROS diagnostics needed to explain a
+            # fail-closed live case.
+            "OPENETA_WORKER_LOG_DIR": str(paths.root / "worker-logs"),
             "OPENETA_SUPERVISION_PROFILE": SCRIPTED_TUI if scripted else "human_gated",
             "OPENETA_SCRIPTED_TUI": "1" if scripted else "0",
             # M4 explicitly selects the existing Gazebo Oracle tool.  The
@@ -613,7 +639,7 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
     cleanup = {
         "mcp_group_exited": process.poll() is not None,
         "mcp_termination_error": mcp_termination_error,
-        "port_free": _port_is_free(allocation.port),
+        "port_free": _wait_for_free_port(allocation.port),
         "owned_worker_groups": worker_groups,
         "owned_worker_groups_exited": all(
             item.get("group_exited") is True for item in worker_groups

@@ -132,6 +132,13 @@ class GazeboRuntime:
                 environment=self.deployment.process_environment,
             )
             self._launch.start()
+            # A launch parent can be alive while Gazebo is still registering
+            # ``/world/<name>/control``.  Gate the first reset on a bounded,
+            # no-op service probe under the existing startup deadline; this
+            # is readiness only, never a reset-success fallback.
+            wait_ready = getattr(self._world, "wait_ready", None)
+            if callable(wait_ready):
+                wait_ready(timeout_s=self._remaining(deadline))
             if PHYSICS in self.profile.capabilities:
                 # The launch omits -r, so this command is still before the
                 # first physics tick.  Do not resume for a missing stock-joint

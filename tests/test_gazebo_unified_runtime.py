@@ -67,6 +67,17 @@ class _World:
         self.resets.append(("models", seed))
 
 
+class _ReadyWorld(_World):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+        self.deadlines = []
+
+    def wait_ready(self, *, timeout_s):
+        self.events.append("world_control_ready")
+        self.deadlines.append(timeout_s)
+
+
 class _M3World(_World):
     def __init__(self, events):
         super().__init__()
@@ -145,6 +156,30 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
     runtime.close()
     assert made_launch[0].closed == 1
     assert made_cameras[0].closed == 1
+
+
+def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
+    events = []
+
+    class Launch(_Launch):
+        def start(self):
+            super().start()
+            events.append("launch")
+
+    world = _ReadyWorld(events)
+    runtime = GazeboRuntime(
+        _deployment(), gazebo_profile("m1"),
+        launch_factory=lambda **kwargs: Launch(**kwargs),
+        camera_factory=lambda config, **kwargs: _Camera(config, **kwargs),
+        world_control=world,
+    )
+
+    runtime.reset(seed=9)
+
+    assert events == ["launch", "world_control_ready"]
+    assert world.deadlines and world.deadlines[0] > 0
+    assert world.resets == [("all", 9)]
+    runtime.close()
 
 
 def test_runtime_reset_retries_only_one_transient_gripper_timeout() -> None:
