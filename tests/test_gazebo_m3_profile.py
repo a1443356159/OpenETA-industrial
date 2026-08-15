@@ -38,18 +38,20 @@ def test_m3_world_uses_official_odometry_and_native_pad_contact_sensors() -> Non
     M3Config().validate_assets()
 
 
-def test_m3_native_adhesion_uses_official_pose_initialization_and_contact_carry() -> None:
+def test_m3_native_adhesion_uses_contact_gated_force_carry() -> None:
     source = (PACKAGE / "src/m3_adhesion_system.cpp").read_text(encoding="utf-8")
 
-    # Capture registers the contact-proven pose through the official helper;
-    # subsequent transport uses a native force, not a pose follower.
-    assert "SetWorldPoseCmd(_ecm, objectPose)" in source
+    # Capture stores a contact-proven rest pose; transport uses a native force,
+    # not a world-pose command or a pose follower.
+    assert "SetWorldPoseCmd" not in source
     assert "SetComponentData<gz::sim::components::WorldPoseCmd>" not in source
     assert "kAdhesionFriction" in source
     assert "ConfigureCapturedContacts" in source
     assert "AddWorldForce" in source
     assert "kAdhesionStiffnessNpm" in source
     assert "EnableVelocityChecks" in source
+    assert "kLiftEngageHeightM" in source
+    assert "adhesionForceEngaged_" in source
 
 
 def test_m3_native_adhesion_softens_only_post_capture_transport_contacts() -> None:

@@ -48,12 +48,13 @@ namespace
 constexpr std::int64_t kMinimumContactSpanNs = 100'000'000;  // 100 ms
 constexpr std::int64_t kFreshContactNs = 250'000'000;        // 250 ms
 constexpr std::size_t kMaximumSamples = 512;
-constexpr double kAdhesionFriction = 20.0;
+constexpr double kAdhesionFriction = 2.0;
 constexpr double kTargetMassKg = 0.10;
 constexpr double kGravityMps2 = 9.81;
 constexpr double kAdhesionStiffnessNpm = 30.0;
 constexpr double kAdhesionDampingNsPm = 3.5;
 constexpr double kMaximumAdhesionForceN = 15.0;
+constexpr double kLiftEngageHeightM = 0.003;
 
 struct ContactSample
 {
@@ -397,6 +398,8 @@ class M3AdhesionSystem final
     this->capturedModel_ = model;
     this->capturedLink_ = objectLink;
     this->mountLink_ = mount;
+    this->capturePose_ = objectPose;
+    this->adhesionForceEngaged_ = false;
     // Ask Physics to publish the live world velocities used by the native
     // damped adhesion force; they are disabled by default for efficiency.
     gz::sim::Link(this->capturedLink_).EnableVelocityChecks(_ecm, true);
@@ -409,10 +412,8 @@ class M3AdhesionSystem final
     this->armed_ = false;
     this->phase_ = "CAPTURED";
     this->reason_ = "bilateral_contact_adhesion_captured";
-    // This one-time command registers the contact-proven initial pose through
-    // Gazebo's official model command; native contact forces carry it after
-    // this point instead of a pose or velocity follower.
-    gz::sim::Model(this->capturedModel_).SetWorldPoseCmd(_ecm, objectPose);
+    // The contact-proven relative pose is a spring rest pose, not a pose
+    // command: the carried body remains dynamic throughout the episode.
     this->FollowMount(_ecm);
   }
 
@@ -429,6 +430,16 @@ class M3AdhesionSystem final
     this->ConfigureCapturedContacts(_ecm);
     const auto desiredPose =
         gz::sim::worldPose(this->mountLink_, _ecm) * this->relativePose_;
+    if (!this->adhesionForceEngaged_ &&
+        desiredPose.Pos().Z() > this->capturePose_.Pos().Z() + kLiftEngageHeightM)
+    {
+      this->adhesionForceEngaged_ = true;
+    }
+    // Keep the capture itself purely contact-driven. Engaging only once the
+    // robot begins a lift avoids injecting a spring impulse while the fingers
+    // are still closing around the contact-proven target.
+    if (!this->adhesionForceEngaged_)
+      return;
     const auto currentPose = gz::sim::worldPose(this->capturedModel_, _ecm);
     const auto objectLink = gz::sim::Link(this->capturedLink_);
     const auto objectVelocity =
@@ -494,6 +505,7 @@ class M3AdhesionSystem final
     this->capturedModelName_.clear();
     this->capturedCollisionEntities_.clear();
     this->carrierCollisionEntities_.clear();
+    this->adhesionForceEngaged_ = false;
     this->reason_ = _reason;
   }
 
@@ -623,6 +635,7 @@ class M3AdhesionSystem final
   bool captureRequested_{false};
   bool releaseRequested_{false};
   bool captured_{false};
+  bool adhesionForceEngaged_{false};
   bool hasSimulationTime_{false};
   std::int64_t lastSimulationTimeNs_{0};
   std::uint64_t receiptId_{0};
@@ -637,6 +650,7 @@ class M3AdhesionSystem final
   std::unordered_set<gz::sim::Entity> capturedCollisionEntities_;
   std::unordered_set<gz::sim::Entity> carrierCollisionEntities_;
   gz::common::ConnectionPtr contactSurfaceConnection_;
+  gz::math::Pose3d capturePose_;
   gz::math::Pose3d relativePose_;
 };
 }  // namespace openeta::gazebo
