@@ -646,6 +646,21 @@ def test_scripted_tui_cli_prepares_only_scripted_cases(tmp_path: Path) -> None:
     assert submissions[5] == "/quit"
 
 
+def test_scripted_tui_m2_to_m4_require_one_exact_agenttool_environment(tmp_path: Path) -> None:
+    """Formal prompts must not leave the model an alternate environment path."""
+
+    for milestone in ("m2", "m3", "m4"):
+        allocation = allocate(f"{milestone}-instruction-contract")
+        paths = prepare_case(ROOT, tmp_path, milestone, SCRIPTED_TUI, allocation)
+        instructions = paths.instructions.read_text(encoding="utf-8")
+
+        assert "第一步且唯一的环境创建必须是 AgentTool create_simulator_env" in instructions
+        assert f"`{ENV_IDS[milestone]}`" in instructions
+        assert "禁止调用 python_exec" in instructions
+        assert "任何其他 env_id（包括 libero）" in instructions
+        assert "最后唯一一次 close_simulator_env" in instructions
+
+
 def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path: Path) -> None:
     paths = _prepare_evidence(tmp_path, "m3", DETERMINISTIC)
     paths.mcp_log.write_text("OpenETA MCP server started\n", encoding="utf-8")

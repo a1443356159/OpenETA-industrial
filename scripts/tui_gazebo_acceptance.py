@@ -314,15 +314,18 @@ def instructions_for(milestone: str, mode: str) -> str:
         "m1": """创建 openeta/gazebo_live_rgbd-v0，连续 observe 两次，然后 close。
 逐一批准 create/reset/close 的 human_gated 提示，确认关闭后用 /quit 退出。
 """,
-        "m2": """仅使用真实 MCP/MoveIt 回执执行碰撞检查动作。
-执行两轮 A↔B、两轮 open→close→open、一次不可达目标（必须返回 MOTION_PLAN_FAILED）、observe、close。
-不得绕过 MoveIt 或把失败动作当作成功。逐一批准所有 human_gated 提示，最后 /quit。
+        "m2": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m2"]}`。
+禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
+创建后按此顺序：仅使用真实 MCP/MoveIt 回执执行两轮 A↔B、两轮 open→close→open、一次不可达目标（必须返回 MOTION_PLAN_FAILED）、observe，最后唯一一次 close_simulator_env。
+不得绕过 MoveIt 或把失败动作当作成功。逐一批准所有 human_gated 提示，确认 close 后用 /quit 退出。
 """,
-        "m3": """创建 M3 环境，先接近，再执行一次真实 close。
-只有回执显示双垫 native contact 与 attached ACK 后才能执行第一段 lift；记录 child-link 的 >=80 mm lift 和 <=10 mm 相对位移。最后 open、detach ACK、close。
+        "m3": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m3"]}`。
+禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
+创建后先接近，再执行一次真实 close。只有回执显示双垫 native contact 与 attached ACK 后才能执行第一段 lift；记录 child-link 的 >=80 mm lift 和 <=10 mm 相对位移；然后 open、detach ACK，最后唯一一次 close_simulator_env。
 """,
-        "m4": """创建 M4 Oracle case，实际调用 oracle_perceive 并记录 perception_source=gazebo_oracle 与 contractual fake candidate。
-它不能替代 M3：执行真实 close、native contact、attached ACK 和 child-link lift 证明，最后 close。
+        "m4": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m4"]}`。
+禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
+创建后实际调用 oracle_perceive 并记录 perception_source=gazebo_oracle 与 contractual fake candidate；它不能替代 M3：随后执行真实 close、native contact、attached ACK 和 child-link lift 证明，然后 open、detach ACK，最后唯一一次 close_simulator_env。
 """,
     }
     prefix = "[automation=scripted_tui; this is not human approval]\n" if mode == SCRIPTED_TUI else ""
