@@ -517,6 +517,101 @@ def test_report_keeps_planner_status_separate_and_stops_formal_chain(tmp_path: P
     assert report_exit_code(report) == 2
 
 
+def test_scripted_tui_report_never_verifies_unrun_planner_autonomy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Scripted PTY runs are backend-only; absent autonomy cases are not failures."""
+
+    seen: list[tuple[str, str]] = []
+
+    def passed_backend(_paths, milestone: str, mode: str):
+        seen.append((milestone, mode))
+        return {"status": "passed", "errors": []}
+
+    monkeypatch.setattr(tui_acceptance, "verify_case", passed_backend)
+
+    report = assemble_report(tmp_path, formal_mode=SCRIPTED_TUI)
+
+    assert report["overall_status"] == "passed"
+    assert seen == [(milestone, SCRIPTED_TUI) for milestone in tui_acceptance.MILESTONES]
+    for milestone in tui_acceptance.MILESTONES:
+        autonomy = report["milestones"][milestone]["planner_autonomy_status"]
+        assert autonomy == {
+            "status": "not_applicable",
+            "errors": [],
+            "reason_code": "SCRIPTED_TUI_AUTONOMY_NOT_REQUIRED",
+        }
+
+
+def test_exact_pre_tool_provider_billing_exhaustion_is_blocked_not_m2_failure(
+    tmp_path: Path,
+) -> None:
+    paths = _prepare_evidence(tmp_path, "m2", SCRIPTED_TUI)
+    trace = paths.trace_root / "sessions/unit/trace.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(
+        json.dumps(
+            {
+                "event_type": "pipeline_plan",
+                "payload": {
+                    "metadata": {
+                        "planner_metadata": {
+                            "backend_status": "failed",
+                            "backend_details": {
+                                "error_type": "ProviderHttpError",
+                                "error": "HTTP 402: Insufficient Balance",
+                                "provider_attempts": 1,
+                            },
+                        }
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = verify_case(paths, "m2", SCRIPTED_TUI)
+
+    assert result["status"] == "blocked"
+    assert result["infrastructure_codes"] == ["PROVIDER_BILLING_EXHAUSTED"]
+    assert "billing exhausted" in " ".join(result["errors"])
+    assert not any("M2 requires" in error for error in result["errors"])
+    assert not any("formal case has no simulator" in error for error in result["errors"])
+
+
+def test_non_billing_planner_failure_remains_a_strict_m2_failure(tmp_path: Path) -> None:
+    paths = _prepare_evidence(tmp_path, "m2", SCRIPTED_TUI)
+    trace = paths.trace_root / "sessions/unit/trace.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(
+        json.dumps(
+            {
+                "event_type": "pipeline_plan",
+                "payload": {
+                    "metadata": {
+                        "planner_metadata": {
+                            "backend_status": "failed",
+                            "backend_details": {
+                                "error_type": "ProviderHttpError",
+                                "error": "HTTP 400: invalid planner request",
+                            },
+                        }
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = verify_case(paths, "m2", SCRIPTED_TUI)
+
+    assert result["status"] == "failed"
+    assert tui_acceptance.PROVIDER_BILLING_EXHAUSTED not in result["infrastructure_codes"]
+    assert any("M2 requires" in error for error in result["errors"])
+
+
 def test_autonomy_failure_cannot_change_backend_result_shape(tmp_path: Path) -> None:
     paths = _prepare_evidence(tmp_path, "m1", AUTONOMY)
     trace = paths.trace_root / "sessions/unit/trace.jsonl"

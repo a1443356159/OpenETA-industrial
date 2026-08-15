@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import shlex
 import signal
@@ -74,6 +75,7 @@ INFRA_CODES = frozenset(
         "TOPIC_DISCOVERY_TIMEOUT",
     }
 )
+PROVIDER_BILLING_EXHAUSTED = "PROVIDER_BILLING_EXHAUSTED"
 
 
 class AcceptanceError(RuntimeError):
@@ -992,6 +994,52 @@ def _base_errors(paths: CasePaths, events: Sequence[Mapping[str, Any]]) -> list[
     return errors
 
 
+def _provider_billing_exhaustion_errors(
+    events: Sequence[Mapping[str, Any]],
+    calls: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Recognise only durable pre-tool provider billing exhaustion.
+
+    A provider may refuse a planner request before it can select a simulator
+    tool.  That is an external blocked run, not evidence that M2 motion
+    planning failed.  Do not infer this from planner prose: require the
+    structured planner metadata emitted by the runtime, the exact upstream
+    ``ProviderHttpError`` type, HTTP 402, and the provider's insufficient
+    balance marker.  Any executed tool call, a different HTTP error, or an
+    ordinary invalid planner response remains subject to the normal strict
+    milestone verifier.
+    """
+
+    if calls:
+        return []
+    for event in events:
+        if str(event.get("event_type") or "") not in {
+            "pipeline_plan",
+            "action",
+            "episode_step",
+        }:
+            continue
+        for item in _walk(event):
+            if not isinstance(item, Mapping):
+                continue
+            details = item.get("backend_details")
+            if (
+                str(item.get("backend_status") or "").lower() != "failed"
+                or not isinstance(details, Mapping)
+                or str(details.get("error_type") or "") != "ProviderHttpError"
+            ):
+                continue
+            message = str(details.get("error") or "")
+            if re.search(r"\bHTTP\s+402\b", message, flags=re.IGNORECASE) and re.search(
+                r"\binsufficient\s+balance\b", message, flags=re.IGNORECASE
+            ):
+                return [
+                    "provider billing exhausted before any simulator tool call "
+                    "(durable ProviderHttpError HTTP 402 Insufficient Balance)"
+                ]
+    return []
+
+
 def _verify_m0(calls: Sequence[Mapping[str, Any]], paths: CasePaths) -> list[str]:
     errors: list[str] = []
     names = [str(call.get("name") or call.get("tool_name") or "") for call in calls]
@@ -1301,8 +1349,14 @@ def verify_case(
         events, trace_paths = _load_trace_events(paths.trace_root)
         calls = _tool_calls(events)
         errors = _base_errors(paths, events)
+        provider_billing_errors = _provider_billing_exhaustion_errors(events, calls)
         payloads: list[Mapping[str, Any]] = []
-        if mode in {DETERMINISTIC, SCRIPTED_TUI}:
+        # The provider may fail before selecting any tool.  Its durable HTTP
+        # 402 exhaustion record is an external blocked condition, so do not
+        # mislabel the unattempted formal tool/M2 requirements as functional
+        # failures.  This exception is deliberately narrower than generic
+        # planner or provider errors; see _provider_billing_exhaustion_errors.
+        if mode in {DETERMINISTIC, SCRIPTED_TUI} and not provider_billing_errors:
             required_mcp_tools = (
                 SIX_SIMULATOR_TOOLS | frozenset({"oracle_perceive"})
                 if milestone == "m4"
@@ -1314,30 +1368,36 @@ def verify_case(
                 required_tools=required_mcp_tools,
             )
             errors.extend(mcp_errors)
-        for call in calls:
-            name = str(call.get("name") or call.get("tool_name") or "")
-            approved = _scripted_approved(call) if mode == SCRIPTED_TUI else _human_approved(call)
-            if name in MUTATING_TOOLS and not approved:
-                profile = SCRIPTED_TUI if mode == SCRIPTED_TUI else "human_gated"
-                errors.append(f"{name} lacks explicit {profile} approval evidence")
-        if mode == AUTONOMY:
-            expected = ENV_IDS[milestone]
-            if not any(_contains(call, "env_id", expected) for call in calls):
-                errors.append("Planner did not create the requested milestone environment")
-            if not any(str(call.get("name") or call.get("tool_name")) == "close_simulator_env" for call in calls):
-                errors.append("Planner did not close its environment")
-        elif milestone == "m0":
-            errors.extend(_verify_m0(calls, paths))
-        elif milestone == "m1":
-            errors.extend(_verify_m1(calls, paths))
-        elif milestone == "m2":
-            errors.extend(_verify_m2(calls))
-        elif milestone == "m3":
-            errors.extend(_verify_m3(calls, payloads))
-        elif milestone == "m4":
-            errors.extend(_verify_m4(calls, payloads))
+        if provider_billing_errors:
+            errors.extend(provider_billing_errors)
+        else:
+            for call in calls:
+                name = str(call.get("name") or call.get("tool_name") or "")
+                approved = _scripted_approved(call) if mode == SCRIPTED_TUI else _human_approved(call)
+                if name in MUTATING_TOOLS and not approved:
+                    profile = SCRIPTED_TUI if mode == SCRIPTED_TUI else "human_gated"
+                    errors.append(f"{name} lacks explicit {profile} approval evidence")
+            if mode == AUTONOMY:
+                expected = ENV_IDS[milestone]
+                if not any(_contains(call, "env_id", expected) for call in calls):
+                    errors.append("Planner did not create the requested milestone environment")
+                if not any(str(call.get("name") or call.get("tool_name")) == "close_simulator_env" for call in calls):
+                    errors.append("Planner did not close its environment")
+            elif milestone == "m0":
+                errors.extend(_verify_m0(calls, paths))
+            elif milestone == "m1":
+                errors.extend(_verify_m1(calls, paths))
+            elif milestone == "m2":
+                errors.extend(_verify_m2(calls))
+            elif milestone == "m3":
+                errors.extend(_verify_m3(calls, payloads))
+            elif milestone == "m4":
+                errors.extend(_verify_m4(calls, payloads))
         error_codes = {str(value) for event in events for value in _values(event, "error_code")}
-        infra = bool(error_codes & INFRA_CODES) or any(
+        infrastructure_codes = error_codes & INFRA_CODES
+        if provider_billing_errors:
+            infrastructure_codes.add(PROVIDER_BILLING_EXHAUSTED)
+        infra = bool(infrastructure_codes) or any(
             "inconclusive" in error for error in errors
         )
         status = "blocked" if infra else ("failed" if errors else "passed")
@@ -1346,7 +1406,7 @@ def verify_case(
             "errors": list(dict.fromkeys(errors)),
             "trace_paths": [str(path.resolve()) for path in trace_paths],
             "tool_call_count": len(calls),
-            "infrastructure_codes": sorted(error_codes & INFRA_CODES),
+            "infrastructure_codes": sorted(infrastructure_codes),
         }
     except (OSError, ValueError, AcceptanceError) as exc:
         return {
@@ -1366,11 +1426,26 @@ def assemble_report(
     milestones: dict[str, Any] = {}
     stop = False
     overall = "passed"
+    scripted_tui = formal_mode == SCRIPTED_TUI
+
+    def autonomy_not_applicable() -> dict[str, Any]:
+        if scripted_tui:
+            return {
+                "status": "not_applicable",
+                "errors": [],
+                "reason_code": "SCRIPTED_TUI_AUTONOMY_NOT_REQUIRED",
+            }
+        return {"status": "not_applicable", "errors": []}
+
     for milestone in MILESTONES:
         if stop:
             milestones[milestone] = {
                 "backend_chain_status": {"status": "not_run", "errors": ["formal predecessor gate did not pass"]},
-                "planner_autonomy_status": {"status": "not_run", "errors": ["backend gate not passed"]},
+                "planner_autonomy_status": (
+                    autonomy_not_applicable()
+                    if scripted_tui
+                    else {"status": "not_run", "errors": ["backend gate not passed"]}
+                ),
             }
             continue
         backend_paths = case_paths(run_root, milestone, formal_mode)
@@ -1382,9 +1457,13 @@ def assemble_report(
         if backend["status"] != "passed":
             stop = True
             overall = "inconclusive" if backend["status"] == "blocked" else "failed"
-            autonomy = {"status": "not_run", "errors": ["backend gate not passed"]}
-        elif milestone == "m0":
-            autonomy = {"status": "not_applicable", "errors": []}
+            autonomy = (
+                autonomy_not_applicable()
+                if scripted_tui
+                else {"status": "not_run", "errors": ["backend gate not passed"]}
+            )
+        elif scripted_tui or milestone == "m0":
+            autonomy = autonomy_not_applicable()
         else:
             autonomy = verify_case(case_paths(run_root, milestone, AUTONOMY), milestone, AUTONOMY)
         milestones[milestone] = {
