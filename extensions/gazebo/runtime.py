@@ -277,9 +277,17 @@ class GazeboRuntime:
         self.scene_epoch += 1
         barrier: float | None = None
         if self.controller is not None:
-            receipt = self.controller.execute({"action_type": "gripper_open"}).to_dict()
-            if not receipt.get("ok"):
-                raise GazeboProcessError(receipt.get("error_code") or "GRIPPER_FAILED")
+            # A cancelled cold-start action can leave the first open command
+            # without a terminal result even though the controller remains
+            # healthy.  Opening is idempotent, so retry that one explicitly
+            # recoverable result once; every other failure remains fail-closed.
+            receipt: dict[str, Any] = {}
+            for attempt in range(2):
+                receipt = self.controller.execute({"action_type": "gripper_open"}).to_dict()
+                if receipt.get("ok"):
+                    break
+                if receipt.get("error_code") != "GRIPPER_TIMEOUT" or attempt:
+                    raise GazeboProcessError(receipt.get("error_code") or "GRIPPER_FAILED")
             value = receipt.get("action_completed_ros_time_s")
             barrier = float(value) if value is not None else None
         observation = self.observe(min_camera_timestamp_s=barrier)

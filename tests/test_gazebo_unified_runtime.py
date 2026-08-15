@@ -67,6 +67,28 @@ class _World:
         self.resets.append(("models", seed))
 
 
+class _Receipt:
+    def __init__(self, payload):
+        self.payload = dict(payload)
+
+    def to_dict(self):
+        return dict(self.payload)
+
+
+class _ResetController:
+    def __init__(self, receipts):
+        self.receipts = list(receipts)
+        self.actions = []
+
+    def execute(self, action):
+        self.actions.append(dict(action))
+        return _Receipt(self.receipts.pop(0))
+
+    @staticmethod
+    def state_provider():
+        return RobotState()
+
+
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:
     for profile in gazebo_profiles().values():
         runtime = SimpleNamespace(started=False, close=lambda: None)
@@ -105,6 +127,40 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
     runtime.close()
     assert made_launch[0].closed == 1
     assert made_cameras[0].closed == 1
+
+
+def test_runtime_reset_retries_only_one_transient_gripper_timeout() -> None:
+    profile = gazebo_profile("m2_robotiq2f85")
+    world = _World()
+    runtime = GazeboRuntime(_deployment(), profile, world_control=world)
+    runtime.started = True
+    runtime._cameras = [_Camera(profile.cameras[0])]
+    controller = _ResetController([
+        {"ok": False, "error_code": "GRIPPER_TIMEOUT"},
+        {"ok": True, "action_completed_ros_time_s": 4.0},
+    ])
+    runtime.controller = controller
+
+    runtime.reset(seed=7)
+
+    assert world.resets == [("models", 7)]
+    assert controller.actions == [
+        {"action_type": "gripper_open"},
+        {"action_type": "gripper_open"},
+    ]
+
+
+def test_runtime_reset_does_not_retry_non_transient_gripper_failure() -> None:
+    profile = gazebo_profile("m2_robotiq2f85")
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [_Camera(profile.cameras[0])]
+    controller = _ResetController([{"ok": False, "error_code": "GRIPPER_FAILED"}])
+    runtime.controller = controller
+
+    with pytest.raises(RuntimeError, match="GRIPPER_FAILED"):
+        runtime.reset(seed=7)
+    assert controller.actions == [{"action_type": "gripper_open"}]
 
 
 def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit() -> None:
