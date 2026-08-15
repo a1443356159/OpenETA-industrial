@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 from pathlib import Path
 
+import scripts.tui_gazebo_acceptance as tui_acceptance
 from scripts.tui_gazebo_acceptance import (
     AUTONOMY,
     DETERMINISTIC,
@@ -130,6 +132,8 @@ def _prepare_evidence(tmp_path: Path, milestone: str, mode: str):
         {
             "mcp_group_exited": True,
             "port_free": True,
+            "owned_worker_groups": [],
+            "owned_worker_groups_exited": True,
             "owned_process_residuals": [],
             "preexisting_process_snapshot_unchanged": True,
             "protected_ros_graphs_unchanged": True,
@@ -150,6 +154,116 @@ def test_allocation_and_receipt_exclude_protected_domains() -> None:
     assert receipt["python_executable"] == str(Path(sys.executable).absolute())
     tampered = dict(receipt, ros_domain_id=42)
     assert verify_receipt(tampered)
+
+
+def test_owned_worker_cleanup_uses_only_matching_run_process_group(monkeypatch) -> None:
+    """A runner must not leave (or signal) a worker outside its own case."""
+
+    rows = [
+        {
+            "pid": 31001,
+            "cmdline": "python sim/bench_worker.py --bench dummy --port 0",
+            "openeta_tui_run_id": "this-case",
+        },
+        {
+            "pid": 31002,
+            "cmdline": "python sim/bench_worker.py --bench dummy --port 0",
+            "openeta_tui_run_id": "other-case",
+        },
+        {
+            "pid": 31003,
+            "cmdline": "python sim/bench_worker.py --bench dummy --port 0",
+            "openeta_tui_run_id": "this-case",
+        },
+    ]
+    terminated: set[int] = set()
+
+    # The server may stop the worker before the runner acts.  Cleanup must use
+    # the pre-shutdown ownership snapshot rather than rediscovering nothing.
+    monkeypatch.setattr(tui_acceptance, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(tui_acceptance.os, "getpgid", lambda pid: pid)
+
+    def fake_killpg(pgid: int, action: int) -> None:
+        if action == signal.SIGTERM:
+            terminated.add(pgid)
+
+    monkeypatch.setattr(tui_acceptance.os, "killpg", fake_killpg)
+    monkeypatch.setattr(
+        tui_acceptance,
+        "_process_group_exited",
+        lambda pgid: pgid in terminated,
+    )
+
+    evidence = tui_acceptance._terminate_owned_worker_groups(
+        run_id="this-case",
+        before=[{"pid": 31003}],
+        candidates=rows,
+        timeout_s=0.01,
+    )
+
+    assert terminated == {31001}
+    assert evidence == [
+        {
+            "pid": 31001,
+            "cmdline": "python sim/bench_worker.py --bench dummy --port 0",
+            "run_id": "this-case",
+            "owned": True,
+            "pgid": 31001,
+            "termination_signal": "SIGTERM",
+            "group_exited": True,
+            "state": "exited",
+        }
+    ]
+
+
+def test_formal_verifier_rejects_missing_worker_cleanup_evidence(tmp_path: Path) -> None:
+    paths = _prepare_evidence(tmp_path, "m0", DETERMINISTIC)
+    cleanup_path = paths.root / "cleanup.json"
+    cleanup = json.loads(cleanup_path.read_text(encoding="utf-8"))
+    cleanup.pop("owned_worker_groups_exited")
+    _write_json(cleanup_path, cleanup)
+
+    result = verify_case(paths, "m0", DETERMINISTIC)
+
+    assert result["status"] == "failed"
+    assert "bench-worker process groups" in " ".join(result["errors"])
+
+
+def test_tool_call_reader_prefers_raw_command_over_compact_action_summary() -> None:
+    """Compact episode summaries must never hide the correlated MCP result."""
+
+    raw = {
+        "kind": "tool_call",
+        "name": "create_simulator_env",
+        "parameters": {"env_id": ENV_IDS["m0"]},
+        "status": "executed",
+        "result": {
+            "success": True,
+            "details": {"outputs": {"mcp_calls": [{"request": {"request_id": "raw"}}]}},
+        },
+    }
+    compact = {
+        "name": "create_simulator_env",
+        "status": "executed",
+        "result": {"success": True, "details": {"outputs": {"mcp": {}}}},
+    }
+    events = [
+        {
+            "event_type": "action",
+            "payload": {
+                # The episode-step form is intentionally compact and lacks
+                # mcp_calls. It must not be mistaken for evidence.
+                "action": {"tool_calls": [compact]},
+                "command": {"tool_calls": [raw]},
+            },
+        },
+        {
+            "event_type": "tool_execution",
+            "payload": {"tool_calls": [raw]},
+        },
+    ]
+
+    assert tui_acceptance._tool_calls(events) == [raw]
 
 
 def test_m0_verifier_uses_trace_and_artifacts_not_planner_summary(tmp_path: Path) -> None:
@@ -234,6 +348,15 @@ def test_scripted_tui_cli_prepares_only_scripted_cases(tmp_path: Path) -> None:
     keys = scripted_tui_input(m0_paths)
     for command in ("/config", "/tools", "/session", "/memory all --json", "/quit"):
         assert command in keys
+    submissions = keys.splitlines()
+    assert submissions[:4] == ["/config", "/tools", "/session", "/memory all --json"]
+    # The first planner prompt after console setup is one complete task, never
+    # a standalone scripted_tui prefix that can trigger generic planning.
+    assert len(submissions) == 6
+    assert submissions[4].startswith("[automation=scripted_tui;")
+    assert "openeta/dummy_sim-v0" in submissions[4]
+    assert "\n" not in submissions[4]
+    assert submissions[5] == "/quit"
 
 
 def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path: Path) -> None:

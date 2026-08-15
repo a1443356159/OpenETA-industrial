@@ -166,7 +166,19 @@ def _process_snapshot() -> list[dict[str, Any]]:
             raw = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
             if not any(token in raw for token in ("ros2", "gz sim", "bench_worker")):
                 continue
-            result.append({"pid": int(entry.name), "cmdline": raw.strip()})
+            row: dict[str, Any] = {"pid": int(entry.name), "cmdline": raw.strip()}
+            # A worker deliberately owns a separate process group.  The
+            # acceptance runner can therefore not infer ownership from a
+            # parent PID after the MCP server has stopped.  Its inherited
+            # per-case run id is the narrow ownership proof used below.
+            environment = (entry / "environ").read_bytes().split(b"\0")
+            for item in environment:
+                if item.startswith(b"OPENETA_TUI_RUN_ID="):
+                    row["openeta_tui_run_id"] = item.partition(b"=")[2].decode(
+                        "utf-8", errors="replace"
+                    )
+                    break
+            result.append(row)
         except (OSError, UnicodeDecodeError):
             continue
     return sorted(result, key=lambda item: item["pid"])
@@ -331,6 +343,121 @@ def _terminate_owned_group(process: subprocess.Popen[Any], pgid: int) -> None:
         process.wait(timeout=5)
 
 
+def _process_group_exited(pgid: int) -> bool:
+    # ``killpg(..., 0)`` still succeeds for an unreaped zombie leader.  That
+    # is not a live residual (and cannot receive a further signal), so inspect
+    # the Linux process table first and require a non-zombie member before
+    # declaring the group live.  This matters after the MCP server has already
+    # sent SIGTERM to its own worker pool.
+    proc = Path("/proc")
+    observed_group = False
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text(encoding="utf-8")
+                tail = stat.rsplit(")", 1)[1].split()
+                state = tail[0]
+                process_group = int(tail[2])
+            except (IndexError, OSError, ValueError):
+                continue
+            if process_group != pgid:
+                continue
+            observed_group = True
+            if state != "Z":
+                return False
+        if observed_group:
+            return True
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def _terminate_owned_worker_groups(
+    *,
+    run_id: str,
+    before: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]] | None = None,
+    timeout_s: float = 15.0,
+) -> list[dict[str, Any]]:
+    """Terminate only bench-worker groups proven to belong to this case.
+
+    ``BenchWorkerManager`` starts workers with ``start_new_session=True`` so
+    a runner cannot rely on the MCP server's process group for cleanup.  Each
+    runner supplies a unique ``OPENETA_TUI_RUN_ID`` inherited by those workers.
+    We additionally reject PIDs present before the case began and require the
+    worker to be its own process-group leader before sending a signal.
+    """
+
+    before_pids = {int(item["pid"]) for item in before if isinstance(item.get("pid"), int)}
+    if candidates is None:
+        candidates = _process_snapshot()
+    owned_candidates = [
+        row
+        for row in candidates
+        if isinstance(row.get("pid"), int)
+        and row["pid"] not in before_pids
+        and "bench_worker" in str(row.get("cmdline") or "")
+        and row.get("openeta_tui_run_id") == run_id
+    ]
+    evidence: list[dict[str, Any]] = []
+    for row in owned_candidates:
+        pid = int(row["pid"])
+        record: dict[str, Any] = {
+            "pid": pid,
+            "cmdline": str(row.get("cmdline") or ""),
+            "run_id": run_id,
+            "owned": True,
+        }
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            record.update({"state": "already_exited", "group_exited": True})
+            evidence.append(record)
+            continue
+        record["pgid"] = pgid
+        if pgid != pid:
+            # Never signal an unrelated shared group.  A worker launched by
+            # BenchWorkerManager must be the leader because it uses
+            # start_new_session=True; otherwise cleanup must fail closed.
+            record.update(
+                {
+                    "state": "refused_non_leader_group",
+                    "group_exited": False,
+                }
+            )
+            evidence.append(record)
+            continue
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            record["termination_signal"] = "SIGTERM"
+        except ProcessLookupError:
+            record.update({"state": "already_exited", "group_exited": True})
+            evidence.append(record)
+            continue
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and not _process_group_exited(pgid):
+            time.sleep(0.05)
+        if not _process_group_exited(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                record["escalation_signal"] = "SIGKILL"
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not _process_group_exited(pgid):
+                time.sleep(0.05)
+        record["group_exited"] = _process_group_exited(pgid)
+        record["state"] = "exited" if record["group_exited"] else "residual"
+        evidence.append(record)
+    return evidence
+
+
 def _partition_cleanup(partition: str) -> dict[str, Any]:
     env = os.environ.copy()
     env["GZ_PARTITION"] = partition
@@ -356,7 +483,16 @@ def scripted_tui_input(paths: CasePaths) -> str:
     commands: list[str] = []
     if paths.root.parent.name == "m0":
         commands.extend(("/config", "/tools", "/session", "/memory all --json"))
-    commands.extend((paths.instructions.read_text(encoding="utf-8"), "/quit"))
+    # prompt_toolkit submits every newline independently.  The automation
+    # provenance and the actual task must therefore be one physical prompt:
+    # sending ``[automation=scripted_tui]`` alone lets a planner start generic
+    # work before it receives the required M0/M3 task.  Preserve the complete
+    # instruction text but collapse formatting whitespace for one real PTY
+    # submission after the console-evidence slash commands.
+    task = " ".join(paths.instructions.read_text(encoding="utf-8").split())
+    if not task:
+        raise AcceptanceError("TUI_NOT_READY: scripted task instructions are empty")
+    commands.extend((task, "/quit"))
     return "\n".join(commands) + "\n"
 
 
@@ -371,6 +507,10 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
             "GZ_PARTITION": allocation.gz_partition,
             "MCP_PORT": str(allocation.port),
             "ROS_LOCALHOST_ONLY": "1",
+            # This is inherited by BenchWorkerManager's independently
+            # sessioned children and is the only ownership marker accepted by
+            # runner-side worker cleanup.
+            "OPENETA_TUI_RUN_ID": allocation.run_id,
             "OPENETA_SUPERVISION_PROFILE": SCRIPTED_TUI if scripted else "human_gated",
             "OPENETA_SCRIPTED_TUI": "1" if scripted else "0",
             # M4 explicitly selects the existing Gazebo Oracle tool.  The
@@ -386,7 +526,16 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
         raise AcceptanceError("TUI_NOT_READY: selected Python executable is unavailable")
     log = paths.mcp_log.open("w", encoding="utf-8")
     process = subprocess.Popen(
-        [str(python), "-m", "sim.mcp_server.server", "--transport", "sse", "--port", str(allocation.port)],
+        [
+            str(python),
+            "-u",
+            "-m",
+            "sim.mcp_server.server",
+            "--transport",
+            "sse",
+            "--port",
+            str(allocation.port),
+        ],
         cwd=paths.root,
         env=env,
         stdout=log,
@@ -399,7 +548,10 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
         paths.pid_record,
         {"mcp_pid": process.pid, "mcp_pgid": pgid, "owned": True, "run_id": allocation.run_id},
     )
+    receipt = _json_load(paths.receipt)
     tui_code = 2
+    mcp_termination_error = ""
+    worker_candidates: list[dict[str, Any]] = []
     try:
         _wait_ready(allocation.port, process)
         print(f"\n=== {paths.root.name} ===")
@@ -422,12 +574,23 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
         )
         tui_code = int(completed.returncode)
     finally:
+        # Capture the run-id-marked worker while the MCP server still owns its
+        # bookkeeping.  Its own shutdown may stop the group before runner-side
+        # cleanup executes; keeping this snapshot makes cleanup evidence prove
+        # both discovery and exit rather than reporting an ambiguous empty set.
+        worker_candidates = _process_snapshot()
         try:
             _terminate_owned_group(process, pgid)
+        except Exception as exc:  # noqa: BLE001 - evidence must survive cleanup failure.
+            mcp_termination_error = f"{type(exc).__name__}: {exc}"
         finally:
             log.close()
+    worker_groups = _terminate_owned_worker_groups(
+        run_id=allocation.run_id,
+        before=receipt["preexisting_processes"],
+        candidates=worker_candidates,
+    )
     after = _process_snapshot()
-    receipt = _json_load(paths.receipt)
     before_pids = {item["pid"] for item in receipt["preexisting_processes"]}
     owned_residuals = [item for item in after if item["pid"] not in before_pids]
     from extensions.gazebo.ros2_ws.acceptance_isolation import (
@@ -449,7 +612,12 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
     )
     cleanup = {
         "mcp_group_exited": process.poll() is not None,
+        "mcp_termination_error": mcp_termination_error,
         "port_free": _port_is_free(allocation.port),
+        "owned_worker_groups": worker_groups,
+        "owned_worker_groups_exited": all(
+            item.get("group_exited") is True for item in worker_groups
+        ),
         "owned_process_residuals": owned_residuals,
         "preexisting_process_snapshot_unchanged": all(
             any(row["pid"] == item["pid"] for row in after)
@@ -461,6 +629,8 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
         "protected_ros_graphs_unchanged": protected_graph_unchanged,
     }
     _json_dump(paths.root / "cleanup.json", cleanup)
+    if mcp_termination_error:
+        raise AcceptanceError(f"MCP_CLEANUP_FAILED: {mcp_termination_error}")
     return tui_code
 
 
@@ -475,18 +645,65 @@ def _walk(value: Any) -> Iterable[Any]:
 
 
 def _tool_calls(events: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    calls: list[Mapping[str, Any]] = []
-    seen: set[int] = set()
-    action_events = [event for event in events if event.get("event_type") == "action"]
-    for event in action_events or events:
-        for node in _walk(event):
-            if not isinstance(node, Mapping) or id(node) in seen:
+    """Extract durable, full-fidelity tool calls from session envelopes.
+
+    An episode also records compact ``payload.action.tool_calls`` summaries for
+    planner context.  Those summaries deliberately omit heavy ``outputs`` such
+    as the MCP request/response/receipt chain.  Recursively walking every
+    ``action`` envelope therefore selected the summary before the raw command
+    and made a real formal run look uncorrelated.  Formal verification must
+    consume only the original command records: ``payload.command.tool_calls``.
+
+    Some older/runtime tool-execution records contain a direct
+    ``payload.tool_calls`` array instead.  It is used only when the case has no
+    command records at all, so one physical call cannot be double-counted by
+    its command and per-tool trace entries.
+    """
+
+    action_command_calls: list[Mapping[str, Any]] = []
+    command_calls: list[Mapping[str, Any]] = []
+    direct_calls: list[Mapping[str, Any]] = []
+
+    def append_raw(
+        destination: list[Mapping[str, Any]],
+        candidate: Any,
+    ) -> None:
+        if not isinstance(candidate, Sequence) or isinstance(
+            candidate, (str, bytes, bytearray)
+        ):
+            return
+        for call in candidate:
+            if not isinstance(call, Mapping):
                 continue
-            name = str(node.get("name") or node.get("tool_name") or "")
-            if name and isinstance(node.get("result"), Mapping):
-                calls.append(node)
-                seen.add(id(node))
-    return calls
+            name = str(call.get("name") or call.get("tool_name") or "")
+            # ``parameters`` and/or the pipeline ``kind`` are present on the
+            # source command.  Compact action summaries intentionally have
+            # neither, even though they retain name/status/result.
+            if (
+                name
+                and isinstance(call.get("result"), Mapping)
+                and ("parameters" in call or "kind" in call)
+            ):
+                destination.append(call)
+
+    for event in events:
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        command = payload.get("command")
+        if isinstance(command, Mapping):
+            destination = (
+                action_command_calls
+                if event.get("event_type") == "action"
+                else command_calls
+            )
+            append_raw(destination, command.get("tool_calls"))
+        append_raw(direct_calls, payload.get("tool_calls"))
+    # The runtime writes the same complete command to ``pipeline_plan`` before
+    # it writes its durable ``action`` event.  Prefer the latter so retries and
+    # M2's repeated motions are counted exactly once rather than once per trace
+    # representation.
+    return action_command_calls or command_calls or direct_calls
 
 
 def _load_trace_events(trace_root: Path) -> tuple[list[Mapping[str, Any]], list[Path]]:
@@ -613,6 +830,8 @@ def _base_errors(paths: CasePaths, events: Sequence[Mapping[str, Any]]) -> list[
         cleanup = _json_load(cleanup_path)
         if not cleanup.get("mcp_group_exited") or not cleanup.get("port_free"):
             errors.append("owned MCP process group or port was not cleaned")
+        if cleanup.get("owned_worker_groups_exited") is not True:
+            errors.append("owned bench-worker process groups lack clean-exit evidence")
         if cleanup.get("owned_process_residuals"):
             errors.append("owned ROS/Gazebo worker residuals remain")
         if cleanup.get("preexisting_process_snapshot_unchanged") is not True:
@@ -634,11 +853,11 @@ def _verify_m0(calls: Sequence[Mapping[str, Any]], paths: CasePaths) -> list[str
     errors: list[str] = []
     names = [str(call.get("name") or call.get("tool_name") or "") for call in calls]
     expected = ["create_simulator_env", "observe", "close_simulator_env"]
-    cursor = 0
-    for name in names:
-        if cursor < len(expected) and name == expected[cursor]:
-            cursor += 1
-    if cursor != len(expected):
+    remaining_names = iter(names)
+    if not all(
+        any(name == expected_name for name in remaining_names)
+        for expected_name in expected
+    ):
         errors.append("M0 create→observe→close sequence missing")
     create = next((call for call in calls if str(call.get("name")) == expected[0]), {})
     if not _contains(create, "env_id", ENV_IDS["m0"]):
