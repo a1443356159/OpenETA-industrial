@@ -55,9 +55,10 @@ GRASP_MOVE_PARAMS = {
     # Gentle trajectory scaling for grasp-critical moves: OMPL joint-space
     # carries can whip the redundant wrist, and at the default 0.3 scaling the
     # resulting payload acceleration rattles a caged box out of the pads (and
-    # stresses a jointed one off the mount).  0.1 keeps carries quasi-static.
-    "max_velocity_scaling_factor": 0.1,
-    "max_acceleration_scaling_factor": 0.1,
+    # stresses a jointed one off the mount).  0.05 leaves enough settling
+    # margin for the independent five-round physical proof.
+    "max_velocity_scaling_factor": 0.05,
+    "max_acceleration_scaling_factor": 0.05,
 }
 DOCUMENTATION = {
     "gazebo_odometry_publisher": "https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1OdometryPublisher.html",
