@@ -47,6 +47,28 @@ def _remove_own_node(
     return result
 
 
+def _normalise_graph_rows(raw: Any) -> list[list[Any]]:
+    """Return ROS graph rows in a deterministic JSON-native representation.
+
+    rclpy exposes topic/service/action rows as tuples.  The protected-domain
+    baseline is persisted in JSON, where those same tuples are read back as
+    lists.  Without normalisation, an unchanged graph compares unequal solely
+    because one snapshot has ``tuple`` rows and the other has ``list`` rows.
+    Preserve every endpoint and type while making both observations represent
+    the exact same JSON topology.
+    """
+
+    rows: list[list[Any]] = []
+    for row in raw:
+        if not isinstance(row, (list, tuple)) or len(row) != 2:
+            raise ValueError("ROS graph row must be a two-column sequence")
+        name, types = row
+        if not isinstance(types, (list, tuple)):
+            raise ValueError("ROS graph row types must be a sequence")
+        rows.append([str(name), sorted(str(item) for item in types)])
+    return sorted(rows, key=lambda item: (str(item[0]), item[1]))
+
+
 def _graph_child(domain: int, connection: Any) -> None:
     started = time.monotonic()
     context = node = executor = None
@@ -77,9 +99,9 @@ def _graph_child(domain: int, connection: Any) -> None:
         connection.send({
             "availability": "AVAILABLE", "duration_ms": round((time.monotonic() - started) * 1000, 1),
             "nodes": nodes,
-            "topics": sorted(node.get_topic_names_and_types()),
-            "services": sorted(node.get_service_names_and_types()),
-            "actions": sorted(get_action_names_and_types(node=node)),
+            "topics": _normalise_graph_rows(node.get_topic_names_and_types()),
+            "services": _normalise_graph_rows(node.get_service_names_and_types()),
+            "actions": _normalise_graph_rows(get_action_names_and_types(node=node)),
         })
     except BaseException as exc:  # child must turn all failures into evidence
         connection.send({

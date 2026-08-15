@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import scripts.tui_gazebo_acceptance as tui_acceptance
+from extensions.gazebo.ros2_ws.acceptance_isolation import _normalise_graph_rows
 from scripts.tui_gazebo_acceptance import (
     AUTONOMY,
     DETERMINISTIC,
@@ -154,6 +155,17 @@ def test_allocation_and_receipt_exclude_protected_domains() -> None:
     assert receipt["python_executable"] == str(Path(sys.executable).absolute())
     tampered = dict(receipt, ros_domain_id=42)
     assert verify_receipt(tampered)
+
+
+def test_protected_graph_rows_are_json_native_before_baseline_comparison() -> None:
+    """An unchanged rclpy tuple row must equal its JSON-loaded list form."""
+
+    live = _normalise_graph_rows(
+        [("/parameter_events", ["rcl_interfaces/msg/ParameterEvent"])]
+    )
+    persisted = [["/parameter_events", ["rcl_interfaces/msg/ParameterEvent"]]]
+
+    assert live == persisted
 
 
 def test_owned_worker_cleanup_uses_only_matching_run_process_group(monkeypatch) -> None:
