@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from extensions.gazebo import GazeboProcess, Ros2LaunchProcess
+from extensions.gazebo import process as gazebo_process
 
 
 def test_gazebo_process_lifecycle_when_gz_is_installed() -> None:
@@ -59,3 +60,34 @@ def test_ros_launch_close_waits_for_every_process_group_member() -> None:
     assert leader.poll() is not None
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
+
+
+def test_ros_launch_inherits_worker_streams_for_case_local_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker log must retain Gazebo's own launch diagnostics."""
+
+    captured = {}
+
+    class Process:
+        pid = 12345
+
+        @staticmethod
+        def poll():
+            return None
+
+    def popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return Process()
+
+    monkeypatch.setattr(gazebo_process.subprocess, "Popen", popen)
+    launch = Ros2LaunchProcess(
+        package="openeta_rm75_robotiq2f85_sim",
+        launch_file="m1_gazebo_rgbd.launch.py",
+        ros2_executable=sys.executable,
+    )
+
+    assert launch.start() == 12345
+    assert captured["kwargs"]["stdout"] is None
+    assert captured["kwargs"]["stderr"] is None

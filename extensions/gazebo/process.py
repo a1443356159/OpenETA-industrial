@@ -786,8 +786,12 @@ class Ros2LaunchProcess:
         self._process = subprocess.Popen(
             [executable, "launch", self.package, self.launch_file, *self.arguments],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            # A formal case captures the bench worker stdout/stderr in its
+            # case-local worker log.  Inherit those streams so Gazebo/ROS
+            # launch diagnostics survive a readiness failure instead of being
+            # stranded in an unread private PIPE.
+            stdout=None,
+            stderr=None,
             # A launch description can start Gazebo and bridge descendants.
             # Give the runtime an owned session so close() reaps the complete
             # tree without ever signalling the bench worker itself.
@@ -799,8 +803,7 @@ class Ros2LaunchProcess:
         while time.monotonic() < deadline:
             if self.running:
                 return int(self._process.pid)
-            output = self._process.stderr.read() if self._process.stderr else ""
-            raise GazeboProcessError(f"ROS 2 launch exited during startup: {output[-1000:]}")
+            raise GazeboProcessError("ROS 2 launch exited during startup; inspect worker launch log")
         self.close()
         raise GazeboProcessError("ROS 2 launch did not stay running")
 
@@ -823,5 +826,3 @@ class Ros2LaunchProcess:
                 process.kill()
                 process.wait(timeout=3.0)
         self._process = None
-        if process.stderr is not None:
-            process.stderr.close()

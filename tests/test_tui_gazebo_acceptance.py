@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
+import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -188,6 +190,21 @@ def test_cleanup_port_wait_remains_fail_closed_for_a_bound_listener(monkeypatch)
     assert tui_acceptance._wait_for_free_port(45678, timeout_s=0.1) is False
 
 
+def test_cleanup_port_probe_rejects_an_active_loopback_listener() -> None:
+    """SO_REUSEADDR accepts transient TCP state, never a real listener."""
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = int(listener.getsockname()[1])
+    try:
+        assert tui_acceptance._port_is_free(port) is False
+    finally:
+        listener.close()
+    assert tui_acceptance._port_is_free(port) is True
+
+
 def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monkeypatch) -> None:
     """Gazebo launch diagnostics must survive in the formal case directory."""
 
@@ -195,6 +212,8 @@ def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monke
     paths = case_paths(tmp_path, "m1", SCRIPTED_TUI)
     paths.root.mkdir(parents=True)
     paths.instructions.write_text("scripted M1 task", encoding="utf-8")
+    ros_python_path = "/opt/ros/jazzy/lib/python3.12/site-packages"
+    monkeypatch.setenv("PYTHONPATH", ros_python_path)
     _write_json(
         paths.receipt,
         {"preexisting_processes": [], "protected_ros_graphs": {}},
@@ -236,6 +255,7 @@ def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monke
     )
 
     assert run_case(ROOT, paths, allocation) == 0
+    assert seen["environment"]["PYTHONPATH"] == os.pathsep.join((str(ROOT), ros_python_path))
     assert seen["environment"]["OPENETA_WORKER_LOG_DIR"] == str(paths.root / "worker-logs")
 
 

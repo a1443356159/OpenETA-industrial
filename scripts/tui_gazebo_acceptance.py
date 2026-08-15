@@ -122,7 +122,13 @@ def _free_port() -> int:
 def _port_is_free(port: int) -> bool:
     with socket.socket() as sock:
         try:
+            # A recently closed MCP/SSE listener can leave TCP state behind
+            # after every owned process has exited.  Reusing that harmless
+            # state is not a residual server; ``listen()`` still rejects any
+            # live process that owns the endpoint.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("127.0.0.1", port))
+            sock.listen(1)
         except OSError:
             return False
     return True
@@ -521,9 +527,17 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
     milestone = paths.root.parent.name
     scripted = paths.root.name == SCRIPTED_TUI
     env = os.environ.copy()
+    # The wrapper has already sourced Jazzy and the workspace overlay.  Keep
+    # their generated Python paths: BenchWorkerManager deliberately removes
+    # the repository path before launching its Gazebo child, but preserves
+    # these ROS paths so rclpy and ros_gz_sim remain importable there.
+    inherited_python_path = env.get("PYTHONPATH", "")
+    python_path = os.pathsep.join(
+        item for item in (str(repo), inherited_python_path) if item
+    )
     env.update(
         {
-            "PYTHONPATH": str(repo),
+            "PYTHONPATH": python_path,
             "ROS_DOMAIN_ID": str(allocation.ros_domain_id),
             "GZ_PARTITION": allocation.gz_partition,
             "MCP_PORT": str(allocation.port),
