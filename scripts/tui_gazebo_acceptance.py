@@ -852,6 +852,109 @@ def _camera_frames(node: Any) -> list[Mapping[str, Any]]:
     return frames
 
 
+def _case_local_artifact_path(value: Any, root: Path) -> Path | None:
+    """Resolve one existing artifact, rejecting path escapes and absent files."""
+
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = Path(value)
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _durable_rgbd_pairs(payload: Mapping[str, Any], root: Path) -> list[tuple[str, Path, Path]]:
+    """Return only camera pairs whose RGB and depth files are case-local."""
+
+    pairs: list[tuple[str, Path, Path]] = []
+    for item in _walk(payload):
+        if not isinstance(item, Mapping):
+            continue
+        if "rgb_path" not in item and "depth_path" not in item:
+            continue
+        rgb = _case_local_artifact_path(item.get("rgb_path"), root)
+        depth = _case_local_artifact_path(item.get("depth_path"), root)
+        if rgb is None or depth is None:
+            continue
+        pairs.append((str(item.get("frame_id") or ""), rgb, depth))
+    return pairs
+
+
+def _m1_camera_frames(
+    result: Mapping[str, Any], *, root: Path
+) -> tuple[list[Mapping[str, Any]], list[str]]:
+    """Resolve compact M1 RGB-D refs against durable response artifacts.
+
+    The action trace deliberately omits image payloads.  Its camera summaries
+    therefore prove RGB-D only when both refs map to existing, case-local
+    materialized files and the durable MCP response records that exact pair.
+    """
+
+    outputs = _mapping_with(result, "outputs")
+    response = outputs.get("response") if isinstance(outputs, Mapping) else None
+    if not isinstance(response, Mapping):
+        return [], ["lacks materialized MCP response reference"]
+    durable_path = _case_local_artifact_path(response.get("response_path"), root)
+    if durable_path is None:
+        return [], ["durable MCP response artifact is missing or escapes the case"]
+    try:
+        durable = _json_load(durable_path)
+    except (OSError, ValueError) as exc:
+        return [], [f"durable MCP response artifact is unreadable: {exc}"]
+    if not isinstance(durable, Mapping):
+        return [], ["durable MCP response artifact is not an object"]
+    durable_pairs = _durable_rgbd_pairs(durable, root)
+    if not durable_pairs:
+        return [], ["durable MCP response has no existing RGB-D pair"]
+    summaries = response.get("cameras")
+    artifacts = response.get("image_artifacts")
+    if not isinstance(summaries, Sequence) or isinstance(summaries, (str, bytes, bytearray)):
+        return [], ["materialized response lacks camera references"]
+    if not isinstance(artifacts, Sequence) or isinstance(artifacts, (str, bytes, bytearray)):
+        return [], ["materialized response lacks image artifacts"]
+    resolved_frames: list[Mapping[str, Any]] = []
+    errors: list[str] = []
+    for index, summary in enumerate(summaries, 1):
+        if not isinstance(summary, Mapping):
+            errors.append(f"camera reference {index} is not an object")
+            continue
+        rgb_ref = summary.get("rgb_ref")
+        depth_ref = summary.get("depth_ref")
+        if not isinstance(rgb_ref, str) or not rgb_ref or not isinstance(depth_ref, str) or not depth_ref:
+            errors.append(f"camera reference {index} lacks paired rgb_ref/depth_ref")
+            continue
+
+        def artifact_path(kind: str, reference: str) -> Path | None:
+            matches = [
+                item for item in artifacts
+                if isinstance(item, Mapping)
+                and item.get("kind") == kind
+                and item.get("index") == reference
+            ]
+            if len(matches) != 1:
+                return None
+            return _case_local_artifact_path(matches[0].get("path"), root)
+
+        rgb = artifact_path("rgb", rgb_ref)
+        depth = artifact_path("depth", depth_ref)
+        if rgb is None or depth is None:
+            errors.append(f"camera reference {index} has missing, ambiguous, or nonlocal RGB-D artifacts")
+            continue
+        frame_id = str(summary.get("frame_id") or "")
+        matching_durable = [
+            pair for pair in durable_pairs
+            if pair[1] == rgb and pair[2] == depth and (not frame_id or pair[0] == frame_id)
+        ]
+        if not matching_durable:
+            errors.append(f"camera reference {index} does not match its durable RGB-D response")
+            continue
+        resolved_frames.append({**summary, "rgb_path": str(rgb), "depth_path": str(depth)})
+    return resolved_frames, errors
+
+
 def _timestamps(node: Any) -> list[float]:
     values: list[float] = []
     for key in ("timestamp_s", "ros_timestamp_s", "capture_timestamp_s"):
@@ -916,7 +1019,7 @@ def _verify_m0(calls: Sequence[Mapping[str, Any]], paths: CasePaths) -> list[str
     return errors
 
 
-def _verify_m1(calls: Sequence[Mapping[str, Any]]) -> list[str]:
+def _verify_m1(calls: Sequence[Mapping[str, Any]], paths: CasePaths) -> list[str]:
     errors: list[str] = []
     observes = [call for call in calls if str(call.get("name") or call.get("tool_name")) == "observe"]
     if len(observes) < 2:
@@ -924,7 +1027,8 @@ def _verify_m1(calls: Sequence[Mapping[str, Any]]) -> list[str]:
     last_timestamp: float | None = None
     for index, call in enumerate(observes[:2], 1):
         result = _result(call)
-        cameras = _camera_frames(result)
+        cameras, camera_errors = _m1_camera_frames(result, root=paths.root)
+        errors.extend(f"M1 observe {index} {error}" for error in camera_errors)
         if not cameras:
             errors.append(f"M1 observe {index} lacks RGB-D")
         if not _contains(result, "intrinsics") and not all(
@@ -1225,7 +1329,7 @@ def verify_case(
         elif milestone == "m0":
             errors.extend(_verify_m0(calls, paths))
         elif milestone == "m1":
-            errors.extend(_verify_m1(calls))
+            errors.extend(_verify_m1(calls, paths))
         elif milestone == "m2":
             errors.extend(_verify_m2(calls))
         elif milestone == "m3":

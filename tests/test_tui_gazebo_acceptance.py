@@ -149,6 +149,58 @@ def _prepare_evidence(tmp_path: Path, milestone: str, mode: str):
     return paths
 
 
+def _m1_materialized_observe(root: Path, *, timestamp_s: float) -> tuple[dict, Path]:
+    """Build one compact observe result plus its durable RGB-D response."""
+
+    image_root = root / "images"
+    rgb_path = image_root / "top-rgb.png"
+    depth_path = image_root / "top-depth.png"
+    rgb_path.parent.mkdir(parents=True, exist_ok=True)
+    rgb_path.write_bytes(b"rgb")
+    depth_path.write_bytes(b"depth")
+    camera = {
+        "frame_id": "top_camera",
+        "rgb_path": str(rgb_path),
+        "depth_path": str(depth_path),
+        "intrinsics": {"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0, "scale": 1000.0},
+        "extrinsics": {"frame_transform": "camera_to_world"},
+        "timestamp_s": timestamp_s,
+    }
+    response_path = root / "responses" / "observe.json"
+    _write_json(
+        response_path,
+        {"cameras": [camera], "metadata": {"observation_provenance": "gazebo_ros_live"}},
+    )
+    return (
+        {
+            "success": True,
+            "details": {
+                "outputs": {
+                    "response": {
+                        "response_path": str(response_path),
+                        "cameras": [
+                            {
+                                "frame_id": "top_camera",
+                                "rgb_ref": "top-camera.rgb",
+                                "depth_ref": "top-camera.depth",
+                                "intrinsics": dict(camera["intrinsics"]),
+                                "extrinsics": dict(camera["extrinsics"]),
+                                "timestamp_s": timestamp_s,
+                            }
+                        ],
+                        "image_artifacts": [
+                            {"index": "top-camera.rgb", "kind": "rgb", "path": str(rgb_path)},
+                            {"index": "top-camera.depth", "kind": "depth", "path": str(depth_path)},
+                        ],
+                        "observation_provenance": "gazebo_ros_live",
+                    }
+                }
+            },
+        },
+        response_path,
+    )
+
+
 def test_allocation_and_receipt_exclude_protected_domains() -> None:
     allocation = allocate("unit", occupied_domains={80, 81})
     assert allocation.ros_domain_id not in {42, 80, 81, 100}
@@ -170,6 +222,43 @@ def test_protected_graph_rows_are_json_native_before_baseline_comparison() -> No
     persisted = [["/parameter_events", ["rcl_interfaces/msg/ParameterEvent"]]]
 
     assert live == persisted
+
+
+def test_m1_verifier_accepts_paired_materialized_rgbd_refs(tmp_path: Path) -> None:
+    first, _ = _m1_materialized_observe(tmp_path / "first", timestamp_s=1.0)
+    second, _ = _m1_materialized_observe(tmp_path / "second", timestamp_s=2.0)
+    calls = [
+        {"name": "observe", "result": first},
+        {"name": "observe", "result": second},
+    ]
+
+    assert tui_acceptance._verify_m1(calls, SimpleNamespace(root=tmp_path)) == []
+
+
+def test_m1_verifier_rejects_missing_mismatched_or_nonexistent_rgbd_artifacts(
+    tmp_path: Path,
+) -> None:
+    missing, _ = _m1_materialized_observe(tmp_path / "missing", timestamp_s=1.0)
+    missing_response = missing["details"]["outputs"]["response"]
+    missing_response["image_artifacts"] = missing_response["image_artifacts"][:1]
+    frames, errors = tui_acceptance._m1_camera_frames(missing, root=tmp_path)
+    assert not frames and any("missing" in error for error in errors)
+
+    mismatched, response_path = _m1_materialized_observe(tmp_path / "mismatched", timestamp_s=1.0)
+    durable = json.loads(response_path.read_text(encoding="utf-8"))
+    other_depth = tmp_path / "mismatched" / "images" / "other-depth.png"
+    other_depth.write_bytes(b"other-depth")
+    durable["cameras"][0]["depth_path"] = str(other_depth)
+    _write_json(response_path, durable)
+    frames, errors = tui_acceptance._m1_camera_frames(mismatched, root=tmp_path)
+    assert not frames and any("does not match" in error for error in errors)
+
+    nonexistent, _ = _m1_materialized_observe(tmp_path / "nonexistent", timestamp_s=1.0)
+    nonexistent["details"]["outputs"]["response"]["image_artifacts"][0]["path"] = str(
+        tmp_path / "nonexistent" / "images" / "absent.png"
+    )
+    frames, errors = tui_acceptance._m1_camera_frames(nonexistent, root=tmp_path)
+    assert not frames and any("nonlocal" in error for error in errors)
 
 
 def test_cleanup_waits_briefly_for_mcp_listener_release(monkeypatch) -> None:
