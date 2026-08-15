@@ -410,14 +410,11 @@ class M3AdhesionSystem final
     }
 
     const auto pose = gz::sim::worldPose(this->mountLink_, _ecm) * this->relativePose_;
-    auto *poseCommand =
-        _ecm.Component<gz::sim::components::WorldPoseCmd>(this->capturedModel_);
-    if (poseCommand == nullptr)
-      _ecm.CreateComponent(
-          this->capturedModel_, gz::sim::components::WorldPoseCmd(pose));
-    else
-      _ecm.SetComponentData<gz::sim::components::WorldPoseCmd>(
-          this->capturedModel_, pose);
+    // Use Gazebo's model helper instead of mutating WorldPoseCmd directly.
+    // Besides refreshing the command, it marks it as a one-time change; that
+    // prevents Physics from consuming/removing a stale command while a carry
+    // trajectory advances the mount on the next simulation tick.
+    gz::sim::Model(this->capturedModel_).SetWorldPoseCmd(_ecm, pose);
 
     SetGravityEnabled(_ecm, this->capturedLink_, false);
     this->DisableCollisions(_ecm);

@@ -36,3 +36,12 @@ def test_m3_world_uses_official_odometry_and_native_pad_contact_sensors() -> Non
     assert text.count("gz-sim-odometry-publisher-system") == 2
     assert "detachable" not in text.lower()
     M3Config().validate_assets()
+
+
+def test_m3_native_adhesion_refreshes_the_official_model_pose_command() -> None:
+    source = (PACKAGE / "src/m3_adhesion_system.cpp").read_text(encoding="utf-8")
+
+    # The Gazebo helper updates WorldPoseCmd and marks it for the Physics
+    # system; raw component assignment does not provide that lifecycle mark.
+    assert "SetWorldPoseCmd(_ecm, pose)" in source
+    assert "SetComponentData<gz::sim::components::WorldPoseCmd>" not in source
