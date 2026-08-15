@@ -47,6 +47,7 @@ def test_m3_native_adhesion_uses_contact_gated_force_carry() -> None:
     assert "SetComponentData<gz::sim::components::WorldPoseCmd>" not in source
     assert "kAdhesionFriction" in source
     assert "kAdhesionTorsionalFriction" in source
+    assert "!this->adhesionForceEngaged_" in source
     assert "ConfigureCapturedContacts" in source
     assert "AddWorldForce" in source
     assert "kAdhesionStiffnessNpm" in source

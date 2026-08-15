@@ -141,7 +141,10 @@ class M3AdhesionSystem final
               this->carrierCollisionEntities_.count(_first) != 0;
           const bool carrierSecond =
               this->carrierCollisionEntities_.count(_second) != 0;
-          if (!this->captured_ ||
+          // Do not alter the live pad contacts while a close is establishing
+          // its evidence window.  The stronger tangential/torsional material
+          // applies only after the captured body has begun the proof lift.
+          if (!this->captured_ || !this->adhesionForceEngaged_ ||
               !((targetFirst && carrierSecond) ||
                 (targetSecond && carrierFirst)))
           {
