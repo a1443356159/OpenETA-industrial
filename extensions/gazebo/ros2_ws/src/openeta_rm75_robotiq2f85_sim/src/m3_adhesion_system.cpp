@@ -51,8 +51,12 @@ constexpr std::size_t kMaximumSamples = 512;
 constexpr double kAdhesionFriction = 2.0;
 constexpr double kTargetMassKg = 0.10;
 constexpr double kGravityMps2 = 9.81;
-constexpr double kAdhesionStiffnessNpm = 30.0;
-constexpr double kAdhesionDampingNsPm = 3.5;
+// A 100 g target needs enough closed-loop authority to remain within the
+// verifier's 10 mm relative-pose contract during the 80 mm proof lift.  This
+// pair is near critically damped for that mass, while the delayed engagement
+// below keeps the initial tabletop contact entirely physical.
+constexpr double kAdhesionStiffnessNpm = 80.0;
+constexpr double kAdhesionDampingNsPm = 6.0;
 constexpr double kMaximumAdhesionForceN = 15.0;
 constexpr double kLiftEngageHeightM = 0.003;
 

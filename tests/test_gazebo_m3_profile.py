@@ -49,6 +49,7 @@ def test_m3_native_adhesion_uses_contact_gated_force_carry() -> None:
     assert "ConfigureCapturedContacts" in source
     assert "AddWorldForce" in source
     assert "kAdhesionStiffnessNpm" in source
+    assert "kAdhesionDampingNsPm" in source
     assert "EnableVelocityChecks" in source
     assert "kLiftEngageHeightM" in source
     assert "adhesionForceEngaged_" in source
