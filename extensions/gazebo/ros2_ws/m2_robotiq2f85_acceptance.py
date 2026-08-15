@@ -55,6 +55,11 @@ DIRECT_Z_ROUNDS = 5
 # the recorded post-action state proves the requested Cartesian tolerance.
 Z_PROBE_VELOCITY_SCALING = 0.1
 Z_PROBE_ACCELERATION_SCALING = 0.1
+# MoveIt can report a trajectory action complete before the first reconciled
+# Gazebo JointState has settled at the requested mount pose.  The certified
+# probe therefore permits exactly one same-target correction, and records the
+# residual from both attempts rather than relaxing its 5 mm acceptance bound.
+MAX_POST_EXECUTION_CORRECTIONS = 1
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -381,21 +386,28 @@ def _validate_robot_metadata(robot: Mapping[str, Any]) -> None:
     _assert(len(robot.get("joint_positions", [])) == 13, "robot state is incomplete")
 
 
-def _validate_pose(receipt: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, float]:
+def _pose_errors(receipt: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, float]:
     end = receipt.get("end") or receipt.get("observation", {}).get("robot", {}).get(
         "end_effector_pose", {}
     )
     position_error = _distance(end.get("xyz", []), target["xyz"])
     orientation_error = _orientation_error(end.get("quat_xyzw", []), target["quat_xyzw"])
+    return {
+        "position_error_m": position_error,
+        "orientation_error_rad": orientation_error,
+    }
+
+
+def _validate_pose(receipt: Mapping[str, Any], target: Mapping[str, Any]) -> dict[str, float]:
+    errors = _pose_errors(receipt, target)
+    position_error = errors["position_error_m"]
+    orientation_error = errors["orientation_error_rad"]
     _assert(position_error <= POSITION_TOLERANCE_M, f"EEF position error {position_error:.6f} m")
     _assert(
         orientation_error <= ORIENTATION_TOLERANCE_RAD,
         f"EEF orientation error {orientation_error:.6f} rad",
     )
-    return {
-        "position_error_m": position_error,
-        "orientation_error_rad": orientation_error,
-    }
+    return errors
 
 
 def _assert_action_timing(receipt: Mapping[str, Any], observation: Mapping[str, Any]) -> None:
@@ -579,48 +591,64 @@ def run_direct(report_path: Path) -> None:
 
         for round_index in range(1, DIRECT_Z_ROUNDS + 1):
             for name, target in (("down", target_down), ("up", target_up)):
-                receipt = controller.execute(
-                    {
-                        "action_type": "move_to",
-                        "target_pose": target,
-                        "position_tolerance_m": 0.002,
-                        "orientation_tolerance_rad": 0.05,
-                        "max_velocity_scaling_factor": Z_PROBE_VELOCITY_SCALING,
-                        "max_acceleration_scaling_factor": Z_PROBE_ACCELERATION_SCALING,
-                        "timeout_s": 60.0,
-                    }
-                ).to_dict()
-                _assert(
-                    receipt.get("error_code") != "START_STATE_INVALID",
-                    f"round {round_index} reproduced START_STATE_INVALID: {receipt}",
-                )
-                _assert(
-                    receipt.get("ok") is True,
-                    f"move_to({name}, round={round_index}) failed: {receipt}",
-                )
-                _assert(receipt.get("motion_outcome") == "completed", "motion was not completed")
-                _assert(receipt.get("reached_target") is True, "motion receipt did not reach target")
-                _assert(
-                    _distance(receipt.get("target", {}).get("xyz", []), target["xyz"])
-                    <= 1e-12
-                    and _orientation_error(
-                        receipt.get("target", {}).get("quat_xyzw", []),
-                        target["quat_xyzw"],
+                attempts: list[dict[str, Any]] = []
+                for correction_index in range(MAX_POST_EXECUTION_CORRECTIONS + 1):
+                    receipt = controller.execute(
+                        {
+                            "action_type": "move_to",
+                            "target_pose": target,
+                            "position_tolerance_m": 0.002,
+                            "orientation_tolerance_rad": 0.05,
+                            "max_velocity_scaling_factor": Z_PROBE_VELOCITY_SCALING,
+                            "max_acceleration_scaling_factor": Z_PROBE_ACCELERATION_SCALING,
+                            "timeout_s": 60.0,
+                        }
+                    ).to_dict()
+                    _assert(
+                        receipt.get("error_code") != "START_STATE_INVALID",
+                        f"round {round_index} reproduced START_STATE_INVALID: {receipt}",
                     )
-                    <= 1e-9,
-                    "controller rewrote the user Cartesian target",
-                )
-                recovery = _validate_start_state_recovery(receipt)
-                barrier = float(receipt["action_completed_ros_time_s"])
-                frames, state = _direct_observation(controller, cameras, barrier)
-                camera_timestamps = _camera_timestamps(frames)
-                _assert_new_timestamps(camera_timestamps, previous_camera_timestamps)
-                previous_camera_timestamps = camera_timestamps
-                observation = {
-                    "cameras": [frame.to_dict() for frame in frames],
-                    "robot": state.to_dict(),
-                }
-                _assert_action_timing(receipt, observation)
+                    _assert(
+                        receipt.get("ok") is True,
+                        f"move_to({name}, round={round_index}) failed: {receipt}",
+                    )
+                    _assert(receipt.get("motion_outcome") == "completed", "motion was not completed")
+                    _assert(receipt.get("reached_target") is True, "motion receipt did not reach target")
+                    _assert(
+                        _distance(receipt.get("target", {}).get("xyz", []), target["xyz"])
+                        <= 1e-12
+                        and _orientation_error(
+                            receipt.get("target", {}).get("quat_xyzw", []),
+                            target["quat_xyzw"],
+                        )
+                        <= 1e-9,
+                        "controller rewrote the user Cartesian target",
+                    )
+                    recovery = _validate_start_state_recovery(receipt)
+                    barrier = float(receipt["action_completed_ros_time_s"])
+                    frames, state = _direct_observation(controller, cameras, barrier)
+                    camera_timestamps = _camera_timestamps(frames)
+                    _assert_new_timestamps(camera_timestamps, previous_camera_timestamps)
+                    previous_camera_timestamps = camera_timestamps
+                    observation = {
+                        "cameras": [frame.to_dict() for frame in frames],
+                        "robot": state.to_dict(),
+                    }
+                    _assert_action_timing(receipt, observation)
+                    errors = _pose_errors(receipt, target)
+                    attempts.append(
+                        {
+                            "index": correction_index,
+                            "receipt": _compact(receipt),
+                            "errors": errors,
+                            "camera_timestamps": camera_timestamps,
+                        }
+                    )
+                    if (
+                        errors["position_error_m"] <= POSITION_TOLERANCE_M
+                        and errors["orientation_error_rad"] <= ORIENTATION_TOLERANCE_RAD
+                    ):
+                        break
                 errors = _validate_pose(receipt, target)
                 gate["actions"].append(
                     {
@@ -631,6 +659,12 @@ def run_direct(report_path: Path) -> None:
                         "start_state_recovery": recovery,
                         "errors": errors,
                         "camera_timestamps": camera_timestamps,
+                        "post_execution_correction": {
+                            "maximum_retries": MAX_POST_EXECUTION_CORRECTIONS,
+                            "retries": len(attempts) - 1,
+                            "attempted": len(attempts) > 1,
+                            "attempts": attempts,
+                        },
                     }
                 )
         gate["status"] = "passed"

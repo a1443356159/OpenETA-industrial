@@ -83,6 +83,7 @@ def test_m2_live_z_probe_keeps_clear_of_the_joint_limit_branch() -> None:
     assert 0.0 < m2_acceptance.UP_AFTER_DOWN_M < m2_acceptance.DOWN_OFFSET_M < 0.050
     assert m2_acceptance.Z_PROBE_VELOCITY_SCALING == pytest.approx(0.1)
     assert m2_acceptance.Z_PROBE_ACCELERATION_SCALING == pytest.approx(0.1)
+    assert m2_acceptance.MAX_POST_EXECUTION_CORRECTIONS == 1
 
 
 @pytest.mark.parametrize(
