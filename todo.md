@@ -101,8 +101,9 @@ when work advances; do not start later milestones early.
       clone plan and a separate `venvs/<SHA>` runtime built from an explicitly
       selected base Python; it installs project dependencies, builds the ROS
       workspace, runs the real PTY TUI → MCP/SSE → Gazebo M0→M4 chain, and
-      stops on a failed predecessor. The remote plan may report a pass only
-      when its `acceptance-report.json` has
+      stops on a failed predecessor. It requires a safe branch ref and makes
+      a HTTP/1.1 shallow clone before detached SHA verification. The remote
+      plan may report a pass only when its `acceptance-report.json` has
       `overall_status=passed`.
 
 ## Runtime configuration

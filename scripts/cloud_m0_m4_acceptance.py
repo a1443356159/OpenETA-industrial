@@ -14,6 +14,7 @@ import argparse
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from typing import Any
@@ -36,6 +37,7 @@ def _report(
     remote_run_root: str = "",
     remote_base_python: str = "",
     remote_venv_python: str = "",
+    branch: str = "",
 ) -> dict[str, Any]:
     milestones: dict[str, Any] = {}
     stopped = False
@@ -65,6 +67,7 @@ def _report(
             "run_root": remote_run_root,
             "base_python_executable": remote_base_python,
             "python_executable": remote_venv_python,
+            "branch": branch,
             "execution": "not_started_by_local_coordinator",
         },
         "remote_command": remote_command,
@@ -82,7 +85,12 @@ def _write(path: Path | None, report: dict[str, Any]) -> None:
         print(f"CLOUD_M0_M4_ACCEPTANCE_REPORT={path}")
 
 
-def _remote_command(sha: str, origin: str, remote_python: str) -> tuple[str, str, str]:
+def _remote_command(
+    sha: str,
+    origin: str,
+    remote_python: str,
+    branch: str,
+) -> tuple[str, str, str]:
     """Return the command an authorized remote operator may run over SSH."""
 
     clone = f"{REMOTE_ROOT}/{sha}"
@@ -98,7 +106,10 @@ def _remote_command(sha: str, origin: str, remote_python: str) -> tuple[str, str
             f"mkdir -p {quote(REMOTE_ROOT)}",
             f"test ! -e {quote(clone)}",
             f"test ! -e {quote(venv)}",
-            f"git clone --no-checkout {quote(origin)} {quote(clone)}",
+            (
+                f"git -c http.version=HTTP/1.1 clone --depth 1 --branch {quote(branch)} "
+                f"--no-checkout {quote(origin)} {quote(clone)}"
+            ),
             f"git -C {quote(clone)} checkout --detach {quote(sha)}",
             f"test \"$(git -C {quote(clone)} rev-parse HEAD)\" = {quote(sha)}",
             f"test -z \"$(git -C {quote(clone)} status --porcelain)\"",
@@ -151,10 +162,24 @@ def _origin(value: str) -> str:
         raise RuntimeError("REMOTE_ORIGIN_UNAVAILABLE") from exc
 
 
+def _safe_branch(value: str) -> bool:
+    """Accept only a simple, non-ambiguous Git branch ref for the clone plan."""
+
+    return bool(
+        value
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value)
+        and ".." not in value
+        and "//" not in value
+        and "@{" not in value
+        and not value.endswith(("/", "."))
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sha", default="")
     parser.add_argument("--origin", default="origin")
+    parser.add_argument("--branch", default="", help="Required branch containing the SHA.")
     parser.add_argument(
         "--remote-python",
         default="",
@@ -171,6 +196,18 @@ def main(argv: list[str] | None = None) -> int:
                 status="blocked",
                 reason_code="REMOTE_SHA_REQUIRED",
                 detail="Push an immutable SHA before preparing remote TUI acceptance.",
+            ),
+        )
+        return 2
+    branch = args.branch.strip()
+    if not _safe_branch(branch):
+        _write(
+            args.report,
+            _report(
+                sha=sha,
+                status="blocked",
+                reason_code="REMOTE_BRANCH_REQUIRED",
+                detail="Provide a non-empty safe --branch containing the requested SHA.",
             ),
         )
         return 2
@@ -202,7 +239,12 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         return 2
-    command, run_root, venv_python = _remote_command(sha, origin, remote_python)
+    command, run_root, venv_python = _remote_command(
+        sha,
+        origin,
+        remote_python,
+        branch,
+    )
     _write(
         args.report,
         _report(
@@ -214,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             remote_run_root=run_root,
             remote_base_python=remote_python,
             remote_venv_python=venv_python,
+            branch=branch,
         ),
     )
     return 2

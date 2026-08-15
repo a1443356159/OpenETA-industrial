@@ -34,6 +34,7 @@ def test_cloud_plan_only_generates_sha_specific_tui_clean_clone_command(tmp_path
     base_python = "/root/autodl-tmp/env/ros2_jazzy/bin/python"
     assert cloud.main([
         "--sha", "abc123", "--origin", "https://example.invalid/openeta.git",
+        "--branch", "codex/m3-detachable-native-live",
         "--remote-python", base_python, "--report", str(report_path),
     ]) == 2
     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -44,21 +45,33 @@ def test_cloud_plan_only_generates_sha_specific_tui_clean_clone_command(tmp_path
     assert "colcon build" in command
     assert "--scripted-tui" in command and "--run-root" in command
     assert report["remote"]["run_root"].endswith("/abc123")
+    assert report["remote"]["branch"] == "codex/m3-detachable-native-live"
     assert report["remote"]["base_python_executable"] == base_python
     assert report["remote"]["python_executable"].endswith("/venvs/abc123/bin/python")
     assert "venv --system-site-packages" in command
     assert "pip install --no-build-isolation ." in command
     assert f"OPENETA_PYTHON_EXECUTABLE={report['remote']['python_executable']}" in command
+    assert "git -c http.version=HTTP/1.1 clone --depth 1 --branch codex/m3-detachable-native-live" in command
 
 
 def test_cloud_plan_requires_an_absolute_verified_base_python(tmp_path: Path) -> None:
     report_path = tmp_path / "report.json"
     assert cloud.main([
         "--sha", "abc123", "--origin", "https://example.invalid/openeta.git",
-        "--report", str(report_path),
+        "--branch", "codex/m3-detachable-native-live", "--report", str(report_path),
     ]) == 2
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["reason_code"] == "REMOTE_PYTHON_REQUIRED"
+
+
+def test_cloud_plan_requires_a_safe_branch(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    assert cloud.main([
+        "--sha", "abc123", "--origin", "https://example.invalid/openeta.git",
+        "--branch", "unsafe..branch", "--remote-python", "/opt/python", "--report", str(report_path),
+    ]) == 2
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["reason_code"] == "REMOTE_BRANCH_REQUIRED"
 
 
 def test_tui_runner_rejects_invalid_explicit_interpreter() -> None:

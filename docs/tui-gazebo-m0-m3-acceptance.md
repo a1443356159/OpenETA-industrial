@@ -15,5 +15,7 @@ any failed predecessor. The clone never supplies an untracked `.venv`: the
 approved remote plan creates a separate
 `OPENETA_CLOUD_ACCEPTANCE_ROOT/venvs/<SHA>` environment from an explicitly
 selected base Python, installs the project dependencies, verifies the runtime
-imports, and passes that venv executable to the TUI. This document makes no
-claim that a remote run has passed.
+imports, and passes that venv executable to the TUI. The plan requires a safe
+branch ref and uses a HTTP/1.1 `--depth 1 --branch <branch>` clone before
+checking out the requested SHA detached. This document makes no claim that a
+remote run has passed.
