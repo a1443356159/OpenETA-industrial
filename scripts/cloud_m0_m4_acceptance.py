@@ -217,6 +217,12 @@ def _resolve_python(checkout: Path, supplied: str | None) -> str:
     return str(candidate.resolve())
 
 
+def _checkout_pythonpath(checkout: Path) -> str:
+    """Put the checkout first without discarding ROS setup's Python packages."""
+    inherited = os.environ.get("PYTHONPATH", "")
+    return os.pathsep.join(item for item in (str(checkout), inherited) if item)
+
+
 def _prepare_paths(checkout: CleanCheckout) -> RunPaths:
     stamp = _utc_now()
     token = hashlib.sha256(f"{checkout.commit}:{stamp}:{os.getpid()}".encode()).hexdigest()[:12]
@@ -320,7 +326,11 @@ def orchestrate(*, source_repo: Path, work_root: Path, python_arg: str | None, d
         python = _resolve_python(checkout.checkout, python_arg)
         paths = _prepare_paths(checkout)
         base_env = {
-            "PYTHONPATH": str(checkout.checkout),
+            # /opt/ros/*/setup.bash exposes rclpy and generated message
+            # packages through PYTHONPATH.  The acceptance checkout must win
+            # imports, but replacing that inherited path makes every graph
+            # isolation probe inconclusive on an otherwise healthy ROS host.
+            "PYTHONPATH": _checkout_pythonpath(checkout.checkout),
             "OPENETA_ACCEPTANCE_PYTHON": python,
             "OPENETA_ACCEPTANCE_SKIP_BUILD": "1",
             "OPENETA_ACCEPTANCE_ARTIFACT_DIR": str(paths.root),

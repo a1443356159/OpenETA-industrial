@@ -87,6 +87,16 @@ def test_dry_run_writes_one_immutable_sha_specific_total_report(tmp_path: Path) 
     assert set(report["commands"]) == set(cloud.MILESTONES)
 
 
+def test_checkout_pythonpath_preserves_ros_setup_packages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", "/opt/ros/jazzy/lib/python3.12/site-packages")
+
+    assert cloud._checkout_pythonpath(tmp_path) == (
+        f"{tmp_path}:/opt/ros/jazzy/lib/python3.12/site-packages"
+    )
+
+
 def test_report_selection_and_existing_gate_status(tmp_path: Path) -> None:
     root = tmp_path / "run"
     paths = cloud.RunPaths(root, root / "logs", root / "reports", root / "total.json", root / "stdout.log")
