@@ -39,7 +39,9 @@ else
 fi
 
 if [[ "${CHECK_PYTHON}" == 1 ]]; then
-  PYTHON_BIN="${REPO_DIR}/.venv/bin/python"
+  # A formal cloud clean clone deliberately has no untracked .venv.  Its
+  # coordinator supplies a preflight-validated interpreter explicitly.
+  PYTHON_BIN="${OPENETA_ACCEPTANCE_PYTHON:-${REPO_DIR}/.venv/bin/python}"
   if [[ ! -x "${PYTHON_BIN}" ]]; then
     record_failure PYTHON_NOT_READY "${PYTHON_BIN} does not exist; run scripts/setup_openeta_m2.sh --python-only"
   elif ! "${PYTHON_BIN}" -c 'import sys; assert sys.version_info[:2] == (3, 12); import gymnasium, mcp, numpy, PIL, imageio, prompt_toolkit, tiktoken' >/dev/null 2>&1; then
