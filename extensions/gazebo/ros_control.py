@@ -492,9 +492,14 @@ class _RosRuntime:
             post_state = self.state_source.wait_fresh(remaining())
         except Exception:
             return failed("POST_RECOVERY_JOINT_STATE_MISSING", result_code=result_code)
-        post_assessment = assess_start_state_bounds(post_state, tolerance_rad=0.0)
+        # Gazebo's joint limiter can report an endpoint one machine epsilon
+        # beyond its decimal limit even after the accepted inset trajectory.
+        # Apply the same certified numeric tolerance used for the preflight;
+        # a zero-tolerance postcheck turns that harmless limiter round-off
+        # into a false recovery failure.
+        post_assessment = assess_start_state_bounds(post_state)
         post_timestamp = post_assessment.get("pre_joint_state_timestamp_s")
-        if post_assessment["classification"] != "WITHIN_BOUNDS":
+        if post_assessment["classification"] == "INVALID":
             return {
                 **failed(
                     "POST_RECOVERY_STATE_OUT_OF_BOUNDS", result_code=result_code

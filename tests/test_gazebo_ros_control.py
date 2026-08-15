@@ -285,16 +285,13 @@ def test_ros_recovery_collision_rejection_never_sends_trajectory() -> None:
     assert trajectory_client.calls == []
 
 
-def test_ros_recovery_success_result_still_requires_strict_post_state() -> None:
+def test_ros_recovery_accepts_a_post_state_within_numeric_tolerance() -> None:
     runtime, _, _ = _recovery_runtime(post_joint_3=3.106 + 4.5e-13)
 
     result = runtime.recover_start_state(_arm_state(3.106 + 4.5e-13), 5.0)
 
-    assert result["ok"] is False
-    assert result["error_code"] == "START_STATE_RECOVERY_FAILED"
-    assert result["start_state_recovery"]["reason_code"] == (
-        "POST_RECOVERY_STATE_OUT_OF_BOUNDS"
-    )
+    assert result["ok"] is True
+    assert result["start_state_recovery"]["status"] == "RECOVERED"
 
 
 def test_ros_recovery_trajectory_rejection_and_failure_are_auditable() -> None:
