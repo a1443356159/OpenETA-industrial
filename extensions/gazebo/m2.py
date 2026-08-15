@@ -149,19 +149,28 @@ def assess_start_state_bounds(
     affected: list[dict[str, Any]] = []
     candidate = list(positions)
     outside_tolerance = False
+    boundary_inset_required = False
     for offset, ((name, lower, upper), position) in enumerate(
         zip(ARM_JOINT_BOUNDS, positions)
     ):
-        if lower <= position <= upper:
+        # MoveIt can reject a trajectory that starts exactly on a hard limit
+        # even though that floating-point value is formally within the URDF
+        # interval.  Treat the certified numeric boundary band as recoverable
+        # and inset it before planning; values beyond that band still fail
+        # closed below.
+        near_lower = lower <= position <= lower + tolerance_rad
+        near_upper = upper - tolerance_rad <= position <= upper
+        if lower <= position <= upper and not (near_lower or near_upper):
             continue
-        if position < lower:
+        if position < lower or near_lower:
             boundary = "lower"
-            violation = lower - position
+            violation = max(0.0, lower - position)
             target = lower + inset_rad
         else:
             boundary = "upper"
-            violation = position - upper
+            violation = max(0.0, position - upper)
             target = upper - inset_rad
+        boundary_inset_required = boundary_inset_required or violation == 0.0
         candidate[offset] = target
         outside_tolerance = outside_tolerance or (
             violation > tolerance_rad
@@ -200,7 +209,11 @@ def assess_start_state_bounds(
     return {
         **base,
         "classification": "RECOVERABLE",
-        "reason_code": "NUMERIC_BOUNDS_VIOLATION",
+        "reason_code": (
+            "START_STATE_BOUNDARY_INSET"
+            if boundary_inset_required
+            else "NUMERIC_BOUNDS_VIOLATION"
+        ),
         "joints": affected,
         "candidate_positions": candidate,
     }

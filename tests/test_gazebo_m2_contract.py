@@ -43,7 +43,7 @@ def _bounded_state(arm_positions=None):
     ("joint_3", "classification"),
     [
         (0.0, "WITHIN_BOUNDS"),
-        (3.106, "WITHIN_BOUNDS"),
+        (3.106, "RECOVERABLE"),
         (3.106 + 4.5e-13, "RECOVERABLE"),
         (3.106 + START_STATE_BOUNDS_TOLERANCE_RAD, "RECOVERABLE"),
         (3.106 + 1.1e-6, "INVALID"),
