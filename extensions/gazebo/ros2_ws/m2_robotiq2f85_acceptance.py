@@ -48,6 +48,13 @@ MIMIC_TOLERANCE_RAD = 0.035
 DOWN_OFFSET_M = 0.040
 UP_AFTER_DOWN_M = 0.020
 DIRECT_Z_ROUNDS = 5
+# The five-round vertical probe is a post-execution accuracy gate, not a
+# throughput benchmark.  Its short reversal can otherwise finish just ahead
+# of the simulated joint controllers' final settle sample on a loaded cloud
+# host.  Use the same quasi-static scaling as the M3 grasp-critical moves so
+# the recorded post-action state proves the requested Cartesian tolerance.
+Z_PROBE_VELOCITY_SCALING = 0.1
+Z_PROBE_ACCELERATION_SCALING = 0.1
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -578,6 +585,8 @@ def run_direct(report_path: Path) -> None:
                         "target_pose": target,
                         "position_tolerance_m": 0.002,
                         "orientation_tolerance_rad": 0.05,
+                        "max_velocity_scaling_factor": Z_PROBE_VELOCITY_SCALING,
+                        "max_acceleration_scaling_factor": Z_PROBE_ACCELERATION_SCALING,
                         "timeout_s": 60.0,
                     }
                 ).to_dict()
@@ -769,6 +778,8 @@ def run_mcp(report_path: Path, url: str) -> None:
                     "yaw": yaw,
                     "tolerance": 0.002,
                     "ori_tolerance": 0.05,
+                    "velocity_scaling": Z_PROBE_VELOCITY_SCALING,
+                    "acceleration_scaling": Z_PROBE_ACCELERATION_SCALING,
                 },
                 target,
             )
