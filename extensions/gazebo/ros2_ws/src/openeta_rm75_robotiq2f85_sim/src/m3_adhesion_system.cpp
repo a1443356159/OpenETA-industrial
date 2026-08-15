@@ -49,6 +49,11 @@ constexpr std::int64_t kMinimumContactSpanNs = 100'000'000;  // 100 ms
 constexpr std::int64_t kFreshContactNs = 250'000'000;        // 250 ms
 constexpr std::size_t kMaximumSamples = 512;
 constexpr double kAdhesionFriction = 20.0;
+constexpr double kTargetMassKg = 0.10;
+constexpr double kGravityMps2 = 9.81;
+constexpr double kAdhesionStiffnessNpm = 30.0;
+constexpr double kAdhesionDampingNsPm = 3.5;
+constexpr double kMaximumAdhesionForceN = 15.0;
 
 struct ContactSample
 {
@@ -392,6 +397,10 @@ class M3AdhesionSystem final
     this->capturedModel_ = model;
     this->capturedLink_ = objectLink;
     this->mountLink_ = mount;
+    // Ask Physics to publish the live world velocities used by the native
+    // damped adhesion force; they are disabled by default for efficiency.
+    gz::sim::Link(this->capturedLink_).EnableVelocityChecks(_ecm, true);
+    gz::sim::Link(this->mountLink_).EnableVelocityChecks(_ecm, true);
     this->relativePose_ = mountPose.Inverse() * objectPose;
     this->captured_ = true;
     this->capturedObjectLabel_ = verdict.objectLabel;
@@ -401,7 +410,7 @@ class M3AdhesionSystem final
     this->phase_ = "CAPTURED";
     this->reason_ = "bilateral_contact_adhesion_captured";
     // This one-time command registers the contact-proven initial pose through
-    // Gazebo's official model command; native contact dynamics carry it after
+    // Gazebo's official model command; native contact forces carry it after
     // this point instead of a pose or velocity follower.
     gz::sim::Model(this->capturedModel_).SetWorldPoseCmd(_ecm, objectPose);
     this->FollowMount(_ecm);
@@ -418,6 +427,22 @@ class M3AdhesionSystem final
     }
 
     this->ConfigureCapturedContacts(_ecm);
+    const auto desiredPose =
+        gz::sim::worldPose(this->mountLink_, _ecm) * this->relativePose_;
+    const auto currentPose = gz::sim::worldPose(this->capturedModel_, _ecm);
+    const auto objectLink = gz::sim::Link(this->capturedLink_);
+    const auto objectVelocity =
+        objectLink.WorldLinearVelocity(_ecm).value_or(gz::math::Vector3d::Zero);
+    const auto mountVelocity = gz::sim::Link(this->mountLink_)
+        .WorldLinearVelocity(_ecm)
+        .value_or(gz::math::Vector3d::Zero);
+    auto force = (desiredPose.Pos() - currentPose.Pos()) * kAdhesionStiffnessNpm +
+        (mountVelocity - objectVelocity) * kAdhesionDampingNsPm +
+        gz::math::Vector3d(0.0, 0.0, kTargetMassKg * kGravityMps2);
+    const auto magnitude = force.Length();
+    if (magnitude > kMaximumAdhesionForceN)
+      force *= kMaximumAdhesionForceN / magnitude;
+    objectLink.AddWorldForce(_ecm, force);
   }
 
   void ConfigureCapturedContacts(gz::sim::EntityComponentManager &_ecm)
@@ -450,6 +475,9 @@ class M3AdhesionSystem final
     if (this->capturedModel_ == gz::sim::kNullEntity ||
         this->capturedLink_ == gz::sim::kNullEntity)
       return;
+    gz::sim::Link(this->capturedLink_).EnableVelocityChecks(_ecm, false);
+    if (this->mountLink_ != gz::sim::kNullEntity)
+      gz::sim::Link(this->mountLink_).EnableVelocityChecks(_ecm, false);
     // Contact-surface customization is filtered by captured_ and its entity
     // sets, so ClearCapture below returns the body to its ordinary materials.
   }
