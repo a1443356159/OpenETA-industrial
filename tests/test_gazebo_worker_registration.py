@@ -33,6 +33,16 @@ def test_m1_launch_is_server_only_and_preserves_official_rgbd_bridge() -> None:
     assert "rgbd_camera/depth_image" in text
 
 
+def test_m3_launch_flattens_spawn_actions_for_ros_launch() -> None:
+    root = Path(__file__).parents[1]
+    launch = root / "extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/launch/m3_gazebo_pickplace.launch.py"
+    text = launch.read_text(encoding="utf-8")
+
+    # _spawn_robot returns two launch actions.  Passing that list as one
+    # LaunchDescription entity makes ROS launch fail before Gazebo can start.
+    assert "            *spawn," in text
+
+
 def test_gazebo_unified_env_reports_the_established_backend_name() -> None:
     # The MCP wire contract and the M2/M3 acceptance gates expect the
     # historical "gazebo" backend string from the pre-UnifiedEnv workers.

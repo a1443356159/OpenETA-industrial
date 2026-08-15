@@ -168,7 +168,7 @@ def generate_launch_description():
             ),
             gz_launch,
             rsp,
-            spawn,
+            *spawn,
             _after_success(jsb, [arm], "joint_state_broadcaster activation"),
             _after_success(arm, [gripper], "RM75 controller activation"),
             _after_success(
