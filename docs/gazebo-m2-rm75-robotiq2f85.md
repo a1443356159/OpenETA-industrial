@@ -73,25 +73,18 @@ These results are development evidence and do not constitute formal M2
 acceptance. Any legacy report that was manually finalized after its original
 run is untrusted cleanup evidence and is not a release gate.
 
-## Formal acceptance
+## Historical and current acceptance evidence
 
-**M2 formal acceptance PASSED on 2026-08-10** (WSL2 host, report
-`.cache/reports/m2-robotiq2f85-acceptance-20260810T194732Z-542318.json`,
-`overall_status=passed`). All gates passed: `ros_workspace_build`,
-`m2_runtime_check`, `offline_contract_regression`, `direct_live`,
-`mcp_live`, `repository_regression`, and `isolation_cleanup`. Direct motion
-stayed within 3.73 mm and 0.069 rad over the ten z-round moves; the SSE MCP
-lifecycle (`create -> reset -> observe -> move_to x2 -> observe -> close`)
-passed with `backend=gazebo`.
+The 2026-08-10 WSL2 report
+`.cache/reports/m2-robotiq2f85-acceptance-20260810T194732Z-542318.json` once
+labelled itself a formal M2 pass. It remains useful development evidence for
+the then-recorded direct and MCP lifecycle, but it is not the current remote
+M0–M4 release gate and must not be used to claim formal acceptance.
 
-The 2026-08-10 session fixed four live blockers to get there: the UnifiedEnv
-backend name regression (`gazebodirectenv` -> `gazebo`), the missing gazebo
-observation normaliser (MCP observations lost their cameras), the structured
-receipt's raw observation clobbering the MCP-wire observation, and the Jazzy
-`ros2 control` readiness probe leaking a detached ros2-daemon into the
-acceptance process group (cleanup gate). Two robustness fixes landed as well:
-`num_planning_attempts=1 -> 3` (MoveIt executes the shortest plan, avoiding
-random joint-space windup onto joint limits) and SRDF `FourBar` exemptions for
-`finger_link <-> inner_knuckle_link` (the six independent Gazebo position
-systems can briefly desynchronise the closed linkage and report a spurious
-self-contact that previously aborted planning with `START_STATE_IN_COLLISION`).
+On 2026-08-16, SHA `c202f51` completed a remote, no-provider M2
+control-only diagnostic after a clean system-Python venv, Jazzy ABI preflight,
+and workspace build. Real SSE MCP performed create/reset, dual RGB-D
+observation, gripper open/close/open, two completed MoveIt motions, and close.
+Because the remote `origin` clone was unavailable (see `problem.md` P-007),
+the run used a hash-verified diagnostic bundle clone. It is neither a formal
+PTY/TUI acceptance nor an origin clean-clone result.

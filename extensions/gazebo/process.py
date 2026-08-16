@@ -412,6 +412,55 @@ class GazeboDetachableJointControl:
         if result.returncode:
             raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
 
+    def wait_ready(self, *, timeout_s: float) -> None:
+        """Wait for the stock joint's three transport endpoints.
+
+        A live world-control service proves only that Gazebo itself is ready.
+        The robot model and its stock DetachableJoint system are spawned later
+        in the launch graph, so publishing the first mandatory detach before
+        these endpoints exist loses the one-shot ACK.  Endpoint discovery is
+        therefore a readiness gate, never an attach/detach retry or a physics
+        fallback.  The caller still requires the subsequent listener-first
+        state ACK from :meth:`ensure_detached`.
+        """
+
+        if timeout_s <= 0:
+            raise ValueError("DetachableJoint readiness timeout must be positive")
+        required = {
+            "/m3/detachable_joint/target/attach",
+            "/m3/detachable_joint/target/detach",
+            "/m3/detachable_joint/target/state",
+        }
+        deadline = time.monotonic() + float(timeout_s)
+        last_error = "endpoint discovery did not run"
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                result = subprocess.run(
+                    [self._executable(self.gz_executable), "topic", "-l"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=self.environment,
+                    timeout=min(self.timeout_s, max(0.1, remaining)),
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+            else:
+                topics = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+                if result.returncode == 0 and required <= topics:
+                    return
+                missing = sorted(required - topics)
+                detail = (result.stderr or result.stdout)[-500:].strip()
+                last_error = (
+                    f"missing={','.join(missing)}"
+                    + (f" detail={detail}" if detail else "")
+                )
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        raise GazeboProcessError(f"M3_DETACHABLE_JOINT_NOT_READY: {last_error}")
+
     def _request(self, action: str) -> str:
         if action not in {"attach", "detach"}:
             raise ValueError("unsupported DetachableJoint action")

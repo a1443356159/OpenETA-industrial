@@ -106,6 +106,19 @@ when work advances; do not start later milestones early.
       plan may report a pass only when its `acceptance-report.json` has
       `overall_status=passed`.
 
+## Current no-provider control-layer progress
+
+- [x] Repair and remote-revalidate the M2 clean-vendor Python/ROS ABI and
+      dependency path at SHA `c202f51`: isolated system-Python venv,
+      `rclpy`/`rosgraph_msgs` preflight, workspace build, and real M2 MCP
+      create/reset/control/close all passed without a model/provider call.
+- [ ] Run the reusable M0→M4 control-only chain sequentially. M3/M4 must
+      still prove native bilateral contact, attach/detach ACKs, and measured
+      child-link lift; no soft-attachment or compatibility path is permitted.
+- [ ] Restore the remote formal origin clean-clone prerequisite (P-007 in
+      `problem.md`) before interpreting any result as formal PTY/TUI
+      acceptance.
+
 ## Runtime configuration
 
 - [x] Configure the local OpenAI-compatible planner provider for DeepSeek

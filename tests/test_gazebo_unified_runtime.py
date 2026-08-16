@@ -225,8 +225,15 @@ def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_pose
     events = []
 
     class Attachment:
+        state = "unknown"
+
+        def wait_ready(self, *, timeout_s):
+            assert timeout_s > 0
+            events.append(("attachment_ready",))
+
         def ensure_detached(self, *, require_ack):
             assert require_ack is True
+            self.state = "detached"
             events.append(("detach_ack",))
 
     class Controller(_ResetController):
@@ -263,21 +270,77 @@ def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_pose
     runtime.reset(seed=11)
 
     first_detach = events.index(("detach_ack",))
-    assert events[:first_detach] == [("launch",), ("paused", True)]
+    assert events[:first_detach] == [("launch",), ("attachment_ready",), ("paused", True)]
     assert events[first_detach + 1] == ("paused", False)
     assert events.index(("controller_ready",)) > events.index(("paused", False))
-    assert world.resets == [("models", 11)]
-    reset_pause = events.index(("paused", True), first_detach + 2)
-    assert events[reset_pause:reset_pause + 5] == [
-        ("paused", True),
-        ("detach_ack",),
-        ("pose", "m3_target"),
-        ("pose", "m3_distractor"),
-        ("paused", False),
-    ]
-    # Close obtains another ACK before dropping resources.
+    # The fresh paused launch, rather than model_only reset, restores the SDF
+    # object poses and gives the stock plugin a real detached transition.
+    assert world.resets == []
+    assert world.poses == []
+    # A known detached state must not request an impossible no-op ACK at close.
     runtime.close()
-    assert events.count(("detach_ack",)) == 3
+    assert events.count(("detach_ack",)) == 1
+
+
+def test_m3_runtime_recreates_the_paused_world_for_a_second_reset() -> None:
+    events = []
+    launches = []
+
+    class Attachment:
+        state = "unknown"
+
+        def wait_ready(self, *, timeout_s):
+            assert timeout_s > 0
+            events.append("attachment_ready")
+
+        def ensure_detached(self, *, require_ack):
+            assert require_ack is True
+            self.state = "detached"
+            events.append("detach_ack")
+
+    class Controller(_ResetController):
+        def __init__(self):
+            super().__init__([{"ok": True, "action_completed_ros_time_s": 1.0}])
+
+        def wait_ready(self, _timeout):
+            events.append("controller_ready")
+
+        def close(self):
+            events.append("controller_close")
+
+    class ControllerFactory:
+        def create(self, *_args, **_kwargs):
+            return Controller()
+
+    class Launch(_Launch):
+        def start(self):
+            super().start()
+            events.append("launch")
+
+    def launch_factory(**kwargs):
+        launch = Launch(**kwargs)
+        launches.append(launch)
+        return launch
+
+    world = _M3World(events)
+    runtime = GazeboRuntime(
+        _deployment(),
+        gazebo_profile("m3_pickplace"),
+        launch_factory=launch_factory,
+        camera_factory=lambda config, **kwargs: _Camera(config, **kwargs),
+        controller_factory=ControllerFactory(),
+        world_control=world,
+        attachment_factory=lambda **_kwargs: Attachment(),
+    )
+
+    runtime.reset(seed=11)
+    runtime.reset(seed=12)
+
+    assert len(launches) == 2
+    assert launches[0].closed == 1
+    assert events.count("detach_ack") == 2
+    assert world.resets == []
+    runtime.close()
 
 
 def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit() -> None:

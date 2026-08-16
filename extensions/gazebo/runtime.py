@@ -10,9 +10,9 @@ from typing import Any, Callable, Mapping
 from adapter.protocol import EnvObservation, RobotState
 
 from .deployment import GazeboDeploymentConfig
-from .m3 import M3Config
 from .observation import RosRgbdCameraConfig, RosRgbdCameraSource
 from .process import (
+    DetachableJointState,
     GazeboDetachableJointControl,
     GazeboProcessError,
     GazeboWorldControl,
@@ -141,11 +141,16 @@ class GazeboRuntime:
                 wait_ready(timeout_s=self._remaining(deadline))
             if PHYSICS in self.profile.capabilities:
                 # The launch omits -r, so this command is still before the
-                # first physics tick.  Do not resume for a missing stock-joint
-                # topic or detached ACK: M3 must fail closed at startup.
-                self._world.set_paused(True)
+                # first physics tick.  A world-control ACK alone is not proof
+                # that the later-spawned stock joint endpoints exist; wait for
+                # those exact endpoints before listener-first detach.  Do not
+                # resume for a missing topic or detached ACK: M3 fails closed.
                 if self.attachment is None:
                     raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+                attachment_ready = getattr(self.attachment, "wait_ready", None)
+                if callable(attachment_ready):
+                    attachment_ready(timeout_s=self._remaining(deadline))
+                self._world.set_paused(True)
                 self.attachment.ensure_detached(require_ack=True)
                 self._world.set_paused(False)
             if CONTROL in self.profile.capabilities:
@@ -198,25 +203,30 @@ class GazeboRuntime:
         )
 
     def reset(self, *, seed: int | None = None) -> EnvObservation:
+        # Gazebo Sim's stock DetachableJoint emits an output-topic transition
+        # only when its state changes.  A ``model_only`` reset leaves a known
+        # detached joint detached, so a second detach request has no truthful
+        # ACK to consume.  M3 therefore resets by recreating its isolated
+        # paused world: every reset starts from the stock attached state and
+        # obtains one fresh, listener-first detached ACK before unpausing.
+        # This is intentionally not a soft attachment or an idempotent-ACK
+        # assumption; inability to recreate and receive that ACK still fails
+        # closed.
+        if PHYSICS in self.profile.capabilities and self.started:
+            self.close()
+            self.closed = False
         self._start()
         if self.controller is not None:
             reset_sources = getattr(self.controller, "reset_sources", None)
             if callable(reset_sources):
                 reset_sources()
-        # M3's stock plugin starts attached.  Each reset pauses the world,
-        # resets the scene, gets a *fresh* detached ACK, then resumes.  A
-        # cached local detached state is not sufficient evidence.
+        # M3's fresh launch has already restored the SDF-declared target and
+        # distractor poses while paused, then obtained the fresh detached ACK
+        # in ``_start``.  Do not issue a model-only reset here: it preserves a
+        # detached stock joint and would turn the required ACK into a no-op.
         if PHYSICS in self.profile.capabilities:
             if self.attachment is None:
                 raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
-            self._world.set_paused(True)
-            self._world.reset_models(seed=seed)
-            self.attachment.ensure_detached(require_ack=True)
-            config = self.profile.model_config
-            if isinstance(config, M3Config):
-                for model_name, xyz in config.reset_object_poses.items():
-                    self._world.set_model_pose(model_name, xyz)
-            self._world.set_paused(False)
         else:
             # Preserve /clock after the ROS action stack has started.
             self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
@@ -259,7 +269,13 @@ class GazeboRuntime:
         errors: list[BaseException] = []
         if self.attachment is not None and self.started:
             try:
-                self.attachment.ensure_detached(require_ack=True)
+                # A previous stock transition already supplied the only valid
+                # detached ACK. Re-publishing detach while it is still known
+                # detached emits no state transition in Gazebo Sim, so never
+                # manufacture a second ACK requirement at cleanup. Unknown
+                # or attached state still requires a real detach ACK.
+                if getattr(self.attachment, "state", DetachableJointState.UNKNOWN) != DetachableJointState.DETACHED:
+                    self.attachment.ensure_detached(require_ack=True)
             except BaseException as exc:
                 errors.append(exc)
         # Failures do not short-circuit reverse-order resource cleanup.

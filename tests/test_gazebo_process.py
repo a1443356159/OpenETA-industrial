@@ -91,3 +91,55 @@ def test_ros_launch_inherits_worker_streams_for_case_local_diagnostics(
     assert launch.start() == 12345
     assert captured["kwargs"]["stdout"] is None
     assert captured["kwargs"]["stderr"] is None
+
+
+def test_detachable_joint_wait_ready_requires_the_stock_endpoint_triplet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3 must not publish its one-shot detach before plugin endpoints exist."""
+
+    seen = []
+
+    def run(command, **kwargs):
+        seen.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="\n".join(
+                [
+                    "/m3/detachable_joint/target/attach",
+                    "/m3/detachable_joint/target/detach",
+                    "/m3/detachable_joint/target/state",
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(gazebo_process.subprocess, "run", run)
+    control = gazebo_process.GazeboDetachableJointControl(
+        gz_executable=sys.executable,
+        environment={"GZ_PARTITION": "isolated"},
+    )
+
+    control.wait_ready(timeout_s=1.0)
+
+    assert seen[0][0] == [sys.executable, "topic", "-l"]
+    assert seen[0][1]["env"] == {"GZ_PARTITION": "isolated"}
+
+
+def test_detachable_joint_wait_ready_fails_closed_when_an_endpoint_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(command, **_kwargs):
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="/m3/detachable_joint/target/attach\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(gazebo_process.subprocess, "run", run)
+    control = gazebo_process.GazeboDetachableJointControl(gz_executable=sys.executable)
+
+    with pytest.raises(gazebo_process.GazeboProcessError, match="M3_DETACHABLE_JOINT_NOT_READY"):
+        control.wait_ready(timeout_s=0.001)
