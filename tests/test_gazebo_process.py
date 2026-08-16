@@ -143,3 +143,41 @@ def test_detachable_joint_wait_ready_fails_closed_when_an_endpoint_is_absent(
 
     with pytest.raises(gazebo_process.GazeboProcessError, match="M3_DETACHABLE_JOINT_NOT_READY"):
         control.wait_ready(timeout_s=0.001)
+
+
+def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> None:
+    """M3's target link is local-to-model in Gazebo Pose_V, not world-space."""
+
+    poses = {
+        "gripper_mount_link": (0.10, -0.20, 0.50),
+        "m3_target": (0.20, -0.20, 0.40),
+        "target_link": (0.0, 0.0, 0.0),
+    }
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._state = gazebo_process.DetachableJointState.ATTACHED
+    control._world_link_positions = lambda: dict(poses)  # type: ignore[method-assign]
+    control.capture_baseline()
+
+    poses.update(
+        {
+            "gripper_mount_link": (0.10, -0.20, 0.60),
+            "m3_target": (0.20, -0.20, 0.50),
+        }
+    )
+    proof = control.child_link_proof()
+
+    assert proof.lift_m == pytest.approx(0.10)
+    assert proof.capture_relative_translation_m == pytest.approx(0.0)
+
+
+def test_detachable_joint_proof_rejects_a_noncanonical_child_link_frame() -> None:
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._state = gazebo_process.DetachableJointState.ATTACHED
+    control._world_link_positions = lambda: {
+        "gripper_mount_link": (0.0, 0.0, 0.50),
+        "m3_target": (0.0, 0.0, 0.40),
+        "target_link": (0.0, 0.0, 0.01),
+    }  # type: ignore[method-assign]
+
+    with pytest.raises(gazebo_process.GazeboProcessError, match="M3_CHILD_LINK_STATE_UNAVAILABLE"):
+        control.capture_baseline()

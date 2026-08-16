@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""PTY TUI acceptance coordinator for the ordered Gazebo M0--M4 chain.
+"""Gazebo M0--M4 acceptance and control-preflight coordinator.
 
 The coordinator owns isolation, evidence locations, process groups and report
-assembly.  It uses the real PTY TUI for every case.  The default profile is
-``human_gated``; the explicitly selected ``scripted_tui`` profile records an
-automation approval rather than impersonating a human operator.
+assembly. Formal modes use the real PTY TUI: the default profile is
+``human_gated`` and ``scripted_tui`` records automation approval rather than
+impersonating a human operator. The separate ``control_only`` mode exercises
+the same AgentTool -> MCP/SSE -> Gazebo boundary without a planner, provider,
+or PTY and cannot produce a formal acceptance report.
 """
 
 from __future__ import annotations
@@ -34,6 +36,11 @@ MILESTONES = ("m0", "m1", "m2", "m3", "m4")
 DETERMINISTIC = "deterministic"
 AUTONOMY = "planner_autonomy"
 SCRIPTED_TUI = "scripted_tui"
+# A deliberately separate execution mode for exercising the simulator control
+# boundary without loading a planner, provider, or the PTY TUI.  Its report is
+# never named ``acceptance-report.json`` and cannot satisfy formal acceptance.
+CONTROL_ONLY = "control_only"
+CONTROL_REPORT_FILENAME = "control-acceptance-report.json"
 PROTECTED_DOMAINS = frozenset({42, 100})
 DOMAIN_CANDIDATES = tuple(i for i in range(80, 102) if i not in PROTECTED_DOMAINS)
 MUTATING_TOOLS = frozenset(
@@ -73,9 +80,16 @@ INFRA_CODES = frozenset(
         "MCP_NOT_READY",
         "TUI_NOT_READY",
         "TOPIC_DISCOVERY_TIMEOUT",
+        "ROS_CAMERA_TOPICS_NOT_READY",
     }
 )
 PROVIDER_BILLING_EXHAUSTED = "PROVIDER_BILLING_EXHAUSTED"
+# These keys exist only on in-memory copies returned by
+# ``_mcp_response_payloads``.  They preserve the exact action/RPC association
+# while keeping the materialized simulator response byte-for-byte intact on
+# disk.
+_MCP_EVIDENCE_REQUEST_ID = "__openeta_acceptance_mcp_request_id"
+_MCP_EVIDENCE_AGENT_TOOL = "__openeta_acceptance_agent_tool"
 
 
 class AcceptanceError(RuntimeError):
@@ -88,6 +102,9 @@ class Allocation:
     gz_partition: str
     port: int
     run_id: str
+    # Recorded only for live coordinator allocations.  Unit fixtures may use
+    # the deterministic allocator without probing a ROS installation.
+    candidate_domain_preflight: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,17 +174,72 @@ def _wait_for_free_port(port: int, *, timeout_s: float = 5.0) -> bool:
         time.sleep(min(0.05, remaining))
 
 
-def allocate(case_name: str, occupied_domains: Iterable[int] = ()) -> Allocation:
+def _candidate_domain_preflight(domain: int) -> dict[str, Any]:
+    """Return fail-closed evidence that a candidate ROS domain is unused.
+
+    A case must never reuse a pre-existing graph or ros2cli daemon just
+    because its numeric domain is not in this invocation's local ``occupied``
+    set.  The isolation probe uses a short-lived rclpy context rather than
+    ``ros2`` CLI graph listing, so preflight itself does not create a daemon.
+    """
+
+    try:
+        from extensions.gazebo.ros2_ws.acceptance_isolation import (
+            candidate_domain_evidence,
+        )
+
+        evidence = candidate_domain_evidence(domain)
+    except Exception as exc:
+        return {
+            "state": "INCONCLUSIVE",
+            "ok": None,
+            "reason_code": "ROS_DOMAIN_PREFLIGHT_UNAVAILABLE",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:500],
+        }
+    if not isinstance(evidence, Mapping):
+        return {
+            "state": "INCONCLUSIVE",
+            "ok": None,
+            "reason_code": "ROS_DOMAIN_PREFLIGHT_MALFORMED",
+        }
+    return dict(evidence)
+
+
+def allocate(
+    case_name: str,
+    occupied_domains: Iterable[int] = (),
+    *,
+    preflight: bool = False,
+) -> Allocation:
     occupied = set(occupied_domains) | set(PROTECTED_DOMAINS)
-    domain = next((item for item in DOMAIN_CANDIDATES if item not in occupied), None)
+    preflight_failures: dict[int, Mapping[str, Any]] = {}
+    domain: int | None = None
+    selected_preflight: Mapping[str, Any] | None = None
+    for candidate in DOMAIN_CANDIDATES:
+        if candidate in occupied:
+            continue
+        if preflight:
+            evidence = _candidate_domain_preflight(candidate)
+            if evidence.get("state") != "PASSED":
+                preflight_failures[candidate] = evidence
+                continue
+            selected_preflight = evidence
+        domain = candidate
+        break
     if domain is None:
-        raise AcceptanceError("no isolated ROS_DOMAIN_ID is available")
+        detail = json.dumps(preflight_failures, sort_keys=True)[:2000]
+        raise AcceptanceError(
+            "no isolated ROS_DOMAIN_ID is available"
+            + (f" after preflight: {detail}" if preflight else "")
+        )
     token = uuid.uuid4().hex[:12]
     return Allocation(
         ros_domain_id=domain,
         gz_partition=f"openeta-tui-{case_name}-{token}",
         port=_free_port(),
         run_id=token,
+        candidate_domain_preflight=selected_preflight,
     )
 
 
@@ -185,6 +257,36 @@ def _command_output(command: Sequence[str]) -> str:
     return raw.decode(encoding, errors="replace").strip()
 
 
+def _is_snapshot_candidate_argv(argv: Sequence[str]) -> bool:
+    """Select actual ROS/Gazebo workload processes, never shell prose.
+
+    The prior substring scan recorded a diagnostic command such as
+    ``bash -c 'ros2 launch ...'`` as a pre-existing workload.  Its natural
+    exit then made cleanup claim that our run had changed a process it never
+    owned.  Inspect the null-separated argv instead and accept only concrete
+    runtime executables or their Python entry points.
+    """
+
+    if not argv:
+        return False
+    executable = Path(argv[0]).name
+    if executable in {"bash", "dash", "sh", "zsh", "fish"}:
+        return False
+    names = {Path(argument).name for argument in argv if argument}
+    if "bench_worker.py" in names:
+        return True
+    if "ros2" in names and "launch" in argv:
+        return True
+    if executable == "gz" and "sim" in argv[1:]:
+        return True
+    # On this Gazebo installation /usr/bin/gz is a Ruby entry point.  Record
+    # a real Ruby->gz sim process, but not an arbitrary shell command that
+    # happens to quote those two words.
+    if executable == "ruby" and "gz" in names and "sim" in argv:
+        return True
+    return executable in {"move_group", "parameter_bridge", "image_bridge"}
+
+
 def _process_snapshot() -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     proc = Path("/proc")
@@ -192,10 +294,14 @@ def _process_snapshot() -> list[dict[str, Any]]:
         if not entry.name.isdigit():
             continue
         try:
-            raw = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
-            if not any(token in raw for token in ("ros2", "gz sim", "bench_worker")):
+            argv = [
+                item.decode("utf-8", errors="replace")
+                for item in (entry / "cmdline").read_bytes().split(b"\0")
+                if item
+            ]
+            if not _is_snapshot_candidate_argv(argv):
                 continue
-            row: dict[str, Any] = {"pid": int(entry.name), "cmdline": raw.strip()}
+            row: dict[str, Any] = {"pid": int(entry.name), "cmdline": " ".join(argv)}
             # A worker deliberately owns a separate process group.  The
             # acceptance runner can therefore not infer ownership from a
             # parent PID after the MCP server has stopped.  Its inherited
@@ -211,6 +317,24 @@ def _process_snapshot() -> list[dict[str, Any]]:
         except (OSError, UnicodeDecodeError):
             continue
     return sorted(result, key=lambda item: item["pid"])
+
+
+def _owned_process_residuals(
+    candidates: Sequence[Mapping[str, Any]], *, run_id: str
+) -> list[dict[str, Any]]:
+    """Return only live processes with this case's explicit ownership marker.
+
+    A broad ROS/Gazebo command-line snapshot is useful for recording the
+    preexisting environment, but it is not an ownership proof: a diagnostic
+    shell can legitimately mention ``ros2`` or ``gz sim`` in its arguments.
+    Runner cleanup may never label or signal such a process as its own.
+    """
+
+    return [
+        dict(item)
+        for item in candidates
+        if item.get("openeta_tui_run_id") == run_id
+    ]
 
 
 def environment_receipt(
@@ -250,6 +374,10 @@ def environment_receipt(
         "protected_domains": sorted(PROTECTED_DOMAINS),
         "preexisting_processes": before,
     }
+    if allocation.candidate_domain_preflight is not None:
+        payload["candidate_domain_preflight"] = dict(
+            allocation.candidate_domain_preflight
+        )
     if capture_protected:
         from extensions.gazebo.ros2_ws.acceptance_isolation import probe_ros_graph
 
@@ -270,6 +398,11 @@ def verify_receipt(receipt: Mapping[str, Any]) -> list[str]:
     domain = receipt.get("ros_domain_id")
     if type(domain) is not int or domain in PROTECTED_DOMAINS:
         errors.append("case reused a protected ROS domain")
+    preflight = receipt.get("candidate_domain_preflight")
+    if preflight is not None and (
+        not isinstance(preflight, Mapping) or preflight.get("state") != "PASSED"
+    ):
+        errors.append("case ROS domain preflight did not prove an empty candidate")
     if not str(receipt.get("gz_partition") or "").startswith("openeta-tui-"):
         errors.append("case did not use a dedicated Gazebo partition")
     supplied_hash = str(receipt.get("receipt_sha256") or "")
@@ -298,6 +431,13 @@ def case_paths(root: Path, milestone: str, mode: str) -> CasePaths:
 
 
 def instructions_for(milestone: str, mode: str) -> str:
+    if mode == CONTROL_ONLY:
+        return (
+            "No-provider control-layer exercise. Execute only the repository's "
+            "AgentTool → simulator MCP/SSE path; do not start a planner, invoke "
+            "a model/provider, or claim PTY/TUI formal acceptance. "
+            f"Milestone environment: {ENV_IDS[milestone]}.\n"
+        )
     if mode == AUTONOMY:
         prompts = {
             "m1": "检查 Gazebo 现场，并基于传感器证据报告所见。完成后关闭环境。",
@@ -528,10 +668,455 @@ def scripted_tui_input(paths: CasePaths) -> str:
     return "\n".join(commands) + "\n"
 
 
+def _control_trace_path(paths: CasePaths) -> Path:
+    """Return the durable raw-command trace for one no-provider case."""
+
+    return paths.trace_root / "sessions" / "control" / "trace.jsonl"
+
+
+def _append_control_trace(paths: CasePaths, event: Mapping[str, Any]) -> None:
+    trace = _control_trace_path(paths)
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    with trace.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(dict(event), ensure_ascii=False, sort_keys=True))
+        stream.write("\n")
+
+
+def _tool_result_record(result: Any) -> dict[str, Any]:
+    """Return a JSON-safe, full-fidelity AgentTool result for the raw trace."""
+
+    return {
+        "success": bool(getattr(result, "success", False)),
+        "content": str(getattr(result, "content", "")),
+        "details": dict(getattr(result, "details", {}) or {}),
+    }
+
+
+def _control_response_payload(result: Any) -> Mapping[str, Any]:
+    """Load the materialized response belonging to one proxied AgentTool call."""
+
+    details = getattr(result, "details", {})
+    if not isinstance(details, Mapping):
+        return {}
+    outputs = details.get("outputs")
+    if not isinstance(outputs, Mapping):
+        return {}
+    response = outputs.get("response")
+    if not isinstance(response, Mapping):
+        return {}
+    raw_path = response.get("response_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return {}
+    try:
+        payload = _json_load(Path(raw_path))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _control_response_has(result: Any, key: str, expected: Any) -> bool:
+    """Read an exact result field from the call's materialized MCP response.
+
+    AgentTool's compact result intentionally summarizes a failed motion as a
+    generic target-not-reached diagnostic.  The durable response is the
+    authoritative controller receipt and retains the precise MoveIt failure
+    code.  A missing or unreadable response remains a failure here.
+    """
+
+    return _contains(_control_response_payload(result), key, expected)
+
+
+def _control_eef_xyz(result: Any) -> tuple[float, float, float]:
+    """Read an actual MCP observation; never infer an M2/M3 pose geometrically."""
+
+    payload = _control_response_payload(result)
+    observation = payload.get("observation", payload)
+    robot = observation.get("robot") if isinstance(observation, Mapping) else None
+    pose = robot.get("end_effector_pose") if isinstance(robot, Mapping) else None
+    xyz = pose.get("xyz") if isinstance(pose, Mapping) else None
+    if (
+        not isinstance(xyz, Sequence)
+        or isinstance(xyz, (str, bytes, bytearray))
+        or len(xyz) < 3
+        or any(type(value) not in {int, float} for value in xyz[:3])
+    ):
+        raise AcceptanceError("CONTROL_EEF_STATE_MISSING")
+    return tuple(float(value) for value in xyz[:3])
+
+
+def _control_rgb_path(result: Any) -> str:
+    """Return one actual case-local RGB artifact for M4's Gazebo oracle."""
+
+    details = getattr(result, "details", {})
+    for item in _walk(details):
+        if not isinstance(item, Mapping) or item.get("kind") != "rgb":
+            continue
+        value = item.get("path")
+        if isinstance(value, str) and Path(value).is_file():
+            return value
+    raise AcceptanceError("CONTROL_RGB_ARTIFACT_MISSING")
+
+
+def _control_observation(result: Any) -> Any | None:
+    """Build a current typed observation only for the local M4 Oracle tool."""
+
+    payload = _control_response_payload(result)
+    raw = payload.get("observation", payload)
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        from adapter.protocol import EnvObservation
+
+        observation = EnvObservation.from_dict(dict(raw), task=str(raw.get("task") or ""))
+    except (ImportError, TypeError, ValueError):
+        return None
+    details = getattr(result, "details", {})
+    artifacts = [
+        dict(item)
+        for item in _walk(details)
+        if isinstance(item, Mapping) and item.get("kind") in {"rgb", "depth"}
+    ]
+    if artifacts:
+        observation.metadata["image_artifacts"] = artifacts
+    return observation
+
+
+class _ControlToolRunner:
+    """Direct AgentTool executor used only by the no-provider control path.
+
+    It deliberately does not construct an agent runtime, planner, provider, or
+    PTY.  Every call is still a normal registered AgentTool backed by the SSE
+    proxy, and every full result is written as a raw command trace so the same
+    receipt verifier can validate the simulator boundary.
+    """
+
+    def __init__(
+        self,
+        *,
+        paths: CasePaths,
+        allocation: Allocation,
+        registry: Any,
+    ) -> None:
+        self.paths = paths
+        self.allocation = allocation
+        self.registry = registry
+        self.metadata = {
+            "execution_id": f"control-{allocation.run_id}",
+            "session_id": f"control-{allocation.run_id}",
+            "agent_session_id": f"control-{allocation.run_id}",
+            "execution_profile": CONTROL_ONLY,
+            "planner_invoked": False,
+            "provider_invoked": False,
+        }
+        self.closed = False
+
+    def invoke(
+        self,
+        name: str,
+        parameters: Mapping[str, Any] | None = None,
+        *,
+        observation: Any | None = None,
+    ) -> Any:
+        normalized_parameters = dict(parameters or {})
+        result = self.registry.call(
+            name,
+            normalized_parameters,
+            observation=observation,
+            metadata=self.metadata,
+        )
+        _append_control_trace(
+            self.paths,
+            {
+                "event_type": "action",
+                "payload": {
+                    "execution_profile": CONTROL_ONLY,
+                    "planner_invoked": False,
+                    "provider_invoked": False,
+                    "command": {
+                        "tool_calls": [
+                            {
+                                "kind": "tool_call",
+                                "name": name,
+                                "parameters": normalized_parameters,
+                                "status": "executed" if getattr(result, "success", False) else "failed",
+                                "result": _tool_result_record(result),
+                            }
+                        ]
+                    },
+                },
+            },
+        )
+        if name == "close_simulator_env" and getattr(result, "success", False):
+            self.closed = True
+        return result
+
+    def require_success(
+        self,
+        name: str,
+        parameters: Mapping[str, Any] | None = None,
+        *,
+        observation: Any | None = None,
+    ) -> Any:
+        result = self.invoke(name, parameters, observation=observation)
+        if not getattr(result, "success", False):
+            raise AcceptanceError(f"CONTROL_TOOL_FAILED:{name}")
+        return result
+
+    def close_if_open(self) -> None:
+        if not self.closed:
+            self.invoke("close_simulator_env")
+
+
+def _bind_control_tools(*, paths: CasePaths, allocation: Allocation, milestone: str) -> _ControlToolRunner:
+    """Bind only simulator-owned tools; this path has no planner/provider dependency."""
+
+    from agent.tools.handlers import build_oracle_perceive_segmenter, build_sam3_handler
+    from agent.tools.registry import build_default_tool_registry
+    from agent.tools.sim_mcp import (
+        SimulatorMcpToolProxyConfig,
+        SseSimulatorMcpTransport,
+        bind_simulator_mcp_tool_handlers,
+    )
+
+    transport = SseSimulatorMcpTransport(f"http://127.0.0.1:{allocation.port}/sse")
+    catalog = transport.list_tools(timeout_s=30.0)
+    _json_dump(paths.root / "mcp-tool-catalog.json", catalog, exclusive=True)
+    proxy_config = SimulatorMcpToolProxyConfig(
+        session_id=f"control-{allocation.run_id}",
+        timeout_s=180.0,
+        image_output_root=paths.root / "mcp-images",
+        text_output_root=paths.root / "mcp-text",
+        response_output_root=paths.root / "mcp-responses",
+    )
+    registry = build_default_tool_registry(
+        perception_profile="oracle" if milestone == "m4" else "sam3"
+    )
+    bind_simulator_mcp_tool_handlers(
+        registry,
+        transport=transport,
+        config=proxy_config,
+        replace=True,
+    )
+    if milestone == "m4":
+        # Reuse the exact production M4 Oracle evidence wrapper, but do not
+        # assemble the broader provider-backed runtime just to exercise it.
+        from agent.runtime.runtime_assembly import (
+            _M4OracleMcpEvidence,
+            _with_m4_contractual_fake_candidate,
+        )
+
+        evidence = _M4OracleMcpEvidence(
+            proxy_config=proxy_config,
+            response_output_root=Path(proxy_config.response_output_root),
+        )
+        oracle_handler = build_sam3_handler(
+            build_oracle_perceive_segmenter(
+                transport,
+                handle_provider=lambda: proxy_config.handle,
+                session_id_provider=lambda: proxy_config.session_id,
+                response_callback=evidence.record,
+            ),
+            tool_name="oracle_perceive",
+            output_root=paths.root / "oracle-images",
+            result_output_root=paths.root / "oracle-results",
+        )
+        registry.bind_handler(
+            "oracle_perceive",
+            _with_m4_contractual_fake_candidate(oracle_handler, mcp_evidence=evidence),
+            replace=True,
+        )
+    return _ControlToolRunner(paths=paths, allocation=allocation, registry=registry)
+
+
+def _run_m0_control(runner: _ControlToolRunner) -> None:
+    runner.require_success(
+        "create_simulator_env",
+        {"env_id": ENV_IDS["m0"], "seed": 0, "task": "M0 control connectivity"},
+    )
+    runner.require_success("observe")
+
+
+def _run_m1_control(runner: _ControlToolRunner) -> None:
+    runner.require_success(
+        "create_simulator_env",
+        {"env_id": ENV_IDS["m1"], "seed": 0, "task": "M1 RGB-D control connectivity"},
+    )
+    runner.require_success("observe")
+    # Require a later live sample rather than accepting the same initial
+    # image twice. Gazebo continues running in M1 after the first observe.
+    time.sleep(0.15)
+    runner.require_success("observe")
+
+
+def _m2_control_motion(runner: _ControlToolRunner) -> None:
+    observed = runner.require_success("observe")
+    x, y, z = _control_eef_xyz(observed)
+    # Keep both repeated A/B targets below the spawn pose.  Returning the
+    # redundant RM75 wrist all the way to its initial z after a 40 mm descent
+    # can select a hard joint-limit IK branch, even though the Cartesian goal
+    # itself is reachable.  This is the same real MoveIt probe topology used
+    # by the M2 live acceptance: 40 mm down, then 20 mm up, repeated.  It does
+    # not suppress an error or add a recovery retry; every one of the four
+    # required A<->B motions must still complete through the production MCP
+    # controller.
+    b = {
+        "x": x,
+        "y": y,
+        "z": z - 0.040,
+        "velocity_scaling": 0.1,
+        "acceleration_scaling": 0.1,
+    }
+    a = {
+        "x": x,
+        "y": y,
+        "z": z - 0.020,
+        "velocity_scaling": 0.1,
+        "acceleration_scaling": 0.1,
+    }
+    for position in (1, 0, 1, 1, 0, 1):
+        runner.require_success("gripper_control", {"position": position})
+    for target in (b, a, b, a):
+        runner.require_success("move_to", target)
+    unreachable = runner.invoke(
+        "move_to",
+        {
+            "x": 99.0,
+            "y": 99.0,
+            "z": 99.0,
+            "velocity_scaling": 0.1,
+            "acceleration_scaling": 0.1,
+        },
+    )
+    if getattr(unreachable, "success", False) or not _control_response_has(
+        unreachable, "error_code", "MOTION_PLAN_FAILED"
+    ):
+        raise AcceptanceError("CONTROL_M2_UNREACHABLE_DID_NOT_FAIL_CLOSED")
+    runner.require_success("observe")
+
+
+def _m3_motion(runner: _ControlToolRunner) -> None:
+    """Issue fixed fixture waypoints; native receipts alone prove a grasp.
+
+    These M3 control-preflight poses are static world-frame values for the
+    repository-owned target block and RM75/2F-85 fixture.  They are neither a
+    geometry/contact predicate nor a TF, distance, or perception-derived
+    target estimate.  In particular, no movement is allowed after close until
+    native bilateral contact and the stock attachment ACK have succeeded in
+    ``GazeboDirectEnv``.
+    """
+
+    # The gripper's fixture-specific contact centre is offset from the block
+    # centre.  Specify the calibrated *mount* pose explicitly, including the
+    # horizontal closing-axis orientation, rather than aiming the mount at the
+    # target model origin.  All values are fixed scene configuration; contact
+    # admission remains exclusively the native two-pad Gazebo stream.
+    common = {
+        "target_pose": {
+            "frame": "world",
+            "euler_xyz_deg": [115.0, 0.0, 90.0],
+        },
+        "velocity_scaling": 0.1,
+        "acceleration_scaling": 0.1,
+        "tolerance": 0.001,
+        "ori_tolerance": 0.01,
+    }
+    approach = {
+        **common,
+        "target_pose": {**common["target_pose"], "xyz": [0.1552, -0.1000, 0.5686]},
+    }
+    capture = {
+        **common,
+        "target_pose": {**common["target_pose"], "xyz": [0.1552, -0.1000, 0.4976]},
+    }
+    lift = {
+        **common,
+        # Keep the first post-attach motion 100 mm above capture.  The M3
+        # verifier requires a measured lift of at least 80 mm, so reusing the
+        # 71 mm approach clearance here could never satisfy the native
+        # child-link proof even if the stock joint held perfectly.
+        "target_pose": {**common["target_pose"], "xyz": [0.1552, -0.1000, 0.5976]},
+    }
+    runner.require_success("move_to", approach)
+    runner.require_success("move_to", capture)
+    runner.require_success("gripper_control", {"position": 0})
+    runner.require_success("move_to", lift)
+    runner.require_success("gripper_control", {"position": 1})
+
+
+def _run_m3_or_m4_control(runner: _ControlToolRunner, *, m4: bool) -> None:
+    runner.require_success(
+        "create_simulator_env",
+        {
+            "env_id": ENV_IDS["m4" if m4 else "m3"],
+            "seed": 0,
+            "task": "M4 Oracle control connectivity" if m4 else "M3 native joint control connectivity",
+        },
+    )
+    current = runner.require_success("observe")
+    if m4:
+        runner.require_success(
+            "oracle_perceive",
+            {"image": _control_rgb_path(current), "prompt": "red rectangular target"},
+            observation=_control_observation(current),
+        )
+    _m3_motion(runner)
+
+
+def _run_control_case(paths: CasePaths, allocation: Allocation) -> int:
+    """Run one no-provider case and retain raw AgentTool/MCP evidence."""
+
+    milestone = paths.root.parent.name
+    runner: _ControlToolRunner | None = None
+    try:
+        runner = _bind_control_tools(paths=paths, allocation=allocation, milestone=milestone)
+        if milestone == "m0":
+            _run_m0_control(runner)
+        elif milestone == "m1":
+            _run_m1_control(runner)
+        elif milestone == "m2":
+            runner.require_success(
+                "create_simulator_env",
+                {"env_id": ENV_IDS["m2"], "seed": 0, "task": "M2 control connectivity"},
+            )
+            _m2_control_motion(runner)
+        elif milestone == "m3":
+            _run_m3_or_m4_control(runner, m4=False)
+        elif milestone == "m4":
+            _run_m3_or_m4_control(runner, m4=True)
+        else:
+            raise AcceptanceError(f"unknown control milestone: {milestone}")
+    except Exception as exc:  # noqa: BLE001 - record the actual local failure before cleanup.
+        _append_control_trace(
+            paths,
+            {
+                "event_type": "control_error",
+                "payload": {
+                    "execution_profile": CONTROL_ONLY,
+                    "planner_invoked": False,
+                    "provider_invoked": False,
+                    "error_code": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            },
+        )
+        return 1
+    finally:
+        if runner is not None:
+            runner.close_if_open()
+    return 0
+
+
 def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
     milestone = paths.root.parent.name
     scripted = paths.root.name == SCRIPTED_TUI
+    control_only = paths.root.name == CONTROL_ONLY
     env = os.environ.copy()
+    # Jazzy deprecates ROS_LOCALHOST_ONLY in favour of discovery-range
+    # controls. In this multi-process topology the legacy switch can prevent
+    # the bridge and camera subscriber from discovering each other. Keep DDS
+    # on this host; the allocated ROS domain isolates individual cases.
+    env.pop("ROS_LOCALHOST_ONLY", None)
+    env.pop("ROS_STATIC_PEERS", None)
     # The wrapper has already sourced Jazzy and the workspace overlay.  Keep
     # their generated Python paths: BenchWorkerManager deliberately removes
     # the repository path before launching its Gazebo child, but preserves
@@ -546,7 +1131,7 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
             "ROS_DOMAIN_ID": str(allocation.ros_domain_id),
             "GZ_PARTITION": allocation.gz_partition,
             "MCP_PORT": str(allocation.port),
-            "ROS_LOCALHOST_ONLY": "1",
+            "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
             # This is inherited by BenchWorkerManager's independently
             # sessioned children and is the only ownership marker accepted by
             # runner-side worker cleanup.
@@ -558,6 +1143,7 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
             "OPENETA_WORKER_LOG_DIR": str(paths.root / "worker-logs"),
             "OPENETA_SUPERVISION_PROFILE": SCRIPTED_TUI if scripted else "human_gated",
             "OPENETA_SCRIPTED_TUI": "1" if scripted else "0",
+            "OPENETA_CONTROL_ONLY": "1" if control_only else "0",
             # M4 explicitly selects the existing Gazebo Oracle tool.  The
             # candidate it emits is a contractual fixture, never a model
             # prediction and never an alternative M3 grasp gate.
@@ -599,25 +1185,28 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
     worker_candidates: list[dict[str, Any]] = []
     try:
         _wait_ready(allocation.port, process)
-        print(f"\n=== {paths.root.name} ===")
-        print(paths.instructions.read_text(encoding="utf-8"))
-        command = f"{shlex.quote(str(python))} -m agent.cli.openeta_cli"
-        if shutil.which("script") is None:
-            raise AcceptanceError("TUI_NOT_READY: util-linux script is missing")
-        scripted_input: str | None = None
-        if scripted:
-            # Feed these through the actual PTY TUI rather than shortcut mode,
-            # so M0's operator-console evidence lands in the transcript.
-            scripted_input = scripted_tui_input(paths)
-        completed = subprocess.run(
-            ["script", "--flush", "--return", "--command", command, str(paths.transcript)],
-            cwd=paths.root,
-            env=env,
-            check=False,
-            input=scripted_input,
-            text=scripted_input is not None,
-        )
-        tui_code = int(completed.returncode)
+        if control_only:
+            tui_code = _run_control_case(paths, allocation)
+        else:
+            print(f"\n=== {paths.root.name} ===")
+            print(paths.instructions.read_text(encoding="utf-8"))
+            command = f"{shlex.quote(str(python))} -m agent.cli.openeta_cli"
+            if shutil.which("script") is None:
+                raise AcceptanceError("TUI_NOT_READY: util-linux script is missing")
+            scripted_input: str | None = None
+            if scripted:
+                # Feed these through the actual PTY TUI rather than shortcut mode,
+                # so M0's operator-console evidence lands in the transcript.
+                scripted_input = scripted_tui_input(paths)
+            completed = subprocess.run(
+                ["script", "--flush", "--return", "--command", command, str(paths.transcript)],
+                cwd=paths.root,
+                env=env,
+                check=False,
+                input=scripted_input,
+                text=scripted_input is not None,
+            )
+            tui_code = int(completed.returncode)
     finally:
         # Capture the run-id-marked worker while the MCP server still owns its
         # bookkeeping.  Its own shutdown may stop the group before runner-side
@@ -636,8 +1225,7 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
         candidates=worker_candidates,
     )
     after = _process_snapshot()
-    before_pids = {item["pid"] for item in receipt["preexisting_processes"]}
-    owned_residuals = [item for item in after if item["pid"] not in before_pids]
+    owned_residuals = _owned_process_residuals(after, run_id=allocation.run_id)
     from extensions.gazebo.ros2_ws.acceptance_isolation import (
         candidate_domain_evidence,
         probe_ros_graph,
@@ -1043,7 +1631,12 @@ def _provider_billing_exhaustion_errors(
     return []
 
 
-def _verify_m0(calls: Sequence[Mapping[str, Any]], paths: CasePaths) -> list[str]:
+def _verify_m0(
+    calls: Sequence[Mapping[str, Any]],
+    paths: CasePaths,
+    *,
+    control_only: bool = False,
+) -> list[str]:
     errors: list[str] = []
     names = [str(call.get("name") or call.get("tool_name") or "") for call in calls]
     expected = ["create_simulator_env", "observe", "close_simulator_env"]
@@ -1058,15 +1651,16 @@ def _verify_m0(calls: Sequence[Mapping[str, Any]], paths: CasePaths) -> list[str
         errors.append("M0 dummy environment identity missing")
     if not _contains(create, "reset_response") and not _contains(create, "initial_observation"):
         errors.append("M0 create did not retain automatic reset evidence")
-    transcript = paths.transcript.read_text(encoding="utf-8", errors="replace") if paths.transcript.exists() else ""
-    for command in ("/config", "/tools", "/session", "/memory all --json"):
-        if command not in transcript:
-            errors.append(f"M0 transcript lacks {command}")
-    for name in SIX_SIMULATOR_TOOLS:
-        if name not in transcript:
-            errors.append(f"M0 tool listing lacks handler {name}")
-    if not list(paths.trace_root.glob("sessions/*/working/artifacts.json")):
-        errors.append("M0 memory artifact missing")
+    if not control_only:
+        transcript = paths.transcript.read_text(encoding="utf-8", errors="replace") if paths.transcript.exists() else ""
+        for command in ("/config", "/tools", "/session", "/memory all --json"):
+            if command not in transcript:
+                errors.append(f"M0 transcript lacks {command}")
+        for name in SIX_SIMULATOR_TOOLS:
+            if name not in transcript:
+                errors.append(f"M0 tool listing lacks handler {name}")
+        if not list(paths.trace_root.glob("sessions/*/working/artifacts.json")):
+            errors.append("M0 memory artifact missing")
     return errors
 
 
@@ -1110,11 +1704,67 @@ def _verify_m1(calls: Sequence[Mapping[str, Any]], paths: CasePaths) -> list[str
     return errors
 
 
-def _verify_m2(calls: Sequence[Mapping[str, Any]]) -> list[str]:
+def _call_mcp_request_ids(call: Mapping[str, Any]) -> set[str]:
+    """Return the explicit RPC ids emitted for one AgentTool action."""
+
+    outputs = _mapping_with(_result(call), "outputs")
+    entries = outputs.get("mcp_calls") if isinstance(outputs, Mapping) else None
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
+        return set()
+    request_ids: set[str] = set()
+    for entry in entries:
+        request = entry.get("request") if isinstance(entry, Mapping) else None
+        request_id = request.get("request_id") if isinstance(request, Mapping) else None
+        if isinstance(request_id, str) and request_id:
+            request_ids.add(request_id)
+    return request_ids
+
+
+def _m2_semantic_nodes(
+    call: Mapping[str, Any],
+    payloads: Sequence[Mapping[str, Any]] | None,
+) -> tuple[list[Mapping[str, Any]], list[str]]:
+    """Join one M2 action to its validated durable controller receipt.
+
+    ``payloads`` are only supplied after ``_mcp_response_payloads`` has
+    checked request, response and environment-receipt correlation.  Thus this
+    does not let an unrelated response satisfy an M2 safety rule.  Direct
+    unit callers may omit ``payloads`` to exercise the legacy raw-result
+    contract in isolation.
+    """
+
+    result = _result(call)
+    if payloads is None:
+        return [result], []
+    request_ids = _call_mcp_request_ids(call)
+    linked = [
+        payload
+        for payload in payloads
+        if str(payload.get(_MCP_EVIDENCE_REQUEST_ID) or "") in request_ids
+    ]
+    name = str(call.get("name") or call.get("tool_name") or "action")
+    if len(request_ids) != 1 or len(linked) != 1:
+        return [result], [f"M2 {name} lacks one correlated durable MCP response"]
+    return [result, linked[0]], []
+
+
+def _verify_m2(
+    calls: Sequence[Mapping[str, Any]],
+    payloads: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str]:
     errors: list[str] = []
     moves = [call for call in calls if str(call.get("name") or call.get("tool_name")) == "move_to"]
     successes = [call for call in moves if _successful(call)]
-    failures = [call for call in moves if _contains(_result(call), "error_code", "MOTION_PLAN_FAILED")]
+    semantic_nodes: dict[int, list[Mapping[str, Any]]] = {}
+    for call in moves:
+        nodes, node_errors = _m2_semantic_nodes(call, payloads)
+        semantic_nodes[id(call)] = nodes
+        errors.extend(node_errors)
+    failures = [
+        call
+        for call in moves
+        if _contains(semantic_nodes[id(call)], "error_code", "MOTION_PLAN_FAILED")
+    ]
     if len(successes) < 4:
         errors.append("M2 requires two A↔B rounds (four successful moves)")
     if len(failures) != 1:
@@ -1126,18 +1776,29 @@ def _verify_m2(calls: Sequence[Mapping[str, Any]]) -> list[str]:
         and _successful(call)
     ]
     for call in successful_controls:
-        result = _result(call)
-        if len(_camera_frames(result)) < 2:
+        nodes, node_errors = _m2_semantic_nodes(call, payloads)
+        errors.extend(node_errors)
+        if len(_camera_frames(nodes)) < 2:
             errors.append("M2 successful action lacks fresh dual RGB-D")
-        if not _contains(result, "robot") and not _contains(result, "joint_positions"):
+        if not _contains(nodes, "robot") and not _contains(nodes, "joint_positions"):
             errors.append("M2 successful action lacks RobotState")
-        if not _contains(result, "schema_version", "m2_start_state_recovery_v1"):
-            errors.append("M2 successful action lacks recovery receipt")
-        if not _contains(result, "action_completed_ros_time_s"):
+        # Start-state recovery is a MoveIt arm-motion contract.  The parallel
+        # gripper action never plans an arm trajectory, so requiring a motion
+        # recovery record on it would reject an otherwise valid native gripper
+        # receipt.  It still needs every other post-action freshness barrier.
+        if (
+            str(call.get("name") or call.get("tool_name") or "") == "move_to"
+            and not _contains(nodes, "schema_version", "m2_start_state_recovery_v1")
+        ):
+            errors.append("M2 successful move lacks recovery receipt")
+        if not _contains(nodes, "action_completed_ros_time_s"):
             errors.append("M2 successful action lacks completion barrier")
-        if not _contains(result, "observation_fresh", True):
+        if not _contains(nodes, "observation_fresh", True):
             errors.append("M2 successful action lacks fresh-observation receipt")
-    if failures and (_successful(failures[0]) or _contains(_result(failures[0]), "reached_target", True)):
+    if failures and (
+        _successful(failures[0])
+        or _contains(semantic_nodes[id(failures[0])], "reached_target", True)
+    ):
         errors.append("M2 unreachable target did not fail closed")
     grippers = [
         call for call in calls if str(call.get("name") or call.get("tool_name")) == "gripper_control"
@@ -1255,7 +1916,13 @@ def _mcp_response_payloads(
             if not isinstance(value, Mapping):
                 errors.append(f"MCP {remote_tool} response artifact is not an object")
                 continue
-            payloads.append(value)
+            # Keep the durable response itself unchanged, but retain the
+            # already-validated RPC association for semantic verifiers such
+            # as M2.  They must never borrow a receipt from another action.
+            annotated = dict(value)
+            annotated[_MCP_EVIDENCE_REQUEST_ID] = request_id
+            annotated[_MCP_EVIDENCE_AGENT_TOOL] = agent_tool
+            payloads.append(annotated)
     if not paths.mcp_log.is_file() or not paths.mcp_log.read_text(encoding="utf-8", errors="replace").strip():
         errors.append("MCP server log is missing or empty")
     return payloads, errors
@@ -1343,6 +2010,31 @@ def _verify_m4(
     return errors
 
 
+def _verify_control_trace(events: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Prove the control-only runner did not silently become a planner run."""
+
+    errors: list[str] = []
+    action_events = [
+        event
+        for event in events
+        if str(event.get("event_type") or "") in {"action", "control_error"}
+    ]
+    if not action_events:
+        return ["control-only trace has no action or failure record"]
+    for event in action_events:
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            errors.append("control-only trace payload is malformed")
+            continue
+        if payload.get("execution_profile") != CONTROL_ONLY:
+            errors.append("control-only trace lacks its explicit execution profile")
+        if payload.get("planner_invoked") is not False:
+            errors.append("control-only trace does not prove planner_invoked=false")
+        if payload.get("provider_invoked") is not False:
+            errors.append("control-only trace does not prove provider_invoked=false")
+    return errors
+
+
 def verify_case(
     paths: CasePaths,
     milestone: str,
@@ -1359,7 +2051,7 @@ def verify_case(
         # mislabel the unattempted formal tool/M2 requirements as functional
         # failures.  This exception is deliberately narrower than generic
         # planner or provider errors; see _provider_billing_exhaustion_errors.
-        if mode in {DETERMINISTIC, SCRIPTED_TUI} and not provider_billing_errors:
+        if mode in {DETERMINISTIC, SCRIPTED_TUI, CONTROL_ONLY} and not provider_billing_errors:
             required_mcp_tools = (
                 SIX_SIMULATOR_TOOLS | frozenset({"oracle_perceive"})
                 if milestone == "m4"
@@ -1374,12 +2066,18 @@ def verify_case(
         if provider_billing_errors:
             errors.extend(provider_billing_errors)
         else:
-            for call in calls:
-                name = str(call.get("name") or call.get("tool_name") or "")
-                approved = _scripted_approved(call) if mode == SCRIPTED_TUI else _human_approved(call)
-                if name in MUTATING_TOOLS and not approved:
-                    profile = SCRIPTED_TUI if mode == SCRIPTED_TUI else "human_gated"
-                    errors.append(f"{name} lacks explicit {profile} approval evidence")
+            if mode == CONTROL_ONLY:
+                errors.extend(_verify_control_trace(events))
+                expected = ENV_IDS[milestone]
+                if not any(_contains(call, "env_id", expected) for call in calls):
+                    errors.append("control-only case did not create the requested milestone environment")
+            else:
+                for call in calls:
+                    name = str(call.get("name") or call.get("tool_name") or "")
+                    approved = _scripted_approved(call) if mode == SCRIPTED_TUI else _human_approved(call)
+                    if name in MUTATING_TOOLS and not approved:
+                        profile = SCRIPTED_TUI if mode == SCRIPTED_TUI else "human_gated"
+                        errors.append(f"{name} lacks explicit {profile} approval evidence")
             if mode == AUTONOMY:
                 expected = ENV_IDS[milestone]
                 if not any(_contains(call, "env_id", expected) for call in calls):
@@ -1387,11 +2085,11 @@ def verify_case(
                 if not any(str(call.get("name") or call.get("tool_name")) == "close_simulator_env" for call in calls):
                     errors.append("Planner did not close its environment")
             elif milestone == "m0":
-                errors.extend(_verify_m0(calls, paths))
+                errors.extend(_verify_m0(calls, paths, control_only=mode == CONTROL_ONLY))
             elif milestone == "m1":
                 errors.extend(_verify_m1(calls, paths))
             elif milestone == "m2":
-                errors.extend(_verify_m2(calls))
+                errors.extend(_verify_m2(calls, payloads))
             elif milestone == "m3":
                 errors.extend(_verify_m3(calls, payloads))
             elif milestone == "m4":
@@ -1482,6 +2180,46 @@ def assemble_report(
     }
 
 
+def assemble_control_report(run_root: Path) -> dict[str, Any]:
+    """Assemble the no-provider control report without mimicking formal TUI output."""
+
+    milestones: dict[str, Any] = {}
+    stop = False
+    overall = "passed"
+    for milestone in MILESTONES:
+        if stop:
+            milestones[milestone] = {
+                "control_layer_status": {
+                    "status": "not_run",
+                    "errors": ["control predecessor gate did not pass"],
+                },
+                "formal_tui_acceptance": "not_run",
+            }
+            continue
+        result = verify_case(
+            case_paths(run_root, milestone, CONTROL_ONLY),
+            milestone,
+            CONTROL_ONLY,
+        )
+        if result["status"] != "passed":
+            stop = True
+            overall = "inconclusive" if result["status"] == "blocked" else "failed"
+        milestones[milestone] = {
+            "control_layer_status": result,
+            "formal_tui_acceptance": "not_run",
+        }
+    return {
+        "schema_version": "openeta.gazebo_control_acceptance.v1",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "run_root": str(run_root.resolve()),
+        "acceptance_scope": "control_only_no_provider_not_formal_tui",
+        "planner_provider_invoked": False,
+        "formal_tui_acceptance": "not_run",
+        "overall_status": overall,
+        "milestones": milestones,
+    }
+
+
 def report_exit_code(report: Mapping[str, Any]) -> int:
     status = report.get("overall_status")
     return 0 if status == "passed" else (2 if status == "inconclusive" else 1)
@@ -1504,13 +2242,72 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run real PTY TUI cases with explicit scripted_tui approvals, never human approval.",
     )
+    parser.add_argument(
+        "--control-only",
+        action="store_true",
+        help=(
+            "Exercise M0–M4 AgentTool → MCP/SSE → Gazebo control only; never "
+            "start a planner/provider or claim formal PTY/TUI acceptance."
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.control_only and args.scripted_tui:
+        raise AcceptanceError("--control-only and --scripted-tui are mutually exclusive")
     repo = Path(__file__).resolve().parents[1]
     run_root = _new_run_root(repo, args.run_root)
+    if args.control_only:
+        if args.verify_only:
+            report = assemble_control_report(run_root)
+            report_path = run_root / CONTROL_REPORT_FILENAME
+            if report_path.exists():
+                raise AcceptanceError(f"immutable report already exists: {report_path}")
+            _json_dump(report_path, report, exclusive=True)
+            report_path.chmod(0o444)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return report_exit_code(report)
+
+        run_root.mkdir(parents=True, exist_ok=False)
+        occupied: set[int] = set()
+        try:
+            for milestone in MILESTONES:
+                allocation = allocate(
+                    f"{milestone}-{CONTROL_ONLY}",
+                    occupied,
+                    # Preparing an immutable plan must remain side-effect
+                    # free and usable on a host without a sourced ROS stack.
+                    # Every execution path below still preflights its actual
+                    # candidate domain before it can start a worker.
+                    preflight=not args.prepare_only,
+                )
+                occupied.add(allocation.ros_domain_id)
+                paths = prepare_case(repo, run_root, milestone, CONTROL_ONLY, allocation)
+                if args.prepare_only:
+                    continue
+                code = run_case(repo, paths, allocation)
+                if code == 130:
+                    return 130
+                gate = verify_case(paths, milestone, CONTROL_ONLY)
+                _json_dump(paths.root / "verification.json", gate)
+                if code != 0 or gate["status"] != "passed":
+                    report = assemble_control_report(run_root)
+                    _json_dump(run_root / CONTROL_REPORT_FILENAME, report, exclusive=True)
+                    return report_exit_code(report)
+            if args.prepare_only:
+                print(run_root)
+                return 0
+            report = assemble_control_report(run_root)
+            report_path = run_root / CONTROL_REPORT_FILENAME
+            _json_dump(report_path, report, exclusive=True)
+            report_path.chmod(0o444)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return report_exit_code(report)
+        except KeyboardInterrupt:
+            return 130
+
     formal_mode = SCRIPTED_TUI if args.scripted_tui else DETERMINISTIC
     if args.verify_only:
         report = assemble_report(run_root, formal_mode=formal_mode)
@@ -1534,7 +2331,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else (DETERMINISTIC, AUTONOMY)
             )
             for mode in modes:
-                allocation = allocate(f"{milestone}-{mode}", occupied)
+                allocation = allocate(
+                    f"{milestone}-{mode}",
+                    occupied,
+                    preflight=not args.prepare_only,
+                )
                 occupied.add(allocation.ros_domain_id)
                 paths = prepare_case(repo, run_root, milestone, mode, allocation)
                 if args.prepare_only:

@@ -19,16 +19,20 @@ def generate_launch_description() -> LaunchDescription:
         # initialization before the world-control service is advertised.
         launch_arguments={"gz_args": "-r -s --headless-rendering sensors_demo.sdf"}.items(),
     )
-    bridge = Node(
+    # ``parameter_bridge`` advertises an Image bridge in this deployment but
+    # does not deliver raw image packets from the headless renderer.  The
+    # official ``ros_gz_image`` bridge is the native image transport for RGB
+    # and depth; retain a directed official bridge for CameraInfo, which the
+    # image bridge intentionally does not publish.  All three messages remain
+    # Gazebo-originated ROS packets--there is no rendered-frame fallback.
+    image_bridge = Node(
+        package="ros_gz_image", executable="image_bridge", output="screen",
+        arguments=["rgbd_camera/image", "rgbd_camera/depth_image"],
+    )
+    camera_info_bridge = Node(
         package="ros_gz_bridge", executable="parameter_bridge", output="screen",
         arguments=[
-            "/camera@sensor_msgs/msg/Image@gz.msgs.Image",
-            "/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo",
-            "/rgbd_camera/image@sensor_msgs/msg/Image@gz.msgs.Image",
-            "/rgbd_camera/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo",
-            "/rgbd_camera/depth_image@sensor_msgs/msg/Image@gz.msgs.Image",
-            "/rgbd_camera/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked",
+            "/rgbd_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
         ],
-        remappings=[("/camera", "/camera/image"), ("/camera_info", "/camera/camera_info")],
     )
-    return LaunchDescription([gazebo, bridge])
+    return LaunchDescription([gazebo, image_bridge, camera_info_bridge])

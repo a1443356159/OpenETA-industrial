@@ -8,16 +8,21 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import scripts.tui_gazebo_acceptance as tui_acceptance
 from extensions.gazebo.ros2_ws.acceptance_isolation import _normalise_graph_rows
 from scripts.tui_gazebo_acceptance import (
     AUTONOMY,
+    CONTROL_ONLY,
+    CONTROL_REPORT_FILENAME,
     DETERMINISTIC,
     ENV_IDS,
     SCHEMA_VERSION,
     SCRIPTED_TUI,
     SIX_SIMULATOR_TOOLS,
     allocate,
+    assemble_control_report,
     assemble_report,
     case_paths,
     environment_receipt,
@@ -213,6 +218,43 @@ def test_allocation_and_receipt_exclude_protected_domains() -> None:
     assert verify_receipt(tampered)
 
 
+def test_live_allocation_preflight_skips_a_busy_ros_domain(monkeypatch) -> None:
+    """A stale external daemon must reserve its domain instead of failing cleanup."""
+
+    seen = []
+
+    def preflight(domain: int):
+        seen.append(domain)
+        return {"state": "FAILED", "reason_code": "ROS2CLI_DAEMON_PRESENT"} if domain == 80 else {
+            "state": "PASSED", "reason_code": "ROS_DOMAIN_EMPTY"
+        }
+
+    monkeypatch.setattr(tui_acceptance, "_candidate_domain_preflight", preflight)
+    allocation = tui_acceptance.allocate("live-unit", preflight=True)
+
+    assert seen == [80, 81]
+    assert allocation.ros_domain_id == 81
+    assert allocation.candidate_domain_preflight == {
+        "state": "PASSED", "reason_code": "ROS_DOMAIN_EMPTY"
+    }
+    receipt = environment_receipt(
+        ROOT, allocation, case_name="live-unit", before=[], capture_protected=False
+    )
+    assert verify_receipt(receipt) == []
+
+
+def test_live_allocation_preflight_fails_closed_when_no_domain_is_empty(monkeypatch) -> None:
+    monkeypatch.setattr(tui_acceptance, "DOMAIN_CANDIDATES", (80, 81))
+    monkeypatch.setattr(
+        tui_acceptance,
+        "_candidate_domain_preflight",
+        lambda _domain: {"state": "FAILED", "reason_code": "ROS_DOMAIN_NOT_EMPTY"},
+    )
+
+    with pytest.raises(tui_acceptance.AcceptanceError, match="after preflight"):
+        tui_acceptance.allocate("live-unit", preflight=True)
+
+
 def test_protected_graph_rows_are_json_native_before_baseline_comparison() -> None:
     """An unchanged rclpy tuple row must equal its JSON-loaded list form."""
 
@@ -303,6 +345,8 @@ def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monke
     paths.instructions.write_text("scripted M1 task", encoding="utf-8")
     ros_python_path = "/opt/ros/jazzy/lib/python3.12/site-packages"
     monkeypatch.setenv("PYTHONPATH", ros_python_path)
+    monkeypatch.setenv("ROS_LOCALHOST_ONLY", "1")
+    monkeypatch.setenv("ROS_STATIC_PEERS", "127.0.0.1")
     _write_json(
         paths.receipt,
         {"preexisting_processes": [], "protected_ros_graphs": {}},
@@ -346,6 +390,9 @@ def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monke
     assert run_case(ROOT, paths, allocation) == 0
     assert seen["environment"]["PYTHONPATH"] == os.pathsep.join((str(ROOT), ros_python_path))
     assert seen["environment"]["OPENETA_WORKER_LOG_DIR"] == str(paths.root / "worker-logs")
+    assert "ROS_LOCALHOST_ONLY" not in seen["environment"]
+    assert "ROS_STATIC_PEERS" not in seen["environment"]
+    assert seen["environment"]["ROS_AUTOMATIC_DISCOVERY_RANGE"] == "LOCALHOST"
 
 
 def test_owned_worker_cleanup_uses_only_matching_run_process_group(monkeypatch) -> None:
@@ -406,6 +453,203 @@ def test_owned_worker_cleanup_uses_only_matching_run_process_group(monkeypatch) 
             "state": "exited",
         }
     ]
+
+
+def test_owned_residuals_ignore_unmarked_diagnostic_commands() -> None:
+    """A command line mentioning Gazebo is not ownership evidence by itself."""
+
+    rows = [
+        {"pid": 41001, "cmdline": "bash -c ros2 launch ... gz sim ..."},
+        {
+            "pid": 41002,
+            "cmdline": "python sim/bench_worker.py --bench gazebo",
+            "openeta_tui_run_id": "this-case",
+        },
+        {
+            "pid": 41003,
+            "cmdline": "python sim/bench_worker.py --bench gazebo",
+            "openeta_tui_run_id": "other-case",
+        },
+    ]
+
+    assert tui_acceptance._owned_process_residuals(rows, run_id="this-case") == [rows[1]]
+
+
+def test_process_snapshot_ignores_shell_prose_but_keeps_real_workloads() -> None:
+    """Only actual runtime argv may become a pre-existing-process gate."""
+
+    assert not tui_acceptance._is_snapshot_candidate_argv(
+        ["/bin/bash", "-c", "ros2 launch pkg file.py; gz sim world.sdf"]
+    )
+    assert tui_acceptance._is_snapshot_candidate_argv(
+        ["/usr/bin/python3", "/opt/ros/jazzy/bin/ros2", "launch", "pkg", "file.py"]
+    )
+    assert tui_acceptance._is_snapshot_candidate_argv(
+        ["/usr/bin/python3", "-u", "/workspace/sim/bench_worker.py"]
+    )
+    assert tui_acceptance._is_snapshot_candidate_argv(["/usr/bin/gz", "sim", "world.sdf"])
+
+
+def test_control_m2_reads_precise_failure_code_from_durable_response(tmp_path: Path) -> None:
+    """A compact proxy diagnostic cannot erase MoveIt's persisted error code."""
+
+    response = tmp_path / "move-to-response.json"
+    _write_json(response, {"ok": False, "error_code": "MOTION_PLAN_FAILED"})
+    result = SimpleNamespace(
+        details={"outputs": {"response": {"response_path": str(response)}}}
+    )
+
+    assert tui_acceptance._control_response_has(result, "error_code", "MOTION_PLAN_FAILED")
+    assert not tui_acceptance._control_response_has(result, "error_code", "GRIPPER_FAILED")
+
+
+def test_control_m2_uses_the_inset_bidirectional_moveit_probe(monkeypatch, tmp_path: Path) -> None:
+    """Four real A<->B moves must avoid the initial hard-limit IK branch."""
+
+    observe_path = tmp_path / "observe.json"
+    _write_json(
+        observe_path,
+        {"observation": {"robot": {"end_effector_pose": {"xyz": [0.1, 0.2, 0.9]}}}},
+    )
+    observed = SimpleNamespace(
+        success=True,
+        details={"outputs": {"response": {"response_path": str(observe_path)}}},
+    )
+    calls = []
+
+    class Runner:
+        def require_success(self, name, parameters=None):
+            calls.append((name, dict(parameters or {})))
+            return observed if name == "observe" else SimpleNamespace(success=True)
+
+        def invoke(self, name, parameters=None):
+            calls.append((name, dict(parameters or {})))
+            return SimpleNamespace(success=False)
+
+    monkeypatch.setattr(tui_acceptance, "_control_response_has", lambda *_args: True)
+    tui_acceptance._m2_control_motion(Runner())
+
+    moves = [parameters for name, parameters in calls if name == "move_to"]
+    assert [move["z"] for move in moves[:4]] == pytest.approx([0.86, 0.88, 0.86, 0.88])
+    assert moves[4]["x"] == 99.0 and moves[4]["y"] == 99.0 and moves[4]["z"] == 99.0
+
+
+def test_m2_verifier_uses_only_correlated_durable_motion_receipts() -> None:
+    """M2 reads exact controller evidence without requiring arm recovery for grippers."""
+
+    def action(
+        name: str,
+        request_id: str,
+        *,
+        success: bool,
+        parameters: dict | None = None,
+    ) -> dict:
+        return {
+            "name": name,
+            "parameters": parameters or {},
+            "status": "executed" if success else "failed",
+            "result": {
+                "success": success,
+                "details": {
+                    "outputs": {
+                        "mcp_calls": [
+                            {"request": {"request_id": request_id, "tool": name}}
+                        ]
+                    },
+                    "environment_receipt": {"observation_fresh": True},
+                    "observation": {
+                        "robot": {"joint_positions": [0.0] * 7},
+                        "cameras": [
+                            {"rgb_path": "one.png", "depth_path": "one-depth.png"},
+                            {"rgb_path": "two.png", "depth_path": "two-depth.png"},
+                        ],
+                    },
+                },
+            },
+        }
+
+    calls = []
+    payloads = []
+    for index, position in enumerate((1, 0, 1, 1, 0, 1), 1):
+        request_id = f"gripper-{index}"
+        calls.append(
+            action(
+                "gripper_control",
+                request_id,
+                success=True,
+                parameters={"position": position},
+            )
+        )
+        # Native gripper actions provide completion timing but intentionally
+        # do not carry MoveIt's arm-start-state recovery record.
+        payloads.append(
+            {
+                tui_acceptance._MCP_EVIDENCE_REQUEST_ID: request_id,
+                "action_completed_ros_time_s": float(index),
+            }
+        )
+    for index in range(4):
+        request_id = f"move-{index}"
+        calls.append(action("move_to", request_id, success=True))
+        payloads.append(
+            {
+                tui_acceptance._MCP_EVIDENCE_REQUEST_ID: request_id,
+                "action_completed_ros_time_s": 10.0 + index,
+                "start_state_recovery": {
+                    "schema_version": "m2_start_state_recovery_v1"
+                },
+            }
+        )
+    calls.append(action("move_to", "unreachable", success=False))
+    payloads.append(
+        {
+            tui_acceptance._MCP_EVIDENCE_REQUEST_ID: "unreachable",
+            "error_code": "MOTION_PLAN_FAILED",
+            "reached_target": False,
+        }
+    )
+
+    assert tui_acceptance._verify_m2(calls, payloads) == []
+
+    payloads[-1][tui_acceptance._MCP_EVIDENCE_REQUEST_ID] = "wrong-request"
+    errors = tui_acceptance._verify_m2(calls, payloads)
+    assert any("lacks one correlated durable MCP response" in error for error in errors)
+    assert any("exactly one stable MOTION_PLAN_FAILED" in error for error in errors)
+
+
+def test_m3_control_uses_fixed_world_fixture_poses_not_a_geometry_gate() -> None:
+    """The preflight path may command a pose, but never infer contact from it."""
+
+    calls: list[tuple[str, dict]] = []
+
+    class Runner:
+        def require_success(self, name: str, parameters: dict):
+            calls.append((name, parameters))
+
+    tui_acceptance._m3_motion(Runner())
+
+    assert [name for name, _ in calls] == [
+        "move_to",
+        "move_to",
+        "gripper_control",
+        "move_to",
+        "gripper_control",
+    ]
+    approach, capture, _, lift, _ = [parameters for _, parameters in calls]
+    assert approach["target_pose"] == {
+        "frame": "world",
+        "euler_xyz_deg": [115.0, 0.0, 90.0],
+        "xyz": [0.1552, -0.1, 0.5686],
+    }
+    assert capture["target_pose"]["xyz"] == [0.1552, -0.1, 0.4976]
+    assert lift["target_pose"] == {
+        "frame": "world",
+        "euler_xyz_deg": [115.0, 0.0, 90.0],
+        "xyz": [0.1552, -0.1, 0.5976],
+    }
+    assert lift["target_pose"]["xyz"][2] - capture["target_pose"]["xyz"][2] >= 0.1 - 1e-9
+    for _, parameters in calls:
+        assert not {"distance", "contact_gate", "tf_lookup", "geometry"} & set(parameters)
 
 
 def test_formal_verifier_rejects_missing_worker_cleanup_evidence(tmp_path: Path) -> None:
@@ -504,6 +748,71 @@ def test_m0_verifier_uses_trace_and_artifacts_not_planner_summary(tmp_path: Path
 
     assert result["status"] == "passed", result["errors"]
     assert result["tool_call_count"] == 3
+
+
+def test_control_only_m0_uses_the_same_mcp_evidence_without_tui_claims(tmp_path: Path) -> None:
+    """Control preflight remains strict on MCP evidence but never needs a PTY."""
+
+    paths = _prepare_evidence(tmp_path, "m0", CONTROL_ONLY)
+    paths.mcp_log.write_text("OpenETA MCP server started\n", encoding="utf-8")
+    create_outputs, create_receipt = _mcp_outputs(
+        paths.root,
+        "create_simulator_env",
+        [("create_env", {"handle": "control-handle"}), ("reset_env", {"success": True})],
+        handle="control-handle",
+    )
+    create_outputs.update(
+        {
+            "environment": {"env_id": ENV_IDS["m0"]},
+            "initial_observation": {"cameras": [{"rgb_path": "rgb.png"}]},
+        }
+    )
+    observe_outputs, observe_receipt = _mcp_outputs(
+        paths.root, "observe", [("render_env", {"success": True})], handle="control-handle"
+    )
+    close_outputs, close_receipt = _mcp_outputs(
+        paths.root, "close_simulator_env", [("close_env", {"success": True})], handle="control-handle"
+    )
+    events = [
+        _tool(
+            "create_simulator_env",
+            parameters={"env_id": ENV_IDS["m0"]},
+            outputs=create_outputs,
+            receipt=create_receipt,
+        ),
+        _tool("observe", outputs=observe_outputs, receipt=observe_receipt),
+        _tool("close_simulator_env", outputs=close_outputs, receipt=close_receipt),
+    ]
+    for event in events:
+        event["payload"].update(
+            {
+                "execution_profile": CONTROL_ONLY,
+                "planner_invoked": False,
+                "provider_invoked": False,
+            }
+        )
+    trace = paths.trace_root / "sessions/control/trace.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text("".join(json.dumps(row) + "\n" for row in events), encoding="utf-8")
+
+    result = verify_case(paths, "m0", CONTROL_ONLY)
+
+    assert result["status"] == "passed", result["errors"]
+    assert not paths.transcript.exists()
+
+
+def test_control_report_is_not_a_formal_tui_report_and_stops_after_failure(
+    tmp_path: Path,
+) -> None:
+    report = assemble_control_report(tmp_path)
+
+    assert report["schema_version"] == "openeta.gazebo_control_acceptance.v1"
+    assert report["acceptance_scope"] == "control_only_no_provider_not_formal_tui"
+    assert report["formal_tui_acceptance"] == "not_run"
+    assert report["overall_status"] == "inconclusive"
+    assert report["milestones"]["m0"]["control_layer_status"]["status"] == "blocked"
+    assert report["milestones"]["m1"]["control_layer_status"]["status"] == "not_run"
+    assert CONTROL_REPORT_FILENAME != "acceptance-report.json"
 
 
 def test_report_keeps_planner_status_separate_and_stops_formal_chain(tmp_path: Path) -> None:

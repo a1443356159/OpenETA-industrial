@@ -60,6 +60,12 @@ class M3Config(M2Config):
     display_name: str = M3_DISPLAY_NAME
     target_id: str = "m3_target"
     distractor_id: str = "m3_distractor"
+    # A real close against the target is allowed to terminate with the
+    # ros2_control ``stalled`` result.  That terminal action result proves
+    # only that the fingers stopped under load; it never proves a grasp.
+    # M3 still admits attachment exclusively through the subsequent native
+    # bilateral Gazebo-contact window and DetachableJoint attach ACK.
+    allow_stalling: bool = True
     table_id: str = "m3_table"
     target_link: str = "target_link"
     parent_link: str = "gripper_mount_link"

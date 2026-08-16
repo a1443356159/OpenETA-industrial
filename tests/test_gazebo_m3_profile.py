@@ -18,6 +18,7 @@ def test_m3_registration_exposes_the_approved_detachable_joint_profile() -> None
     m3, m2 = get_env_spec(M3_ENV_ID), get_env_spec(M2_ENV_ID)
     assert m3 is not None and m2 is not None and m3.display_name == M3_DISPLAY_NAME
     assert M3Config().model_id == M3_MODEL_ID
+    assert M3Config().allow_stalling is True
     assert M2Config().model_id == MODEL_ID
     profile = gazebo_profile("m3_pickplace")
     assert profile.unavailable_reason is None
@@ -30,6 +31,25 @@ def test_m3_assets_are_required_before_manipulation_starts() -> None:
     config.validate_assets()
     package = config.ros_workspace / "src" / config.ros_package_name
     assert (package / "worlds/m3_rm75_robotiq2f85_pickplace.sdf").is_file()
+
+
+def test_m3_target_pose_contract_is_a_single_link_at_the_model_origin() -> None:
+    """Keep the native Pose_V world/local-frame proof contract explicit."""
+
+    config = M3Config()
+    world_path = (
+        config.ros_workspace
+        / "src"
+        / config.ros_package_name
+        / "worlds/m3_rm75_robotiq2f85_pickplace.sdf"
+    )
+    root = ET.parse(world_path).getroot()
+    target = root.find(f".//model[@name='{config.target_id}']")
+    assert target is not None
+    assert tuple(float(value) for value in target.findtext("pose", "").split()[:3]) == config.target_initial_xyz
+    links = target.findall("link")
+    assert [link.get("name") for link in links] == [config.target_link]
+    assert links[0].find("pose") is None
 
 
 def test_m3_sdf_renderer_allows_only_the_stock_fixed_joint_topology() -> None:

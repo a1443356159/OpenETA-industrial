@@ -25,11 +25,13 @@ def test_m1_registration_resolves_the_single_direct_env_profile() -> None:
     assert "authoritative_camera" in profile.capabilities
 
 
-def test_m1_launch_is_server_only_and_preserves_official_rgbd_bridge() -> None:
+def test_m1_launch_is_server_only_and_uses_official_rgbd_bridges() -> None:
     root = Path(__file__).parents[1]
     launch = root / "extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/launch/m1_gazebo_rgbd.launch.py"
     text = launch.read_text(encoding="utf-8")
     assert '"-r -s --headless-rendering sensors_demo.sdf"' in text
+    assert 'package="ros_gz_image", executable="image_bridge"' in text
+    assert "/rgbd_camera/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo" in text
     assert "rgbd_camera/depth_image" in text
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import shutil
+import subprocess
 import threading
 import time
 from typing import Any, Callable, Mapping
@@ -57,10 +59,14 @@ class GazeboRuntime:
         )
         self.attachment: Any | None = None
         if PHYSICS in profile.capabilities:
+            model_config = profile.model_config
             self.attachment = attachment_factory(
                 gz_executable=deployment.gz_executable,
                 environment=deployment.process_environment,
                 world_name=deployment.world_override or profile.world_name,
+                parent_link=getattr(model_config, "parent_link", "gripper_mount_link"),
+                child_model=getattr(model_config, "target_id", "m3_target"),
+                child_link=getattr(model_config, "target_link", "target_link"),
             )
         self._launch: Any | None = None
         self._cameras: list[Any] = []
@@ -103,6 +109,52 @@ class GazeboRuntime:
             raise GazeboProcessError("GAZEBO_READINESS_TIMEOUT")
         return remaining
 
+    def _wait_for_camera_publishers(self, *, deadline: float) -> None:
+        """Wait for every configured ROS camera publisher before subscribing.
+
+        The world-control endpoint is advertised before the headless image and
+        CameraInfo bridges necessarily create their ROS publishers.  Creating
+        a Fast DDS subscription in that interval can leave it permanently
+        unmatched on the deployed local-only discovery configuration.  This
+        probe starts fresh short-lived ``ros2 topic list`` clients until the
+        exact configured topics are advertised; the subsequent camera capture
+        still proves fresh packet delivery and calibration.
+        """
+
+        required = {
+            topic
+            for config in self._camera_configs()
+            for topic in (config.rgb_topic, config.depth_topic, config.camera_info_topic)
+        }
+        executable = shutil.which(self.deployment.ros2_executable) or self.deployment.ros2_executable
+        last_error = "topics were not advertised"
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            try:
+                result = subprocess.run(
+                    [executable, "topic", "list"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    env=dict(self.deployment.process_environment),
+                    timeout=min(5.0, remaining),
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+            else:
+                advertised = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+                missing = sorted(required - advertised)
+                if result.returncode == 0 and not missing:
+                    return
+                detail = (result.stderr or result.stdout)[-500:].strip()
+                last_error = "missing=" + ",".join(missing)
+                if detail:
+                    last_error += f" detail={detail}"
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                threading.Event().wait(timeout=min(0.1, remaining))
+        raise GazeboProcessError(f"ROS_CAMERA_TOPICS_NOT_READY: {last_error}")
+
     def _start(self) -> None:
         if self.closed:
             raise GazeboProcessError("Gazebo runtime is closed")
@@ -120,8 +172,6 @@ class GazeboRuntime:
                 )
                 for index, config in enumerate(self._camera_configs())
             ]
-            for camera in self._cameras:
-                camera.start()
             arguments = (*self.deployment.launch_arguments,)
             self._launch = self._launch_factory(
                 package=self.profile.launch_package,
@@ -161,6 +211,16 @@ class GazeboRuntime:
                 wait_ready = getattr(self.controller, "wait_ready", None)
                 if callable(wait_ready):
                     wait_ready(self._remaining(deadline))
+            if self._camera_factory is RosRgbdCameraSource:
+                self._wait_for_camera_publishers(deadline=deadline)
+            # Start ROS camera subscriptions only after the launch has made
+            # its bridge publishers.  On the deployed Fast DDS stack, a
+            # subscription created before a later headless image bridge can
+            # remain unmatched indefinitely even while raw Gazebo frames are
+            # available.  This is a startup ordering gate, not a cached-image
+            # fallback: reset still requires newly received RGB/depth/info.
+            for camera in self._cameras:
+                camera.start()
             self.started = True
             self.start_count += 1
         except Exception:

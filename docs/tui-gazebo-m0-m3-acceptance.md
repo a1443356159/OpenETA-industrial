@@ -26,3 +26,8 @@ transport issue in `problem.md` P-007. A hash-verified bundle clone was used
 only to diagnose the no-provider M2 control chain; it is neither a formal
 origin clone nor a PTY/TUI result. This document makes no claim that a remote
 formal run has passed.
+
+For the distinct local control-only result, see
+`docs/gazebo-unified-runtime-acceptance.md`. Its M0–M4 run deliberately
+disabled planner/provider and PTY input, so it cannot satisfy the formal path
+described here.

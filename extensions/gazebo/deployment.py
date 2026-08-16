@@ -49,13 +49,17 @@ def _json_value(snapshot: Mapping[str, str], name: str, default: Any) -> Any:
 
 
 def _gazebo_child_environment(source: Mapping[str, str]) -> dict[str, str]:
-    """Return a Gazebo-safe child environment without changing ROS settings.
+    """Return a Gazebo-safe, localhost-isolated child environment.
 
     The vendor ``gz`` entrypoint is a Ruby script with ``#!/usr/bin/env ruby``.
     A host Ruby/Gem bundle can therefore make an otherwise valid `/opt/ros`
     Gazebo launch fail before it creates the world.  Gazebo children must use
     the system Ruby compatible with the vendor wrapper, while retaining all
-    sourced ROS overlay, Python, transport, and rendering variables.
+    sourced ROS overlay, Python, transport, and rendering variables. Jazzy's
+    legacy ``ROS_LOCALHOST_ONLY`` is replaced by its supported automatic
+    discovery control. Runtime startup creates camera subscriptions after the
+    bridge publishers, so localhost-only DDS discovery remains usable while
+    the per-case ROS domain provides the second isolation boundary.
     """
 
     if not os.path.isfile(f"{_SYSTEM_RUBY_BIN}/ruby"):
@@ -70,6 +74,9 @@ def _gazebo_child_environment(source: Mapping[str, str]) -> dict[str, str]:
         if part and os.path.normpath(part) != _SYSTEM_RUBY_BIN
     ]
     child_env["PATH"] = os.pathsep.join([_SYSTEM_RUBY_BIN, *path_parts])
+    child_env.pop("ROS_LOCALHOST_ONLY", None)
+    child_env.pop("ROS_STATIC_PEERS", None)
+    child_env["ROS_AUTOMATIC_DISCOVERY_RANGE"] = "LOCALHOST"
     return child_env
 
 

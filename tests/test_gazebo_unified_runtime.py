@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from extensions.gazebo.deployment import GazeboDeploymentConfig
 from extensions.gazebo.direct_env import GazeboDirectEnv
 from extensions.gazebo.profiles import gazebo_profile, gazebo_profiles
 from extensions.gazebo.runtime import GazeboRuntime
+from extensions.gazebo import runtime as gazebo_runtime
 from sim.mcp_server.worker_mgr import (
     BenchWorkerHandle,
     BenchWorkerManager,
@@ -185,6 +187,65 @@ def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
     assert world.deadlines and world.deadlines[0] > 0
     assert world.resets == [("all", 9)]
     runtime.close()
+
+
+def test_runtime_subscribes_to_cameras_only_after_launch_bridge_readiness() -> None:
+    """Headless M1 must not create DDS subscriptions before its publishers."""
+
+    events = []
+
+    class Launch(_Launch):
+        def start(self):
+            super().start()
+            events.append("launch")
+
+    class Camera(_Camera):
+        def start(self):
+            super().start()
+            events.append("camera_subscribe")
+
+    world = _ReadyWorld(events)
+    runtime = GazeboRuntime(
+        _deployment(),
+        gazebo_profile("m1"),
+        launch_factory=lambda **kwargs: Launch(**kwargs),
+        camera_factory=lambda config, **kwargs: Camera(config, **kwargs),
+        world_control=world,
+    )
+
+    runtime.reset(seed=5)
+
+    assert events == ["launch", "world_control_ready", "camera_subscribe"]
+    runtime.close()
+
+
+def test_runtime_waits_for_all_configured_ros_camera_publishers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = GazeboRuntime(_deployment(), gazebo_profile("m1"))
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="\n".join(
+                [
+                    "/rgbd_camera/image",
+                    "/rgbd_camera/depth_image",
+                    "/rgbd_camera/camera_info",
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(gazebo_runtime.subprocess, "run", run)
+
+    runtime._wait_for_camera_publishers(deadline=gazebo_runtime.time.monotonic() + 1.0)
+
+    assert calls[0][0][-2:] == ["topic", "list"]
+    assert calls[0][1]["env"] == {"ROS_DOMAIN_ID": "17"}
 
 
 def test_runtime_reset_retries_only_one_transient_gripper_timeout() -> None:
@@ -368,6 +429,8 @@ def test_deployment_sanitizes_host_ruby_for_the_vendor_gz_wrapper() -> None:
         "RUBYLIB": "/root/autodl-tmp/env/ros2_jazzy/gems",
         "GEM_HOME": "/root/autodl-tmp/env/ros2_jazzy/gems",
         "BUNDLE_GEMFILE": "/root/autodl-tmp/env/ros2_jazzy/Gemfile",
+        "ROS_LOCALHOST_ONLY": "1",
+        "ROS_STATIC_PEERS": "127.0.0.1",
     }
 
     config = GazeboDeploymentConfig.from_environment(source)
@@ -381,6 +444,9 @@ def test_deployment_sanitizes_host_ruby_for_the_vendor_gz_wrapper() -> None:
     assert child["GZ_SIM_RESOURCE_PATH"] == source["GZ_SIM_RESOURCE_PATH"]
     assert child["ROS_DOMAIN_ID"] == "24"
     assert child["GZ_PARTITION"] == "ruby-isolated"
+    assert "ROS_LOCALHOST_ONLY" not in child
+    assert "ROS_STATIC_PEERS" not in child
+    assert child["ROS_AUTOMATIC_DISCOVERY_RANGE"] == "LOCALHOST"
 
 
 def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(

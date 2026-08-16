@@ -26,3 +26,23 @@ This is useful control-layer evidence only. It did not invoke a planner or
 provider, did not use the formal PTY TUI, and could not use the required
 remote `origin` clean clone because of `problem.md` P-007. It therefore does
 not mark M0–M4 formal acceptance complete.
+
+On 2026-08-16, the local no-provider coordinator completed a separate,
+strictly serial M0–M4 control run at
+`.cache/reports/control-local-20260816T054203Z-m2inset` with
+`overall_status=passed`. It used AgentTool → MCP/SSE → Gazebo only, records
+`planner_provider_invoked=false`, and explicitly records
+`formal_tui_acceptance=not_run`. M0 through M4 each used a distinct empty ROS
+domain (80, 81, 82, 84, 85), Gazebo partition and loopback port; all five
+cleanup records report an empty candidate graph, empty partition, free port
+and no owned process residuals. Domain 83 was skipped because a pre-existing
+external ros2cli daemon occupied it.
+
+M2 completed its six gripper commands, four real A↔B MoveIt motions and a
+real unreachable `MOTION_PLAN_FAILED`. M3 recorded bilateral native contact,
+the stock `attached` and `detached` ACKs, a 96.5 mm native child-link lift and
+2.51 mm capture-relative translation. M4 ran the same physical sequence
+(100.8 mm / 1.04 mm) plus the explicitly labelled `gazebo_oracle` contractual
+fake candidate (`is_model_prediction=false`). These are local control-layer
+facts, not evidence of an external perception model or a formal remote PTY
+TUI run.

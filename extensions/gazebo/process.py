@@ -381,6 +381,7 @@ class GazeboDetachableJointControl:
         environment: dict[str, str] | None = None,
         world_name: str = "m3_rm75_robotiq2f85_pickplace",
         parent_link: str = "gripper_mount_link",
+        child_model: str = "m3_target",
         child_link: str = "target_link",
     ) -> None:
         self.gz_executable = gz_executable
@@ -388,6 +389,7 @@ class GazeboDetachableJointControl:
         self.environment = dict(environment) if environment is not None else None
         self.world_name = world_name
         self.parent_link = parent_link
+        self.child_model = child_model
         self.child_link = child_link
         self._state = DetachableJointState.UNKNOWN
         self._baseline: tuple[float, tuple[float, float, float]] | None = None
@@ -567,6 +569,28 @@ class GazeboDetachableJointControl:
             raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
         return matches[0]
 
+    def _child_world_position(
+        self, poses: dict[str, tuple[float, float, float]]
+    ) -> tuple[float, float, float]:
+        """Return M3's child-link position in the world frame, or fail closed.
+
+        Gazebo's native ``Pose_V`` stream reports the M3 target *model* in
+        world coordinates but its sole ``target_link`` in that model's local
+        coordinates.  The approved M3 SDF contract fixes that one link at the
+        model origin (validated alongside the asset), so the model pose is the
+        native world pose of the child link.  A non-origin link makes this
+        assumption invalid and must fail rather than silently mixing frames.
+
+        This deliberately reads only Gazebo pose state and the static SDF
+        contract; it performs no TF lookup, geometry inference, or kinematic
+        following.
+        """
+
+        child_local = self._named_position(poses, self.child_link)
+        if any(abs(component) > 1e-6 for component in child_local):
+            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
+        return self._named_position(poses, self.child_model)
+
     def capture_baseline(self) -> None:
         """Record native target child-link state after the attach ACK."""
 
@@ -574,7 +598,7 @@ class GazeboDetachableJointControl:
             raise GazeboProcessError("M3_ATTACH_ACK_MISSING")
         poses = self._world_link_positions()
         parent = self._named_position(poses, self.parent_link)
-        child = self._named_position(poses, self.child_link)
+        child = self._child_world_position(poses)
         self._baseline = (child[2], tuple(child[index] - parent[index] for index in range(3)))
 
     def child_link_proof(self):
@@ -586,7 +610,7 @@ class GazeboDetachableJointControl:
             from .m3 import ChildLinkProof
             poses = self._world_link_positions()
             parent = self._named_position(poses, self.parent_link)
-            child = self._named_position(poses, self.child_link)
+            child = self._child_world_position(poses)
             baseline_z, baseline_relative = self._baseline
             relative = tuple(child[index] - parent[index] for index in range(3))
             return ChildLinkProof(

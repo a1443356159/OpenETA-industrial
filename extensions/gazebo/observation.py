@@ -145,6 +145,9 @@ class RosRgbdCameraSource:
         self._last_depth_stamp: float | None = None
         self._rgb_received_monotonic = 0.0
         self._depth_received_monotonic = 0.0
+        # Keep explicit references for the lifetime of the node. This also
+        # makes the intended camera QoS visible to tests.
+        self._subscriptions: list[Any] = []
 
     def _rgb_callback(self, message: Any) -> None:
         with self._lock:
@@ -168,6 +171,7 @@ class RosRgbdCameraSource:
             raise GazeboObservationError("live camera requires explicit camera-to-world extrinsics")
         try:
             import rclpy
+            from rclpy.qos import qos_profile_sensor_data
             from sensor_msgs.msg import CameraInfo, Image
         except ImportError as exc:
             raise GazeboObservationError("rclpy and sensor_msgs are required for live observation") from exc
@@ -175,11 +179,24 @@ class RosRgbdCameraSource:
             rclpy.init()
             self._owns_context = True
         self._node = rclpy.create_node(self.node_name, context=self._context)
-        self._node.create_subscription(Image, self.config.rgb_topic, self._rgb_callback, 10)
-        self._node.create_subscription(Image, self.config.depth_topic, self._depth_callback, 10)
-        self._node.create_subscription(
-            CameraInfo, self.config.camera_info_topic, self._info_callback, 10
-        )
+        # Gazebo's camera bridge offers sensor-data (best-effort) QoS. The
+        # integer ``10`` shorthand is reliable and can be incompatible with
+        # it, leaving a live world with no deliverable frames. This changes
+        # only the subscriber contract; no rendered-frame fallback exists.
+        self._subscriptions = [
+            self._node.create_subscription(
+                Image, self.config.rgb_topic, self._rgb_callback, qos_profile_sensor_data
+            ),
+            self._node.create_subscription(
+                Image, self.config.depth_topic, self._depth_callback, qos_profile_sensor_data
+            ),
+            self._node.create_subscription(
+                CameraInfo,
+                self.config.camera_info_topic,
+                self._info_callback,
+                qos_profile_sensor_data,
+            ),
+        ]
         if self._executor is not None:
             self._executor.add_node(self._node)
 
@@ -266,6 +283,7 @@ class RosRgbdCameraSource:
                 self._executor.remove_node(self._node)
             self._node.destroy_node()
             self._node = None
+        self._subscriptions = []
         if self._owns_context:
             import rclpy
             if rclpy.ok():
