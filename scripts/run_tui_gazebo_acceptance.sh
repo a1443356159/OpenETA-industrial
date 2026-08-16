@@ -17,7 +17,7 @@ fi
 # operator may provide the independently verified remote interpreter, but it
 # must be an absolute executable.  Falling back to python3 is allowed only
 # after proving the runtime imports used by the PTY acceptance path exist.
-REQUIRED_PYTHON_MODULES="pytest,gymnasium,numpy,prompt_toolkit"
+REQUIRED_PYTHON_MODULES="pytest,gymnasium,numpy,prompt_toolkit,mcp,starlette,uvicorn"
 PYTHON_SOURCE=""
 if [[ -n "${OPENETA_PYTHON_EXECUTABLE:-}" ]]; then
   PYTHON_BIN="${OPENETA_PYTHON_EXECUTABLE}"
@@ -55,6 +55,15 @@ source /opt/ros/jazzy/setup.bash
 # shellcheck disable=SC1091
 source "${REPO_DIR}/extensions/gazebo/ros2_ws/install/setup.bash"
 set -u
+
+# The application venv stays clean, but the live Gazebo worker needs the
+# sourced Jazzy generated packages.  Prove this interpreter can import the
+# system ROS ABI before starting a case; do not defer an ABI mismatch until a
+# control action is already in flight.
+if ! "${PYTHON_BIN}" -c "import rclpy; from rosgraph_msgs.msg import Clock" >/dev/null 2>&1; then
+  echo "OPENETA_ROS_PYTHON_ABI_UNAVAILABLE: Jazzy rclpy/typesupport import failed" >&2
+  exit 3
+fi
 
 # The Python used for the isolated acceptance venv can itself be hosted under
 # another ROS prefix.  Gazebo workers must import and dynamically link one

@@ -7,11 +7,13 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "cloud_m0_m4_acceptance.py"
 TUI_RUNNER = Path(__file__).resolve().parents[1] / "scripts" / "run_tui_gazebo_acceptance.sh"
+PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 SPEC = importlib.util.spec_from_file_location("cloud_m0_m4_acceptance", SCRIPT)
 assert SPEC and SPEC.loader
 cloud = importlib.util.module_from_spec(SPEC)
@@ -31,7 +33,7 @@ def test_cloud_entry_requires_sha_and_stops_the_formal_chain(tmp_path: Path) -> 
 
 def test_cloud_plan_only_generates_sha_specific_tui_clean_clone_command(tmp_path: Path) -> None:
     report_path = tmp_path / "report.json"
-    base_python = "/root/autodl-tmp/env/ros2_jazzy/bin/python"
+    base_python = "/usr/bin/python3"
     assert cloud.main([
         "--sha", "abc123", "--origin", "https://example.invalid/openeta.git",
         "--branch", "codex/m3-detachable-native-live",
@@ -48,8 +50,11 @@ def test_cloud_plan_only_generates_sha_specific_tui_clean_clone_command(tmp_path
     assert report["remote"]["branch"] == "codex/m3-detachable-native-live"
     assert report["remote"]["base_python_executable"] == base_python
     assert report["remote"]["python_executable"].endswith("/venvs/abc123/bin/python")
-    assert "venv --system-site-packages" in command
+    assert "venv --system-site-packages" not in command
+    assert "python3 -m venv" in command
+    assert "setuptools>=68" in command
     assert "pip install --no-build-isolation ." in command
+    assert "starlette" in command and "uvicorn" in command
     assert f"OPENETA_PYTHON_EXECUTABLE={report['remote']['python_executable']}" in command
     assert "git -c http.version=HTTP/1.1 clone --depth 1 --branch codex/m3-detachable-native-live" in command
 
@@ -62,6 +67,18 @@ def test_cloud_plan_requires_an_absolute_verified_base_python(tmp_path: Path) ->
     ]) == 2
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["reason_code"] == "REMOTE_PYTHON_REQUIRED"
+
+
+def test_cloud_plan_rejects_host_managed_ros_python(tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    assert cloud.main([
+        "--sha", "abc123", "--origin", "https://example.invalid/openeta.git",
+        "--branch", "codex/m3-detachable-native-live",
+        "--remote-python", "/root/autodl-tmp/env/ros2_jazzy/bin/python",
+        "--report", str(report_path),
+    ]) == 2
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["reason_code"] == "REMOTE_PYTHON_UNTRUSTED"
 
 
 def test_cloud_plan_requires_a_safe_branch(tmp_path: Path) -> None:
@@ -105,3 +122,12 @@ def test_tui_runner_declares_the_vendor_ros_and_clean_clone_overlay_prefixes() -
 
     assert 'OPENETA_GAZEBO_SYSTEM_ROS_PREFIX="/opt/ros/jazzy"' in source
     assert 'OPENETA_GAZEBO_OVERLAY="${REPO_DIR}/extensions/gazebo/ros2_ws/install"' in source
+    assert "OPENETA_ROS_PYTHON_ABI_UNAVAILABLE" in source
+    assert "starlette,uvicorn" in source
+
+
+def test_clean_acceptance_venv_declares_the_mcp_server_runtime_dependencies() -> None:
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    dependencies = set(project["project"]["dependencies"])
+    assert "starlette>=0.27" in dependencies
+    assert "uvicorn>=0.23" in dependencies

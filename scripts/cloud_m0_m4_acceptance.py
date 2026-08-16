@@ -25,6 +25,12 @@ REMOTE = "root@connect.nmb1.seetacloud.com"
 REMOTE_PORT = 33584
 REMOTE_ROOT = "/home/yyysaiko/.cache/openeta-cloud-acceptance"
 MILESTONES = ("m0", "m1", "m2", "m3", "m4")
+# A virtualenv based on a host-managed ROS Python can still expose that
+# installation's generated packages and native typesupport libraries.  Gazebo
+# workers source the one supported Jazzy stack separately, so acceptance uses
+# the OS CPython only.  Both paths resolve to the Ubuntu 24.04 Python 3.12
+# interpreter on the approved remote image.
+TRUSTED_REMOTE_PYTHONS = frozenset({"/usr/bin/python3", "/usr/bin/python3.12"})
 
 
 def _report(
@@ -117,15 +123,19 @@ def _remote_command(
                 f"{quote(remote_python)} -c "
                 + quote("import sys; assert sys.version_info[:2] == (3, 12)")
             ),
-            f"{quote(remote_python)} -m venv --system-site-packages {quote(venv)}",
+            f"{quote(remote_python)} -m venv {quote(venv)}",
             f"cd {quote(clone)}",
+            (
+                f"{quote(venv_python)} -m pip install --upgrade "
+                f"{quote('pip>=24')} {quote('setuptools>=68')} {quote('wheel>=0.42')}"
+            ),
             (
                 f"{quote(venv_python)} -m pip install --no-build-isolation . "
                 f"{quote('pytest>=8')}"
             ),
             (
                 f"{quote(venv_python)} -c "
-                + quote("import pytest, gymnasium, numpy, prompt_toolkit")
+                + quote("import pytest, gymnasium, numpy, prompt_toolkit, mcp, starlette, uvicorn")
             ),
             "source /opt/ros/jazzy/setup.bash",
             "set -u",
@@ -173,6 +183,12 @@ def _safe_branch(value: str) -> bool:
         and "@{" not in value
         and not value.endswith(("/", "."))
     )
+
+
+def _trusted_remote_python(value: str) -> bool:
+    """Accept only the system CPython approved for the remote Jazzy image."""
+
+    return value in TRUSTED_REMOTE_PYTHONS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -223,6 +239,21 @@ def main(argv: list[str] | None = None) -> int:
                     "Provide --remote-python with the verified absolute interpreter "
                     "for the detached clean clone."
                 ),
+            ),
+        )
+        return 2
+    if not _trusted_remote_python(remote_python):
+        _write(
+            args.report,
+            _report(
+                sha=sha,
+                status="blocked",
+                reason_code="REMOTE_PYTHON_UNTRUSTED",
+                detail=(
+                    "Use the remote OS CPython (/usr/bin/python3 or "
+                    "/usr/bin/python3.12), not a host-managed ROS Python."
+                ),
+                branch=branch,
             ),
         )
         return 2
