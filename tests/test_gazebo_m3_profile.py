@@ -52,6 +52,24 @@ def test_m3_target_pose_contract_is_a_single_link_at_the_model_origin() -> None:
     assert links[0].find("pose") is None
 
 
+def test_m3_contact_sensor_topics_use_the_sdf_sensor_topic_field() -> None:
+    config = M3Config()
+    xacro_path = (
+        config.ros_workspace
+        / "src"
+        / config.ros_package_name
+        / "urdf/rm75_robotiq2f85_m3.urdf.xacro"
+    )
+    root = ET.parse(xacro_path).getroot()
+    sensors = root.findall(".//sensor[@type='contact']")
+
+    assert [sensor.findtext("topic") for sensor in sensors] == [
+        config.left_contact_topic,
+        config.right_contact_topic,
+    ]
+    assert all(sensor.find("contact/topic") is None for sensor in sensors)
+
+
 def test_m3_sdf_renderer_allows_only_the_stock_fixed_joint_topology() -> None:
     root = ET.fromstring(
         """<sdf><model name="robot"><link name="base_link"/>
