@@ -191,6 +191,8 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
         assert controllers.count(name) == 1
     assert robot.count("gz::sim::systems::JointPositionController") == 1
     assert robot.count("xacro:gz_gripper_position_controller joint=") == 6
+    assert "<p_gain>30.0</p_gain>" in robot
+    assert "<d_gain>0.8</d_gain>" in robot
     assert "ParallelGripperCommand" in adapter
     assert "JOINT_MULTIPLIERS" in adapter
     assert 'declare_parameter("action_timeout_s", ACTION_TIMEOUT_S)' in adapter
