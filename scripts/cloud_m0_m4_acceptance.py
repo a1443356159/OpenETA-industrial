@@ -119,6 +119,11 @@ def _remote_command(
             f"git -C {quote(clone)} checkout --detach {quote(sha)}",
             f"test \"$(git -C {quote(clone)} rev-parse HEAD)\" = {quote(sha)}",
             f"test -z \"$(git -C {quote(clone)} status --porcelain)\"",
+            # Cloud hosts may export a Miniforge/ROS Python into the login
+            # environment. The clean venv and the ament configure step must
+            # not inherit it: both are intentionally anchored to the selected
+            # OS CPython below.
+            "unset PYTHONHOME PYTHONPATH PYTHON_EXECUTABLE Python_EXECUTABLE AMENT_PYTHON_EXECUTABLE",
             (
                 f"{quote(remote_python)} -c "
                 + quote("import sys; assert sys.version_info[:2] == (3, 12)")
@@ -140,7 +145,11 @@ def _remote_command(
             "source /opt/ros/jazzy/setup.bash",
             "set -u",
             "cd extensions/gazebo/ros2_ws",
-            "colcon build --symlink-install",
+            (
+                "colcon build --symlink-install --cmake-args "
+                f"-DPython3_EXECUTABLE={quote(remote_python)} "
+                f"-DPYTHON_EXECUTABLE={quote(remote_python)}"
+            ),
             f"cd {quote(clone)}",
             f"test \"$(git rev-parse HEAD)\" = {quote(sha)}",
             "test -z \"$(git status --porcelain)\"",

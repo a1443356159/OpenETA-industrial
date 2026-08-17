@@ -57,6 +57,11 @@ def test_cloud_plan_only_generates_sha_specific_tui_clean_clone_command(tmp_path
     assert "starlette" in command and "uvicorn" in command
     assert f"OPENETA_PYTHON_EXECUTABLE={report['remote']['python_executable']}" in command
     assert "git -c http.version=HTTP/1.1 clone --depth 1 --branch codex/m3-detachable-native-live" in command
+    assert "unset PYTHONHOME PYTHONPATH PYTHON_EXECUTABLE Python_EXECUTABLE AMENT_PYTHON_EXECUTABLE" in command
+    assert (
+        "colcon build --symlink-install --cmake-args "
+        "-DPython3_EXECUTABLE=/usr/bin/python3 -DPYTHON_EXECUTABLE=/usr/bin/python3"
+    ) in command
 
 
 def test_cloud_plan_requires_an_absolute_verified_base_python(tmp_path: Path) -> None:
