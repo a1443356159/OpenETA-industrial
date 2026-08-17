@@ -41,6 +41,15 @@ START_STATE_BOUNDS_TOLERANCE_RAD = 1e-6
 START_STATE_RECOVERY_INSET_RAD = 1e-3
 START_STATE_RECOVERY_TRAJECTORY_S = 1.0
 START_STATE_RECOVERY_TIMEOUT_S = 5.0
+# These targets are relative to the first fresh mount pose after a reset, not
+# absolute world coordinates.  They are the small, validated neutral motions
+# available in the empty M2 profile.  Publishing the relation in the existing
+# control_spec lets an agent use the runtime contract instead of guessing a
+# lateral Cartesian target from an image or a model prior.
+NEUTRAL_RELATIVE_MOTION_TARGETS = (
+    ("vertical_low", (0.0, 0.0, -0.040)),
+    ("vertical_high", (0.0, 0.0, -0.020)),
+)
 
 ERROR_CODES = frozenset(
     {
@@ -62,6 +71,27 @@ ERROR_CODES = frozenset(
         "ROBOT_STATE_UNAVAILABLE",
     }
 )
+
+
+def neutral_relative_motion_guidance() -> dict[str, Any]:
+    """Return a fresh, serializable M2 neutral-motion capability.
+
+    This is descriptive runtime guidance, never an executable macro: callers
+    still form one normal ``move_to`` target at a time and must honor the
+    resulting structured receipt.
+    """
+
+    return {
+        "schema_version": "openeta.gazebo.relative_motion.v1",
+        "reference": "first_fresh_end_effector_pose_after_reset",
+        "frame": "world",
+        "orientation": "preserve_observed",
+        "targets": [
+            {"name": name, "xyz_offset_m": list(offset)}
+            for name, offset in NEUTRAL_RELATIVE_MOTION_TARGETS
+        ],
+        "on_rejection": "observe_and_report; do_not_guess_an_unadvertised_target",
+    }
 
 
 def assess_start_state_bounds(

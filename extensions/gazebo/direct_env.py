@@ -10,12 +10,28 @@ from gymnasium import Env, spaces
 from adapter.protocol import EnvObservation
 
 from .deployment import GazeboDeploymentConfig, worker_deployment_config
-from .m2 import JOINT_NAMES
+from .m2 import JOINT_NAMES, neutral_relative_motion_guidance
 from .m3 import M3Config, M3Verifier, ReasonCode
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .process import GazeboProcessError
 from .process import GazeboNativeContactWindow
 from .runtime import GazeboRuntime
+
+
+def build_gazebo_control_spec(profile: GazeboProfile) -> dict[str, Any]:
+    """Expose profile-owned control capabilities through the existing receipt."""
+
+    spec: dict[str, Any] = {
+        "read_only": CONTROL not in profile.capabilities,
+        "m1": profile.name == "m1",
+        "m2": CONTROL in profile.capabilities,
+        "m3": PHYSICS in profile.capabilities,
+        "physical_verification": PHYSICS in profile.capabilities,
+        "model_id": getattr(profile.model_config, "model_id", None),
+    }
+    if profile.name == "m2_robotiq2f85":
+        spec["validated_relative_motion"] = neutral_relative_motion_guidance()
+    return spec
 
 
 class GazeboDirectEnv(Env):
@@ -47,14 +63,7 @@ class GazeboDirectEnv(Env):
         self._latest: dict[str, Any] | None = None
         self._backend = "gazebo"
         self.openeta_capabilities = self.profile.capabilities
-        self.openeta_control_spec = {
-            "read_only": CONTROL not in self.profile.capabilities,
-            "m1": self.profile.name == "m1",
-            "m2": CONTROL in self.profile.capabilities,
-            "m3": PHYSICS in self.profile.capabilities,
-            "physical_verification": PHYSICS in self.profile.capabilities,
-            "model_id": getattr(self.profile.model_config, "model_id", None),
-        }
+        self.openeta_control_spec = build_gazebo_control_spec(self.profile)
         self.action_space = spaces.Discrete(1)
         self._m3_config = self.profile.model_config if isinstance(self.profile.model_config, M3Config) else None
         self._m3_verifier = M3Verifier(self._m3_config) if self._m3_config is not None else None

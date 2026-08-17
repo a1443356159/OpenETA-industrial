@@ -1997,6 +1997,8 @@ def test_planner_context_selects_gazebo_skill_from_environment_receipt_identity(
     assert "read-only environment, only observe and report" in selected["gazebo"]["content"]
     assert "Do not connect to ROS or Gazebo directly" in selected["gazebo"]["content"]
     assert "Never switch to Oracle merely because" in selected["gazebo"]["content"]
+    assert "control_spec.validated_relative_motion" in selected["gazebo"]["content"]
+    assert "unadvertised target" in selected["gazebo"]["content"]
     assert len(context["skill_usage"]["selected_skills"]) <= 3
     assert "will not auto-expand" in context["execution_rules"]["skills"]
 
