@@ -89,7 +89,7 @@ def test_m3_sdf_renderer_allows_only_the_stock_fixed_joint_topology() -> None:
     assert model.findtext("self_collide") == "false"
 
 
-def test_m3_sdf_renderer_removes_converter_contact_topic_placeholders() -> None:
+def test_m3_sdf_renderer_replaces_converter_contact_topic_placeholders() -> None:
     root = ET.fromstring(
         """<sdf><model name="robot"><link name="base_link"/><link name="tip">
         <sensor name="pad" type="contact"><topic>/m3/contacts/left_pad</topic>
@@ -107,4 +107,4 @@ def test_m3_sdf_renderer_removes_converter_contact_topic_placeholders() -> None:
     sensor = prepared.find(".//sensor[@name='pad']")
     assert sensor is not None
     assert sensor.findtext("topic") == "/m3/contacts/left_pad"
-    assert sensor.find("contact/topic") is None
+    assert sensor.findtext("contact/topic") == "/m3/contacts/left_pad"
