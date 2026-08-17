@@ -146,6 +146,52 @@ def test_detachable_joint_wait_ready_fails_closed_when_an_endpoint_is_absent(
         control.wait_ready(timeout_s=0.001)
 
 
+def test_detachable_joint_command_waits_for_state_listener_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Listener:
+        @staticmethod
+        def communicate(timeout):
+            events.append("ack")
+            return ('data: "detached"\n', "")
+
+        @staticmethod
+        def poll():
+            return 0
+
+    monkeypatch.setattr(
+        gazebo_process.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: Listener(),
+    )
+
+    def run(command, **_kwargs):
+        if "-i" in command:
+            events.append("listener")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "No publishers on topic [/m3/detachable_joint/target/state]\n"
+                    "Subscribers [Address, Message Type]:\n"
+                    "  tcp://127.0.0.1:12345, google.protobuf.Message\n"
+                ),
+                stderr="",
+            )
+        events.append("publish")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(gazebo_process.subprocess, "run", run)
+    control = gazebo_process.GazeboDetachableJointControl(
+        gz_executable=sys.executable,
+    )
+
+    assert control.ensure_detached() == gazebo_process.DetachableJointState.DETACHED
+    assert events == ["listener", "publish", "ack"]
+
+
 def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> None:
     """M3's target link is local-to-model in Gazebo Pose_V, not world-space."""
 

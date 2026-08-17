@@ -479,9 +479,37 @@ class GazeboDetachableJointControl:
         except OSError as exc:
             raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE") from exc
         try:
-            time.sleep(0.15)
+            # Process creation does not mean the transport subscription is
+            # discoverable yet.  The state transition is published once, so
+            # prove the listener appears in topic introspection before
+            # sending the command instead of relying on a timing sleep.
+            deadline = time.monotonic() + self.timeout_s
+            listener_ready = False
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                try:
+                    info = subprocess.run(
+                        [self._executable(self.gz_executable), "topic", "-i", "-t",
+                         "/m3/detachable_joint/target/state"],
+                        capture_output=True, text=True, check=False,
+                        env=self.environment, timeout=min(1.0, max(0.1, remaining)),
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+                else:
+                    if info.returncode == 0 and re.search(
+                        r"Subscribers\s*\[[^\]]*\]:\s*\n\s+\S", info.stdout
+                    ):
+                        listener_ready = True
+                        break
+                time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+            if not listener_ready:
+                raise GazeboProcessError(
+                    "M3_ATTACH_ACK_MISSING" if action == "attach" else "M3_DETACH_ACK_MISSING"
+                )
             self._publish_empty(topic)
-            output, _ = listener.communicate(timeout=self.timeout_s)
+            remaining = max(0.1, deadline - time.monotonic())
+            output, _ = listener.communicate(timeout=remaining)
         except subprocess.TimeoutExpired as exc:
             raise GazeboProcessError(
                 "M3_ATTACH_ACK_MISSING" if action == "attach" else "M3_DETACH_ACK_MISSING"
