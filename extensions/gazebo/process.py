@@ -716,15 +716,29 @@ class GazeboNativeContactWindow:
             self._samples.clear()
 
     def evaluate(self, *, close_completed_sim_time_s: float | None, config=None):
-        from .m3 import ReasonCode, confirm_native_bilateral_contact
+        from .m3 import M3Config, ReasonCode, confirm_native_bilateral_contact
+        cfg = config or M3Config()
         deadline = time.monotonic() + self.timeout_s
         result = None
         while time.monotonic() < deadline:
+            now = time.monotonic()
             with self._lock:
+                # ``gz topic -e`` may still have pre-close messages buffered
+                # in its stdout pipe when ``begin_post_close`` clears the
+                # parsed list.  Those messages can arrive in the reader
+                # thread after the clear.  Keep that transport backlog out of
+                # the verifier, which must continue to reject any stale or
+                # pre-close sample it is actually asked to judge.
+                if close_completed_sim_time_s is not None:
+                    self._samples[:] = [
+                        sample for sample in self._samples
+                        if sample.timestamp_s > close_completed_sim_time_s
+                        and now - sample.received_monotonic_s <= cfg.contact_freshness_s
+                    ]
                 samples = tuple(self._samples)
             result = confirm_native_bilateral_contact(
                 samples, close_completed_sim_time_s=close_completed_sim_time_s,
-                now_monotonic_s=time.monotonic(), config=config,
+                now_monotonic_s=now, config=cfg,
             )
             if result.accepted or result.reason_code not in {
                 ReasonCode.CONTACT_INSUFFICIENT_SAMPLES, ReasonCode.CONTACT_WINDOW_TOO_SHORT,
@@ -733,7 +747,7 @@ class GazeboNativeContactWindow:
             time.sleep(0.02)
         return result or confirm_native_bilateral_contact(
             (), close_completed_sim_time_s=close_completed_sim_time_s,
-            now_monotonic_s=time.monotonic(), config=config,
+            now_monotonic_s=time.monotonic(), config=cfg,
         )
 
     def close(self) -> None:

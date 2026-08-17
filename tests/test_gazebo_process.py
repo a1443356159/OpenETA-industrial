@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from extensions.gazebo import GazeboProcess, Ros2LaunchProcess
+from extensions.gazebo.m3 import M3Config, NativeContactSample
 from extensions.gazebo import process as gazebo_process
 
 
@@ -181,3 +182,35 @@ def test_detachable_joint_proof_rejects_a_noncanonical_child_link_frame() -> Non
 
     with pytest.raises(gazebo_process.GazeboProcessError, match="M3_CHILD_LINK_STATE_UNAVAILABLE"):
         control.capture_baseline()
+
+
+def test_native_contact_window_drops_pipe_backlog_before_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Late-parsed pre-close transport data must not poison fresh contacts."""
+
+    now = 100.0
+    monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: now)
+    window = gazebo_process.GazeboNativeContactWindow(timeout_s=0.1)
+    target = "m3_target::target_link::target_collision"
+    window._samples.append(
+        NativeContactSample(
+            "left", 9.9, 90.0,
+            ("robot::robotiq_85_left_finger_tip_link::collision", target),
+        )
+    )
+    for side in ("left", "right"):
+        tip = f"robot::robotiq_85_{side}_finger_tip_link::collision"
+        for timestamp in (10.1, 10.2, 10.3):
+            window._samples.append(
+                NativeContactSample(side, timestamp, 99.9, (tip, target))
+            )
+
+    result = window.evaluate(
+        close_completed_sim_time_s=10.0,
+        config=M3Config(contact_freshness_s=2.0),
+    )
+
+    assert result.accepted is True
+    assert result.left_sample_count == 3
+    assert result.right_sample_count == 3
