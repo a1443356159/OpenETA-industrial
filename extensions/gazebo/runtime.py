@@ -63,6 +63,7 @@ class GazeboRuntime:
             self.attachment = attachment_factory(
                 gz_executable=deployment.gz_executable,
                 environment=deployment.process_environment,
+                timeout_s=15.0,
                 world_name=deployment.world_override or profile.world_name,
                 parent_link=getattr(model_config, "parent_link", "gripper_mount_link"),
                 child_model=getattr(model_config, "target_id", "m3_target"),

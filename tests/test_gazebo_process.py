@@ -169,12 +169,19 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
 
     def run(command, **_kwargs):
         if "-i" in command:
-            events.append("listener")
+            is_state = command[-1].endswith("/state")
+            events.append("state_listener" if is_state else "command_listener")
             return subprocess.CompletedProcess(
                 command,
                 0,
                 stdout=(
-                    "No publishers on topic [/m3/detachable_joint/target/state]\n"
+                    (
+                        "Publishers [Address, Message Type]:\n"
+                        "  tcp://127.0.0.1:12344, gz.msgs.StringMsg\n"
+                    )
+                    if is_state else "No publishers on topic [command]\n"
+                )
+                + (
                     "Subscribers [Address, Message Type]:\n"
                     "  tcp://127.0.0.1:12345, google.protobuf.Message\n"
                 ),
@@ -189,7 +196,7 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
     )
 
     assert control.ensure_detached() == gazebo_process.DetachableJointState.DETACHED
-    assert events == ["listener", "publish", "ack"]
+    assert events == ["state_listener", "command_listener", "publish", "ack"]
 
 
 def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> None:

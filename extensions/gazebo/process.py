@@ -488,17 +488,29 @@ class GazeboDetachableJointControl:
             while time.monotonic() < deadline:
                 remaining = deadline - time.monotonic()
                 try:
-                    info = subprocess.run(
+                    state_info = subprocess.run(
                         [self._executable(self.gz_executable), "topic", "-i", "-t",
                          "/m3/detachable_joint/target/state"],
+                        capture_output=True, text=True, check=False,
+                        env=self.environment, timeout=min(1.0, max(0.1, remaining)),
+                    )
+                    remaining = deadline - time.monotonic()
+                    command_info = subprocess.run(
+                        [self._executable(self.gz_executable), "topic", "-i", "-t", topic],
                         capture_output=True, text=True, check=False,
                         env=self.environment, timeout=min(1.0, max(0.1, remaining)),
                     )
                 except subprocess.TimeoutExpired:
                     pass
                 else:
-                    if info.returncode == 0 and re.search(
-                        r"Subscribers\s*\[[^\]]*\]:\s*\n\s+\S", info.stdout
+                    publisher = r"Publishers\s*\[[^\]]*\]:\s*\n\s+\S"
+                    subscriber = r"Subscribers\s*\[[^\]]*\]:\s*\n\s+\S"
+                    if (
+                        state_info.returncode == 0
+                        and command_info.returncode == 0
+                        and re.search(publisher, state_info.stdout)
+                        and re.search(subscriber, state_info.stdout)
+                        and re.search(subscriber, command_info.stdout)
                     ):
                         listener_ready = True
                         break
