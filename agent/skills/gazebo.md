@@ -55,6 +55,13 @@ target names rather than guessing a lateral world coordinate. A rejected motion
 remains a rejection: observe and report it, and do not manufacture an
 unadvertised target to continue.
 
+When a physical-verification observation or receipt exposes
+`control_spec.validated_pickplace_motion`, use its named poses, motion
+parameters, atomic order, and receipt prerequisites exactly. Choose and inspect
+each atomic AgentTool call yourself; the advertised order is not a macro. Do
+not infer a capture pose from a visually plausible height, and never lift
+before the required native-contact and attachment acknowledgements pass.
+
 Use real RGB-D observations as the default perception basis. Oracle or
 ground-truth perception is allowed only when an explicit test or debugging
 context and the runtime profile expose it. Never switch to Oracle merely because

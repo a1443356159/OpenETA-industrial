@@ -90,6 +90,13 @@ class M3Config(M2Config):
     distractor_initial_xyz: tuple[float, float, float] = (0.28, 0.12, 0.44)
     destination_center_xy: tuple[float, float] = (0.48, -0.10)
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
+    # Profile-owned, live-validated gripper-mount poses for the fixed M3
+    # fixture.  They are advertised through control_spec so an agent can use
+    # the stable controller contract instead of guessing from image depth.
+    approach_mount_xyz: tuple[float, float, float] = (0.1552, -0.1000, 0.5686)
+    capture_mount_xyz: tuple[float, float, float] = (0.1552, -0.1000, 0.4976)
+    lift_mount_xyz: tuple[float, float, float] = (0.1552, -0.1000, 0.5976)
+    mount_euler_xyz_deg: tuple[float, float, float] = (115.0, 0.0, 90.0)
 
     @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
@@ -118,6 +125,66 @@ class M3Config(M2Config):
         )
         if not all(path.is_file() for path in required):
             raise RuntimeError("MODEL_ASSET_NOT_FOUND")
+
+
+def validated_pickplace_motion_guidance(
+    config: M3Config | None = None,
+) -> dict[str, Any]:
+    """Return the stable atomic motion and receipt gates for the M3 fixture."""
+
+    cfg = config or M3Config()
+
+    def pose(name: str, xyz: tuple[float, float, float]) -> dict[str, Any]:
+        return {
+            "name": name,
+            "target_pose": {
+                "frame": "world",
+                "xyz": list(xyz),
+                "euler_xyz_deg": list(cfg.mount_euler_xyz_deg),
+            },
+        }
+
+    return {
+        "schema_version": "openeta.gazebo.validated_pickplace_motion.v1",
+        "pose_semantics": cfg.parent_link,
+        "motion_parameters": {
+            "velocity_scaling": 0.1,
+            "acceleration_scaling": 0.1,
+            "tolerance": 0.001,
+            "ori_tolerance": 0.01,
+        },
+        "poses": [
+            pose("approach", cfg.approach_mount_xyz),
+            pose("capture", cfg.capture_mount_xyz),
+            pose("lift", cfg.lift_mount_xyz),
+        ],
+        "atomic_order": [
+            {"tool": "move_to", "pose": "approach"},
+            {"tool": "move_to", "pose": "capture"},
+            {
+                "tool": "gripper_control",
+                "position": 0,
+                "requires_receipt": ["native_bilateral_contact", "attached_ack"],
+            },
+            {
+                "tool": "move_to",
+                "pose": "lift",
+                "requires_receipt": ["native_bilateral_contact", "attached_ack"],
+            },
+            {
+                "tool": "gripper_control",
+                "position": 1,
+                "requires_receipt": ["child_link_lift_proof", "detached_ack"],
+            },
+        ],
+        "success_evidence": {
+            "minimum_child_link_lift_m": cfg.minimum_lift_m,
+            "maximum_capture_relative_translation_m": (
+                cfg.maximum_capture_relative_translation_m
+            ),
+        },
+        "on_rejection": "observe_and_report; do_not_bypass_native_receipt_gates",
+    }
 
 
 @dataclass(frozen=True, slots=True)

@@ -2064,6 +2064,7 @@ def test_planner_context_selects_gazebo_skill_from_environment_receipt_identity(
     assert "Never switch to Oracle merely because" in selected["gazebo"]["content"]
     assert "observation or structured receipt" in selected["gazebo"]["content"]
     assert "control_spec.validated_relative_motion" in selected["gazebo"]["content"]
+    assert "control_spec.validated_pickplace_motion" in selected["gazebo"]["content"]
     assert "unadvertised target" in selected["gazebo"]["content"]
     assert len(context["skill_usage"]["selected_skills"]) <= 3
     assert "will not auto-expand" in context["execution_rules"]["skills"]

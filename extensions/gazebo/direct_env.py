@@ -11,7 +11,7 @@ from adapter.protocol import EnvObservation
 
 from .deployment import GazeboDeploymentConfig, worker_deployment_config
 from .m2 import JOINT_NAMES, neutral_relative_motion_guidance
-from .m3 import M3Config, M3Verifier, ReasonCode
+from .m3 import M3Config, M3Verifier, ReasonCode, validated_pickplace_motion_guidance
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .process import GazeboProcessError
 from .process import GazeboNativeContactWindow
@@ -31,6 +31,10 @@ def build_gazebo_control_spec(profile: GazeboProfile) -> dict[str, Any]:
     }
     if profile.name == "m2_robotiq2f85":
         spec["validated_relative_motion"] = neutral_relative_motion_guidance()
+    if isinstance(profile.model_config, M3Config):
+        spec["validated_pickplace_motion"] = validated_pickplace_motion_guidance(
+            profile.model_config
+        )
     return spec
 
 
