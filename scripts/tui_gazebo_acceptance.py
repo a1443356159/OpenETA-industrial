@@ -2180,8 +2180,8 @@ def run_case(
     control_only = paths.root.name == CONTROL_ONLY
     # The simulator MCP server never needs provider credentials.  Start from
     # a scrubbed copy so process inheritance cannot make them appear in MCP or
-    # worker diagnostics; only the actual scripted PTY receives the resolved
-    # primary provider configuration below.
+    # worker diagnostics; only the actual TUI receives the resolved primary
+    # provider configuration below.
     env = _without_provider_environment(os.environ)
     # Jazzy deprecates ROS_LOCALHOST_ONLY in favour of discovery-range
     # controls. In this multi-process topology the legacy switch can prevent
@@ -2225,11 +2225,12 @@ def run_case(
         }
     )
     tui_env = dict(env)
-    if scripted:
-        # Resolve root `.env`/`apikey.md` before the child changes into its
-        # isolated case directory.  Keep the result solely in the child
-        # process environment; never copy a config file into evidence.
-        tui_env.update(_resolved_provider_environment(_root_provider_config(repo)))
+    # Resolve root `.env`/`apikey.md` before the child changes into its
+    # isolated case directory.  Both human-gated and scripted TUI cases use
+    # the same provider boundary; otherwise a human-gated case silently falls
+    # back to its empty case-directory defaults.  Keep this mapping solely in
+    # the child process environment; never copy a config file into evidence.
+    tui_env.update(_resolved_provider_environment(_root_provider_config(repo)))
     python = Path(os.environ.get("OPENETA_PYTHON_EXECUTABLE") or sys.executable).absolute()
     if not python.is_file() or not os.access(python, os.X_OK):
         raise AcceptanceError("TUI_NOT_READY: selected Python executable is unavailable")

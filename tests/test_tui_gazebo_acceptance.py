@@ -790,6 +790,71 @@ def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monke
     assert not any(key.startswith("OPENETA_LLM_FALLBACK_") for key in tui_environment)
 
 
+def test_human_gated_tui_receives_resolved_root_provider_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A case-local human TUI must not lose the repository's provider config."""
+
+    allocation = allocate("m0-human-provider")
+    paths = case_paths(tmp_path, "m0", DETERMINISTIC)
+    paths.root.mkdir(parents=True)
+    paths.instructions.write_text("human M0 task", encoding="utf-8")
+    _write_json(
+        paths.receipt,
+        {"preexisting_processes": [], "protected_ros_graphs": {}},
+    )
+    config = _provider_config(vision=False)
+    seen = {}
+
+    class Process:
+        pid = 12345
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    def popen(*_args, **kwargs):
+        seen["mcp_environment"] = kwargs["env"]
+        return Process()
+
+    def human_run(*_args, **kwargs):
+        seen["tui_environment"] = dict(kwargs["env"])
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(tui_acceptance.subprocess, "Popen", popen)
+    monkeypatch.setattr(tui_acceptance.subprocess, "run", human_run)
+    monkeypatch.setattr(tui_acceptance, "_root_provider_config", lambda _repo: config)
+    monkeypatch.setattr(tui_acceptance, "_wait_ready", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tui_acceptance, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(tui_acceptance, "_terminate_owned_worker_groups", lambda **_kwargs: [])
+    monkeypatch.setattr(tui_acceptance, "_wait_for_free_port", lambda _port: True)
+    monkeypatch.setattr(tui_acceptance, "_partition_cleanup", lambda _partition: {"state": "PASSED"})
+    monkeypatch.setattr(tui_acceptance.shutil, "which", lambda _name: "/usr/bin/script")
+    monkeypatch.setattr(tui_acceptance.os, "getpgid", lambda _pid: 12345)
+    from extensions.gazebo.ros2_ws import acceptance_isolation
+
+    monkeypatch.setattr(
+        acceptance_isolation, "candidate_domain_evidence", lambda _domain: {"state": "PASSED"}
+    )
+    monkeypatch.setattr(
+        acceptance_isolation,
+        "probe_ros_graph",
+        lambda _domain: {"availability": "AVAILABLE", "nodes": [], "topics": []},
+    )
+
+    assert run_case(ROOT, paths, allocation) == 0
+    assert not any(
+        key.startswith("OPENETA_LLM_") for key in seen["mcp_environment"]
+    )
+    assert seen["tui_environment"]["OPENETA_LLM_MODEL"] == "unit-model"
+    assert seen["tui_environment"]["OPENETA_LLM_MAX_TOKENS"] == "256"
+    assert seen["tui_environment"]["OPENETA_LLM_ENABLE_VISION"] == "false"
+    assert not any(
+        key.startswith("OPENETA_LLM_FALLBACK_") for key in seen["tui_environment"]
+    )
+
+
 def test_owned_worker_cleanup_uses_only_matching_run_process_group(monkeypatch) -> None:
     """A runner must not leave (or signal) a worker outside its own case."""
 
