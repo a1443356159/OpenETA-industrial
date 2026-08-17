@@ -33,6 +33,19 @@ def test_m3_assets_are_required_before_manipulation_starts() -> None:
     assert (package / "worlds/m3_rm75_robotiq2f85_pickplace.sdf").is_file()
 
 
+def test_m3_paused_launch_gives_runtime_a_bounded_detach_window() -> None:
+    config = M3Config()
+    launch = (
+        config.ros_workspace
+        / "src"
+        / config.ros_package_name
+        / "launch/m3_gazebo_pickplace.launch.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'switch_timeout = ["--switch-timeout", "30.0"]' in launch
+    assert launch.count("*switch_timeout") == 3
+
+
 def test_m3_target_pose_contract_is_a_single_link_at_the_model_origin() -> None:
     """Keep the native Pose_V world/local-frame proof contract explicit."""
 

@@ -77,9 +77,14 @@ def generate_launch_description():
     )
     common = [{"use_sim_time": True}]
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher", output="screen", parameters=[{"robot_description": robot_description}, *common])
-    jsb = Node(package="controller_manager", executable="spawner", output="screen", arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager"])
-    arm = Node(package="controller_manager", executable="spawner", output="screen", arguments=["rm_group_controller", "--controller-manager", "/controller_manager"])
-    gripper = Node(package="controller_manager", executable="spawner", output="screen", arguments=["parallel_gripper_controller", "--controller-manager", "/controller_manager"])
+    # M3 deliberately starts paused until the runtime obtains the initial
+    # DetachableJoint detach ACK.  Controller activation needs a physics tick,
+    # so retain the spawner through that bounded preflight window instead of
+    # letting its five-second default tear down the whole launch.
+    switch_timeout = ["--switch-timeout", "30.0"]
+    jsb = Node(package="controller_manager", executable="spawner", output="screen", arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager", *switch_timeout])
+    arm = Node(package="controller_manager", executable="spawner", output="screen", arguments=["rm_group_controller", "--controller-manager", "/controller_manager", *switch_timeout])
+    gripper = Node(package="controller_manager", executable="spawner", output="screen", arguments=["parallel_gripper_controller", "--controller-manager", "/controller_manager", *switch_timeout])
     gripper_action = Node(package="openeta_rm75_robotiq2f85_sim", executable="gripper_action_adapter.py", output="screen", parameters=[{"use_sim_time": True, "allow_stalling": True, "drive_mode": "four_bar"}])
     move_group = Node(package="moveit_ros_move_group", executable="move_group", output="screen", parameters=[moveit.to_dict(), {"use_sim_time": True}])
     bridge = Node(
