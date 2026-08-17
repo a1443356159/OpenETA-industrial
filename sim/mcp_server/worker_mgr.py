@@ -771,6 +771,41 @@ class BenchWorkerManager:
 # Proxy helpers (used by REST API and MCP tools)
 # ══════════════════════════════════════════════════════════════════════
 
+def _attach_control_spec(response: dict, meta: dict) -> dict:
+    """Attach the existing environment control contract to fresh observations.
+
+    ``create_env`` advertises a profile-owned ``control_spec`` once, but a
+    planner acts from the reset/render observation on later turns.  Carry the
+    same descriptive contract with that observation so it remains runtime
+    authoritative without adding a new tool or control path.
+    """
+
+    control_spec = meta.get("control_spec")
+    if (
+        not isinstance(response, dict)
+        or not isinstance(control_spec, dict)
+        or not control_spec
+    ):
+        return response
+    result = dict(response)
+    observation = result.get("observation")
+    if isinstance(observation, dict):
+        enriched = dict(observation)
+        metadata = enriched.get("metadata")
+        enriched["metadata"] = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "control_spec": dict(control_spec),
+        }
+        result["observation"] = enriched
+        return result
+    metadata = result.get("metadata")
+    result["metadata"] = {
+        **(metadata if isinstance(metadata, dict) else {}),
+        "control_spec": dict(control_spec),
+    }
+    return result
+
+
 def _proxy_step(meta: dict, action, num_steps: int = 1, render: bool = True) -> dict:
     """Proxy a step request to the worker and cache the observation.
 
@@ -791,7 +826,10 @@ def _proxy_step(meta: dict, action, num_steps: int = 1, render: bool = True) -> 
     body["num_steps"] = num_steps
     if not render:
         body["render"] = False
-    result = mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/step", method="POST", body=body)
+    result = _attach_control_spec(
+        mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/step", method="POST", body=body),
+        meta,
+    )
     # Cache observation for streaming
     obs = result.get("observation")
     if obs:
@@ -825,7 +863,10 @@ def _proxy_reset(meta: dict, seed: int | None = None) -> dict:
     """Proxy a reset request to the worker and cache the observation."""
     mgr = _get_mgr()
     body = {"seed": seed} if seed is not None else {}
-    result = mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/reset", method="POST", body=body)
+    result = _attach_control_spec(
+        mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/reset", method="POST", body=body),
+        meta,
+    )
     key = _obs_key(meta)
     with _session_last_obs_lock:
         _session_last_obs.setdefault(meta.get("_sid", ""), {})[key] = result
@@ -847,13 +888,19 @@ def _proxy_reset(meta: dict, seed: int | None = None) -> dict:
 def _proxy_observe(meta: dict) -> dict:
     """Proxy an observe request to the worker."""
     mgr = _get_mgr()
-    return mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/observe", method="POST")
+    return _attach_control_spec(
+        mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/observe", method="POST"),
+        meta,
+    )
 
 
 def _proxy_render(meta: dict) -> dict:
     """Proxy a render request to the worker."""
     mgr = _get_mgr()
-    return mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/render", method="POST")
+    return _attach_control_spec(
+        mgr.proxy_handle_op(meta, f"/env/{meta['remote_handle']}/render", method="POST"),
+        meta,
+    )
 
 
 def _proxy_oracle_perceive(meta: dict, *, image_base64: str, prompt: str) -> dict:

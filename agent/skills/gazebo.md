@@ -45,14 +45,15 @@ accept success only when the structured environment receipt says the required
 verification passed; visual plausibility and actuator acknowledgements are not
 substitutes.
 
-When a structured receipt exposes `control_spec.validated_relative_motion`, it
-is the authoritative motion envelope for that profile. Record the first fresh
-end-effector pose after reset as its stated reference, preserve the observed
-orientation unless the receipt says otherwise, and derive any named targets
-from that same reference. If a task needs two distinct neutral targets, use two
-different receipt-advertised target names rather than guessing a lateral world
-coordinate. A rejected motion remains a rejection: observe and report it, and
-do not manufacture an unadvertised target to continue.
+When an observation or structured receipt exposes
+`control_spec.validated_relative_motion`, it is the authoritative motion
+envelope for that profile. Record the first fresh end-effector pose after reset
+as its stated reference, preserve the observed orientation unless the receipt
+says otherwise, and derive any named targets from that same reference. If a
+task needs two distinct neutral targets, use two different receipt-advertised
+target names rather than guessing a lateral world coordinate. A rejected motion
+remains a rejection: observe and report it, and do not manufacture an
+unadvertised target to continue.
 
 Use real RGB-D observations as the default perception basis. Oracle or
 ground-truth perception is allowed only when an explicit test or debugging

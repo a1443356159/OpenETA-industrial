@@ -979,6 +979,9 @@ class SimulatorEnvironmentCreator:
         display_name = str(create_response.get("name") or "").strip()
         if display_name:
             environment["display_name"] = display_name
+        control_spec = create_response.get("control_spec")
+        if isinstance(control_spec, dict) and control_spec:
+            environment["control_spec"] = dict(control_spec)
         if assigned_task:
             environment["assigned_task"] = assigned_task
         if server_url:

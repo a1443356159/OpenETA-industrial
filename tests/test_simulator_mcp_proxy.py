@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import agent.tools.sim_mcp as sim_mcp
+from sim.mcp_server.worker_mgr import _attach_control_spec
 from adapter.protocol import EnvAction, JsonDict
 from agent.tools.sim_mcp import (
     DEFAULT_SIMULATOR_MCP_TOOL_NAMES,
@@ -362,6 +363,7 @@ def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Pa
                 "session_id": "session-1",
                 "env_id": "openeta/demo-v0",
                 "name": "Gazebo 仿真环境",
+                "control_spec": {"validated_relative_motion": {"targets": ["low", "high"]}},
             },
             {
                 "success": True,
@@ -432,6 +434,9 @@ def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Pa
     environment = result.details["outputs"]["environment"]
     assert environment["assigned_task"] == ("pick up alphabet soup and place it into basket")
     assert environment["display_name"] == "Gazebo 仿真环境"
+    assert environment["control_spec"] == {
+        "validated_relative_motion": {"targets": ["low", "high"]}
+    }
     assert environment["dashboard_url"] == "http://sim.example/session/session-1"
     camera = result.details["outputs"]["initial_observation"]["cameras"][0]
     assert camera["anygrasp_intrinsics"]["scale"] == 1000.0
@@ -454,6 +459,20 @@ def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Pa
         assert Path(entry["response"]["response_path"]).is_file()
     assert result.details["state_delta"]["simulator_environment"]["handle"] == "env-1"
     assert [callback["name"] for callback in callbacks] == ["create_env", "reset_env"]
+
+
+def test_worker_proxy_carries_existing_control_spec_into_observation_metadata() -> None:
+    control_spec = {"validated_relative_motion": {"targets": ["low", "high"]}}
+
+    nested = _attach_control_spec(
+        {"observation": {"metadata": {"backend": "gazebo"}}},
+        {"control_spec": control_spec},
+    )
+    top_level = _attach_control_spec({"metadata": {"backend": "gazebo"}}, {"control_spec": control_spec})
+
+    assert nested["observation"]["metadata"]["control_spec"] == control_spec
+    assert top_level["metadata"]["control_spec"] == control_spec
+    assert _attach_control_spec({"metadata": {}}, {}) == {"metadata": {}}
 
 
 def test_create_simulator_env_requires_env_id() -> None:
