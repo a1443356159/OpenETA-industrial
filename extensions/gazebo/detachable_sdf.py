@@ -27,6 +27,31 @@ def _plugins(model: ET.Element) -> list[ET.Element]:
     ]
 
 
+def _remove_contact_topic_placeholders(model: ET.Element) -> None:
+    """Drop URDF converter placeholders that mask a sensor's real topic.
+
+    ``gz sdf -p`` adds ``<contact><topic>__default_topic__</topic>`` to
+    contact sensors even when the SDF sensor already has an explicit topic.
+    Gazebo's contact system resolves that nested value first and consequently
+    publishes neither of M3's approved per-pad topics.  The nested field is a
+    converter artifact, not part of the authored sensor contract.
+    """
+
+    for sensor in model.findall(".//sensor[@type='contact']"):
+        topic = sensor.findtext("topic")
+        contact_topic = sensor.find("contact/topic")
+        if contact_topic is None:
+            continue
+        nested_topic = (contact_topic.text or "").strip()
+        if nested_topic not in {"", "__default_topic__", topic}:
+            raise DetachableSdfError(
+                "rendered SDF contact sensor has conflicting topic fields"
+            )
+        contact = sensor.find("contact")
+        if contact is not None:
+            contact.remove(contact_topic)
+
+
 def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) -> ET.Element:
     """Validate the one approved joint and add DART-only fixed-root details."""
 
@@ -50,6 +75,7 @@ def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) ->
         raise DetachableSdfError("rendered SDF DetachableJoint topology is not approved")
     if model.find("link[@name='base_link']") is None:
         raise DetachableSdfError("rendered SDF has no base_link for a fixed root")
+    _remove_contact_topic_placeholders(model)
     for joint in list(model.findall("joint[@name='openeta_m3_world_to_base']")):
         model.remove(joint)
     root_joint = ET.Element("joint", {"name": "openeta_m3_world_to_base", "type": "fixed"})

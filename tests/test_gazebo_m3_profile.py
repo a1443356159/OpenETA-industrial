@@ -87,3 +87,24 @@ def test_m3_sdf_renderer_allows_only_the_stock_fixed_joint_topology() -> None:
     assert model.findtext("joint[@name='openeta_m3_world_to_base']/parent") == "world"
     assert model.findtext("joint[@name='openeta_m3_world_to_base']/child") == "base_link"
     assert model.findtext("self_collide") == "false"
+
+
+def test_m3_sdf_renderer_removes_converter_contact_topic_placeholders() -> None:
+    root = ET.fromstring(
+        """<sdf><model name="robot"><link name="base_link"/><link name="tip">
+        <sensor name="pad" type="contact"><topic>/m3/contacts/left_pad</topic>
+          <contact><collision>tip_collision</collision><topic>__default_topic__</topic></contact>
+        </sensor></link>
+        <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+          <parent_link>gripper_mount_link</parent_link><child_model>m3_target</child_model>
+          <child_link>target_link</child_link><attach_topic>/m3/detachable_joint/target/attach</attach_topic>
+          <detach_topic>/m3/detachable_joint/target/detach</detach_topic>
+          <output_topic>/m3/detachable_joint/target/state</output_topic>
+        </plugin></model></sdf>"""
+    )
+
+    prepared = prepare_detachable_sdf(root)
+    sensor = prepared.find(".//sensor[@name='pad']")
+    assert sensor is not None
+    assert sensor.findtext("topic") == "/m3/contacts/left_pad"
+    assert sensor.find("contact/topic") is None
