@@ -568,12 +568,15 @@ def test_noop_response_is_not_planner_facing() -> None:
     assert "Unsupported response name" in decision.parameters["validation_errors"][0]
 
 
-def test_default_planner_prompt_uses_first_class_simulator_creation_tool() -> None:
+def test_default_planner_prompt_preserves_generic_lifecycle_boundaries() -> None:
     prompt = _default_tool_planner_system_prompt()
 
-    assert "tool_call::create_simulator_env" in prompt
-    assert "only environment-creation path" in prompt
-    assert "Do not invoke create_env or close_env through python_exec or code_policy." in prompt
+    assert "tool_context.tool_references" in prompt
+    assert "currently executable tool" in prompt
+    assert "create_simulator_env and close_simulator_env" in prompt
+    assert "host-owned lifecycle" in prompt
+    assert "skills are editable text guidance, not executable macros" in prompt.lower()
+    assert all(term not in prompt.lower() for term in ("sam3", "anygrasp", "anyplace", "molmopoint"))
 
 
 def test_planner_enforces_reference_guided_sam3_roi_obligation() -> None:
@@ -952,12 +955,13 @@ def test_sam3_point_validation_rejects_molmopoint_fields_then_accepts_xy() -> No
     assert decision.metadata["validation_attempts"] == 2
 
 
-def test_planner_prompt_explains_molmopoint_to_sam3_point_mapping() -> None:
+def test_planner_prompt_leaves_perception_pipeline_details_to_skills() -> None:
     prompt = _default_tool_planner_system_prompt()
 
-    assert "SAM3 also supports mode=points" in prompt
-    assert "pixel_x/pixel_y to SAM3 x/y" in prompt
-    assert "image_sources[image_index]" in prompt
+    assert "tool_context.tool_references" in prompt
+    assert "runtime-discovered catalogs, docstrings, schemas" in prompt.lower()
+    assert "molmopoint" not in prompt.lower()
+    assert "sam3" not in prompt.lower()
 
 
 def test_anygrasp_validation_rejects_placeholder_mask_and_incomplete_intrinsics() -> None:
@@ -1951,7 +1955,7 @@ def test_pick_skill_is_loaded_from_markdown_guidance() -> None:
 def test_builtin_task_skills_are_loaded_from_markdown_guidance() -> None:
     skills = build_default_skill_registry()
 
-    for name in ("pick", "place", "push", "pull", "stack"):
+    for name in ("gazebo", "pick", "place", "push", "pull", "stack"):
         skill = skills.get(name)
         assert skill.source == f"markdown:skills/{name}.md"
         assert skill.editable is True
@@ -1962,14 +1966,81 @@ def test_builtin_task_skills_are_loaded_from_markdown_guidance() -> None:
         assert "executable" in skill.content
 
 
-def test_planner_prompt_guards_pick_against_direct_motion_and_localizes_sam3_prompt() -> None:
-    prompt = _default_tool_planner_system_prompt()
+def test_planner_context_selects_gazebo_skill_from_environment_receipt_identity() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the cube")
+    memory.record_environment_receipt(
+        reward=0.0,
+        terminated=False,
+        truncated=False,
+        info={
+            "env_id": "openeta/gazebo_live_rgbd-v0",
+            "backend": "gazebo",
+            "profile": "gazebo_live_rgbd",
+        },
+    )
+    observation = _observation()
+    observation.task = "pick the cube"
 
-    assert "do not start with move_to or gripper_control" in prompt
-    assert "prior perception/grasp tool result" in prompt
-    assert "`罐子` -> `can`" in prompt
-    assert "before calling SAM3" in prompt
-    assert "never run grasp estimation on the basket" in prompt
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=build_default_tool_registry(),
+        skills=build_default_skill_registry(),
+    )
+
+    selected = {skill["name"]: skill for skill in context["selected_skill_guidance"]}
+    assert "gazebo" in selected
+    assert selected["gazebo"]["source"] == "markdown:skills/gazebo.md"
+    assert "real RGB-D observations as the default" in selected["gazebo"]["content"]
+    assert "not as an executable macro" in selected["gazebo"]["content"]
+    assert "read-only environment, only observe and report" in selected["gazebo"]["content"]
+    assert "Do not connect to ROS or Gazebo directly" in selected["gazebo"]["content"]
+    assert "Never switch to Oracle merely because" in selected["gazebo"]["content"]
+    assert len(context["skill_usage"]["selected_skills"]) <= 3
+    assert "will not auto-expand" in context["execution_rules"]["skills"]
+
+
+def test_non_gazebo_backend_does_not_select_gazebo_skill() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the cube")
+    observation = _observation()
+    observation.task = "pick the cube"
+    observation.metadata.update(
+        {
+            "env_id": "openeta/libero_libero_10_task0-v0",
+            "backend": "libero",
+        }
+    )
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=build_default_tool_registry(),
+        skills=build_default_skill_registry(),
+    )
+
+    assert "gazebo" not in context["skill_usage"]["selected_skills"]
+
+
+def test_sim_mcp_skill_keeps_injected_low_frequency_catalog_discovery_boundary() -> None:
+    skill = build_default_skill_registry().get("sim_mcp")
+
+    assert "low-frequency MCP directory-discovery path remains available" in skill.content
+    assert "`mcp.list_tools()`" in skill.content
+    assert "use injected `mcp` and `artifacts` only" in skill.content
+    assert "do not import `asyncio`, an\nMCP SDK" in skill.content
+
+
+def test_specialist_skills_hold_pick_and_place_pipeline_guidance() -> None:
+    skills = build_default_skill_registry()
+
+    pick = skills.get("pick")
+    place = skills.get("place")
+    assert "Do not pass a non-English user phrase directly to `sam3`" in pick.content
+    assert "static post-close image is not evidence" in pick.content.lower()
+    assert "Never run grasp estimation on the receptacle" in place.content
+    assert "Call `gripper_control`" in place.content
 
 
 def test_skill_selection_smoke_includes_relevant_markdown_guidance() -> None:

@@ -46,9 +46,10 @@ the currently bound handle and clears runtime state atomically. Do not route
 
 The MCP server's live catalog, tool docstrings, and input schemas are
 authoritative for simulator operations that do not have a stable AgentTool.
-Use `python_exec` to inspect `mcp.list_tools()` and read the saved full catalog
-with `artifacts.read_json(...)` when exact fields matter. If this skill
-conflicts with the MCP catalog/docstring/schema, follow the MCP documentation.
+The existing low-frequency MCP directory-discovery path remains available.
+Prefer stable AgentTools and the TUI's cached directory; use injected
+`mcp.list_tools()` only to inspect an unexposed capability or schema. Read its
+saved catalog with `artifacts.read_json(...)` when exact fields matter.
 If a simulator MCP call fails, first inspect the saved error response and the
 relevant MCP catalog/docstring/schema before changing parameters or retrying.
 `remote_capability_missing` means the configured server does not expose the
@@ -76,6 +77,8 @@ artifacts.grep_text(path, pattern, max_matches=20)
 Set a JSON-serializable `result` variable before the code exits. Use sandboxed
 execution by default. `outside_sandbox` is a general-purpose, separately
 approved host subprocess and is not needed for configured MCP helpers.
+Sandbox: use injected `mcp` and `artifacts` only; do not import `asyncio`, an
+MCP SDK, or construct a raw client.
 
 `mcp.call_tool` returns a lightweight reference. It automatically materializes
 MCP image payloads into local files and saves full JSON responses under
