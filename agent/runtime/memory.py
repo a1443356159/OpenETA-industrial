@@ -7212,6 +7212,18 @@ def _compact_metadata(metadata: JsonDict) -> JsonDict:
     for key, value in metadata.items():
         if key in {"planner_metadata", "tool_context", "raw_backend_payload"}:
             compact[key] = "<omitted>"
+        elif key == "control_spec":
+            # Control specs are small host-owned contracts.  Flattening their
+            # nested target lists into type/count descriptors makes the
+            # planner guess motion parameters that the backend explicitly
+            # advertised.  Keep the contract values while retaining strict
+            # depth/item/string bounds and the normal inline-blob filtering.
+            compact[key] = _compact_value(
+                value,
+                max_depth=8,
+                max_items=32,
+                preserve_control_specs=False,
+            )
         elif key == "previous_action":
             compact[key] = _compact_previous_action(value)
         elif key in {"observation", "raw_payload"}:
@@ -7245,7 +7257,13 @@ def _compact_named_item(item: JsonDict) -> JsonDict:
     }
 
 
-def _compact_value(value: Any, *, max_depth: int = 2, max_items: int = 8) -> Any:
+def _compact_value(
+    value: Any,
+    *,
+    max_depth: int = 2,
+    max_items: int = 8,
+    preserve_control_specs: bool = True,
+) -> Any:
     if max_depth <= 0:
         if isinstance(value, dict):
             return {"type": "dict", "keys": sorted(str(key) for key in value)[:max_items]}
@@ -7263,16 +7281,29 @@ def _compact_value(value: Any, *, max_depth: int = 2, max_items: int = 8) -> Any
                 break
             if _looks_like_inline_blob_key(str(key)):
                 compact[str(key)] = "<omitted>"
+            elif key == "control_spec" and preserve_control_specs:
+                compact[str(key)] = _compact_value(
+                    value[key],
+                    max_depth=8,
+                    max_items=32,
+                    preserve_control_specs=False,
+                )
             else:
                 compact[str(key)] = _compact_value(
                     value[key],
                     max_depth=max_depth - 1,
                     max_items=max_items,
+                    preserve_control_specs=preserve_control_specs,
                 )
         return compact
     if isinstance(value, (list, tuple)):
         compact_list = [
-            _compact_value(item, max_depth=max_depth - 1, max_items=max_items)
+            _compact_value(
+                item,
+                max_depth=max_depth - 1,
+                max_items=max_items,
+                preserve_control_specs=preserve_control_specs,
+            )
             for item in list(value)[:max_items]
         ]
         if len(value) > max_items:

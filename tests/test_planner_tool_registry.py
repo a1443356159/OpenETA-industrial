@@ -1891,6 +1891,71 @@ def test_planner_context_compacts_previous_action_metadata() -> None:
     assert previous_action["tool_calls"][0]["result"]["success"] is True
 
 
+def test_planner_context_preserves_bounded_control_contract_values() -> None:
+    control_spec = {
+        "validated_relative_motion": {
+            "frame": "world",
+            "reference": "first_fresh_end_effector_pose_after_reset",
+            "orientation": "preserve_observed",
+            "targets": [
+                {"name": "vertical_low", "xyz_offset_m": [0.0, 0.0, -0.04]},
+                {"name": "vertical_high", "xyz_offset_m": [0.0, 0.0, -0.02]},
+            ],
+        }
+    }
+    observation = _observation()
+    observation.metadata["control_spec"] = control_spec
+    memory = AgentMemory()
+    memory.start_session(task="exercise the advertised gazebo motion envelope")
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request_name": "create_simulator_env",
+                "tool_calls": [
+                    {
+                        "name": "create_simulator_env",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "state_delta": {
+                                    "simulator_environment": {
+                                        "control_spec": control_spec,
+                                    }
+                                }
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=build_default_tool_registry(),
+        skills=build_default_skill_registry(),
+    )
+
+    expected_targets = control_spec["validated_relative_motion"]["targets"]
+    assert (
+        context["observation"]["metadata"]["control_spec"]
+        ["validated_relative_motion"]["targets"]
+        == expected_targets
+    )
+    action = next(
+        item for item in context["memory"]["recent_events"] if item["type"] == "action"
+    )
+    assert (
+        action["payload"]["command"]["tool_calls"][0]["result"]["details"]
+        ["state_delta"]["simulator_environment"]["control_spec"]
+        ["validated_relative_motion"]["targets"]
+        == expected_targets
+    )
+
+
 def test_planner_context_bounds_selected_skill_guidance_content() -> None:
     memory = AgentMemory()
     memory.start_session(task="inspect long skill")
