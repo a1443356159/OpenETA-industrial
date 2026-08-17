@@ -693,10 +693,14 @@ class _RosRuntime:
         from control_msgs.action import ParallelGripperCommand
 
         action_started = self.ros_time_s()
+        wall_started = time.monotonic()
 
         def finish(payload: dict[str, Any]) -> dict[str, Any]:
             payload["action_started_ros_time_s"] = action_started
             payload["action_completed_ros_time_s"] = self.ros_time_s()
+            # Diagnostics only: wall-clock duration and terminal status do
+            # not affect the strict success predicate below.
+            payload["wall_elapsed_ms"] = round((time.monotonic() - wall_started) * 1000, 3)
             self.state_source.clear()
             return payload
 
@@ -706,7 +710,13 @@ class _RosRuntime:
         goal.command.position = [float(position)]
         handle = self._await(self.gripper_client.send_goal_async(goal), min(5.0, timeout_s))
         if not handle.accepted:
-            return finish({"ok": False, "error_code": "GRIPPER_FAILED"})
+            return finish(
+                {
+                    "ok": False,
+                    "error_code": "GRIPPER_FAILED",
+                    "terminal_status": "rejected",
+                }
+            )
         try:
             wrapped = self._await(handle.get_result_async(), timeout_s)
         except TimeoutError:
@@ -719,6 +729,7 @@ class _RosRuntime:
                 "reached_goal": False,
                 "stalled": False,
                 "error_code": "GRIPPER_TIMEOUT",
+                "terminal_status": "timed_out",
             })
         except Exception:
             return finish({
@@ -726,11 +737,13 @@ class _RosRuntime:
                 "reached_goal": False,
                 "stalled": False,
                 "error_code": "GRIPPER_FAILED",
+                "terminal_status": "result_error",
             })
         result = wrapped.result
         reached_goal = bool(result.reached_goal)
         stalled = bool(result.stalled)
-        terminal_succeeded = gripper_terminal_succeeded(getattr(wrapped, "status", None))
+        terminal_status_code = getattr(wrapped, "status", None)
+        terminal_succeeded = gripper_terminal_succeeded(terminal_status_code)
         ok = gripper_action_success(
             reached_goal=reached_goal,
             stalled=stalled,
@@ -742,6 +755,12 @@ class _RosRuntime:
             "reached_goal": reached_goal,
             "stalled": stalled,
             "error_code": None if ok else "GRIPPER_FAILED",
+            "terminal_status": "succeeded" if terminal_succeeded else "not_succeeded",
+            "terminal_status_code": (
+                int(terminal_status_code)
+                if isinstance(terminal_status_code, int) and not isinstance(terminal_status_code, bool)
+                else None
+            ),
         })
 
     def cancel_pending(self) -> None:

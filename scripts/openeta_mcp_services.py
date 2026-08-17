@@ -201,7 +201,7 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             python,
             str(REPO_ROOT / "tools" / "sam3_mcp_server.py"),
             "--transport",
-            "sse",
+            "dual",
             "--host",
             args.host,
             "--port",

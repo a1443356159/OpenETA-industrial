@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gazebo M0--M4 acceptance and control-preflight coordinator.
+"""Gazebo M0--M5 acceptance and control-preflight coordinator.
 
 The coordinator owns isolation, evidence locations, process groups and report
 assembly. Formal modes use the real PTY TUI: the default profile is
@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, UTC
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -28,11 +29,26 @@ import subprocess
 import sys
 import time
 from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import urlparse
 import uuid
+
+from agent.backends.planner import (
+    OpenAICompatiblePlannerBackend,
+    OpenAICompatiblePlannerBackendConfig,
+    PlannerBackendRequest,
+    list_openai_compatible_models,
+)
+from agent.backends.provider_config import (
+    PlannerProviderConfig,
+    load_planner_provider_config,
+)
+from agent.runtime.actions import PipelineStatus
 
 
 SCHEMA_VERSION = "openeta.tui_gazebo_acceptance.v2"
 MILESTONES = ("m0", "m1", "m2", "m3", "m4")
+M5_MILESTONE = "m5"
+M2_GRIPPER_SEQUENCE = (1, 0, 1, 1, 0, 1)
 DETERMINISTIC = "deterministic"
 AUTONOMY = "planner_autonomy"
 SCRIPTED_TUI = "scripted_tui"
@@ -68,6 +84,9 @@ ENV_IDS = {
     "m2": "openeta/gazebo_rm75_robotiq2f85-v0",
     "m3": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
     "m4": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+    # M5 deliberately reuses M3's exact physical scene and native
+    # DetachableJoint rules; only the preceding perception gate changes.
+    "m5": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
 }
 INFRA_CODES = frozenset(
     {
@@ -81,9 +100,14 @@ INFRA_CODES = frozenset(
         "TUI_NOT_READY",
         "TOPIC_DISCOVERY_TIMEOUT",
         "ROS_CAMERA_TOPICS_NOT_READY",
+        "SAM3_UNAVAILABLE",
+        "SAM3_TOOL_UNAVAILABLE",
+        "SAM3_INFERENCE_UNAVAILABLE",
     }
 )
 PROVIDER_BILLING_EXHAUSTED = "PROVIDER_BILLING_EXHAUSTED"
+PROVIDER_PREFLIGHT_FILENAME = "provider-preflight.json"
+_PROVIDER_ENV_PREFIX = "OPENETA_LLM_"
 # These keys exist only on in-memory copies returned by
 # ``_mcp_response_payloads``.  They preserve the exact action/RPC association
 # while keeping the materialized simulator response byte-for-byte intact on
@@ -94,6 +118,22 @@ _MCP_EVIDENCE_AGENT_TOOL = "__openeta_acceptance_agent_tool"
 
 class AcceptanceError(RuntimeError):
     pass
+
+
+class M5ControlError(AcceptanceError):
+    """A recorded M5 gate result, distinguished from simulator infrastructure."""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        super().__init__(message or code)
+        self.code = code
+
+
+class M5BlockedError(M5ControlError):
+    """An unavailable external SAM3 service; M3 motion must not start."""
+
+
+class M5FailedError(M5ControlError):
+    """A malformed or ambiguous perception result; M3 motion must not start."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,8 +496,8 @@ def instructions_for(milestone: str, mode: str) -> str:
 """,
         "m2": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m2"]}`。
 禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
-创建后按此顺序：仅使用真实 MCP/MoveIt 回执执行两轮 A↔B、两轮 open→close→open、一次不可达目标（必须返回 MOTION_PLAN_FAILED）、observe，最后唯一一次 close_simulator_env。
-不得绕过 MoveIt 或把失败动作当作成功。逐一批准所有 human_gated 提示，确认 close 后用 /quit 退出。
+创建后仅使用真实 MCP/MoveIt 回执，严格按以下合同执行：四次成功 move_to，目标依次为 A、B、A、B（A 与 B 必须不同且碰撞安全）；随后六次成功 gripper_control，position 精确依次为 [1, 0, 1, 1, 0, 1]；随后仅一次不可达 move_to，且它必须返回 MOTION_PLAN_FAILED；随后 observe；最后唯一一次 close_simulator_env。
+每个 move_to 或 gripper_control 只可在严格回执 ok=true、reached_goal/reached_target=true 且 stalled=false 后进入下一步。stalled、超时、未到目标或任何失败都不是成功。某一夹爪步骤首次失败时，必须先 fresh observe，再以完全相同的 position 仅重试一次；该重试再次失败时，立即 close_simulator_env 并让 M2 失败，绝不可继续或进行第二次重试。不得绕过 MoveIt、跳步、替换 A/B，或把失败动作当作成功。逐一批准所有 human_gated 提示，确认 close 后用 /quit 退出。
 """,
         "m3": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m3"]}`。
 禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
@@ -668,6 +708,176 @@ def scripted_tui_input(paths: CasePaths) -> str:
     return "\n".join(commands) + "\n"
 
 
+def _scripted_tui_initial_input(paths: CasePaths) -> str:
+    """Return console setup plus the task, withholding `/quit` until completion.
+
+    Prompt-toolkit consumes stdin while a planner turn is in flight.  Sending
+    `/quit` in the same initial pipe can therefore lose it before the episode
+    reaches its final response.  Keep the public scripted-input contract for
+    evidence/tests, but make process driving explicitly sequential.
+    """
+
+    lines = scripted_tui_input(paths).splitlines()
+    if not lines or lines[-1] != "/quit":
+        raise AcceptanceError("TUI_NOT_READY: scripted input lacks a final /quit")
+    return "\n".join(lines[:-1]) + "\n"
+
+
+def _scripted_tui_trace_state(paths: CasePaths) -> str:
+    """Return the newest durable scripted-TUI state from the trace tail.
+
+    A scripted run has no human operator.  ``ask_human`` is therefore a
+    terminal gate for the driver, rather than a prompt to which an automation
+    command could accidentally become an answer.  Read JSONL events in reverse
+    order so a later human answer or episode result overrides an older pause.
+    """
+
+    seen_human_pause = False
+    for trace in paths.trace_root.glob("sessions/*/trace.jsonl"):
+        try:
+            with trace.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 128 * 1024), os.SEEK_SET)
+                tail = stream.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in reversed(tail.splitlines()):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, Mapping):
+                continue
+            event_type = event.get("event_type")
+            if event_type == "episode_result":
+                return "completed"
+            # A newer human answer means an older pause is no longer active.
+            if event_type in {"human_answer", "user_message"}:
+                break
+            if event_type != "episode_step":
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, Mapping):
+                continue
+            step_result = payload.get("step_result")
+            if not isinstance(step_result, Mapping):
+                continue
+            info = step_result.get("info")
+            if isinstance(info, Mapping) and info.get("pause_reason") == "ask_human":
+                seen_human_pause = True
+                break
+    return "human_input_required" if seen_human_pause else "running"
+
+
+def _wait_for_scripted_tui_episode(
+    paths: CasePaths,
+    process: subprocess.Popen[Any],
+    *,
+    timeout_s: float,
+) -> str:
+    """Wait for completion or an unattended human-input gate.
+
+    The result deliberately does not label a completed episode as passed: the
+    existing milestone verifier remains the sole authority for that decision.
+    """
+
+    deadline = time.monotonic() + timeout_s
+    while process.poll() is None and time.monotonic() < deadline:
+        state = _scripted_tui_trace_state(paths)
+        if state != "running":
+            return state
+        time.sleep(0.1)
+    state = _scripted_tui_trace_state(paths)
+    if state != "running":
+        return state
+    return "exited" if process.poll() is not None else "timed_out"
+
+
+def _terminate_scripted_tui_process(process: subprocess.Popen[Any]) -> None:
+    """Terminate only the PTY process group created for one scripted case."""
+
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        process.wait(timeout=5)
+
+
+def _scripted_tui_driver_evidence(paths: CasePaths, *, status: str, reason_code: str) -> None:
+    """Persist a bounded, secret-free reason when the PTY driver stops early."""
+
+    _json_dump(
+        paths.root / "scripted-tui-driver.json",
+        {
+            "schema_version": "openeta.scripted_tui_driver.v1",
+            "status": status,
+            "reason_code": reason_code,
+        },
+    )
+
+
+def _run_scripted_tui(command: str, paths: CasePaths, env: Mapping[str, str]) -> int:
+    """Drive the real PTY TUI, then submit `/quit` after episode completion."""
+
+    timeout_raw = str(env.get("OPENETA_SCRIPTED_TUI_TIMEOUT_S", "3600"))
+    try:
+        timeout_s = float(timeout_raw)
+    except ValueError:
+        timeout_s = 3600.0
+    if timeout_s <= 0:
+        raise AcceptanceError("TUI_NOT_READY: scripted TUI timeout must be positive")
+    process = subprocess.Popen(
+        ["script", "--flush", "--return", "--command", command, str(paths.transcript)],
+        cwd=paths.root,
+        env=dict(env),
+        stdin=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    if process.stdin is None:
+        raise AcceptanceError("TUI_NOT_READY: scripted PTY stdin is unavailable")
+    try:
+        process.stdin.write(_scripted_tui_initial_input(paths))
+        process.stdin.flush()
+        state = _wait_for_scripted_tui_episode(paths, process, timeout_s=timeout_s)
+        if state != "completed":
+            reason_code = {
+                "human_input_required": "TUI_HUMAN_INPUT_REQUIRED",
+                "timed_out": "TUI_SCRIPTED_TASK_TIMEOUT",
+                "exited": "TUI_EXITED_BEFORE_EPISODE_RESULT",
+            }.get(state, "TUI_SCRIPTED_DRIVER_STATE_INVALID")
+            _scripted_tui_driver_evidence(
+                paths,
+                status="blocked" if state == "human_input_required" else "failed",
+                reason_code=reason_code,
+            )
+            _terminate_scripted_tui_process(process)
+            # The caller's normal finally block must still stop MCP/Gazebo and
+            # materialize cleanup evidence, so return a failed TUI code rather
+            # than bypassing it with an exception.
+            return 1
+        if process.poll() is None:
+            process.stdin.write("/quit\n")
+            process.stdin.flush()
+        try:
+            return int(process.wait(timeout=30))
+        except subprocess.TimeoutExpired as exc:
+            _terminate_scripted_tui_process(process)
+            raise AcceptanceError("TUI_NOT_READY: PTY did not exit after /quit") from exc
+    finally:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
+
+
 def _control_trace_path(paths: CasePaths) -> Path:
     """Return the durable raw-command trace for one no-provider case."""
 
@@ -816,13 +1026,15 @@ class _ControlToolRunner:
         parameters: Mapping[str, Any] | None = None,
         *,
         observation: Any | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> Any:
         normalized_parameters = dict(parameters or {})
+        call_metadata = {**self.metadata, **dict(metadata or {})}
         result = self.registry.call(
             name,
             normalized_parameters,
             observation=observation,
-            metadata=self.metadata,
+            metadata=call_metadata,
         )
         _append_control_trace(
             self.paths,
@@ -839,7 +1051,11 @@ class _ControlToolRunner:
                                 "name": name,
                                 "parameters": normalized_parameters,
                                 "status": "executed" if getattr(result, "success", False) else "failed",
-                                "result": _tool_result_record(result),
+                                "result": (
+                                    _m5_redact_external_value(_tool_result_record(result))
+                                    if name == "sam3"
+                                    else _tool_result_record(result)
+                                ),
                             }
                         ]
                     },
@@ -856,8 +1072,14 @@ class _ControlToolRunner:
         parameters: Mapping[str, Any] | None = None,
         *,
         observation: Any | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> Any:
-        result = self.invoke(name, parameters, observation=observation)
+        result = self.invoke(
+            name,
+            parameters,
+            observation=observation,
+            metadata=metadata,
+        )
         if not getattr(result, "success", False):
             raise AcceptanceError(f"CONTROL_TOOL_FAILED:{name}")
         return result
@@ -973,10 +1195,10 @@ def _m2_control_motion(runner: _ControlToolRunner) -> None:
         "velocity_scaling": 0.1,
         "acceleration_scaling": 0.1,
     }
-    for position in (1, 0, 1, 1, 0, 1):
-        runner.require_success("gripper_control", {"position": position})
     for target in (b, a, b, a):
         runner.require_success("move_to", target)
+    for position in M2_GRIPPER_SEQUENCE:
+        runner.require_success("gripper_control", {"position": position})
     unreachable = runner.invoke(
         "move_to",
         {
@@ -994,7 +1216,7 @@ def _m2_control_motion(runner: _ControlToolRunner) -> None:
     runner.require_success("observe")
 
 
-def _m3_motion(runner: _ControlToolRunner) -> None:
+def _m3_motion(runner: _ControlToolRunner) -> list[Any]:
     """Issue fixed fixture waypoints; native receipts alone prove a grasp.
 
     These M3 control-preflight poses are static world-frame values for the
@@ -1036,11 +1258,841 @@ def _m3_motion(runner: _ControlToolRunner) -> None:
         # child-link proof even if the stock joint held perfectly.
         "target_pose": {**common["target_pose"], "xyz": [0.1552, -0.1000, 0.5976]},
     }
-    runner.require_success("move_to", approach)
-    runner.require_success("move_to", capture)
-    runner.require_success("gripper_control", {"position": 0})
-    runner.require_success("move_to", lift)
-    runner.require_success("gripper_control", {"position": 1})
+    return [
+        runner.require_success("move_to", approach),
+        runner.require_success("move_to", capture),
+        runner.require_success("gripper_control", {"position": 0}),
+        runner.require_success("move_to", lift),
+        runner.require_success("gripper_control", {"position": 1}),
+    ]
+
+
+def _m5_endpoint_id(url: str) -> str:
+    """Return a credential/query-free identifier for M5 durable evidence."""
+
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise AcceptanceError("--sam3-url must be an absolute http(s) SSE MCP URL")
+    try:
+        port_value = parsed.port
+    except ValueError as exc:
+        raise AcceptanceError("--sam3-url has an invalid port") from exc
+    port = f":{port_value}" if port_value is not None else ""
+    return f"{parsed.scheme}://{parsed.hostname}{port}"
+
+
+def _provider_endpoint_id(api_base: str) -> str:
+    """Return a credential-, path-, and query-free provider identifier."""
+
+    parsed = urlparse(str(api_base or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return "unconfigured"
+    try:
+        port_value = parsed.port
+    except ValueError:
+        return "invalid"
+    port = f":{port_value}" if port_value is not None else ""
+    return f"{parsed.scheme}://{parsed.hostname}{port}"
+
+
+def _root_provider_config(
+    repo: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> PlannerProviderConfig:
+    """Resolve the repository provider configuration before changing into a case.
+
+    The PTY and MCP children deliberately use the case directory as their
+    working directory, where the repository `.env` is not visible.  Resolve
+    it here using the normal application precedence instead of copying a
+    credential-bearing configuration file into a case artifact directory.
+    """
+
+    return load_planner_provider_config(
+        env=environ,
+        dotenv_path=repo / ".env",
+        apikey_path=repo / "apikey.md",
+    )
+
+
+def _resolved_provider_environment(config: PlannerProviderConfig) -> dict[str, str]:
+    """Return the primary, resolved provider config for a case-local TUI.
+
+    The acceptance run intentionally has one selected model.  In particular,
+    it does not transfer a configured fallback endpoint, so an unavailable
+    primary cannot turn into an unrecorded model/provider switch during a
+    scripted acceptance case.  The mapping is held only in process memory.
+    """
+
+    values = {
+        "OPENETA_LLM_PROVIDER": config.provider,
+        "OPENETA_LLM_MODEL": config.model,
+        "OPENETA_LLM_API_BASE": config.api_base,
+        "OPENETA_LLM_API_KEY": config.api_key,
+        "OPENETA_LLM_TIMEOUT_S": str(config.timeout_s),
+        "OPENETA_LLM_MAX_ATTEMPTS": str(config.max_attempts),
+        "OPENETA_LLM_RETRY_BACKOFF_S": str(config.retry_backoff_s),
+        "OPENETA_LLM_MAX_TOKENS": str(config.max_tokens),
+    }
+    if config.context_window_tokens is not None:
+        values["OPENETA_LLM_CONTEXT_WINDOW_TOKENS"] = str(config.context_window_tokens)
+    vision = config.metadata.get("enable_vision")
+    if isinstance(vision, bool):
+        values["OPENETA_LLM_ENABLE_VISION"] = "true" if vision else "false"
+    return values
+
+
+def _without_provider_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    """Copy an environment without inherited provider or fallback settings."""
+
+    return {
+        key: value
+        for key, value in environ.items()
+        if not key.startswith(_PROVIDER_ENV_PREFIX)
+    }
+
+
+def _provider_preflight_failure_code(exc: Exception, *, stage: str) -> tuple[str, str]:
+    """Classify a provider failure without materializing provider text.
+
+    Provider error bodies are untrusted and can contain echoed credentials or
+    request headers.  Durable acceptance evidence records only this bounded
+    code and error class, never the raw body.
+    """
+
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        matched = re.search(r"\bHTTP\s+(\d{3})\b", str(exc))
+        status = int(matched.group(1)) if matched else None
+    if status in {401, 403}:
+        return "blocked", "PROVIDER_AUTH_FAILED"
+    if status is not None:
+        return "blocked", f"PROVIDER_HTTP_{status}"
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return "blocked", "PROVIDER_NETWORK_OR_TIMEOUT"
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+        return "failed", "PROVIDER_RESPONSE_JSON_INCOMPATIBLE"
+    if stage == "models":
+        return "blocked", "PROVIDER_MODEL_LIST_UNAVAILABLE"
+    return "blocked", "PROVIDER_PLANNER_SMOKE_UNAVAILABLE"
+
+
+def _provider_preflight_result(
+    repo: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Run the no-Gazebo, primary-only scripted-provider preflight.
+
+    This checks the exact selected model through `/v1/models`, then makes one
+    constrained planner request which can only return an `ask_human` response.
+    It neither starts the MCP server nor offers a simulator tool, and it never
+    persists provider request/response payloads.
+    """
+
+    started = time.monotonic()
+    try:
+        config = _root_provider_config(repo, environ=environ)
+    except Exception as exc:  # noqa: BLE001 - unreadable local config is a gate result.
+        return {
+            "schema_version": "openeta.provider_preflight.v1",
+            "generated_at": datetime.now(UTC).isoformat(),
+            "status": "blocked",
+            "provider": "openai-compatible",
+            "model": "",
+            "endpoint_id": "unconfigured",
+            "vision_enabled": False,
+            "fallback_used": False,
+            "reason_code": "PROVIDER_CONFIG_UNREADABLE",
+            "error_type": type(exc).__name__,
+            "model_list": {"status": "not_run"},
+            "planner_smoke": {"status": "not_run"},
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+    backend_config = OpenAICompatiblePlannerBackendConfig.from_provider_config(config)
+    # A preflight is evidence for the selected primary endpoint only.  Do not
+    # retry or activate a configured fallback and accidentally validate a
+    # different provider/model than the TUI will be allowed to use.
+    backend_config.max_attempts = 1
+    backend_config.retry_backoff_s = 0.0
+    backend_config.fallback = None
+    result: dict[str, Any] = {
+        "schema_version": "openeta.provider_preflight.v1",
+        "generated_at": datetime.now(UTC).isoformat(),
+        "status": "blocked",
+        "provider": config.provider,
+        "model": config.model,
+        "endpoint_id": _provider_endpoint_id(config.api_base),
+        # This is the resolved configuration after normal environment > .env
+        # precedence, not a documentation/default value.
+        "max_tokens": config.max_tokens,
+        "vision_enabled": backend_config.enable_vision,
+        "fallback_used": False,
+        "model_list": {"status": "not_run"},
+        "planner_smoke": {"status": "not_run"},
+    }
+    missing = [
+        field
+        for field, value in (
+            ("model", config.model),
+            ("api_base", config.api_base),
+            ("api_key", config.api_key),
+        )
+        if not value
+    ]
+    if missing:
+        result.update(
+            {
+                "reason_code": "PROVIDER_CONFIG_MISSING",
+                "missing_fields": missing,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        )
+        return result
+
+    models_started = time.monotonic()
+    try:
+        models = list_openai_compatible_models(backend_config)
+    except Exception as exc:  # noqa: BLE001 - provider failures are evidence, not crashes.
+        status, reason_code = _provider_preflight_failure_code(exc, stage="models")
+        result.update(
+            {
+                "status": status,
+                "reason_code": reason_code,
+                "error_type": type(exc).__name__,
+                "model_list": {
+                    "status": "failed",
+                    "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
+                },
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        )
+        return result
+    if not isinstance(models, list) or not all(isinstance(model, str) for model in models):
+        result.update(
+            {
+                "status": "failed",
+                "reason_code": "PROVIDER_MODEL_LIST_RESPONSE_INCOMPATIBLE",
+                "model_list": {
+                    "status": "failed",
+                    "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
+                },
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        )
+        return result
+    if config.model not in models:
+        result.update(
+            {
+                "status": "failed",
+                "reason_code": "PROVIDER_MODEL_NOT_FOUND",
+                "model_list": {
+                    "status": "failed",
+                    "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
+                    "selected_model_found": False,
+                },
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        )
+        return result
+    result["model_list"] = {
+        "status": "passed",
+        "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
+        "selected_model_found": True,
+    }
+
+    smoke_started = time.monotonic()
+    try:
+        smoke = OpenAICompatiblePlannerBackend(backend_config).decide(
+            PlannerBackendRequest(
+                tool_context={"acceptance_preflight": True, "available_tools": []},
+                system_prompt=(
+                    "This is a provider connectivity preflight with no tools and no "
+                    "world access. Return only this JSON object: "
+                    '{"kind":"response","name":"ask_human",'
+                    '"parameters":{"message":"provider preflight"},'
+                    '"reasoning":"structured provider preflight"}.'
+                ),
+                metadata={"isolated_context": True, "purpose": "provider_preflight"},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - retain a redacted, bounded failure only.
+        status, reason_code = _provider_preflight_failure_code(exc, stage="planner")
+        result.update(
+            {
+                "status": status,
+                "reason_code": reason_code,
+                "error_type": type(exc).__name__,
+                "planner_smoke": {
+                    "status": "failed",
+                    "latency_ms": round((time.monotonic() - smoke_started) * 1000, 3),
+                },
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        )
+        return result
+
+    payload: Any = smoke.payload
+    try:
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        structured = (
+            smoke.status == PipelineStatus.PLANNED
+            and isinstance(payload, Mapping)
+            and payload.get("kind") == "response"
+            and payload.get("name") == "ask_human"
+            and isinstance(payload.get("parameters"), Mapping)
+            and isinstance(payload.get("reasoning"), str)
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        structured = False
+    if not structured:
+        result.update(
+            {
+                "status": "failed",
+                "reason_code": "PROVIDER_STRUCTURED_RESPONSE_INCOMPATIBLE",
+                "planner_smoke": {
+                    "status": "failed",
+                    "latency_ms": round((time.monotonic() - smoke_started) * 1000, 3),
+                },
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        )
+        return result
+    result.update(
+        {
+            "status": "passed",
+            "reason_code": "PROVIDER_PREFLIGHT_PASSED",
+            "planner_smoke": {
+                "status": "passed",
+                "latency_ms": round((time.monotonic() - smoke_started) * 1000, 3),
+                "response_schema": "response/ask_human",
+            },
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+    )
+    return result
+
+
+def _m5_case_artifact(paths: CasePaths, value: str | Path) -> dict[str, Any]:
+    """Reference one existing case-local file with a durable content hash."""
+
+    path = Path(value).resolve()
+    try:
+        relative = path.relative_to(paths.root.resolve())
+    except ValueError as exc:
+        raise M5FailedError("M5_ARTIFACT_OUTSIDE_CASE") from exc
+    if not path.is_file():
+        raise M5FailedError("M5_ARTIFACT_MISSING")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {
+        "path": str(relative),
+        "sha256": digest,
+        "byte_size": path.stat().st_size,
+    }
+
+
+def _m5_optional_case_artifact(paths: CasePaths, value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, (str, Path)) or not str(value):
+        return None
+    return _m5_case_artifact(paths, value)
+
+
+def _m5_scrub_json_artifact(paths: CasePaths, value: str | Path) -> None:
+    """Remove credential-like values before linking an external SAM3 artifact."""
+
+    path = Path(value).resolve()
+    _m5_case_artifact(paths, path)
+    try:
+        decoded = _json_load(path)
+    except (OSError, ValueError) as exc:
+        raise M5FailedError("M5_SAM3_ARTIFACT_UNREADABLE") from exc
+
+    _json_dump(path, _m5_redact_external_value(decoded))
+
+
+def _m5_redact_external_value(value: Any) -> Any:
+    """Recursively remove payload forms that must not enter M5 evidence."""
+
+    secret_markers = (
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "credential",
+        "password",
+        "authorization",
+    )
+    if isinstance(value, Mapping):
+        cleaned: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key)
+            normalized = key_text.lower().replace("-", "_")
+            if "base64" in normalized or any(marker in normalized for marker in secret_markers):
+                cleaned[f"{key_text}_omitted"] = True
+            else:
+                cleaned[key_text] = _m5_redact_external_value(child)
+        return cleaned
+    if isinstance(value, list):
+        return [_m5_redact_external_value(item) for item in value]
+    return value
+
+
+def _m5_tool_catalog_names(catalog: Mapping[str, Any]) -> set[str]:
+    tools = catalog.get("tools")
+    if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes, bytearray)):
+        return set()
+    return {
+        str(item.get("name") or "")
+        for item in tools
+        if isinstance(item, Mapping) and str(item.get("name") or "")
+    }
+
+
+def _m5_current_camera(observe_result: Any, paths: CasePaths) -> dict[str, Any]:
+    """Select the one numeric-extrinsic top RGB-D camera from this observe call."""
+
+    payload = _control_response_payload(observe_result)
+    observation = payload.get("observation", payload)
+    cameras = observation.get("cameras") if isinstance(observation, Mapping) else None
+    if not isinstance(cameras, Sequence) or isinstance(cameras, (str, bytes, bytearray)):
+        raise M5FailedError("M5_OBSERVE_CAMERAS_MISSING")
+    candidates = [
+        dict(camera)
+        for camera in cameras
+        if isinstance(camera, Mapping)
+        and camera.get("role") == "scene_primary"
+        and isinstance(camera.get("extrinsics"), Mapping)
+        and camera["extrinsics"].get("frame_transform") == "camera_to_world"
+    ]
+    if len(candidates) != 1:
+        raise M5FailedError("M5_TOP_RGBD_CAMERA_AMBIGUOUS")
+    camera = candidates[0]
+    # Validate all paths before sending the RGB upstream.  This is the first
+    # M5 gate and prevents a later bridge error from accepting a stale frame.
+    _m5_case_artifact(paths, str(camera.get("rgb_path") or ""))
+    _m5_case_artifact(paths, str(camera.get("depth_path") or ""))
+    if not isinstance(camera.get("intrinsics"), Mapping):
+        raise M5FailedError("M5_INTRINSICS_MISSING")
+    if not str(camera.get("frame_id") or ""):
+        raise M5FailedError("M5_SOURCE_FRAME_MISSING")
+    return camera
+
+
+def _m5_observation_for_sam3(camera: Mapping[str, Any], task: str) -> Any:
+    """Expose only the current top RGB artifact to SAM3, never Gazebo objects."""
+
+    from adapter.protocol import CameraFrame, EnvObservation, RobotState
+
+    frame_id = str(camera["frame_id"])
+    role = str(camera.get("role") or "scene_primary")
+    return EnvObservation(
+        task=task,
+        cameras=[
+            CameraFrame(
+                frame_id=frame_id,
+                role=role,
+                rgb=[],
+                depth=None,
+                intrinsics=dict(camera.get("intrinsics") or {}),
+                extrinsics=dict(camera.get("extrinsics") or {}),
+            )
+        ],
+        robot=RobotState(),
+        # The SAM3 handler resolves its image solely from these current
+        # artifacts.  Do not copy raw observation objects/metadata here: those
+        # can contain Gazebo ground truth and are out of M5 control scope.
+        metadata={
+            "image_artifacts": [
+                {
+                    "kind": "rgb",
+                    "frame_id": frame_id,
+                    "role": role,
+                    "path": str(camera["rgb_path"]),
+                },
+                {
+                    "kind": "depth",
+                    "frame_id": frame_id,
+                    "role": role,
+                    "path": str(camera["depth_path"]),
+                },
+            ]
+        },
+    )
+
+
+def _m5_observe_receipt(observe_result: Any, paths: CasePaths) -> dict[str, Any]:
+    details = getattr(observe_result, "details", {})
+    outputs = details.get("outputs") if isinstance(details, Mapping) else None
+    response = outputs.get("response") if isinstance(outputs, Mapping) else None
+    mcp_calls = outputs.get("mcp_calls") if isinstance(outputs, Mapping) else None
+    receipt: dict[str, Any] = {}
+    if isinstance(response, Mapping):
+        artifact = _m5_optional_case_artifact(paths, response.get("response_path"))
+        if artifact is not None:
+            receipt["response"] = artifact
+        for key in ("request_id", "tool", "session_id", "handle"):
+            if isinstance(response.get(key), str):
+                receipt[key] = response[key]
+    if isinstance(mcp_calls, Sequence) and not isinstance(mcp_calls, (str, bytes, bytearray)):
+        for call in mcp_calls:
+            if not isinstance(call, Mapping):
+                continue
+            environment_receipt = call.get("environment_receipt")
+            if isinstance(environment_receipt, Mapping):
+                receipt["environment_receipt"] = {
+                    key: environment_receipt[key]
+                    for key in ("receipt_id", "remote_tool", "mcp_request_id", "handle", "simulator_session_id")
+                    if isinstance(environment_receipt.get(key), str)
+                }
+                break
+    return receipt
+
+
+def _m5_selection_is_forbidden(value: Any) -> bool:
+    """Reject Oracle and contractual/fake-candidate contamination before motion."""
+
+    if _contains(value, "perception_source", "gazebo_oracle"):
+        return True
+    if _contains(value, "provenance", "gazebo_oracle"):
+        return True
+    if any(isinstance(item, Mapping) for item in _values(value, "fake_grasp_candidate")):
+        return True
+    return any(
+        isinstance(item, Mapping)
+        and (
+            item.get("kind") == "contractual_fake_grasp_candidate"
+            or item.get("schema_version")
+            == "openeta.m4.contractual_fake_grasp_candidate.v1"
+        )
+        for item in _walk(value)
+    )
+
+
+def _m5_require_single_real_candidate(outputs: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return M5's sole permissible candidate without score/oracle fallback."""
+
+    if _m5_selection_is_forbidden(outputs):
+        raise M5FailedError("M5_ORACLE_OR_FAKE_CANDIDATE")
+    candidates = outputs.get("detections")
+    if not isinstance(candidates, list) or len(candidates) == 0:
+        raise M5FailedError("M5_ZERO_SAM3_CANDIDATES")
+    if len(candidates) != 1:
+        raise M5FailedError("M5_MULTIPLE_SAM3_CANDIDATES")
+    candidate = candidates[0]
+    if not isinstance(candidate, Mapping) or not str(candidate.get("id") or ""):
+        raise M5FailedError("M5_SAM3_CANDIDATE_MALFORMED")
+    score = candidate.get("score")
+    if (
+        not isinstance(score, (int, float))
+        or isinstance(score, bool)
+        or not math.isfinite(float(score))
+    ):
+        raise M5FailedError("M5_SAM3_CANDIDATE_MALFORMED")
+    return candidate
+
+
+def _m5_m3_receipts(results: Sequence[Any], paths: CasePaths) -> list[dict[str, Any]]:
+    receipts: list[dict[str, Any]] = []
+    for result in results:
+        details = getattr(result, "details", {})
+        outputs = details.get("outputs") if isinstance(details, Mapping) else None
+        response = outputs.get("response") if isinstance(outputs, Mapping) else None
+        if not isinstance(response, Mapping):
+            continue
+        artifact = _m5_optional_case_artifact(paths, response.get("response_path"))
+        if artifact is None:
+            continue
+        receipt: dict[str, Any] = {"response": artifact}
+        for key in ("request_id", "tool", "session_id", "handle"):
+            if isinstance(response.get(key), str):
+                receipt[key] = response[key]
+        receipts.append(receipt)
+    return receipts
+
+
+def _m5_post_motion_evaluation(last_result: Any) -> dict[str, Any]:
+    """Record bounded Gazebo truth only after M3 has completed.
+
+    This is deliberately an evaluation annotation rather than an input to a
+    selection, pose, contact, or motion decision.
+    """
+
+    payload = _control_response_payload(last_result)
+    observation = payload.get("observation", payload)
+    objects = observation.get("objects") if isinstance(observation, Mapping) else None
+    entries = objects if isinstance(objects, Sequence) and not isinstance(objects, (str, bytes, bytearray)) else []
+    return {
+        "available": bool(entries),
+        "used_for_control": False,
+        "captured_after_m3_motion": True,
+        "object_count": len(entries),
+    }
+
+
+def _run_m5_control(
+    runner: _ControlToolRunner,
+    *,
+    paths: CasePaths,
+    sam3_url: str,
+) -> None:
+    """Run real external SAM3 once, then the unchanged M3 physical sequence."""
+
+    from adapter.protocol import EnvAction
+    from agent.runtime.planner import BasePlanner
+    from agent.runtime.runtime import OpenEtaAgentRuntime
+    from agent.tools.handlers import build_sam3_handler, build_sse_sam3_mcp_segmenter
+    from agent.tools.sim_mcp import SseSimulatorMcpTransport
+    from extensions.gazebo.perception_summary import (
+        M5PerceptionBridgeError,
+        build_m5_object_summary,
+    )
+
+    evidence_path = paths.root / "m5-perception.json"
+    evidence: dict[str, Any] = {
+        "schema_version": "openeta.gazebo.m5_perception_evidence.v1",
+        "acceptance_scope": "control_only_real_sam3_no_planner_not_formal_tui",
+        "status": "started",
+        "sam3": {"endpoint_id": _m5_endpoint_id(sam3_url)},
+        "ground_truth_evaluation": {
+            "available": False,
+            "used_for_control": False,
+            "captured_after_m3_motion": False,
+        },
+    }
+
+    def write_evidence() -> None:
+        _json_dump(evidence_path, evidence)
+
+    class _SelectionOnlyPlanner(BasePlanner):
+        """A guard that makes accidental planner execution fail immediately."""
+
+        def plan(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("M5 control-only selection must not invoke a planner")
+
+    try:
+        # This transport belongs to the externally supplied SAM3 URL only.
+        # We do not spawn, stop, or otherwise manage that service.
+        try:
+            sam3_transport = SseSimulatorMcpTransport(sam3_url)
+            catalog = sam3_transport.list_tools(timeout_s=30.0)
+        except Exception as exc:  # noqa: BLE001 - transport details may contain credentials.
+            evidence.update({"status": "blocked", "reason_code": "SAM3_UNAVAILABLE"})
+            write_evidence()
+            raise M5BlockedError("SAM3_UNAVAILABLE", "external SAM3 service is unavailable") from exc
+        if not isinstance(catalog, Mapping) or "segment" not in _m5_tool_catalog_names(catalog):
+            evidence.update({"status": "blocked", "reason_code": "SAM3_TOOL_UNAVAILABLE"})
+            write_evidence()
+            raise M5BlockedError("SAM3_TOOL_UNAVAILABLE", "external SAM3 service lacks segment")
+        # The endpoint is external. Persist only the discovered names/count,
+        # not arbitrary remote tool descriptions or schemas that could carry
+        # deployment-specific secrets.
+        catalog_path = paths.root / "m5-sam3-tool-catalog.json"
+        tool_names = sorted(_m5_tool_catalog_names(catalog))
+        _json_dump(
+            catalog_path,
+            {"tool_names": tool_names, "tool_count": len(tool_names)},
+            exclusive=True,
+        )
+        evidence["sam3"]["tool_catalog"] = _m5_case_artifact(paths, catalog_path)
+
+        runner.require_success(
+            "create_simulator_env",
+            {
+                "env_id": ENV_IDS[M5_MILESTONE],
+                "seed": 0,
+                "task": "M5 real SAM3 perception then M3 native joint control",
+            },
+        )
+        current = runner.require_success("observe")
+        camera = _m5_current_camera(current, paths)
+        evidence["observe"] = {
+            "receipt": _m5_observe_receipt(current, paths),
+            "frame_id": str(camera["frame_id"]),
+            "rgb": _m5_case_artifact(paths, str(camera["rgb_path"])),
+            "depth": _m5_case_artifact(paths, str(camera["depth_path"])),
+            "intrinsics": dict(camera["intrinsics"]),
+            "extrinsics": dict(camera["extrinsics"]),
+        }
+
+        # Reuse the production SAM3 materializer so the request/response are
+        # scrubbed and its mask artifacts remain case-local.  OpenEtaAgentRuntime
+        # is instantiated only to bind the existing selection contract; no
+        # planner, provider, PTY, or runtime act loop is invoked.
+        sam3_handler = build_sam3_handler(
+            build_sse_sam3_mcp_segmenter(url=sam3_url, tool_name="segment"),
+            output_root=paths.root / "m5-sam3-images",
+            result_output_root=paths.root / "m5-sam3-results",
+        )
+        runner.registry.bind_handler("sam3", sam3_handler, replace=True)
+        selection_runtime = OpenEtaAgentRuntime(
+            planner=_SelectionOnlyPlanner(),
+            tools=runner.registry,
+            rollout_enabled=False,
+            default_session_id=str(runner.metadata["session_id"]),
+        )
+        selection_runtime.start_session(
+            task="M5 control-only SAM3 single-candidate selection",
+            metadata={"execution_profile": CONTROL_ONLY, "planner_invoked": False},
+        )
+        sam3_result = runner.invoke(
+            "sam3",
+            {"image": str(camera["rgb_path"]), "prompt": "red rectangular target"},
+            observation=_m5_observation_for_sam3(camera, "M5 SAM3 segmentation"),
+        )
+        sam3_details = getattr(sam3_result, "details", {})
+        sam3_outputs = (
+            sam3_details.get("outputs") if isinstance(sam3_details, Mapping) else None
+        )
+        if not getattr(sam3_result, "success", False):
+            reason = (
+                str(sam3_outputs.get("reason") or "SAM3_INFERENCE_UNAVAILABLE")
+                if isinstance(sam3_outputs, Mapping)
+                else "SAM3_INFERENCE_UNAVAILABLE"
+            )
+            if reason in {
+                "inconsistent_detection_outputs",
+                "artifact_write_failed",
+                "image_not_found",
+                "image_encode_failed",
+            }:
+                evidence.update({"status": "failed", "reason_code": "M5_SAM3_RESPONSE_MALFORMED", "sam3_reason": reason})
+                write_evidence()
+                raise M5FailedError("M5_SAM3_RESPONSE_MALFORMED")
+            evidence.update({"status": "blocked", "reason_code": "SAM3_INFERENCE_UNAVAILABLE", "sam3_reason": reason})
+            write_evidence()
+            raise M5BlockedError("SAM3_INFERENCE_UNAVAILABLE", "external SAM3 inference is unavailable")
+        if not isinstance(sam3_outputs, Mapping):
+            evidence.update({"status": "failed", "reason_code": "M5_SAM3_RESPONSE_MALFORMED"})
+            write_evidence()
+            raise M5FailedError("M5_SAM3_RESPONSE_MALFORMED")
+        try:
+            candidate = _m5_require_single_real_candidate(sam3_outputs)
+        except M5FailedError as exc:
+            evidence.update({"status": "failed", "reason_code": exc.code})
+            write_evidence()
+            raise
+        raw_response_ref = sam3_outputs.get("raw_output_ref")
+        sam3_run_dir = Path(str(raw_response_ref)).parent if isinstance(raw_response_ref, str) else None
+        for artifact_path in (
+            sam3_run_dir / "request.json" if sam3_run_dir else None,
+            raw_response_ref,
+            sam3_run_dir / "tool_result.json" if sam3_run_dir else None,
+        ):
+            if artifact_path is None:
+                continue
+            try:
+                _m5_scrub_json_artifact(paths, artifact_path)
+            except M5FailedError as exc:
+                evidence.update({"status": "failed", "reason_code": exc.code})
+                write_evidence()
+                raise
+        sam3_artifacts: dict[str, Any] = {}
+        for name, artifact_path in (
+            ("request", sam3_run_dir / "request.json" if sam3_run_dir else None),
+            ("response", raw_response_ref),
+            ("tool_result", sam3_run_dir / "tool_result.json" if sam3_run_dir else None),
+            ("mask", candidate.get("mask_ref")),
+        ):
+            artifact = _m5_optional_case_artifact(paths, artifact_path)
+            if artifact is None:
+                evidence.update({"status": "failed", "reason_code": "M5_SAM3_ARTIFACT_MISSING"})
+                write_evidence()
+                raise M5FailedError("M5_SAM3_ARTIFACT_MISSING")
+            sam3_artifacts[name] = artifact
+        evidence["sam3"].update(
+            {
+                "tool": "segment",
+                "candidate_count": 1,
+                "request_response_artifacts": sam3_artifacts,
+            }
+        )
+
+        # Feed the real handler result into the unchanged pending-selection
+        # state machine, then make its one candidate explicit with protected
+        # host-only metadata.  There is no score-based selection or Oracle
+        # fallback in this branch.
+        selection_runtime.memory.add_action(
+            EnvAction(
+                action_type="tool_call",
+                command={
+                    "tool_calls": [
+                        {
+                            "name": "sam3",
+                            "result": _m5_redact_external_value(
+                                _tool_result_record(sam3_result)
+                            ),
+                        }
+                    ]
+                },
+            )
+        )
+        selection = runner.invoke(
+            "select_sam3_detection",
+            {
+                "sam3_result_id": str(sam3_outputs.get("result_id") or ""),
+                "detection_id": str(candidate["id"]),
+                "reason": "control-only exact single SAM3 candidate",
+            },
+            metadata={
+                "_openeta_control_only_m5": True,
+                "_openeta_host_selection_source": "scripted_single_candidate",
+            },
+        )
+        selection_outputs = (
+            selection.details.get("outputs")
+            if isinstance(getattr(selection, "details", {}), Mapping)
+            else None
+        )
+        selected = selection_outputs.get("selected_detection") if isinstance(selection_outputs, Mapping) else None
+        if (
+            not getattr(selection, "success", False)
+            or not isinstance(selected, Mapping)
+            or selected.get("selection_source") != "scripted_single_candidate"
+            or _m5_selection_is_forbidden(selected)
+        ):
+            evidence.update({"status": "failed", "reason_code": "M5_SELECTION_REJECTED"})
+            write_evidence()
+            raise M5FailedError("M5_SELECTION_REJECTED")
+        evidence["selection"] = {
+            "tool": "select_sam3_detection",
+            "result_id": str(selection_outputs.get("result_id") or ""),
+            "detection_id": str(selected.get("id") or ""),
+            "selection_source": "scripted_single_candidate",
+            "reason": "control-only exact single SAM3 candidate",
+        }
+
+        try:
+            object_summary = build_m5_object_summary(
+                detection=selected,
+                camera=camera,
+                case_root=paths.root,
+            )
+        except M5PerceptionBridgeError as exc:
+            evidence.update({"status": "failed", "reason_code": exc.code})
+            write_evidence()
+            raise M5FailedError(exc.code) from exc
+        summary_path = paths.root / "m5-object-summary.json"
+        _json_dump(summary_path, object_summary, exclusive=True)
+        evidence["m5_object_summary"] = {
+            "artifact": _m5_case_artifact(paths, summary_path),
+            "provenance": "sam3_perception",
+            "source_camera": str(camera["frame_id"]),
+            "confidence": object_summary["objects"][0].get("confidence"),
+        }
+        write_evidence()
+
+        m3_results = _m3_motion(runner)
+        evidence["m3_receipts"] = _m5_m3_receipts(m3_results, paths)
+        evidence["ground_truth_evaluation"] = _m5_post_motion_evaluation(m3_results[-1])
+        evidence["status"] = "passed"
+        write_evidence()
+    except M5ControlError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - retain no endpoint/credential in artifacts.
+        evidence.update({"status": "failed", "reason_code": "M5_UNEXPECTED_FAILURE"})
+        write_evidence()
+        raise M5FailedError("M5_UNEXPECTED_FAILURE") from exc
 
 
 def _run_m3_or_m4_control(runner: _ControlToolRunner, *, m4: bool) -> None:
@@ -1062,7 +2114,12 @@ def _run_m3_or_m4_control(runner: _ControlToolRunner, *, m4: bool) -> None:
     _m3_motion(runner)
 
 
-def _run_control_case(paths: CasePaths, allocation: Allocation) -> int:
+def _run_control_case(
+    paths: CasePaths,
+    allocation: Allocation,
+    *,
+    sam3_url: str = "",
+) -> int:
     """Run one no-provider case and retain raw AgentTool/MCP evidence."""
 
     milestone = paths.root.parent.name
@@ -1083,9 +2140,14 @@ def _run_control_case(paths: CasePaths, allocation: Allocation) -> int:
             _run_m3_or_m4_control(runner, m4=False)
         elif milestone == "m4":
             _run_m3_or_m4_control(runner, m4=True)
+        elif milestone == M5_MILESTONE:
+            if not sam3_url:
+                raise M5BlockedError("SAM3_UNAVAILABLE", "M5 requires an external SAM3 URL")
+            _run_m5_control(runner, paths=paths, sam3_url=sam3_url)
         else:
             raise AcceptanceError(f"unknown control milestone: {milestone}")
     except Exception as exc:  # noqa: BLE001 - record the actual local failure before cleanup.
+        error_code = exc.code if isinstance(exc, M5ControlError) else str(exc)
         _append_control_trace(
             paths,
             {
@@ -1094,7 +2156,7 @@ def _run_control_case(paths: CasePaths, allocation: Allocation) -> int:
                     "execution_profile": CONTROL_ONLY,
                     "planner_invoked": False,
                     "provider_invoked": False,
-                    "error_code": str(exc),
+                    "error_code": error_code,
                     "error_type": type(exc).__name__,
                 },
             },
@@ -1106,11 +2168,21 @@ def _run_control_case(paths: CasePaths, allocation: Allocation) -> int:
     return 0
 
 
-def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
+def run_case(
+    repo: Path,
+    paths: CasePaths,
+    allocation: Allocation,
+    *,
+    sam3_url: str = "",
+) -> int:
     milestone = paths.root.parent.name
     scripted = paths.root.name == SCRIPTED_TUI
     control_only = paths.root.name == CONTROL_ONLY
-    env = os.environ.copy()
+    # The simulator MCP server never needs provider credentials.  Start from
+    # a scrubbed copy so process inheritance cannot make them appear in MCP or
+    # worker diagnostics; only the actual scripted PTY receives the resolved
+    # primary provider configuration below.
+    env = _without_provider_environment(os.environ)
     # Jazzy deprecates ROS_LOCALHOST_ONLY in favour of discovery-range
     # controls. In this multi-process topology the legacy switch can prevent
     # the bridge and camera subscriber from discovering each other. Keep DDS
@@ -1152,6 +2224,12 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
             "RMW_IMPLEMENTATION": env.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         }
     )
+    tui_env = dict(env)
+    if scripted:
+        # Resolve root `.env`/`apikey.md` before the child changes into its
+        # isolated case directory.  Keep the result solely in the child
+        # process environment; never copy a config file into evidence.
+        tui_env.update(_resolved_provider_environment(_root_provider_config(repo)))
     python = Path(os.environ.get("OPENETA_PYTHON_EXECUTABLE") or sys.executable).absolute()
     if not python.is_file() or not os.access(python, os.X_OK):
         raise AcceptanceError("TUI_NOT_READY: selected Python executable is unavailable")
@@ -1186,27 +2264,25 @@ def run_case(repo: Path, paths: CasePaths, allocation: Allocation) -> int:
     try:
         _wait_ready(allocation.port, process)
         if control_only:
-            tui_code = _run_control_case(paths, allocation)
+            tui_code = _run_control_case(paths, allocation, sam3_url=sam3_url)
         else:
             print(f"\n=== {paths.root.name} ===")
             print(paths.instructions.read_text(encoding="utf-8"))
             command = f"{shlex.quote(str(python))} -m agent.cli.openeta_cli"
             if shutil.which("script") is None:
                 raise AcceptanceError("TUI_NOT_READY: util-linux script is missing")
-            scripted_input: str | None = None
             if scripted:
                 # Feed these through the actual PTY TUI rather than shortcut mode,
                 # so M0's operator-console evidence lands in the transcript.
-                scripted_input = scripted_tui_input(paths)
-            completed = subprocess.run(
-                ["script", "--flush", "--return", "--command", command, str(paths.transcript)],
-                cwd=paths.root,
-                env=env,
-                check=False,
-                input=scripted_input,
-                text=scripted_input is not None,
-            )
-            tui_code = int(completed.returncode)
+                tui_code = _run_scripted_tui(command, paths, tui_env)
+            else:
+                completed = subprocess.run(
+                    ["script", "--flush", "--return", "--command", command, str(paths.transcript)],
+                    cwd=paths.root,
+                    env=tui_env,
+                    check=False,
+                )
+                tui_code = int(completed.returncode)
     finally:
         # Capture the run-id-marked worker while the MCP server still owns its
         # bookkeeping.  Its own shutdown may stop the group before runner-side
@@ -1748,36 +2824,275 @@ def _m2_semantic_nodes(
     return [result, linked[0]], []
 
 
+def _m2_terminal_receipt(nodes: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """Return the durable controller response for one M2 action when present."""
+
+    # ``_m2_semantic_nodes`` places the validated materialized MCP response
+    # last.  Work in reverse for direct unit tests too, whose single node is
+    # their synthetic controller receipt.
+    for node in reversed(nodes):
+        for item in _walk(node):
+            if isinstance(item, Mapping) and "ok" in item:
+                return item
+    return {}
+
+
+def _m2_strict_action_success(
+    nodes: Sequence[Mapping[str, Any]],
+    *,
+    reached_key: str,
+) -> bool:
+    """Accept only the terminal M2 receipt's explicit, non-stalled success."""
+
+    receipt = _m2_terminal_receipt(nodes)
+    reached = receipt.get(reached_key)
+    if reached is None and reached_key == "reached_target":
+        reached = receipt.get("reached_goal")
+    return (
+        receipt.get("ok") is True
+        and reached is True
+        and receipt.get("stalled") is False
+    )
+
+
+def _m2_gripper_position(call: Mapping[str, Any]) -> int | None:
+    """Read exactly the agent-submitted binary command, never a nested echo."""
+
+    parameters = call.get("parameters")
+    position = parameters.get("position") if isinstance(parameters, Mapping) else None
+    return position if type(position) is int and position in {0, 1} else None
+
+
+def _m2_move_target_key(
+    call: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]]
+) -> str | None:
+    """Canonicalise the submitted A/B target before receipt-normalised poses."""
+
+    candidates: list[Any] = []
+    # The AgentTool request is the A/B contract.  A target pose may omit
+    # orientation, in which case the simulator intentionally preserves the
+    # current orientation and the post-action receipt can differ by tiny
+    # numerical amounts between identical requested xyz values.  Do not turn
+    # that controller normalisation into a false A/B mismatch.
+    parameters = call.get("parameters")
+    if isinstance(parameters, Mapping):
+        candidates.extend((parameters.get("target_pose"), parameters))
+    for node in reversed(nodes):
+        if isinstance(node, Mapping):
+            candidates.append(node.get("target"))
+            candidates.append(node.get("requested_tool_pose"))
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        xyz = candidate.get("xyz")
+        if xyz is None and all(key in candidate for key in ("x", "y", "z")):
+            xyz = [candidate["x"], candidate["y"], candidate["z"]]
+        quat = candidate.get("quat_xyzw")
+        if not (
+            isinstance(xyz, Sequence)
+            and not isinstance(xyz, (str, bytes, bytearray))
+            and len(xyz) == 3
+        ):
+            continue
+        try:
+            canonical: dict[str, list[float]] = {"xyz": [float(value) for value in xyz]}
+            if (
+                isinstance(quat, Sequence)
+                and not isinstance(quat, (str, bytes, bytearray))
+                and len(quat) == 4
+            ):
+                canonical["quat_xyzw"] = [float(value) for value in quat]
+            return json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _m2_successful_observe(
+    call: Mapping[str, Any], nodes: Sequence[Mapping[str, Any]]
+) -> bool:
+    """Keep retry recovery tied to a real successful observation action."""
+
+    return (
+        str(call.get("name") or call.get("tool_name") or "") == "observe"
+        and _successful(call)
+        and _contains(nodes, "observation_fresh", True)
+    )
+
+
 def _verify_m2(
     calls: Sequence[Mapping[str, Any]],
     payloads: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[str]:
+    """Verify M2's ordered, fail-closed motion and gripper contract.
+
+    A mere sequence of requested gripper parameters is not evidence of six
+    state transitions.  Every credited action must instead point at its own
+    correlated, durable controller response and meet the strict terminal
+    success predicate.  The one recovery path is deliberately explicit so a
+    planner cannot hide retries or treat stalls as a successful close/open.
+    """
+
     errors: list[str] = []
-    moves = [call for call in calls if str(call.get("name") or call.get("tool_name")) == "move_to"]
-    successes = [call for call in moves if _successful(call)]
     semantic_nodes: dict[int, list[Mapping[str, Any]]] = {}
-    for call in moves:
+    for call in calls:
+        name = str(call.get("name") or call.get("tool_name") or "")
+        if name not in {"move_to", "gripper_control", "observe"}:
+            continue
         nodes, node_errors = _m2_semantic_nodes(call, payloads)
         semantic_nodes[id(call)] = nodes
         errors.extend(node_errors)
-    failures = [
-        call
-        for call in moves
-        if _contains(semantic_nodes[id(call)], "error_code", "MOTION_PLAN_FAILED")
-    ]
-    if len(successes) < 4:
-        errors.append("M2 requires two A↔B rounds (four successful moves)")
-    if len(failures) != 1:
-        errors.append("M2 requires exactly one stable MOTION_PLAN_FAILED target")
-    successful_controls = successes + [
+
+    contract_names = {
+        "create_simulator_env",
+        "move_to",
+        "gripper_control",
+        "observe",
+        "close_simulator_env",
+    }
+    contract_calls = [
         call
         for call in calls
-        if str(call.get("name") or call.get("tool_name")) == "gripper_control"
-        and _successful(call)
+        if str(call.get("name") or call.get("tool_name") or "") in contract_names
     ]
-    for call in successful_controls:
-        nodes, node_errors = _m2_semantic_nodes(call, payloads)
-        errors.extend(node_errors)
+    forbidden_trajectory_calls = [
+        call
+        for call in calls
+        if str(call.get("name") or call.get("tool_name") or "") == "follow_eef_trajectory"
+    ]
+    if forbidden_trajectory_calls:
+        errors.append("M2 contract forbids follow_eef_trajectory in place of A/B moves")
+
+    create_calls = [
+        call
+        for call in contract_calls
+        if str(call.get("name") or call.get("tool_name") or "") == "create_simulator_env"
+    ]
+    if len(create_calls) != 1:
+        errors.append("M2 requires exactly one create_simulator_env")
+    elif not _contains(create_calls[0], "env_id", ENV_IDS["m2"]):
+        errors.append("M2 environment identity is not the required M2 environment")
+    if not contract_calls or str(contract_calls[0].get("name") or contract_calls[0].get("tool_name") or "") != "create_simulator_env":
+        errors.append("M2 create_simulator_env must precede every M2 action")
+        return errors
+
+    cursor = 1
+    # The create receipt normally includes its reset observation.  Permit one
+    # explicit initial observe for a controller that needs it to derive two
+    # safe Cartesian targets; it cannot substitute for the mandatory final
+    # observe or for a failed-gripper recovery observe.
+    if cursor < len(contract_calls) and _m2_successful_observe(
+        contract_calls[cursor], semantic_nodes.get(id(contract_calls[cursor]), [])
+    ):
+        cursor += 1
+
+    successful_actions: list[Mapping[str, Any]] = []
+    move_targets: list[str | None] = []
+    for step in range(4):
+        if cursor >= len(contract_calls) or str(
+            contract_calls[cursor].get("name") or contract_calls[cursor].get("tool_name") or ""
+        ) != "move_to":
+            errors.append("M2 requires four ordered successful moves A,B,A,B")
+            return errors
+        call = contract_calls[cursor]
+        nodes = semantic_nodes.get(id(call), [])
+        if not _m2_strict_action_success(nodes, reached_key="reached_target"):
+            errors.append(f"M2 move {step + 1} is not a strict successful receipt")
+        else:
+            successful_actions.append(call)
+        move_targets.append(_m2_move_target_key(call, nodes))
+        cursor += 1
+    if any(target is None for target in move_targets):
+        errors.append("M2 A/B move receipts lack canonical controller targets")
+    elif (
+        move_targets[0] != move_targets[2]
+        or move_targets[1] != move_targets[3]
+        or move_targets[0] == move_targets[1]
+    ):
+        errors.append("M2 moves must be two distinct targets in exact A,B,A,B order")
+
+    retry_used = False
+    for step, expected_position in enumerate(M2_GRIPPER_SEQUENCE, 1):
+        if cursor >= len(contract_calls) or str(
+            contract_calls[cursor].get("name") or contract_calls[cursor].get("tool_name") or ""
+        ) != "gripper_control":
+            errors.append("M2 requires six ordered gripper steps [1,0,1,1,0,1]")
+            return errors
+        call = contract_calls[cursor]
+        position = _m2_gripper_position(call)
+        if position != expected_position:
+            errors.append(
+                f"M2 gripper step {step} must use position={expected_position}, got {position!r}"
+            )
+        nodes = semantic_nodes.get(id(call), [])
+        strict_success = _m2_strict_action_success(nodes, reached_key="reached_goal")
+        cursor += 1
+        if strict_success:
+            successful_actions.append(call)
+            continue
+
+        if retry_used:
+            errors.append("M2 permits only one fresh-observe gripper retry")
+            return errors
+        retry_used = True
+        if cursor >= len(contract_calls) or not _m2_successful_observe(
+            contract_calls[cursor], semantic_nodes.get(id(contract_calls[cursor]), [])
+        ):
+            errors.append("M2 failed gripper step requires a fresh observe before retry")
+            return errors
+        cursor += 1
+        if cursor >= len(contract_calls) or str(
+            contract_calls[cursor].get("name") or contract_calls[cursor].get("tool_name") or ""
+        ) != "gripper_control":
+            errors.append("M2 failed gripper step requires exactly one same-position retry")
+            return errors
+        retry = contract_calls[cursor]
+        retry_position = _m2_gripper_position(retry)
+        retry_nodes = semantic_nodes.get(id(retry), [])
+        retry_success = _m2_strict_action_success(retry_nodes, reached_key="reached_goal")
+        if retry_position != expected_position:
+            errors.append("M2 gripper retry must use the failed step's same position")
+        if not retry_success:
+            errors.append("M2 gripper retry did not strictly succeed; close and fail M2")
+            return errors
+        successful_actions.append(retry)
+        cursor += 1
+
+    if cursor >= len(contract_calls) or str(
+        contract_calls[cursor].get("name") or contract_calls[cursor].get("tool_name") or ""
+    ) != "move_to":
+        errors.append("M2 requires one MOTION_PLAN_FAILED move after all gripper steps")
+        return errors
+    unreachable = contract_calls[cursor]
+    unreachable_receipt = _m2_terminal_receipt(semantic_nodes.get(id(unreachable), []))
+    if (
+        unreachable_receipt.get("ok") is not False
+        or unreachable_receipt.get("error_code") != "MOTION_PLAN_FAILED"
+        or unreachable_receipt.get("reached_target") is True
+        or unreachable_receipt.get("reached_goal") is True
+    ):
+        errors.append("M2 requires exactly one fail-closed MOTION_PLAN_FAILED target")
+    cursor += 1
+
+    if cursor >= len(contract_calls) or not _m2_successful_observe(
+        contract_calls[cursor], semantic_nodes.get(id(contract_calls[cursor]), [])
+    ):
+        errors.append("M2 requires one successful observe after MOTION_PLAN_FAILED")
+        return errors
+    cursor += 1
+    if cursor >= len(contract_calls) or str(
+        contract_calls[cursor].get("name") or contract_calls[cursor].get("tool_name") or ""
+    ) != "close_simulator_env":
+        errors.append("M2 requires one final close_simulator_env")
+        return errors
+    if not _successful(contract_calls[cursor]):
+        errors.append("M2 final close_simulator_env did not succeed")
+    cursor += 1
+    if cursor != len(contract_calls):
+        errors.append("M2 contract contains skipped, duplicate, or out-of-order control actions")
+
+    for call in successful_actions:
+        nodes = semantic_nodes[id(call)]
         if len(_camera_frames(nodes)) < 2:
             errors.append("M2 successful action lacks fresh dual RGB-D")
         if not _contains(nodes, "robot") and not _contains(nodes, "joint_positions"):
@@ -1795,22 +3110,6 @@ def _verify_m2(
             errors.append("M2 successful action lacks completion barrier")
         if not _contains(nodes, "observation_fresh", True):
             errors.append("M2 successful action lacks fresh-observation receipt")
-    if failures and (
-        _successful(failures[0])
-        or _contains(semantic_nodes[id(failures[0])], "reached_target", True)
-    ):
-        errors.append("M2 unreachable target did not fail closed")
-    grippers = [
-        call for call in calls if str(call.get("name") or call.get("tool_name")) == "gripper_control"
-    ]
-    positions = [value for call in grippers for value in _values(call, "position")]
-    pattern = [1, 0, 1, 1, 0, 1]
-    cursor = 0
-    for position in positions:
-        if cursor < len(pattern) and position == pattern[cursor]:
-            cursor += 1
-    if cursor != len(pattern):
-        errors.append("M2 requires two open→close→open rounds")
     return errors
 
 
@@ -2010,6 +3309,164 @@ def _verify_m4(
     return errors
 
 
+def _verify_m5_artifact(
+    paths: CasePaths,
+    artifact: Any,
+    *,
+    label: str,
+) -> tuple[Path | None, str | None]:
+    if not isinstance(artifact, Mapping):
+        return None, f"M5 {label} artifact descriptor is missing"
+    relative = artifact.get("path")
+    digest = artifact.get("sha256")
+    if not isinstance(relative, str) or not isinstance(digest, str):
+        return None, f"M5 {label} artifact descriptor is malformed"
+    path = (paths.root / relative).resolve()
+    try:
+        path.relative_to(paths.root.resolve())
+    except ValueError:
+        return None, f"M5 {label} artifact escapes the case directory"
+    if not path.is_file():
+        return None, f"M5 {label} artifact is missing"
+    if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        return None, f"M5 {label} artifact hash mismatch"
+    return path, None
+
+
+def _verify_m5(
+    calls: Sequence[Mapping[str, Any]],
+    payloads: Sequence[Mapping[str, Any]],
+    paths: CasePaths,
+) -> list[str]:
+    """Verify the M5 perception gate before accepting the inherited M3 proof."""
+
+    errors: list[str] = []
+    evidence_path = paths.root / "m5-perception.json"
+    if not evidence_path.is_file():
+        return ["M5 perception evidence is missing"]
+    try:
+        evidence = _json_load(evidence_path)
+    except (OSError, ValueError):
+        return ["M5 perception evidence is unreadable"]
+    if not isinstance(evidence, Mapping):
+        return ["M5 perception evidence is malformed"]
+    if evidence.get("schema_version") != "openeta.gazebo.m5_perception_evidence.v1":
+        errors.append("M5 perception evidence schema is missing")
+    if evidence.get("acceptance_scope") != "control_only_real_sam3_no_planner_not_formal_tui":
+        errors.append("M5 report scope is not the restricted real-SAM3 control scope")
+    endpoint = evidence.get("sam3", {}).get("endpoint_id") if isinstance(evidence.get("sam3"), Mapping) else ""
+    if not isinstance(endpoint, str) or not endpoint or any(token in endpoint for token in ("?", "#", "@")):
+        errors.append("M5 SAM3 endpoint identifier is not redacted")
+
+    sam3_calls = [
+        call for call in calls if str(call.get("name") or call.get("tool_name") or "") == "sam3"
+    ]
+    if len(sam3_calls) != 1 or not _successful(sam3_calls[0]):
+        errors.append("M5 did not complete exactly one real SAM3 segment call")
+    if any(_m5_selection_is_forbidden(call) for call in sam3_calls):
+        errors.append("M5 SAM3 evidence contains Oracle or fake candidate data")
+
+    evidence_status = str(evidence.get("status") or "")
+    if evidence_status != "passed":
+        reason = str(evidence.get("reason_code") or "unknown")
+        errors.append(f"M5 perception gate did not pass: {reason}")
+        if any(
+            str(call.get("name") or call.get("tool_name") or "")
+            in {"move_to", "follow_eef_trajectory", "gripper_control"}
+            for call in calls
+        ):
+            errors.append("M5 entered M3 motion before its perception gate passed")
+        return errors
+
+    sam3 = evidence.get("sam3")
+    if not isinstance(sam3, Mapping) or sam3.get("tool") != "segment" or sam3.get("candidate_count") != 1:
+        errors.append("M5 SAM3 evidence does not prove one segment candidate")
+    artifacts = sam3.get("request_response_artifacts") if isinstance(sam3, Mapping) else None
+    if not isinstance(artifacts, Mapping):
+        errors.append("M5 SAM3 request/response artifacts are missing")
+    else:
+        for name in ("request", "response", "tool_result", "mask"):
+            _, artifact_error = _verify_m5_artifact(paths, artifacts.get(name), label=f"SAM3 {name}")
+            if artifact_error:
+                errors.append(artifact_error)
+
+    observe = evidence.get("observe")
+    if not isinstance(observe, Mapping):
+        errors.append("M5 observe evidence is missing")
+    else:
+        for name in ("rgb", "depth"):
+            _, artifact_error = _verify_m5_artifact(paths, observe.get(name), label=name)
+            if artifact_error:
+                errors.append(artifact_error)
+        if not isinstance(observe.get("frame_id"), str) or not observe["frame_id"]:
+            errors.append("M5 observe source frame is missing")
+        if not isinstance(observe.get("intrinsics"), Mapping):
+            errors.append("M5 observe intrinsics are missing")
+        if not isinstance(observe.get("extrinsics"), Mapping):
+            errors.append("M5 observe extrinsics are missing")
+
+    selection = evidence.get("selection")
+    if (
+        not isinstance(selection, Mapping)
+        or selection.get("tool") != "select_sam3_detection"
+        or selection.get("selection_source") != "scripted_single_candidate"
+        or not isinstance(selection.get("result_id"), str)
+        or not isinstance(selection.get("detection_id"), str)
+    ):
+        errors.append("M5 does not prove a host-only explicit single-candidate selection")
+    select_calls = [
+        call
+        for call in calls
+        if str(call.get("name") or call.get("tool_name") or "") == "select_sam3_detection"
+    ]
+    if len(select_calls) != 1 or not _successful(select_calls[0]):
+        errors.append("M5 select_sam3_detection call is missing or failed")
+    elif _m5_selection_is_forbidden(select_calls[0]):
+        errors.append("M5 selection contains Oracle or fake candidate data")
+
+    summary_meta = evidence.get("m5_object_summary")
+    summary_artifact = summary_meta.get("artifact") if isinstance(summary_meta, Mapping) else None
+    summary_path, summary_error = _verify_m5_artifact(
+        paths, summary_artifact, label="object summary"
+    )
+    if summary_error:
+        errors.append(summary_error)
+    elif summary_path is not None:
+        try:
+            summary = _json_load(summary_path)
+        except (OSError, ValueError):
+            errors.append("M5 object summary is unreadable")
+        else:
+            objects = summary.get("objects") if isinstance(summary, Mapping) else None
+            entry = objects[0] if isinstance(objects, list) and len(objects) == 1 and isinstance(objects[0], Mapping) else None
+            position = entry.get("position") if isinstance(entry, Mapping) else None
+            if (
+                not isinstance(entry, Mapping)
+                or entry.get("provenance") != "sam3_perception"
+                or not isinstance(entry.get("source_camera"), str)
+                or not isinstance(entry.get("confidence"), (int, float))
+                or isinstance(entry.get("confidence"), bool)
+                or not math.isfinite(float(entry.get("confidence")))
+                or not isinstance(position, list)
+                or len(position) != 3
+                or any(
+                    not isinstance(item, (int, float))
+                    or isinstance(item, bool)
+                    or not math.isfinite(float(item))
+                    for item in position
+                )
+            ):
+                errors.append("M5 object summary lacks a finite SAM3 world position")
+
+    evaluation = evidence.get("ground_truth_evaluation")
+    if not isinstance(evaluation, Mapping) or evaluation.get("used_for_control") is not False or evaluation.get("captured_after_m3_motion") is not True:
+        errors.append("M5 Gazebo truth is not restricted to post-motion evaluation")
+    if not isinstance(evidence.get("m3_receipts"), list) or not evidence["m3_receipts"]:
+        errors.append("M5 evidence lacks linked M3 receipts")
+    errors.extend(_verify_m3(calls, payloads))
+    return errors
+
+
 def _verify_control_trace(events: Sequence[Mapping[str, Any]]) -> list[str]:
     """Prove the control-only runner did not silently become a planner run."""
 
@@ -2094,6 +3551,8 @@ def verify_case(
                 errors.extend(_verify_m3(calls, payloads))
             elif milestone == "m4":
                 errors.extend(_verify_m4(calls, payloads))
+            elif milestone == M5_MILESTONE:
+                errors.extend(_verify_m5(calls, payloads, paths))
         error_codes = {str(value) for event in events for value in _values(event, "error_code")}
         infrastructure_codes = error_codes & INFRA_CODES
         if provider_billing_errors:
@@ -2119,15 +3578,146 @@ def verify_case(
         }
 
 
+def _provider_preflight_summary(run_root: Path) -> dict[str, Any] | None:
+    """Load only the safe, reportable subset of provider-preflight evidence."""
+
+    path = run_root / PROVIDER_PREFLIGHT_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        raw = _json_load(path)
+    except (OSError, ValueError):
+        return {
+            "status": "blocked",
+            "reason_code": "PROVIDER_PREFLIGHT_EVIDENCE_UNREADABLE",
+        }
+    if not isinstance(raw, Mapping):
+        return {
+            "status": "blocked",
+            "reason_code": "PROVIDER_PREFLIGHT_EVIDENCE_INVALID",
+        }
+
+    def bounded_string(value: Any, *, limit: int = 240) -> str:
+        return value[:limit] if isinstance(value, str) else ""
+
+    status = str(raw.get("status") or "")
+    reason_code = bounded_string(raw.get("reason_code"), limit=120)
+    summary: dict[str, Any] = {
+        "status": status if status in {"passed", "blocked", "failed"} else "blocked",
+        "reason_code": reason_code or "PROVIDER_PREFLIGHT_EVIDENCE_INVALID",
+    }
+    for key in ("provider", "model", "endpoint_id"):
+        value = bounded_string(raw.get(key))
+        if value:
+            summary[key] = value
+    for key in ("vision_enabled", "fallback_used"):
+        if isinstance(raw.get(key), bool):
+            summary[key] = raw[key]
+    for key in ("max_tokens", "elapsed_ms"):
+        if isinstance(raw.get(key), (int, float)) and not isinstance(raw.get(key), bool):
+            summary[key] = raw[key]
+    for stage in ("model_list", "planner_smoke"):
+        raw_stage = raw.get(stage)
+        if not isinstance(raw_stage, Mapping):
+            continue
+        stage_summary: dict[str, Any] = {}
+        stage_status = bounded_string(raw_stage.get("status"), limit=32)
+        if stage_status:
+            stage_summary["status"] = stage_status
+        latency = raw_stage.get("latency_ms")
+        if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+            stage_summary["latency_ms"] = latency
+        if raw_stage.get("selected_model_found") is not None:
+            stage_summary["selected_model_found"] = raw_stage.get("selected_model_found") is True
+        schema = bounded_string(raw_stage.get("response_schema"), limit=80)
+        if schema:
+            stage_summary["response_schema"] = schema
+        if stage_summary:
+            summary[stage] = stage_summary
+    return summary
+
+
+def _scripted_tui_report_metadata(
+    preflight: Mapping[str, Any] | None,
+    *,
+    milestones: Sequence[str] = MILESTONES,
+) -> dict[str, Any]:
+    """Keep local scripted evidence distinct from human/remote acceptance."""
+
+    selected = tuple(milestones)
+    full_m0_m4 = selected == MILESTONES
+    payload: dict[str, Any] = {
+        "acceptance_scope": (
+            "local_automated_scripted_tui_m0_m4"
+            if full_m0_m4
+            else "local_automated_scripted_tui_selected_milestones"
+        ),
+        "selected_milestones": list(selected),
+        "full_m0_m4_acceptance": full_m0_m4,
+        "human_approval": "not_claimed",
+        "remote_clean_clone_acceptance": "not_run",
+        "m5_sam3_acceptance": "not_run",
+    }
+    if preflight is not None:
+        payload["provider_preflight"] = dict(preflight)
+    return payload
+
+
 def assemble_report(
     run_root: Path,
     *,
     formal_mode: str = DETERMINISTIC,
+    milestones: Sequence[str] = MILESTONES,
 ) -> dict[str, Any]:
+    selected_milestones = tuple(milestones)
+    if not selected_milestones or any(item not in MILESTONES for item in selected_milestones):
+        raise AcceptanceError("formal report has an invalid selected milestone scope")
+    if len(set(selected_milestones)) != len(selected_milestones):
+        raise AcceptanceError("formal report selected milestone scope contains duplicates")
     milestones: dict[str, Any] = {}
     stop = False
     overall = "passed"
     scripted_tui = formal_mode == SCRIPTED_TUI
+    preflight = _provider_preflight_summary(run_root) if scripted_tui else None
+
+    # A requested provider preflight is a gate before any ROS/MCP process can
+    # be started.  Report its own bounded result rather than pretending that a
+    # missing M0 trace was a simulator failure.
+    if preflight is not None and preflight["status"] != "passed":
+        first_status = str(preflight["status"])
+        reason_code = str(preflight["reason_code"])
+        for milestone in selected_milestones:
+            if milestone == "m0":
+                backend = {
+                    "status": first_status,
+                    "errors": [f"provider preflight did not pass: {reason_code}"],
+                    "trace_paths": [],
+                    "tool_call_count": 0,
+                    "infrastructure_codes": [reason_code]
+                    if first_status == "blocked"
+                    else [],
+                }
+            else:
+                backend = {
+                    "status": "not_run",
+                    "errors": ["provider preflight gate did not pass"],
+                }
+            milestones[milestone] = {
+                "backend_chain_status": backend,
+                "planner_autonomy_status": {
+                    "status": "not_applicable",
+                    "errors": [],
+                    "reason_code": "SCRIPTED_TUI_AUTONOMY_NOT_REQUIRED",
+                },
+            }
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "run_root": str(run_root.resolve()),
+            "overall_status": "inconclusive" if first_status == "blocked" else "failed",
+            "milestones": milestones,
+            **_scripted_tui_report_metadata(preflight, milestones=selected_milestones),
+        }
 
     def autonomy_not_applicable() -> dict[str, Any]:
         if scripted_tui:
@@ -2138,7 +3728,7 @@ def assemble_report(
             }
         return {"status": "not_applicable", "errors": []}
 
-    for milestone in MILESTONES:
+    for milestone in selected_milestones:
         if stop:
             milestones[milestone] = {
                 "backend_chain_status": {"status": "not_run", "errors": ["formal predecessor gate did not pass"]},
@@ -2171,22 +3761,30 @@ def assemble_report(
             "backend_chain_status": backend,
             "planner_autonomy_status": autonomy,
         }
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
         "run_root": str(run_root.resolve()),
         "overall_status": overall,
         "milestones": milestones,
     }
+    if scripted_tui:
+        report.update(_scripted_tui_report_metadata(preflight, milestones=selected_milestones))
+    return report
 
 
-def assemble_control_report(run_root: Path) -> dict[str, Any]:
+def assemble_control_report(
+    run_root: Path,
+    *,
+    include_m5: bool = False,
+) -> dict[str, Any]:
     """Assemble the no-provider control report without mimicking formal TUI output."""
 
     milestones: dict[str, Any] = {}
     stop = False
     overall = "passed"
-    for milestone in MILESTONES:
+    control_milestones = (*MILESTONES, M5_MILESTONE) if include_m5 else MILESTONES
+    for milestone in control_milestones:
         if stop:
             milestones[milestone] = {
                 "control_layer_status": {
@@ -2208,11 +3806,16 @@ def assemble_control_report(run_root: Path) -> dict[str, Any]:
             "control_layer_status": result,
             "formal_tui_acceptance": "not_run",
         }
+    scope = (
+        "control_only_real_sam3_no_planner_not_formal_tui"
+        if include_m5
+        else "control_only_no_provider_not_formal_tui"
+    )
     return {
         "schema_version": "openeta.gazebo_control_acceptance.v1",
         "generated_at": datetime.now(UTC).isoformat(),
         "run_root": str(run_root.resolve()),
-        "acceptance_scope": "control_only_no_provider_not_formal_tui",
+        "acceptance_scope": scope,
         "planner_provider_invoked": False,
         "formal_tui_acceptance": "not_run",
         "overall_status": overall,
@@ -2243,12 +3846,44 @@ def _parser() -> argparse.ArgumentParser:
         help="Run real PTY TUI cases with explicit scripted_tui approvals, never human approval.",
     )
     parser.add_argument(
+        "--provider-preflight",
+        action="store_true",
+        help=(
+            "For --scripted-tui only, verify the configured primary provider/model "
+            "before any Gazebo or MCP case starts."
+        ),
+    )
+    parser.add_argument(
+        "--milestones",
+        nargs="+",
+        choices=MILESTONES,
+        metavar="MILESTONE",
+        help=(
+            "For --scripted-tui only, run and report only the selected M0–M4 "
+            "milestones. The default remains the complete M0–M4 sequence."
+        ),
+    )
+    parser.add_argument(
         "--control-only",
         action="store_true",
         help=(
             "Exercise M0–M4 AgentTool → MCP/SSE → Gazebo control only; never "
             "start a planner/provider or claim formal PTY/TUI acceptance."
         ),
+    )
+    parser.add_argument(
+        "--include-m5",
+        action="store_true",
+        help=(
+            "After strict M0–M4 control gates, run the opt-in real-SAM3 M5 "
+            "perception-to-M3 control check. Valid only with --control-only."
+        ),
+    )
+    parser.add_argument(
+        "--sam3-url",
+        default="",
+        metavar="URL",
+        help="Already-running external SAM3 SSE MCP endpoint, required with --include-m5.",
     )
     return parser
 
@@ -2257,11 +3892,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.control_only and args.scripted_tui:
         raise AcceptanceError("--control-only and --scripted-tui are mutually exclusive")
+    if args.provider_preflight and not args.scripted_tui:
+        raise AcceptanceError("--provider-preflight is valid only with --scripted-tui")
+    if args.milestones and not args.scripted_tui:
+        raise AcceptanceError("--milestones is valid only with --scripted-tui")
+    if args.milestones and len(set(args.milestones)) != len(args.milestones):
+        raise AcceptanceError("--milestones must not contain duplicates")
+    if args.include_m5 and not args.control_only:
+        raise AcceptanceError("--include-m5 is valid only with --control-only")
+    if args.include_m5 and not args.sam3_url:
+        raise AcceptanceError("--include-m5 requires --sam3-url URL")
+    if args.sam3_url and not args.include_m5:
+        raise AcceptanceError("--sam3-url requires --include-m5")
+    if args.include_m5:
+        # Validate once before creating a run root.  The original URL remains
+        # in process memory only; case evidence records a redacted identifier.
+        _m5_endpoint_id(args.sam3_url)
     repo = Path(__file__).resolve().parents[1]
     run_root = _new_run_root(repo, args.run_root)
     if args.control_only:
         if args.verify_only:
-            report = assemble_control_report(run_root)
+            report = assemble_control_report(run_root, include_m5=args.include_m5)
             report_path = run_root / CONTROL_REPORT_FILENAME
             if report_path.exists():
                 raise AcceptanceError(f"immutable report already exists: {report_path}")
@@ -2273,7 +3924,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_root.mkdir(parents=True, exist_ok=False)
         occupied: set[int] = set()
         try:
-            for milestone in MILESTONES:
+            control_milestones = (*MILESTONES, M5_MILESTONE) if args.include_m5 else MILESTONES
+            for milestone in control_milestones:
                 allocation = allocate(
                     f"{milestone}-{CONTROL_ONLY}",
                     occupied,
@@ -2287,19 +3939,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 paths = prepare_case(repo, run_root, milestone, CONTROL_ONLY, allocation)
                 if args.prepare_only:
                     continue
-                code = run_case(repo, paths, allocation)
+                code = run_case(repo, paths, allocation, sam3_url=args.sam3_url)
                 if code == 130:
                     return 130
                 gate = verify_case(paths, milestone, CONTROL_ONLY)
                 _json_dump(paths.root / "verification.json", gate)
                 if code != 0 or gate["status"] != "passed":
-                    report = assemble_control_report(run_root)
+                    report = assemble_control_report(run_root, include_m5=args.include_m5)
                     _json_dump(run_root / CONTROL_REPORT_FILENAME, report, exclusive=True)
                     return report_exit_code(report)
             if args.prepare_only:
                 print(run_root)
                 return 0
-            report = assemble_control_report(run_root)
+            report = assemble_control_report(run_root, include_m5=args.include_m5)
             report_path = run_root / CONTROL_REPORT_FILENAME
             _json_dump(report_path, report, exclusive=True)
             report_path.chmod(0o444)
@@ -2309,8 +3961,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 130
 
     formal_mode = SCRIPTED_TUI if args.scripted_tui else DETERMINISTIC
+    selected_milestones = tuple(args.milestones or MILESTONES)
     if args.verify_only:
-        report = assemble_report(run_root, formal_mode=formal_mode)
+        report = assemble_report(
+            run_root,
+            formal_mode=formal_mode,
+            milestones=selected_milestones,
+        )
         report_path = run_root / "acceptance-report.json"
         if report_path.exists():
             raise AcceptanceError(f"immutable report already exists: {report_path}")
@@ -2320,9 +3977,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return report_exit_code(report)
 
     run_root.mkdir(parents=True, exist_ok=False)
+    if args.scripted_tui and args.provider_preflight:
+        preflight = _provider_preflight_result(repo)
+        _json_dump(run_root / PROVIDER_PREFLIGHT_FILENAME, preflight, exclusive=True)
+        if preflight["status"] != "passed":
+            report = assemble_report(
+                run_root,
+                formal_mode=SCRIPTED_TUI,
+                milestones=selected_milestones,
+            )
+            report_path = run_root / "acceptance-report.json"
+            _json_dump(report_path, report, exclusive=True)
+            report_path.chmod(0o444)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return report_exit_code(report)
     occupied: set[int] = set()
     try:
-        for milestone in MILESTONES:
+        for milestone in selected_milestones:
             modes = (
                 (SCRIPTED_TUI,)
                 if args.scripted_tui
@@ -2354,13 +4025,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                         report = assemble_report(
                             run_root,
                             formal_mode=formal_mode,
+                            milestones=selected_milestones,
                         )
                         _json_dump(run_root / "acceptance-report.json", report, exclusive=True)
                         return report_exit_code(report)
         if args.prepare_only:
             print(run_root)
             return 0
-        report = assemble_report(run_root, formal_mode=formal_mode)
+        report = assemble_report(
+            run_root,
+            formal_mode=formal_mode,
+            milestones=selected_milestones,
+        )
         report_path = run_root / "acceptance-report.json"
         _json_dump(report_path, report, exclusive=True)
         report_path.chmod(0o444)

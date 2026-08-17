@@ -193,6 +193,8 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert robot.count("xacro:gz_gripper_position_controller joint=") == 6
     assert "ParallelGripperCommand" in adapter
     assert "JOINT_MULTIPLIERS" in adapter
+    assert 'declare_parameter("action_timeout_s", ACTION_TIMEOUT_S)' in adapter
+    assert '"action_timeout_s": 90.0' in launch
     assert launch.count("std_msgs/msg/Float64]gz.msgs.Double") == 6
     for token in (
         "rm75_robotiq_2f85_sim_v1",

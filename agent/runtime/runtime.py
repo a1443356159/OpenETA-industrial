@@ -468,11 +468,24 @@ class OpenEtaAgentRuntime:
                     content="selection_confidence must be between 0 and 1.",
                     diagnostics=[{"code": "invalid_selection_confidence"}],
                 )
+        # The normal path records a VLM/main-agent semantic choice.  The M5
+        # control-only acceptance harness is the narrowly-scoped exception:
+        # it may select the one and only returned candidate, but only through
+        # host-owned execution metadata (never a planner-supplied parameter).
+        # Keeping this at the existing selection-tool boundary preserves the
+        # same pending-result and candidate-id validation for both paths.
+        selection_source = "main_agent_vlm"
+        if (
+            context.metadata.get("_openeta_control_only_m5") is True
+            and context.metadata.get("_openeta_host_selection_source")
+            == "scripted_single_candidate"
+        ):
+            selection_source = "scripted_single_candidate"
         try:
             selected = self.memory.resolve_sam3_selection(
                 result_id=result_id,
                 detection_id=detection_id,
-                selection_source="main_agent_vlm",
+                selection_source=selection_source,
                 confidence=confidence,
                 reason=str(context.parameters.get("reason") or ""),
                 target_geometry_family=str(

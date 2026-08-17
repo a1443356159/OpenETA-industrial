@@ -84,6 +84,14 @@ def test_m2_live_z_probe_keeps_clear_of_the_joint_limit_branch() -> None:
     assert m2_acceptance.Z_PROBE_VELOCITY_SCALING == pytest.approx(0.1)
     assert m2_acceptance.Z_PROBE_ACCELERATION_SCALING == pytest.approx(0.1)
     assert m2_acceptance.MAX_POST_EXECUTION_CORRECTIONS == 1
+    assert m2_acceptance.M2_GRIPPER_SEQUENCE == (
+        ("gripper_open", 1, "open"),
+        ("gripper_close", 0, "closed"),
+        ("gripper_open", 1, "open"),
+        ("gripper_open", 1, "open"),
+        ("gripper_close", 0, "closed"),
+        ("gripper_open", 1, "open"),
+    )
 
 
 @pytest.mark.parametrize(
@@ -168,6 +176,46 @@ def test_controller_routes_actions_and_unknown_outcome():
     assert result["ok"] and result["reached_target"] and result["observation"]["robot"]
     assert ctl.execute({"action_type": "gripper_open"}).ok
     assert ctl.execute({"action_type": "other"}).error_code == "INVALID_CONTROL_ACTION"
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"ok": True, "reached_goal": False, "stalled": False},
+        {"ok": True, "reached_goal": False, "stalled": True},
+        {"ok": False, "reached_goal": False, "stalled": False, "error_code": "GRIPPER_TIMEOUT"},
+    ],
+)
+def test_m2_gripper_never_credits_unreached_stalled_or_timed_out_results(result) -> None:
+    controller = M2Controller(state_provider=_state, gripper_action=lambda _position, _timeout: result)
+
+    receipt = controller.execute({"action_type": "gripper_open"}).to_dict()
+
+    assert receipt["ok"] is False
+    assert receipt["reached_goal"] is False
+    assert receipt["stalled"] is bool(result.get("stalled", False))
+    assert receipt["error_code"] in {"GRIPPER_FAILED", "GRIPPER_TIMEOUT"}
+
+
+def test_m2_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> None:
+    controller = M2Controller(
+        state_provider=_state,
+        gripper_action=lambda _position, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "stalled": False,
+            "terminal_status": "succeeded",
+            "terminal_status_code": 4,
+            "wall_elapsed_ms": 123.456,
+        },
+    )
+
+    receipt = controller.execute({"action_type": "gripper_open"}).to_dict()
+
+    assert receipt["ok"] is True
+    assert receipt["terminal_status"] == "succeeded"
+    assert receipt["terminal_status_code"] == 4
+    assert receipt["wall_elapsed_ms"] == pytest.approx(123.456)
 
 
 def test_controller_runs_one_recovery_then_submits_the_original_target_once() -> None:

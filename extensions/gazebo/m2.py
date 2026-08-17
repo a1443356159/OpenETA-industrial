@@ -787,6 +787,7 @@ class M2Controller:
                         "end_state": end.to_dict(),
                         "steps_executed": 1,
                         "reached_target": bool(result.get("reached_goal", ok)),
+                        "stalled": False,
                         "terminated": False,
                         "truncated": False,
                         "motion_outcome": result.get(
@@ -821,11 +822,20 @@ class M2Controller:
                         "MOTION_OUTCOME_UNKNOWN",
                         {"motion_outcome": "unknown", "reconciliation_required": True},
                     )
-                ok = result["ok"]
+                reached_goal = bool(result.get("reached_goal", result["ok"]))
+                stalled = bool(result.get("stalled", False))
+                # The M3 profile explicitly allows a successful stalled close
+                # as an input to its independent native-contact gate.  M2's
+                # default profile never credits a stalled or unreached action,
+                # even if a lower adapter incorrectly labels it ``ok``.
+                if bool(getattr(self.config, "allow_stalling", False)):
+                    ok = result["ok"]
+                else:
+                    ok = result["ok"] and reached_goal and not stalled
                 state.gripper_state.update(
                     {
-                        "reached_goal": bool(result.get("reached_goal", ok)),
-                        "stalled": bool(result.get("stalled", False)),
+                        "reached_goal": reached_goal,
+                        "stalled": stalled,
                     }
                 )
                 action_timing = {
@@ -841,10 +851,19 @@ class M2Controller:
                     result.get("error_code") or (None if ok else "GRIPPER_FAILED"),
                     {
                         "gripper_state": state.gripper_state,
-                        "reached_goal": bool(result.get("reached_goal", ok)),
-                        "stalled": bool(result.get("stalled", False)),
+                        "reached_goal": reached_goal,
+                        "stalled": stalled,
                         "observation": {"robot": state.to_dict()},
                         **action_timing,
+                        **{
+                            key: result[key]
+                            for key in (
+                                "terminal_status",
+                                "terminal_status_code",
+                                "wall_elapsed_ms",
+                            )
+                            if key in result
+                        },
                     },
                 )
             return M2ControlResult(False, "INVALID_CONTROL_ACTION")

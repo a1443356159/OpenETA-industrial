@@ -125,6 +125,18 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
 
 ## Gazebo Milestones
 
+- [x] M5: opt-in real upstream SAM3 SSE MCP control-only integration.
+  - Runs only after M0–M4 control gates through
+    `scripts/tui_gazebo_acceptance.py --control-only --include-m5 --sam3-url URL`.
+  - Requires one real `segment` candidate and an explicit host-only
+    `scripted_single_candidate` selection; zero/multiple/Oracle/fake candidates
+    fail before M3 motion.
+  - Strictly associates source RGB, depth, mask, frame id and numeric
+    `camera_to_world` extrinsics; evidence is case-local and hash-linked.
+  - The result is `control_only_real_sam3_no_planner_not_formal_tui`, not a
+    formal remote/PTy/LLM acceptance or perception benchmark.
+  - Details: `docs/gazebo-m5-sam3-perception.md`.
+
 - [ ] M4: Oracle perception remains a SAM3-shaped simulator-only perception
   module. M4 candidates must use M3's native-contact DetachableJoint gate.
   - [x] `oracle_perceive` reuses the SAM3 handler/contract/selection flow end

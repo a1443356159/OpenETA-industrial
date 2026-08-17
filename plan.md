@@ -1377,7 +1377,17 @@ M4 reports as readiness evidence.
 
 ## M5 — Generic SAM3 Integration
 
-Replace oracle object discovery with upstream SAM3.
+Status: control-only perception-to-physical-loop integration implemented.
+
+Reuse the M3 Gazebo fixture and fixed physical trajectory. After M0–M4 pass,
+an opt-in run sends the current top RGB artifact to an already-running upstream
+SAM3 SSE MCP `segment` tool, requires exactly one candidate, resolves it only
+through the existing host-owned selection contract, strictly back-projects its
+case-local mask against that same RGB-D frame, then executes unchanged M3
+native-contact/attach/lift/detach verification. Ground truth is recorded only
+after motion as non-control evaluation metadata. The report scope is
+`control_only_real_sam3_no_planner_not_formal_tui`; it is not a formal
+PTY/TUI, Planner/LLM, generalization, or benchmark result.
 
 Keep Gazebo ground truth only for evaluation.
 

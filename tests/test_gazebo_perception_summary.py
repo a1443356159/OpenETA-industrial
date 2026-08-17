@@ -19,6 +19,10 @@ from extensions.gazebo.perception_summary import (
     ERR_MASK_MISSING,
     ERR_NO_VALID_DEPTH,
     PROVENANCE_SAM3,
+    M5PerceptionBridgeError,
+    M5_ERR_MASK_SHAPE,
+    M5_ERR_SOURCE_IMAGE,
+    build_m5_object_summary,
     build_object_summary,
     summarize_detection,
 )
@@ -242,3 +246,74 @@ def test_build_object_summary_wraps_entries(tmp_path) -> None:
     assert [entry["id"] for entry in summary["objects"]] == ["a", "b"]
     assert summary["objects"][0]["position"] is not None
     assert summary["objects"][1]["position"] is None
+
+
+def test_m5_bridge_requires_current_case_local_rgbd_and_selected_frame(tmp_path) -> None:
+    root = tmp_path / "case"
+    root.mkdir()
+    rgb_path = root / "rgb.png"
+    depth_path = root / "depth.png"
+    mask_path = root / "mask.png"
+    Image.new("RGB", (4, 4), (1, 2, 3)).save(rgb_path)
+    Image.fromarray(np.full((4, 4), 2000, dtype=np.uint16), mode="I;16").save(depth_path)
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[2, 2] = True
+    _write_mask(mask_path, mask)
+
+    summary = build_m5_object_summary(
+        detection={
+            "id": "detection_000",
+            "label": "target",
+            "score": 0.9,
+            "mask_ref": str(mask_path),
+            "source_image": str(rgb_path),
+            "source_frame_id": "top_camera_optical_frame",
+        },
+        camera={
+            "frame_id": "top_camera_optical_frame",
+            "rgb_path": str(rgb_path),
+            "depth_path": str(depth_path),
+            "intrinsics": {**_INTRINSICS, "scale": 1000.0},
+            "extrinsics": dict(_EXTRINSICS),
+        },
+        case_root=root,
+    )
+
+    entry = summary["objects"][0]
+    assert entry["position"] == pytest.approx([-0.96, -0.96, 2.0], abs=1e-9)
+    assert entry["provenance"] == PROVENANCE_SAM3
+    assert summary["source_frame_id"] == "top_camera_optical_frame"
+
+
+def test_m5_bridge_refuses_stale_rgb_or_resized_mask(tmp_path) -> None:
+    root = tmp_path / "case"
+    root.mkdir()
+    rgb_path = root / "rgb.png"
+    stale_rgb_path = root / "stale-rgb.png"
+    depth_path = root / "depth.png"
+    mask_path = root / "mask.png"
+    Image.new("RGB", (4, 4)).save(rgb_path)
+    Image.new("RGB", (4, 4)).save(stale_rgb_path)
+    Image.fromarray(np.full((4, 4), 1000, dtype=np.uint16), mode="I;16").save(depth_path)
+    _write_mask(mask_path, np.ones((2, 2), dtype=bool))
+    camera = {
+        "frame_id": "top_camera_optical_frame",
+        "rgb_path": str(rgb_path),
+        "depth_path": str(depth_path),
+        "intrinsics": {**_INTRINSICS, "scale": 1000.0},
+        "extrinsics": dict(_EXTRINSICS),
+    }
+    detection = {
+        "id": "detection_000",
+        "mask_ref": str(mask_path),
+        "source_image": str(stale_rgb_path),
+        "source_frame_id": "top_camera_optical_frame",
+    }
+    with pytest.raises(M5PerceptionBridgeError) as source_error:
+        build_m5_object_summary(detection=detection, camera=camera, case_root=root)
+    assert source_error.value.code == M5_ERR_SOURCE_IMAGE
+
+    detection["source_image"] = str(rgb_path)
+    with pytest.raises(M5PerceptionBridgeError) as mask_error:
+        build_m5_object_summary(detection=detection, camera=camera, case_root=root)
+    assert mask_error.value.code == M5_ERR_MASK_SHAPE

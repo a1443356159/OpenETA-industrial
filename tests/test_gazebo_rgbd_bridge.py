@@ -10,10 +10,17 @@ from extensions.gazebo import GazeboProcess, RosGzBridgeProcess
 
 
 def test_m1_rgbd_bridge_process_contract() -> None:
-    ros2 = shutil.which("ros2") or ("/opt/ros/jazzy/bin/ros2" if os.path.exists("/opt/ros/jazzy/bin/ros2") else None)
-    gz = shutil.which("gz") or ("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz" if os.path.exists("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz") else None)
+    # A bare vendor binary is not a live Gazebo runtime: its plugin/resource
+    # paths are exported only by Jazzy's setup script.  Without this gate an
+    # ordinary unit-test shell waits for topics that can never be advertised.
+    if os.environ.get("ROS_DISTRO") != "jazzy" or not os.environ.get(
+        "GZ_SIM_RESOURCE_PATH"
+    ):
+        pytest.skip("source ROS 2 Jazzy before running the live Gazebo test")
+    ros2 = shutil.which("ros2")
+    gz = shutil.which("gz")
     if ros2 is None or gz is None:
-        pytest.skip("ROS 2 Jazzy/Gazebo Sim is not installed")
+        pytest.skip("sourced ROS 2 Jazzy/Gazebo Sim runtime is unavailable")
     sim = GazeboProcess(world="extensions/gazebo/worlds/m1_rgbd.sdf", gz_executable=gz)
     bridge = RosGzBridgeProcess(
         ros2_executable=ros2,

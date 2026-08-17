@@ -132,6 +132,9 @@ class RobotiqGripperActionAdapter(Node):
         self.declare_parameter("allow_stalling", False)
         self.declare_parameter("stall_velocity_threshold", 0.001)
         self.declare_parameter("stall_timeout", 1.0)
+        # Keep the generic/M3 default short.  M2's live acceptance launch
+        # explicitly raises this to match its 90-second controller budget.
+        self.declare_parameter("action_timeout_s", ACTION_TIMEOUT_S)
         self.declare_parameter("ramp_s", RAMP_S)
         self.declare_parameter("blocked_ramp_factor", BLOCKED_RAMP_FACTOR)
         self.declare_parameter("stall_hold_extra_rad", STALL_HOLD_EXTRA_RAD)
@@ -146,7 +149,12 @@ class RobotiqGripperActionAdapter(Node):
             self.get_parameter("stall_velocity_threshold").value
         )
         self._stall_timeout = float(self.get_parameter("stall_timeout").value)
-        if self._stall_velocity_threshold < 0 or self._stall_timeout <= 0:
+        self._action_timeout_s = float(self.get_parameter("action_timeout_s").value)
+        if (
+            self._stall_velocity_threshold < 0
+            or self._stall_timeout <= 0
+            or self._action_timeout_s <= 0
+        ):
             raise ValueError("stall thresholds must be non-negative with a positive timeout")
         self._callback_group = ReentrantCallbackGroup()
         self._lock = threading.Lock()
@@ -232,7 +240,7 @@ class RobotiqGripperActionAdapter(Node):
             targets = dict(self._six_joint_positions(active_position))
         start_positions, _, _ = self._snapshot()
         result = ParallelGripperCommand.Result()
-        deadline = time.monotonic() + ACTION_TIMEOUT_S
+        deadline = time.monotonic() + self._action_timeout_s
         ramp_s = float(self.get_parameter("ramp_s").value)
         stall_hold_extra = float(self.get_parameter("stall_hold_extra_rad").value)
         max_lead = float(self.get_parameter("max_lead_rad").value)

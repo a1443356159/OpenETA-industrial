@@ -74,9 +74,15 @@ def test_world_control_readiness_fails_closed_without_the_exact_service(
 
 
 def test_gazebo_world_reset_service() -> None:
-    gz = shutil.which("gz") or ("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz" if os.path.exists("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz") else None)
+    # Do not mistake an installed vendor binary for a configured runtime.  The
+    # live test requires the plugin/resource paths exported by Jazzy setup.
+    if os.environ.get("ROS_DISTRO") != "jazzy" or not os.environ.get(
+        "GZ_SIM_RESOURCE_PATH"
+    ):
+        pytest.skip("source ROS 2 Jazzy before running the live Gazebo test")
+    gz = shutil.which("gz")
     if gz is None:
-        pytest.skip("Gazebo Sim is not installed")
+        pytest.skip("sourced Gazebo Sim runtime is unavailable")
     process = GazeboProcess(world="extensions/gazebo/worlds/m1_rgbd.sdf", gz_executable=gz)
     control = GazeboWorldControl(world_name="industrial_rgbd", gz_executable=gz)
     try:

@@ -1222,6 +1222,11 @@ class AgentMemory:
             {
                 "result_id": result_id,
                 "source_image": pending.get("source_image"),
+                # Preserve the current observation identity alongside the
+                # selected mask.  M5's strict RGB-D bridge requires this
+                # exact frame association and must never infer it from a file
+                # name or a unique camera count.
+                "source_frame_id": pending.get("frame_id"),
                 "target_prompt": pending.get("target_prompt"),
                 "segmentation_mode": pending.get("segmentation_mode"),
                 "selection_source": selection_source or "main_agent_vlm",
@@ -1234,6 +1239,9 @@ class AgentMemory:
                 ),
             }
         )
+        camera_role = pending.get("camera_role")
+        if isinstance(camera_role, str) and camera_role:
+            selected["source_camera_role"] = camera_role
         if geometry_family and geometry_family != "unknown":
             selected["target_geometry_family"] = geometry_family
         self.facts.pop(PENDING_SAM3_SELECTION_KEY, None)

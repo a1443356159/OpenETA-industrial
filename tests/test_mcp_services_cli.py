@@ -45,7 +45,7 @@ def test_start_sam3_dry_run_prints_command(tmp_path: Path, capsys) -> None:
     output = capsys.readouterr().out
     assert "/path/to/sam3-env/bin/python" in output
     assert "tools/sam3_mcp_server.py" in output
-    assert "--transport sse" in output
+    assert "--transport dual" in output
     assert "--port 8773" in output
     assert not (tmp_path / "sam3.pid").exists()
 

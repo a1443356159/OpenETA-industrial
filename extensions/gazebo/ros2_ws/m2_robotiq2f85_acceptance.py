@@ -60,6 +60,14 @@ Z_PROBE_ACCELERATION_SCALING = 0.1
 # probe therefore permits exactly one same-target correction, and records the
 # residual from both attempts rather than relaxing its 5 mm acceptance bound.
 MAX_POST_EXECUTION_CORRECTIONS = 1
+M2_GRIPPER_SEQUENCE = (
+    ("gripper_open", 1, "open"),
+    ("gripper_close", 0, "closed"),
+    ("gripper_open", 1, "open"),
+    ("gripper_open", 1, "open"),
+    ("gripper_close", 0, "closed"),
+    ("gripper_open", 1, "open"),
+)
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -549,33 +557,6 @@ def run_direct(report_path: Path) -> None:
         gate["reset_pose"] = reset_pose
         gate["initial_camera_timestamps"] = previous_camera_timestamps
 
-        for _round in range(2):
-            for command, expected in (
-                ("gripper_open", "open"),
-                ("gripper_close", "closed"),
-                ("gripper_open", "open"),
-            ):
-                receipt = controller.execute({"action_type": command}).to_dict()
-                _assert(receipt.get("ok") is True, f"{command} failed: {receipt}")
-                barrier = float(receipt["action_completed_ros_time_s"])
-                frames, state = _direct_observation(controller, cameras, barrier)
-                camera_timestamps = _camera_timestamps(frames)
-                _assert_new_timestamps(camera_timestamps, previous_camera_timestamps)
-                previous_camera_timestamps = camera_timestamps
-                observation = {
-                    "cameras": [frame.to_dict() for frame in frames],
-                    "robot": state.to_dict(),
-                }
-                _assert_action_timing(receipt, observation)
-                gate["actions"].append(
-                    {
-                        "name": command,
-                        "receipt": _compact(receipt),
-                        "gripper": _validate_gripper_state(state, expected),
-                        "camera_timestamps": camera_timestamps,
-                    }
-                )
-
         target_down = {
             "xyz": [*reset_pose["xyz"][:2], reset_pose["xyz"][2] - DOWN_OFFSET_M],
             "quat_xyzw": list(reset_pose["quat_xyzw"]),
@@ -667,6 +648,34 @@ def run_direct(report_path: Path) -> None:
                         },
                     }
                 )
+
+        # Exercise the exact transition pattern only after the live Cartesian
+        # probe.  This matches the scripted M2 contract's failure order and
+        # avoids masking a post-motion gripper regression with startup-only
+        # evidence.
+        for command, _position, expected in M2_GRIPPER_SEQUENCE:
+            receipt = controller.execute({"action_type": command}).to_dict()
+            _assert(receipt.get("ok") is True, f"{command} failed: {receipt}")
+            _assert(receipt.get("reached_goal") is True, "gripper did not reach goal")
+            _assert(receipt.get("stalled") is False, "M2 gripper stalled")
+            barrier = float(receipt["action_completed_ros_time_s"])
+            frames, state = _direct_observation(controller, cameras, barrier)
+            camera_timestamps = _camera_timestamps(frames)
+            _assert_new_timestamps(camera_timestamps, previous_camera_timestamps)
+            previous_camera_timestamps = camera_timestamps
+            observation = {
+                "cameras": [frame.to_dict() for frame in frames],
+                "robot": state.to_dict(),
+            }
+            _assert_action_timing(receipt, observation)
+            gate["actions"].append(
+                {
+                    "name": command,
+                    "receipt": _compact(receipt),
+                    "gripper": _validate_gripper_state(state, expected),
+                    "camera_timestamps": camera_timestamps,
+                }
+            )
         gate["status"] = "passed"
     except Exception as exc:
         gate.update(
@@ -817,6 +826,15 @@ def run_mcp(report_path: Path, url: str) -> None:
                 },
                 target,
             )
+
+        # Keep MCP coverage on the same post-motion six-transition sequence
+        # as direct M2.  A transport-layer ``ok`` alone is insufficient: the
+        # production response must explicitly prove a non-stalled goal reach.
+        for name, expected_position, _expected_state in M2_GRIPPER_SEQUENCE:
+            receipt = action(name, {})
+            _assert(receipt.get("reached_goal") is True, f"{name} did not reach goal")
+            _assert(receipt.get("stalled") is False, f"{name} stalled")
+            gate["actions"][-1]["expected_position"] = expected_position
 
         observed_after = transport.call_tool("observe_env", common, timeout_s=60.0)
         observation = _mcp_observation(observed_after)

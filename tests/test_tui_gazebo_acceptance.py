@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
 import signal
@@ -9,8 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
+from agent.backends.planner import ProviderHttpError
+from agent.backends.provider_config import PlannerProviderConfig, ProviderEndpointConfig
 import scripts.tui_gazebo_acceptance as tui_acceptance
+from agent.tools.registry import ToolResult, build_default_tool_registry
 from extensions.gazebo.ros2_ws.acceptance_isolation import _normalise_graph_rows
 from scripts.tui_gazebo_acceptance import (
     AUTONOMY,
@@ -42,6 +48,27 @@ ROOT = Path(__file__).parents[1]
 def _write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+
+
+def _provider_config(*, vision: bool = False) -> PlannerProviderConfig:
+    return PlannerProviderConfig(
+        provider="unit-openai-compatible",
+        model="unit-model",
+        api_base="https://provider.example.test/v1?never=persisted",
+        api_key="unit-provider-secret",
+        timeout_s=5.0,
+        max_attempts=4,
+        retry_backoff_s=0.25,
+        context_window_tokens=32000,
+        max_tokens=256,
+        fallback=ProviderEndpointConfig(
+            provider="fallback-provider",
+            model="fallback-model",
+            api_base="https://fallback.example.test/v1",
+            api_key="fallback-secret",
+        ),
+        metadata={"enable_vision": vision},
+    )
 
 
 def _tool(name: str, *, parameters=None, outputs=None, receipt=None, profile="human_gated"):
@@ -218,6 +245,366 @@ def test_allocation_and_receipt_exclude_protected_domains() -> None:
     assert verify_receipt(tampered)
 
 
+def test_root_provider_resolution_preserves_precedence_and_never_copies_credentials(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".env").write_text(
+        "\n".join(
+            (
+                "OPENETA_LLM_PROVIDER=dotenv-provider",
+                "OPENETA_LLM_MODEL=dotenv-model",
+                "OPENETA_LLM_API_BASE=https://dotenv.example.test/v1",
+                "OPENETA_LLM_API_KEY=dotenv-provider-secret",
+                "OPENETA_LLM_ENABLE_VISION=false",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (repo / "apikey.md").write_text(
+        '{"_type":"newapi_channel_conn","url":"https://apikey.example.test",'
+        '"key":"apikey-provider-secret"}\n',
+        encoding="utf-8",
+    )
+
+    config = tui_acceptance._root_provider_config(  # noqa: SLF001 - boundary contract.
+        repo,
+        environ={
+            "OPENETA_LLM_MODEL": "environment-model",
+            "OPENETA_LLM_API_KEY": "environment-provider-secret",
+        },
+    )
+    child = tui_acceptance._resolved_provider_environment(config)  # noqa: SLF001
+
+    assert child["OPENETA_LLM_PROVIDER"] == "dotenv-provider"
+    assert child["OPENETA_LLM_MODEL"] == "environment-model"
+    assert child["OPENETA_LLM_API_BASE"] == "https://dotenv.example.test/v1"
+    assert child["OPENETA_LLM_API_KEY"] == "environment-provider-secret"
+    assert child["OPENETA_LLM_ENABLE_VISION"] == "false"
+    assert not any(key.startswith("OPENETA_LLM_FALLBACK_") for key in child)
+
+    case = tmp_path / "case"
+    case.mkdir()
+    assert not (case / ".env").exists()
+    assert not (case / "apikey.md").exists()
+
+
+def test_provider_preflight_passes_only_a_primary_structured_response(monkeypatch) -> None:
+    config = _provider_config(vision=False)
+    seen = {}
+
+    monkeypatch.setattr(tui_acceptance, "_root_provider_config", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr(tui_acceptance, "list_openai_compatible_models", lambda _config: ["unit-model"])
+
+    class FakeBackend:
+        def __init__(self, backend_config) -> None:
+            seen["backend_config"] = backend_config
+
+        def decide(self, request):
+            seen["request"] = request
+            return SimpleNamespace(
+                status=tui_acceptance.PipelineStatus.PLANNED,
+                payload=(
+                    '{"kind":"response","name":"ask_human",'
+                    '"parameters":{"message":"ok"},"reasoning":"ok"}'
+                ),
+            )
+
+    monkeypatch.setattr(tui_acceptance, "OpenAICompatiblePlannerBackend", FakeBackend)
+
+    result = tui_acceptance._provider_preflight_result(Path("/unused"))  # noqa: SLF001
+
+    assert result["status"] == "passed"
+    assert result["endpoint_id"] == "https://provider.example.test"
+    assert result["max_tokens"] == 256
+    assert result["vision_enabled"] is False
+    assert result["fallback_used"] is False
+    assert result["planner_smoke"]["response_schema"] == "response/ask_human"
+    assert seen["backend_config"].model == "unit-model"
+    assert seen["backend_config"].fallback is None
+    assert seen["backend_config"].max_attempts == 1
+    assert seen["request"].tool_context["available_tools"] == []
+    assert "unit-provider-secret" not in json.dumps(result)
+    assert "never=persisted" not in json.dumps(result)
+
+
+@pytest.mark.parametrize(
+    ("models", "error", "expected_status", "reason_code"),
+    [
+        (None, None, "blocked", "PROVIDER_CONFIG_MISSING"),
+        ([], None, "failed", "PROVIDER_MODEL_NOT_FOUND"),
+        (
+            None,
+            ProviderHttpError(401, "unit-provider-secret"),
+            "blocked",
+            "PROVIDER_AUTH_FAILED",
+        ),
+        (
+            None,
+            TimeoutError("unit-provider-secret"),
+            "blocked",
+            "PROVIDER_NETWORK_OR_TIMEOUT",
+        ),
+    ],
+)
+def test_provider_preflight_fails_closed_without_secret_evidence(
+    monkeypatch,
+    models,
+    error,
+    expected_status: str,
+    reason_code: str,
+) -> None:
+    config = _provider_config()
+    if models is None and error is None:
+        config = PlannerProviderConfig()
+    monkeypatch.setattr(tui_acceptance, "_root_provider_config", lambda *_args, **_kwargs: config)
+
+    def list_models(_config):
+        if error is not None:
+            raise error
+        return models
+
+    monkeypatch.setattr(tui_acceptance, "list_openai_compatible_models", list_models)
+    result = tui_acceptance._provider_preflight_result(Path("/unused"))  # noqa: SLF001
+
+    assert result["status"] == expected_status
+    assert result["reason_code"] == reason_code
+    assert "unit-provider-secret" not in json.dumps(result)
+
+
+def test_provider_preflight_rejects_non_structured_planner_response(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tui_acceptance,
+        "_root_provider_config",
+        lambda *_args, **_kwargs: _provider_config(),
+    )
+    monkeypatch.setattr(tui_acceptance, "list_openai_compatible_models", lambda _config: ["unit-model"])
+
+    class FakeBackend:
+        def __init__(self, _config) -> None:
+            pass
+
+        def decide(self, _request):
+            return SimpleNamespace(
+                status=tui_acceptance.PipelineStatus.PLANNED,
+                payload="this is not JSON",
+            )
+
+    monkeypatch.setattr(tui_acceptance, "OpenAICompatiblePlannerBackend", FakeBackend)
+    result = tui_acceptance._provider_preflight_result(Path("/unused"))  # noqa: SLF001
+
+    assert result["status"] == "failed"
+    assert result["reason_code"] == "PROVIDER_STRUCTURED_RESPONSE_INCOMPATIBLE"
+
+
+def test_provider_preflight_blocks_before_any_gazebo_or_mcp_case(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    run_root = tmp_path / "scripted-provider-blocked"
+    preflight = {
+        "schema_version": "openeta.provider_preflight.v1",
+        "status": "blocked",
+        "provider": "unit-provider",
+        "model": "unit-model",
+        "endpoint_id": "https://provider.example.test",
+        "reason_code": "PROVIDER_AUTH_FAILED",
+        "model_list": {"status": "failed"},
+        "planner_smoke": {"status": "not_run"},
+    }
+    monkeypatch.setattr(tui_acceptance, "_provider_preflight_result", lambda _repo: preflight)
+    monkeypatch.setattr(
+        tui_acceptance,
+        "allocate",
+        lambda *_args, **_kwargs: pytest.fail("a provider-blocked run must not allocate Gazebo"),
+    )
+
+    assert (
+        tui_acceptance.main(
+            [
+                "--scripted-tui",
+                "--provider-preflight",
+                "--run-root",
+                str(run_root),
+            ]
+        )
+        == 2
+    )
+    assert not (run_root / "m0").exists()
+    durable = json.loads((run_root / tui_acceptance.PROVIDER_PREFLIGHT_FILENAME).read_text())
+    report = json.loads((run_root / "acceptance-report.json").read_text())
+    assert durable["reason_code"] == "PROVIDER_AUTH_FAILED"
+    assert report["overall_status"] == "inconclusive"
+    assert report["acceptance_scope"] == "local_automated_scripted_tui_m0_m4"
+    assert report["human_approval"] == "not_claimed"
+
+
+def test_m5_cli_is_control_only_and_requires_an_external_sam3_url() -> None:
+    with pytest.raises(tui_acceptance.AcceptanceError, match="valid only with --control-only"):
+        tui_acceptance.main(["--include-m5", "--sam3-url", "http://sam3.example/sse"])
+    with pytest.raises(tui_acceptance.AcceptanceError, match="requires --sam3-url"):
+        tui_acceptance.main(["--control-only", "--include-m5", "--prepare-only"])
+    assert (
+        tui_acceptance._m5_endpoint_id(  # noqa: SLF001 - redaction is an acceptance contract.
+            "https://token@example.invalid:9443/sse?credential=never-record"
+        )
+        == "https://example.invalid:9443"
+    )
+
+
+@pytest.mark.parametrize(
+    ("outputs", "code"),
+    [
+        ({"detections": []}, "M5_ZERO_SAM3_CANDIDATES"),
+        (
+            {"detections": [{"id": "detection_000"}, {"id": "detection_001"}]},
+            "M5_MULTIPLE_SAM3_CANDIDATES",
+        ),
+        (
+            {
+                "detections": [{"id": "detection_000"}],
+                "perception_source": "gazebo_oracle",
+            },
+            "M5_ORACLE_OR_FAKE_CANDIDATE",
+        ),
+        (
+            {
+                "detections": [{"id": "detection_000"}],
+                "fake_grasp_candidate": {"kind": "contractual_fake_grasp_candidate"},
+            },
+            "M5_ORACLE_OR_FAKE_CANDIDATE",
+        ),
+    ],
+)
+def test_m5_rejects_ambiguous_or_nonreal_candidates_before_m3_motion(outputs, code) -> None:
+    with pytest.raises(tui_acceptance.M5FailedError) as error:
+        tui_acceptance._m5_require_single_real_candidate(outputs)  # noqa: SLF001
+    assert error.value.code == code
+
+
+def test_m5_single_real_candidate_uses_existing_selection_then_gates_m3(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The no-provider M5 path still uses real handler/selection contracts."""
+
+    paths = _prepare_evidence(tmp_path, "m5", CONTROL_ONLY)
+    rgb_path = paths.root / "mcp-images" / "rgb.png"
+    depth_path = paths.root / "mcp-images" / "depth.png"
+    rgb_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (4, 4), (10, 20, 30)).save(rgb_path)
+    Image.new("I;16", (4, 4), 2000).save(depth_path)
+    response_path = paths.root / "mcp-responses" / "observe.json"
+    _write_json(
+        response_path,
+        {
+            "cameras": [
+                {
+                    "frame_id": "top_camera_optical_frame",
+                    "role": "scene_primary",
+                    "rgb_path": str(rgb_path),
+                    "depth_path": str(depth_path),
+                    "intrinsics": {"fx": 100.0, "fy": 100.0, "cx": 1.5, "cy": 1.5, "scale": 1000.0},
+                    "extrinsics": {
+                        "frame_transform": "camera_to_world",
+                        "camera_frame": "opencv",
+                        "pos": [0.0, 0.0, 0.0],
+                        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    },
+                }
+            ]
+        },
+    )
+    observe = ToolResult(
+        True,
+        details={
+            "outputs": {
+                "response": {"response_path": str(response_path), "request_id": "observe-1", "tool": "render_env"},
+                "mcp_calls": [],
+            }
+        },
+    )
+    mask = io.BytesIO()
+    Image.new("L", (4, 4), 255).save(mask, format="PNG")
+    encoded_mask = base64.b64encode(mask.getvalue()).decode("ascii")
+
+    class FakeSam3Transport:
+        def __init__(self, _url: str) -> None:
+            pass
+
+        def list_tools(self, *, timeout_s=None):
+            return {"tools": [{"name": "segment"}], "tool_count": 1}
+
+        def call_tool(self, name, _arguments, *, timeout_s=None):
+            assert name == "segment"
+            return {
+                "success": True,
+                "details": {
+                    "detection_count": 1,
+                    "metadata": {"api_key": "must-not-be-persisted"},
+                    "detections": [
+                        {
+                            "label": "red rectangular target",
+                            "score": 0.95,
+                            "mask": {"format": "png", "base64": encoded_mask},
+                        }
+                    ],
+                },
+            }
+
+    import agent.tools.handlers as handlers_module
+    import agent.tools.sim_mcp as sim_mcp_module
+
+    monkeypatch.setattr(handlers_module, "SseSimulatorMcpTransport", FakeSam3Transport)
+    monkeypatch.setattr(sim_mcp_module, "SseSimulatorMcpTransport", FakeSam3Transport)
+
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.registry = build_default_tool_registry(perception_profile="sam3")
+            self.metadata = {
+                "execution_id": "control-m5",
+                "session_id": "control-m5",
+                "agent_session_id": "control-m5",
+                "execution_profile": CONTROL_ONLY,
+                "planner_invoked": False,
+                "provider_invoked": False,
+            }
+            self.calls = []
+
+        def require_success(self, name, parameters=None, *, observation=None, metadata=None):
+            self.calls.append(name)
+            if name == "observe":
+                return observe
+            return ToolResult(True, details={})
+
+        def invoke(self, name, parameters=None, *, observation=None, metadata=None):
+            self.calls.append(name)
+            return self.registry.call(
+                name,
+                parameters or {},
+                observation=observation,
+                metadata={**self.metadata, **(metadata or {})},
+            )
+
+    runner = FakeRunner()
+    monkeypatch.setattr(tui_acceptance, "_m3_motion", lambda _runner: [observe])
+
+    tui_acceptance._run_m5_control(  # noqa: SLF001 - focused control-path contract.
+        runner, paths=paths, sam3_url="http://sam3.example/sse?secret=not-recorded"
+    )
+
+    evidence = json.loads((paths.root / "m5-perception.json").read_text())
+    assert evidence["status"] == "passed"
+    assert evidence["sam3"]["endpoint_id"] == "http://sam3.example"
+    assert evidence["selection"]["selection_source"] == "scripted_single_candidate"
+    assert "move_to" not in runner.calls  # monkeypatched M3 invokes only after the gate.
+    assert (paths.root / "m5-object-summary.json").is_file()
+    assert "not-recorded" not in (paths.root / "m5-perception.json").read_text()
+    sam3_response = evidence["sam3"]["request_response_artifacts"]["response"]["path"]
+    assert "must-not-be-persisted" not in (paths.root / sam3_response).read_text()
+
+
 def test_live_allocation_preflight_skips_a_busy_ros_domain(monkeypatch) -> None:
     """A stale external daemon must reserve its domain instead of failing cleanup."""
 
@@ -362,13 +749,16 @@ def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monke
             return 0
 
     def popen(*_args, **kwargs):
-        seen["environment"] = kwargs["env"]
+        seen["mcp_environment"] = kwargs["env"]
         return Process()
 
     monkeypatch.setattr(tui_acceptance.subprocess, "Popen", popen)
-    monkeypatch.setattr(
-        tui_acceptance.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
-    )
+
+    def scripted_run(_command, _paths, env):
+        seen["tui_environment"] = dict(env)
+        return 0
+
+    monkeypatch.setattr(tui_acceptance, "_run_scripted_tui", scripted_run)
     monkeypatch.setattr(tui_acceptance, "_wait_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tui_acceptance, "_process_snapshot", lambda: [])
     monkeypatch.setattr(tui_acceptance, "_terminate_owned_worker_groups", lambda **_kwargs: [])
@@ -388,11 +778,16 @@ def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monke
     )
 
     assert run_case(ROOT, paths, allocation) == 0
-    assert seen["environment"]["PYTHONPATH"] == os.pathsep.join((str(ROOT), ros_python_path))
-    assert seen["environment"]["OPENETA_WORKER_LOG_DIR"] == str(paths.root / "worker-logs")
-    assert "ROS_LOCALHOST_ONLY" not in seen["environment"]
-    assert "ROS_STATIC_PEERS" not in seen["environment"]
-    assert seen["environment"]["ROS_AUTOMATIC_DISCOVERY_RANGE"] == "LOCALHOST"
+    mcp_environment = seen["mcp_environment"]
+    tui_environment = seen["tui_environment"]
+    assert mcp_environment["PYTHONPATH"] == os.pathsep.join((str(ROOT), ros_python_path))
+    assert mcp_environment["OPENETA_WORKER_LOG_DIR"] == str(paths.root / "worker-logs")
+    assert "ROS_LOCALHOST_ONLY" not in mcp_environment
+    assert "ROS_STATIC_PEERS" not in mcp_environment
+    assert mcp_environment["ROS_AUTOMATIC_DISCOVERY_RANGE"] == "LOCALHOST"
+    assert not any(key.startswith("OPENETA_LLM_") for key in mcp_environment)
+    assert "OPENETA_LLM_MODEL" in tui_environment
+    assert not any(key.startswith("OPENETA_LLM_FALLBACK_") for key in tui_environment)
 
 
 def test_owned_worker_cleanup_uses_only_matching_run_process_group(monkeypatch) -> None:
@@ -529,13 +924,28 @@ def test_control_m2_uses_the_inset_bidirectional_moveit_probe(monkeypatch, tmp_p
     monkeypatch.setattr(tui_acceptance, "_control_response_has", lambda *_args: True)
     tui_acceptance._m2_control_motion(Runner())
 
+    assert [name for name, _ in calls] == [
+        "observe",
+        "move_to",
+        "move_to",
+        "move_to",
+        "move_to",
+        *(["gripper_control"] * 6),
+        "move_to",
+        "observe",
+    ]
+    assert [
+        parameters["position"]
+        for name, parameters in calls
+        if name == "gripper_control"
+    ] == list(tui_acceptance.M2_GRIPPER_SEQUENCE)
     moves = [parameters for name, parameters in calls if name == "move_to"]
     assert [move["z"] for move in moves[:4]] == pytest.approx([0.86, 0.88, 0.86, 0.88])
     assert moves[4]["x"] == 99.0 and moves[4]["y"] == 99.0 and moves[4]["z"] == 99.0
 
 
 def test_m2_verifier_uses_only_correlated_durable_motion_receipts() -> None:
-    """M2 reads exact controller evidence without requiring arm recovery for grippers."""
+    """M2 credits only the ordered strict receipts, never parameter echoes."""
 
     def action(
         name: str,
@@ -568,9 +978,36 @@ def test_m2_verifier_uses_only_correlated_durable_motion_receipts() -> None:
             },
         }
 
-    calls = []
+    calls = [
+        action(
+            "create_simulator_env",
+            "create",
+            success=True,
+            parameters={"env_id": ENV_IDS["m2"]},
+        )
+    ]
     payloads = []
-    for index, position in enumerate((1, 0, 1, 1, 0, 1), 1):
+    targets = (
+        {"xyz": [0.1, 0.2, 0.8], "quat_xyzw": [0.0, 0.0, 0.0, 1.0]},
+        {"xyz": [0.1, 0.2, 0.82], "quat_xyzw": [0.0, 0.0, 0.0, 1.0]},
+    )
+    for index, target in enumerate((targets[0], targets[1], targets[0], targets[1]), 1):
+        request_id = f"move-{index}"
+        calls.append(action("move_to", request_id, success=True, parameters={"target_pose": target}))
+        payloads.append(
+            {
+                tui_acceptance._MCP_EVIDENCE_REQUEST_ID: request_id,
+                "ok": True,
+                "reached_target": True,
+                "stalled": False,
+                "target": target,
+                "action_completed_ros_time_s": float(index),
+                "start_state_recovery": {
+                    "schema_version": "m2_start_state_recovery_v1"
+                },
+            }
+        )
+    for index, position in enumerate(tui_acceptance.M2_GRIPPER_SEQUENCE, 1):
         request_id = f"gripper-{index}"
         calls.append(
             action(
@@ -580,41 +1017,165 @@ def test_m2_verifier_uses_only_correlated_durable_motion_receipts() -> None:
                 parameters={"position": position},
             )
         )
-        # Native gripper actions provide completion timing but intentionally
-        # do not carry MoveIt's arm-start-state recovery record.
         payloads.append(
             {
                 tui_acceptance._MCP_EVIDENCE_REQUEST_ID: request_id,
-                "action_completed_ros_time_s": float(index),
-            }
-        )
-    for index in range(4):
-        request_id = f"move-{index}"
-        calls.append(action("move_to", request_id, success=True))
-        payloads.append(
-            {
-                tui_acceptance._MCP_EVIDENCE_REQUEST_ID: request_id,
+                "ok": True,
+                "reached_goal": True,
+                "stalled": False,
                 "action_completed_ros_time_s": 10.0 + index,
-                "start_state_recovery": {
-                    "schema_version": "m2_start_state_recovery_v1"
-                },
             }
         )
     calls.append(action("move_to", "unreachable", success=False))
     payloads.append(
         {
             tui_acceptance._MCP_EVIDENCE_REQUEST_ID: "unreachable",
+            "ok": False,
             "error_code": "MOTION_PLAN_FAILED",
             "reached_target": False,
+            "stalled": False,
+        }
+    )
+    calls.extend(
+        [
+            action("observe", "observe-final", success=True),
+            action("close_simulator_env", "close", success=True),
+        ]
+    )
+    payloads.append(
+        {
+            tui_acceptance._MCP_EVIDENCE_REQUEST_ID: "observe-final",
+            "observation_fresh": True,
         }
     )
 
     assert tui_acceptance._verify_m2(calls, payloads) == []
 
-    payloads[-1][tui_acceptance._MCP_EVIDENCE_REQUEST_ID] = "wrong-request"
+    payloads[-2][tui_acceptance._MCP_EVIDENCE_REQUEST_ID] = "wrong-request"
     errors = tui_acceptance._verify_m2(calls, payloads)
     assert any("lacks one correlated durable MCP response" in error for error in errors)
-    assert any("exactly one stable MOTION_PLAN_FAILED" in error for error in errors)
+    assert any("MOTION_PLAN_FAILED" in error for error in errors)
+
+
+def test_m2_verifier_allows_one_observed_same_position_retry_but_rejects_stalls() -> None:
+    """A gripper retry is a narrow recovery branch, not a success loophole."""
+
+    # Reuse the independently verified baseline and replace its first gripper
+    # action with failed → fresh observe → strict same-position success.
+    calls: list[dict] = []
+    payloads: list[dict] = []
+
+    def add(name: str, request_id: str, *, success: bool, parameters: dict | None = None, **receipt) -> None:
+        calls.append(
+            {
+                "name": name,
+                "parameters": parameters or {},
+                "status": "executed" if success else "failed",
+                "result": {
+                    "success": success,
+                    "details": {
+                        "outputs": {"mcp_calls": [{"request": {"request_id": request_id}}]},
+                        "environment_receipt": {"observation_fresh": True},
+                        "observation": {
+                            "robot": {"joint_positions": [0.0] * 7},
+                            "cameras": [
+                                {"rgb_path": "one.png", "depth_path": "one-depth.png"},
+                                {"rgb_path": "two.png", "depth_path": "two-depth.png"},
+                            ],
+                        },
+                    },
+                },
+            }
+        )
+        payloads.append(
+            {
+                tui_acceptance._MCP_EVIDENCE_REQUEST_ID: request_id,
+                "action_completed_ros_time_s": float(len(payloads) + 1),
+                **receipt,
+            }
+        )
+
+    add("create_simulator_env", "create", success=True, parameters={"env_id": ENV_IDS["m2"]})
+    target_a = {"xyz": [0.1, 0.2, 0.8], "quat_xyzw": [0, 0, 0, 1]}
+    target_b = {"xyz": [0.1, 0.2, 0.82], "quat_xyzw": [0, 0, 0, 1]}
+    for index, target in enumerate((target_a, target_b, target_a, target_b), 1):
+        add(
+            "move_to",
+            f"move-{index}",
+            success=True,
+            parameters={"target_pose": target},
+            ok=True,
+            reached_target=True,
+            stalled=False,
+            target=target,
+            start_state_recovery={"schema_version": "m2_start_state_recovery_v1"},
+        )
+    add(
+        "gripper_control",
+        "gripper-failed",
+        success=False,
+        parameters={"position": 1},
+        ok=False,
+        reached_goal=False,
+        stalled=False,
+    )
+    add("observe", "retry-observe", success=True)
+    add(
+        "gripper_control",
+        "gripper-retry",
+        success=True,
+        parameters={"position": 1},
+        ok=True,
+        reached_goal=True,
+        stalled=False,
+    )
+    for index, position in enumerate(tui_acceptance.M2_GRIPPER_SEQUENCE[1:], 2):
+        add(
+            "gripper_control",
+            f"gripper-{index}",
+            success=True,
+            parameters={"position": position},
+            ok=True,
+            reached_goal=True,
+            stalled=False,
+        )
+    add(
+        "move_to",
+        "unreachable",
+        success=False,
+        ok=False,
+        reached_target=False,
+        stalled=False,
+        error_code="MOTION_PLAN_FAILED",
+    )
+    add("observe", "observe-final", success=True)
+    add("close_simulator_env", "close", success=True)
+
+    assert tui_acceptance._verify_m2(calls, payloads) == []
+
+    # A misleading action-level success cannot turn a stalled terminal
+    # receipt into a successful sixth gripper transition.
+    payloads[7]["stalled"] = True
+    payloads[7]["reached_goal"] = False
+    errors = tui_acceptance._verify_m2(calls, payloads)
+    assert any("fresh observe" in error or "retry" in error for error in errors)
+
+
+def test_m2_ab_targets_use_the_submitted_pose_not_controller_orientation_normalisation() -> None:
+    call = {"parameters": {"target_pose": {"xyz": [0.25, 0.0, 0.65]}}}
+    nodes = [
+        {
+            "target": {
+                "xyz": [0.25, 0.0, 0.65],
+                "quat_xyzw": [0.001, 0.0, 0.0, 0.999999],
+            }
+        }
+    ]
+
+    assert tui_acceptance._m2_move_target_key(call, nodes) == '{"xyz":[0.25,0.0,0.65]}'
+    assert tui_acceptance._m2_move_target_key(
+        {"parameters": {"x": 0.25, "y": 0.0, "z": 0.65}}, []
+    ) == '{"xyz":[0.25,0.0,0.65]}'
 
 
 def test_m3_control_uses_fixed_world_fixture_poses_not_a_geometry_gate() -> None:
@@ -953,6 +1514,189 @@ def test_scripted_tui_cli_prepares_only_scripted_cases(tmp_path: Path) -> None:
     assert "openeta/dummy_sim-v0" in submissions[4]
     assert "\n" not in submissions[4]
     assert submissions[5] == "/quit"
+
+
+def test_scripted_tui_selected_milestone_scope_is_explicit_and_m2_prompt_is_exact(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "scripted-m2-only"
+    assert (
+        main(
+            [
+                "--prepare-only",
+                "--scripted-tui",
+                "--milestones",
+                "m2",
+                "--run-root",
+                str(run_root),
+            ]
+        )
+        == 0
+    )
+    assert sorted(path.name for path in run_root.iterdir()) == ["m2"]
+    instructions = (
+        run_root / "m2" / SCRIPTED_TUI / "operator-instructions.txt"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "A、B、A、B",
+        "[1, 0, 1, 1, 0, 1]",
+        "ok=true、reached_goal/reached_target=true 且 stalled=false",
+        "fresh observe",
+        "仅重试一次",
+        "MOTION_PLAN_FAILED",
+        "唯一一次 close_simulator_env",
+    ):
+        assert required in instructions
+
+    report = assemble_report(
+        run_root,
+        formal_mode=SCRIPTED_TUI,
+        milestones=("m2",),
+    )
+    assert report["acceptance_scope"] == "local_automated_scripted_tui_selected_milestones"
+    assert report["selected_milestones"] == ["m2"]
+    assert report["full_m0_m4_acceptance"] is False
+    assert set(report["milestones"]) == {"m2"}
+
+    with pytest.raises(tui_acceptance.AcceptanceError, match="only with --scripted-tui"):
+        main(["--prepare-only", "--milestones", "m2", "--run-root", str(tmp_path / "bad")])
+
+
+def test_scripted_tui_driver_sends_quit_only_after_the_terminal_episode_event(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = prepare_case(ROOT, tmp_path, "m0", SCRIPTED_TUI, allocate("scripted-driver"))
+    seen = {}
+
+    class FakeStdin:
+        def __init__(self) -> None:
+            self.parts: list[str] = []
+            self.closed = False
+
+        def write(self, value: str) -> int:
+            self.parts.append(value)
+            return len(value)
+
+        @staticmethod
+        def flush() -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        def getvalue(self) -> str:
+            return "".join(self.parts)
+
+    class FakeProcess:
+        pid = 43210
+
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+
+        @staticmethod
+        def poll():
+            return None
+
+        @staticmethod
+        def wait(*, timeout):
+            assert timeout == 30
+            return 0
+
+    process = FakeProcess()
+
+    def popen(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+        return process
+
+    def episode_finished(_paths, _process, *, timeout_s):
+        seen["input_before_finish"] = process.stdin.getvalue()
+        assert timeout_s == 3600.0
+        return "completed"
+
+    monkeypatch.setattr(tui_acceptance.subprocess, "Popen", popen)
+    monkeypatch.setattr(tui_acceptance, "_wait_for_scripted_tui_episode", episode_finished)
+
+    assert (
+        tui_acceptance._run_scripted_tui("python -m agent.cli.openeta_cli", paths, {})
+        == 0
+    )  # noqa: SLF001
+    assert "\n/quit\n" not in seen["input_before_finish"]
+    assert process.stdin.getvalue().endswith("/quit\n")
+    assert process.stdin.closed
+    assert seen["kwargs"]["start_new_session"] is True
+
+
+def test_scripted_tui_driver_blocks_instead_of_answering_ask_human(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    paths = prepare_case(ROOT, tmp_path, "m0", SCRIPTED_TUI, allocate("scripted-human"))
+    trace = paths.trace_root / "sessions" / "session" / "trace.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(
+        json.dumps(
+            {
+                "event_type": "episode_step",
+                "payload": {"step_result": {"info": {"pause_reason": "ask_human"}}},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeStdin:
+        closed = False
+
+        def __init__(self) -> None:
+            self.parts: list[str] = []
+
+        def write(self, value: str) -> int:
+            self.parts.append(value)
+            return len(value)
+
+        @staticmethod
+        def flush() -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+        def getvalue(self) -> str:
+            return "".join(self.parts)
+
+    class FakeProcess:
+        pid = 43211
+
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+            self.terminated = False
+
+        def poll(self):
+            return None if not self.terminated else 1
+
+        def wait(self, *, timeout):
+            self.terminated = True
+            return 1
+
+    process = FakeProcess()
+    kill_calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(tui_acceptance.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        tui_acceptance.os,
+        "killpg",
+        lambda pgid, sig: kill_calls.append((pgid, sig)),
+    )
+
+    assert tui_acceptance._run_scripted_tui("tui", paths, {}) == 1  # noqa: SLF001
+    assert "/quit\n" not in process.stdin.getvalue()
+    assert kill_calls == [(process.pid, tui_acceptance.signal.SIGTERM)]
+    assert json.loads((paths.root / "scripted-tui-driver.json").read_text()) == {
+        "schema_version": "openeta.scripted_tui_driver.v1",
+        "status": "blocked",
+        "reason_code": "TUI_HUMAN_INPUT_REQUIRED",
+    }
 
 
 def test_scripted_tui_m2_to_m4_require_one_exact_agenttool_environment(tmp_path: Path) -> None:

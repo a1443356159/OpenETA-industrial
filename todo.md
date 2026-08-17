@@ -63,7 +63,9 @@ when work advances; do not start later milestones early.
       native-contact stock `DetachableJoint` implementation; it fails closed
       on missing contact, attach/detach ACK, DART child-link state, or physical
       lift proof. Old soft-adhesion reports remain diagnostic evidence only.
-- [ ] M5+ SAM3 integration and industrial benchmark.
+- [x] M5 control-only real SAM3 → strict RGB-D object summary → M3 physical
+      loop (opt-in external SSE MCP; no Planner/LLM/formal TUI claim).
+- [ ] M5 formal remote/PTY acceptance, M6 fine-tuning, and industrial benchmark.
 
 ## M2 verification
 

@@ -1,97 +1,93 @@
-# M5 感知桥接：detections → 3D 对象摘要
+# M5：真实 SAM3 感知到 M3 物理闭环
 
-## 当前结论
+## 当前能力
 
-M5 的目标是 plan.md §M5 的验收口径——"same manipulation flow works with SAM3 perception"。M4 已交付与 SAM3 同契约的 oracle 感知（见 `docs/gazebo-m4-oracle-perception.md`），但 SAM3/oracle 的输出都是**像素级**（mask + bbox + score），而 planner 消费的对象摘要是 plan.md §17 的 **3D 级**条目。本文档对应本次交付的桥接模块：
+M5 是一个严格 opt-in 的 control-only 集成验收。它复用 M3 的
+`openeta/gazebo_rm75_robotiq2f85_pickplace-v0` 场景、固定轨迹和原生
+`DetachableJoint`；不创建 world、URDF、软吸附、AnyGrasp 或 AnyPlace 流程。
 
-- 新模块 `extensions/gazebo/perception_summary.py`（纯 Python，无 ROS import，numpy/PIL 懒加载，风格对齐 `oracle_perception.py`）；
-- 新测试 `tests/test_gazebo_perception_summary.py`（14 项，全离线）；
-- **不接线**到 agent 工具层/worker/MCP 面——接线属于后续 M5 任务；当前 M3/M4
-  manipulation 仍须经过 M3 的原生接触、joint ACK 和 child-link 物理证明；Oracle
-  离线契约不改变该边界。
+运行：
 
-## 管线定位
+```bash
+scripts/tui_gazebo_acceptance.py --control-only --include-m5 --sam3-url "$OPENETA_SAM3_URL"
+```
+
+`--include-m5` 只能与 `--control-only` 一起使用，且必须给出一个已运行的
+上游 SAM3 **legacy SSE** MCP endpoint（例如 `http://127.0.0.1:8773/sse`）。
+验收脚本只发现其工具并调用一次 `segment`；它不启动、停止或配置该服务。
+
+OpenETA 自带 SAM3 服务启动为 `dual`：标准 Streamable HTTP 在 `/mcp`，为 M5
+兼容保留的旧 HTTP+SSE 在 `/sse`。当前 MCP 标准以 `/mcp` 为首选；新客户端应
+使用它。M5 的首轮合约仍明确测试旧 `/sse`，所以不要把 `/mcp` 作为
+`--sam3-url` 传入该验收命令。
+
+SAM3 service 应使用隔离 Python 环境，并仅在该服务进程里注入具有官方模型访问
+权限的 `HF_TOKEN`（或经哈希核验的本地官方 checkpoint/cache）。不要将 token 放进
+仓库、命令行、`--sam3-url`、M5 evidence 或日志。若模型尚未获授权或无法下载，
+M5 会以 `SAM3_INFERENCE_UNAVAILABLE` 阻塞，并且不会进入 M3 motion。
+
+同一 run 必须先严格通过 M0–M4；只有之后才创建 M5 的 M3 场景并执行以下链路：
 
 ```text
-top RGB-D observe（CameraFrame: rgb/depth/intrinsics/extrinsics）
-→ SAM3 segment（OPENETA_PERCEPTION_PROFILE=sam3，detections: mask/bbox/score）
-→ selection flow（既有，选中 detection 带 mask_ref + source_image）
-→ perception_summary.summarize_detection   ← 本模块
-→ plan.md §17 对象摘要条目（世界系 position）
-→ Observation / Working Memory（后续接线）
+当前顶视 RGB-D observe（case-local artifacts）
+→ 外部 SAM3 SSE MCP segment（真实文本分割）
+→ 恰好一个候选
+→ select_sam3_detection（host-only scripted_single_candidate）
+→ 严格 RGB-D → m5_object_summary
+→ 原有 M3 close / attach / lift / open / detach
 ```
 
-Oracle profile 下同一模块同样可用（oracle 与 SAM3 同检测契约），这使 M5 的对比口径可以是：**同一桥接、同一下游，仅切换感知 profile**。
+它不调用 Planner Provider、LLM 或 PTY/TUI。成功报告的 scope 固定为
+`control_only_real_sam3_no_planner_not_formal_tui`；这不是正式 TUI/远端验收，
+也不证明视觉泛化能力或工业 benchmark 成绩。
 
-## 输入与输出 schema
+## 受限感知 bridge
 
-输入：
+`extensions/gazebo/perception_summary.py` 保留通用的离线几何函数
+`summarize_detection`，它可支持 mask resize。真实 M5 路径使用更严格的
+`build_m5_object_summary`：
 
-- `detection`：选中的 SAM3/oracle detection。mask 取 `mask_ref`（单通道 PNG 路径，前景 >0）或内联 `mask={"format":"png","base64":...}`；`id`/`label`/`score` 分别映射到摘要字段；`source_image` 按 selection 契约接收但不做像素级复核——detection 与 CameraFrame 的帧对应关系由调用方保证（fresh-observation 语义；M4 中这类匹配在 worker 侧完成）。
-- `camera_frame`：`adapter/protocol.py` 的 `CameraFrame`（dataclass 或等价 mapping，duck-typed），depth 为 metres 的 H×W 数组。
+- 仅接受本次 observe 的 `scene_primary` 顶视 RGB、depth、intrinsics 和数值
+  OpenCV `camera_to_world` 外参；wrist 的 `tf_dynamic` 不可用。
+- 已选 detection 必须有 case-local `mask_ref`、`source_image` 和
+  `source_frame_id`；RGB 路径和 frame id 必须与当前 observe 完全相同。
+- RGB、depth、mask 都必须位于 case root 内，RGB/depth/mask 的尺寸必须完全一致。
+  depth 仅从当前 uint16 PNG 按显式 scale 还原为 metres；M5 不重采样或猜测。
+- mask 内有限、正 depth 的中位数与像素质心经针孔反投影和外参转换成世界系
+  `position`。不能得到有限位置即失败。
 
-输出（plan.md §17 形态）：
+输出的单物体 summary 带 `provenance="sam3_perception"`、源相机与 SAM3 score；
+不编造 6-DoF 姿态或 visibility。
 
-```json
-{
-  "id": "det_0",
-  "label": "target block",
-  "confidence": 0.96,
-  "position": [0.39, -0.01, 2.0],
-  "visibility": "unknown",
-  "source_camera": "top_camera_optical_frame",
-  "provenance": "sam3_perception"
-}
-```
+## 选择与物理门
 
-`build_object_summary` 把多个 detection 包成 §17 的 `{"objects": [...]}`。
+M5 没有 LLM 选择。SAM3 必须返回恰好一个候选，仍通过既有
+`select_sam3_detection` 合约记录为 `selection_source="scripted_single_candidate"`。
+这是显式 host-only 选择，不是按 score 自动选择。
 
-字段口径：
+零候选、多候选、response 结构错误、Oracle、contractual fake candidate、帧或
+artifact 不匹配都会在进入 M3 motion 前停止。通过感知门后，M3 的规则未变：
+必须有双垫 native contact、attached ACK、至少 80 mm child-link lift、最多 10 mm
+capture-relative translation 和 detached ACK。
 
-- `position`：世界系 `[x, y, z]`（米）。无法诚实计算时为 `null`，并附 `position_error` 原因——不编造（§17："Do not invent precise orientation just to fill a schema / Use unknown / missing fields where appropriate"）。
-- `visibility`：恒为 `"unknown"`。SAM3 mask 是可见区域本身，不包含遮挡状态信息；不做图像边缘截断之类的启发式猜测。
-- `confidence`：直接取 detection 的 `score`；缺失/非数值时为 `null`。
-- `source_camera`：CameraFrame 的 `frame_id`（稳定后端标识，不改写）。
-- `provenance`：默认 `"sam3_perception"`，可参数化（如 oracle profile 复用时显式覆盖），延续 M4 的 provenance 标注要求。
+## 证据与状态
 
-## 几何语义
+每个 M5 case 生成 `m5-perception.json` 和 `m5-object-summary.json`。前者关联：
 
-1. mask 解码为布尔数组；与 depth 分辨率不一致时按最近邻重采样到 depth 尺寸（与 agent 侧 selection overlay 的处理一致）。
-2. 有效样本 = mask 内且深度有限且 >0；为空则 `position=null`（`no_valid_depth`）。
-3. `z` = 有效深度**中位数**（对 mask 边缘混入背景深度 Robust）；`(u, v)` = 有效像素质心。
-4. 针孔反投影：`x=(u-cx)·z/fx, y=(v-cy)·z/fy`。
-5. `camera_to_world` 外参（OpenCV 相机系，pos + quat_xyzw）旋转平移到世界系，复用 `extensions/gazebo/m3.py` 的 `quaternion_rotate`。
+- observe MCP receipt、RGB/depth SHA-256、source frame/intrinsics/extrinsics；
+- SAM3 tool catalog、脱敏 endpoint id、已脱敏 request/response、tool-result 和 mask；
+- selection record、object summary 和 M3 response receipts；
+- M3 动作后才记录的 `used_for_control=false` Gazebo 真值 evaluation metadata。
 
-`position_error` 取值：`mask_missing` / `mask_decode_failed` / `empty_mask` / `depth_missing` / `no_valid_depth` / `invalid_intrinsics` / `unsupported_extrinsics`。
+证据绝不写 URL query、凭据、图像 base64 或模型密钥。外部服务不可达、缺少
+`segment`、模型加载或推理环境不可用标为 `blocked`；结构、候选或 RGB-D 合约错误
+标为 `failed`。两种情况都禁止 M3 motion。
 
-## 与 oracle 的对比口径
+普通单元测试使用受控 MCP stub。真实 SAM3 集成应只在
+`OPENETA_RUN_M5_LIVE=1` 并显式提供 `--sam3-url` 时启用。
 
-| 维度 | oracle（M4） | SAM3 + 本模块（M5） |
-| --- | --- | --- |
-| 物体发现 | 真值注册表 + prompt 子串匹配 | SAM3 文本提示分割 |
-| mask 来源 | 几何投影栅格化（忽略遮挡） | 模型推理（可见区域） |
-| score | 恒 1.0 | 模型置信度 |
-| 3D position | 真值直接可得（未走摘要） | mask 内深度中位数 + 反投影 |
-| provenance | `gazebo_oracle` | `sam3_perception` |
+## 未覆盖范围
 
-M5 的 A/B 评测应保持桥接与下游不变、只切 `OPENETA_PERCEPTION_PROFILE`，position 精度差异即感知质量差异。真值仅用于评测（plan.md M5："Keep Gazebo ground truth only for evaluation"）。
-
-已知系统误差来源（诚实声明）：mask 边缘像素的深度混合（中位数仅部分缓解）、质心对非对称 mask 的偏移、深度噪声。对抓取用途，position 是对象级参考点而非 6-DoF 位姿；朝向不编造（§17）。
-
-## wrist 相机 tf_dynamic 限制
-
-与 M4 oracle 相同的限制：wrist 相机外参在 profile 中是 `{"frame_transform": "tf_dynamic"}`（`extensions/gazebo/profiles.py`），尚未数值化。本模块对非 `camera_to_world` 外参显式返回 `position=null, position_error="unsupported_extrinsics"`，而非编造。wrist 外参数值化（TF 查询接入）是 follow-up，届时本模块无需改动——外参变为数值即自动支持。
-
-## 测试与验收状态
-
-- `tests/test_gazebo_perception_summary.py` 14 项全离线通过：手算反投影（恒定深度块、中位数选取、无效深度剔除）、外参旋转平推手算、depth 缺失、空 mask、mask 无有效深度、`tf_dynamic` 拒绝、无效内参、mask 缺失、内联 base64 mask、分辨率重采样、`CameraFrame` dataclass 输入、`build_object_summary` 聚合。
-- 运行方式：`.venv/bin/python -m pytest tests/test_gazebo_perception_summary.py -q`，无需 live 环境（不起 Gazebo）。
-- live 链路（SAM3 → 摘要 → 操控复跑）属于 M5 后续接线任务，本次不验收。
-
-## 明确不做
-
-- 不接 agent 工具层 / worker / MCP 面（后续 M5 任务）；
-- wrist 相机外参数值化（follow-up）；
-- 6-DoF 姿态估计、遮挡/visibility 启发式；
-- SAM3 侧任何改动；
-- M6 工业微调。
+- AnyGrasp、AnyPlace、grasp/planner provider 与 M6 工业微调；
+- wrist 外参数值化、6-DoF 位姿估计和遮挡启发式；
+- 感知精度阈值、视觉 benchmark 或正式 PTY/TUI 验收。

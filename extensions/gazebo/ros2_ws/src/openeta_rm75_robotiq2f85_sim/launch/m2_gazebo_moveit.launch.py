@@ -72,7 +72,13 @@ def generate_launch_description():
         output="screen",
         # M2's certified mimic-relation contract is checked against the legacy
         # constant-multiplier drive; M3 uses the exact four-bar drive.
-        parameters=[{"use_sim_time": True, "drive_mode": "multiplier"}],
+        parameters=[
+            {
+                "use_sim_time": True,
+                "drive_mode": "multiplier",
+                "action_timeout_s": 90.0,
+            }
+        ],
     )
     move_group = Node(
         package="moveit_ros_move_group", executable="move_group", output="screen",

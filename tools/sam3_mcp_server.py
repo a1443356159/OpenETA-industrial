@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -113,9 +114,65 @@ def segment_points(
     )
 
 
+def build_dual_http_app():
+    """Serve standard MCP HTTP and legacy SSE compatibility endpoints.
+
+    Streamable HTTP at ``/mcp`` is the current MCP HTTP transport.  The
+    separate ``/sse`` and ``/messages/`` routes stay only for existing OpenETA
+    M5 callers that still use the superseded HTTP+SSE transport.  Both route
+    sets are constructed through FastMCP's public ASGI APIs; this server does
+    not hand-roll JSON-RPC or access its private low-level server.
+    """
+
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    # Calling streamable_http_app creates FastMCP's public session manager.
+    # Its lifespan is not retained when its routes are combined below, so this
+    # outer application owns the manager explicitly.
+    streamable_app = mcp.streamable_http_app()
+    legacy_sse_app = mcp.sse_app()
+
+    async def health(_request):
+        return JSONResponse(
+            {
+                "ok": True,
+                "server": "sam3",
+                "mcp": {
+                    "primary_transport": "streamable-http",
+                    "endpoint": "/mcp",
+                    "legacy_sse_endpoint": "/sse",
+                },
+            }
+        )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with mcp.session_manager.run():
+            yield
+
+    return Starlette(
+        routes=[
+            Route("/", health, methods=["GET"]),
+            *legacy_sse_app.routes,
+            *streamable_app.routes,
+        ],
+        lifespan=lifespan,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="OpenETA SAM3 MCP server")
-    parser.add_argument("--transport", choices=("stdio", "sse"), default="stdio")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "sse", "streamable-http", "dual"),
+        default="stdio",
+        help=(
+            "MCP transport: stdio, legacy SSE, standard Streamable HTTP, or "
+            "dual (/mcp plus legacy /sse compatibility)."
+        ),
+    )
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8773)
     args = parser.parse_args()
@@ -124,42 +181,24 @@ def main() -> int:
         mcp.run(transport="stdio")
         return 0
 
+    # Standalone FastMCP modes read network settings from this public object.
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    if args.transport == "sse":
+        print(f"\n  SAM3 MCP legacy SSE: http://{args.host}:{args.port}/sse")
+        mcp.run(transport="sse")
+        return 0
+    if args.transport == "streamable-http":
+        print(f"\n  SAM3 MCP Streamable HTTP: http://{args.host}:{args.port}/mcp")
+        mcp.run(transport="streamable-http")
+        return 0
+
     import uvicorn
-    from mcp.server.sse import SseServerTransport
-    from starlette.applications import Starlette
-    from starlette.responses import JSONResponse
-    from starlette.routing import Route
 
-    async def health(_request):
-        return JSONResponse(
-            {
-                "ok": True,
-                "server": "sam3",
-            }
-        )
-
-    health_app = Starlette(routes=[Route("/", health, methods=["GET"])])
-    sse_transport = SseServerTransport("/sse/messages/")
-
-    async def combined(scope, receive, send):
-        if scope["type"] == "http":
-            path = scope["path"]
-            if path == "/sse" and scope["method"] == "GET":
-                async with sse_transport.connect_sse(scope, receive, send) as streams:
-                    await mcp._mcp_server.run(
-                        streams[0],
-                        streams[1],
-                        mcp._mcp_server.create_initialization_options(),
-                    )
-                return
-            if path.startswith("/sse/messages/") and scope["method"] == "POST":
-                await sse_transport.handle_post_message(scope, receive, send)
-                return
-        await health_app(scope, receive, send)
-
-    print(f"\n  SAM3 MCP SSE: http://{args.host}:{args.port}/sse")
-    print(f"  Health:       http://{args.host}:{args.port}/")
-    uvicorn.run(combined, host=args.host, port=args.port, log_level="warning")
+    print(f"\n  SAM3 MCP Streamable HTTP: http://{args.host}:{args.port}/mcp")
+    print(f"  SAM3 MCP legacy SSE:     http://{args.host}:{args.port}/sse")
+    print(f"  Health:                   http://{args.host}:{args.port}/")
+    uvicorn.run(build_dual_http_app(), host=args.host, port=args.port, log_level="warning")
     return 0
 
 

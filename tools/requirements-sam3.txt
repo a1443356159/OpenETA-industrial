@@ -3,7 +3,12 @@
 # Install these in the SAM3 service environment only. Do not add SAM3 or CUDA
 # dependencies to the default OpenETA runtime environment.
 
-mcp
+# Keep the service on the FastMCP 1.x API used by this repository.  The MCP
+# protocol endpoint itself is standards-compatible through Streamable HTTP.
+mcp>=1.0,<2
+# The official SAM3 package still imports pkg_resources; setuptools 81+ no
+# longer provides it.  Keep this only in the isolated SAM3 service env.
+setuptools>=68,<81
 uvicorn
 starlette
 einops
@@ -16,4 +21,7 @@ psutil
 #   torchvision==0.25.0+cu128
 #
 # Install SAM3 from the official SAM3 package/repository appropriate for your
-# deployment environment.
+# deployment environment.  The official checkpoint download may require an
+# account that has accepted the model's Hugging Face access terms.  Provide
+# `HF_TOKEN` only to this isolated service environment; never place it in the
+# repository, CLI arguments, acceptance evidence, or logs.

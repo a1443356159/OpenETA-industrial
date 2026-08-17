@@ -29,7 +29,12 @@ openeta-replay = "logger.replay:main"
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8",
+  # ROS 2 Jazzy's launch_testing pytest entry point imports this when a live
+  # test sources the vendor ROS environment.
+  "lark>=1.1",
+  # ROS 2 Jazzy's launch_testing pytest plugin still uses pytest 8's
+  # collection hook signature; pytest 9 rejects it at plugin registration.
+  "pytest>=8,<9",
 ]
 # Compatibility name only. Real-robot SDKs are intentionally isolated from
 # the Python 3.12 M0-M2 lock because the L515-compatible pyrealsense2 wheel is

@@ -8,8 +8,15 @@ from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
-import torch
-from omegaconf import OmegaConf
+
+# BEHAVIOR is an optional simulator backend and its pure-CPU contract suite
+# still exercises torch tensors.  The base OpenETA control/MCP environment is
+# intentionally free of that heavyweight dependency, so absence must be a
+# normal skip rather than a collection error for every unrelated test suite.
+torch = pytest.importorskip("torch", reason="optional BEHAVIOR backend requires torch")
+OmegaConf = pytest.importorskip(
+    "omegaconf", reason="optional BEHAVIOR backend requires omegaconf"
+).OmegaConf
 
 from sim.env_config import build_behavior_cfg
 from sim.envs.behavior.behavior_env import (

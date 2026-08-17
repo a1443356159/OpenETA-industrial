@@ -64,6 +64,14 @@ if ! "${PYTHON_BIN}" -c "import rclpy; from rosgraph_msgs.msg import Clock" >/de
   echo "OPENETA_ROS_PYTHON_ABI_UNAVAILABLE: Jazzy rclpy/typesupport import failed" >&2
   exit 3
 fi
+if ! command -v ros2 >/dev/null 2>&1 || ! command -v gz >/dev/null 2>&1; then
+  echo "OPENETA_GAZEBO_COMMAND_UNAVAILABLE: sourced Jazzy must provide ros2 and gz" >&2
+  exit 3
+fi
+if ! ros2 pkg prefix openeta_rm75_robotiq2f85_sim >/dev/null 2>&1; then
+  echo "OPENETA_GAZEBO_OVERLAY_PACKAGE_UNAVAILABLE: rebuild/source the OpenETA Gazebo overlay" >&2
+  exit 3
+fi
 
 # The Python used for the isolated acceptance venv can itself be hosted under
 # another ROS prefix.  Gazebo workers must import and dynamically link one
