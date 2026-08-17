@@ -1532,6 +1532,30 @@ def _provider_preflight_result(
         )
         return result
 
+    if smoke.status != PipelineStatus.PLANNED:
+        # The planner backend normally converts provider exceptions into a
+        # failed, structured ask_human result.  Classify that bounded failure
+        # before schema validation; otherwise an HTTP billing/auth error is
+        # misleadingly reported as a structured-response incompatibility.
+        details = smoke.details if isinstance(smoke.details, Mapping) else {}
+        error_text = str(details.get("error") or "")
+        status, reason_code = _provider_preflight_failure_code(
+            RuntimeError(error_text), stage="planner"
+        )
+        result.update(
+            {
+                "status": status,
+                "reason_code": reason_code,
+                "error_type": str(details.get("error_type") or "PlannerBackendFailed"),
+                "planner_smoke": {
+                    "status": "failed",
+                    "latency_ms": round((time.monotonic() - smoke_started) * 1000, 3),
+                },
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        )
+        return result
+
     payload: Any = smoke.payload
     try:
         if isinstance(payload, str):

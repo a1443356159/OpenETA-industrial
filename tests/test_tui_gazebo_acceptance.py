@@ -399,6 +399,42 @@ def test_provider_preflight_rejects_non_structured_planner_response(monkeypatch)
     assert result["reason_code"] == "PROVIDER_STRUCTURED_RESPONSE_INCOMPATIBLE"
 
 
+def test_provider_preflight_classifies_backend_wrapped_http_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tui_acceptance,
+        "_root_provider_config",
+        lambda *_args, **_kwargs: _provider_config(),
+    )
+    monkeypatch.setattr(tui_acceptance, "list_openai_compatible_models", lambda _config: ["unit-model"])
+
+    class FakeBackend:
+        def __init__(self, _config) -> None:
+            pass
+
+        def decide(self, _request):
+            return SimpleNamespace(
+                status=tui_acceptance.PipelineStatus.FAILED,
+                payload={
+                    "kind": "response",
+                    "name": "ask_human",
+                    "parameters": {"message": "failed"},
+                    "reasoning": "failed",
+                },
+                details={
+                    "error_type": "ProviderHttpError",
+                    "error": "HTTP 402 unit-provider-secret",
+                },
+            )
+
+    monkeypatch.setattr(tui_acceptance, "OpenAICompatiblePlannerBackend", FakeBackend)
+    result = tui_acceptance._provider_preflight_result(Path("/unused"))  # noqa: SLF001
+
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == "PROVIDER_HTTP_402"
+    assert result["error_type"] == "ProviderHttpError"
+    assert "unit-provider-secret" not in json.dumps(result)
+
+
 def test_provider_preflight_blocks_before_any_gazebo_or_mcp_case(
     tmp_path: Path,
     monkeypatch,
