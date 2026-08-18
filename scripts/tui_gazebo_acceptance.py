@@ -1964,7 +1964,7 @@ def _run_m5_control(
         )
         sam3_result = runner.invoke(
             "sam3",
-            {"image": str(camera["rgb_path"]), "prompt": "red rectangular target"},
+            {"image": str(camera["rgb_path"]), "prompt": "red rectangular block"},
             observation=_m5_observation_for_sam3(camera, "M5 SAM3 segmentation"),
         )
         sam3_details = getattr(sam3_result, "details", {})

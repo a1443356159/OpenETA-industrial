@@ -565,6 +565,8 @@ def test_m5_single_real_candidate_uses_existing_selection_then_gates_m3(
     Image.new("L", (4, 4), 255).save(mask, format="PNG")
     encoded_mask = base64.b64encode(mask.getvalue()).decode("ascii")
 
+    sam3_arguments: list[dict] = []
+
     class FakeSam3Transport:
         def __init__(self, _url: str) -> None:
             pass
@@ -572,8 +574,9 @@ def test_m5_single_real_candidate_uses_existing_selection_then_gates_m3(
         def list_tools(self, *, timeout_s=None):
             return {"tools": [{"name": "segment"}], "tool_count": 1}
 
-        def call_tool(self, name, _arguments, *, timeout_s=None):
+        def call_tool(self, name, arguments, *, timeout_s=None):
             assert name == "segment"
+            sam3_arguments.append(arguments)
             return {
                 "success": True,
                 "details": {
@@ -581,7 +584,7 @@ def test_m5_single_real_candidate_uses_existing_selection_then_gates_m3(
                     "metadata": {"api_key": "must-not-be-persisted"},
                     "detections": [
                         {
-                            "label": "red rectangular target",
+                            "label": "red rectangular block",
                             "score": 0.95,
                             "mask": {"format": "png", "base64": encoded_mask},
                         }
@@ -634,6 +637,8 @@ def test_m5_single_real_candidate_uses_existing_selection_then_gates_m3(
     assert evidence["status"] == "passed"
     assert evidence["sam3"]["endpoint_id"] == "http://sam3.example"
     assert evidence["selection"]["selection_source"] == "scripted_single_candidate"
+    assert len(sam3_arguments) == 1
+    assert sam3_arguments[0]["prompt"] == "red rectangular block"
     assert "move_to" not in runner.calls  # monkeypatched M3 invokes only after the gate.
     assert (paths.root / "m5-object-summary.json").is_file()
     assert "not-recorded" not in (paths.root / "m5-perception.json").read_text()
