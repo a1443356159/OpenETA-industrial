@@ -163,6 +163,16 @@ def test_move_goal_applies_inverse_mount_transform():
     assert goal["target_pose"]["xyz"] == pytest.approx([0.9, 0, 0])
 
 
+def test_move_goal_accepts_public_tool_tolerance_names() -> None:
+    goal = make_move_group_goal(
+        {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
+        tolerances={"tolerance": 0.0002, "ori_tolerance": 0.002},
+    )
+
+    assert goal["position_tolerance_m"] == 0.0002
+    assert goal["orientation_tolerance_rad"] == 0.002
+
+
 def test_controller_routes_actions_and_unknown_outcome():
     sent = []
     ctl = M2Controller(
@@ -176,6 +186,35 @@ def test_controller_routes_actions_and_unknown_outcome():
     assert result["ok"] and result["reached_target"] and result["observation"]["robot"]
     assert ctl.execute({"action_type": "gripper_open"}).ok
     assert ctl.execute({"action_type": "other"}).error_code == "INVALID_CONTROL_ACTION"
+
+
+def test_controller_rejects_moveit_success_when_fresh_pose_misses_goal() -> None:
+    start, end = _state(), _state()
+    end.end_effector_pose["xyz"] = [0.02, 0.0, 0.5]
+    states = iter((start, end))
+    controller = M2Controller(
+        state_provider=lambda: next(states),
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "motion_outcome": "completed",
+        },
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
+            "tolerance": 0.0002,
+            "ori_tolerance": 0.002,
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is False
+    assert receipt["reached_target"] is False
+    assert receipt["error_code"] == "MOTION_TARGET_NOT_REACHED"
+    assert receipt["motion_outcome"] == "failed"
+    assert receipt["position_error_m"] == pytest.approx(0.02)
 
 
 @pytest.mark.parametrize(

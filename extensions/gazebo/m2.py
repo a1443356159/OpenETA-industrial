@@ -64,6 +64,7 @@ ERROR_CODES = frozenset(
         "MOTION_EXECUTION_FAILED",
         "MOTION_EXECUTION_TIMEOUT",
         "MOTION_OUTCOME_UNKNOWN",
+        "MOTION_TARGET_NOT_REACHED",
         "GRIPPER_UNAVAILABLE",
         "GRIPPER_FAILED",
         "GRIPPER_TIMEOUT",
@@ -480,6 +481,7 @@ def make_move_group_goal(
     link_q = _q_multiply(tool_q, mount_q_inv)
     offset = _q_rotate(link_q, cfg.mount_xyz)
     link_xyz = [tool_xyz[i] - offset[i] for i in range(3)]
+    tolerance_values = tolerances or {}
     return {
         "group_name": cfg.move_group,
         "base_frame": cfg.base_link,
@@ -490,9 +492,16 @@ def make_move_group_goal(
             "quat_xyzw": list(tool_q),
         },
         "target_pose": {"frame_id": cfg.base_link, "xyz": link_xyz, "quat_xyzw": list(link_q)},
-        "position_tolerance_m": float((tolerances or {}).get("position_tolerance_m", 0.002)),
+        "position_tolerance_m": float(
+            tolerance_values.get(
+                "position_tolerance_m", tolerance_values.get("tolerance", 0.002)
+            )
+        ),
         "orientation_tolerance_rad": float(
-            (tolerances or {}).get("orientation_tolerance_rad", 0.05)
+            tolerance_values.get(
+                "orientation_tolerance_rad",
+                tolerance_values.get("ori_tolerance", 0.05),
+            )
         ),
         # Carrying moves may request gentler trajectory scaling; the default
         # preserves the long-standing M2/M3 motion contract.
@@ -521,6 +530,22 @@ def _q_multiply(a: Sequence[float], b: Sequence[float]) -> tuple[float, float, f
         aw * bz + ax * by - ay * bx + az * bw,
         aw * bw - ax * bx - ay * by - az * bz,
     )
+
+
+def _pose_goal_errors(
+    actual: Mapping[str, Sequence[float]],
+    target: Mapping[str, Sequence[float]],
+) -> tuple[float, float]:
+    """Return translation and sign-invariant quaternion angular error."""
+
+    actual_xyz = tuple(float(value) for value in actual["xyz"])
+    target_xyz = tuple(float(value) for value in target["xyz"])
+    position_error_m = math.dist(actual_xyz, target_xyz)
+    actual_quat = _q_normalize(tuple(float(value) for value in actual["quat_xyzw"]))
+    target_quat = _q_normalize(tuple(float(value) for value in target["quat_xyzw"]))
+    dot = min(1.0, abs(sum(a * b for a, b in zip(actual_quat, target_quat))))
+    orientation_error_rad = 2.0 * math.acos(dot)
+    return position_error_m, orientation_error_rad
 
 
 def _q_rotate(q: Sequence[float], v: Sequence[float]) -> tuple[float, float, float]:
@@ -806,6 +831,27 @@ class M2Controller:
                 )
                 if recovery_started is not None:
                     action_evidence["action_started_ros_time_s"] = recovery_started
+                position_error_m, orientation_error_rad = _pose_goal_errors(
+                    end.end_effector_pose, goal["requested_tool_pose"]
+                )
+                # The post-action TF is sampled after MoveIt's result boundary,
+                # so allow a small measurement/settling margin while still
+                # rejecting a trajectory result that stopped materially away
+                # from the requested tool pose.
+                position_verification_tolerance_m = max(
+                    0.0005, 2.0 * float(goal["position_tolerance_m"])
+                )
+                orientation_verification_tolerance_rad = max(
+                    0.005, 2.0 * float(goal["orientation_tolerance_rad"])
+                )
+                target_verified = (
+                    position_error_m <= position_verification_tolerance_m
+                    and orientation_error_rad <= orientation_verification_tolerance_rad
+                )
+                if ok and not bool(result.get("plan_only", False)) and not target_verified:
+                    ok = False
+                    error = "MOTION_TARGET_NOT_REACHED"
+                    extra = {}
                 return M2ControlResult(
                     ok,
                     error,
@@ -816,12 +862,26 @@ class M2Controller:
                         "start_state": start.to_dict(),
                         "end_state": end.to_dict(),
                         "steps_executed": 1,
-                        "reached_target": bool(result.get("reached_goal", ok)),
+                        "reached_target": bool(
+                            result.get("reached_goal", ok) and target_verified
+                        ),
                         "stalled": False,
                         "terminated": False,
                         "truncated": False,
-                        "motion_outcome": result.get(
-                            "motion_outcome", "completed" if ok else "failed"
+                        "motion_outcome": (
+                            "failed"
+                            if error == "MOTION_TARGET_NOT_REACHED"
+                            else result.get(
+                                "motion_outcome", "completed" if ok else "failed"
+                            )
+                        ),
+                        "position_error_m": position_error_m,
+                        "orientation_error_rad": orientation_error_rad,
+                        "position_verification_tolerance_m": (
+                            position_verification_tolerance_m
+                        ),
+                        "orientation_verification_tolerance_rad": (
+                            orientation_verification_tolerance_rad
                         ),
                         "observation": {"robot": end.to_dict()},
                         **(
