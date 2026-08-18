@@ -46,3 +46,25 @@ the stock `attached` and `detached` ACKs, a 96.5 mm native child-link lift and
 fake candidate (`is_model_prediction=false`). These are local control-layer
 facts, not evidence of an external perception model or a formal remote PTY
 TUI run.
+
+On 2026-08-18, SHA `10a56e1` completed a remote, strictly serial M0–M5
+control-only run with the real ModelScope-sourced SAM3 checkpoint. The report
+is stored at
+`/root/autodl-tmp/openeta-services/acceptance-runs/10a56e1-m0-m5-control-20260818/control-acceptance-report.json`
+and records `overall_status=passed`,
+`acceptance_scope=control_only_real_sam3_no_planner_not_formal_tui`,
+`planner_provider_invoked=false`, and `formal_tui_acceptance=not_run`.
+
+M0 through M5 used only the stable AgentTool → MCP/SSE → Gazebo boundary.
+M5 performed one real text-prompt SAM3 call, selected its sole candidate, and
+then passed the unchanged M3 native-contact chain. M3/M4/M5 respectively
+recorded 99.93/100.14/99.85 mm child-link lift and
+0.25/0.35/0.34 mm capture-relative translation. Every case released its ROS
+graph, Gazebo partition, port and owned processes. Motion receipts were also
+checked against fresh post-action TF; a MoveIt success outside the documented
+verification tolerances is now rejected as `MOTION_TARGET_NOT_REACHED`.
+
+This is end-to-end control-layer and MCP receipt evidence, but it did not run
+the interactive PTY TUI or a planner/provider and therefore is not formal TUI
+acceptance. The pinned model asset and deployment record is in
+`docs/gazebo-sam3-assets-and-deployment.md`.

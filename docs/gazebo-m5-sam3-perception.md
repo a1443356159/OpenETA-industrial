@@ -26,6 +26,10 @@ SAM3 service 应使用隔离 Python 环境，并仅在该服务进程里注入�
 仓库、命令行、`--sam3-url`、M5 evidence 或日志。若模型尚未获授权或无法下载，
 M5 会以 `SAM3_INFERENCE_UNAVAILABLE` 阻塞，并且不会进入 M3 motion。
 
+ModelScope checkpoint 的固定版本、SHA-256、离线 cache 布局和服务命令统一记录在
+[Gazebo SAM3 资产与服务部署](gazebo-sam3-assets-and-deployment.md)，不要在各验收文档
+中复制另一份权重清单。
+
 同一 run 必须先严格通过 M0–M4；只有之后才创建 M5 的 M3 场景并执行以下链路：
 
 ```text
@@ -85,6 +89,11 @@ capture-relative translation 和 detached ACK。
 
 普通单元测试使用受控 MCP stub。真实 SAM3 集成应只在
 `OPENETA_RUN_M5_LIVE=1` 并显式提供 `--sam3-url` 时启用。
+
+运动工具的成功回执还必须通过动作后的新鲜 TF 验证。回执会给出
+`position_error_m`、`orientation_error_rad` 及对应 verification tolerance；即使
+MoveIt terminal result 为成功，实际位姿越界也必须返回
+`MOTION_TARGET_NOT_REACHED`、`ok=false`、`reached_target=false`，不能进入下一物理门。
 
 ## 未覆盖范围
 

@@ -276,6 +276,7 @@ environment receipts, rewards, checkers, and retained rollout evidence.
 | [Architecture](docs/architecture.md) | Boundaries across the Agent, Adapter, Simulator, and MCP layers |
 | [Agent command pipeline](docs/agent-action-pipeline.md) | Command schemas, Tool contracts, AtomActions, and safety gates |
 | [Simulation layer](sim/README.md) | Installation, environment registry, MCP, REST, and Dashboard |
+| [Gazebo SAM3 assets](docs/gazebo-sam3-assets-and-deployment.md) | Pinned ModelScope checkpoint, offline cache, service deployment, and M5 evidence |
 | [Parallel simulator evaluation](docs/parallel-simulator-evaluation.md) | Concurrency, budgets, human recovery, and experience promotion |
 | [Rollout data contract](docs/rollout-data-contract.md) | Session data layers and immutable evidence |
 | [Code policy runtime](docs/code-policy-runtime.md) | Bounded code backends and sandbox boundaries |
