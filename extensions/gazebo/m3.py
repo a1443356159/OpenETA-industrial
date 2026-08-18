@@ -150,8 +150,13 @@ def validated_pickplace_motion_guidance(
         "motion_parameters": {
             "velocity_scaling": 0.1,
             "acceleration_scaling": 0.1,
-            "tolerance": 0.001,
-            "ori_tolerance": 0.01,
+            # The 40 mm fixture can be pushed out of the opposing pad before
+            # the second pad makes contact when MoveIt stops at the edge of a
+            # 1 mm / 0.01 rad goal window.  Keep the calibrated waypoint and
+            # require the controller to settle tightly enough for repeatable
+            # bilateral native-contact evidence.
+            "tolerance": 0.0002,
+            "ori_tolerance": 0.002,
         },
         "poses": [
             pose("approach", cfg.approach_mount_xyz),

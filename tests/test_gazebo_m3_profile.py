@@ -9,6 +9,7 @@ from extensions.gazebo.m3 import (
     M3_ENV_ID,
     M3_MODEL_ID,
     M3Config,
+    validated_pickplace_motion_guidance,
 )
 from extensions.gazebo.profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, gazebo_profile
 from sim.env_registry import get_env_spec
@@ -31,6 +32,13 @@ def test_m3_assets_are_required_before_manipulation_starts() -> None:
     config.validate_assets()
     package = config.ros_workspace / "src" / config.ros_package_name
     assert (package / "worlds/m3_rm75_robotiq2f85_pickplace.sdf").is_file()
+
+
+def test_m3_stable_motion_contract_uses_bilateral_contact_goal_tolerances() -> None:
+    motion = validated_pickplace_motion_guidance()["motion_parameters"]
+
+    assert motion["tolerance"] == 0.0002
+    assert motion["ori_tolerance"] == 0.002
 
 
 def test_m3_paused_launch_gives_runtime_a_bounded_detach_window() -> None:

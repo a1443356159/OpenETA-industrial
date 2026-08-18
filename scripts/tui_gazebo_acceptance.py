@@ -1239,8 +1239,11 @@ def _m3_motion(runner: _ControlToolRunner) -> list[Any]:
         },
         "velocity_scaling": 0.1,
         "acceleration_scaling": 0.1,
-        "tolerance": 0.001,
-        "ori_tolerance": 0.01,
+        # Match the profile-owned stable motion contract.  A looser goal
+        # window lets the first pad push the 40 mm target away before the
+        # opposite native contact stream begins.
+        "tolerance": 0.0002,
+        "ori_tolerance": 0.002,
     }
     approach = {
         **common,

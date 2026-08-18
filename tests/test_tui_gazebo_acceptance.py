@@ -1310,6 +1310,9 @@ def test_m3_control_uses_fixed_world_fixture_poses_not_a_geometry_gate() -> None
         "xyz": [0.1552, -0.1, 0.5976],
     }
     assert lift["target_pose"]["xyz"][2] - capture["target_pose"]["xyz"][2] >= 0.1 - 1e-9
+    for parameters in (approach, capture, lift):
+        assert parameters["tolerance"] == 0.0002
+        assert parameters["ori_tolerance"] == 0.002
     for _, parameters in calls:
         assert not {"distance", "contact_gate", "tf_lookup", "geometry"} & set(parameters)
 
