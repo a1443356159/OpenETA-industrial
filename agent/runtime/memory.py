@@ -3103,7 +3103,12 @@ class AgentMemory:
             )
         hover = outputs.get("hover_pose")
         gripper_state = self.gripper_command_state() or {}
-        already_open = gripper_state.get("position") == 1
+        last_rejection = policy.get("last_rejection")
+        failed_close_requires_open = (
+            isinstance(last_rejection, dict)
+            and last_rejection.get("source") == "host_gripper_close_failed"
+        )
+        already_open = gripper_state.get("position") == 1 and not failed_close_requires_open
         if already_open and isinstance(hover, dict):
             initial_stage = "hover"
             required_action = {

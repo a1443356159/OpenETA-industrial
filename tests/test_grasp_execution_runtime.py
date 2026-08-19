@@ -994,6 +994,15 @@ def test_known_failed_host_close_rejects_candidate_without_repeating() -> None:
 
     assert memory.grasp_candidate_policy()["active_candidate"]["id"] == "grasp_001"
     assert memory.grasp_execution() is None
+    next_compiled = _compiled(memory)
+    memory.add_action(
+        _tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=next_compiled)
+    )
+    assert memory.grasp_execution()["stage"] == "open"
+    assert memory.grasp_execution()["required_action"] == {
+        "name": "gripper_control",
+        "parameters": {"position": 1},
+    }
 
 
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:
