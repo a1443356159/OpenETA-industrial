@@ -429,6 +429,31 @@ def _host_obligation_decision(
 ) -> PlannerDecision | None:
     """Dispatch fully determined structured joins without model JSON copying."""
 
+    grasp_policy = tool_context.get("grasp_candidate_policy")
+    if isinstance(grasp_policy, dict) and grasp_policy.get("status") == "blocked":
+        return PlannerDecision(
+            action_type="response",
+            action="ask_human",
+            parameters={
+                "question": (
+                    "Grasp compilation failed deterministically; inspect the staged "
+                    "embodiment calibration before retrying."
+                ),
+                "failure_code": "grasp_compile_terminal_failure",
+                "reason": grasp_policy.get("terminal_failure"),
+            },
+            reasoning=(
+                "The same retained candidate cannot be recompiled after a terminal "
+                "host calibration failure; stop instead of repeating the request."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.grasp_compile_stop.v1",
+                    "status": "blocked",
+                }
+            },
+        )
+
     refresh = tool_context.get("fresh_observation_obligation")
     if (
         isinstance(refresh, dict)

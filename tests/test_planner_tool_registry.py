@@ -8427,6 +8427,54 @@ def test_candidate_width_compile_failure_advances_anygrasp_candidate() -> None:
     assert policy["rejected_candidates"][0]["source"] == ("grasp_seed_geometry_rejected")
 
 
+def test_terminal_compile_failure_blocks_repeat_and_requests_human() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cylinder")
+    _record_anygrasp_candidate_policy(memory)
+    active = memory.grasp_candidate_policy()["active_candidate"]
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {
+                    "kind": "tool_call",
+                    "name": "compile_grasp_seed",
+                    "parameters": {"camera_pose": dict(active)},
+                },
+                "status": "failed",
+                "tool_calls": [
+                    {
+                        "name": "compile_grasp_seed",
+                        "status": "failed",
+                        "result": {
+                            "success": False,
+                            "content": "grasp seed compilation failed: calibration mismatch",
+                            "details": {
+                                "diagnostics": [
+                                    {
+                                        "code": "grasp_seed_compile_failed",
+                                        "message": "calibration mismatch",
+                                    }
+                                ],
+                                "outputs": {"reason": "grasp_seed_compile_failed"},
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "blocked"
+    decision = _host_obligation_decision(
+        {"grasp_candidate_policy": policy},
+        tools=build_default_tool_registry(),
+    )
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "grasp_compile_terminal_failure"
+
+
 def test_structured_strategy_filter_exhaustion_triggers_perception_refinement() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick bowl")

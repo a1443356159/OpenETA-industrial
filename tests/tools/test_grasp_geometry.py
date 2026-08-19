@@ -79,6 +79,35 @@ def test_compile_grasp_seed_applies_camera_and_eef_transforms() -> None:
     assert result["scene_epoch"] == 0
 
 
+def test_compile_grasp_seed_accepts_rm75_robotiq_profile_and_preserves_rotation() -> None:
+    profile_path = (
+        Path(__file__).resolve().parents[2]
+        / "agent"
+        / "calibrations"
+        / "candidate"
+        / "graspnet-eef-rm75-robotiq2f85.json"
+    )
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    parameters = _compile_parameters()
+    parameters["target_class"] = "other"
+    parameters["camera_pose"]["width"] = 0.085
+
+    result = compile_grasp_seed(
+        parameters,
+        profile=profile,
+        profile_sha256="rm75-profile-sha",
+        strategies=[],
+    )
+
+    assert result["calibration_id"] == "graspnet-eef-rm75-robotiq2f85"
+    assert result["orientation_clamped"] is False
+    assert result["contact_pose"]["rotation_matrix"] == [
+        [1.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, -1.0],
+    ]
+
+
 def test_compile_placement_reuses_eef_calibration_and_preserves_rotation() -> None:
     source = _candidate()
     pose = {

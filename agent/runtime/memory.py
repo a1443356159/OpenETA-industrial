@@ -375,6 +375,11 @@ class AgentMemory:
         recovery_updated = self._advance_grasp_recovery(action)
         estimation_recovery_updated = self._advance_grasp_estimation_recovery(action)
         candidate_advanced = self._advance_anygrasp_candidate_after_rejection(action)
+        terminal_compile_blocked = (
+            False
+            if candidate_advanced
+            else self._capture_terminal_grasp_compile_failure(action)
+        )
         candidate_accepted = (
             False if candidate_advanced else self._accept_anygrasp_candidate_after_motion(action)
         )
@@ -420,6 +425,7 @@ class AgentMemory:
             or gripper_state_updated
             or candidate_advanced
             or candidate_accepted
+            or terminal_compile_blocked
             or target_mask_invalidated
             or environment_task_updated
         ):
@@ -436,6 +442,41 @@ class AgentMemory:
         )
         for conversation_item in self.conversation.add_action(action):
             self._append_conversation_record(item_record(conversation_item))
+
+    def _capture_terminal_grasp_compile_failure(self, action: EnvAction) -> bool:
+        """Stop deterministic retries after a non-candidate compile failure."""
+
+        call = _tool_call(action, "compile_grasp_seed")
+        if not isinstance(call, dict) or _call_result_success(call):
+            return False
+        policy = self.grasp_candidate_policy()
+        if not isinstance(policy, dict):
+            return False
+        policy.update(
+            {
+                "status": "blocked",
+                "blocked_tool": "compile_grasp_seed",
+                "terminal_failure": _call_failure_reason(call),
+                "blocked_at_s": time.time(),
+            }
+        )
+        self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy,
+            source="terminal_grasp_compile_failure",
+        )
+        command = action.command if isinstance(action.command, dict) else {}
+        request = command.get("request")
+        request = request if isinstance(request, dict) else {}
+        parameters = request.get("parameters")
+        parameters = parameters if isinstance(parameters, dict) else {}
+        self.record(
+            "grasp_compile_terminal_failure",
+            {
+                "candidate_id": _parameters_grasp_candidate_id(parameters),
+                "reason": policy["terminal_failure"],
+            },
+        )
+        return True
 
     def _invalidate_failed_anygrasp_target_mask(self, action: EnvAction) -> bool:
         call = _tool_call(action, "grasp_pose_estimate") or _tool_call(action, "anygrasp")

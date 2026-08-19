@@ -888,11 +888,11 @@ def _validate_profile(profile: Mapping[str, Any], *, target_class: str) -> None:
         raise GraspGeometryError("unsupported calibration profile schema")
     if profile.get("status") not in {"candidate", "validated"}:
         raise GraspGeometryError("calibration status must be candidate or validated")
+    for key in ("robot_model", "gripper_model", "eef_frame"):
+        if not isinstance(profile.get(key), str) or not str(profile.get(key)).strip():
+            raise GraspGeometryError(f"calibration {key} must be a non-empty string")
     required = {
-        "robot_model": "Panda",
-        "gripper_model": "PandaGripper",
         "grasp_frame": "graspnet",
-        "eef_frame": "openeta_eef",
         "length_unit": "m",
         "rotation_convention": "active_column_vectors",
     }
