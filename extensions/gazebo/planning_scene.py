@@ -70,7 +70,12 @@ class PlanningSceneSynchronizer:
                 "world_objects": [table.to_dict(), distractor.to_dict(), target.to_dict()],
                 "attached_objects": [],
                 "allowed_collisions": {
-                    target.object_id: list(TARGET_TOUCH_LINKS),
+                    # The target begins exactly supported by the table, so
+                    # FCL reports their coincident surfaces as contact. This
+                    # is the one support-surface exception required for the
+                    # first attached lift and final release; all other world
+                    # objects and non-touch robot links remain collidable.
+                    target.object_id: [*TARGET_TOUCH_LINKS, table.object_id],
                 },
             },
             expected_world={table.object_id, distractor.object_id, target.object_id},

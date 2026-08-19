@@ -61,7 +61,10 @@ def test_planning_scene_reset_and_attach_detach_switch() -> None:
     scene = PlanningSceneSynchronizer(apply)
     table, distractor, target = _boxes()
     assert scene.reset(table=table, distractor=distractor, target=target) == 1
-    assert calls[0]["allowed_collisions"]["target"] == list(TARGET_TOUCH_LINKS)
+    assert calls[0]["allowed_collisions"]["target"] == [
+        *TARGET_TOUCH_LINKS,
+        "table",
+    ]
     assert scene.attach_target(target=target, relative_pose_xyz=(0.0, 0.0, -0.04)) == 2
     assert scene.world_ids == {"table", "distractor"}
     assert scene.attached_ids == {"target"}
