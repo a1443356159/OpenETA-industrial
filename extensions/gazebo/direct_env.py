@@ -11,7 +11,13 @@ from adapter.protocol import EnvObservation
 
 from .deployment import GazeboDeploymentConfig, worker_deployment_config
 from .robot_control import JOINT_NAMES, neutral_relative_motion_guidance
-from .native_grasp import NativePickPlaceConfig, NativeGraspVerifier, ReasonCode, validated_pickplace_motion_guidance
+from .native_grasp import (
+    NativePickPlaceConfig,
+    NativeGraspVerifier,
+    ReasonCode,
+    validated_pickplace_motion_guidance,
+    verify_stable_placement,
+)
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .process import GazeboProcessError
 from .process import GazeboNativeContactWindow
@@ -249,7 +255,17 @@ class GazeboDirectEnv(Env):
                     if attachment is None:
                         raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
                     attachment.ensure_detached(require_ack=True)
-                    target_pose, _ = attachment.native_target_mount_poses()
+                    receipt["detachable_joint"] = {
+                        "state": "detached",
+                        "detach_topic": self._native_grasp_config.detach_topic,
+                        "state_topic": self._native_grasp_config.state_topic,
+                    }
+                    samples = attachment.sample_detached_target_poses(
+                        duration_s=self._native_grasp_config.placement_stability_duration_s,
+                        interval_s=self._native_grasp_config.placement_sample_interval_s,
+                    )
+                    placement = verify_stable_placement(samples, self._native_grasp_config)
+                    target_pose = samples[-1]
                     sync_detach = getattr(self.controller, "sync_planning_scene_detach", None)
                     if not callable(sync_detach):
                         raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
@@ -259,12 +275,8 @@ class GazeboDirectEnv(Env):
                         target_quat_xyzw=target_pose.quat_xyzw,
                     )
                     record = self._native_grasp_verifier.release_result(detached_acked=True)
-                    receipt["detachable_joint"] = {
-                        "state": "detached",
-                        "detach_topic": self._native_grasp_config.detach_topic,
-                        "state_topic": self._native_grasp_config.state_topic,
-                    }
                     receipt["planning_scene_revision"] = scene_revision
+                    receipt["placement_verification"] = placement.to_dict()
                     self._native_grasp_transport_locked = False
                     self._native_grasp_lift_proof_pending = False
                 except Exception as exc:

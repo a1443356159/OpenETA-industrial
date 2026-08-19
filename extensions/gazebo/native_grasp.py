@@ -21,6 +21,7 @@ PICKPLACE_ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
 PICKPLACE_MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
 PICKPLACE_DISPLAY_NAME = "Gazebo 仿真环境（原生接触 DetachableJoint 拾放）"
 NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
+PLACEMENT_VERIFICATION_SCHEMA_VERSION = "openeta.gazebo.placement_verification.v1"
 
 
 class Verdict(StrEnum):
@@ -49,6 +50,40 @@ class ReasonCode(StrEnum):
     RELATIVE_POSE_DRIFT = "NATIVE_GRASP_CAPTURE_RELATIVE_TRANSLATION_EXCEEDED"
     TARGET_HELD = "NATIVE_GRASP_TARGET_HELD"
     RELEASE_ACK_MISSING = "NATIVE_GRASP_RELEASE_DETACH_ACK_MISSING"
+
+
+class PlacementReasonCode(StrEnum):
+    PLACED = "PLACEMENT_STABLE_IN_DESTINATION"
+    POSE_UNAVAILABLE = "PLACEMENT_NATIVE_POSE_UNAVAILABLE"
+    OBSERVATION_TOO_SHORT = "PLACEMENT_OBSERVATION_TOO_SHORT"
+    TERMINAL_DRIFT = "PLACEMENT_TERMINAL_DRIFT_EXCEEDED"
+    HEIGHT_OUT_OF_RANGE = "PLACEMENT_CENTER_HEIGHT_OUT_OF_RANGE"
+    FOOTPRINT_OUTSIDE_DESTINATION = "PLACEMENT_FOOTPRINT_OUTSIDE_DESTINATION"
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementPoseSample:
+    """One native Gazebo target pose sampled after the detach ACK."""
+
+    monotonic_s: float
+    xyz: tuple[float, float, float]
+    quat_xyzw: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementVerification:
+    verdict: Verdict
+    reason_code: PlacementReasonCode
+    evidence: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": PLACEMENT_VERIFICATION_SCHEMA_VERSION,
+            "verdict": self.verdict.value,
+            "reason_code": self.reason_code.value,
+            "placement_confirmed": self.verdict is Verdict.PASS,
+            "evidence": dict(self.evidence),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +125,12 @@ class NativePickPlaceConfig(GazeboControlConfig):
     distractor_initial_xyz: tuple[float, float, float] = (0.28, 0.12, 0.44)
     destination_center_xy: tuple[float, float] = (0.48, -0.10)
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
+    placement_stability_duration_s: float = 0.50
+    placement_sample_interval_s: float = 0.10
+    placement_terminal_window_s: float = 0.20
+    maximum_placement_terminal_drift_m: float = 0.005
+    placement_center_height_m: float = 0.43
+    placement_center_height_tolerance_m: float = 0.01
     # Profile-owned, live-validated gripper-mount poses for this fixed
     # fixture.  They are advertised through control_spec so an agent can use
     # the stable controller contract instead of guessing from image depth.
@@ -125,6 +166,75 @@ class NativePickPlaceConfig(GazeboControlConfig):
         )
         if not all(path.is_file() for path in required):
             raise RuntimeError("MODEL_ASSET_NOT_FOUND")
+
+
+def verify_stable_placement(
+    samples: Sequence[PlacementPoseSample],
+    config: NativePickPlaceConfig | None = None,
+) -> PlacementVerification:
+    """Prove a settled release using only native poses and conservative geometry."""
+
+    cfg = config or NativePickPlaceConfig()
+    if len(samples) < 2:
+        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE)
+    if any(
+        not math.isfinite(value)
+        for sample in samples
+        for value in (sample.monotonic_s, *sample.xyz, *sample.quat_xyzw)
+    ):
+        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE)
+
+    ordered = sorted(samples, key=lambda sample: sample.monotonic_s)
+    duration_s = ordered[-1].monotonic_s - ordered[0].monotonic_s
+    final = ordered[-1]
+    radius_m = math.hypot(cfg.target_size_m[0], cfg.target_size_m[1]) / 2.0
+    half_x = cfg.destination_size_xy_m[0] / 2.0
+    half_y = cfg.destination_size_xy_m[1] / 2.0
+    x_margin_m = half_x - abs(final.xyz[0] - cfg.destination_center_xy[0]) - radius_m
+    y_margin_m = half_y - abs(final.xyz[1] - cfg.destination_center_xy[1]) - radius_m
+    height_error_m = abs(final.xyz[2] - cfg.placement_center_height_m)
+    terminal = [
+        sample
+        for sample in ordered
+        if final.monotonic_s - sample.monotonic_s <= cfg.placement_terminal_window_s + 1e-9
+    ]
+    terminal_drift_m = max(math.dist(sample.xyz, final.xyz) for sample in terminal)
+    evidence = {
+        "sample_count": len(ordered),
+        "stable_duration_s": duration_s,
+        "terminal_window_s": cfg.placement_terminal_window_s,
+        "terminal_drift_m": terminal_drift_m,
+        "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
+        "final_pose": {
+            "frame": "world",
+            "xyz": list(final.xyz),
+            "quat_xyzw": list(final.quat_xyzw),
+        },
+        "expected_center_height_m": cfg.placement_center_height_m,
+        "center_height_tolerance_m": cfg.placement_center_height_tolerance_m,
+        "center_height_error_m": height_error_m,
+        "destination_center_xy": list(cfg.destination_center_xy),
+        "destination_size_xy_m": list(cfg.destination_size_xy_m),
+        "conservative_footprint_radius_m": radius_m,
+        "footprint_margin_xy_m": [x_margin_m, y_margin_m],
+    }
+    if duration_s + 1e-9 < cfg.placement_stability_duration_s:
+        return PlacementVerification(
+            Verdict.UNKNOWN, PlacementReasonCode.OBSERVATION_TOO_SHORT, evidence
+        )
+    if len(terminal) < 2:
+        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE, evidence)
+    if terminal_drift_m > cfg.maximum_placement_terminal_drift_m:
+        return PlacementVerification(Verdict.FAIL, PlacementReasonCode.TERMINAL_DRIFT, evidence)
+    if height_error_m > cfg.placement_center_height_tolerance_m:
+        return PlacementVerification(
+            Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
+        )
+    if min(x_margin_m, y_margin_m) < 0.0:
+        return PlacementVerification(
+            Verdict.FAIL, PlacementReasonCode.FOOTPRINT_OUTSIDE_DESTINATION, evidence
+        )
+    return PlacementVerification(Verdict.PASS, PlacementReasonCode.PLACED, evidence)
 
 
 def validated_pickplace_motion_guidance(
@@ -187,6 +297,15 @@ def validated_pickplace_motion_guidance(
             "maximum_capture_relative_translation_m": (
                 cfg.maximum_capture_relative_translation_m
             ),
+            "placement": {
+                "minimum_stability_duration_s": cfg.placement_stability_duration_s,
+                "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
+                "center_height_m": cfg.placement_center_height_m,
+                "center_height_tolerance_m": cfg.placement_center_height_tolerance_m,
+                "destination_center_xy": list(cfg.destination_center_xy),
+                "destination_size_xy_m": list(cfg.destination_size_xy_m),
+                "footprint_rule": "target_xy_circumscribed_circle_fully_inside",
+            },
         },
         "on_rejection": "observe_and_report; do_not_bypass_native_receipt_gates",
     }

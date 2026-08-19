@@ -709,6 +709,36 @@ class GazeboDetachableJointControl:
             poses, self.parent_link
         )
 
+    def sample_detached_target_poses(
+        self,
+        *,
+        duration_s: float,
+        interval_s: float,
+    ):
+        """Sample the released target long enough to prove terminal stability."""
+
+        if self._state != DetachableJointState.DETACHED:
+            raise GazeboProcessError("NATIVE_GRASP_DETACH_ACK_MISSING")
+        if duration_s <= 0.0 or interval_s <= 0.0:
+            raise ValueError("placement sampling duration and interval must be positive")
+        from .native_grasp import PlacementPoseSample
+
+        samples: list[PlacementPoseSample] = []
+        while True:
+            target, _ = self.native_target_mount_poses()
+            sampled_s = time.monotonic()
+            samples.append(
+                PlacementPoseSample(
+                    monotonic_s=sampled_s,
+                    xyz=target.xyz,
+                    quat_xyzw=target.quat_xyzw,
+                )
+            )
+            elapsed_s = sampled_s - samples[0].monotonic_s
+            if elapsed_s >= duration_s:
+                return samples
+            time.sleep(min(interval_s, max(0.0, duration_s - elapsed_s)))
+
     def child_link_proof(self):
         """Return the approved child-link lift proof, or fail closed."""
 
