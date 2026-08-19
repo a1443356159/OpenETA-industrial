@@ -2240,6 +2240,12 @@ class AgentMemory:
                 execution=self.grasp_execution(),
             )
         if rejection is None:
+            rejection = _host_stage_close_rejection(
+                action,
+                active_candidate_id=active_candidate_id,
+                execution=self.grasp_execution(),
+            )
+        if rejection is None:
             if str(policy.get("status") or "") == "accepted":
                 rejection = _candidate_linked_grasp_outcome_rejection(
                     action,
@@ -2332,6 +2338,7 @@ class AgentMemory:
             "grasp_seed_geometry_rejected",
             "independent_precontact_review_rejected",
             "independent_host_stage_review_rejected",
+            "host_gripper_close_failed",
             "wrist_reference_localization_rejected",
             "articulated_attachment_assessment_failed",
         }:
@@ -5758,6 +5765,40 @@ def _host_stage_precontact_review_rejection(
         "grasp_stage": execution.get("stage"),
         "reason": _call_failure_reason(call),
         **_independent_review_recovery_metadata(call),
+    }
+
+
+def _host_stage_close_rejection(
+    action: EnvAction,
+    *,
+    active_candidate_id: str,
+    execution: JsonDict | None,
+) -> JsonDict | None:
+    """Reject one grasp candidate after a known failed close; never retry it."""
+
+    if (
+        not active_candidate_id
+        or not isinstance(execution, dict)
+        or execution.get("stage") != "close"
+        or str(execution.get("candidate_id") or "") != active_candidate_id
+    ):
+        return None
+    required = execution.get("required_action")
+    if not isinstance(required, dict) or not _action_matches(action, required):
+        return None
+    call = _tool_call(action, "gripper_control")
+    if not isinstance(call, dict) or _call_result_success(call):
+        return None
+    outputs = _tool_call_outputs(call)
+    if str(outputs.get("motion_outcome") or "").lower() == "unknown" or (
+        outputs.get("reconciliation_required") is True
+    ):
+        return None
+    return {
+        "source": "host_gripper_close_failed",
+        "target_tool": "gripper_control",
+        "grasp_stage": "close",
+        "reason": _call_failure_reason(call),
     }
 
 

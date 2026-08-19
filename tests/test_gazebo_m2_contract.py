@@ -15,6 +15,7 @@ from extensions.gazebo.robot_control import (
     make_move_group_goal,
     robot_state_from_sources,
 )
+from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.ros2_ws import m2_robotiq2f85_acceptance as m2_acceptance
 from sim.env_registry import get_env_spec
 
@@ -234,6 +235,26 @@ def test_m2_gripper_never_credits_unreached_stalled_or_timed_out_results(result)
     assert receipt["reached_goal"] is False
     assert receipt["stalled"] is bool(result.get("stalled", False))
     assert receipt["error_code"] in {"GRIPPER_FAILED", "GRIPPER_TIMEOUT"}
+
+
+def test_native_grasp_profile_admits_known_stalled_close_to_contact_gate() -> None:
+    controller = GazeboController(
+        config=NativePickPlaceConfig(),
+        state_provider=_state,
+        gripper_action=lambda _position, _timeout: {
+            "ok": False,
+            "reached_goal": False,
+            "stalled": True,
+            "terminal_status": "not_succeeded",
+            "terminal_status_code": 6,
+        },
+    )
+
+    receipt = controller.execute({"action_type": "gripper_close"}).to_dict()
+
+    assert receipt["ok"] is True
+    assert receipt["reached_goal"] is False
+    assert receipt["stalled"] is True
 
 
 def test_m2_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> None:

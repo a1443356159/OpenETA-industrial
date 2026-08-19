@@ -963,6 +963,39 @@ def test_point_segmentation_retains_same_frame_text_target_prompt() -> None:
     assert memory.selected_sam3_detection()["target_prompt"] == "blue cylinder"
 
 
+def test_known_failed_host_close_rejects_candidate_without_repeating() -> None:
+    memory = _memory_with_candidates()
+    policy = memory.grasp_candidate_policy()
+    policy["status"] = "accepted"
+    memory.save_fact("grasp_candidate_policy", policy, source="test")
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "schema_version": "openeta.grasp_execution.v1",
+            "status": "required",
+            "stage": "close",
+            "candidate_id": "grasp_000",
+            "required_action": {
+                "name": "gripper_control",
+                "parameters": {"position": 0},
+            },
+        },
+        source="test",
+    )
+
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 0},
+            success=False,
+            outputs={"motion_outcome": "failed", "error_code": "CONTACT_REJECTED"},
+        )
+    )
+
+    assert memory.grasp_candidate_policy()["active_candidate"]["id"] == "grasp_001"
+    assert memory.grasp_execution() is None
+
+
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:
     memory = _memory_with_candidates()
     memory.add_action(_tool_action("gripper_control", {"position": 1}))

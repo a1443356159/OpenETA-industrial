@@ -960,7 +960,12 @@ class GazeboController:
                 # default profile never credits a stalled or unreached action,
                 # even if a lower adapter incorrectly labels it ``ok``.
                 if bool(getattr(self.config, "allow_stalling", False)):
-                    ok = result["ok"]
+                    # FollowJointTrajectory reports a load-stalled Robotiq close
+                    # as ABORTED even though the terminal state and stalled bit
+                    # are known.  In the native-grasp profile this admits only
+                    # the subsequent independent Gazebo contact gate; it never
+                    # constitutes grasp or attachment evidence by itself.
+                    ok = result["ok"] or stalled
                 else:
                     ok = result["ok"] and reached_goal and not stalled
                 state.gripper_state.update(
