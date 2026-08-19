@@ -2003,6 +2003,13 @@ class AgentMemory:
                 if target_prompt and target_prompt == previous_prompt
                 else []
             )
+            failed_request_fingerprints = (
+                list(previous_policy.get("failed_request_fingerprints") or [])
+                if isinstance(previous_policy, dict)
+                and target_prompt
+                and target_prompt == previous_prompt
+                else []
+            )
             all_candidates_over_width = bool(raw_candidates) and len(width_rejections) == len(
                 raw_candidates
             )
@@ -2042,6 +2049,7 @@ class AgentMemory:
                 "candidate_attempt_count": 0,
                 "max_candidate_attempts": GRASP_CANDIDATE_MAX_ATTEMPTS,
                 "candidate_fallback": False,
+                "failed_request_fingerprints": failed_request_fingerprints,
                 "rejected_candidates": [
                     {
                         "candidate_id": candidate.get("id"),
@@ -2644,6 +2652,35 @@ class AgentMemory:
         rejected = policy.get("rejected_candidates")
         if not isinstance(rejected, list):
             rejected = []
+        request_fingerprint = str(rejection.get("request_fingerprint") or "").strip()
+        failed_request_fingerprints = list(
+            policy.get("failed_request_fingerprints") or []
+        )
+        if request_fingerprint and request_fingerprint in failed_request_fingerprints:
+            policy.update(
+                {
+                    "status": "stopped_requires_human",
+                    "active_candidate": None,
+                    "active_rank": None,
+                    "remaining_candidate_ids": [],
+                    "last_rejection": dict(rejection),
+                    "stop_reason": "repeated_failed_request_fingerprint",
+                }
+            )
+            self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy,
+                source="grasp_fingerprint_repeated",
+            )
+            self.record(
+                "grasp_failed_request_fingerprint_repeated",
+                {
+                    "candidate_id": active.get("id"),
+                    "request_fingerprint": request_fingerprint,
+                },
+            )
+            return True
+        if request_fingerprint:
+            failed_request_fingerprints.append(request_fingerprint)
         rejected.append(
             {
                 "candidate_id": active.get("id"),
@@ -2652,6 +2689,7 @@ class AgentMemory:
                 "reason": rejection.get("reason"),
                 "source": rejection.get("source"),
                 "recovery_class": _grasp_estimation_recovery_class(rejection),
+                "request_fingerprint": request_fingerprint,
                 "rejected_at_s": time.time(),
             }
         )
@@ -2682,6 +2720,7 @@ class AgentMemory:
                 if next_candidate is not None
                 else [],
                 "rejected_candidates": rejected,
+                "failed_request_fingerprints": failed_request_fingerprints,
                 "candidate_attempt_count": attempts,
                 "last_candidate_attempt": {
                     "candidate_id": active.get("id"),
@@ -5737,7 +5776,35 @@ def _candidate_linked_rejection(
         "source": "candidate_motion_rejected",
         "target_tool": request_name,
         "reason": _call_failure_reason(failed_tool),
+        **_motion_rejection_fingerprint(failed_tool),
     }
+
+
+def _motion_rejection_fingerprint(call: JsonDict) -> JsonDict:
+    result = call.get("result")
+    details = result.get("details") if isinstance(result, dict) else None
+    if not isinstance(details, dict):
+        return {}
+    outputs = details.get("outputs")
+    sources = [details]
+    if isinstance(outputs, dict):
+        sources.extend(
+            source
+            for source in (
+                outputs,
+                outputs.get("response"),
+                outputs.get("motion_summary"),
+            )
+            if isinstance(source, dict)
+        )
+    receipt = details.get("environment_receipt")
+    if isinstance(receipt, dict):
+        sources.append(receipt)
+    for source in sources:
+        fingerprint = str(source.get("request_fingerprint") or "").strip()
+        if fingerprint:
+            return {"request_fingerprint": fingerprint}
+    return {}
 
 
 def _host_stage_precontact_review_rejection(

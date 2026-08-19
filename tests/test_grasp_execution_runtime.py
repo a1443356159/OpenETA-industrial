@@ -488,6 +488,76 @@ def test_candidate_attempt_limit_requires_fresh_reestimation() -> None:
     assert memory.grasp_recovery()["status"] == "required"
 
 
+def test_reestimated_grasp_stops_on_repeated_failed_motion_fingerprint() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick red block")
+    memory.save_fact(
+        "selected_sam3_detection",
+        {
+            "id": "target-mask",
+            "target_prompt": "red block",
+            "source_image": "/tmp/scene.rgb.png",
+            "mask_ref": "/tmp/target.mask.png",
+            "scene_epoch": memory.scene_epoch(),
+        },
+        source="test",
+    )
+    estimate_outputs = {
+        "mode": "targeted",
+        "source_rgb": "/tmp/scene.rgb.png",
+        "source_depth": "/tmp/scene.depth.png",
+        "grasp_candidates": [_candidate("grasp_000", 0.9)],
+    }
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={"result_id": "estimate-1", **estimate_outputs},
+        )
+    )
+    memory.add_action(
+        _tool_action(
+            "move_to",
+            {"target_pose": {"source_grasp_id": "grasp_000"}},
+            success=False,
+            outputs={
+                "request_fingerprint": "same-motion",
+                "motion_summary": {"reached_target": False},
+            },
+        )
+    )
+    assert memory.grasp_candidate_policy()["failed_request_fingerprints"] == [
+        "same-motion"
+    ]
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={"result_id": "estimate-2", **estimate_outputs},
+        )
+    )
+    assert memory.grasp_candidate_policy()["failed_request_fingerprints"] == [
+        "same-motion"
+    ]
+    memory.add_action(
+        _tool_action(
+            "move_to",
+            {"target_pose": {"source_grasp_id": "grasp_000"}},
+            success=False,
+            outputs={
+                "response": {"request_fingerprint": "same-motion"},
+                "motion_summary": {"reached_target": False},
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "stopped_requires_human"
+    assert policy["stop_reason"] == "repeated_failed_request_fingerprint"
+    assert policy["active_candidate"] is None
+
+
 def test_anygrasp_filters_non_executable_width_before_score_ranking() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick can")
