@@ -1734,7 +1734,7 @@ def build_anyplace_handler(
         object_mask = _string_param(context.parameters.get("object_mask"))
         placement_region_mask = context.parameters.get("placement_region_mask")
         selected_grasp = context.parameters.get("selected_grasp")
-        scene_revision = context.parameters.get("scene_revision")
+        scene_revision = context.parameters.get("scene_revision", 0)
         if (
             not isinstance(scene_revision, int)
             or isinstance(scene_revision, bool)

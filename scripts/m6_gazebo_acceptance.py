@@ -422,7 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         allocation,
         calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
         extra_environment=(
-            {"OPENETA_M6_ACCEPTANCE_FAULT": args.scenario}
+            {"OPENETA_ACCEPTANCE_PLACEMENT_FAULT": args.scenario}
             if args.scenario != "normal"
             else None
         ),

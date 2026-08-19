@@ -959,9 +959,9 @@ class _RosRuntime:
             goal.get("max_acceleration_scaling_factor", 0.3)
         )
         request.request.start_state.is_diff = True
-        fault_scenario = os.environ.get("OPENETA_M6_ACCEPTANCE_FAULT", "")
+        fault_scenario = os.environ.get("OPENETA_ACCEPTANCE_PLACEMENT_FAULT", "")
         placement_id = str(goal.get("placement_candidate_id") or "")
-        rejected_ids = getattr(self, "_m6_acceptance_rejected_ids", set())
+        rejected_ids = getattr(self, "_acceptance_rejected_placement_ids", set())
         inject_rejection = False
         if placement_id and fault_scenario == "reject-first" and not rejected_ids:
             inject_rejection = True
@@ -974,7 +974,7 @@ class _RosRuntime:
             inject_rejection = True
         if inject_rejection:
             rejected_ids.add(placement_id)
-            self._m6_acceptance_rejected_ids = rejected_ids
+            self._acceptance_rejected_placement_ids = rejected_ids
         pose = Pose()
         pose.position.x, pose.position.y, pose.position.z = goal["target_pose"]["xyz"]
         if inject_rejection:
