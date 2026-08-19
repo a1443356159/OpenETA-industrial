@@ -296,15 +296,7 @@ class RosGazeboController(GazeboController):
                 tuple(config.target_initial_xyz),
             ),
         )
-        validity = self.runtime.current_state_validity(timeout_s=3.0)
-        self.runtime.planning_scene_validation = validity
-        if validity.get("valid") is not True:
-            self.planning_scene.ready = False
-            pairs = validity.get("collision_pairs") or []
-            raise PlanningSceneError(
-                "planning-scene current state is invalid; collision_pairs="
-                + repr(pairs)
-            )
+        self._require_current_planning_state_valid()
         self.runtime.scene_revision = revision
         self.runtime.planning_scene_ready = self.planning_scene.ready
         return revision
@@ -341,9 +333,22 @@ class RosGazeboController(GazeboController):
             relative_pose_xyz=relative_xyz,
             relative_pose_quat_xyzw=relative_quaternion,
         )
+        self._require_current_planning_state_valid()
         self.runtime.scene_revision = revision
         self.runtime.planning_scene_ready = self.planning_scene.ready
         return revision
+
+    def _require_current_planning_state_valid(self) -> None:
+        validity = self.runtime.current_state_validity(timeout_s=3.0)
+        self.runtime.planning_scene_validation = validity
+        if validity.get("valid") is True:
+            return
+        self.planning_scene.ready = False
+        pairs = validity.get("collision_pairs") or []
+        raise PlanningSceneError(
+            "planning-scene current state is invalid; collision_pairs="
+            + repr(pairs)
+        )
 
     def sync_planning_scene_detach(
         self,
