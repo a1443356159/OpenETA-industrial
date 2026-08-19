@@ -94,6 +94,41 @@ def test_m6_recovery_scenarios_are_explicit_acceptance_only_fixtures(
         assert "execution_started=false" in prompt
         receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
         assert receipt["m6_scenario"] == scenario
+        unhashed = dict(receipt)
+        supplied_hash = unhashed.pop("receipt_sha256")
+        assert supplied_hash == m6.base.hashlib.sha256(
+            json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
+def test_m6_failed_fingerprint_check_ignores_receipt_mirrors() -> None:
+    event = {
+        "execution_started": False,
+        "request_fingerprint": "fingerprint-a",
+        "result": {
+            "details": {
+                "environment_receipt": {
+                    "execution_started": False,
+                    "request_fingerprint": "fingerprint-a",
+                },
+                "outputs": {
+                    "mcp_calls": [
+                        {
+                            "environment_receipt": {
+                                "execution_started": False,
+                                "request_fingerprint": "fingerprint-a",
+                            }
+                        }
+                    ]
+                },
+            }
+        },
+    }
+
+    assert not m6._repeated_failed_motion_fingerprints([event])
+    assert m6._repeated_failed_motion_fingerprints([event, event]) == {
+        "fingerprint-a"
+    }
 
 
 def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:

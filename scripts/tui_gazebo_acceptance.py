@@ -424,6 +424,14 @@ def environment_receipt(
         payload["protected_ros_graphs"] = {
             str(domain): probe_ros_graph(domain) for domain in sorted(PROTECTED_DOMAINS)
         }
+    return seal_environment_receipt(payload)
+
+
+def seal_environment_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a receipt hash covering all fields present at the call boundary."""
+
+    payload = dict(receipt)
+    payload.pop("receipt_sha256", None)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     payload["receipt_sha256"] = hashlib.sha256(canonical).hexdigest()
     return payload

@@ -145,18 +145,14 @@ def prepare_case(
         + "\n",
         encoding="utf-8",
     )
-    base._json_dump(
-        paths.receipt,
-        {
-            **base.environment_receipt(
-                repo,
-                allocation,
-                case_name=f"{MILESTONE}-{MODE}",
-                before=base._process_snapshot(),
-            ),
-            "m6_scenario": scenario,
-        },
+    receipt = base.environment_receipt(
+        repo,
+        allocation,
+        case_name=f"{MILESTONE}-{MODE}",
+        before=base._process_snapshot(),
     )
+    receipt["m6_scenario"] = scenario
+    base._json_dump(paths.receipt, base.seal_environment_receipt(receipt))
     return paths
 
 
@@ -179,6 +175,28 @@ def _parameters(call: Mapping[str, Any]) -> Mapping[str, Any]:
 def _ordered(names: Sequence[str], required: Sequence[str]) -> bool:
     cursor = iter(names)
     return all(any(name == wanted for name in cursor) for wanted in required)
+
+
+def _repeated_failed_motion_fingerprints(
+    events: Sequence[Mapping[str, Any]],
+) -> set[str]:
+    """Find fingerprints repeated across failed actions, ignoring receipt mirrors."""
+
+    failed: list[str] = []
+    for event in events:
+        if not base._contains(event, "execution_started", False):
+            continue
+        failed.extend(
+            sorted(
+                {
+                    str(value)
+                    for value in base._values(event, "request_fingerprint")
+                    if value
+                }
+            )
+        )
+    counts = {fingerprint: failed.count(fingerprint) for fingerprint in set(failed)}
+    return {fingerprint for fingerprint, count in counts.items() if count > 1}
 
 
 def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str, Any]:
@@ -293,14 +311,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ):
             errors.append("stable in-zone placement verification missing")
         fingerprints = [str(value) for value in base._values(events, "request_fingerprint") if value]
-        failed = [
-            str(value)
-            for event in events
-            if base._contains(event, "execution_started", False)
-            for value in base._values(event, "request_fingerprint")
-            if value
-        ]
-        if len(failed) != len(set(failed)):
+        if _repeated_failed_motion_fingerprints(events):
             errors.append("a failed motion request fingerprint was repeated")
         placement_failures = [
             call
