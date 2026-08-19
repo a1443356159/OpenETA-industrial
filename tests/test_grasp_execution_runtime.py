@@ -578,6 +578,20 @@ def test_anygrasp_filters_non_executable_width_before_score_ranking() -> None:
 
     policy = memory.anygrasp_candidate_policy()
     assert policy["raw_candidate_count"] == 2
+    assert policy["candidate_count"] == 1
+    assert policy["active_candidate"]["id"] == "grasp_001"
+    assert policy["active_candidate"]["rank"] == 0
+    assert policy["rejected_candidates"] == [
+        {
+            "candidate_id": "grasp_000",
+            "rank": None,
+            "score": 0.99,
+            "reason": (
+                "candidate width exceeds calibration max_gripper_width_m 0.0800 m"
+            ),
+            "source": "physical_gripper_width_filter",
+        }
+    ]
 
 
 def test_graspgenx_bounded_retry_queue_diversifies_approach_axes() -> None:
@@ -630,20 +644,6 @@ def test_graspgenx_bounded_retry_queue_diversifies_approach_axes() -> None:
         0,
         3,
         4,
-    ]
-    assert policy["candidate_count"] == 1
-    assert policy["active_candidate"]["id"] == "grasp_001"
-    assert policy["active_candidate"]["rank"] == 0
-    assert policy["rejected_candidates"] == [
-        {
-            "candidate_id": "grasp_000",
-            "rank": None,
-            "score": 0.99,
-            "reason": (
-                "candidate width exceeds calibration max_gripper_width_m 0.0800 m"
-            ),
-            "source": "physical_gripper_width_filter",
-        }
     ]
 
 
