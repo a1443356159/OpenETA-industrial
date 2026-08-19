@@ -52,7 +52,10 @@ MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
 TRANSITION_LEDGER_KEY = "transition_ledger"
 ACTIVE_ENVIRONMENT_TASK_KEY = "active_environment_task"
-GRASP_LIFT_PROBE_DISTANCE_M = 0.08
+# Command enough clearance for compliant grasp dynamics while retaining the
+# independent 80 mm measured child-link threshold.  An 80 mm EEF command can
+# truthfully yield less than 80 mm object travel and must not be credited.
+GRASP_LIFT_PROBE_DISTANCE_M = 0.10
 GRASP_FULL_LIFT_DISTANCE_M = 0.08
 NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
 NATIVE_GRASP_MINIMUM_LIFT_M = 0.08
