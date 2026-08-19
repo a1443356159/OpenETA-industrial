@@ -6905,7 +6905,12 @@ def test_stale_prehover_wrist_mask_dispatches_current_wrist_sam3(tmp_path: Path)
     )
     observation = _observation()
     observation.metadata["image_artifacts"] = [
-        {"kind": "rgb", "frame_id": "wrist", "path": str(current_rgb)}
+        {
+            "kind": "rgb",
+            "frame_id": "wrist_camera_optical_frame",
+            "role": "wrist",
+            "path": str(current_rgb),
+        }
     ]
     tools = _tools_with_handlers("sam3", "compute_wrist_alignment")
 
@@ -6937,6 +6942,7 @@ def test_stale_prehover_wrist_mask_dispatches_current_wrist_sam3(tmp_path: Path)
     assert decision.action == "sam3"
     assert decision.parameters == obligation["required_parameters"]
     assert decision.metadata["execution_model"] == "host_obligation_dispatch"
+    assert decision.metadata["host_obligation"]["stage"] == "wrist_segmentation"
 
 
 def test_empty_wrist_sam3_requires_canonical_reference_fallback(tmp_path: Path) -> None:

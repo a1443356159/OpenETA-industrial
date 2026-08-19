@@ -257,6 +257,12 @@ def compile_grasp_seed(
         max_gripper_width,
     )
     calibration_id = str(profile.get("calibration_id") or "")
+    wrist_alignment_policy = str(profile.get("wrist_alignment_policy") or "required")
+    if wrist_alignment_policy not in {
+        "required",
+        "optional_if_fresh_segmentation_empty",
+    }:
+        raise GraspGeometryError("unsupported wrist_alignment_policy")
     available_strategies = (
         load_grasp_strategies()
         if strategies is None and profile.get("schema_version") == GRASP_CALIBRATION_SCHEMA
@@ -459,6 +465,7 @@ def compile_grasp_seed(
         "grasp_strategy": public_grasp_strategy(strategy),
         "alignment_policy": alignment_policy,
         "motion_policy": motion_policy,
+        "wrist_alignment_policy": wrist_alignment_policy,
         "warning": (
             (
                 "No validated task-family strategy matched; preserving the grasp "
@@ -492,8 +499,14 @@ def compile_grasp_seed(
             else ""
         )
         + (
-            "Calibration/strategy outputs remain references; hover alignment "
-            "and attachment gates are mandatory."
+            "Calibration/strategy outputs remain references; hover alignment and "
+            "attachment gates are mandatory."
+            if wrist_alignment_policy == "required"
+            else (
+                "Calibration/strategy outputs remain references; a fresh empty wrist "
+                "segmentation preserves the full compiled pose, while collision, "
+                "contact, and attachment gates remain mandatory."
+            )
         ),
     }
 

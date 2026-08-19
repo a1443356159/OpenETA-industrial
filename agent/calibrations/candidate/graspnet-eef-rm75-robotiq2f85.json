@@ -10,6 +10,7 @@
   "rotation_convention": "active_column_vectors",
   "max_gripper_width_m": 0.085,
   "minimum_pregrasp_distance_m": 0.07,
+  "wrist_alignment_policy": "optional_if_fresh_segmentation_empty",
   "compatibility": {
     "environment_families": ["openeta_gazebo_rm75"],
     "controllers": ["MoveIt2"],

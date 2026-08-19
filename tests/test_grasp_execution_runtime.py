@@ -134,6 +134,7 @@ def _tool_action(
     success: bool = True,
     outputs: dict | None = None,
     grasp_outcome: str = "",
+    planner_metadata: dict | None = None,
 ) -> EnvAction:
     details = {"parameters": parameters, "outputs": dict(outputs or {})}
     if grasp_outcome:
@@ -143,6 +144,7 @@ def _tool_action(
         command={
             "request": {"kind": "tool_call", "name": name, "parameters": parameters},
             "status": "executed" if success else "failed",
+            "metadata": {"planner_metadata": dict(planner_metadata or {})},
             "tool_calls": [
                 {
                     "name": name,
@@ -854,6 +856,76 @@ def test_host_grasp_execution_accepts_bounded_pose_adjustment_at_contact() -> No
         memory.add_action(_tool_action(required["name"], required["parameters"]))
         assert memory.grasp_execution()["stage"] == expected_stage
     assert memory.anygrasp_candidate_policy()["status"] == "accepted"
+
+
+def test_rm75_empty_fresh_wrist_segmentation_preserves_compiled_pose() -> None:
+    memory = _memory_with_candidates()
+    compiled = _compiled(memory)
+    compiled["wrist_alignment_policy"] = "optional_if_fresh_segmentation_empty"
+    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
+    for expected_stage in ("hover", "align"):
+        required = memory.grasp_execution()["required_action"]
+        memory.add_action(_tool_action(required["name"], required["parameters"]))
+        assert memory.grasp_execution()["stage"] == expected_stage
+
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": "/fresh/wrist.rgb.png", "prompt": "alphabet soup"},
+            outputs={
+                "result_id": "sam3-empty-wrist",
+                "source_image": "/fresh/wrist.rgb.png",
+                "detections": [],
+            },
+            planner_metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.wrist_segmentation_obligation.v1",
+                    "tool": "sam3",
+                    "stage": "wrist_segmentation",
+                }
+            },
+        )
+    )
+
+    execution = memory.grasp_execution()
+    expected_pose = compiled.get("precontact_pose") or compiled["contact_pose"]
+    assert execution["stage"] in {"precontact", "descend"}
+    assert execution["required_action"]["parameters"]["target_pose"][
+        "rotation_matrix"
+    ] == expected_pose["rotation_matrix"]
+    assert execution["adjusted_contact_pose"] == compiled["contact_pose"]
+    assert execution["wrist_alignment_skipped_reason"] == (
+        "fresh_wrist_segmentation_empty"
+    )
+    assert execution["wrist_alignment_skip_evidence"]["result_id"] == (
+        "sam3-empty-wrist"
+    )
+
+
+def test_required_wrist_alignment_does_not_accept_empty_segmentation() -> None:
+    memory = _memory_with_candidates()
+    compiled = _compiled(memory)
+    assert compiled["wrist_alignment_policy"] == "required"
+    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
+    for expected_stage in ("hover", "align"):
+        required = memory.grasp_execution()["required_action"]
+        memory.add_action(_tool_action(required["name"], required["parameters"]))
+        assert memory.grasp_execution()["stage"] == expected_stage
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": "/fresh/wrist.rgb.png", "prompt": "alphabet soup"},
+            outputs={"result_id": "sam3-empty-wrist", "detections": []},
+            planner_metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.wrist_segmentation_obligation.v1",
+                    "tool": "sam3",
+                    "stage": "wrist_segmentation",
+                }
+            },
+        )
+    )
+    assert memory.grasp_execution()["stage"] == "align"
 
 
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:

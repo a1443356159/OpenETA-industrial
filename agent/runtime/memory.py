@@ -3943,7 +3943,7 @@ class AgentMemory:
         stage = str(execution.get("stage") or "")
         required = execution.get("required_action")
         if stage == "align":
-            return False
+            return self._advance_empty_wrist_alignment_fallback(execution, action)
         if stage == "probe":
             articulated_probe = self.articulated_attachment_probe()
             if isinstance(articulated_probe, dict):
@@ -4145,6 +4145,83 @@ class AgentMemory:
                 "candidate_id": execution.get("candidate_id"),
                 "completed_stage": stage,
                 "next_stage": execution.get("stage"),
+                "scene_epoch": self.scene_epoch(),
+            },
+        )
+        return True
+
+    def _advance_empty_wrist_alignment_fallback(
+        self,
+        execution: JsonDict,
+        action: EnvAction,
+    ) -> bool:
+        """Preserve a calibrated grasp when its safe-hover wrist view is empty."""
+
+        compiled = execution.get("compiled_grasp")
+        if not isinstance(compiled, dict) or compiled.get("wrist_alignment_policy") != (
+            "optional_if_fresh_segmentation_empty"
+        ):
+            return False
+        obligation = _action_host_obligation(action)
+        if (
+            obligation.get("schema_version")
+            != "openeta.wrist_segmentation_obligation.v1"
+            or obligation.get("tool") != "sam3"
+            or obligation.get("stage") != "wrist_segmentation"
+        ):
+            return False
+        call = _successful_tool_call(action, "sam3")
+        if call is None:
+            return False
+        outputs = _tool_call_outputs(call)
+        detections = outputs.get("detections")
+        if not isinstance(detections, list) or detections:
+            return False
+        contact = compiled.get("contact_pose")
+        if not isinstance(contact, dict):
+            return False
+        precontact = compiled.get("precontact_pose")
+        next_stage = "precontact" if isinstance(precontact, dict) else "descend"
+        next_pose = precontact if isinstance(precontact, dict) else contact
+        result_id = str(outputs.get("result_id") or "")
+        source_image = str(outputs.get("source_image") or "")
+        execution.update(
+            {
+                "stage": next_stage,
+                "scene_epoch": self.scene_epoch(),
+                "adjusted_contact_pose": dict(contact),
+                "adjusted_precontact_pose": (
+                    dict(precontact) if isinstance(precontact, dict) else None
+                ),
+                "wrist_alignment_policy": compiled["wrist_alignment_policy"],
+                "wrist_alignment_skipped_reason": "fresh_wrist_segmentation_empty",
+                "wrist_alignment_skip_evidence": {
+                    "schema_version": obligation.get("schema_version"),
+                    "result_id": result_id,
+                    "source_image": source_image,
+                    "scene_epoch": self.scene_epoch(),
+                },
+                "required_action": {
+                    "name": "move_to",
+                    "parameters": {
+                        "target_pose": _pose_for_epoch(next_pose, self.scene_epoch())
+                    },
+                },
+            }
+        )
+        execution.pop("required_tool", None)
+        self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
+            execution,
+            source="runtime_empty_wrist_alignment_fallback",
+        )
+        self.record(
+            "grasp_wrist_alignment_skipped",
+            {
+                "candidate_id": execution.get("candidate_id"),
+                "compiled_grasp_id": execution.get("compiled_grasp_id"),
+                "reason": execution["wrist_alignment_skipped_reason"],
+                "result_id": result_id,
+                "next_stage": next_stage,
                 "scene_epoch": self.scene_epoch(),
             },
         )

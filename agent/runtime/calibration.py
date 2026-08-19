@@ -634,6 +634,17 @@ def validate_calibration_profile(
         )
         if not 0.04 <= pregrasp <= 0.16:
             raise ValueError("minimum_pregrasp_distance_m must be in [0.04, 0.16]")
+    wrist_alignment_policy = str(
+        normalized.get("wrist_alignment_policy") or "required"
+    )
+    if wrist_alignment_policy not in {
+        "required",
+        "optional_if_fresh_segmentation_empty",
+    }:
+        raise ValueError(
+            "wrist_alignment_policy must be required or "
+            "optional_if_fresh_segmentation_empty"
+        )
     transform = _required_object(normalized.get("T_grasp_eef"), "T_grasp_eef")
     rotation = _matrix3(transform.get("rotation_matrix"), "T_grasp_eef.rotation_matrix")
     _validate_rotation_matrix(rotation)

@@ -84,6 +84,9 @@ _CAMERA_ROLE_PREFERENCE = {
     "wrist_primary": 2,
     "wrist_secondary": 3,
 }
+_CAMERA_ROLE_ALIASES = {
+    "wrist": "wrist_primary",
+}
 
 
 @dataclass(slots=True)
@@ -1292,6 +1295,7 @@ def _host_obligation_decision(
                     "host_obligation": {
                         "schema_version": wrist_segmentation.get("schema_version"),
                         "tool": tool_name,
+                        "stage": "wrist_segmentation",
                     }
                 },
             )
@@ -3021,7 +3025,6 @@ def _validate_grasp_execution_obligation(
                 "with wrist_segmentation_obligation.required_parameters exactly."
             ]
         if decision.action in {
-            "sam3",
             "select_sam3_detection",
             "retrieve_asset_reference",
             "molmopoint",
@@ -3950,7 +3953,7 @@ def _current_camera_artifacts(observation: EnvObservation) -> list[JsonDict]:
             "kind": kind,
             "path": path,
         }
-        role = str(raw.get("role") or "")
+        role = _normalise_camera_role(raw.get("role"))
         if role:
             artifact["role"] = role
         for artifact_field in ("width", "height", "format", "index"):
@@ -3991,8 +3994,13 @@ def _current_camera_calibrations(observation: EnvObservation) -> list[JsonDict]:
 
 def _camera_item_role(value: object) -> str:
     if isinstance(value, dict):
-        return str(value.get("role") or "")
-    return str(getattr(value, "role", "") or "")
+        return _normalise_camera_role(value.get("role"))
+    return _normalise_camera_role(getattr(value, "role", ""))
+
+
+def _normalise_camera_role(value: object) -> str:
+    role = str(value or "")
+    return _CAMERA_ROLE_ALIASES.get(role, role)
 
 
 def _camera_item_frame_id(value: object) -> str:

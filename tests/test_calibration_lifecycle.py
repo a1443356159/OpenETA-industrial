@@ -12,6 +12,7 @@ from agent.runtime.calibration import (
     calibration_profile_sha256,
     collect_calibration_evidence,
     evaluate_validation_gates,
+    validate_calibration_profile,
 )
 from agent.tools.registry import build_default_tool_registry
 
@@ -39,6 +40,21 @@ def _fingerprint() -> dict:
             "mujoco": "3.3.0",
         },
     }
+
+
+def test_calibration_rejects_unknown_wrist_alignment_policy() -> None:
+    profile = _profile()
+    profile["wrist_alignment_policy"] = "always_skip"
+    try:
+        validate_calibration_profile(
+            profile,
+            fingerprint=_fingerprint(),
+            validation_gates=[],
+        )
+    except ValueError as exc:
+        assert "wrist_alignment_policy" in str(exc)
+    else:
+        raise AssertionError("unknown wrist alignment policy must fail closed")
 
 
 def _manager(
