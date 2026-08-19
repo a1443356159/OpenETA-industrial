@@ -624,6 +624,11 @@ class _RosRuntime:
             raise RuntimeError("PLANNING_SCENE_READBACK_UNAVAILABLE")
         scene = self.planning_scene_message_type()
         scene.is_diff = True
+        # AttachedCollisionObject additions/removals live under robot_state.
+        # Mark that nested message as a diff too; otherwise MoveIt interprets
+        # the intentionally sparse state as a complete RobotState and rejects
+        # the ApplyPlanningScene request.
+        scene.robot_state.is_diff = True
         for object_id in diff.get("remove_world_ids", []):
             collision = self.collision_object_type()
             collision.id = str(object_id)
