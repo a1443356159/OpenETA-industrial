@@ -1,0 +1,37 @@
+{
+  "schema_version": "libero.grasp_to_eef_calibration.v2",
+  "status": "candidate",
+  "calibration_id": "graspnet-eef-rm75-robotiq2f85",
+  "robot_model": "RM75",
+  "gripper_model": "Robotiq 2F-85",
+  "grasp_frame": "graspnet",
+  "eef_frame": "gripper_mount_link",
+  "length_unit": "m",
+  "rotation_convention": "active_column_vectors",
+  "max_gripper_width_m": 0.085,
+  "compatibility": {
+    "environment_families": ["openeta_gazebo_rm75"],
+    "controllers": ["MoveIt2"],
+    "camera_calibration_ids": ["gazebo-rm75-pickplace-v1"],
+    "grasp_backend_families": ["graspgenx"]
+  },
+  "T_grasp_eef": {
+    "rotation_matrix": [
+      [1.0, 0.0, 0.0],
+      [0.0, 1.0, 0.0],
+      [0.0, 0.0, 1.0]
+    ],
+    "translation_xyz": [0.0, 0.0, 0.0]
+  },
+  "provenance": {
+    "calibrated_on": "2026-08-19",
+    "task": "Gazebo RM75 Robotiq 2F-85 constraint-correct placement",
+    "method": "GraspGenX Robotiq gripper-frame pose forwarded to the MoveIt gripper mount frame",
+    "grasp_origin_note": "The GraspGenX Robotiq configuration emits the gripper mounting pose; gripper_tip_position_xyz remains separate contact evidence.",
+    "orientation_policy": "Preserve every candidate rotation; no fixed wrist orientation or pose preview is permitted."
+  },
+  "candidate_status": {
+    "reason": "Scoped to the isolated Gazebo RM75/Robotiq acceptance until physical validation gates pass.",
+    "intended_use": "GraspGenX grasp-frame to RM75 gripper_mount_link compilation in the pick-place simulator."
+  }
+}

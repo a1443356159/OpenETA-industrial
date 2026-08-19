@@ -14,8 +14,22 @@ DEFAULT_GRASP_CALIBRATION_PROFILE = (
     / "candidate"
     / "graspnet-eef-panda-p8.json"
 )
+RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE = (
+    Path(__file__).resolve().parents[1]
+    / "calibrations"
+    / "candidate"
+    / "graspnet-eef-rm75-robotiq2f85.json"
+)
 
 _CALIBRATION_RULES = (
+    {
+        "calibration_id": "graspnet-eef-rm75-robotiq2f85",
+        "profile_path": RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
+        "environment_contains": ("gazebo rm75 robotiq2f85", "gazebo_rm75_robotiq2f85"),
+        "robot_models": ("rm75",),
+        "gripper_models": ("robotiq 2f 85", "robotiq2f85"),
+        "grasp_frames": ("graspnet",),
+    },
     {
         "calibration_id": "graspnet-eef-panda-p8",
         "profile_path": DEFAULT_GRASP_CALIBRATION_PROFILE,

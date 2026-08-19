@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 import urllib.request
 
 from scripts import tui_gazebo_acceptance as base
+from agent.runtime.calibration_registry import RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE
 
 
 SCHEMA_VERSION = "openeta.gazebo_m6_acceptance.v1"
@@ -340,7 +341,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.prepare_only:
         print(run_root)
         return 0
-    code = base.run_case(repo, paths, allocation)
+    code = base.run_case(
+        repo,
+        paths,
+        allocation,
+        calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
+    )
     report = verify_case(paths)
     report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})
     base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)

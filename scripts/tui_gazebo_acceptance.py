@@ -2213,6 +2213,7 @@ def run_case(
     allocation: Allocation,
     *,
     sam3_url: str = "",
+    calibration_profile: Path | None = None,
 ) -> int:
     milestone = paths.root.parent.name
     scripted = paths.root.name == SCRIPTED_TUI
@@ -2309,6 +2310,11 @@ def run_case(
             print(f"\n=== {paths.root.name} ===")
             print(paths.instructions.read_text(encoding="utf-8"))
             command = f"{shlex.quote(str(python))} -m agent.cli.openeta_cli"
+            if calibration_profile is not None:
+                command += (
+                    " --calibration-profile "
+                    + shlex.quote(str(calibration_profile.resolve()))
+                )
             if shutil.which("script") is None:
                 raise AcceptanceError("TUI_NOT_READY: util-linux script is missing")
             if scripted:

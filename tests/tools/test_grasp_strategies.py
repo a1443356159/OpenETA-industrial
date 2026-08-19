@@ -119,6 +119,20 @@ def test_calibration_registry_matches_libero_panda_and_rejects_unknown_robot() -
         == selected
     )
 
+
+def test_calibration_registry_selects_rm75_robotiq_profile() -> None:
+    selected = resolve_grasp_calibration_profile(
+        environment_id="openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+        fingerprint={
+            "robot_model": "RM75",
+            "gripper_model": "Robotiq 2F-85",
+            "grasp_frame": "graspnet",
+        },
+    )
+
+    assert isinstance(selected, Path)
+    assert selected.name == "graspnet-eef-rm75-robotiq2f85.json"
+
     assert (
         resolve_grasp_calibration_profile(
             environment_id="libero_10",
