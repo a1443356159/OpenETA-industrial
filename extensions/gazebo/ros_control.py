@@ -87,6 +87,17 @@ def _stamp_seconds(stamp: Any) -> float | None:
     ) * 1e-9
 
 
+def _moveit_scene_frame(frame: object, *, base_link: str) -> str:
+    """Map the co-located Gazebo world frame into MoveIt's fixed root frame."""
+
+    value = str(frame or "")
+    # This profile spawns the robot at the Gazebo world origin and its SRDF
+    # has a fixed base_link root, so MoveIt has no separate `world` TF frame.
+    # World collision poses are numerically base_link poses under that asset
+    # contract; attached-object link frames must pass through unchanged.
+    return base_link if value in {"", "world"} else value
+
+
 def gripper_action_success(
     *,
     reached_goal: bool,
@@ -593,7 +604,9 @@ class _RosRuntime:
     def _collision_object_from_spec(self, spec: Mapping[str, Any]) -> Any:
         collision = self.collision_object_type()
         collision.id = str(spec["id"])
-        collision.header.frame_id = str(spec.get("frame") or self.config.base_link)
+        collision.header.frame_id = _moveit_scene_frame(
+            spec.get("frame"), base_link=self.config.base_link
+        )
         primitive = self.solid_primitive_type()
         primitive.type = self.solid_primitive_type.BOX
         primitive.dimensions = [float(value) for value in spec["size_xyz"]]

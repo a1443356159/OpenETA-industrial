@@ -10,9 +10,19 @@ from extensions.gazebo.ros_control import (
     RosGazeboController,
     RosGazeboStateSource,
     _RosRuntime,
+    _moveit_scene_frame,
     _populate_recovery_trajectory_goal,
     _populate_state_validity_request,
 )
+
+
+def test_moveit_scene_maps_gazebo_world_to_fixed_robot_root_only() -> None:
+    assert _moveit_scene_frame("world", base_link="base_link") == "base_link"
+    assert _moveit_scene_frame("", base_link="base_link") == "base_link"
+    assert (
+        _moveit_scene_frame("gripper_mount_link", base_link="base_link")
+        == "gripper_mount_link"
+    )
 
 
 class _Clock:
