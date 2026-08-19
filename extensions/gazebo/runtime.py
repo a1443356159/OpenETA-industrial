@@ -292,12 +292,17 @@ class GazeboRuntime:
             # Preserve /clock after the ROS action stack has started.
             self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
         self.scene_epoch += 1
-        if PHYSICS in self.profile.capabilities and self.controller is not None:
-            sync_scene = getattr(self.controller, "sync_planning_scene_reset", None)
+        if self.controller is not None:
+            if PHYSICS in self.profile.capabilities:
+                sync_scene = getattr(self.controller, "sync_planning_scene_reset", None)
+                scene_args = (self.profile.model_config,)
+            else:
+                sync_scene = getattr(self.controller, "sync_planning_scene_empty", None)
+                scene_args = ()
             if not callable(sync_scene):
                 raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
             try:
-                sync_scene(self.profile.model_config)
+                sync_scene(*scene_args)
             except Exception as exc:
                 raise GazeboProcessError("PLANNING_SCENE_SYNC_FAILED") from exc
         barrier: float | None = None

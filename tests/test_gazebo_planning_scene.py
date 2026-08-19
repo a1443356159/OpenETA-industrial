@@ -8,6 +8,34 @@ from extensions.gazebo.planning_scene import (
     PlanningSceneSynchronizer,
     TARGET_TOUCH_LINKS,
 )
+
+
+def test_motion_only_scene_requires_empty_readback() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        return {"applied": True, "world_ids": [], "attached_ids": []}
+
+    scene = PlanningSceneSynchronizer(apply)
+
+    assert scene.initialize_empty() == 1
+    assert scene.ready is True
+    assert calls == [{"operation": "initialize_empty"}]
+
+
+def test_motion_only_scene_fails_closed_on_nonempty_readback() -> None:
+    scene = PlanningSceneSynchronizer(
+        lambda _diff: {
+            "applied": True,
+            "world_ids": ["stale_object"],
+            "attached_ids": [],
+        }
+    )
+
+    with pytest.raises(PlanningSceneError, match="readback mismatch"):
+        scene.initialize_empty()
+    assert scene.ready is False
 from extensions.gazebo.ros_control import _relative_pose
 
 

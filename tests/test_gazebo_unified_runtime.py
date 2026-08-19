@@ -124,6 +124,10 @@ class _ResetController:
         self.actions.append({"action_type": "planning_scene_reset", "target": config.target_id})
         return 1
 
+    def sync_planning_scene_empty(self):
+        self.actions.append({"action_type": "planning_scene_empty"})
+        return 1
+
 
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:
     for profile in gazebo_profiles().values():
@@ -268,6 +272,7 @@ def test_runtime_reset_retries_only_one_transient_gripper_timeout() -> None:
 
     assert world.resets == [("models", 7)]
     assert controller.actions == [
+        {"action_type": "planning_scene_empty"},
         {"action_type": "gripper_open"},
         {"action_type": "gripper_open"},
     ]
@@ -283,7 +288,10 @@ def test_runtime_reset_does_not_retry_non_transient_gripper_failure() -> None:
 
     with pytest.raises(RuntimeError, match="GRIPPER_FAILED"):
         runtime.reset(seed=7)
-    assert controller.actions == [{"action_type": "gripper_open"}]
+    assert controller.actions == [
+        {"action_type": "planning_scene_empty"},
+        {"action_type": "gripper_open"},
+    ]
 
 
 def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_poses() -> None:

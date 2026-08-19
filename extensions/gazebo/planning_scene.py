@@ -48,6 +48,15 @@ class PlanningSceneSynchronizer:
         self.attached_ids: set[str] = set()
         self.last_error = ""
 
+    def initialize_empty(self) -> int:
+        """Prove that a motion-only environment has no scene objects."""
+
+        return self._commit(
+            {"operation": "initialize_empty"},
+            expected_world=set(),
+            expected_attached=set(),
+        )
+
     def reset(
         self,
         *,

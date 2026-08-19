@@ -273,6 +273,12 @@ class RosGazeboController(GazeboController):
         self.runtime.planning_scene_ready = self.planning_scene.ready
         return revision
 
+    def sync_planning_scene_empty(self) -> int:
+        revision = self.planning_scene.initialize_empty()
+        self.runtime.scene_revision = revision
+        self.runtime.planning_scene_ready = self.planning_scene.ready
+        return revision
+
     def sync_planning_scene_attach(
         self,
         config: Any,
