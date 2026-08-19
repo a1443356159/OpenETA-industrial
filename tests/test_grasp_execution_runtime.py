@@ -1310,6 +1310,57 @@ def test_lift_probe_reconciliation_advances_to_attachment_gate() -> None:
     assert memory.grasp_execution()["attachment_actions"] == {}
 
 
+def test_failed_lift_probe_is_single_attempt_and_stops_without_replay() -> None:
+    memory = _memory_with_candidates()
+    compiled = _compiled(memory)
+    memory.add_action(
+        _tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled)
+    )
+    execution = memory.grasp_execution()
+    execution.update({"stage": "probe", "required_action": None})
+    memory.save_fact("grasp_execution", execution, source="test")
+    required = {
+        "target_pose": {
+            "frame": "world",
+            "probe_type": "grasp_lift",
+            "source_grasp_id": "grasp_000",
+            "compiled_grasp_id": execution["compiled_grasp_id"],
+            "scene_epoch": memory.scene_epoch(),
+            "scene_revision": 2,
+            "xyz": [0.1, 0.2, 0.4],
+        }
+    }
+    memory.save_fact(
+        "grasp_lift_probe",
+        {
+            "status": "required",
+            "candidate_id": "grasp_000",
+            "compiled_grasp_id": execution["compiled_grasp_id"],
+            "scene_epoch": memory.scene_epoch(),
+            "planning_scene_revision": 2,
+            "required_parameters": required,
+        },
+        source="test",
+    )
+
+    memory.add_action(
+        _tool_action(
+            "move_to",
+            required,
+            success=False,
+            outputs={"motion_outcome": "failed", "error_code": "MOTION_PLAN_FAILED"},
+        )
+    )
+
+    assert memory.grasp_lift_probe()["attempt_count"] == 1
+    assert memory.grasp_lift_probe()["status"] == "completed"
+    assert memory.attachment_gate()["status"] == "stopped_requires_human"
+    assert memory.grasp_execution()["attachment_actions"] == {}
+    assert memory.grasp_execution_gate_error(
+        tool_name="move_to", parameters=required
+    ) is not None
+
+
 def test_robotiq_object_detection_resolves_attachment_and_completes_full_lift() -> None:
     memory = AgentMemory()
     full_lift = {

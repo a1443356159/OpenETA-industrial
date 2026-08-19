@@ -5266,7 +5266,29 @@ class AgentMemory:
             or not _call_result_success(move_call)
             or _motion_call_rejects_candidate(move_call)
         ):
-            probe["last_attempt_status"] = "failed"
+            receipt = _environment_receipt(move_call) if isinstance(move_call, dict) else {}
+            probe.update(
+                {
+                    "status": "completed",
+                    "completed_at_s": time.time(),
+                    "last_attempt_status": "failed",
+                    "proof_verdict": "UNKNOWN",
+                    "proof_reason": (
+                        "lift_probe_motion_outcome_unknown"
+                        if receipt.get("error_code") == "MOTION_OUTCOME_UNKNOWN"
+                        or receipt.get("motion_outcome") == "unknown"
+                        else "lift_probe_motion_not_completed"
+                    ),
+                    "proof": {
+                        "receipt": receipt,
+                        "candidate_id": probe.get("candidate_id"),
+                        "compiled_grasp_id": probe.get("compiled_grasp_id"),
+                        "planning_scene_revision": probe.get(
+                            "planning_scene_revision"
+                        ),
+                    },
+                }
+            )
             self.facts[GRASP_LIFT_PROBE_KEY] = _memory_fact_entry(
                 probe,
                 source="runtime_grasp_lift_probe",
