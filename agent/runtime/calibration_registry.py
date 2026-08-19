@@ -27,7 +27,7 @@ _CALIBRATION_RULES = (
         "profile_path": RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
         "environment_contains": ("gazebo rm75 robotiq2f85", "gazebo_rm75_robotiq2f85"),
         "robot_models": ("rm75",),
-        "gripper_models": ("robotiq 2f 85", "robotiq2f85"),
+        "gripper_models": ("robotiq 2f-85", "robotiq 2f 85", "robotiq2f85"),
         "grasp_frames": ("graspnet",),
     },
     {
