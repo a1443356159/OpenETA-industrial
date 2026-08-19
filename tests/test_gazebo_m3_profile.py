@@ -25,6 +25,7 @@ def test_m3_registration_exposes_the_approved_detachable_joint_profile() -> None
     assert profile.unavailable_reason is None
     assert {CONTROL, PHYSICS, STRUCTURED_RECEIPT} <= profile.capabilities
     assert profile.launch_file == "gazebo_pickplace.launch.py"
+    assert profile.cameras[0].extrinsics["pos"] == [0.0, 0.0, 1.3]
 
 
 def test_m3_assets_are_required_before_manipulation_starts() -> None:
