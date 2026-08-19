@@ -3405,7 +3405,8 @@ def _verify_m3(
         errors.append("M3 environment identity missing")
     records = [
         item for payload in payloads for item in _walk(payload)
-        if isinstance(item, Mapping) and item.get("schema_version") == "openeta.m3.detachable_joint.v1"
+        if isinstance(item, Mapping)
+        and item.get("schema_version") == "openeta.gazebo.native_grasp.v1"
     ]
     if not any(item.get("reason_code") == "NATIVE_GRASP_TARGET_HELD" and item.get("grasp_confirmed") is True for item in records):
         errors.append("M3 child-link held proof missing")

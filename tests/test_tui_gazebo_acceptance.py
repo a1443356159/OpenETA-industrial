@@ -1938,7 +1938,7 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
         },
         "detachable_joint": {"state": "attached"},
         "physical_verification": {
-            "schema_version": "openeta.m3.detachable_joint.v1",
+            "schema_version": "openeta.gazebo.native_grasp.v1",
             "reason_code": "NATIVE_GRASP_ATTACH_ACKED_UNPROVEN",
             "grasp_confirmed": False,
         },
@@ -1946,7 +1946,7 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
     lift = {
         "child_link_proof": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
         "physical_verification": {
-            "schema_version": "openeta.m3.detachable_joint.v1",
+            "schema_version": "openeta.gazebo.native_grasp.v1",
             "reason_code": "NATIVE_GRASP_TARGET_HELD",
             "grasp_confirmed": True,
             "evidence": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
@@ -1955,7 +1955,7 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
     opened = {
         "detachable_joint": {"state": "detached"},
         "physical_verification": {
-            "schema_version": "openeta.m3.detachable_joint.v1",
+            "schema_version": "openeta.gazebo.native_grasp.v1",
             "reason_code": "READY",
             "grasp_confirmed": False,
         },
@@ -2085,7 +2085,7 @@ def test_m4_requires_actual_oracle_output_and_truthful_fake_candidate(tmp_path: 
     }
     held = {
         "physical_verification": {
-            "schema_version": "openeta.m3.detachable_joint.v1",
+            "schema_version": "openeta.gazebo.native_grasp.v1",
             "reason_code": "NATIVE_GRASP_TARGET_HELD", "grasp_confirmed": True,
             "evidence": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
         }
