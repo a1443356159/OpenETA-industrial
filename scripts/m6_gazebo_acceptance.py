@@ -118,7 +118,14 @@ def prepare_case(
 
 
 def _name(call: Mapping[str, Any]) -> str:
-    return str(call.get("name") or call.get("tool_name") or "")
+    name = str(call.get("name") or call.get("tool_name") or "")
+    if name == "grasp_pose_estimate" and (
+        base._contains(call, "backend", "graspgenx_mcp")
+        or base._contains(call, "source_backend", "graspgenx")
+        or "GraspGenX" in str(call)
+    ):
+        return "graspgenx"
+    return name
 
 
 def _parameters(call: Mapping[str, Any]) -> Mapping[str, Any]:

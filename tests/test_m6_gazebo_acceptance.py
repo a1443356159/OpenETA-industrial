@@ -47,6 +47,16 @@ def test_m6_order_helper_rejects_anyplace_before_lift() -> None:
     assert not m6._ordered(invalid, required)
 
 
+def test_m6_canonicalizes_public_grasp_tool_only_with_real_graspgenx_backend() -> None:
+    assert m6._name(
+        {
+            "name": "grasp_pose_estimate",
+            "result": {"details": {"backend": "graspgenx_mcp"}},
+        }
+    ) == "graspgenx"
+    assert m6._name({"name": "grasp_pose_estimate"}) == "grasp_pose_estimate"
+
+
 def test_m6_health_url_preserves_service_root() -> None:
     assert m6._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
 
