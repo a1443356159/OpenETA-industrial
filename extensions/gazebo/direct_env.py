@@ -248,6 +248,12 @@ class GazeboDirectEnv(Env):
                         })
                 except Exception as exc:
                     attached_before_cleanup = getattr(attachment, "state", None) == "attached"
+                    rollback_target_pose = None
+                    if attached_before_cleanup:
+                        try:
+                            rollback_target_pose, _ = attachment.native_target_mount_poses()
+                        except Exception:
+                            rollback_target_pose = None
                     if attached_before_cleanup:
                         try:
                             attachment.ensure_detached(require_ack=True)
@@ -258,6 +264,36 @@ class GazeboDirectEnv(Env):
                             }
                         except Exception:
                             pass
+                    planning_scene = getattr(self.controller, "planning_scene", None)
+                    if (
+                        rollback_target_pose is not None
+                        and self._native_grasp_config.target_id
+                        in set(getattr(planning_scene, "attached_ids", set()))
+                    ):
+                        try:
+                            sync_detach = getattr(
+                                self.controller, "sync_planning_scene_detach", None
+                            )
+                            if not callable(sync_detach):
+                                raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                            scene_revision = sync_detach(
+                                self._native_grasp_config,
+                                target_xyz=rollback_target_pose.xyz,
+                                target_quat_xyzw=rollback_target_pose.quat_xyzw,
+                            )
+                            receipt["planning_scene_revision"] = scene_revision
+                            receipt["planning_scene_rollback"] = {
+                                "state": "detached",
+                                "revision": scene_revision,
+                            }
+                            raw.setdefault("metadata", {})[
+                                "planning_scene_revision"
+                            ] = scene_revision
+                        except Exception as rollback_exc:
+                            receipt["planning_scene_rollback"] = {
+                                "state": "failed",
+                                "detail": str(rollback_exc),
+                            }
                     if gate is not None and gate.accepted and attached_before_cleanup:
                         record = self._native_grasp_verifier.prove_lift(None, dart_supported=True)
                     else:

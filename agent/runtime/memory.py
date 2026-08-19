@@ -377,11 +377,16 @@ class AgentMemory:
         lift_probe_updated = self._capture_grasp_lift_probe_result(action)
         execution_updated = self._advance_grasp_execution(action)
         reconciliation_updated = self._capture_motion_reconciliation(action)
+        planning_scene_stopped = self._capture_planning_scene_control_failure(action)
         placement_candidate_advanced = self._advance_placement_candidate_after_motion(action)
         placement_recovery_updated = self._advance_placement_recovery(action)
         recovery_updated = self._advance_grasp_recovery(action)
         estimation_recovery_updated = self._advance_grasp_estimation_recovery(action)
-        candidate_advanced = self._advance_anygrasp_candidate_after_rejection(action)
+        candidate_advanced = (
+            False
+            if planning_scene_stopped
+            else self._advance_anygrasp_candidate_after_rejection(action)
+        )
         terminal_compile_blocked = (
             False
             if candidate_advanced
@@ -1137,7 +1142,16 @@ class AgentMemory:
                 "partial move because the original controller may still be running."
             )
         execution = self.grasp_execution()
-        if not isinstance(execution, dict) or execution.get("status") != "required":
+        if not isinstance(execution, dict):
+            return None
+        if execution.get("status") == "stopped_requires_human":
+            if tool_name == "observe":
+                return None
+            return (
+                "The planning scene became unavailable before motion execution. "
+                "Do not resend or switch grasp candidates; human recovery is required."
+            )
+        if execution.get("status") != "required":
             return None
         stage = str(execution.get("stage") or "")
         if tool_name == "observe":
@@ -4853,6 +4867,78 @@ class AgentMemory:
             source="simulator_action_outcome_unknown",
         )
         self.record("motion_reconciliation_required", dict(reconciliation))
+        return True
+
+    def _capture_planning_scene_control_failure(self, action: EnvAction) -> bool:
+        """Stop a grasp once the controller cannot prove its planning scene."""
+
+        execution = self.grasp_execution()
+        if not isinstance(execution, dict) or execution.get("status") != "required":
+            return False
+        command = action.command if isinstance(action.command, dict) else {}
+        request = command.get("request")
+        if not isinstance(request, dict):
+            return False
+        name = str(request.get("name") or "")
+        if name not in {"move_to", "follow_eef_trajectory", "gripper_control"}:
+            return False
+        call = _tool_call(action, name)
+        if not isinstance(call, dict) or _call_result_success(call):
+            return False
+        receipt = _environment_receipt(call)
+        error_code = str(receipt.get("error_code") or "")
+        if not (
+            error_code == "PLANNING_SCENE_UNAVAILABLE"
+            or error_code.startswith("PLANNING_SCENE_SYNC_FAILED")
+            or (
+                isinstance(receipt.get("planning_scene_rollback"), dict)
+                and receipt["planning_scene_rollback"].get("state") == "failed"
+            )
+        ):
+            return False
+        if receipt.get("execution_started") not in {False, None}:
+            return False
+        execution.update(
+            {
+                "status": "stopped_requires_human",
+                "stage": "planning_scene_failure",
+                "required_action": None,
+                "control_failure": {
+                    "error_code": error_code or "PLANNING_SCENE_ROLLBACK_FAILED",
+                    "planning_scene_revision": receipt.get(
+                        "planning_scene_revision"
+                    ),
+                    "execution_started": receipt.get("execution_started"),
+                },
+                "stopped_at_s": time.time(),
+            }
+        )
+        self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
+            execution, source="planning_scene_control_failure"
+        )
+        policy = self.grasp_candidate_policy()
+        if isinstance(policy, dict):
+            policy.update(
+                {
+                    "status": "stopped_requires_human",
+                    "active_candidate_id": execution.get("candidate_id"),
+                }
+            )
+            self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy, source="planning_scene_control_failure"
+            )
+        gate = {
+            "schema_version": "openeta.attachment_gate.v1",
+            "status": "stopped_requires_human",
+            "verdict": "UNKNOWN",
+            "assessment_reason": "planning_scene_control_failure",
+            "candidate_id": execution.get("candidate_id"),
+            "planning_scene_revision": receipt.get("planning_scene_revision"),
+        }
+        self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
+            gate, source="planning_scene_control_failure"
+        )
+        self.record("planning_scene_control_failure", dict(execution["control_failure"]))
         return True
 
     def _reconcile_unknown_motion(self, observation: EnvObservation) -> bool:

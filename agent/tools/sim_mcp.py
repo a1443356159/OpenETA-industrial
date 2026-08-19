@@ -85,6 +85,7 @@ CONTROL_RECEIPT_FIELDS = (
     "physical_verification",
     "child_link_proof",
     "placement_verification",
+    "planning_scene_rollback",
 )
 
 SIMULATOR_CONTROL_MCP_TOOL_NAMES = (

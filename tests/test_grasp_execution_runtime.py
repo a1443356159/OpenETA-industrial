@@ -136,8 +136,11 @@ def _tool_action(
     outputs: dict | None = None,
     grasp_outcome: str = "",
     planner_metadata: dict | None = None,
+    environment_receipt: dict | None = None,
 ) -> EnvAction:
     details = {"parameters": parameters, "outputs": dict(outputs or {})}
+    if environment_receipt is not None:
+        details["environment_receipt"] = dict(environment_receipt)
     if grasp_outcome:
         details["supervision"] = {"details": {"grasp_outcome": grasp_outcome}}
     return EnvAction(
@@ -1356,6 +1359,54 @@ def test_failed_lift_probe_is_single_attempt_and_stops_without_replay() -> None:
     assert memory.grasp_lift_probe()["status"] == "completed"
     assert memory.attachment_gate()["status"] == "stopped_requires_human"
     assert memory.grasp_execution()["attachment_actions"] == {}
+    assert memory.grasp_execution_gate_error(
+        tool_name="move_to", parameters=required
+    ) is not None
+
+
+def test_planning_scene_unavailable_stops_grasp_without_candidate_replay() -> None:
+    memory = _memory_with_candidates()
+    required = {
+        "target_pose": {
+            "frame": "world",
+            "source_grasp_id": "grasp_000",
+            "compiled_grasp_id": "compiled-000",
+            "xyz": [0.2, 0.0, 0.6],
+        }
+    }
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "schema_version": "openeta.grasp_execution.v1",
+            "status": "required",
+            "stage": "hover",
+            "candidate_id": "grasp_000",
+            "compiled_grasp_id": "compiled-000",
+            "required_action": {"name": "move_to", "parameters": required},
+        },
+        source="test",
+    )
+
+    memory.add_action(
+        _tool_action(
+            "move_to",
+            required,
+            success=False,
+            environment_receipt={
+                "ok": False,
+                "error_code": "PLANNING_SCENE_UNAVAILABLE",
+                "motion_outcome": "failed",
+                "execution_started": False,
+                "planning_scene_revision": 2,
+            },
+        )
+    )
+
+    assert memory.grasp_execution()["status"] == "stopped_requires_human"
+    assert memory.grasp_execution()["stage"] == "planning_scene_failure"
+    assert memory.grasp_candidate_policy()["status"] == "stopped_requires_human"
+    assert memory.grasp_candidate_policy()["active_candidate"]["id"] == "grasp_000"
+    assert memory.attachment_gate()["verdict"] == "UNKNOWN"
     assert memory.grasp_execution_gate_error(
         tool_name="move_to", parameters=required
     ) is not None

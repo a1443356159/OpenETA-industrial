@@ -9,7 +9,21 @@ from typing import Any
 
 LEFT_FINGERTIP = "robotiq_85_left_finger_tip_link"
 RIGHT_FINGERTIP = "robotiq_85_right_finger_tip_link"
-TARGET_TOUCH_LINKS = (LEFT_FINGERTIP, RIGHT_FINGERTIP)
+# MoveIt touch links describe every gripper link that a physically verified
+# held object may contact, not only the two Gazebo links used as the bilateral
+# contact sensor gate.  The 2F-85 four-bar linkage brings the inner knuckles
+# against a correctly centered object at closure, so excluding them makes a
+# valid native grasp invalidate the planning scene immediately after attach.
+TARGET_TOUCH_LINKS = (
+    "robotiq_85_left_knuckle_link",
+    "robotiq_85_right_knuckle_link",
+    "robotiq_85_left_finger_link",
+    "robotiq_85_right_finger_link",
+    "robotiq_85_left_inner_knuckle_link",
+    "robotiq_85_right_inner_knuckle_link",
+    LEFT_FINGERTIP,
+    RIGHT_FINGERTIP,
+)
 
 
 class PlanningSceneError(RuntimeError):

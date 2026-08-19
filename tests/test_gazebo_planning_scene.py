@@ -69,6 +69,8 @@ def test_planning_scene_reset_and_attach_detach_switch() -> None:
     assert scene.world_ids == {"table", "distractor"}
     assert scene.attached_ids == {"target"}
     assert calls[1]["attached_objects"][0]["touch_links"] == list(TARGET_TOUCH_LINKS)
+    assert "robotiq_85_left_inner_knuckle_link" in TARGET_TOUCH_LINKS
+    assert "robotiq_85_right_inner_knuckle_link" in TARGET_TOUCH_LINKS
     assert "remove_world_ids" not in calls[1]
     assert scene.detach_target(target=target) == 3
     assert scene.world_ids == {"table", "distractor", "target"}
