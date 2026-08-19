@@ -56,6 +56,7 @@ GRASP_LIFT_PROBE_DISTANCE_M = 0.08
 GRASP_FULL_LIFT_DISTANCE_M = 0.08
 GRASP_RECOVERY_RETREAT_DISTANCE_M = 0.12
 GRASP_CANDIDATE_MAX_ATTEMPTS = 3
+GRASP_RETRY_APPROACH_DIVERSITY_DEG = 15.0
 ARTICULATED_HANDLE_APPROACH_MODES = ("top_down", "front", "side")
 GRASP_REFERENCE_POSITION_TOLERANCE_M = 0.05
 GRASP_REFERENCE_ORIENTATION_TOLERANCE_DEG = 20.0
@@ -1961,6 +1962,11 @@ class AgentMemory:
                 )
             ]
             candidates.sort(key=_grasp_candidate_sort_key)
+            for score_rank, candidate in enumerate(candidates):
+                candidate["score_rank"] = score_rank
+            approach_diversified = source_backend == "graspgenx"
+            if approach_diversified:
+                candidates = _diversify_grasp_retry_approaches(candidates)
             for rank, candidate in enumerate(candidates):
                 candidate["rank"] = rank
             result_id = str(outputs.get("result_id") or "")
@@ -2029,7 +2035,11 @@ class AgentMemory:
                 "result_id": result_id,
                 "source_tool": source_tool,
                 "source_backend": source_backend,
-                "ranking": "score_descending",
+                "ranking": (
+                    "score_descending_with_approach_diversity"
+                    if approach_diversified
+                    else "score_descending"
+                ),
                 "status": "active" if candidates else "exhausted",
                 "candidate_count": len(candidates),
                 "raw_candidate_count": len(raw_candidates),
@@ -5662,6 +5672,45 @@ def _parameters_grasp_candidate_id(parameters: JsonDict) -> str:
             if isinstance(value, str) and value:
                 return value
     return ""
+
+
+def _diversify_grasp_retry_approaches(candidates: list[JsonDict]) -> list[JsonDict]:
+    """Keep score order while exposing distinct approach axes to bounded retries."""
+
+    if len(candidates) < 2:
+        return candidates
+    cosine_limit = math.cos(math.radians(GRASP_RETRY_APPROACH_DIVERSITY_DEG))
+    selected: list[JsonDict] = []
+    selected_axes: list[list[float]] = []
+    deferred: list[JsonDict] = []
+    for candidate in candidates:
+        rotation = candidate.get("rotation_matrix")
+        axis: list[float] | None = None
+        if (
+            isinstance(rotation, list)
+            and len(rotation) == 3
+            and all(isinstance(row, list) and len(row) == 3 for row in rotation)
+        ):
+            try:
+                raw_axis = [float(rotation[row][0]) for row in range(3)]
+                norm = math.sqrt(sum(value * value for value in raw_axis))
+                if norm > 1e-9 and all(math.isfinite(value) for value in raw_axis):
+                    axis = [value / norm for value in raw_axis]
+            except (TypeError, ValueError):
+                axis = None
+        if axis is None:
+            deferred.append(candidate)
+            continue
+        if not selected_axes or all(
+            abs(sum(axis[index] * existing[index] for index in range(3)))
+            <= cosine_limit
+            for existing in selected_axes
+        ):
+            selected.append(candidate)
+            selected_axes.append(axis)
+        else:
+            deferred.append(candidate)
+    return [*selected, *deferred]
 
 
 def _candidate_linked_rejection(

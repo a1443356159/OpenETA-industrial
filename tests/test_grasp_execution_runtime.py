@@ -578,6 +578,59 @@ def test_anygrasp_filters_non_executable_width_before_score_ranking() -> None:
 
     policy = memory.anygrasp_candidate_policy()
     assert policy["raw_candidate_count"] == 2
+
+
+def test_graspgenx_bounded_retry_queue_diversifies_approach_axes() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick red block")
+    candidates = [
+        _candidate("vertical-0", 0.99),
+        _candidate("vertical-1", 0.98),
+        _candidate("vertical-2", 0.97),
+        _candidate("side", 0.80),
+        _candidate("tilted", 0.70),
+    ]
+    for candidate in candidates[:3]:
+        candidate["rotation_matrix"] = [
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+        ]
+    candidates[3]["rotation_matrix"] = [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    candidates[4]["rotation_matrix"] = [
+        [0.3, 0.0, 0.953939],
+        [0.0, 1.0, 0.0],
+        [0.953939, 0.0, -0.3],
+    ]
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "diverse-graspgenx",
+                "selected_backend": "graspgenx",
+                "grasp_candidates": candidates,
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["ranking"] == "score_descending_with_approach_diversity"
+    assert [candidate["id"] for candidate in policy["candidates"][:3]] == [
+        "vertical-0",
+        "side",
+        "tilted",
+    ]
+    assert [candidate["score_rank"] for candidate in policy["candidates"][:3]] == [
+        0,
+        3,
+        4,
+    ]
     assert policy["candidate_count"] == 1
     assert policy["active_candidate"]["id"] == "grasp_001"
     assert policy["active_candidate"]["rank"] == 0
