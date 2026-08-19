@@ -874,9 +874,17 @@ def _run_scripted_tui(command: str, paths: CasePaths, env: Mapping[str, str]) ->
             process.stdin.flush()
         try:
             return int(process.wait(timeout=30))
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
+            _scripted_tui_driver_evidence(
+                paths,
+                status="failed",
+                reason_code="TUI_DID_NOT_EXIT_AFTER_QUIT",
+            )
             _terminate_scripted_tui_process(process)
-            raise AcceptanceError("TUI_NOT_READY: PTY did not exit after /quit") from exc
+            # Return through run_case's ordinary cleanup path. Raising here
+            # would run only its inner MCP finally block and skip the durable
+            # worker/ROS/Gazebo cleanup evidence assembled afterwards.
+            return 1
     finally:
         if process.stdin is not None and not process.stdin.closed:
             process.stdin.close()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from types import SimpleNamespace
 
 from scripts import m6_gazebo_acceptance as m6
 
@@ -47,3 +49,46 @@ def test_m6_order_helper_rejects_anyplace_before_lift() -> None:
 
 def test_m6_health_url_preserves_service_root() -> None:
     assert m6._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
+
+
+def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("task\n", encoding="utf-8")
+    paths = SimpleNamespace(
+        root=tmp_path,
+        transcript=tmp_path / "tui.transcript",
+        instructions=instructions,
+    )
+
+    class Stdin:
+        closed = False
+
+        def write(self, value):
+            return len(value)
+
+        def flush(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    class Process:
+        pid = 12345
+        stdin = Stdin()
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            raise subprocess.TimeoutExpired("tui", timeout)
+
+    process = Process()
+    terminated = []
+    monkeypatch.setattr(m6.base.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(m6.base, "_wait_for_scripted_tui_episode", lambda *args, **kwargs: "completed")
+    monkeypatch.setattr(m6.base, "_terminate_scripted_tui_process", lambda value: terminated.append(value))
+
+    assert m6.base._run_scripted_tui("tui", paths, {}) == 1
+    assert terminated == [process]
+    evidence = json.loads((tmp_path / "scripted-tui-driver.json").read_text())
+    assert evidence["reason_code"] == "TUI_DID_NOT_EXIT_AFTER_QUIT"
