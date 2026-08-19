@@ -976,6 +976,59 @@ def test_owned_residuals_ignore_unmarked_diagnostic_commands() -> None:
     assert tui_acceptance._owned_process_residuals(rows, run_id="this-case") == [rows[1]]
 
 
+def test_owned_residual_cleanup_terminates_each_matching_child_group(monkeypatch) -> None:
+    rows = [
+        {"pid": 42001, "cmdline": "ros2 launch fixture", "openeta_tui_run_id": "this-case"},
+        {"pid": 42002, "cmdline": "gz sim fixture", "openeta_tui_run_id": "this-case"},
+        {"pid": 42003, "cmdline": "gz server", "openeta_tui_run_id": "this-case"},
+        {"pid": 42004, "cmdline": "gz sim other", "openeta_tui_run_id": "other-case"},
+    ]
+    pgids = {42001: 42100, 42002: 42200, 42003: 42200, 42004: 42400}
+    terminated: set[int] = set()
+    monkeypatch.setattr(tui_acceptance.os, "getpgrp", lambda: 41900)
+    monkeypatch.setattr(tui_acceptance.os, "getpgid", lambda pid: pgids[pid])
+
+    def fake_killpg(pgid: int, action: int) -> None:
+        if action == signal.SIGTERM:
+            terminated.add(pgid)
+
+    monkeypatch.setattr(tui_acceptance.os, "killpg", fake_killpg)
+    monkeypatch.setattr(
+        tui_acceptance, "_process_group_exited", lambda pgid: pgid in terminated
+    )
+
+    evidence = tui_acceptance._terminate_owned_residual_groups(
+        run_id="this-case", before=[], candidates=rows, timeout_s=0.01
+    )
+
+    assert terminated == {42100, 42200}
+    assert [(row["pgid"], row["member_pids"]) for row in evidence] == [
+        (42100, [42001]),
+        (42200, [42002, 42003]),
+    ]
+    assert all(row["group_exited"] is True for row in evidence)
+
+
+def test_owned_residual_cleanup_refuses_coordinator_process_group(monkeypatch) -> None:
+    rows = [
+        {"pid": 43001, "cmdline": "ros2 launch fixture", "openeta_tui_run_id": "this-case"}
+    ]
+    monkeypatch.setattr(tui_acceptance.os, "getpgrp", lambda: 43100)
+    monkeypatch.setattr(tui_acceptance.os, "getpgid", lambda _pid: 43100)
+    monkeypatch.setattr(
+        tui_acceptance.os,
+        "killpg",
+        lambda *_args: pytest.fail("coordinator group must not be signalled"),
+    )
+
+    evidence = tui_acceptance._terminate_owned_residual_groups(
+        run_id="this-case", before=[], candidates=rows
+    )
+
+    assert evidence[0]["state"] == "refused_coordinator_group"
+    assert evidence[0]["group_exited"] is False
+
+
 def test_process_snapshot_ignores_shell_prose_but_keeps_real_workloads() -> None:
     """Only actual runtime argv may become a pre-existing-process gate."""
 

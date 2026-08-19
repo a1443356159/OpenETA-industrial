@@ -674,6 +674,90 @@ def _terminate_owned_worker_groups(
     return evidence
 
 
+def _terminate_owned_residual_groups(
+    *,
+    run_id: str,
+    before: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]] | None = None,
+    timeout_s: float = 15.0,
+) -> list[dict[str, Any]]:
+    """Terminate remaining process groups carrying this case's exact run id.
+
+    ROS launch and Gazebo may create sessions below the bench worker, so
+    stopping the worker group alone does not necessarily stop those adopted
+    descendants.  The inherited ``OPENETA_TUI_RUN_ID`` is the ownership
+    boundary.  Never signal the coordinator's own group or a process that was
+    already present when the case began.
+    """
+
+    before_pids = {int(item["pid"]) for item in before if isinstance(item.get("pid"), int)}
+    if candidates is None:
+        candidates = _process_snapshot()
+    owned = [
+        row
+        for row in candidates
+        if isinstance(row.get("pid"), int)
+        and row["pid"] not in before_pids
+        and row.get("openeta_tui_run_id") == run_id
+    ]
+    groups: dict[int, list[Mapping[str, Any]]] = {}
+    evidence: list[dict[str, Any]] = []
+    current_pgid = os.getpgrp()
+    for row in owned:
+        pid = int(row["pid"])
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            evidence.append(
+                {
+                    "pgid": None,
+                    "member_pids": [pid],
+                    "run_id": run_id,
+                    "owned": True,
+                    "state": "already_exited",
+                    "group_exited": True,
+                }
+            )
+            continue
+        groups.setdefault(pgid, []).append(row)
+
+    for pgid, rows in sorted(groups.items()):
+        member_pids = sorted(int(row["pid"]) for row in rows)
+        record: dict[str, Any] = {
+            "pgid": pgid,
+            "member_pids": member_pids,
+            "run_id": run_id,
+            "owned": True,
+        }
+        if pgid == current_pgid:
+            record.update({"state": "refused_coordinator_group", "group_exited": False})
+            evidence.append(record)
+            continue
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+            record["termination_signal"] = "SIGTERM"
+        except ProcessLookupError:
+            record.update({"state": "already_exited", "group_exited": True})
+            evidence.append(record)
+            continue
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and not _process_group_exited(pgid):
+            time.sleep(0.05)
+        if not _process_group_exited(pgid):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                record["escalation_signal"] = "SIGKILL"
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not _process_group_exited(pgid):
+                time.sleep(0.05)
+        record["group_exited"] = _process_group_exited(pgid)
+        record["state"] = "exited" if record["group_exited"] else "residual"
+        evidence.append(record)
+    return evidence
+
+
 def _partition_cleanup(partition: str) -> dict[str, Any]:
     env = os.environ.copy()
     env["GZ_PARTITION"] = partition
@@ -2360,6 +2444,12 @@ def run_case(
         candidates=worker_candidates,
     )
     after = _process_snapshot()
+    residual_groups = _terminate_owned_residual_groups(
+        run_id=allocation.run_id,
+        before=receipt["preexisting_processes"],
+        candidates=after,
+    )
+    after = _process_snapshot()
     owned_residuals = _owned_process_residuals(after, run_id=allocation.run_id)
     residual_deadline = time.monotonic() + 15.0
     while owned_residuals and time.monotonic() < residual_deadline:
@@ -2395,6 +2485,10 @@ def run_case(
         "owned_worker_groups": worker_groups,
         "owned_worker_groups_exited": all(
             item.get("group_exited") is True for item in worker_groups
+        ),
+        "owned_residual_groups": residual_groups,
+        "owned_residual_groups_exited": all(
+            item.get("group_exited") is True for item in residual_groups
         ),
         "owned_process_residuals": owned_residuals,
         "preexisting_process_snapshot_unchanged": all(
