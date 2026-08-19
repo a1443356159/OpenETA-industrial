@@ -36,6 +36,9 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert "execution_started=false" in prompt
     assert "稳定 >=0.5 s" in prompt
     assert "禁止 Oracle" in prompt
+    assert "initial observation 不计作这次显式 observe" in prompt
+    assert "覆盖完整目标轮廓" in prompt
+    assert "不得固定 detection id" in prompt
 
 
 def test_m6_order_helper_rejects_anyplace_before_lift() -> None:

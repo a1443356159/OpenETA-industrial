@@ -39,10 +39,13 @@ REQUIRED_REAL_M6_TOOLS = (
 INSTRUCTIONS = """
 [automation=scripted_tui] 在隔离 Gazebo pick-place 环境中完成一次真实约束放置验收。
 创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 一次并冻结这一个
-scene_primary RGB-D；此冻结帧必须同时供 SAM3 分割 target_object、GraspGenX
+scene_primary RGB-D；create 返回的 initial observation 不计作这次显式 observe。此冻结帧必须
+同时供 SAM3 分割 target_object、GraspGenX
 (gripper_name=robotiq_2f_85) 和 SAM3 分割绿色 placement_zone_marker 使用。禁止 Oracle、
 fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增运动工具。抓取前不得运行
-AnyPlace。必须由主 VLM 选择 GraspGenX 候选并 compile_grasp_seed，执行真实接近、close，
+AnyPlace。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
+拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
+GraspGenX 候选并 compile_grasp_seed，执行真实接近、close，
 仅在双垫 native contact 与 attached ACK 后 lift；lift 必须 >=80 mm 且抓持相对漂移 <=10 mm。
 之后才用同一冻结 RGB-D、区域 mask 和已抓取的完整 source grasp 运行 AnyPlace；五个候选
 必须全部绑定该 source grasp 并保留完整旋转与候选图。主 VLM 只能通过
