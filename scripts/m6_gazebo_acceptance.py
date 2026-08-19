@@ -40,7 +40,7 @@ INSTRUCTIONS = """
 [automation=scripted_tui] 在隔离 Gazebo pick-place 环境中完成一次真实约束放置验收。
 创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 一次并冻结这一个
 scene_primary RGB-D；create 返回的 initial observation 不计作这次显式 observe。此冻结帧必须
-同时供 SAM3 分割蓝色圆柱 target_object、GraspGenX
+同时供 SAM3 分割红色方块 target_object、GraspGenX
 (gripper_name=robotiq_2f_85) 和 SAM3 分割绿色 placement_zone_marker 使用。禁止 Oracle、
 fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增运动工具。抓取前不得运行
 AnyPlace。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
