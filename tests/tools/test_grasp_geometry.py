@@ -102,10 +102,13 @@ def test_compile_grasp_seed_accepts_rm75_robotiq_profile_and_preserves_rotation(
     assert result["calibration_id"] == "graspnet-eef-rm75-robotiq2f85"
     assert result["orientation_clamped"] is False
     assert result["contact_pose"]["rotation_matrix"] == [
-        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [-1.0, 0.0, 0.0],
         [0.0, -1.0, 0.0],
-        [0.0, 0.0, -1.0],
     ]
+    assert result["contact_pose"]["xyz"] == pytest.approx([0.094, -0.2, -0.3])
+    assert result["pregrasp_distance_m"] == pytest.approx(0.07)
+    assert result["hover_pose"]["xyz"] == pytest.approx([0.024, -0.2, -0.3])
 
 
 def test_compile_placement_reuses_eef_calibration_and_preserves_rotation() -> None:

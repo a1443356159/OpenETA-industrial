@@ -627,6 +627,13 @@ def validate_calibration_profile(
     width = _finite_number(normalized.get("max_gripper_width_m"), "max_gripper_width_m")
     if not 0.0 < width <= 0.2:
         raise ValueError("max_gripper_width_m must be in (0, 0.2]")
+    if "minimum_pregrasp_distance_m" in normalized:
+        pregrasp = _finite_number(
+            normalized.get("minimum_pregrasp_distance_m"),
+            "minimum_pregrasp_distance_m",
+        )
+        if not 0.04 <= pregrasp <= 0.16:
+            raise ValueError("minimum_pregrasp_distance_m must be in [0.04, 0.16]")
     transform = _required_object(normalized.get("T_grasp_eef"), "T_grasp_eef")
     rotation = _matrix3(transform.get("rotation_matrix"), "T_grasp_eef.rotation_matrix")
     _validate_rotation_matrix(rotation)

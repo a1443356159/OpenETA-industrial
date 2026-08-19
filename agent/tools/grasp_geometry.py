@@ -212,15 +212,24 @@ def compile_grasp_seed(
         )
     requested_strategy_id = str(parameters.get("strategy_id") or "").strip()
     scene_epoch = _nonnegative_int(parameters.get("scene_epoch"), "scene_epoch")
+    profile_minimum_pregrasp_distance = _bounded_float(
+        profile.get("minimum_pregrasp_distance_m", _MIN_SAFE_HOVER_DISTANCE_M),
+        "minimum_pregrasp_distance_m",
+        0.04,
+        0.16,
+    )
     requested_pregrasp_distance = _bounded_float(
-        parameters.get("pregrasp_distance_m", _MIN_SAFE_HOVER_DISTANCE_M),
+        parameters.get("pregrasp_distance_m", profile_minimum_pregrasp_distance),
         "pregrasp_distance_m",
         0.04,
         0.16,
     )
-    # Hover is a clearance pose, not a task-tuned contact correction. Keep at
-    # least 15 cm along the grasp approach normal before wrist alignment.
-    pregrasp_distance = max(_MIN_SAFE_HOVER_DISTANCE_M, requested_pregrasp_distance)
+    # Hover is a clearance pose, not a task-tuned contact correction. Long
+    # grippers may certify a smaller additional mount standoff because their
+    # fingertips already extend substantially along the approach axis.
+    pregrasp_distance = max(
+        profile_minimum_pregrasp_distance, requested_pregrasp_distance
+    )
     candidate_fallback = (
         parameters.get("candidate_fallback") is True
         or candidate.get("candidate_fallback") is True
