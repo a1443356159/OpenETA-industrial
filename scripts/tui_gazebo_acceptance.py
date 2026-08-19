@@ -759,7 +759,15 @@ def _scripted_tui_trace_state(paths: CasePaths) -> str:
                     continue
                 event_type = event.get("event_type")
                 if event_type == "episode_result":
-                    state = "completed"
+                    payload = event.get("payload")
+                    metadata = payload.get("metadata") if isinstance(payload, Mapping) else None
+                    if isinstance(metadata, Mapping) and (
+                        metadata.get("waiting_for_human") is True
+                        or metadata.get("stop_reason") == "ask_human"
+                    ):
+                        state = "human_input_required"
+                    else:
+                        state = "completed"
                     continue
                 if event_type in {"human_answer", "user_message"}:
                     state = "running"

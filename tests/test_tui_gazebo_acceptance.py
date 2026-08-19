@@ -1546,6 +1546,18 @@ def test_exact_pre_tool_provider_billing_exhaustion_is_blocked_not_m2_failure(
                 },
             }
         )
+        + "\n"
+        + json.dumps(
+            {
+                "event_type": "episode_result",
+                "payload": {
+                    "metadata": {
+                        "stop_reason": "ask_human",
+                        "waiting_for_human": True,
+                    }
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
