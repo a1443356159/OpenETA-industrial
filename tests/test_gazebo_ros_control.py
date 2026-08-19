@@ -11,9 +11,30 @@ from extensions.gazebo.ros_control import (
     RosGazeboStateSource,
     _RosRuntime,
     _moveit_scene_frame,
+    _merged_allowed_collision_rows,
     _populate_recovery_trajectory_goal,
     _populate_state_validity_request,
 )
+
+
+def test_allowed_collision_merge_preserves_srdf_rows_and_adds_target_links() -> None:
+    names, rows = _merged_allowed_collision_rows(
+        ["base_link", "link_1"],
+        [[False, True], [True, False]],
+        {"target_object": ["left_tip", "right_tip"]},
+    )
+    matrix = {
+        (row_name, column_name): rows[row_index][column_index]
+        for row_index, row_name in enumerate(names)
+        for column_index, column_name in enumerate(names)
+    }
+
+    assert matrix["base_link", "link_1"] is True
+    assert matrix["link_1", "base_link"] is True
+    assert matrix["target_object", "left_tip"] is True
+    assert matrix["left_tip", "target_object"] is True
+    assert matrix["target_object", "right_tip"] is True
+    assert matrix["base_link", "target_object"] is False
 
 
 def test_moveit_scene_maps_gazebo_world_to_fixed_robot_root_only() -> None:

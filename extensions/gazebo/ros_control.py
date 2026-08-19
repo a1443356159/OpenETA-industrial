@@ -142,6 +142,33 @@ def _populate_recovery_trajectory_goal(
     goal.trajectory.points = [point]
 
 
+def _merged_allowed_collision_rows(
+    current_names: list[str],
+    current_rows: list[list[bool]],
+    additions: Mapping[str, Any],
+) -> tuple[list[str], list[list[bool]]]:
+    """Merge object/link allowances without erasing the SRDF self matrix."""
+
+    enabled_pairs: set[tuple[str, str]] = set()
+    for row_index, row_name in enumerate(current_names):
+        values = current_rows[row_index] if row_index < len(current_rows) else []
+        for column_index, column_name in enumerate(current_names):
+            if column_index < len(values) and bool(values[column_index]):
+                enabled_pairs.add(tuple(sorted((row_name, column_name))))
+    for object_id, links in additions.items():
+        for link in links:
+            enabled_pairs.add(tuple(sorted((str(object_id), str(link)))))
+    names = sorted(
+        set(current_names)
+        | {str(key) for key in additions}
+        | {str(link) for links in additions.values() for link in links}
+    )
+    return names, [
+        [tuple(sorted((row_name, column))) in enabled_pairs for column in names]
+        for row_name in names
+    ]
+
+
 class RosGazeboStateSource:
     def __init__(self, node: Any, tf_buffer: Any, *, config: GazeboControlConfig, freshness_s: float = 2.0):
         self.node, self.tf_buffer, self.config = node, tf_buffer, config
@@ -619,21 +646,36 @@ class _RosRuntime:
             scene.robot_state.attached_collision_objects.append(attached)
         allowed = diff.get("allowed_collisions")
         if isinstance(allowed, Mapping):
-            names = sorted(
-                {str(key) for key in allowed}
-                | {str(link) for links in allowed.values() for link in links}
+            # A sparse AllowedCollisionMatrix in a PlanningScene diff replaces
+            # MoveIt's SRDF-derived matrix rather than patching it.  Read and
+            # merge the live matrix first, otherwise adding target/fingertip
+            # exceptions accidentally re-enables every adjacent-link
+            # self-collision and all subsequent plans fail at the start state.
+            components = self.planning_scene_components_type
+            acm_request = self.get_scene_service_type.Request()
+            acm_request.components.components = int(
+                components.ALLOWED_COLLISION_MATRIX
+            )
+            acm_readback = self._await(
+                self.get_scene_client.call_async(acm_request), 5.0
+            )
+            current_acm = acm_readback.scene.allowed_collision_matrix
+            names, merged_rows = _merged_allowed_collision_rows(
+                [str(value) for value in current_acm.entry_names],
+                [list(row.enabled) for row in current_acm.entry_values],
+                allowed,
             )
             scene.allowed_collision_matrix.entry_names = names
-            for row_name in names:
+            for enabled in merged_rows:
                 row = self.allowed_collision_entry_type()
-                row.enabled = [
-                    bool(
-                        column in allowed.get(row_name, [])
-                        or row_name in allowed.get(column, [])
-                    )
-                    for column in names
-                ]
+                row.enabled = enabled
                 scene.allowed_collision_matrix.entry_values.append(row)
+            scene.allowed_collision_matrix.default_entry_names = list(
+                current_acm.default_entry_names
+            )
+            scene.allowed_collision_matrix.default_entry_values = list(
+                current_acm.default_entry_values
+            )
         apply_request = self.apply_scene_service_type.Request()
         apply_request.scene = scene
         applied = self._await(self.apply_scene_client.call_async(apply_request), 5.0)
