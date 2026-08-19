@@ -9,8 +9,8 @@ import math
 import numpy as np
 from PIL import Image
 
-from extensions.gazebo.m3 import M3Config
-from extensions.gazebo.m2 import M2Config
+from extensions.gazebo.native_grasp import NativePickPlaceConfig
+from extensions.gazebo.robot_control import GazeboControlConfig
 from extensions.gazebo.oracle_perception import (
     OracleObjectSpec,
     PosedOracleObject,
@@ -33,11 +33,11 @@ _EXTRINSICS = {
 }
 
 _BOX_SPEC = OracleObjectSpec(
-    object_id="m3_target", name="m3_target", label="target block",
+    object_id="target_object", name="target_object", label="target block",
     shape="box", dimensions=(2.0, 2.0, 2.0),
 )
 _CYLINDER_SPEC = OracleObjectSpec(
-    object_id="m3_distractor", name="m3_distractor", label="distractor cylinder",
+    object_id="distractor_object", name="distractor_object", label="distractor cylinder",
     shape="cylinder", dimensions=(0.5, 2.0),
 )
 
@@ -85,7 +85,7 @@ def test_box_oblique_projection_shifts_and_stretches_hull() -> None:
     # 100*1.5/4.5+50 ≈ 83.33 (x=1.5,z=4.5);
     # v extremes: 50 ± 100*0.5/4.5 ≈ {38.89, 61.11} (y=±0.5, z=4.5).
     spec = OracleObjectSpec(
-        object_id="m3_target", name="m3_target", label="target block",
+        object_id="target_object", name="target_object", label="target block",
         shape="box", dimensions=(1.0, 1.0, 1.0),
     )
     result = oracle_segment_prompt(
@@ -217,8 +217,8 @@ def test_prompt_matching_is_case_insensitive_substring_on_id_name_label() -> Non
         "target block": 1,          # exact label
         "distractor": 1,            # substring of id/name/label
         "cylinder": 1,              # substring of label
-        "m3": 2,                    # substring of both ids
-        "m3_target": 1,
+        "object": 2,                # substring of both semantic ids
+        "target_object": 1,
         "nonexistent": 0,
     }
     for prompt, expected_count in cases.items():
@@ -233,7 +233,7 @@ def test_prompt_matching_is_case_insensitive_substring_on_id_name_label() -> Non
 def test_prompt_matching_helper_covers_both_substring_directions() -> None:
     assert prompt_matches_object("target", _BOX_SPEC)
     assert prompt_matches_object("the target block on the table", _BOX_SPEC)
-    assert prompt_matches_object("M3_TARGET", _BOX_SPEC)
+    assert prompt_matches_object("TARGET_OBJECT", _BOX_SPEC)
     assert not prompt_matches_object("", _BOX_SPEC)
     assert not prompt_matches_object("sphere", _BOX_SPEC)
 
@@ -302,28 +302,28 @@ def test_missing_prompt_fails_like_sam3() -> None:
 
 
 def test_registry_from_m3_config_matches_declared_geometry() -> None:
-    specs = oracle_registry_from_model_config(M3Config())
-    assert [spec.object_id for spec in specs] == ["m3_target", "m3_distractor"]
+    specs = oracle_registry_from_model_config(NativePickPlaceConfig())
+    assert [spec.object_id for spec in specs] == ["target_object", "distractor_object"]
     box, cylinder = specs
     assert box.shape == "box" and box.dimensions == (0.04, 0.04, 0.06)
     assert cylinder.shape == "cylinder" and cylinder.dimensions == (0.025, 0.08)
-    assert oracle_registry_from_model_config(M2Config()) == []
+    assert oracle_registry_from_model_config(GazeboControlConfig()) == []
     assert oracle_registry_from_model_config(None) == []
 
 
 def test_posed_oracle_objects_joins_observation_dicts_with_registry() -> None:
-    registry = oracle_registry_from_model_config(M3Config())
+    registry = oracle_registry_from_model_config(NativePickPlaceConfig())
     observation_objects = [
-        {"id": "m3_target", "name": "m3_target", "label": "target block",
+        {"id": "target_object", "name": "target_object", "label": "target block",
          "position": [0.28, -0.10, 0.43], "orientation": [0.0, 0.0, 0.0, 1.0]},
-        {"id": "m3_table", "name": "m3_table", "label": "table",
+        {"id": "work_table", "name": "work_table", "label": "table",
          "position": [0.40, 0.0, 0.38], "orientation": [0.0, 0.0, 0.0, 1.0]},
-        {"id": "m3_distractor", "name": "m3_distractor", "label": "distractor cylinder",
+        {"id": "distractor_object", "name": "distractor_object", "label": "distractor cylinder",
          "position": [0.28, 0.12, 0.44], "orientation": [0.0, 0.0, 0.0, 1.0]},
     ]
     posed = posed_oracle_objects(registry, observation_objects)
     # The table has no registry shape and must be skipped.
-    assert [item.spec.object_id for item in posed] == ["m3_target", "m3_distractor"]
+    assert [item.spec.object_id for item in posed] == ["target_object", "distractor_object"]
     assert posed[0].position == (0.28, -0.10, 0.43)
 
 

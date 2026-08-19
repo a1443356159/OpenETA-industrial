@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from extensions.gazebo.asset_preflight import validate_asset_root
-from extensions.gazebo.m2 import ARM_JOINT_BOUNDS, ARM_JOINTS, M2Config
+from extensions.gazebo.robot_control import ARM_JOINT_BOUNDS, ARM_JOINTS, GazeboControlConfig
 
 
 ROOT = Path(__file__).parents[1]
@@ -60,9 +60,9 @@ def test_all_repository_m2_xml_is_well_formed() -> None:
 
 
 def test_robotiq_z_motion_world_is_test_only_and_launch_selectable() -> None:
-    production = ROBOTIQ_PACKAGE / "worlds/m2_rm75_robotiq2f85.sdf"
-    z_test = ROBOTIQ_PACKAGE / "worlds/m2_rm75_robotiq2f85_z_test.sdf"
-    launch = (ROBOTIQ_PACKAGE / "launch/m2_gazebo_moveit.launch.py").read_text(
+    production = ROBOTIQ_PACKAGE / "worlds/rm75_robotiq2f85.sdf"
+    z_test = ROBOTIQ_PACKAGE / "worlds/rm75_robotiq2f85_z_test.sdf"
+    launch = (ROBOTIQ_PACKAGE / "launch/gazebo_moveit.launch.py").read_text(
         encoding="utf-8"
     )
 
@@ -72,8 +72,8 @@ def test_robotiq_z_motion_world_is_test_only_and_launch_selectable() -> None:
     z_test_world = z_test_root.find("world")
     assert production_world is not None
     assert z_test_world is not None
-    assert production_world.attrib["name"] == "m2_rm75_robotiq2f85"
-    assert z_test_world.attrib["name"] == "m2_rm75_robotiq2f85_z_test"
+    assert production_world.attrib["name"] == "rm75_robotiq2f85"
+    assert z_test_world.attrib["name"] == "rm75_robotiq2f85_z_test"
 
     # XML comments and the world name are the only intentional differences.
     # In particular the test asset cannot introduce a robot, joint initial
@@ -89,7 +89,7 @@ def test_robotiq_z_motion_world_is_test_only_and_launch_selectable() -> None:
 
     assert "DeclareLaunchArgument" in launch
     assert 'LaunchConfiguration("world")' in launch
-    assert 'default_world = str(share / "worlds/m2_rm75_robotiq2f85.sdf")' in launch
+    assert 'default_world = str(share / "worlds/rm75_robotiq2f85.sdf")' in launch
 
 
 def test_m2_profiles_use_production_command_limits_without_ineffective_adapter_knob() -> None:
@@ -170,7 +170,7 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     control = (ROBOTIQ_PACKAGE / "urdf/ros2_control.xacro").read_text(encoding="utf-8")
     controllers = (ROBOTIQ_PACKAGE / "config/controllers.yaml").read_text(encoding="utf-8")
     robot = (ROBOTIQ_PACKAGE / "urdf/rm75_robotiq2f85.urdf.xacro").read_text(encoding="utf-8")
-    launch = (ROBOTIQ_PACKAGE / "launch/m2_gazebo_moveit.launch.py").read_text(encoding="utf-8")
+    launch = (ROBOTIQ_PACKAGE / "launch/gazebo_moveit.launch.py").read_text(encoding="utf-8")
     adapter = (ROBOTIQ_PACKAGE / "scripts/gripper_action_adapter.py").read_text(encoding="utf-8")
     shared_control = (ASSETS / "urdf/arm_ros2_control.xacro").read_text(encoding="utf-8")
     assert control.count("xacro:rm75_v_arm_control_interfaces") == 1
@@ -214,7 +214,7 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
 
 def test_production_config_ignores_external_vendor_environment(monkeypatch) -> None:
     monkeypatch.setenv("OPENETA_RM75_MODEL_PATH", "/does/not/exist")
-    config = M2Config()
+    config = GazeboControlConfig()
     config.validate_assets()
     assert config.asset_root == ASSETS
 

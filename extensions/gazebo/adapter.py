@@ -9,7 +9,7 @@ from .lifecycle import GazeboEnvironment, GazeboLifecycleError
 
 
 class GazeboSimulatorAdapter(SimulatorAdapter):
-    """Expose the M1 lifecycle through the standard simulator adapter API."""
+    """Expose the observation-only lifecycle through the standard simulator adapter API."""
 
     def __init__(self, environment: GazeboEnvironment | None = None) -> None:
         self.environment = environment or GazeboEnvironment()
@@ -22,7 +22,7 @@ class GazeboSimulatorAdapter(SimulatorAdapter):
 
     def step(self, action: EnvAction) -> StepResult:
         raise GazeboLifecycleError(
-            "Gazebo M1 adapter is read-only; manipulation/control is deferred to M2"
+            "Gazebo observation-only adapter is read-only; manipulation/control is deferred to motion-control"
         )
 
     def close(self) -> None:

@@ -34,21 +34,21 @@ def _png_base64(rgb: np.ndarray) -> str:
 
 
 def _fake_env():
-    return types.SimpleNamespace(profile=gazebo_profile("m3_pickplace"))
+    return types.SimpleNamespace(profile=gazebo_profile("rm75_robotiq2f85_pickplace"))
 
 
 def _objects() -> list[dict]:
     return [
         {
-            "id": "m3_target", "name": "m3_target", "label": "target block",
+            "id": "target_object", "name": "target_object", "label": "target block",
             "position": [0.28, -0.10, 0.43], "orientation": [0.0, 0.0, 0.0, 1.0],
         },
         {
-            "id": "m3_distractor", "name": "m3_distractor", "label": "distractor cylinder",
+            "id": "distractor_object", "name": "distractor_object", "label": "distractor cylinder",
             "position": [0.28, 0.12, 0.44], "orientation": [0.0, 0.0, 0.0, 1.0],
         },
         {
-            "id": "m3_table", "name": "m3_table", "label": "table",
+            "id": "work_table", "name": "work_table", "label": "table",
             "position": [0.40, 0.0, 0.38], "orientation": [0.0, 0.0, 0.0, 1.0],
         },
     ]
@@ -197,7 +197,7 @@ def test_worker_route_fails_on_envs_without_oracle_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frames = _seed_worker(monkeypatch)
-    env = types.SimpleNamespace(profile=gazebo_profile("m1"))
+    env = types.SimpleNamespace(profile=gazebo_profile("rgbd_observation"))
     monkeypatch.setitem(bench_worker._envs, "h1", env)
     result = bench_worker._oracle_perceive_frame(
         env, "h1",

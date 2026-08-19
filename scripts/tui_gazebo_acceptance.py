@@ -497,15 +497,19 @@ def instructions_for(milestone: str, mode: str) -> str:
         "m2": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m2"]}`。
 禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
 创建后仅使用真实 MCP/MoveIt 回执，严格按以下合同执行：四次成功 move_to，目标依次为 A、B、A、B（A 与 B 必须不同且碰撞安全）；随后六次成功 gripper_control，position 精确依次为 [1, 0, 1, 1, 0, 1]；随后仅一次不可达 move_to，且它必须返回 MOTION_PLAN_FAILED；随后 observe；最后唯一一次 close_simulator_env。
+将创建回执中的初始 EEF xyz 作为唯一基准：A 为该 xyz 加 validated vertical_low 偏移，B 为该 xyz 加 validated vertical_high 偏移。四次 A/B move_to 的 target_pose 只提交 frame=world 和这两个固定 xyz，不得提交 quat_xyzw；第三次必须逐字节复用第一次的 target_pose，第四次必须逐字节复用第二次的 target_pose，不得从后续观测重算。
+六个夹爪位置是六个独立原子动作；第 3 个 position=1 成功后，仍必须单独调用第 4 个 position=1 并等待其独立回执，不得合并、去重或省略相邻的相同参数。
 每个 move_to 或 gripper_control 只可在严格回执 ok=true、reached_goal/reached_target=true 且 stalled=false 后进入下一步。stalled、超时、未到目标或任何失败都不是成功。某一夹爪步骤首次失败时，必须先 fresh observe，再以完全相同的 position 仅重试一次；该重试再次失败时，立即 close_simulator_env 并让 M2 失败，绝不可继续或进行第二次重试。不得绕过 MoveIt、跳步、替换 A/B，或把失败动作当作成功。逐一批准所有 human_gated 提示，确认 close 后用 /quit 退出。
 """,
         "m3": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m3"]}`。
 禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
 创建后先接近，再执行一次真实 close。只有回执显示双垫 native contact 与 attached ACK 后才能执行第一段 lift；记录 child-link 的 >=80 mm lift 和 <=10 mm 相对位移；然后 open、detach ACK，最后唯一一次 close_simulator_env。
+close 回执中 native_contact_gate.accepted=true（source=gazebo_native_contacts）且 detachable_joint.state=attached 时，physical_verification.reason_code=NATIVE_GRASP_ATTACH_ACKED_UNPROVEN 是已通过双垫接触与 attach ACK、等待唯一一次 lift proof 的预期中间态。此时 grasp_confirmed=false 与 verdict=UNKNOWN 仅表示 lift proof 尚未执行，不是 attach 失败；不得用 observe 等待它自行变化，必须立即执行 validated lift [0.1552,-0.1000,0.5976]，再以 lift 回执判定 >=80 mm 与 <=10 mm 物理证明。
 """,
         "m4": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m4"]}`。
 禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
 创建后实际调用 oracle_perceive 并记录 perception_source=gazebo_oracle 与 contractual fake candidate；它不能替代 M3：随后执行真实 close、native contact、attached ACK 和 child-link lift 证明，然后 open、detach ACK，最后唯一一次 close_simulator_env。
+close 回执中 native_contact_gate.accepted=true（source=gazebo_native_contacts）且 detachable_joint.state=attached 时，physical_verification.reason_code=NATIVE_GRASP_ATTACH_ACKED_UNPROVEN 是已通过双垫接触与 attach ACK、等待唯一一次 lift proof 的预期中间态。此时 grasp_confirmed=false 与 verdict=UNKNOWN 仅表示 lift proof 尚未执行，不是 attach 失败；不得用 observe 等待它自行变化，必须立即执行 validated lift [0.1552,-0.1000,0.5976]，再以 lift 回执判定 >=80 mm 与 <=10 mm 物理证明。
 """,
     }
     prefix = "[automation=scripted_tui; this is not human approval]\n" if mode == SCRIPTED_TUI else ""
@@ -1123,11 +1127,11 @@ def _bind_control_tools(*, paths: CasePaths, allocation: Allocation, milestone: 
         # Reuse the exact production M4 Oracle evidence wrapper, but do not
         # assemble the broader provider-backed runtime just to exercise it.
         from agent.runtime.runtime_assembly import (
-            _M4OracleMcpEvidence,
-            _with_m4_contractual_fake_candidate,
+            _OracleMcpEvidence,
+            _with_contractual_fake_candidate,
         )
 
-        evidence = _M4OracleMcpEvidence(
+        evidence = _OracleMcpEvidence(
             proxy_config=proxy_config,
             response_output_root=Path(proxy_config.response_output_root),
         )
@@ -1144,7 +1148,7 @@ def _bind_control_tools(*, paths: CasePaths, allocation: Allocation, milestone: 
         )
         registry.bind_handler(
             "oracle_perceive",
-            _with_m4_contractual_fake_candidate(oracle_handler, mcp_evidence=evidence),
+            _with_contractual_fake_candidate(oracle_handler, mcp_evidence=evidence),
             replace=True,
         )
     return _ControlToolRunner(paths=paths, allocation=allocation, registry=registry)
@@ -1790,7 +1794,7 @@ def _m5_selection_is_forbidden(value: Any) -> bool:
         and (
             item.get("kind") == "contractual_fake_grasp_candidate"
             or item.get("schema_version")
-            == "openeta.m4.contractual_fake_grasp_candidate.v1"
+            == "openeta.contractual_fake_grasp_candidate.v1"
         )
         for item in _walk(value)
     )
@@ -1871,8 +1875,8 @@ def _run_m5_control(
     from agent.tools.handlers import build_sam3_handler, build_sse_sam3_mcp_segmenter
     from agent.tools.sim_mcp import SseSimulatorMcpTransport
     from extensions.gazebo.perception_summary import (
-        M5PerceptionBridgeError,
-        build_m5_object_summary,
+        PerceptionBridgeError,
+        build_perception_object_summary,
     )
 
     evidence_path = paths.root / "m5-perception.json"
@@ -2062,7 +2066,7 @@ def _run_m5_control(
                 "reason": "control-only exact single SAM3 candidate",
             },
             metadata={
-                "_openeta_control_only_m5": True,
+                "_openeta_control_only_perception": True,
                 "_openeta_host_selection_source": "scripted_single_candidate",
             },
         )
@@ -2090,12 +2094,12 @@ def _run_m5_control(
         }
 
         try:
-            object_summary = build_m5_object_summary(
+            object_summary = build_perception_object_summary(
                 detection=selected,
                 camera=camera,
                 case_root=paths.root,
             )
-        except M5PerceptionBridgeError as exc:
+        except PerceptionBridgeError as exc:
             evidence.update({"status": "failed", "reason_code": exc.code})
             write_evidence()
             raise M5FailedError(exc.code) from exc
@@ -3266,9 +3270,9 @@ def _verify_m3(
         item for payload in payloads for item in _walk(payload)
         if isinstance(item, Mapping) and item.get("schema_version") == "openeta.m3.detachable_joint.v1"
     ]
-    if not any(item.get("reason_code") == "M3_TARGET_HELD" and item.get("grasp_confirmed") is True for item in records):
+    if not any(item.get("reason_code") == "NATIVE_GRASP_TARGET_HELD" and item.get("grasp_confirmed") is True for item in records):
         errors.append("M3 child-link held proof missing")
-    held = [item for item in records if item.get("reason_code") == "M3_TARGET_HELD"]
+    held = [item for item in records if item.get("reason_code") == "NATIVE_GRASP_TARGET_HELD"]
     if not any(
         isinstance(item.get("evidence"), Mapping)
         and isinstance(item["evidence"].get("lift_m"), (int, float))
@@ -3285,7 +3289,7 @@ def _verify_m3(
     if not any(
         item.get("accepted") is True
         and isinstance(item.get("evidence"), Mapping)
-        and item["evidence"].get("target_id") == "m3_target"
+        and item["evidence"].get("target_id") == "target_object"
         and isinstance(item.get("left_sample_count"), int) and item["left_sample_count"] >= 3
         and isinstance(item.get("right_sample_count"), int) and item["right_sample_count"] >= 3
         and isinstance(item.get("left_span_s"), (int, float)) and float(item["left_span_s"]) >= 0.100
@@ -3326,7 +3330,7 @@ def _verify_m4(
                 _successful(call)
                 and _contains(result, "perception_source", "gazebo_oracle")
                 and candidate.get("schema_version")
-                == "openeta.m4.contractual_fake_grasp_candidate.v1"
+                == "openeta.contractual_fake_grasp_candidate.v1"
                 and candidate.get("kind") == "contractual_fake_grasp_candidate"
                 and candidate.get("is_model_prediction") is False
                 and candidate.get("perception_source") == "gazebo_oracle"

@@ -52,7 +52,7 @@ def predict_placement(
             encoded as ``<base64-encoded placement-region mask png>``.
         intrinsics: Pinhole camera values ``fx``, ``fy``, ``cx``, ``cy``, and
             depth ``scale``. For uint16 millimetre depth, use ``scale=1000``.
-        selected_grasp: One model-native AnyGrasp candidate in
+        selected_grasp: One normalized model-native grasp candidate in
             ``frame=camera`` and ``camera_frame=opencv``. The agent handler is
             responsible for unwrapping local Selected Grasp provenance before
             this MCP call.

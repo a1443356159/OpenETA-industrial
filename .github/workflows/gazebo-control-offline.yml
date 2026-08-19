@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Reproduce Python environment
-        run: bash scripts/setup_openeta_m2.sh --no-apt --python-only
+        run: bash scripts/setup_openeta_gazebo.sh --no-apt --python-only
       - name: Compile and test M2 contracts
         run: |
           .venv/bin/python -m compileall -q extensions/gazebo sim

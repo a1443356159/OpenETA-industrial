@@ -227,7 +227,7 @@ def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
     calls: list[tuple[dict, int]] = []
     meta = {
         "backend": "gazebo",
-        "control_spec": {"m2": True, "model_id": "rm75_robotiq_2f85_sim_v1"},
+        "control_spec": {"motion_control": True, "model_id": "rm75_robotiq_2f85_sim_v1"},
     }
     monkeypatch.setattr(server, "_session_envs", {"sid": {"local": meta}})
     monkeypatch.setattr(server, "_touch_session", lambda _sid: None)
@@ -265,7 +265,7 @@ def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
 
 def test_m2_move_to_preserves_worker_start_state_recovery_receipt(monkeypatch) -> None:
     recovery = {
-        "schema_version": "m2_start_state_recovery_v1",
+        "schema_version": "openeta.gazebo.start_state_recovery.v1",
         "status": "RECOVERED",
         "reason_code": "NUMERIC_BOUNDS_RECOVERED",
         "attempted": True,
@@ -278,7 +278,7 @@ def test_m2_move_to_preserves_worker_start_state_recovery_receipt(monkeypatch) -
     }
     meta = {
         "backend": "gazebo",
-        "control_spec": {"m2": True},
+        "control_spec": {"motion_control": True},
     }
     monkeypatch.setattr(server, "_session_envs", {"sid": {"local": meta}})
     monkeypatch.setattr(server, "_touch_session", lambda _sid: None)

@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from extensions.gazebo import GazeboProcess, Ros2LaunchProcess
-from extensions.gazebo.m3 import M3Config, NativeContactSample
+from extensions.gazebo.native_grasp import NativePickPlaceConfig, NativeContactSample
 from extensions.gazebo import process as gazebo_process
 
 
@@ -16,7 +16,7 @@ def test_gazebo_process_lifecycle_when_gz_is_installed() -> None:
     gz = shutil.which("gz") or ("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz" if os.path.exists("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz") else None)
     if gz is None:
         pytest.skip("Gazebo Sim executable is not installed")
-    process = GazeboProcess(world="extensions/gazebo/worlds/m1_oracle.sdf", gz_executable=gz)
+    process = GazeboProcess(world="extensions/gazebo/worlds/oracle.sdf", gz_executable=gz)
     try:
         pid = process.start()
         assert pid > 0
@@ -85,7 +85,7 @@ def test_ros_launch_inherits_worker_streams_for_case_local_diagnostics(
     monkeypatch.setattr(gazebo_process.subprocess, "Popen", popen)
     launch = Ros2LaunchProcess(
         package="openeta_rm75_robotiq2f85_sim",
-        launch_file="m1_gazebo_rgbd.launch.py",
+        launch_file="gazebo_rgbd.launch.py",
         ros2_executable=sys.executable,
     )
 
@@ -108,9 +108,9 @@ def test_detachable_joint_wait_ready_requires_the_stock_endpoint_triplet(
             0,
             stdout="\n".join(
                 [
-                    "/m3/detachable_joint/target/attach",
-                    "/m3/detachable_joint/target/detach",
-                    "/m3/detachable_joint/target/state",
+                    "/openeta/native_grasp/detachable_joint/target/attach",
+                    "/openeta/native_grasp/detachable_joint/target/detach",
+                    "/openeta/native_grasp/detachable_joint/target/state",
                 ]
             ),
             stderr="",
@@ -135,14 +135,14 @@ def test_detachable_joint_wait_ready_fails_closed_when_an_endpoint_is_absent(
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout="/m3/detachable_joint/target/attach\n",
+            stdout="/openeta/native_grasp/detachable_joint/target/attach\n",
             stderr="",
         )
 
     monkeypatch.setattr(gazebo_process.subprocess, "run", run)
     control = gazebo_process.GazeboDetachableJointControl(gz_executable=sys.executable)
 
-    with pytest.raises(gazebo_process.GazeboProcessError, match="M3_DETACHABLE_JOINT_NOT_READY"):
+    with pytest.raises(gazebo_process.GazeboProcessError, match="NATIVE_GRASP_DETACHABLE_JOINT_NOT_READY"):
         control.wait_ready(timeout_s=0.001)
 
 
@@ -204,7 +204,7 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> Non
 
     poses = {
         "gripper_mount_link": (0.10, -0.20, 0.50),
-        "m3_target": (0.20, -0.20, 0.40),
+        "target_object": (0.20, -0.20, 0.40),
         "target_link": (0.0, 0.0, 0.0),
     }
     control = gazebo_process.GazeboDetachableJointControl()
@@ -215,7 +215,7 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> Non
     poses.update(
         {
             "gripper_mount_link": (0.10, -0.20, 0.60),
-            "m3_target": (0.20, -0.20, 0.50),
+            "target_object": (0.20, -0.20, 0.50),
         }
     )
     proof = control.child_link_proof()
@@ -224,16 +224,33 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> Non
     assert proof.capture_relative_translation_m == pytest.approx(0.0)
 
 
+def test_native_pose_parser_preserves_and_normalizes_quaternion() -> None:
+    poses = gazebo_process.GazeboDetachableJointControl._pose_records(
+        '''
+pose {
+  name: "target_object"
+  position { x: 0.2 y: -0.1 z: 0.43 }
+  orientation { x: 0.0 y: 0.0 z: 1.0 w: 1.0 }
+}
+'''
+    )
+
+    assert poses["target_object"].xyz == (0.2, -0.1, 0.43)
+    assert poses["target_object"].quat_xyzw == pytest.approx(
+        (0.0, 0.0, 2**-0.5, 2**-0.5)
+    )
+
+
 def test_detachable_joint_proof_rejects_a_noncanonical_child_link_frame() -> None:
     control = gazebo_process.GazeboDetachableJointControl()
     control._state = gazebo_process.DetachableJointState.ATTACHED
     control._world_link_positions = lambda: {
         "gripper_mount_link": (0.0, 0.0, 0.50),
-        "m3_target": (0.0, 0.0, 0.40),
+        "target_object": (0.0, 0.0, 0.40),
         "target_link": (0.0, 0.0, 0.01),
     }  # type: ignore[method-assign]
 
-    with pytest.raises(gazebo_process.GazeboProcessError, match="M3_CHILD_LINK_STATE_UNAVAILABLE"):
+    with pytest.raises(gazebo_process.GazeboProcessError, match="NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"):
         control.capture_baseline()
 
 
@@ -245,7 +262,7 @@ def test_native_contact_window_drops_pipe_backlog_before_verification(
     now = 100.0
     monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: now)
     window = gazebo_process.GazeboNativeContactWindow(timeout_s=0.1)
-    target = "m3_target::target_link::target_collision"
+    target = "target_object::target_link::target_collision"
     window._samples.append(
         NativeContactSample(
             "left", 9.9, 90.0,
@@ -261,7 +278,7 @@ def test_native_contact_window_drops_pipe_backlog_before_verification(
 
     result = window.evaluate(
         close_completed_sim_time_s=10.0,
-        config=M3Config(contact_freshness_s=2.0),
+        config=NativePickPlaceConfig(contact_freshness_s=2.0),
     )
 
     assert result.accepted is True

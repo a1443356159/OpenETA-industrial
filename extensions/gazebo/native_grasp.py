@@ -1,8 +1,8 @@
-"""Fail-closed contracts for the M3 native-contact DetachableJoint path.
+"""Fail-closed contracts for native-contact grasping in Gazebo.
 
-M3 has exactly one grasp mechanism: Gazebo Sim's stock
+This path has exactly one grasp mechanism: Gazebo Sim's stock
 ``gz::sim::systems::DetachableJoint`` fixed joint.  A request is allowed only
-after both *native Gazebo* fingertip contact streams identify ``m3_target``
+after both *native Gazebo* fingertip contact streams identify ``target_object``
 after a real close command.  This module deliberately contains neither ROS
 nor Gazebo imports so the admission and proof rules are testable offline.
 """
@@ -14,13 +14,13 @@ from enum import StrEnum
 import math
 from typing import Any, Iterable, Mapping, Sequence
 
-from .m2 import M2Config
+from .robot_control import GazeboControlConfig
 
 
-M3_ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
-M3_MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
-M3_DISPLAY_NAME = "Gazebo 仿真环境（M3 原生接触 DetachableJoint 拾放）"
-M3_SCHEMA_VERSION = "openeta.m3.detachable_joint.v1"
+PICKPLACE_ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
+PICKPLACE_MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
+PICKPLACE_DISPLAY_NAME = "Gazebo 仿真环境（原生接触 DetachableJoint 拾放）"
+NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
 
 
 class Verdict(StrEnum):
@@ -31,49 +31,49 @@ class Verdict(StrEnum):
 
 class ReasonCode(StrEnum):
     READY = "READY"
-    CONTACT_WINDOW_NOT_ARMED = "M3_CONTACT_WINDOW_NOT_ARMED"
-    CONTACT_INSUFFICIENT_SAMPLES = "M3_CONTACT_INSUFFICIENT_SAMPLES"
-    CONTACT_WINDOW_TOO_SHORT = "M3_CONTACT_WINDOW_TOO_SHORT"
-    CONTACT_SAMPLE_STALE = "M3_CONTACT_SAMPLE_STALE"
-    CONTACT_SAMPLE_BEFORE_CLOSE = "M3_CONTACT_SAMPLE_BEFORE_CLOSE"
-    CONTACT_UNKNOWN = "M3_CONTACT_UNKNOWN"
-    CONTACT_MIXED = "M3_CONTACT_MIXED"
-    CONTACT_DISTRACTOR = "M3_CONTACT_DISTRACTOR"
-    CONTACT_TARGET_CONFIRMED = "M3_CONTACT_TARGET_CONFIRMED"
-    DETACH_ACK_MISSING = "M3_DETACH_ACK_MISSING"
-    ATTACH_ACK_MISSING = "M3_ATTACH_ACK_MISSING"
-    ATTACH_ACKED_UNPROVEN = "M3_ATTACH_ACKED_UNPROVEN"
-    CHILD_LINK_STATE_UNAVAILABLE = "M3_CHILD_LINK_STATE_UNAVAILABLE"
-    DART_UNSUPPORTED = "M3_DART_UNSUPPORTED"
-    TARGET_NOT_LIFTED = "M3_TARGET_NOT_LIFTED"
-    RELATIVE_POSE_DRIFT = "M3_CAPTURE_RELATIVE_TRANSLATION_EXCEEDED"
-    TARGET_HELD = "M3_TARGET_HELD"
-    RELEASE_ACK_MISSING = "M3_RELEASE_DETACH_ACK_MISSING"
+    CONTACT_WINDOW_NOT_ARMED = "NATIVE_GRASP_CONTACT_WINDOW_NOT_ARMED"
+    CONTACT_INSUFFICIENT_SAMPLES = "NATIVE_GRASP_CONTACT_INSUFFICIENT_SAMPLES"
+    CONTACT_WINDOW_TOO_SHORT = "NATIVE_GRASP_CONTACT_WINDOW_TOO_SHORT"
+    CONTACT_SAMPLE_STALE = "NATIVE_GRASP_CONTACT_SAMPLE_STALE"
+    CONTACT_SAMPLE_BEFORE_CLOSE = "NATIVE_GRASP_CONTACT_SAMPLE_BEFORE_CLOSE"
+    CONTACT_UNKNOWN = "NATIVE_GRASP_CONTACT_UNKNOWN"
+    CONTACT_MIXED = "NATIVE_GRASP_CONTACT_MIXED"
+    CONTACT_DISTRACTOR = "NATIVE_GRASP_CONTACT_DISTRACTOR"
+    CONTACT_TARGET_CONFIRMED = "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED"
+    DETACH_ACK_MISSING = "NATIVE_GRASP_DETACH_ACK_MISSING"
+    ATTACH_ACK_MISSING = "NATIVE_GRASP_ATTACH_ACK_MISSING"
+    ATTACH_ACKED_UNPROVEN = "NATIVE_GRASP_ATTACH_ACKED_UNPROVEN"
+    CHILD_LINK_STATE_UNAVAILABLE = "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
+    DART_UNSUPPORTED = "NATIVE_GRASP_DART_UNSUPPORTED"
+    TARGET_NOT_LIFTED = "NATIVE_GRASP_TARGET_NOT_LIFTED"
+    RELATIVE_POSE_DRIFT = "NATIVE_GRASP_CAPTURE_RELATIVE_TRANSLATION_EXCEEDED"
+    TARGET_HELD = "NATIVE_GRASP_TARGET_HELD"
+    RELEASE_ACK_MISSING = "NATIVE_GRASP_RELEASE_DETACH_ACK_MISSING"
 
 
 @dataclass(frozen=True, slots=True)
-class M3Config(M2Config):
-    """Static M3 scene and non-negotiable native-contact thresholds."""
+class NativePickPlaceConfig(GazeboControlConfig):
+    """Static pick/place scene and non-negotiable native-contact thresholds."""
 
-    model_id: str = M3_MODEL_ID
-    env_id: str = M3_ENV_ID
-    display_name: str = M3_DISPLAY_NAME
-    target_id: str = "m3_target"
-    distractor_id: str = "m3_distractor"
+    model_id: str = PICKPLACE_MODEL_ID
+    env_id: str = PICKPLACE_ENV_ID
+    display_name: str = PICKPLACE_DISPLAY_NAME
+    target_id: str = "target_object"
+    distractor_id: str = "distractor_object"
     # A real close against the target is allowed to terminate with the
     # ros2_control ``stalled`` result.  That terminal action result proves
     # only that the fingers stopped under load; it never proves a grasp.
-    # M3 still admits attachment exclusively through the subsequent native
+    # Attachment is admitted exclusively through the subsequent native
     # bilateral Gazebo-contact window and DetachableJoint attach ACK.
     allow_stalling: bool = True
-    table_id: str = "m3_table"
+    table_id: str = "work_table"
     target_link: str = "target_link"
     parent_link: str = "gripper_mount_link"
-    left_contact_topic: str = "/m3/contacts/left_pad"
-    right_contact_topic: str = "/m3/contacts/right_pad"
-    attach_topic: str = "/m3/detachable_joint/target/attach"
-    detach_topic: str = "/m3/detachable_joint/target/detach"
-    state_topic: str = "/m3/detachable_joint/target/state"
+    left_contact_topic: str = "/openeta/native_grasp/contacts/left_pad"
+    right_contact_topic: str = "/openeta/native_grasp/contacts/right_pad"
+    attach_topic: str = "/openeta/native_grasp/detachable_joint/target/attach"
+    detach_topic: str = "/openeta/native_grasp/detachable_joint/target/detach"
+    state_topic: str = "/openeta/native_grasp/detachable_joint/target/state"
     contact_samples_required: int = 3
     contact_span_s: float = 0.100
     contact_freshness_s: float = 2.0
@@ -90,7 +90,7 @@ class M3Config(M2Config):
     distractor_initial_xyz: tuple[float, float, float] = (0.28, 0.12, 0.44)
     destination_center_xy: tuple[float, float] = (0.48, -0.10)
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
-    # Profile-owned, live-validated gripper-mount poses for the fixed M3
+    # Profile-owned, live-validated gripper-mount poses for this fixed
     # fixture.  They are advertised through control_spec so an agent can use
     # the stable controller contract instead of guessing from image depth.
     approach_mount_xyz: tuple[float, float, float] = (0.1552, -0.1000, 0.5686)
@@ -110,29 +110,29 @@ class M3Config(M2Config):
         return "openeta_rm75_robotiq2f85_sim"
 
     def validate_assets(self, *, require_vendor: bool = True) -> None:
-        """Validate only the approved M3 files before a worker starts."""
+        """Validate only the approved pick/place files before a worker starts."""
 
         # ``dataclass(slots=True)`` creates a replacement class object on
         # Python 3.11+, for which zero-argument ``super()`` can retain the
         # pre-decoration class cell.  Name the inherited contract explicitly.
-        M2Config.validate_assets(self, require_vendor=require_vendor)
+        GazeboControlConfig.validate_assets(self, require_vendor=require_vendor)
         package = self.ros_workspace / "src" / self.ros_package_name
         required = (
-            package / "config/rm75_robotiq2f85_m3.srdf",
-            package / "launch/m3_gazebo_pickplace.launch.py",
-            package / "urdf/rm75_robotiq2f85_m3.urdf.xacro",
-            package / "worlds/m3_rm75_robotiq2f85_pickplace.sdf",
+            package / "config/rm75_robotiq2f85_pickplace.srdf",
+            package / "launch/gazebo_pickplace.launch.py",
+            package / "urdf/rm75_robotiq2f85_pickplace.urdf.xacro",
+            package / "worlds/rm75_robotiq2f85_pickplace.sdf",
         )
         if not all(path.is_file() for path in required):
             raise RuntimeError("MODEL_ASSET_NOT_FOUND")
 
 
 def validated_pickplace_motion_guidance(
-    config: M3Config | None = None,
+    config: NativePickPlaceConfig | None = None,
 ) -> dict[str, Any]:
-    """Return the stable atomic motion and receipt gates for the M3 fixture."""
+    """Return the stable atomic motion and receipt gates for the fixture."""
 
-    cfg = config or M3Config()
+    cfg = config or NativePickPlaceConfig()
 
     def pose(name: str, xyz: tuple[float, float, float]) -> dict[str, Any]:
         return {
@@ -239,7 +239,7 @@ class ContactGateResult:
 
 
 def _identity_kind(
-    names: Sequence[str], config: M3Config, side: str
+    names: Sequence[str], config: NativePickPlaceConfig, side: str
 ) -> ReasonCode | None:
     """Classify a raw contact message without accepting partial identities."""
 
@@ -270,7 +270,7 @@ def confirm_native_bilateral_contact(
     *,
     close_completed_sim_time_s: float | None,
     now_monotonic_s: float,
-    config: M3Config | None = None,
+    config: NativePickPlaceConfig | None = None,
 ) -> ContactGateResult:
     """Accept only stable, post-close, bilateral target contacts.
 
@@ -279,7 +279,7 @@ def confirm_native_bilateral_contact(
     silently selecting the later target-looking contacts.
     """
 
-    cfg = config or M3Config()
+    cfg = config or NativePickPlaceConfig()
     ordered = sorted(samples, key=lambda item: (item.timestamp_s, item.side))
     by_side: dict[str, list[NativeContactSample]] = {"left": [], "right": []}
     if close_completed_sim_time_s is None or not math.isfinite(close_completed_sim_time_s):
@@ -344,7 +344,7 @@ class VerificationRecord:
     target_id: str
     grasp_confirmed: bool
     evidence: Mapping[str, Any] = field(default_factory=dict)
-    schema_version: str = M3_SCHEMA_VERSION
+    schema_version: str = NATIVE_GRASP_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -358,11 +358,11 @@ class VerificationRecord:
         }
 
 
-class M3Verifier:
-    """Record M3 attach and proof state without any alternate grasp path."""
+class NativeGraspVerifier:
+    """Record native-grasp attach and proof state without any alternate grasp path."""
 
-    def __init__(self, config: M3Config | None = None) -> None:
-        self.config = config or M3Config()
+    def __init__(self, config: NativePickPlaceConfig | None = None) -> None:
+        self.config = config or NativePickPlaceConfig()
         self.reset()
 
     def reset(self) -> VerificationRecord:
@@ -431,7 +431,7 @@ class M3Verifier:
 
 
 def quaternion_rotate(q: Sequence[float], v: Sequence[float]) -> tuple[float, float, float]:
-    """Rotate a vector by an xyzw quaternion (retained for M2 callers)."""
+    """Rotate a vector by an xyzw quaternion (retained for motion-control callers)."""
 
     if len(q) != 4 or len(v) != 3:
         raise ValueError("quaternion/vector dimensions are invalid")

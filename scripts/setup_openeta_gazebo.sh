@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-# shellcheck source=../config/runtime/m0_m2.env
-source "${REPO_DIR}/config/runtime/m0_m2.env"
+# shellcheck source=../config/runtime/gazebo_rm75_robotiq2f85.env
+source "${REPO_DIR}/config/runtime/gazebo_rm75_robotiq2f85.env"
 
 UV_VERSION="0.8.13"
 DO_APT=1
@@ -42,7 +42,7 @@ if [[ "${CHECK_ONLY}" == 1 ]]; then
   scope=()
   if [[ "${DO_PYTHON}" == 0 ]]; then scope=(--ros-only); fi
   if [[ "${DO_ROS}" == 0 ]]; then scope=(--python-only); fi
-  exec "${SCRIPT_DIR}/check_openeta_m2.sh" "${scope[@]}"
+  exec "${SCRIPT_DIR}/check_openeta_gazebo.sh" "${scope[@]}"
 fi
 
 if ((EUID == 0)); then
@@ -126,7 +126,7 @@ if [[ "${DO_ROS}" == 1 ]]; then
   set -u
 fi
 
-REPORT="${REPO_DIR}/config/runtime/m0_m2.versions.local.yaml"
+REPORT="${REPO_DIR}/config/runtime/gazebo_rm75_robotiq2f85.versions.local.yaml"
 {
   echo "generated_at_utc: \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
   echo "openeta_git_commit: \"$(git -C "${REPO_DIR}" rev-parse HEAD)\""
@@ -150,5 +150,5 @@ REPORT="${REPO_DIR}/config/runtime/m0_m2.versions.local.yaml"
 scope=()
 if [[ "${DO_PYTHON}" == 0 ]]; then scope=(--ros-only); fi
 if [[ "${DO_ROS}" == 0 ]]; then scope=(--python-only); fi
-"${SCRIPT_DIR}/check_openeta_m2.sh" "${scope[@]}"
-echo "OPENETA_M2_SETUP_OK version_report=${REPORT}"
+"${SCRIPT_DIR}/check_openeta_gazebo.sh" "${scope[@]}"
+echo "OPENETA_GAZEBO_SETUP_OK version_report=${REPORT}"

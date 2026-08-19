@@ -120,6 +120,10 @@ class _ResetController:
     def state_provider():
         return RobotState()
 
+    def sync_planning_scene_reset(self, config):
+        self.actions.append({"action_type": "planning_scene_reset", "target": config.target_id})
+        return 1
+
 
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:
     for profile in gazebo_profiles().values():
@@ -149,7 +153,7 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
 
     world = _World()
     runtime = GazeboRuntime(
-        _deployment(), gazebo_profile("m1"), launch_factory=launch_factory,
+        _deployment(), gazebo_profile("rgbd_observation"), launch_factory=launch_factory,
         camera_factory=camera_factory, world_control=world,
     )
     assert runtime.started is False and not made_launch and not made_cameras
@@ -175,7 +179,7 @@ def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
 
     world = _ReadyWorld(events)
     runtime = GazeboRuntime(
-        _deployment(), gazebo_profile("m1"),
+        _deployment(), gazebo_profile("rgbd_observation"),
         launch_factory=lambda **kwargs: Launch(**kwargs),
         camera_factory=lambda config, **kwargs: _Camera(config, **kwargs),
         world_control=world,
@@ -207,7 +211,7 @@ def test_runtime_subscribes_to_cameras_only_after_launch_bridge_readiness() -> N
     world = _ReadyWorld(events)
     runtime = GazeboRuntime(
         _deployment(),
-        gazebo_profile("m1"),
+        gazebo_profile("rgbd_observation"),
         launch_factory=lambda **kwargs: Launch(**kwargs),
         camera_factory=lambda config, **kwargs: Camera(config, **kwargs),
         world_control=world,
@@ -222,7 +226,7 @@ def test_runtime_subscribes_to_cameras_only_after_launch_bridge_readiness() -> N
 def test_runtime_waits_for_all_configured_ros_camera_publishers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime = GazeboRuntime(_deployment(), gazebo_profile("m1"))
+    runtime = GazeboRuntime(_deployment(), gazebo_profile("rgbd_observation"))
     calls = []
 
     def run(command, **kwargs):
@@ -249,7 +253,7 @@ def test_runtime_waits_for_all_configured_ros_camera_publishers(
 
 
 def test_runtime_reset_retries_only_one_transient_gripper_timeout() -> None:
-    profile = gazebo_profile("m2_robotiq2f85")
+    profile = gazebo_profile("rm75_robotiq2f85_control")
     world = _World()
     runtime = GazeboRuntime(_deployment(), profile, world_control=world)
     runtime.started = True
@@ -270,7 +274,7 @@ def test_runtime_reset_retries_only_one_transient_gripper_timeout() -> None:
 
 
 def test_runtime_reset_does_not_retry_non_transient_gripper_failure() -> None:
-    profile = gazebo_profile("m2_robotiq2f85")
+    profile = gazebo_profile("rm75_robotiq2f85_control")
     runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
     runtime.started = True
     runtime._cameras = [_Camera(profile.cameras[0])]
@@ -320,7 +324,7 @@ def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_pose
     world = _M3World(events)
     runtime = GazeboRuntime(
         _deployment(),
-        gazebo_profile("m3_pickplace"),
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
         launch_factory=lambda **kwargs: Launch(**kwargs),
         camera_factory=lambda config, **kwargs: _Camera(config, **kwargs),
         controller_factory=ControllerFactory(),
@@ -386,7 +390,7 @@ def test_m3_runtime_recreates_the_paused_world_for_a_second_reset() -> None:
     world = _M3World(events)
     runtime = GazeboRuntime(
         _deployment(),
-        gazebo_profile("m3_pickplace"),
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
         launch_factory=launch_factory,
         camera_factory=lambda config, **kwargs: _Camera(config, **kwargs),
         controller_factory=ControllerFactory(),

@@ -1,4 +1,4 @@
-"""Deterministic, oracle-only Gazebo lifecycle boundary (M1).
+"""Deterministic, oracle-only Gazebo lifecycle boundary (observation-only).
 
 The class is intentionally transport agnostic: a real Gazebo process can be
 attached behind the same methods in a later milestone.  It never pretends that

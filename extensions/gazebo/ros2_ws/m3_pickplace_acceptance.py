@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from extensions.gazebo.m3 import M3Config, M3_SCHEMA_VERSION
+from extensions.gazebo.native_grasp import NativePickPlaceConfig, NATIVE_GRASP_SCHEMA_VERSION
 
 
 def _read(path: Path) -> Mapping[str, Any]:
@@ -33,47 +33,47 @@ def validate_evidence(value: Mapping[str, Any]) -> list[str]:
     PTY TUI coordinator correlates all three into formal acceptance evidence.
     """
 
-    config = M3Config()
+    config = NativePickPlaceConfig()
     errors: list[str] = []
     physical = value.get("physical_verification")
     if not isinstance(physical, Mapping):
         physical = value
-    if physical.get("schema_version") != M3_SCHEMA_VERSION:
-        errors.append("M3_SCHEMA_VERSION_MISMATCH")
+    if physical.get("schema_version") != NATIVE_GRASP_SCHEMA_VERSION:
+        errors.append("NATIVE_GRASP_SCHEMA_VERSION_MISMATCH")
     ack = value.get("detachable_joint")
     proof = value.get("child_link_proof")
     if not isinstance(proof, Mapping):
         proof = physical.get("evidence")
     is_attached_receipt = isinstance(ack, Mapping) and ack.get("state") == "attached"
     is_detached_receipt = isinstance(ack, Mapping) and ack.get("state") == "detached"
-    is_lift_receipt = physical.get("reason_code") == "M3_TARGET_HELD"
+    is_lift_receipt = physical.get("reason_code") == "NATIVE_GRASP_TARGET_HELD"
     if is_attached_receipt:
         gate = value.get("native_contact_gate")
         if not isinstance(gate, Mapping) or gate.get("accepted") is not True:
-            errors.append("M3_NATIVE_CONTACT_GATE_MISSING")
+            errors.append("NATIVE_GRASP_NATIVE_CONTACT_GATE_MISSING")
         elif (
             int(gate.get("left_sample_count", 0)) < config.contact_samples_required
             or int(gate.get("right_sample_count", 0)) < config.contact_samples_required
         ):
-            errors.append("M3_NATIVE_CONTACT_SAMPLE_COUNT")
+            errors.append("NATIVE_GRASP_NATIVE_CONTACT_SAMPLE_COUNT")
     elif is_lift_receipt:
         if not isinstance(proof, Mapping):
-            errors.append("M3_CHILD_LINK_PROOF_MISSING")
+            errors.append("NATIVE_GRASP_CHILD_LINK_PROOF_MISSING")
         else:
             try:
                 lift_m = float(proof.get("lift_m", -1.0))
                 relative_m = float(proof.get("capture_relative_translation_m", float("inf")))
             except (TypeError, ValueError):
-                errors.append("M3_CHILD_LINK_PROOF_MALFORMED")
+                errors.append("NATIVE_GRASP_CHILD_LINK_PROOF_MALFORMED")
                 return errors
             if lift_m < config.minimum_lift_m:
-                errors.append("M3_TARGET_NOT_LIFTED")
+                errors.append("NATIVE_GRASP_TARGET_NOT_LIFTED")
             if relative_m > config.maximum_capture_relative_translation_m:
-                errors.append("M3_CAPTURE_RELATIVE_TRANSLATION_EXCEEDED")
+                errors.append("NATIVE_GRASP_CAPTURE_RELATIVE_TRANSLATION_EXCEEDED")
     elif is_detached_receipt:
         return errors
     else:
-        errors.append("M3_DIRECT_RECEIPT_ROLE_UNKNOWN")
+        errors.append("NATIVE_GRASP_DIRECT_RECEIPT_ROLE_UNKNOWN")
     return errors
 
 

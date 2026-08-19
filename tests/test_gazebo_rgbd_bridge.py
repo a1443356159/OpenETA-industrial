@@ -21,7 +21,7 @@ def test_m1_rgbd_bridge_process_contract() -> None:
     gz = shutil.which("gz")
     if ros2 is None or gz is None:
         pytest.skip("sourced ROS 2 Jazzy/Gazebo Sim runtime is unavailable")
-    sim = GazeboProcess(world="extensions/gazebo/worlds/m1_rgbd.sdf", gz_executable=gz)
+    sim = GazeboProcess(world="extensions/gazebo/worlds/rgbd.sdf", gz_executable=gz)
     bridge = RosGzBridgeProcess(
         ros2_executable=ros2,
         topics=(

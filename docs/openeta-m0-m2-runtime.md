@@ -19,12 +19,12 @@ environment's display name.
 From a clean native Ubuntu 24.04 checkout:
 
 ```bash
-bash scripts/setup_openeta_m2.sh
-source config/runtime/m0_m2.env
+bash scripts/setup_openeta_gazebo.sh
+source config/runtime/gazebo_rm75_robotiq2f85.env
 source /opt/ros/jazzy/setup.bash
 source .venv/bin/activate
 source extensions/gazebo/ros2_ws/install/setup.bash
-bash scripts/check_openeta_m2.sh
+bash scripts/check_openeta_gazebo.sh
 ```
 
 The setup command supports `--check-only`, `--no-apt`, `--python-only`, and
@@ -32,7 +32,7 @@ The setup command supports `--check-only`, `--no-apt`, `--python-only`, and
 `uv.lock` with repository-local uv 0.8.13, runs rosdep, and rebuilds the colcon
 overlay with `--symlink-install`. Exact Debian package versions and the actual
 checkout commit are written to the ignored
-`config/runtime/m0_m2.versions.local.yaml` report.
+`config/runtime/gazebo_rm75_robotiq2f85.versions.local.yaml` report.
 
 The checker emits stable failure codes including `PYTHON_NOT_READY`,
 `ROS_NOT_READY`, `GAZEBO_NOT_READY`, `ROS_PACKAGE_MISSING`,
@@ -70,7 +70,7 @@ unreachable motion, idempotent close, and exact process-group cleanup. The old
 parallel-fixture smoke remains available as `run_m2_smoke.sh` for compatibility
 only.
 
-The 2026-08-09 local checkpoint passed `scripts/check_openeta_m2.sh`, 34 focused
+The 2026-08-09 local checkpoint passed `scripts/check_openeta_gazebo.sh`, 34 focused
 offline contracts, both live layers, all cleanup checks, and the repository
 regression (`1202 passed, 14 skipped`). It is development evidence and does not
 constitute formal M2 acceptance. For this checkpoint, the two
@@ -85,7 +85,7 @@ the checkpoint report is
 `build/`, `install/`, and `log/` are not migration inputs. To test relocation,
 copy the tracked checkout (without ignored files) to any temporary directory,
 then run setup, check, build, and smoke there. Runtime paths are derived from
-`config/runtime/m0_m2.env`; no `/home/<developer>` path or external asset
+`config/runtime/gazebo_rm75_robotiq2f85.env`; no `/home/<developer>` path or external asset
 symlink is supported.
 
 WSL2 is a development compatibility mode only. Use headless Gazebo and expect

@@ -1,6 +1,6 @@
-"""Gazebo M5 perception bridge: selected SAM3 detection → 3D object summary.
+"""Gazebo perception-bridge perception bridge: selected SAM3 detection → 3D object summary.
 
-Pure-Python geometry core for the M5 perception bridge.  SAM3 (and the M4
+Pure-Python geometry core for the perception-bridge perception bridge.  SAM3 (and the oracle-fixture
 oracle, which shares its contract) produces pixel-level outputs — a mask and a
 bbox — while the planner consumes plan.md §17 object summaries with a
 world-frame ``position``.  This module closes that gap: it takes one selected
@@ -29,7 +29,7 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .m3 import quaternion_rotate
+from .native_grasp import quaternion_rotate
 
 
 PROVENANCE_SAM3 = "sam3_perception"
@@ -44,11 +44,11 @@ ERR_INTRINSICS = "invalid_intrinsics"
 ERR_EXTRINSICS = "unsupported_extrinsics"
 
 
-class M5PerceptionBridgeError(ValueError):
-    """A fail-closed violation at the M5 RGB-D/SAM3 boundary.
+class PerceptionBridgeError(ValueError):
+    """A fail-closed violation at the perception-bridge RGB-D/SAM3 boundary.
 
     The generic helpers in this module deliberately support a few useful
-    offline conveniences (for example mask resizing).  The live M5 control
+    offline conveniences (for example mask resizing).  The live perception-bridge control
     path cannot make those assumptions: it receives one particular observe
     frame and must prove that SAM3's mask belongs to that exact RGB-D frame.
     This exception gives that stricter caller a stable, auditable reason code.
@@ -59,18 +59,18 @@ class M5PerceptionBridgeError(ValueError):
         self.code = code
 
 
-M5_ERR_CASE_ROOT = "m5_artifact_outside_case_root"
-M5_ERR_SOURCE_IMAGE = "m5_source_image_mismatch"
-M5_ERR_SOURCE_FRAME = "m5_source_frame_mismatch"
-M5_ERR_RGB_MISSING = "m5_rgb_missing"
-M5_ERR_DEPTH_MISSING = "m5_depth_missing"
-M5_ERR_DEPTH_DECODE = "m5_depth_decode_failed"
-M5_ERR_RGBD_SHAPE = "m5_rgb_depth_shape_mismatch"
-M5_ERR_DEPTH_SCALE = "m5_depth_scale_invalid"
-M5_ERR_MASK_MISSING = "m5_mask_missing"
-M5_ERR_MASK_DECODE = "m5_mask_decode_failed"
-M5_ERR_MASK_SHAPE = "m5_mask_depth_shape_mismatch"
-M5_ERR_POSITION = "m5_position_unavailable"
+PERCEPTION_ERR_CASE_ROOT = "perception_artifact_outside_case_root"
+PERCEPTION_ERR_SOURCE_IMAGE = "perception_source_image_mismatch"
+PERCEPTION_ERR_SOURCE_FRAME = "perception_source_frame_mismatch"
+PERCEPTION_ERR_RGB_MISSING = "perception_rgb_missing"
+PERCEPTION_ERR_DEPTH_MISSING = "perception_depth_missing"
+PERCEPTION_ERR_DEPTH_DECODE = "perception_depth_decode_failed"
+PERCEPTION_ERR_RGBD_SHAPE = "perception_rgb_depth_shape_mismatch"
+PERCEPTION_ERR_DEPTH_SCALE = "perception_depth_scale_invalid"
+PERCEPTION_ERR_MASK_MISSING = "perception_mask_missing"
+PERCEPTION_ERR_MASK_DECODE = "perception_mask_decode_failed"
+PERCEPTION_ERR_MASK_SHAPE = "perception_mask_depth_shape_mismatch"
+PERCEPTION_ERR_POSITION = "perception_position_unavailable"
 
 
 def summarize_detection(
@@ -89,7 +89,7 @@ def summarize_detection(
         ``mask`` mapping (``{"format": "png", "base64": ...}``).
         ``source_image`` is accepted as part of the selection contract but
         not re-verified: frame correspondence (detection ↔ camera frame) is
-        the caller's responsibility, same as the M4 worker-side frame
+        the caller's responsibility, same as the oracle-fixture worker-side frame
         matching.  ``id`` / ``label`` / ``score`` map to ``id`` / ``label``
         / ``confidence``.
     camera_frame:
@@ -144,13 +144,13 @@ def build_object_summary(
     }
 
 
-def build_m5_object_summary(
+def build_perception_object_summary(
     *,
     detection: Mapping[str, Any],
     camera: Mapping[str, Any],
     case_root: str | Path,
 ) -> dict[str, Any]:
-    """Build the strict, case-local M5 object summary for one SAM3 selection.
+    """Build the strict, case-local perception-bridge object summary for one SAM3 selection.
 
     Unlike :func:`summarize_detection`, this is intentionally not a generic
     convenience API.  It accepts only materialized artifacts from the current
@@ -158,40 +158,40 @@ def build_m5_object_summary(
     ``source_frame_id`` must match the camera's RGB path and frame id, and its
     mask must have the *same* pixels as the decoded metric depth image.  Every
     artifact must live under ``case_root``.  Any uncertainty raises
-    :class:`M5PerceptionBridgeError`; no path, frame, scale, or image resize is
+    :class:`PerceptionBridgeError`; no path, frame, scale, or image resize is
     guessed by the live control path.
 
     ``camera`` is the materialized camera mapping from a single MCP observe
     response (``rgb_path``, ``depth_path``, intrinsics and numeric
-    ``camera_to_world`` extrinsics).  The returned shape is a durable M5
-    object summary, ready to be embedded in ``m5-perception.json``.
+    ``camera_to_world`` extrinsics).  The returned shape is a durable perception-bridge
+    object summary, ready to be embedded in a perception evidence report.
     """
 
     root = Path(case_root).resolve()
     if not root.is_dir():
-        raise M5PerceptionBridgeError(M5_ERR_CASE_ROOT, "case root does not exist")
+        raise PerceptionBridgeError(PERCEPTION_ERR_CASE_ROOT, "case root does not exist")
 
     frame_id = str(camera.get("frame_id") or "").strip()
     if not frame_id:
-        raise M5PerceptionBridgeError(M5_ERR_SOURCE_FRAME, "camera frame_id is missing")
+        raise PerceptionBridgeError(PERCEPTION_ERR_SOURCE_FRAME, "camera frame_id is missing")
     selected_frame_id = str(detection.get("source_frame_id") or "").strip()
     if selected_frame_id != frame_id:
-        raise M5PerceptionBridgeError(
-            M5_ERR_SOURCE_FRAME,
+        raise PerceptionBridgeError(
+            PERCEPTION_ERR_SOURCE_FRAME,
             "selected detection does not identify the current camera frame",
         )
 
-    rgb_path = _m5_case_file(camera.get("rgb_path"), root, M5_ERR_RGB_MISSING)
-    source_image = _m5_case_file(
-        detection.get("source_image"), root, M5_ERR_SOURCE_IMAGE
+    rgb_path = _case_file(camera.get("rgb_path"), root, PERCEPTION_ERR_RGB_MISSING)
+    source_image = _case_file(
+        detection.get("source_image"), root, PERCEPTION_ERR_SOURCE_IMAGE
     )
     if source_image != rgb_path:
-        raise M5PerceptionBridgeError(
-            M5_ERR_SOURCE_IMAGE,
+        raise PerceptionBridgeError(
+            PERCEPTION_ERR_SOURCE_IMAGE,
             "selected detection source_image is not the current RGB artifact",
         )
-    depth_path = _m5_case_file(camera.get("depth_path"), root, M5_ERR_DEPTH_MISSING)
-    mask_path = _m5_case_file(detection.get("mask_ref"), root, M5_ERR_MASK_MISSING)
+    depth_path = _case_file(camera.get("depth_path"), root, PERCEPTION_ERR_DEPTH_MISSING)
+    mask_path = _case_file(detection.get("mask_ref"), root, PERCEPTION_ERR_MASK_MISSING)
 
     from PIL import Image
     import numpy as np
@@ -202,8 +202,8 @@ def build_m5_object_summary(
         with Image.open(depth_path) as depth_image:
             depth_pixels = np.asarray(depth_image)
     except (OSError, ValueError) as exc:
-        raise M5PerceptionBridgeError(
-            M5_ERR_DEPTH_DECODE, "M5 RGB-D artifact cannot be decoded"
+        raise PerceptionBridgeError(
+            PERCEPTION_ERR_DEPTH_DECODE, "perception-bridge RGB-D artifact cannot be decoded"
         ) from exc
     try:
         with Image.open(mask_path) as mask_image:
@@ -211,26 +211,26 @@ def build_m5_object_summary(
     except (OSError, ValueError) as exc:
         # A malformed mask is a SAM3 output-contract failure, whereas a
         # malformed depth artifact belongs to the observed RGB-D input.
-        raise M5PerceptionBridgeError(
-            M5_ERR_MASK_DECODE, "SAM3 mask artifact cannot be decoded"
+        raise PerceptionBridgeError(
+            PERCEPTION_ERR_MASK_DECODE, "SAM3 mask artifact cannot be decoded"
         ) from exc
 
     if depth_pixels.ndim != 2:
-        raise M5PerceptionBridgeError(M5_ERR_DEPTH_DECODE, "depth image is not single-channel")
+        raise PerceptionBridgeError(PERCEPTION_ERR_DEPTH_DECODE, "depth image is not single-channel")
     if tuple(rgb_size) != (int(depth_pixels.shape[1]), int(depth_pixels.shape[0])):
-        raise M5PerceptionBridgeError(
-            M5_ERR_RGBD_SHAPE,
+        raise PerceptionBridgeError(
+            PERCEPTION_ERR_RGBD_SHAPE,
             "current RGB and depth artifacts have different dimensions",
         )
     if mask_pixels.shape != depth_pixels.shape:
-        raise M5PerceptionBridgeError(
-            M5_ERR_MASK_SHAPE,
+        raise PerceptionBridgeError(
+            PERCEPTION_ERR_MASK_SHAPE,
             "SAM3 mask dimensions do not match the current depth image",
         )
 
     intrinsics = camera.get("intrinsics")
     if not isinstance(intrinsics, Mapping):
-        raise M5PerceptionBridgeError(ERR_INTRINSICS, "camera intrinsics are missing")
+        raise PerceptionBridgeError(ERR_INTRINSICS, "camera intrinsics are missing")
     scale_value = intrinsics.get("scale", camera.get("depth_scale", 1000.0))
     if (
         not isinstance(scale_value, (int, float))
@@ -238,7 +238,7 @@ def build_m5_object_summary(
         or not math.isfinite(float(scale_value))
         or float(scale_value) <= 0.0
     ):
-        raise M5PerceptionBridgeError(M5_ERR_DEPTH_SCALE, "depth scale is invalid")
+        raise PerceptionBridgeError(PERCEPTION_ERR_DEPTH_SCALE, "depth scale is invalid")
 
     # The simulator MCP encodes metric depth as a uint16 PNG in fixed units.
     # A numeric array supplied here would be untrusted, so reconstruct only
@@ -262,12 +262,12 @@ def build_m5_object_summary(
             for value in position
         )
     ):
-        raise M5PerceptionBridgeError(
-            M5_ERR_POSITION,
+        raise PerceptionBridgeError(
+            PERCEPTION_ERR_POSITION,
             str(entry.get("position_error") or "world position is unavailable"),
         )
     return {
-        "schema_version": "openeta.gazebo.m5_object_summary.v1",
+        "schema_version": "openeta.gazebo.perception_object_summary.v1",
         "objects": [entry],
         "source_frame_id": frame_id,
         "source_image": str(source_image),
@@ -275,18 +275,18 @@ def build_m5_object_summary(
     }
 
 
-def _m5_case_file(value: Any, root: Path, code: str) -> Path:
-    """Return an existing artifact below one M5 case root, or fail closed."""
+def _case_file(value: Any, root: Path, code: str) -> Path:
+    """Return an existing artifact below one perception-bridge case root, or fail closed."""
 
     if not isinstance(value, str) or not value.strip():
-        raise M5PerceptionBridgeError(code, "required artifact path is missing")
+        raise PerceptionBridgeError(code, "required artifact path is missing")
     path = Path(value).expanduser().resolve()
     try:
         path.relative_to(root)
     except ValueError as exc:
-        raise M5PerceptionBridgeError(M5_ERR_CASE_ROOT, "artifact escapes case root") from exc
+        raise PerceptionBridgeError(PERCEPTION_ERR_CASE_ROOT, "artifact escapes case root") from exc
     if not path.is_file():
-        raise M5PerceptionBridgeError(code, "required artifact is missing")
+        raise PerceptionBridgeError(code, "required artifact is missing")
     return path
 
 
@@ -389,7 +389,7 @@ def _resize_mask(mask: Any, shape: tuple[int, int]) -> Any:
 
 
 def _validate_extrinsics(extrinsics: Mapping[str, Any]) -> str | None:
-    """Same acceptance rule as the M4 oracle: numeric ``camera_to_world``."""
+    """Same acceptance rule as the oracle-fixture oracle: numeric ``camera_to_world``."""
 
     if extrinsics.get("frame_transform") != "camera_to_world":
         return ERR_EXTRINSICS

@@ -17,7 +17,7 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
   - Standardize `ToolResult.details` shapes for perception, planning, safety,
     bookkeeping, and world-mutating tools.
   - Provide dummy handlers for `scene_detector`, `sam3`, `anygrasp`,
-    `ik_preview_check`, `move_to`, and `gripper_control`.
+    `move_to`, and `gripper_control`.
   - Ensure tool results can be recorded into session trace and working memory.
 
 - [x] Add minimal checker hooks without locking final sub-agent schema.
@@ -34,7 +34,7 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
 ## Skills
 
 - [x] Add `place.md` as text guidance under `agent/skills/`.
-  - Use atomic tools such as `observe`, `scene_detector`, `ik_preview_check`,
+  - Use atomic tools such as `observe`, `scene_detector`,
     `obstacle_avoidance`, `move_to`, and `gripper_control`.
 
 - [x] Add `push.md`, `pull.md`, and `stack.md` skeleton guidance.
@@ -105,7 +105,6 @@ Optional path: bounded `code_policy` as an atomic-tool backend only.
 - [ ] Coordinate with perception/control owners on real handlers.
   - [x] `sam3` via remote MCP `segment` and `segment_points`
   - [x] `anygrasp` via remote MCP `detect_grasps`
-  - `ik_preview_check`
   - `obstacle_avoidance`
   - [x] `move_to` via MCP `move_to`
   - [x] `gripper_control` via MCP `gripper_open` / `gripper_close`

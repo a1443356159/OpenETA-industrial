@@ -79,6 +79,76 @@ def test_compile_grasp_seed_applies_camera_and_eef_transforms() -> None:
     assert result["scene_epoch"] == 0
 
 
+def test_compile_placement_reuses_eef_calibration_and_preserves_rotation() -> None:
+    source = _candidate()
+    pose = {
+        **source,
+        "id": "place_grasp_002",
+        "source_grasp_id": source["id"],
+        "rotation_matrix": [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    }
+    result = compile_grasp_seed(
+        {
+            "purpose": "placement",
+            "placement_candidate_id": "placement_002",
+            "placement_candidate": {
+                "id": "placement_002",
+                "place_grasp_pose": pose,
+            },
+            "source_grasp": source,
+            "camera_extrinsics": {
+                "camera_frame": "opencv",
+                "pos": [0.0, 0.0, 0.0],
+                "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            },
+            "scene_epoch": 4,
+        },
+        profile=_profile(),
+        profile_sha256="profile-sha",
+    )
+
+    assert result["purpose"] == "placement"
+    assert result["selection_source"] == "main_agent_vlm"
+    assert result["orientation_clamped"] is False
+    assert result["hover_pose"]["rotation_matrix"] == result["release_pose"]["rotation_matrix"]
+    assert result["hover_pose"]["rotation_matrix"] != _profile()["T_grasp_eef"]["rotation_matrix"]
+    assert result["hover_pose"]["xyz"][2] - result["release_pose"]["xyz"][2] == pytest.approx(0.1)
+    assert result["release_clearance_m"] == pytest.approx(0.005)
+    assert result["hover_pose"]["compiled_eef_pose"] is True
+
+
+def test_compile_placement_rejects_source_grasp_mismatch() -> None:
+    source = _candidate()
+    with pytest.raises(GraspGeometryError, match="source grasp"):
+        compile_grasp_seed(
+            {
+                "purpose": "placement",
+                "placement_candidate_id": "placement_000",
+                "placement_candidate": {
+                    "id": "placement_000",
+                    "place_grasp_pose": {
+                        **source,
+                        "id": "place_grasp_000",
+                        "source_grasp_id": "grasp_other",
+                    },
+                },
+                "source_grasp": source,
+                "camera_extrinsics": {
+                    "camera_frame": "opencv",
+                    "pos": [0.0, 0.0, 0.0],
+                    "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                },
+                "scene_epoch": 4,
+            },
+            profile=_profile(),
+            profile_sha256="profile-sha",
+        )
+
+
 def test_normalized_opencv_and_legacy_opengl_extrinsics_are_equivalent() -> None:
     legacy_parameters = _compile_parameters()
     normalized_parameters = deepcopy(legacy_parameters)

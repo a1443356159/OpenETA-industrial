@@ -14,7 +14,7 @@ from .profiles import gazebo_profile
 
 
 def make_gazebo_direct_env(
-    *, profile: str = "m1", deployment: GazeboDeploymentConfig | None = None,
+    *, profile: str = "rgbd_observation", deployment: GazeboDeploymentConfig | None = None,
     **kwargs: Any,
 ) -> GazeboDirectEnv:
     return GazeboDirectEnv(

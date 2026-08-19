@@ -123,13 +123,13 @@ def test_cli_checker_config_keeps_pre_safety_gates_opt_in(monkeypatch) -> None:
 def test_cli_checker_config_accepts_explicit_safety_mapping(monkeypatch) -> None:
     monkeypatch.setenv(
         "OPENETA_PRE_SAFETY_CHECKS",
-        '{"move_to": "ik_preview_check"}',
+        '{"move_to": "obstacle_avoidance"}',
     )
     tools = bind_dummy_tool_handlers(build_default_tool_registry())
 
     config = _build_cli_checker_config(tools)
 
-    assert config.pre_safety_checks == {"move_to": "ik_preview_check"}
+    assert config.pre_safety_checks == {"move_to": "obstacle_avoidance"}
 
 
 def test_cli_runtime_binds_only_explicitly_enabled_web_capabilities(
@@ -594,7 +594,8 @@ def test_cli_binds_graspgenx_behind_unified_grasp_tool(
     monkeypatch.setattr(
         runtime_assembly,
         "build_grasp_pose_estimate_handler",
-        lambda handlers: facade_backends.update(handlers) or prediction_handler,
+        lambda handlers, **_kwargs: facade_backends.update(handlers)
+        or prediction_handler,
     )
 
     tools = build_default_tool_registry()

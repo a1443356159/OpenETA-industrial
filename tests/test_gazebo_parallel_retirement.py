@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from extensions.gazebo.m2 import M2Config, M2_ENV_ID, MODEL_ID
+from extensions.gazebo.robot_control import GazeboControlConfig, GAZEBO_CONTROL_ENV_ID, MODEL_ID
 from extensions.gazebo.profiles import gazebo_profile
 from sim.env_registry import get_env_spec
 
@@ -11,11 +11,11 @@ ROOT = Path(__file__).parents[1]
 
 
 def test_m2_has_one_robotiq_identity_and_profile() -> None:
-    assert M2_ENV_ID == "openeta/gazebo_rm75_robotiq2f85-v0"
+    assert GAZEBO_CONTROL_ENV_ID == "openeta/gazebo_rm75_robotiq2f85-v0"
     assert MODEL_ID == "rm75_robotiq_2f85_sim_v1"
-    assert M2Config().model_id == MODEL_ID
-    assert get_env_spec(M2_ENV_ID) is not None
-    assert gazebo_profile("m2_robotiq2f85").model_config == M2Config()
+    assert GazeboControlConfig().model_id == MODEL_ID
+    assert get_env_spec(GAZEBO_CONTROL_ENV_ID) is not None
+    assert gazebo_profile("rm75_robotiq2f85_control").model_config == GazeboControlConfig()
     with pytest.raises(ValueError):
         gazebo_profile("m2")
 

@@ -97,6 +97,6 @@ MoveIt terminal result 为成功，实际位姿越界也必须返回
 
 ## 未覆盖范围
 
-- AnyGrasp、AnyPlace、grasp/planner provider 与 M6 工业微调；
+- AnyGrasp、AnyPlace、grasp/planner provider 与 M6 约束正确放置；
 - wrist 外参数值化、6-DoF 位姿估计和遮挡启发式；
 - 感知精度阈值、视觉 benchmark 或正式 PTY/TUI 验收。

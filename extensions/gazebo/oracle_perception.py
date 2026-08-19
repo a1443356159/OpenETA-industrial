@@ -1,6 +1,6 @@
 """Gazebo oracle perception: project ground-truth object poses into a camera image.
 
-Pure-Python geometry core for the M4 oracle perception module.  Object poses
+Pure-Python geometry core for the oracle-fixture oracle perception module.  Object poses
 come from the worker-side observation cache (``EnvObservation.objects``,
 fed by the odometry bridge) and camera extrinsics from the static profile
 config, so this module imports neither ROS nor Gazebo.
@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from .m3 import quaternion_rotate
+from .native_grasp import quaternion_rotate
 
 
 # Rim samples per cylinder end disc.
@@ -72,10 +72,10 @@ class PosedOracleObject:
 
 
 def oracle_registry_from_model_config(config: Any) -> list[OracleObjectSpec]:
-    """Build the oracle registry from a profile ``model_config`` (duck-typed M3Config).
+    """Build the oracle registry from a profile ``model_config`` (duck-typed NativePickPlaceConfig).
 
-    Returns an empty list for configs without M3-style object declarations
-    (e.g. M1/M2), which callers treat as "oracle unsupported on this env".
+    Returns an empty list for configs without native-grasp-style object declarations
+    (e.g. observation-only/motion-control), which callers treat as "oracle unsupported on this env".
     """
 
     specs: list[OracleObjectSpec] = []

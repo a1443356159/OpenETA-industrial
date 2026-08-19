@@ -1,4 +1,4 @@
-"""In-process MCP transport for the M1 oracle environment.
+"""In-process MCP transport for the observation-only oracle environment.
 
 This is a contract test transport, not a second MCP server.  It mirrors the
 existing simulator tool names so OpenETA's own

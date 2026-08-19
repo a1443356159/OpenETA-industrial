@@ -10,8 +10,8 @@ from gymnasium import Env, spaces
 from adapter.protocol import EnvObservation
 
 from .deployment import GazeboDeploymentConfig, worker_deployment_config
-from .m2 import JOINT_NAMES, neutral_relative_motion_guidance
-from .m3 import M3Config, M3Verifier, ReasonCode, validated_pickplace_motion_guidance
+from .robot_control import JOINT_NAMES, neutral_relative_motion_guidance
+from .native_grasp import NativePickPlaceConfig, NativeGraspVerifier, ReasonCode, validated_pickplace_motion_guidance
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .process import GazeboProcessError
 from .process import GazeboNativeContactWindow
@@ -23,15 +23,15 @@ def build_gazebo_control_spec(profile: GazeboProfile) -> dict[str, Any]:
 
     spec: dict[str, Any] = {
         "read_only": CONTROL not in profile.capabilities,
-        "m1": profile.name == "m1",
-        "m2": CONTROL in profile.capabilities,
-        "m3": PHYSICS in profile.capabilities,
+        "rgbd_observation": profile.name == "rgbd_observation",
+        "motion_control": CONTROL in profile.capabilities,
+        "native_grasp": PHYSICS in profile.capabilities,
         "physical_verification": PHYSICS in profile.capabilities,
         "model_id": getattr(profile.model_config, "model_id", None),
     }
-    if profile.name == "m2_robotiq2f85":
+    if profile.name == "rm75_robotiq2f85_control":
         spec["validated_relative_motion"] = neutral_relative_motion_guidance()
-    if isinstance(profile.model_config, M3Config):
+    if isinstance(profile.model_config, NativePickPlaceConfig):
         spec["validated_pickplace_motion"] = validated_pickplace_motion_guidance(
             profile.model_config
         )
@@ -39,7 +39,7 @@ def build_gazebo_control_spec(profile: GazeboProfile) -> dict[str, Any]:
 
 
 class GazeboDirectEnv(Env):
-    """Profile-driven DirectEnv for M1, M2, and guarded M3.
+    """Profile-driven DirectEnv for observation-only, motion-control, and guarded native-grasp.
 
     No Gazebo or ROS resource is started in ``__init__``.  The first reset is
     the authoritative lazy-start boundary.
@@ -50,7 +50,7 @@ class GazeboDirectEnv(Env):
     def __init__(
         self,
         *,
-        profile: GazeboProfile | str = "m1",
+        profile: GazeboProfile | str = "rgbd_observation",
         deployment: GazeboDeploymentConfig | None = None,
         runtime: GazeboRuntime | None = None,
         task: str = "",
@@ -69,10 +69,10 @@ class GazeboDirectEnv(Env):
         self.openeta_capabilities = self.profile.capabilities
         self.openeta_control_spec = build_gazebo_control_spec(self.profile)
         self.action_space = spaces.Discrete(1)
-        self._m3_config = self.profile.model_config if isinstance(self.profile.model_config, M3Config) else None
-        self._m3_verifier = M3Verifier(self._m3_config) if self._m3_config is not None else None
-        self._m3_transport_locked = False
-        self._m3_lift_proof_pending = False
+        self._native_grasp_config = self.profile.model_config if isinstance(self.profile.model_config, NativePickPlaceConfig) else None
+        self._native_grasp_verifier = NativeGraspVerifier(self._native_grasp_config) if self._native_grasp_config is not None else None
+        self._native_grasp_transport_locked = False
+        self._native_grasp_lift_proof_pending = False
 
     @property
     def controller(self) -> Any | None:
@@ -108,11 +108,11 @@ class GazeboDirectEnv(Env):
                 "joint_names": list(getattr(config, "joint_names", JOINT_NAMES)),
                 "camera_frames": [item.frame_id for item in self.profile.cameras],
             })
-        if self._m3_config is not None:
+        if self._native_grasp_config is not None:
             raw.setdefault("metadata", {}).update({
                 "grasp_mechanism": "gazebo_sim8_detachable_joint",
                 "contact_provenance": "gazebo_native_contacts",
-                "attachment_target": self._m3_config.target_id,
+                "attachment_target": self._native_grasp_config.target_id,
             })
         return raw
 
@@ -125,14 +125,14 @@ class GazeboDirectEnv(Env):
         del options
         if seed is not None:
             self._seed = int(seed)
-        if self._m3_verifier is not None:
-            self._m3_verifier.reset()
-            self._m3_transport_locked = False
-            self._m3_lift_proof_pending = False
+        if self._native_grasp_verifier is not None:
+            self._native_grasp_verifier.reset()
+            self._native_grasp_transport_locked = False
+            self._native_grasp_lift_proof_pending = False
         observation = self.runtime.reset(seed=self._seed)
         raw = self._decorate_robot(self._as_unified(observation))
-        if self._m3_verifier is not None:
-            raw.setdefault("metadata", {})["physical_verification"] = self._m3_verifier.last_record.to_dict()
+        if self._native_grasp_verifier is not None:
+            raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
         self._latest = raw
         return raw, {}
 
@@ -140,7 +140,7 @@ class GazeboDirectEnv(Env):
         raw_action = action if isinstance(action, Mapping) else {}
         action_type = str(raw_action.get("action_type") or "")
         contact_window: GazeboNativeContactWindow | None = None
-        if self._m3_config is not None and action_type == "gripper_close":
+        if self._native_grasp_config is not None and action_type == "gripper_close":
             contact_window = GazeboNativeContactWindow(
                 gz_executable=self.deployment.gz_executable,
                 environment=dict(self.deployment.process_environment),
@@ -151,16 +151,16 @@ class GazeboDirectEnv(Env):
                 observation = self.runtime.observe()
                 receipt = {"ok": False, "error_code": str(exc)}
                 raw = self._decorate_robot(self._as_unified(observation))
-                raw.setdefault("metadata", {})["physical_verification"] = self._m3_verifier.last_record.to_dict() if self._m3_verifier else {}
+                raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict() if self._native_grasp_verifier else {}
                 receipt["observation"] = raw
                 return raw, 0.0, False, False, {"_openeta_receipt": receipt}
-        if self._m3_config is not None and self._m3_transport_locked and action_type in {"move_to", "follow_eef_trajectory"}:
+        if self._native_grasp_config is not None and self._native_grasp_transport_locked and action_type in {"move_to", "follow_eef_trajectory"}:
             attachment = getattr(self.runtime, "attachment", None)
             if attachment is None or getattr(attachment, "state", None) != "attached":
                 observation = self.runtime.observe()
                 receipt = {"ok": False, "error_code": ReasonCode.ATTACH_ACK_MISSING.value}
                 raw = self._decorate_robot(self._as_unified(observation))
-                raw.setdefault("metadata", {})["physical_verification"] = self._m3_verifier.last_record.to_dict() if self._m3_verifier else {}
+                raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict() if self._native_grasp_verifier else {}
                 receipt["observation"] = raw
                 return raw, 0.0, False, False, {"_openeta_receipt": receipt}
         try:
@@ -170,11 +170,11 @@ class GazeboDirectEnv(Env):
                 contact_window.close()
             raise
         raw = self._decorate_robot(self._as_unified(observation))
-        if self._m3_config is not None and self._m3_verifier is not None:
+        if self._native_grasp_config is not None and self._native_grasp_verifier is not None:
             attachment = getattr(self.runtime, "attachment", None)
             if action_type == "gripper_close":
                 gate = None
-                self._m3_transport_locked = True
+                self._native_grasp_transport_locked = True
                 try:
                     if receipt.get("ok") is not True:
                         raise GazeboProcessError(str(receipt.get("error_code") or "GRIPPER_FAILED"))
@@ -182,27 +182,39 @@ class GazeboDirectEnv(Env):
                     barrier = float(barrier_value) if isinstance(barrier_value, int | float) else None
                     assert contact_window is not None
                     contact_window.begin_post_close()
-                    gate = contact_window.evaluate(close_completed_sim_time_s=barrier, config=self._m3_config)
+                    gate = contact_window.evaluate(close_completed_sim_time_s=barrier, config=self._native_grasp_config)
                     if not gate.accepted or attachment is None:
-                        record = self._m3_verifier.close_result(gate, attach_acked=False)
+                        record = self._native_grasp_verifier.close_result(gate, attach_acked=False)
                         receipt.update({"ok": False, "error_code": record.reason_code.value, "native_contact_gate": gate.to_dict()})
                     else:
                         attachment.attach()
-                        record = self._m3_verifier.close_result(gate, attach_acked=True)
+                        target_pose, mount_pose = attachment.native_target_mount_poses()
+                        sync_attach = getattr(self.controller, "sync_planning_scene_attach", None)
+                        if not callable(sync_attach):
+                            raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                        scene_revision = sync_attach(
+                            self._native_grasp_config,
+                            target_xyz=target_pose.xyz,
+                            target_quat_xyzw=target_pose.quat_xyzw,
+                            mount_xyz=mount_pose.xyz,
+                            mount_quat_xyzw=mount_pose.quat_xyzw,
+                        )
+                        record = self._native_grasp_verifier.close_result(gate, attach_acked=True)
                         attachment.capture_baseline()
-                        self._m3_transport_locked = False
+                        self._native_grasp_transport_locked = False
                         # The first transport command after an acknowledged
-                        # capture is M3's configured lift-proof step.  Later
+                        # capture is native-grasp's configured lift-proof step.  Later
                         # place moves retain this successful evidence instead
                         # of reclassifying a deliberately lowered object.
-                        self._m3_lift_proof_pending = True
+                        self._native_grasp_lift_proof_pending = True
                         receipt.update({
                             "native_contact_gate": gate.to_dict(),
                             "detachable_joint": {
                                 "state": "attached",
-                                "attach_topic": self._m3_config.attach_topic,
-                                "state_topic": self._m3_config.state_topic,
+                                "attach_topic": self._native_grasp_config.attach_topic,
+                                "state_topic": self._native_grasp_config.state_topic,
                             },
+                            "planning_scene_revision": scene_revision,
                         })
                 except Exception as exc:
                     attached_before_cleanup = getattr(attachment, "state", None) == "attached"
@@ -211,20 +223,20 @@ class GazeboDirectEnv(Env):
                             attachment.ensure_detached(require_ack=True)
                             receipt["detachable_joint"] = {
                                 "state": "detached",
-                                "detach_topic": self._m3_config.detach_topic,
-                                "state_topic": self._m3_config.state_topic,
+                                "detach_topic": self._native_grasp_config.detach_topic,
+                                "state_topic": self._native_grasp_config.state_topic,
                             }
                         except Exception:
                             pass
                     if gate is not None and gate.accepted and attached_before_cleanup:
-                        record = self._m3_verifier.prove_lift(None, dart_supported=True)
+                        record = self._native_grasp_verifier.prove_lift(None, dart_supported=True)
                     else:
-                        record = self._m3_verifier.close_result(
+                        record = self._native_grasp_verifier.close_result(
                             gate if gate is not None else self._contact_unavailable_result(), attach_acked=False
                         )
                     receipt.update({"ok": False, "error_code": record.reason_code.value, "physical_verification": record.to_dict(), "detail": str(exc)})
-                    self._m3_transport_locked = True
-                    self._m3_lift_proof_pending = False
+                    self._native_grasp_transport_locked = True
+                    self._native_grasp_lift_proof_pending = False
                 finally:
                     if contact_window is not None:
                         contact_window.close()
@@ -235,29 +247,39 @@ class GazeboDirectEnv(Env):
                     if receipt.get("ok") is not True:
                         raise GazeboProcessError(str(receipt.get("error_code") or "GRIPPER_FAILED"))
                     if attachment is None:
-                        raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+                        raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
                     attachment.ensure_detached(require_ack=True)
-                    record = self._m3_verifier.release_result(detached_acked=True)
+                    target_pose, _ = attachment.native_target_mount_poses()
+                    sync_detach = getattr(self.controller, "sync_planning_scene_detach", None)
+                    if not callable(sync_detach):
+                        raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                    scene_revision = sync_detach(
+                        self._native_grasp_config,
+                        target_xyz=target_pose.xyz,
+                        target_quat_xyzw=target_pose.quat_xyzw,
+                    )
+                    record = self._native_grasp_verifier.release_result(detached_acked=True)
                     receipt["detachable_joint"] = {
                         "state": "detached",
-                        "detach_topic": self._m3_config.detach_topic,
-                        "state_topic": self._m3_config.state_topic,
+                        "detach_topic": self._native_grasp_config.detach_topic,
+                        "state_topic": self._native_grasp_config.state_topic,
                     }
-                    self._m3_transport_locked = False
-                    self._m3_lift_proof_pending = False
+                    receipt["planning_scene_revision"] = scene_revision
+                    self._native_grasp_transport_locked = False
+                    self._native_grasp_lift_proof_pending = False
                 except Exception as exc:
-                    record = self._m3_verifier.release_result(detached_acked=False)
+                    record = self._native_grasp_verifier.release_result(detached_acked=False)
                     receipt.update({"ok": False, "error_code": str(exc)})
-                    self._m3_transport_locked = True
-                    self._m3_lift_proof_pending = False
+                    self._native_grasp_transport_locked = True
+                    self._native_grasp_lift_proof_pending = False
                 raw.setdefault("metadata", {})["physical_verification"] = record.to_dict()
                 receipt["physical_verification"] = record.to_dict()
-            elif action_type in {"move_to", "follow_eef_trajectory"} and self._m3_lift_proof_pending:
+            elif action_type in {"move_to", "follow_eef_trajectory"} and self._native_grasp_lift_proof_pending:
                 try:
                     proof = attachment.child_link_proof() if attachment is not None else None
-                    record = self._m3_verifier.prove_lift(proof, dart_supported=True)
+                    record = self._native_grasp_verifier.prove_lift(proof, dart_supported=True)
                 except Exception:
-                    record = self._m3_verifier.prove_lift(None, dart_supported=True)
+                    record = self._native_grasp_verifier.prove_lift(None, dart_supported=True)
                 raw.setdefault("metadata", {})["physical_verification"] = record.to_dict()
                 receipt["physical_verification"] = record.to_dict()
                 proof_evidence = dict(record.evidence)
@@ -266,23 +288,23 @@ class GazeboDirectEnv(Env):
                     if {"lift_m", "capture_relative_translation_m"} <= proof_evidence.keys()
                     else {"available": False, "reason_code": record.reason_code.value}
                 )
-                self._m3_lift_proof_pending = False
+                self._native_grasp_lift_proof_pending = False
                 if record.reason_code is not ReasonCode.TARGET_HELD:
-                    self._m3_transport_locked = True
+                    self._native_grasp_transport_locked = True
                     try:
                         if attachment is None:
-                            raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+                            raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
                         attachment.ensure_detached(require_ack=True)
                         receipt["detachable_joint"] = {
                             "state": "detached",
-                            "detach_topic": self._m3_config.detach_topic,
-                            "state_topic": self._m3_config.state_topic,
+                            "detach_topic": self._native_grasp_config.detach_topic,
+                            "state_topic": self._native_grasp_config.state_topic,
                         }
                     except Exception:
                         receipt["detach_cleanup_error"] = ReasonCode.DETACH_ACK_MISSING.value
                     receipt.update({"ok": False, "error_code": record.reason_code.value})
             else:
-                raw.setdefault("metadata", {})["physical_verification"] = self._m3_verifier.last_record.to_dict()
+                raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
         self._latest = raw
         # The Direct/Gym boundary owns the public unified observation.  Keep
         # the structured receipt anchored to that exact post-action object so
@@ -294,7 +316,7 @@ class GazeboDirectEnv(Env):
         return raw, 0.0, False, False, info
 
     def _contact_unavailable_result(self):
-        from .m3 import ContactGateResult
+        from .native_grasp import ContactGateResult
         return ContactGateResult(False, ReasonCode.CONTACT_WINDOW_NOT_ARMED, 0, 0)
 
     def render(self):

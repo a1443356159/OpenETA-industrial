@@ -190,7 +190,7 @@ successful or failed return into the same `ToolResult.details` envelope:
 |---|---|---|
 | `perception` | perception tools such as `scene_detector` or `sam3` | object lists, detections, masks, camera-derived artifacts |
 | `planning` | planning/manipulation/navigation tools such as `anygrasp` | candidate poses, trajectories, plans, scores |
-| `safety` | safety tools such as `ik_preview_check` | feasibility flags, blocked reasons, safety margins |
+| `safety` | safety tools such as `obstacle_avoidance` | feasibility flags, blocked reasons, safety margins |
 | `bookkeeping` | memory and other runtime bookkeeping tools | saved keys, loaded memory, compact summaries |
 | `world_mutating` | control tools such as `move_to` or `gripper_control` | executed command summary and `state_delta` |
 
@@ -441,7 +441,7 @@ separate from planner-requested `safe_check` calls:
 This is the current placeholder for future safety/failure sub-agents:
 
 - `pre_safety_checks`: maps a target tool to a safety checker tool. Example:
-  `{"move_to": "ik_preview_check"}` runs `ik_preview_check` before the
+  `{"move_to": "obstacle_avoidance"}` runs `obstacle_avoidance` before the
   world-mutating move. If the checker is pending, failed, or returns
   `success=false`, the target tool call is skipped and the command is marked
   `blocked`. CLI pre-check gates are deliberately opt-in through the

@@ -863,7 +863,7 @@ def test_move_to_can_map_anygrasp_world_pose_to_panda_eef_orientation() -> None:
     assert result.details["outputs"]["mcp"]["target_orientation_mode"] == ("graspnet_to_panda_eef")
 
 
-def test_move_to_preserves_orientation_for_anyplace_pose_by_default() -> None:
+def test_move_to_rejects_raw_anyplace_pose_by_default() -> None:
     transport = FakeSimulatorMcpTransport({"success": True, "reached_target": True})
     tools = bind_simulator_mcp_tool_handlers(
         build_default_tool_registry(),
@@ -889,12 +889,12 @@ def test_move_to_preserves_orientation_for_anyplace_pose_by_default() -> None:
         },
     )
 
-    assert result.success is True
-    assert {"roll", "pitch", "yaw"}.isdisjoint(transport.calls[0]["arguments"])
-    assert result.details["outputs"]["mcp"]["target_orientation_mode"] == ("preserve_current")
+    assert result.success is False
+    assert "Raw AnyPlace poses are not executable" in result.content
+    assert transport.calls == []
 
 
-def test_move_to_preserves_anyplace_orientation_when_grasp_forwarding_enabled() -> None:
+def test_move_to_rejects_raw_anyplace_pose_when_grasp_forwarding_enabled() -> None:
     transport = FakeSimulatorMcpTransport({"success": True, "reached_target": True})
     tools = bind_simulator_mcp_tool_handlers(
         build_default_tool_registry(),
@@ -924,9 +924,44 @@ def test_move_to_preserves_anyplace_orientation_when_grasp_forwarding_enabled() 
         },
     )
 
+    assert result.success is False
+    assert "Raw AnyPlace poses are not executable" in result.content
+    assert transport.calls == []
+
+
+def test_move_to_forwards_full_compiled_placement_eef_rotation() -> None:
+    transport = FakeSimulatorMcpTransport({"success": True, "reached_target": True})
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-1", handle="env-1"),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call(
+        "move_to",
+        {
+            "target_pose": {
+                "purpose": "placement",
+                "compiled_eef_pose": True,
+                "placement_candidate_id": "placement_002",
+                "source_grasp_id": "grasp_003",
+                "frame": "world",
+                "xyz": [0.1, 0.2, 0.3],
+                "rotation_matrix": [
+                    [0.0, -1.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+        },
+    )
+
     assert result.success is True
-    assert {"roll", "pitch", "yaw"}.isdisjoint(transport.calls[0]["arguments"])
-    assert result.details["outputs"]["mcp"]["target_orientation_mode"] == ("preserve_current")
+    arguments = transport.calls[0]["arguments"]
+    assert [arguments[key] for key in ("roll", "pitch", "yaw")] == pytest.approx(
+        [0.0, 0.0, 90.0]
+    )
 
 
 def _grasp_pose_estimate_world_pose() -> JsonDict:

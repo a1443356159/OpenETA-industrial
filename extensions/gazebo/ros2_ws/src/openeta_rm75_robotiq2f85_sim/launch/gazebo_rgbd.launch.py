@@ -1,4 +1,4 @@
-"""Start the installed RGB-D demo server-only for headless M1 workers."""
+"""Start the installed RGB-D demo server-only for headless observation-only workers."""
 
 from pathlib import Path
 

@@ -83,7 +83,7 @@ def test_gazebo_world_reset_service() -> None:
     gz = shutil.which("gz")
     if gz is None:
         pytest.skip("sourced Gazebo Sim runtime is unavailable")
-    process = GazeboProcess(world="extensions/gazebo/worlds/m1_rgbd.sdf", gz_executable=gz)
+    process = GazeboProcess(world="extensions/gazebo/worlds/rgbd.sdf", gz_executable=gz)
     control = GazeboWorldControl(world_name="industrial_rgbd", gz_executable=gz)
     try:
         process.start()

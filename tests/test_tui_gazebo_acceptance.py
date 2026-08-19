@@ -1823,6 +1823,36 @@ def test_scripted_tui_m2_to_m4_require_one_exact_agenttool_environment(tmp_path:
         assert "最后唯一一次 close_simulator_env" in instructions
 
 
+def test_scripted_tui_m2_freezes_ab_targets_and_preserves_duplicate_gripper_steps(
+    tmp_path: Path,
+) -> None:
+    allocation = allocate("m2-exact-action-instruction-contract")
+    paths = prepare_case(ROOT, tmp_path, "m2", SCRIPTED_TUI, allocation)
+    instructions = paths.instructions.read_text(encoding="utf-8")
+
+    assert "初始 EEF xyz 作为唯一基准" in instructions
+    assert "不得提交 quat_xyzw" in instructions
+    assert "第三次必须逐字节复用第一次的 target_pose" in instructions
+    assert "第 4 个 position=1" in instructions
+    assert "不得合并、去重或省略" in instructions
+
+
+@pytest.mark.parametrize("milestone", ["m3", "m4"])
+def test_scripted_tui_physical_grasp_prompt_explains_attach_proof_phase(
+    tmp_path: Path,
+    milestone: str,
+) -> None:
+    allocation = allocate(f"{milestone}-attach-proof-instruction-contract")
+    paths = prepare_case(ROOT, tmp_path, milestone, SCRIPTED_TUI, allocation)
+    instructions = paths.instructions.read_text(encoding="utf-8")
+
+    assert "native_contact_gate.accepted=true" in instructions
+    assert "detachable_joint.state=attached" in instructions
+    assert "NATIVE_GRASP_ATTACH_ACKED_UNPROVEN" in instructions
+    assert "grasp_confirmed=false" in instructions
+    assert "必须立即执行 validated lift [0.1552,-0.1000,0.5976]" in instructions
+
+
 def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path: Path) -> None:
     paths = _prepare_evidence(tmp_path, "m3", DETERMINISTIC)
     paths.mcp_log.write_text("OpenETA MCP server started\n", encoding="utf-8")
@@ -1834,12 +1864,12 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
             "right_sample_count": 3,
             "left_span_s": 0.100,
             "right_span_s": 0.101,
-            "evidence": {"target_id": "m3_target"},
+            "evidence": {"target_id": "target_object"},
         },
         "detachable_joint": {"state": "attached"},
         "physical_verification": {
             "schema_version": "openeta.m3.detachable_joint.v1",
-            "reason_code": "M3_ATTACH_ACKED_UNPROVEN",
+            "reason_code": "NATIVE_GRASP_ATTACH_ACKED_UNPROVEN",
             "grasp_confirmed": False,
         },
     }
@@ -1847,7 +1877,7 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
         "child_link_proof": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
         "physical_verification": {
             "schema_version": "openeta.m3.detachable_joint.v1",
-            "reason_code": "M3_TARGET_HELD",
+            "reason_code": "NATIVE_GRASP_TARGET_HELD",
             "grasp_confirmed": True,
             "evidence": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
         },
@@ -1979,14 +2009,14 @@ def test_m4_requires_actual_oracle_output_and_truthful_fake_candidate(tmp_path: 
         "native_contact_gate": {
             "accepted": True, "left_sample_count": 3, "right_sample_count": 3,
             "left_span_s": 0.101, "right_span_s": 0.101,
-            "evidence": {"target_id": "m3_target"},
+            "evidence": {"target_id": "target_object"},
         },
         "detachable_joint": {"state": "attached"},
     }
     held = {
         "physical_verification": {
             "schema_version": "openeta.m3.detachable_joint.v1",
-            "reason_code": "M3_TARGET_HELD", "grasp_confirmed": True,
+            "reason_code": "NATIVE_GRASP_TARGET_HELD", "grasp_confirmed": True,
             "evidence": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
         }
     }
@@ -2012,9 +2042,9 @@ def test_m4_requires_actual_oracle_output_and_truthful_fake_candidate(tmp_path: 
         handle="m4-handle", session_id="m4-session",
     )
     candidate = {
-        "schema_version": "openeta.m4.contractual_fake_grasp_candidate.v1",
+        "schema_version": "openeta.contractual_fake_grasp_candidate.v1",
         "kind": "contractual_fake_grasp_candidate",
-        "candidate_id": "m4-contractual-test",
+        "candidate_id": "contractual-test",
         "perception_source": "gazebo_oracle",
         "is_model_prediction": False,
         "provenance": "oracle_contract_fixture",

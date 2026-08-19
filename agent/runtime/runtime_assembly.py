@@ -118,12 +118,12 @@ ApprovalCallback = Callable[[ToolExecutionContext], bool]
 PublicationApproval = Callable[[JsonDict], bool]
 SkillApproval = Callable[[str], bool]
 
-M4_CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR = "OPENETA_M4_CONTRACTUAL_FAKE_CANDIDATE"
-M4_CONTRACTUAL_FAKE_CANDIDATE_SCHEMA = "openeta.m4.contractual_fake_grasp_candidate.v1"
+CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR = "OPENETA_CONTRACTUAL_FAKE_CANDIDATE"
+CONTRACTUAL_FAKE_CANDIDATE_SCHEMA = "openeta.contractual_fake_grasp_candidate.v1"
 
 
 @dataclass(slots=True)
-class _M4OracleMcpEvidence:
+class _OracleMcpEvidence:
     """One-use correlated evidence record for the Oracle simulator MCP RPC."""
 
     proxy_config: SimulatorMcpToolProxyConfig
@@ -152,7 +152,7 @@ class _M4OracleMcpEvidence:
         artifact = materialize_json_response(
             response_payload,
             output_root=self.response_output_root,
-            bundle_id=f"m4-oracle-{request_id}",
+            bundle_id=f"oracle-{request_id}",
             name=f"{remote_tool}-response",
             session_id=artifact_session_id(context.metadata),
         )
@@ -212,15 +212,15 @@ class _M4OracleMcpEvidence:
         return result
 
 
-def _with_m4_contractual_fake_candidate(
+def _with_contractual_fake_candidate(
     handler: Callable[[ToolExecutionContext], ToolResult],
     *,
-    mcp_evidence: _M4OracleMcpEvidence | None = None,
+    mcp_evidence: _OracleMcpEvidence | None = None,
 ) -> Callable[[ToolExecutionContext], ToolResult]:
-    """Add the M4 fixture marker to a successful *Oracle* tool result only.
+    """Add the oracle-fixture fixture marker to a successful *Oracle* tool result only.
 
     This is deliberately data-only: no pose is inferred or acted upon and the
-    marker is never read by the M3 attachment path.  It records that the M4
+    marker is never read by the native-grasp attachment path.  It records that the oracle-fixture
     candidate is a contractual fake rather than a visual-model prediction.
     """
 
@@ -234,9 +234,9 @@ def _with_m4_contractual_fake_candidate(
         result_id = str(details.get("result_id") or "oracle-result")
         details["perception_source"] = "gazebo_oracle"
         details["fake_grasp_candidate"] = {
-            "schema_version": M4_CONTRACTUAL_FAKE_CANDIDATE_SCHEMA,
+            "schema_version": CONTRACTUAL_FAKE_CANDIDATE_SCHEMA,
             "kind": "contractual_fake_grasp_candidate",
-            "candidate_id": f"m4-contractual-{result_id}",
+            "candidate_id": f"contractual-{result_id}",
             "perception_source": "gazebo_oracle",
             "is_model_prediction": False,
             "provenance": "oracle_contract_fixture",
@@ -257,7 +257,6 @@ REMOTE_PLACEHOLDER_TOOLS = (
     "graspgenx",
     "list_graspgenx_grippers",
     "hand_pose_database",
-    "ik_preview_check",
     "obstacle_avoidance",
     "lower_body_control_policy",
     "estimate_depth_prior",
@@ -641,7 +640,7 @@ def bind_runtime_perception_tools(
         # instead of sam3, never alongside it.
         if simulator_transport is not None:
             proxy_config = simulator_proxy_config or SimulatorMcpToolProxyConfig()
-            m4_mcp_evidence = _M4OracleMcpEvidence(
+            oracle_mcp_evidence = _OracleMcpEvidence(
                 proxy_config=proxy_config,
                 response_output_root=Path(proxy_config.response_output_root),
             )
@@ -650,16 +649,16 @@ def bind_runtime_perception_tools(
                     simulator_transport,
                     handle_provider=lambda: proxy_config.handle,
                     session_id_provider=lambda: proxy_config.session_id,
-                    response_callback=m4_mcp_evidence.record,
+                    response_callback=oracle_mcp_evidence.record,
                 ),
                 tool_name="oracle_perceive",
                 output_root=artifact_root / "oracle_perceive_images",
                 result_output_root=artifact_root / "oracle_perceive_results",
             )
-            if os.environ.get(M4_CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR) == "1":
-                oracle_handler = _with_m4_contractual_fake_candidate(
+            if os.environ.get(CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR) == "1":
+                oracle_handler = _with_contractual_fake_candidate(
                     oracle_handler,
-                    mcp_evidence=m4_mcp_evidence,
+                    mcp_evidence=oracle_mcp_evidence,
                 )
             tools.bind_handler(
                 "oracle_perceive",
@@ -730,7 +729,11 @@ def bind_runtime_perception_tools(
     if grasp_backends:
         tools.bind_handler(
             "grasp_pose_estimate",
-            build_grasp_pose_estimate_handler(grasp_backends),
+            build_grasp_pose_estimate_handler(
+                grasp_backends,
+                backend_order=("graspgenx", "anygrasp", "contact_graspnet"),
+                graspgenx_gripper_name="robotiq_2f_85",
+            ),
             replace=True,
         )
     return depth_prefetch

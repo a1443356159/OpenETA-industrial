@@ -18,7 +18,7 @@ spanning at least 100 ms, all fresh, all unambiguously naming `m3_target`.
 Unknown, mixed, stale, distractor, or one-sided evidence is rejection.
 
 An ACK proves plugin state only. The M3 lift proof reads Gazebo's native
-`/world/m3_rm75_robotiq2f85_pickplace/pose/info` link state for
+`/world/rm75_robotiq2f85_pickplace/pose/info` link state for
 `target_link` and `gripper_mount_link`: target child-link lift must be at
 least 80 mm and capture-relative translation at most 10 mm. DART/state
 incompatibility reports `M3_DART_UNSUPPORTED` or a child-link/ACK error; it

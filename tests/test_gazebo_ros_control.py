@@ -5,10 +5,10 @@ import time
 
 import pytest
 
-from extensions.gazebo.m2 import JOINT_NAMES, M2Config, robot_state_from_sources
+from extensions.gazebo.robot_control import JOINT_NAMES, GazeboControlConfig, robot_state_from_sources
 from extensions.gazebo.ros_control import (
-    RosM2Controller,
-    RosM2StateSource,
+    RosGazeboController,
+    RosGazeboStateSource,
     _RosRuntime,
     _populate_recovery_trajectory_goal,
     _populate_state_validity_request,
@@ -44,7 +44,7 @@ def _joint_message():
 
 
 def test_ros_state_source_requires_fresh_complete_joint_state_and_tf() -> None:
-    source = RosM2StateSource(_Node(), _Tf(), config=M2Config(), freshness_s=0.02)
+    source = RosGazeboStateSource(_Node(), _Tf(), config=GazeboControlConfig(), freshness_s=0.02)
     with pytest.raises(RuntimeError, match="JOINT_STATE_TIMEOUT"):
         source.state()
     source.joint_state_callback(_joint_message())
@@ -57,7 +57,7 @@ def test_ros_state_source_requires_fresh_complete_joint_state_and_tf() -> None:
 
 
 def test_ros_state_source_fails_closed_without_tf() -> None:
-    source = RosM2StateSource(_Node(), _Tf(fail=True), config=M2Config())
+    source = RosGazeboStateSource(_Node(), _Tf(fail=True), config=GazeboControlConfig())
     source.joint_state_callback(_joint_message())
     with pytest.raises(RuntimeError, match="TF_TIMEOUT"):
         source.state()
@@ -246,7 +246,7 @@ def _recovery_runtime(
         ),
         duration_type=lambda **values: SimpleNamespace(**values),
         state_source=_StateSource(_arm_state(post_joint_3)),
-        config=M2Config(),
+        config=GazeboControlConfig(),
     )
     runtime._await = lambda future, timeout_s: future
     runtime.ros_time_s = lambda: 100.0
@@ -344,27 +344,3 @@ def test_ros_recovery_requires_fresh_post_action_joint_state() -> None:
     assert result["start_state_recovery"]["reason_code"] == (
         "POST_RECOVERY_JOINT_STATE_MISSING"
     )
-
-
-def test_plan_pose_is_read_only_and_bypasses_start_state_recovery() -> None:
-    calls = []
-    runtime = SimpleNamespace(
-        state_source=SimpleNamespace(wait_fresh=lambda: _arm_state(0.0)),
-        move=lambda goal, timeout: calls.append((goal, timeout)) or {"ok": True},
-        gripper=lambda position, timeout: {"ok": True},
-        recover_start_state=lambda state, timeout: pytest.fail(
-            "plan-only must not recover"
-        ),
-        cancel_pending=lambda: None,
-        close=lambda: None,
-    )
-    controller = RosM2Controller(runtime, config=M2Config())
-
-    result = controller.plan_pose(
-        {"xyz": [0.0, 0.0, 0.5], "quat_xyzw": [0.0, 0.0, 0.0, 1.0]},
-        timeout_s=3.0,
-    )
-
-    assert result["ok"] is True
-    assert len(calls) == 1
-    assert calls[0][0]["plan_only"] is True

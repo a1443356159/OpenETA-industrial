@@ -21,7 +21,7 @@ from .process import (
     Ros2LaunchProcess,
 )
 from .profiles import CONTROL, PHYSICS, GazeboProfile
-from .ros_control import RosM2ControllerFactory
+from .ros_control import RosGazeboControllerFactory
 
 
 class GazeboRuntime:
@@ -49,7 +49,7 @@ class GazeboRuntime:
         self.task = task
         self._launch_factory = launch_factory
         self._camera_factory = camera_factory
-        self._controller_factory = controller_factory or RosM2ControllerFactory(
+        self._controller_factory = controller_factory or RosGazeboControllerFactory(
             readiness_timeout_s=deployment.startup_timeout_s
         )
         self._world = world_control or GazeboWorldControl(
@@ -66,7 +66,7 @@ class GazeboRuntime:
                 timeout_s=15.0,
                 world_name=deployment.world_override or profile.world_name,
                 parent_link=getattr(model_config, "parent_link", "gripper_mount_link"),
-                child_model=getattr(model_config, "target_id", "m3_target"),
+                child_model=getattr(model_config, "target_id", "target_object"),
                 child_link=getattr(model_config, "target_link", "target_link"),
             )
         self._launch: Any | None = None
@@ -195,9 +195,9 @@ class GazeboRuntime:
                 # first physics tick.  A world-control ACK alone is not proof
                 # that the later-spawned stock joint endpoints exist; wait for
                 # those exact endpoints before listener-first detach.  Do not
-                # resume for a missing topic or detached ACK: M3 fails closed.
+                # resume for a missing topic or detached ACK: native-grasp fails closed.
                 if self.attachment is None:
-                    raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+                    raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
                 attachment_ready = getattr(self.attachment, "wait_ready", None)
                 if callable(attachment_ready):
                     attachment_ready(timeout_s=self._remaining(deadline))
@@ -267,7 +267,7 @@ class GazeboRuntime:
         # Gazebo Sim's stock DetachableJoint emits an output-topic transition
         # only when its state changes.  A ``model_only`` reset leaves a known
         # detached joint detached, so a second detach request has no truthful
-        # ACK to consume.  M3 therefore resets by recreating its isolated
+        # ACK to consume.  native-grasp therefore resets by recreating its isolated
         # paused world: every reset starts from the stock attached state and
         # obtains one fresh, listener-first detached ACK before unpausing.
         # This is intentionally not a soft attachment or an idempotent-ACK
@@ -281,17 +281,25 @@ class GazeboRuntime:
             reset_sources = getattr(self.controller, "reset_sources", None)
             if callable(reset_sources):
                 reset_sources()
-        # M3's fresh launch has already restored the SDF-declared target and
+        # native-grasp's fresh launch has already restored the SDF-declared target and
         # distractor poses while paused, then obtained the fresh detached ACK
         # in ``_start``.  Do not issue a model-only reset here: it preserves a
         # detached stock joint and would turn the required ACK into a no-op.
         if PHYSICS in self.profile.capabilities:
             if self.attachment is None:
-                raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+                raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
         else:
             # Preserve /clock after the ROS action stack has started.
             self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
         self.scene_epoch += 1
+        if PHYSICS in self.profile.capabilities and self.controller is not None:
+            sync_scene = getattr(self.controller, "sync_planning_scene_reset", None)
+            if not callable(sync_scene):
+                raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+            try:
+                sync_scene(self.profile.model_config)
+            except Exception as exc:
+                raise GazeboProcessError("PLANNING_SCENE_SYNC_FAILED") from exc
         barrier: float | None = None
         if self.controller is not None:
             # A cancelled cold-start action can leave the first open command

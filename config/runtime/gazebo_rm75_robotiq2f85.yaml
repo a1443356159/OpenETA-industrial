@@ -24,8 +24,8 @@ network:
   mcp_port: 8765
   ros_domain_id: 42
 ros_packages:
-  # Exact installed Debian versions are captured by setup_openeta_m2.sh in
-  # config/runtime/m0_m2.versions.local.yaml; Jazzy apt updates are permitted.
+  # Exact installed Debian versions are captured by setup_openeta_gazebo.sh in
+  # config/runtime/gazebo_rm75_robotiq2f85.versions.local.yaml; Jazzy apt updates are permitted.
   version_source: dpkg-query
   names:
     - ros-jazzy-ros-base

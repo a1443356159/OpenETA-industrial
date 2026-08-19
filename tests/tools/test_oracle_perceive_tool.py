@@ -16,8 +16,8 @@ from agent.runtime.memory import (
 )
 from agent.runtime.runtime_assembly import (
     RuntimeMcpEndpoints,
-    _M4OracleMcpEvidence,
-    _with_m4_contractual_fake_candidate,
+    _OracleMcpEvidence,
+    _with_contractual_fake_candidate,
     bind_runtime_perception_tools,
 )
 from agent.tools.handlers import (
@@ -206,12 +206,12 @@ def test_m4_oracle_wrapper_marks_candidate_as_contractual_not_prediction(tmp_pat
         session_id="oracle-session",
         response_output_root=tmp_path / "responses",
     )
-    mcp_evidence = _M4OracleMcpEvidence(
+    mcp_evidence = _OracleMcpEvidence(
         proxy_config=proxy_config,
         response_output_root=tmp_path / "responses",
     )
 
-    handler = _with_m4_contractual_fake_candidate(
+    handler = _with_contractual_fake_candidate(
         build_sam3_handler(
             build_oracle_perceive_segmenter(
                 transport,

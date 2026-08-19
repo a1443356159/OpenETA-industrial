@@ -658,7 +658,10 @@ class SimulatorMcpToolProxy:
         is_anyplace_pose = _is_anyplace_pose(parameters)
         is_grasp_candidate = _is_ranked_grasp_candidate_pose(parameters)
         if is_anyplace_pose:
-            pass
+            raise ValueError(
+                "Raw AnyPlace poses are not executable; select the retained candidate "
+                "with compile_grasp_seed(purpose=placement) and use only its EEF poses."
+            )
         elif is_grasp_candidate and self.config.forward_grasp_candidate_orientation:
             arguments.update(
                 _extract_graspnet_panda_orientation_arguments(
@@ -2164,6 +2167,8 @@ def _is_ranked_grasp_candidate_pose(parameters: JsonDict) -> bool:
     pose = parameters.get("target_pose") or parameters.get("pose")
     if not isinstance(pose, dict):
         return False
+    if pose.get("compiled_eef_pose") is True:
+        return False
     candidate_id = str(pose.get("id") or pose.get("candidate_id") or "").strip()
     source_model = str(pose.get("source_model") or "").strip().lower()
     if source_model in {"anygrasp", "contact_graspnet"}:
@@ -2190,9 +2195,19 @@ def _is_anyplace_pose(parameters: JsonDict) -> bool:
     pose = parameters.get("target_pose") or parameters.get("pose")
     if not isinstance(pose, dict):
         return False
-    candidate_id = str(pose.get("id") or pose.get("candidate_id") or "").strip()
+    if pose.get("compiled_eef_pose") is True:
+        return False
+    candidate_id = str(
+        pose.get("id")
+        or pose.get("candidate_id")
+        or pose.get("placement_candidate_id")
+        or ""
+    ).strip()
     source_grasp_id = str(pose.get("source_grasp_id") or "").strip()
-    return candidate_id.startswith("place_grasp_") and source_grasp_id.startswith("grasp_")
+    source_tool = str(pose.get("source_tool") or "").strip().lower()
+    return source_tool == "anyplace" or (
+        candidate_id.startswith("place_grasp_") and bool(source_grasp_id)
+    )
 
 
 def _extract_graspnet_panda_orientation_arguments(

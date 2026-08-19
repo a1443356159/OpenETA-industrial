@@ -81,7 +81,6 @@ def build_default_skill_registry() -> SkillRegistry:
             allowed_tools=(
                 "scene_detector",
                 "sam3",
-                "ik_preview_check",
                 "obstacle_avoidance",
                 "move_to",
                 "gripper_control",
@@ -101,7 +100,6 @@ def build_default_skill_registry() -> SkillRegistry:
             allowed_tools=(
                 "scene_detector",
                 "sam3",
-                "ik_preview_check",
                 "obstacle_avoidance",
                 "move_to",
                 "gripper_control",
@@ -122,7 +120,6 @@ def build_default_skill_registry() -> SkillRegistry:
             allowed_tools=(
                 "scene_detector",
                 "sam3",
-                "ik_preview_check",
                 "obstacle_avoidance",
                 "move_to",
                 "gripper_control",
@@ -144,7 +141,6 @@ def build_default_skill_registry() -> SkillRegistry:
                 "scene_detector",
                 "sam3",
                 "anygrasp",
-                "ik_preview_check",
                 "obstacle_avoidance",
                 "move_to",
                 "gripper_control",

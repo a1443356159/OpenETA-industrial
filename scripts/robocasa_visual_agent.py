@@ -275,7 +275,6 @@ def run_workspace_attempt(args: argparse.Namespace) -> dict[str, Any]:
         precontact = point + outward * 0.13 + eef_from_pad
         contact = point - outward * 0.025 + eef_from_pad
         retreat = point + outward * 0.22 + eef_from_pad
-        trace.append({"turn": 4, "kind": "tool_call", "name": "ik_preview_check", "parameters": {"targets": [precontact.tolist(), contact.tolist(), retreat.tolist()]}, "result": {"allowed": True, "method": "workspace_radius_and_height_bounds"}})
 
         for stage, target, budget in (("precontact", precontact, 90), ("contact", contact, 120), ("retreat", retreat, 60)):
             stage_start = total_steps

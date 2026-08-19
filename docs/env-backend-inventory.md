@@ -36,7 +36,7 @@ device placement, and process lifecycle differ significantly.
 | `robotwin` | External RobotWin vector env | `sim/envs/robotwin/robotwin_env.py` imports RobotWin. | The physics backend is hidden behind the external package. |
 | `roboverse` | MetaSim abstraction | `sim/envs/roboverse/roboverse_env.py` delegates to MetaSim. | Backend is selected by config. |
 | `embodichain` | External EmbodiChain env | `sim/envs/embodichain/embodichain_env.py` resolves an EmbodiChain config. | The concrete simulator backend is external. |
-| `gazebo` | Gazebo Sim (Harmonic) / ROS 2 Jazzy + MoveIt 2 | `sim/env_registry.py:_register_gazebo_envs` registers `openeta/gazebo_live_rgbd-v0`, `openeta/gazebo_rm75_robotiq2f85-v0`, and `openeta/gazebo_rm75_robotiq2f85_pickplace-v0`. All use `extensions/gazebo/direct_env.py:GazeboDirectEnv` (wrapped in `UnifiedEnv`). | OpenETA-native. M3 uses only the `openeta.m3.detachable_joint.v1` guarded stock DetachableJoint path: paused detach ACK, dual native contact gate, attach ACK and child-link proof. Oracle/fake candidates cannot bypass it. See `docs/gazebo-adapter-design.md`. |
+| `gazebo` | Gazebo Sim (Harmonic) / ROS 2 Jazzy + MoveIt 2 | `sim/env_registry.py:_register_gazebo_envs` registers `openeta/gazebo_live_rgbd-v0`, `openeta/gazebo_rm75_robotiq2f85-v0`, and `openeta/gazebo_rm75_robotiq2f85_pickplace-v0`. All use `extensions/gazebo/direct_env.py:GazeboDirectEnv` (wrapped in `UnifiedEnv`). | OpenETA-native. Native grasping uses only the `openeta.gazebo.native_grasp.v1` guarded stock DetachableJoint path: paused detach ACK, dual native contact gate, attach ACK and child-link proof. Oracle/fake candidates cannot bypass it. See `docs/gazebo-adapter-design.md`. |
 
 ## Gym Unification Assessment
 

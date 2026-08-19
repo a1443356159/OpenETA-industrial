@@ -326,7 +326,7 @@ def make_env(
     if env_type == "gazebo":
         from extensions.gazebo.direct_env import GazeboDirectEnv
 
-        profile = overrides.pop("gazebo_profile", "m1")
+        profile = overrides.pop("gazebo_profile", "rgbd_observation")
         runtime_task = overrides.pop("task", task_name)
         raw = GazeboDirectEnv(
             profile=profile, task=runtime_task, seed=seed, **overrides
@@ -835,7 +835,7 @@ def _register_dummy_envs() -> None:
 
 
 def _register_gazebo_envs() -> None:
-    """Register the deployment-configured, read-only M1 Gazebo worker env."""
+    """Register the deployment-configured, read-only observation-only Gazebo worker env."""
 
     _register_one(
         "openeta/gazebo_live_rgbd-v0",
@@ -843,7 +843,7 @@ def _register_gazebo_envs() -> None:
             id="openeta/gazebo_live_rgbd-v0",
             env_type="gazebo",
             task_slug="live_rgbd",
-            task_description="Gazebo ROS 2 live RGB-D observation (M1 read-only).",
+            task_description="Gazebo ROS 2 live RGB-D observation (observation-only read-only).",
             display_name="Gazebo 仿真环境",
             max_episode_steps=1_000_000,
             requires_gpu=False,
@@ -856,10 +856,10 @@ def _register_gazebo_envs() -> None:
         "openeta/gazebo_rm75_robotiq2f85-v0",
         EnvSpec(
             id="openeta/gazebo_rm75_robotiq2f85-v0", env_type="gazebo", task_slug="rm75_robotiq2f85",
-            task_description="Gazebo Sim Jazzy RM75 with the frozen Robotiq 2F-85 simulation asset (M2).",
+            task_description="Gazebo Sim Jazzy RM75 with the frozen Robotiq 2F-85 simulation asset (motion-control).",
             display_name="Gazebo 仿真环境",
             max_episode_steps=1_000_000, requires_gpu=False, requires_sim_install=True,
-        ), env_type="gazebo", task_name="rm75_robotiq2f85", gazebo_profile="m2_robotiq2f85",
+        ), env_type="gazebo", task_name="rm75_robotiq2f85", gazebo_profile="rm75_robotiq2f85_control",
     )
     _register_one(
         "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
@@ -868,18 +868,18 @@ def _register_gazebo_envs() -> None:
             env_type="gazebo",
             task_slug="rm75_robotiq2f85_pickplace",
             task_description=(
-                "M3 native Gazebo contact pick/place with the stock fixed "
+                "native-grasp native Gazebo contact pick/place with the stock fixed "
                 "DetachableJoint; attach and transport fail closed without "
                 "contact, ACK, and child-link lift evidence."
             ),
-            display_name="Gazebo 仿真环境（M3 原生接触 DetachableJoint 拾放）",
+            display_name="Gazebo 仿真环境（原生接触 DetachableJoint 拾放）",
             max_episode_steps=1_000_000,
             requires_gpu=False,
             requires_sim_install=True,
         ),
         env_type="gazebo",
         task_name="rm75_robotiq2f85_pickplace",
-        gazebo_profile="m3_pickplace",
+        gazebo_profile="rm75_robotiq2f85_pickplace",
     )
 
 

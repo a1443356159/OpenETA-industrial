@@ -1,7 +1,7 @@
 """Offline contract tests for the M7 industrial benchmark manifest (v0).
 
 The manifest is pure data: these tests pin the schema promised in
-docs/gazebo-m7-industrial-benchmark.md and the M3Config-derived scene
+docs/gazebo-m7-industrial-benchmark.md and the NativePickPlaceConfig-derived scene
 defaults, without starting Gazebo.
 """
 
@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 from agent.cli.batch_eval import load_parallel_episode_manifest
-from extensions.gazebo.m3 import M3Config, M3_ENV_ID
+from extensions.gazebo.native_grasp import NativePickPlaceConfig, PICKPLACE_ENV_ID
 
 MANIFEST_PATH = (
     Path(__file__).resolve().parents[1] / "examples" / "gazebo_industrial_benchmark_v0.json"
@@ -38,7 +38,7 @@ def test_manifest_parses_with_existing_loader() -> None:
     specs = load_parallel_episode_manifest(MANIFEST_PATH)
     assert len(specs) == 10
     assert len({spec.episode_id for spec in specs}) == 10
-    assert all(spec.env_id == M3_ENV_ID for spec in specs)
+    assert all(spec.env_id == PICKPLACE_ENV_ID for spec in specs)
     assert all(spec.task for spec in specs)
     assert all(spec.metadata.get("suite") == "gazebo_industrial" for spec in specs)
     assert all(spec.metadata.get("benchmark_version") == "v0" for spec in specs)
@@ -93,7 +93,7 @@ def test_failure_injection_scoping() -> None:
 
 
 def test_m3_scene_defaults_match_m3config() -> None:
-    config = M3Config()
+    config = NativePickPlaceConfig()
     for row in _load_rows():
         scene = row["metadata"]["scene"]
         objects = {item["id"]: item for item in scene["objects"]}

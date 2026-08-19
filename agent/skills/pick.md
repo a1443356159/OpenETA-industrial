@@ -23,7 +23,6 @@ allowed_tools:
   - compile_grasp_seed
   - compute_wrist_alignment
   - camera_pose_to_world
-  - ik_preview_check
   - obstacle_avoidance
   - move_to
   - gripper_control

@@ -149,6 +149,31 @@ def test_start_graspgenx_requires_all_backend_roots(tmp_path: Path, capsys) -> N
     assert "gripper descriptions root" in capsys.readouterr().err.lower()
 
 
+def test_graspgenx_child_environment_disables_runtime_asset_downloads(
+    tmp_path: Path,
+) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "start",
+            "graspgenx",
+            "--state-dir",
+            str(tmp_path),
+            "--graspgenx-root",
+            "/srv/graspgenx",
+            "--graspgenx-checkpoint-root",
+            "/srv/checkpoints/graspgenx-v1",
+            "--graspgenx-gripper-descriptions-root",
+            "/srv/grippers",
+            "--dry-run",
+        ]
+    )
+
+    config = cli._build_configs(args)[0]
+
+    assert config.env["GRASPGENX_CHECKPOINT_DIR"] == "/srv/checkpoints"
+    assert config.env["GRASPGENX_GRIPPER_CFG_DIR"] == "/srv/grippers"
+
+
 def test_start_all_dry_run_includes_seven_services(tmp_path: Path, capsys) -> None:
     assert (
         cli.main(

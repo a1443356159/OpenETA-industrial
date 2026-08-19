@@ -9,8 +9,8 @@ LOCK_DIR="/tmp/openeta-acceptance-locks"
 ARTIFACT_DIR="${OPENETA_ACCEPTANCE_ARTIFACT_DIR:-${REPO_DIR}/.cache}"
 mkdir -p "${LOCK_DIR}" "${ARTIFACT_DIR}/logs" "${ARTIFACT_DIR}/reports"
 
-# shellcheck source=../../../config/runtime/m0_m2.env
-source "${REPO_DIR}/config/runtime/m0_m2.env"
+# shellcheck source=../../../config/runtime/gazebo_rm75_robotiq2f85.env
+source "${REPO_DIR}/config/runtime/gazebo_rm75_robotiq2f85.env"
 ORIGINAL_ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}"
 
 set +u
@@ -171,9 +171,9 @@ REPORT="${ARTIFACT_DIR}/reports/m2-robotiq2f85-acceptance-${RUN_STAMP}-$$.json"
 DIRECT_LOG="${ARTIFACT_DIR}/logs/m2-robotiq2f85-direct-${RUN_STAMP}-$$.log"
 MCP_LOG="${ARTIFACT_DIR}/logs/m2-robotiq2f85-mcp-${RUN_STAMP}-$$.log"
 REGRESSION_LOG="${ARTIFACT_DIR}/logs/m2-regression-${RUN_STAMP}-$$.log"
-TEST_WORLD="${SCRIPT_DIR}/src/openeta_rm75_robotiq2f85_sim/worlds/m2_rm75_robotiq2f85_z_test.sdf"
+TEST_WORLD="${SCRIPT_DIR}/src/openeta_rm75_robotiq2f85_sim/worlds/rm75_robotiq2f85_z_test.sdf"
 export OPENETA_GAZEBO_LAUNCH_ARGUMENTS="[\"world:=${TEST_WORLD}\"]"
-export OPENETA_GAZEBO_WORLD="m2_rm75_robotiq2f85_z_test"
+export OPENETA_GAZEBO_WORLD="rm75_robotiq2f85_z_test"
 
 run_cleanup_path_self_tests
 "${PYTHON_BIN}" "${DRIVER}" init --report "${REPORT}" \
@@ -246,9 +246,9 @@ fi
 "${PYTHON_BIN}" "${DRIVER}" gate --report "${REPORT}" --gate ros_workspace_build \
   --details "colcon build completed for both M2 profiles"
 
-bash "${REPO_DIR}/scripts/check_openeta_m2.sh"
+bash "${REPO_DIR}/scripts/check_openeta_gazebo.sh"
 "${PYTHON_BIN}" "${DRIVER}" gate --report "${REPORT}" --gate m2_runtime_check \
-  --details "scripts/check_openeta_m2.sh passed"
+  --details "scripts/check_openeta_gazebo.sh passed"
 
 env -u OPENETA_GAZEBO_WORLD -u OPENETA_GAZEBO_LAUNCH_ARGUMENTS \
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "${PYTHON_BIN}" -m pytest -q \
@@ -261,7 +261,7 @@ env -u OPENETA_GAZEBO_WORLD -u OPENETA_GAZEBO_LAUNCH_ARGUMENTS \
 "${PYTHON_BIN}" "${DRIVER}" gate --report "${REPORT}" --gate offline_contract_regression \
   --details "M2 assets/control/freshness/MCP routing contracts passed"
 
-setsid ros2 launch openeta_rm75_robotiq2f85_sim m2_gazebo_moveit.launch.py \
+setsid ros2 launch openeta_rm75_robotiq2f85_sim gazebo_moveit.launch.py \
   "world:=${TEST_WORLD}" \
   >"${DIRECT_LOG}" 2>&1 &
 DIRECT_PID=$!

@@ -8,7 +8,7 @@ from sim import bench_worker
 
 
 def test_m2_profiles_use_the_single_direct_env_and_structured_receipt_capability() -> None:
-    for name in ("m2_robotiq2f85",):
+    for name in ("rm75_robotiq2f85_control",):
         profile = gazebo_profile(name)
         assert CONTROL in profile.capabilities
         assert STRUCTURED_RECEIPT in profile.capabilities
@@ -16,7 +16,7 @@ def test_m2_profiles_use_the_single_direct_env_and_structured_receipt_capability
 
 
 def test_m2_control_spec_advertises_validated_relative_motion_only_for_m2() -> None:
-    m2_spec = build_gazebo_control_spec(gazebo_profile("m2_robotiq2f85"))
+    m2_spec = build_gazebo_control_spec(gazebo_profile("rm75_robotiq2f85_control"))
 
     guidance = m2_spec["validated_relative_motion"]
     assert guidance["reference"] == "first_fresh_end_effector_pose_after_reset"
@@ -25,7 +25,7 @@ def test_m2_control_spec_advertises_validated_relative_motion_only_for_m2() -> N
         {"name": "vertical_low", "xyz_offset_m": [0.0, 0.0, -0.040]},
         {"name": "vertical_high", "xyz_offset_m": [0.0, 0.0, -0.020]},
     ]
-    assert "validated_relative_motion" not in build_gazebo_control_spec(gazebo_profile("m3_pickplace"))
+    assert "validated_relative_motion" not in build_gazebo_control_spec(gazebo_profile("rm75_robotiq2f85_pickplace"))
 
 
 def test_generic_worker_codec_restores_internal_receipt_without_observation_clobber() -> None:

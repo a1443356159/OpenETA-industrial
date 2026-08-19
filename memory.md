@@ -5,7 +5,7 @@
 - The production M2 profile is now
   `openeta/gazebo_rm75_robotiq2f85-v0` / `rm75_robotiq_2f85_sim_v1`; the old
   70 mm parallel fixture remains a buildable offline compatibility profile.
-- The repository-owned Jazzy/Harmonic launch, `RosM2ControllerFactory`, MoveIt
+- The repository-owned Jazzy/Harmonic launch, `RosGazeboControllerFactory`, MoveIt
   action path, dual live RGB-D source, worker routing, and real SSE MCP
   lifecycle are integrated. Mutating actions consume strictly newer RGB and
   depth samples and a JointState received after the action result; CameraInfo
@@ -20,7 +20,7 @@
   paths all passed while the pre-existing domain 42 stack remained healthy.
 - Local development verification based on commit
   `9bc2a2c67c3881b8c687182de341cc1a8bf7c503` passed build and asset checks,
-  `scripts/check_openeta_m2.sh`, 34 focused offline contracts, direct live ROS,
+  `scripts/check_openeta_gazebo.sh`, 34 focused offline contracts, direct live ROS,
   real MCP live, isolation cleanup, and the non-optional repository regression
   (`1202 passed, 14 skipped`). This evidence is a checkpoint and does not
   constitute formal M2 acceptance. Optional BEHAVIOR/RoboCasa `torch` suites
@@ -106,7 +106,7 @@
 - Added fail-fast validation for camera dimensions, object SI-unit positions,
   quaternions, labels, and confidence bounds; Gazebo tests now pass `6/6`.
 - The environment contains ROS 2 Jazzy/Gazebo Sim. Added
-  `GazeboProcess` plus `worlds/m1_oracle.sdf`; with `/opt/ros/jazzy/setup.bash`
+  `GazeboProcess` plus `worlds/oracle.sdf`; with `/opt/ros/jazzy/setup.bash`
   sourced, process lifecycle and oracle tests pass `7/7`. This validates only
   process ownership/cleanup, not camera topics or robot control.
 - Added `RosGzBridgeProcess` using the installed Jazzy
@@ -116,7 +116,7 @@
 - Camera topic names are now explicit configuration (`rgb`, metric `depth`,
   `CameraInfo`) and are emitted as metadata; the oracle still makes no claim
   that those topics are live until a configured sensor world is attached.
-- Added `worlds/m1_rgbd.sdf` based on the installed Gazebo RGB-D sensor schema;
+- Added `worlds/rgbd.sdf` based on the installed Gazebo RGB-D sensor schema;
   test evidence confirms raw `/top_camera/image`, `/top_camera/depth_image`,
   and `/top_camera/camera_info` topics are published. ROS message conversion
   is intentionally still pending a documented executor/subscription boundary.
@@ -226,7 +226,7 @@
   `5fc226e...` (`ros2_rm_robot`) and `bdb12c...` (`rm_models`). M2 asset
   validation accepts this explicit workspace path. That backend remains
   plan-only and was not reused. The former `ROS_NOT_READY` blocker is resolved
-  by the repository-owned Robotiq profile and `RosM2ControllerFactory`.
+  by the repository-owned Robotiq profile and `RosGazeboControllerFactory`.
 
 - The invalid soft-adhesion experiment was removed. Current M3 uses the
   approved native-contact stock `DetachableJoint` implementation and fails

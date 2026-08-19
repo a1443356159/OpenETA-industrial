@@ -19,10 +19,10 @@ from extensions.gazebo.perception_summary import (
     ERR_MASK_MISSING,
     ERR_NO_VALID_DEPTH,
     PROVENANCE_SAM3,
-    M5PerceptionBridgeError,
-    M5_ERR_MASK_SHAPE,
-    M5_ERR_SOURCE_IMAGE,
-    build_m5_object_summary,
+    PerceptionBridgeError,
+    PERCEPTION_ERR_MASK_SHAPE,
+    PERCEPTION_ERR_SOURCE_IMAGE,
+    build_perception_object_summary,
     build_object_summary,
     summarize_detection,
 )
@@ -260,7 +260,7 @@ def test_m5_bridge_requires_current_case_local_rgbd_and_selected_frame(tmp_path)
     mask[2, 2] = True
     _write_mask(mask_path, mask)
 
-    summary = build_m5_object_summary(
+    summary = build_perception_object_summary(
         detection={
             "id": "detection_000",
             "label": "target",
@@ -309,11 +309,11 @@ def test_m5_bridge_refuses_stale_rgb_or_resized_mask(tmp_path) -> None:
         "source_image": str(stale_rgb_path),
         "source_frame_id": "top_camera_optical_frame",
     }
-    with pytest.raises(M5PerceptionBridgeError) as source_error:
-        build_m5_object_summary(detection=detection, camera=camera, case_root=root)
-    assert source_error.value.code == M5_ERR_SOURCE_IMAGE
+    with pytest.raises(PerceptionBridgeError) as source_error:
+        build_perception_object_summary(detection=detection, camera=camera, case_root=root)
+    assert source_error.value.code == PERCEPTION_ERR_SOURCE_IMAGE
 
     detection["source_image"] = str(rgb_path)
-    with pytest.raises(M5PerceptionBridgeError) as mask_error:
-        build_m5_object_summary(detection=detection, camera=camera, case_root=root)
-    assert mask_error.value.code == M5_ERR_MASK_SHAPE
+    with pytest.raises(PerceptionBridgeError) as mask_error:
+        build_perception_object_summary(detection=detection, camera=camera, case_root=root)
+    assert mask_error.value.code == PERCEPTION_ERR_MASK_SHAPE

@@ -1392,13 +1392,19 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             name="compile_grasp_seed",
             category="geometry",
             description=(
-                "Compile one active normalized camera-frame grasp seed into staged "
-                "world-frame Panda EEF hover/contact poses with the host-owned "
+                "Compile one active normalized camera-frame grasp seed, or one "
+                "retained AnyPlace candidate selected by id, into staged world-frame "
+                "EEF poses with the host-owned "
                 "read-only embodiment calibration and an optional task-family "
                 "strategy. Unknown geometry families use the generic calibrated "
                 "transform instead of being rejected."
             ),
             parameters={
+                "purpose": "grasp (default) or placement",
+                "placement_candidate_id": (
+                    "for purpose=placement, the only planner-selected field; the host "
+                    "binds pose, source grasp, calibration, camera extrinsics, and scene epoch"
+                ),
                 "camera_pose": "complete active normalized camera-frame grasp candidate",
                 "camera_extrinsics": ("matching camera calibration from the estimator observation"),
                 "camera_frame_id": "matching camera frame id for provenance",
@@ -1561,19 +1567,6 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             category="manipulation",
             description="Retrieve reference hand poses for dexterous manipulation.",
             parameters={"object": "object name", "task": "manipulation intent"},
-            effect=ToolEffect.READ_ONLY,
-        ),
-        ToolSpec(
-            name="ik_preview_check",
-            category="safety",
-            description="Preview inverse-kinematics feasibility before execution.",
-            parameters={
-                "target_pose": (
-                    "desired end-effector pose; preserve the active grasp candidate id "
-                    "from camera_pose_to_world when checking a grasp pose"
-                )
-            },
-            safe_by_default=True,
             effect=ToolEffect.READ_ONLY,
         ),
         ToolSpec(

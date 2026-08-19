@@ -12,10 +12,10 @@
               name="gz::sim::systems::JointPositionController">
         <joint_name>${joint}</joint_name>
         <topic>${topic}</topic>
-        <!-- M2 executes repeated arm probes before its strict non-stalled
+        <!-- motion-control executes repeated arm probes before its strict non-stalled
              gripper sequence.  Keep the unloaded linkage inside the 0.02 rad
-             action tolerance under changing wrist gravity loads; M3 retains
-             its lower contact-sensitive gains in the separate M3 xacro. -->
+             action tolerance under changing wrist gravity loads; native-grasp retains
+             its lower contact-sensitive gains in the separate native-grasp xacro. -->
         <p_gain>30.0</p_gain>
         <i_gain>0.0</i_gain>
         <d_gain>0.8</d_gain>

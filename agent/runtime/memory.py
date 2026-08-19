@@ -46,6 +46,7 @@ GRASP_ESTIMATION_RECOVERY_KEY = "grasp_estimation_recovery"
 GRIPPER_COMMAND_STATE_KEY = "gripper_command_state"
 ATTACHMENT_GATE_KEY = "attachment_gate"
 PLACEMENT_RELEASE_KEY = "placement_release"
+PLACEMENT_CANDIDATE_POLICY_KEY = "placement_candidate_policy"
 COMPLETED_PLACEMENT_SUBGOALS_KEY = "completed_placement_subgoals"
 MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
@@ -355,6 +356,7 @@ class AgentMemory:
                 "source": "tool_result",
                 "timestamp_s": time.time(),
             }
+        placement_candidates_updated = self._capture_placement_candidates(action)
         world_mutated = self._record_successful_world_mutation(action)
         gripper_state_updated = self._capture_gripper_command_state(action)
         placement_release_denied = self._capture_placement_release_denial(action)
@@ -368,6 +370,8 @@ class AgentMemory:
         lift_probe_updated = self._capture_grasp_lift_probe_result(action)
         execution_updated = self._advance_grasp_execution(action)
         reconciliation_updated = self._capture_motion_reconciliation(action)
+        placement_candidate_advanced = self._advance_placement_candidate_after_motion(action)
+        placement_recovery_updated = self._advance_placement_recovery(action)
         recovery_updated = self._advance_grasp_recovery(action)
         estimation_recovery_updated = self._advance_grasp_estimation_recovery(action)
         candidate_advanced = self._advance_anygrasp_candidate_after_rejection(action)
@@ -401,6 +405,7 @@ class AgentMemory:
             or world_mutated
             or placement_release_denied
             or placement_release_updated
+            or placement_candidates_updated
             or lift_probe_updated
             or articulated_probe_prepared
             or articulated_probe_updated
@@ -408,6 +413,8 @@ class AgentMemory:
             or attachment_updated
             or articulated_assessment_updated
             or reconciliation_updated
+            or placement_candidate_advanced
+            or placement_recovery_updated
             or recovery_updated
             or estimation_recovery_updated
             or gripper_state_updated
@@ -869,6 +876,9 @@ class AgentMemory:
     def placement_release(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(PLACEMENT_RELEASE_KEY))
 
+    def placement_candidate_policy(self) -> JsonDict | None:
+        return _memory_fact_value(self.facts.get(PLACEMENT_CANDIDATE_POLICY_KEY))
+
     def motion_reconciliation(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(MOTION_RECONCILIATION_KEY))
 
@@ -967,7 +977,6 @@ class AgentMemory:
             "camera_pose_to_world",
             "move_to",
             "follow_eef_trajectory",
-            "ik_preview_check",
             "obstacle_avoidance",
         }:
             return None
@@ -1223,7 +1232,7 @@ class AgentMemory:
                 "result_id": result_id,
                 "source_image": pending.get("source_image"),
                 # Preserve the current observation identity alongside the
-                # selected mask.  M5's strict RGB-D bridge requires this
+                # selected mask.  perception-bridge's strict RGB-D bridge requires this
                 # exact frame association and must never infer it from a file
                 # name or a unique camera count.
                 "source_frame_id": pending.get("frame_id"),
@@ -2443,7 +2452,6 @@ class AgentMemory:
             and existing.get("hover_completed_scene_epoch") is not None
         ):
             for key in (
-                "ik_passed",
                 "collision_check_passed",
                 "hover_completed_scene_epoch",
                 "hover_target_pose",
@@ -2484,10 +2492,7 @@ class AgentMemory:
             return False
         outputs = _tool_call_outputs(call)
         success = _call_result_success(call)
-        if name == "ik_preview_check":
-            passed = success and outputs.get("feasible") is True
-            recovery["ik_passed"] = passed
-        elif name == "obstacle_avoidance":
+        if name == "obstacle_avoidance":
             passed = success and outputs.get("clear") is True
             recovery["collision_check_passed"] = passed
         elif name == "move_to":
@@ -2504,13 +2509,9 @@ class AgentMemory:
                         "tool": name,
                         "reason": _call_failure_reason(call),
                         "hard_rejection": (
-                            "ik_unreachable"
-                            if name == "ik_preview_check"
-                            else (
-                                "collision_or_unsafe_path"
-                                if name == "obstacle_avoidance"
-                                else "refinement_hover_motion_failed"
-                            )
+                            "collision_or_unsafe_path"
+                            if name == "obstacle_avoidance"
+                            else "refinement_hover_motion_failed"
                         ),
                     },
                     "completed_at_s": time.time(),
@@ -3009,6 +3010,8 @@ class AgentMemory:
         if call is None:
             return False
         outputs = _tool_call_outputs(call)
+        if outputs.get("schema_version") == "openeta.compiled_placement_seed.v1":
+            return self._capture_compiled_placement(outputs)
         if outputs.get("schema_version") != "openeta.compiled_grasp_seed.v1":
             return False
         policy = self.anygrasp_candidate_policy() or {}
@@ -3092,6 +3095,269 @@ class AgentMemory:
                 "scene_epoch": self.scene_epoch(),
             },
         )
+        return True
+
+    def _capture_placement_candidates(self, action: EnvAction) -> bool:
+        call = _successful_tool_call(action, "anyplace")
+        if call is None:
+            return False
+        outputs = _tool_call_outputs(call)
+        candidates = outputs.get("placement_candidates")
+        if not isinstance(candidates, list) or not candidates:
+            return False
+        source_grasp_id = str(outputs.get("selected_grasp_id") or "")
+        queue = [
+            str(candidate.get("id") or "")
+            for candidate in candidates
+            if isinstance(candidate, dict) and str(candidate.get("id") or "")
+        ]
+        if not source_grasp_id or not queue:
+            return False
+        latest_receipt = self.latest_environment_receipt() or {}
+        scene_revision = latest_receipt.get("planning_scene_revision")
+        if scene_revision is None:
+            scene_revision = latest_receipt.get("scene_revision", self.scene_epoch())
+        policy = {
+            "schema_version": "openeta.placement_candidate_policy.v1",
+            "status": "selection_required",
+            "candidate_queue": queue,
+            "source_grasp_id": source_grasp_id,
+            "active_candidate_id": None,
+            "rejected_candidates": [],
+            "failed_request_fingerprints": [],
+            "scene_revision": outputs.get("scene_revision", scene_revision),
+            "scene_epoch": self.scene_epoch(),
+            "selection_source": None,
+        }
+        self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy, source="anyplace"
+        )
+        self.record("placement_candidates_retained", dict(policy))
+        return True
+
+    def _capture_compiled_placement(self, outputs: JsonDict) -> bool:
+        policy = self.placement_candidate_policy()
+        if not isinstance(policy, dict):
+            return False
+        candidate_id = str(outputs.get("placement_candidate_id") or "")
+        rejected = {
+            str(item.get("candidate_id") or "")
+            for item in policy.get("rejected_candidates", [])
+            if isinstance(item, dict)
+        }
+        if (
+            policy.get("status") != "selection_required"
+            or candidate_id not in policy.get("candidate_queue", [])
+            or candidate_id in rejected
+            or str(outputs.get("source_grasp_id") or "") != str(policy.get("source_grasp_id") or "")
+            or _optional_int(outputs.get("scene_epoch"), default=-1) != self.scene_epoch()
+            or _optional_int(outputs.get("scene_revision"), default=-1)
+            != _optional_int(policy.get("scene_revision"), default=-2)
+        ):
+            return False
+        policy.update(
+            {
+                "status": "active",
+                "active_candidate_id": candidate_id,
+                "selection_source": "main_agent_vlm",
+                "compiled_placement": dict(outputs),
+            }
+        )
+        self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy, source="compile_grasp_seed"
+        )
+        self.record(
+            "placement_candidate_selected",
+            {
+                "placement_candidate_id": candidate_id,
+                "source_grasp_id": outputs.get("source_grasp_id"),
+                "scene_revision": policy.get("scene_revision"),
+                "selection_source": "main_agent_vlm",
+            },
+        )
+        return True
+
+    def _advance_placement_candidate_after_motion(self, action: EnvAction) -> bool:
+        policy = self.placement_candidate_policy()
+        if not isinstance(policy, dict) or policy.get("status") != "active":
+            return False
+        call = _tool_call(action, "move_to")
+        if not isinstance(call, dict):
+            return False
+        request = call.get("parameters")
+        if not isinstance(request, dict):
+            request = call.get("request")
+        target = request.get("target_pose") if isinstance(request, dict) else None
+        if not isinstance(target, dict) or target.get("purpose") != "placement":
+            return False
+        result = call.get("result")
+        details = result.get("details") if isinstance(result, dict) else None
+        details = details if isinstance(details, dict) else {}
+        outputs = details.get("outputs")
+        outputs = outputs if isinstance(outputs, dict) else {}
+        receipt = details.get("environment_receipt")
+        if not isinstance(receipt, dict):
+            receipt = outputs.get("response")
+        receipt = receipt if isinstance(receipt, dict) else outputs
+        candidate_id = str(policy.get("active_candidate_id") or "")
+        requested_candidate_id = str(target.get("placement_candidate_id") or "")
+        if not candidate_id or requested_candidate_id != candidate_id:
+            policy.update(
+                {
+                    "status": "stopped_requires_human",
+                    "stop_reason": "placement_candidate_identity_mismatch",
+                }
+            )
+            self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy, source="placement_candidate_identity_mismatch"
+            )
+            return True
+        if receipt.get("error_code") == "MOTION_OUTCOME_UNKNOWN" or receipt.get(
+            "motion_outcome"
+        ) == "unknown":
+            policy.update(
+                {
+                    "status": "stopped_requires_human",
+                    "stop_reason": "motion_outcome_unknown",
+                }
+            )
+            self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy, source="placement_motion_unknown"
+            )
+            return True
+        result_success = result.get("success") if isinstance(result, dict) else None
+        if result_success is False and not (
+            receipt.get("error_code") == "MOTION_PLAN_FAILED"
+            and receipt.get("execution_started") is False
+        ):
+            policy.update(
+                {
+                    "status": "stopped_requires_human",
+                    "stop_reason": "placement_motion_may_have_started",
+                }
+            )
+            self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy, source="placement_motion_uncertain"
+            )
+            return True
+        if (
+            receipt.get("error_code") != "MOTION_PLAN_FAILED"
+            or receipt.get("execution_started") is not False
+        ):
+            return False
+        fingerprint = str(receipt.get("request_fingerprint") or "").strip()
+        failed = list(policy.get("failed_request_fingerprints") or [])
+        if fingerprint and fingerprint in failed:
+            policy.update(
+                {
+                    "status": "stopped_requires_human",
+                    "stop_reason": "repeated_failed_request_fingerprint",
+                }
+            )
+            self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy, source="placement_fingerprint_repeated"
+            )
+            return True
+        if fingerprint and fingerprint not in failed:
+            failed.append(fingerprint)
+        rejected = list(policy.get("rejected_candidates") or [])
+        rejected.append(
+            {
+                "candidate_id": candidate_id,
+                "request_fingerprint": fingerprint,
+                "moveit_error_code": receipt.get("moveit_error_code"),
+                "planned_point_count": receipt.get("planned_point_count", 0),
+                "scene_revision": receipt.get("scene_revision", policy.get("scene_revision")),
+                "reason": (
+                    "planning failed for this current joint state, target, tolerances, and scene"
+                ),
+            }
+        )
+        remaining = [
+            candidate
+            for candidate in policy.get("candidate_queue", [])
+            if candidate not in {str(item.get("candidate_id") or "") for item in rejected}
+        ]
+        policy.update(
+            {
+                "active_candidate_id": None,
+                "compiled_placement": None,
+                "rejected_candidates": rejected,
+                "failed_request_fingerprints": failed,
+                "status": "selection_required" if remaining else "exhausted_return_required",
+            }
+        )
+        if not remaining:
+            execution = self.grasp_execution() or {}
+            compiled_grasp = execution.get("compiled_grasp")
+            source_hover = (
+                compiled_grasp.get("hover_pose") if isinstance(compiled_grasp, dict) else None
+            )
+            source_capture = (
+                compiled_grasp.get("contact_pose") if isinstance(compiled_grasp, dict) else None
+            )
+            policy["recovery"] = {
+                "stage": "return_source_hover",
+                "source_hover_pose": source_hover,
+                "source_capture_pose": source_capture,
+                "then": "open_detach_reobserve_regrasp_and_rerun_anyplace",
+            }
+        self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy, source="placement_candidate_rejected"
+        )
+        self.record("placement_candidate_rejected", dict(rejected[-1]))
+        return True
+
+    def _advance_placement_recovery(self, action: EnvAction) -> bool:
+        policy = self.placement_candidate_policy()
+        if not isinstance(policy, dict) or policy.get("status") != "exhausted_return_required":
+            return False
+        recovery = policy.get("recovery")
+        if not isinstance(recovery, dict):
+            return False
+        stage = str(recovery.get("stage") or "")
+        if stage in {"return_source_hover", "return_source_capture"}:
+            call = _successful_tool_call(action, "move_to")
+            if call is None:
+                return False
+            parameters = call.get("parameters")
+            if not isinstance(parameters, dict):
+                command = action.command if isinstance(action.command, dict) else {}
+                request = command.get("request")
+                parameters = request.get("parameters") if isinstance(request, dict) else None
+            target = parameters.get("target_pose") if isinstance(parameters, dict) else None
+            if not isinstance(target, dict) or target.get("placement_recovery_stage") != stage:
+                return False
+            recovery["stage"] = (
+                "return_source_capture" if stage == "return_source_hover" else "open_detach"
+            )
+        elif stage == "open_detach":
+            call = _successful_tool_call(action, "gripper_control")
+            if call is None:
+                return False
+            result = call.get("result")
+            details = result.get("details") if isinstance(result, dict) else None
+            details = details if isinstance(details, dict) else {}
+            receipt = details.get("environment_receipt")
+            if not isinstance(receipt, dict):
+                outputs = details.get("outputs")
+                receipt = outputs.get("response") if isinstance(outputs, dict) else None
+            if (
+                not isinstance(receipt, dict)
+                or not isinstance(receipt.get("detachable_joint"), dict)
+                or receipt["detachable_joint"].get("state") != "detached"
+                or not isinstance(receipt.get("planning_scene_revision"), int)
+            ):
+                return False
+            recovery["stage"] = "reobserve_regrasp"
+            policy["status"] = "reobserve_regrasp_required"
+        else:
+            return False
+        policy["recovery"] = recovery
+        self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy, source="placement_exhaustion_recovery"
+        )
+        self.record("placement_recovery_advanced", {"stage": recovery["stage"]})
         return True
 
     def _capture_articulated_attachment_probe(self, action: EnvAction) -> bool:
@@ -4647,6 +4913,7 @@ class AgentMemory:
             "gripper_command_state": self.gripper_command_state(),
             "attachment_gate": self.attachment_gate(),
             "placement_release": self.placement_release(),
+            "placement_candidate_policy": self.placement_candidate_policy(),
             "motion_reconciliation": self.motion_reconciliation(),
             "scene_epoch": self.scene_epoch(),
             "transition_ledger": self.transition_ledger()[-12:],
@@ -5938,7 +6205,7 @@ def _is_grasp_estimation_recovery_action(
     if (
         not isinstance(recovery, dict)
         or recovery.get("status") != "required"
-        or tool_name not in {"ik_preview_check", "obstacle_avoidance", "move_to"}
+        or tool_name not in {"obstacle_avoidance", "move_to"}
     ):
         return False
     recovery_id = str(recovery.get("recovery_id") or "")
@@ -6678,11 +6945,11 @@ def _extract_placement_candidate_artifacts(
             "selected_grasp_id": source.get("selected_grasp_id"),
             "placement_candidates": compact_candidates,
             "source": source.get("source"),
+            "candidate_image_ref": source.get("candidate_image_ref"),
             "raw_output_ref": source.get("raw_output_ref"),
             "next_tool_hint": (
-                "After pickup is visually verified, choose one complete "
-                "placement_candidates[i].place_grasp_pose and transform it with "
-                "camera_pose_to_world using the matching pre-grasp camera extrinsics."
+                "Choose a retained placement candidate id with the main VLM, then call "
+                "compile_grasp_seed(purpose=placement); raw AnyPlace poses are not executable."
             ),
         }
     ]
@@ -6802,6 +7069,8 @@ def summarize_memory_artifact(artifact: JsonDict) -> JsonDict:
             "grasp_candidates",
             "selected_grasp_id",
             "placement_candidates",
+            "candidate_image_ref",
+            "source",
             "source_rgb",
             "source_depth",
             "source_sensor_confidence",
@@ -6840,6 +7109,7 @@ def summarize_memory_artifact(artifact: JsonDict) -> JsonDict:
                     "grasp_candidates",
                     "placement_candidates",
                     "selected_grasp_source",
+                    "source",
                     "world_pose",
                     "extrinsics",
                     "rotation_matrix",

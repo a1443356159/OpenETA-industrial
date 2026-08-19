@@ -1,4 +1,4 @@
-"""M2 RM75 + Robotiq 2F-85 control contracts.
+"""RM75 + Robotiq 2F-85 control contracts.
 
 The module deliberately contains no ROS imports.  ROS action clients and TF/
 joint-state subscriptions are injected by the deployment adapter, which keeps
@@ -8,6 +8,8 @@ the worker contract testable on machines without Jazzy installed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import math
 from pathlib import Path
 import time
@@ -15,7 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from adapter.protocol import RobotState
 
-M2_ENV_ID = "openeta/gazebo_rm75_robotiq2f85-v0"
+GAZEBO_CONTROL_ENV_ID = "openeta/gazebo_rm75_robotiq2f85-v0"
 MODEL_ID = "rm75_robotiq_2f85_sim_v1"
 ARM_JOINTS = tuple(f"joint_{i}" for i in range(1, 8))
 GRIPPER_JOINTS = (
@@ -36,14 +38,14 @@ ARM_JOINT_BOUNDS = (
     ("joint_6", -2.234, 2.234),
     ("joint_7", -6.28, 6.28),
 )
-START_STATE_RECOVERY_SCHEMA_VERSION = "m2_start_state_recovery_v1"
+START_STATE_RECOVERY_SCHEMA_VERSION = "openeta.gazebo.start_state_recovery.v1"
 START_STATE_BOUNDS_TOLERANCE_RAD = 1e-6
 START_STATE_RECOVERY_INSET_RAD = 1e-3
 START_STATE_RECOVERY_TRAJECTORY_S = 1.0
 START_STATE_RECOVERY_TIMEOUT_S = 5.0
 # These targets are relative to the first fresh mount pose after a reset, not
 # absolute world coordinates.  They are the small, validated neutral motions
-# available in the empty M2 profile.  Publishing the relation in the existing
+# available in the empty motion-control profile.  Publishing the relation in the existing
 # control_spec lets an agent use the runtime contract instead of guessing a
 # lateral Cartesian target from an image or a model prior.
 NEUTRAL_RELATIVE_MOTION_TARGETS = (
@@ -58,6 +60,8 @@ ERROR_CODES = frozenset(
         "JOINT_STATE_TIMEOUT",
         "TF_TIMEOUT",
         "MOVE_GROUP_UNAVAILABLE",
+        "PLANNING_SCENE_UNAVAILABLE",
+        "PLANNING_SCENE_SYNC_FAILED",
         "START_STATE_INVALID",
         "START_STATE_RECOVERY_FAILED",
         "MOTION_PLAN_FAILED",
@@ -75,7 +79,7 @@ ERROR_CODES = frozenset(
 
 
 def neutral_relative_motion_guidance() -> dict[str, Any]:
-    """Return a fresh, serializable M2 neutral-motion capability.
+    """Return a fresh, serializable motion-control neutral-motion capability.
 
     This is descriptive runtime guidance, never an executable macro: callers
     still form one normal ``move_to`` target at a time and must honor the
@@ -259,7 +263,7 @@ def start_state_recovery_record(
     post_joint_state_timestamp_s: float | None = None,
     trajectory_result_code: int | None = None,
 ) -> dict[str, Any]:
-    """Build the stable, JSON-safe M2/M3 recovery evidence envelope."""
+    """Build the stable, JSON-safe motion-control/native-grasp recovery evidence envelope."""
 
     return {
         "schema_version": START_STATE_RECOVERY_SCHEMA_VERSION,
@@ -278,7 +282,7 @@ def start_state_recovery_record(
 
 
 @dataclass(frozen=True, slots=True)
-class M2Config:
+class GazeboControlConfig:
     model_id: str = MODEL_ID
     base_link: str = "base_link"
     arm_tip: str = "link_7"
@@ -332,7 +336,7 @@ class M2Config:
         return JOINT_NAMES
 
     def validate_assets(self, *, require_vendor: bool = True) -> None:
-        del require_vendor  # Compatibility with the early M2 contract.
+        del require_vendor  # Compatibility with the early motion-control contract.
         try:
             from .asset_preflight import validate_asset_root
 
@@ -402,9 +406,9 @@ def gripper_state(
     *,
     reached_goal: bool = True,
     stalled: bool = False,
-    config: M2Config | None = None,
+    config: GazeboControlConfig | None = None,
 ) -> dict[str, Any]:
-    cfg = config or M2Config()
+    cfg = config or GazeboControlConfig()
     aperture = cfg.calibration.aperture_from_angle(float(active_position_m))
     p = max(cfg.closed_position_m, min(cfg.active_open_position_m, aperture / 2.0))
     openness = p / cfg.active_open_position_m
@@ -425,10 +429,10 @@ def robot_state_from_sources(
     joint_state: Mapping[str, Sequence[float]],
     tf: Mapping[str, Any],
     *,
-    config: M2Config | None = None,
+    config: GazeboControlConfig | None = None,
 ) -> RobotState:
     """Build state only when all required joints and the configured TF exist."""
-    cfg = config or M2Config()
+    cfg = config or GazeboControlConfig()
     names = list(joint_state.get("name", ()))
     required_names = tuple(getattr(cfg, "joint_names", JOINT_NAMES))
     positions = list(joint_state.get("position", ()))
@@ -462,10 +466,10 @@ def robot_state_from_sources(
 def make_move_group_goal(
     target_pose: Mapping[str, Sequence[float]],
     *,
-    config: M2Config | None = None,
+    config: GazeboControlConfig | None = None,
     tolerances: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
-    cfg = config or M2Config()
+    cfg = config or GazeboControlConfig()
     xyz, quat = target_pose.get("xyz"), target_pose.get("quat_xyzw")
     if xyz is None or quat is None or len(xyz) != 3 or len(quat) != 4:
         raise ValueError("target pose must contain xyz and quat_xyzw")
@@ -504,7 +508,7 @@ def make_move_group_goal(
             )
         ),
         # Carrying moves may request gentler trajectory scaling; the default
-        # preserves the long-standing M2/M3 motion contract.
+        # preserves the long-standing motion-control/native-grasp motion contract.
         "max_velocity_scaling_factor": float(
             (tolerances or {}).get("max_velocity_scaling_factor", 0.3)
         ),
@@ -560,7 +564,7 @@ def _q_rotate(q: Sequence[float], v: Sequence[float]) -> tuple[float, float, flo
 
 
 @dataclass(slots=True)
-class M2ControlResult:
+class GazeboControlResult:
     ok: bool
     error_code: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
@@ -573,7 +577,24 @@ class M2ControlResult:
         }
 
 
-class M2Controller:
+def motion_request_fingerprint(
+    *, start: RobotState, goal: Mapping[str, Any], scene_revision: int
+) -> str:
+    """Hash exactly the state-dependent MoveIt request identity used for recovery."""
+
+    payload = {
+        "joint_positions": [round(float(value), 12) for value in start.joint_positions],
+        "target_pose": goal.get("requested_tool_pose"),
+        "position_tolerance_m": goal.get("position_tolerance_m"),
+        "orientation_tolerance_rad": goal.get("orientation_tolerance_rad"),
+        "scene_revision": int(scene_revision),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+class GazeboController:
     """Action facade. ``move_action``/``gripper_action`` return action results."""
 
     def __init__(
@@ -585,13 +606,17 @@ class M2Controller:
         start_state_recovery: Callable[[RobotState, float], Mapping[str, Any]] | None = None,
         cancel_pending: Callable[[], None] | None = None,
         close_source: Callable[[], None] | None = None,
-        config: M2Config | None = None,
+        scene_revision_provider: Callable[[], int] | None = None,
+        motion_scene_ready: Callable[[], bool] | None = None,
+        config: GazeboControlConfig | None = None,
     ):
-        self.config = config or M2Config()
+        self.config = config or GazeboControlConfig()
         self.state_provider = state_provider
         self.move_action, self.gripper_action = move_action, gripper_action
         self.start_state_recovery = start_state_recovery
         self.cancel_pending, self.close_source = cancel_pending, close_source
+        self.scene_revision_provider = scene_revision_provider or (lambda: 0)
+        self.motion_scene_ready = motion_scene_ready or (lambda: True)
         self._closed = False
 
     def close(self) -> None:
@@ -603,15 +628,27 @@ class M2Controller:
             self.close_source()
         self._closed = True
 
-    def execute(self, action: Mapping[str, Any]) -> M2ControlResult:
+    def execute(self, action: Mapping[str, Any]) -> GazeboControlResult:
         kind = action.get("action_type")
         try:
             if kind == "move_to":
                 if self.move_action is None:
-                    return M2ControlResult(False, "MOVE_GROUP_UNAVAILABLE")
+                    return GazeboControlResult(False, "MOVE_GROUP_UNAVAILABLE")
+                if not self.motion_scene_ready():
+                    return GazeboControlResult(
+                        False,
+                        "PLANNING_SCENE_UNAVAILABLE",
+                        {"motion_outcome": "failed", "execution_started": False},
+                    )
                 start = self.state_provider()
                 goal = make_move_group_goal(
                     action["target_pose"], config=self.config, tolerances=action
+                )
+                scene_revision = int(self.scene_revision_provider())
+                request_fingerprint = motion_request_fingerprint(
+                    start=start,
+                    goal=goal,
+                    scene_revision=scene_revision,
                 )
                 timeout_s = float(action.get("timeout_s", 30.0))
                 recovery_result: dict[str, Any] | None = None
@@ -676,7 +713,7 @@ class M2Controller:
                             )
                             if key in recovery_result
                         }
-                        return M2ControlResult(
+                        return GazeboControlResult(
                             False,
                             str(
                                 recovery_result.get("error_code")
@@ -718,7 +755,7 @@ class M2Controller:
                         for key in ("action_started_ros_time_s",)
                         if recovery_result is not None and key in recovery_result
                     }
-                    return M2ControlResult(
+                    return GazeboControlResult(
                         False,
                         "MOTION_OUTCOME_UNKNOWN",
                         {
@@ -760,7 +797,7 @@ class M2Controller:
                         action_timing["action_started_ros_time_s"] = recovery_result[
                             "action_started_ros_time_s"
                         ]
-                    return M2ControlResult(
+                    return GazeboControlResult(
                         False,
                         "MOTION_OUTCOME_UNKNOWN",
                         {
@@ -785,7 +822,7 @@ class M2Controller:
                         },
                     )
                 if type(result.get("ok")) is not bool:
-                    return M2ControlResult(
+                    return GazeboControlResult(
                         False,
                         "MOTION_OUTCOME_UNKNOWN",
                         {
@@ -821,6 +858,8 @@ class M2Controller:
                         "action_started_ros_time_s",
                         "action_completed_ros_time_s",
                         "moveit_error_code",
+                        "planned_point_count",
+                        "execution_started",
                     )
                     if key in result
                 }
@@ -831,6 +870,8 @@ class M2Controller:
                 )
                 if recovery_started is not None:
                     action_evidence["action_started_ros_time_s"] = recovery_started
+                action_evidence["scene_revision"] = scene_revision
+                action_evidence["request_fingerprint"] = request_fingerprint
                 position_error_m, orientation_error_rad = _pose_goal_errors(
                     end.end_effector_pose, goal["requested_tool_pose"]
                 )
@@ -852,7 +893,7 @@ class M2Controller:
                     ok = False
                     error = "MOTION_TARGET_NOT_REACHED"
                     extra = {}
-                return M2ControlResult(
+                return GazeboControlResult(
                     ok,
                     error,
                     {
@@ -895,7 +936,7 @@ class M2Controller:
                 )
             if kind in ("gripper_open", "gripper_close"):
                 if self.gripper_action is None:
-                    return M2ControlResult(False, "GRIPPER_UNAVAILABLE")
+                    return GazeboControlResult(False, "GRIPPER_UNAVAILABLE")
                 p = self.config.gripper_position(1 if kind == "gripper_open" else 0)
                 try:
                     # The RGB-D Harmonic stack can run below real time on a
@@ -904,18 +945,18 @@ class M2Controller:
                     # the simulated joint is still making progress.
                     result = dict(self.gripper_action(p, float(action.get("timeout_s", 90.0))))
                 except TimeoutError:
-                    return M2ControlResult(False, "GRIPPER_TIMEOUT")
+                    return GazeboControlResult(False, "GRIPPER_TIMEOUT")
                 state = self.state_provider()
                 if type(result.get("ok")) is not bool:
-                    return M2ControlResult(
+                    return GazeboControlResult(
                         False,
                         "MOTION_OUTCOME_UNKNOWN",
                         {"motion_outcome": "unknown", "reconciliation_required": True},
                     )
                 reached_goal = bool(result.get("reached_goal", result["ok"]))
                 stalled = bool(result.get("stalled", False))
-                # The M3 profile explicitly allows a successful stalled close
-                # as an input to its independent native-contact gate.  M2's
+                # The native-grasp profile explicitly allows a successful stalled close
+                # as an input to its independent native-contact gate.  motion-control's
                 # default profile never credits a stalled or unreached action,
                 # even if a lower adapter incorrectly labels it ``ok``.
                 if bool(getattr(self.config, "allow_stalling", False)):
@@ -936,7 +977,7 @@ class M2Controller:
                     )
                     if key in result
                 }
-                return M2ControlResult(
+                return GazeboControlResult(
                     ok,
                     result.get("error_code") or (None if ok else "GRIPPER_FAILED"),
                     {
@@ -956,13 +997,13 @@ class M2Controller:
                         },
                     },
                 )
-            return M2ControlResult(False, "INVALID_CONTROL_ACTION")
+            return GazeboControlResult(False, "INVALID_CONTROL_ACTION")
         except KeyError:
-            return M2ControlResult(False, "INVALID_CONTROL_ACTION")
+            return GazeboControlResult(False, "INVALID_CONTROL_ACTION")
         except (TypeError, ValueError):
-            return M2ControlResult(False, "INVALID_CONTROL_ACTION")
+            return GazeboControlResult(False, "INVALID_CONTROL_ACTION")
         except RuntimeError as exc:
             code = str(exc)
-            return M2ControlResult(
+            return GazeboControlResult(
                 False, code if code in ERROR_CODES else "ROBOT_STATE_UNAVAILABLE"
             )

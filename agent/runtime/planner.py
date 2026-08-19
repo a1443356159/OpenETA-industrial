@@ -76,7 +76,7 @@ _PLACEMENT_RELEASE_Z_TOLERANCE_M = 0.01
 _PLACEMENT_POST_RELEASE_RETREAT_M = 0.10
 _REFERENCE_VERIFIED_SAM3_MIN_SCORE = 0.90
 _REFERENCE_VERIFIED_SAM3_MIN_MARGIN = 0.20
-_GRASP_FALLBACK_BACKEND_ORDER = ("anygrasp", "contact_graspnet", "graspgenx")
+_GRASP_FALLBACK_BACKEND_ORDER = ("graspgenx", "anygrasp", "contact_graspnet")
 _MOLMOPOINT_FALLBACK_MAX_ATTEMPTS = 2
 _CAMERA_ROLE_PREFERENCE = {
     "scene_primary": 0,
@@ -766,7 +766,6 @@ def _host_obligation_decision(
             in {
                 "sam3",
                 "grasp_pose_estimate",
-                "ik_preview_check",
                 "obstacle_avoidance",
                 "move_to",
                 "activate_final_grasp_candidate",
@@ -782,10 +781,6 @@ def _host_obligation_decision(
                 "alternate_camera_estimation": (
                     "The alternate camera target is selected; run the normalized "
                     "grasp estimator on this view before changing backend."
-                ),
-                "wrist_refinement_ik": (
-                    "Check inverse-kinematics feasibility for the host-generated "
-                    "target-centric wrist observation hover."
                 ),
                 "wrist_refinement_collision_check": (
                     "Check the target-centric wrist observation hover path for obstacles."
@@ -1412,7 +1407,11 @@ def _host_obligation_decision(
             )
     if (
         isinstance(placement_motion, dict)
-        and placement_motion.get("stage") in {"attachment_lost", "placement_drop_detected"}
+        and placement_motion.get("stage") in {
+            "attachment_lost",
+            "placement_drop_detected",
+            "recovery_open_detach",
+        }
         and tools.can_execute("gripper_control")
     ):
         placed_early = placement_motion.get("stage") == "placement_drop_detected"
@@ -1427,6 +1426,8 @@ def _host_obligation_decision(
                 else (
                     "Post-lift telemetry shows an empty closed gripper; reopen through "
                     "independent review so the ranked candidate can be rejected."
+                    if placement_motion.get("stage") == "attachment_lost"
+                    else "The verified source return completed; open and require detach ACK."
                 )
             ),
             metadata={
@@ -1464,20 +1465,25 @@ def _host_obligation_decision(
             )
     if isinstance(placement_motion, dict):
         stage = str(placement_motion.get("stage") or "")
-        next_pose = placement_motion.get("safe_hover_pose")
+        parameters = placement_motion.get("required_parameters")
         if (
-            stage in {"carry_raise", "carry_hover", "descend", "release"}
-            and isinstance(next_pose, dict)
+            stage in {
+                "hover",
+                "descend",
+                "release",
+                "return_source_hover",
+                "return_source_capture",
+            }
+            and isinstance(parameters, dict)
             and tools.can_execute("move_to")
         ):
             return PlannerDecision(
                 action_type="tool_call",
                 action="move_to",
-                parameters={"target_pose": dict(next_pose)},
+                parameters=dict(parameters),
                 reasoning=(
-                    "The attached-object placement has one host-derived waypoint for "
-                    f"stage {stage}; dispatch it directly while retaining fresh-image "
-                    "independent review."
+                    "The attached-object placement has one compiled MoveIt target for "
+                    f"stage {stage}; dispatch it with the constraint-correct-placement transport tolerances."
                 ),
                 metadata={
                     "host_obligation": {
@@ -2834,7 +2840,10 @@ def _validate_anygrasp_candidate_policy(
         ]
     active_id = str(active.get("id") or "")
     if target_tool == "camera_pose_to_world" and _planner_is_anyplace_pose(decision.parameters):
-        return []
+        return [
+            "Raw AnyPlace poses are not valid EEF targets; select an id with "
+            "compile_grasp_seed(purpose=placement)."
+        ]
     if (
         source_tool in {"grasp_pose_estimate", "anygrasp"}
         and target_tool == "camera_pose_to_world"
@@ -3089,9 +3098,7 @@ def _validate_pick_place_anyplace_obligation(
     }
     if "anyplace" not in executable_tools:
         return []
-    policy = tool_context.get("grasp_candidate_policy")
-    retained = tool_context.get("retained_targeted_grasp")
-    retained_source = retained.get("source") if isinstance(retained, dict) else None
+    placement_policy = tool_context.get("placement_candidate_policy")
     execution = tool_context.get("grasp_execution")
     attachment = tool_context.get("attachment_gate")
     attachment_passed = (
@@ -3103,20 +3110,49 @@ def _validate_pick_place_anyplace_obligation(
         and attachment.get("status") == "resolved"
         and attachment.get("verdict") == "PASS"
     )
+    if decision.action == "anyplace" and not attachment_passed:
+        return [
+            "AnyPlace placement inference starts only after the source grasp passes "
+            "attach and lift verification. Preserve the frozen pre-grasp RGB-D until then."
+        ]
+    if decision.action == "camera_pose_to_world" and _planner_is_anyplace_pose(
+        decision.parameters
+    ):
+        return [
+            "Raw AnyPlace poses cannot be transformed or executed directly. Select a "
+            "retained id with compile_grasp_seed(purpose=placement)."
+        ]
+    if decision.action == "compile_grasp_seed" and str(
+        decision.parameters.get("purpose") or "grasp"
+    ) == "placement":
+        if not isinstance(placement_policy, dict):
+            return ["No retained AnyPlace candidate set is available for placement compilation."]
+        allowed = list(placement_policy.get("candidate_queue") or [])
+        rejected = {
+            str(item.get("candidate_id") or "")
+            for item in placement_policy.get("rejected_candidates", [])
+            if isinstance(item, dict)
+        }
+        candidate_id = str(decision.parameters.get("placement_candidate_id") or "")
+        if set(decision.parameters) != {"purpose", "placement_candidate_id"}:
+            return [
+                "For purpose=placement the main VLM selects only placement_candidate_id; "
+                "the host owns pose, source grasp, extrinsics, calibration, and scene state."
+            ]
+        if candidate_id not in allowed or candidate_id in rejected:
+            return ["Select one non-rejected id from the retained AnyPlace candidate queue."]
+        return []
+    policy = tool_context.get("grasp_candidate_policy")
+    retained = tool_context.get("retained_targeted_grasp")
+    retained_source = retained.get("source") if isinstance(retained, dict) else None
     placement = tool_context.get("placement_obligation")
     required_placement = (
         placement.get("required_parameters") if isinstance(placement, dict) else None
     )
-    if decision.action == "anyplace" and not attachment_passed:
-        return [
-            "AnyPlace must wait until the final grasp candidate passes the lift probe "
-            "and attachment gate. Compile and execute the active grasp first so the "
-            "placement pose is bound to the candidate that actually holds the object."
-        ]
     if decision.action == "anyplace" and not isinstance(required_placement, dict):
         return [
-            "AnyPlace requires a post-attachment placement_obligation. Segment the "
-            "receptacle on retained_targeted_grasp.source.rgb after attachment PASS, "
+            "AnyPlace requires a placement_obligation built from the frozen pre-grasp "
+            "RGB-D. Segment the receptacle on retained_targeted_grasp.source.rgb, "
             "then copy the host-joined parameters exactly."
         ]
     if (
@@ -3400,7 +3436,12 @@ def _validate_placement_motion_guidance(
         return []
     stage = str(guidance.get("stage") or "")
     if decision.action == "gripper_control" and _gripper_open_requested(decision.parameters):
-        if stage in {"release", "attachment_lost", "placement_drop_detected"}:
+        if stage in {
+            "release",
+            "attachment_lost",
+            "placement_drop_detected",
+            "recovery_open_detach",
+        }:
             return []
         return [
             "Keep the gripper closed during placement carry. Move to the high "
@@ -3411,31 +3452,18 @@ def _validate_placement_motion_guidance(
     target_xyz = _pose_xyz(decision.parameters.get("target_pose"))
     if target_xyz is None:
         return ["Placement move_to requires a finite world-frame target pose."]
-    if stage in {"carry_raise", "carry_hover"}:
-        safe_hover = guidance.get("safe_hover_pose")
-        hover_xyz = _pose_xyz(safe_hover)
-        if hover_xyz is None:
-            return ["placement_motion_guidance.safe_hover_pose is malformed."]
-        xy_error = math.hypot(target_xyz[0] - hover_xyz[0], target_xyz[1] - hover_xyz[1])
-        z_error = abs(target_xyz[2] - hover_xyz[2])
-        if xy_error > _PLACEMENT_CARRY_ARRIVAL_TOLERANCE_M or z_error > 0.02:
+    if stage in {
+        "hover",
+        "descend",
+        "release",
+        "return_source_hover",
+        "return_source_capture",
+    }:
+        required = guidance.get("required_parameters")
+        if decision.parameters != required:
             return [
-                "Do not use a long or low carry for the attached object. Follow the "
-                "bounded placement_motion_guidance.safe_hover_pose waypoint while "
-                "preserving the current EEF orientation."
-            ]
-    elif stage == "descend":
-        release = guidance.get("release_pose")
-        release_xyz = _pose_xyz(release)
-        current_xyz = _pose_xyz(guidance.get("current_eef_pose"))
-        if release_xyz is None or current_xyz is None:
-            return ["placement_motion_guidance descend geometry is malformed."]
-        xy_error = math.hypot(target_xyz[0] - release_xyz[0], target_xyz[1] - release_xyz[1])
-        lateral_step = math.hypot(target_xyz[0] - current_xyz[0], target_xyz[1] - current_xyz[1])
-        if xy_error > _PLACEMENT_XY_TOLERANCE_M or lateral_step > (_PLACEMENT_XY_TOLERANCE_M):
-            return [
-                "After the pre-place hover, descend approximately vertically at the "
-                "receptacle; do not add another long lateral carry."
+                "Placement motion must use the exact compiled EEF target, full rotation, "
+                "0.002 m / 0.05 rad tolerances, and 0.1 velocity/acceleration scaling."
             ]
     return []
 
@@ -4247,15 +4275,6 @@ def _grasp_estimation_fallback_obligation(
             scene_epoch=scene_epoch,
         )
         if isinstance(hover_target, dict):
-            if recovery.get("ik_passed") is not True:
-                return {
-                    "schema_version": "openeta.grasp_estimation_recovery.v1",
-                    "status": "required",
-                    "stage": "wrist_refinement_ik",
-                    "required_tool": "ik_preview_check",
-                    "required_parameters": {"target_pose": hover_target},
-                    "recovery_id": recovery.get("recovery_id"),
-                }
             path = {
                 "kind": "grasp_estimation_refinement_hover",
                 "recovery_id": recovery.get("recovery_id"),
@@ -4917,7 +4936,7 @@ def _placement_transform_obligation(
     execution: object,
     attachment: object,
 ) -> JsonDict | None:
-    """Join retained AnyPlace output to calibration after attachment passes."""
+    """Expose id-only placement selection after attachment; never select for the VLM."""
 
     if (
         not isinstance(execution, dict)
@@ -4929,151 +4948,37 @@ def _placement_transform_obligation(
         or attachment.get("verdict") != "PASS"
     ):
         return None
-    entry = memory.artifacts.get("anyplace_placement_candidates_latest")
-    value = entry.get("value") if isinstance(entry, dict) else None
-    candidates = value.get("placement_candidates") if isinstance(value, dict) else None
-    if not isinstance(candidates, list) or not candidates:
+    policy = memory.placement_candidate_policy()
+    if not isinstance(policy, dict) or policy.get("status") != "selection_required":
         return None
-    selected, selection = _select_anyplace_candidate(
-        candidates,
-        anyplace_output=value if isinstance(value, dict) else {},
-        source_grasp_id=str(execution.get("candidate_id") or ""),
-    )
-    pose = selected.get("place_grasp_pose") if isinstance(selected, dict) else None
-    if not isinstance(pose, dict) or pose.get("frame") != "camera":
+    if str(policy.get("source_grasp_id") or "") != str(execution.get("candidate_id") or ""):
         return None
-    if str(pose.get("source_grasp_id") or "") != str(execution.get("candidate_id") or ""):
-        return None
-    transformed = memory.artifacts.get("camera_pose_to_world_world_pose_latest")
-    transformed_value = transformed.get("value") if isinstance(transformed, dict) else None
-    if isinstance(transformed_value, dict) and transformed_value.get("source_grasp_id") == pose.get(
-        "id"
-    ):
-        return None
-    compiled = execution.get("compiled_grasp")
-    explicit_frame_id = (
-        str(compiled.get("camera_frame_id") or "")
-        if isinstance(compiled, dict)
-        else ""
-    )
-    frame_id = explicit_frame_id or "agentview"
-    camera = next(
-        (camera for camera in observation.cameras if camera.frame_id == frame_id),
-        None,
-    )
-    if camera is None and not explicit_frame_id:
-        camera = next(
-            (
-                candidate
-                for candidate in observation.cameras
-                if _camera_matches(
-                    candidate,
-                    roles={"scene_primary"},
-                    legacy_frames=set(),
-                )
-            ),
-            None,
-        )
-        if camera is not None:
-            frame_id = camera.frame_id
-    if camera is None or not camera.extrinsics:
+    rejected = {
+        str(item.get("candidate_id") or "")
+        for item in policy.get("rejected_candidates", [])
+        if isinstance(item, dict)
+    }
+    remaining = [
+        str(candidate_id)
+        for candidate_id in policy.get("candidate_queue", [])
+        if str(candidate_id) not in rejected
+    ]
+    if not remaining:
         return None
     return {
-        "schema_version": "openeta.placement_transform_obligation.v1",
-        "required_tool": "camera_pose_to_world",
-        "required_parameters": {
-            "camera_pose": dict(pose),
-            "camera_extrinsics": dict(camera.extrinsics),
-            "camera_frame_id": frame_id,
+        "schema_version": "openeta.placement_selection_obligation.v1",
+        "status": "selection_required",
+        "required_tool": "compile_grasp_seed",
+        "allowed_parameters": {
+            "purpose": "placement",
+            "placement_candidate_id": remaining,
         },
-        "placement_candidate_id": selected.get("id"),
-        "source_grasp_id": pose.get("source_grasp_id"),
-        "selection": selection,
-    }
-
-
-def _select_anyplace_candidate(
-    candidates: list[object],
-    *,
-    anyplace_output: JsonDict,
-    source_grasp_id: str,
-) -> tuple[JsonDict, JsonDict]:
-    compatible = [
-        (index, dict(candidate))
-        for index, candidate in enumerate(candidates)
-        if isinstance(candidate, dict)
-        and isinstance(candidate.get("place_grasp_pose"), dict)
-        and str(candidate["place_grasp_pose"].get("source_grasp_id") or "") == source_grasp_id
-    ]
-    if not compatible:
-        return {}, {"policy": "no_compatible_candidate"}
-    source = anyplace_output.get("source")
-    source = source if isinstance(source, dict) else {}
-    region = source.get("placement_region_mask")
-    region = region if isinstance(region, dict) else {}
-    mask_ref = region.get("mask_ref")
-    intrinsics = source.get("intrinsics")
-    if not isinstance(mask_ref, str) or not isinstance(intrinsics, dict):
-        index, candidate = compatible[0]
-        return candidate, {"policy": "rank_zero_fallback", "original_rank": index}
-    try:
-        fx = float(intrinsics.get("fx"))
-        fy = float(intrinsics.get("fy"))
-        cx = float(intrinsics.get("cx"))
-        cy = float(intrinsics.get("cy"))
-        with Image.open(mask_ref) as image:
-            bbox = image.convert("L").getbbox()
-        if bbox is None:
-            raise ValueError("empty placement mask")
-        left, top, right, bottom = [float(value) for value in bbox]
-    except (OSError, TypeError, ValueError):
-        index, candidate = compatible[0]
-        return candidate, {"policy": "rank_zero_fallback", "original_rank": index}
-
-    center_x = (left + right) / 2.0
-    center_y = (top + bottom) / 2.0
-    ranked: list[tuple[float, float, int, JsonDict, list[float]]] = []
-    for index, candidate in compatible:
-        pose = candidate["place_grasp_pose"]
-        point = pose.get("gripper_tip_position_xyz") or pose.get("translation_xyz")
-        if not isinstance(point, list | tuple) or len(point) != 3:
-            continue
-        try:
-            x, y, z = [float(value) for value in point]
-        except (TypeError, ValueError):
-            continue
-        if not all(math.isfinite(value) for value in (x, y, z)) or z <= 0:
-            continue
-        pixel_x = fx * x / z + cx
-        pixel_y = fy * y / z + cy
-        clearance = min(
-            pixel_x - left,
-            right - pixel_x,
-            pixel_y - top,
-            bottom - pixel_y,
-        )
-        center_distance_sq = (pixel_x - center_x) ** 2 + (pixel_y - center_y) ** 2
-        ranked.append(
-            (
-                -clearance,
-                center_distance_sq,
-                index,
-                candidate,
-                [round(pixel_x, 3), round(pixel_y, 3)],
-            )
-        )
-    if not ranked:
-        index, candidate = compatible[0]
-        return candidate, {"policy": "rank_zero_fallback", "original_rank": index}
-    ranked.sort(key=lambda row: (row[0], row[1], row[2]))
-    negative_clearance, _, index, candidate, pixel = ranked[0]
-    return candidate, {
-        "policy": "max_receptacle_mask_bbox_clearance",
-        "original_rank": index,
-        "projected_pixel_xy": pixel,
-        "mask_bbox_xyxy": [left, top, right, bottom],
-        "mask_center_xy": [round(center_x, 3), round(center_y, 3)],
-        "mask_clearance_px": round(-negative_clearance, 3),
+        "source_grasp_id": policy.get("source_grasp_id"),
+        "selection_source": "main_agent_vlm",
+        "rule": (
+            "The main VLM must choose one retained candidate id. The host binds pose, "
+            "source grasp, original camera extrinsics, scene revision, and calibration."
+        ),
     }
 
 
@@ -5084,7 +4989,7 @@ def _placement_motion_guidance(
     execution: object,
     attachment: object,
 ) -> JsonDict | None:
-    """Stage an attached object's carry above the low AnyPlace release pose."""
+    """Plan directly to compiled pre-place hover, then descend to release."""
 
     if (
         not isinstance(execution, dict)
@@ -5102,15 +5007,56 @@ def _placement_motion_guidance(
         parsed_openness = float(openness)
     except (TypeError, ValueError):
         parsed_openness = None
-    artifact = memory.artifacts.get("camera_pose_to_world_world_pose_latest")
-    value = artifact.get("value") if isinstance(artifact, dict) else None
-    world_pose = value.get("world_pose") if isinstance(value, dict) else None
+    policy = memory.placement_candidate_policy()
+    if isinstance(policy, dict) and policy.get("status") == "exhausted_return_required":
+        recovery = policy.get("recovery")
+        recovery = recovery if isinstance(recovery, dict) else {}
+        recovery_stage = str(recovery.get("stage") or "")
+        if recovery_stage == "open_detach":
+            return {
+                "schema_version": "openeta.placement_motion_guidance.v1",
+                "status": "required",
+                "stage": "recovery_open_detach",
+                "required_action": {"name": "gripper_control", "parameters": {"position": 1}},
+                "candidate_id": execution.get("candidate_id"),
+                "rule": "Safe source return completed; open and require Gazebo detach ACK.",
+            }
+        pose_key = {
+            "return_source_hover": "source_hover_pose",
+            "return_source_capture": "source_capture_pose",
+        }.get(recovery_stage)
+        pose = recovery.get(pose_key) if pose_key else None
+        if not isinstance(pose, dict):
+            return None
+        recovery_pose = dict(pose)
+        recovery_pose["placement_recovery_stage"] = recovery_stage
+        return {
+            "schema_version": "openeta.placement_motion_guidance.v1",
+            "status": "required",
+            "stage": recovery_stage,
+            "candidate_id": execution.get("candidate_id"),
+            "safe_hover_pose": recovery_pose,
+            "required_parameters": {
+                "target_pose": recovery_pose,
+                "tolerance": 0.002,
+                "ori_tolerance": 0.05,
+                "velocity_scaling": 0.1,
+                "acceleration_scaling": 0.1,
+                "enable_collision_check": True,
+            },
+            "rule": "Return only through the source grasp's previously verified geometry.",
+        }
+    compiled = policy.get("compiled_placement") if isinstance(policy, dict) else None
+    if not isinstance(compiled, dict) or policy.get("status") != "active":
+        return None
+    hover_pose = compiled.get("hover_pose")
+    release_pose = compiled.get("release_pose")
+    if not isinstance(hover_pose, dict) or not isinstance(release_pose, dict):
+        return None
     current_pose = observation.robot.end_effector_pose
     current_xyz = _pose_xyz(current_pose)
-    valid_place_pose = isinstance(world_pose, dict) and str(world_pose.get("id") or "").startswith(
-        "place_grasp_"
-    )
-    release_xyz = _pose_xyz(world_pose) if valid_place_pose else None
+    hover_xyz = _pose_xyz(hover_pose)
+    release_xyz = _pose_xyz(release_pose)
     if parsed_openness is not None and parsed_openness <= _PLACEMENT_EMPTY_GRIPPER_OPENNESS_MAX:
         near_receptacle = (
             release_xyz is not None
@@ -5126,7 +5072,7 @@ def _placement_motion_guidance(
             "status": "required",
             "stage": "placement_drop_detected" if near_receptacle else "attachment_lost",
             "candidate_id": execution.get("candidate_id"),
-            "placement_pose_id": world_pose.get("id") if valid_place_pose else None,
+            "placement_pose_id": policy.get("active_candidate_id"),
             "required_action": {
                 "name": "gripper_control",
                 "parameters": {"position": 1},
@@ -5142,84 +5088,46 @@ def _placement_motion_guidance(
                 )
             ),
         }
-    if release_xyz is None or current_xyz is None:
+    if release_xyz is None or hover_xyz is None or current_xyz is None:
         return None
-    adjusted_release_xyz = [
-        release_xyz[0],
-        release_xyz[1],
-        release_xyz[2] + _PLACEMENT_DROP_RELEASE_CLEARANCE_M,
-    ]
-    adjusted_release_pose = dict(world_pose)
-    adjusted_release_pose["translation_xyz"] = adjusted_release_xyz
-    tip_xyz = world_pose.get("gripper_tip_position_xyz")
-    if isinstance(tip_xyz, list | tuple) and len(tip_xyz) == 3:
-        try:
-            adjusted_release_pose["gripper_tip_position_xyz"] = [
-                float(tip_xyz[0]),
-                float(tip_xyz[1]),
-                float(tip_xyz[2]) + _PLACEMENT_DROP_RELEASE_CLEARANCE_M,
-            ]
-        except (TypeError, ValueError):
-            pass
-    adjusted_release_pose["placement_stage"] = "release"
-    adjusted_release_pose["anyplace_reference_z"] = release_xyz[2]
-    final_hover_xyz = [
-        release_xyz[0],
-        release_xyz[1],
-        max(current_xyz[2], release_xyz[2] + _PLACEMENT_HOVER_CLEARANCE_M),
-    ]
-    xy_distance = math.hypot(current_xyz[0] - release_xyz[0], current_xyz[1] - release_xyz[1])
-    if xy_distance <= _PLACEMENT_CARRY_ARRIVAL_TOLERANCE_M:
+    hover_error = math.dist(current_xyz, hover_xyz)
+    if hover_error <= _PLACEMENT_CARRY_ARRIVAL_TOLERANCE_M:
         stage = (
             "descend"
-            if current_xyz[2] > adjusted_release_xyz[2] + _PLACEMENT_RELEASE_Z_TOLERANCE_M
+            if math.dist(current_xyz, release_xyz) > _PLACEMENT_RELEASE_Z_TOLERANCE_M
             else "release"
         )
-        safe_hover_xyz = adjusted_release_xyz
-    elif current_xyz[2] < (final_hover_xyz[2] - _PLACEMENT_CARRY_HEIGHT_TOLERANCE_M):
-        stage = "carry_raise"
-        safe_hover_xyz = [current_xyz[0], current_xyz[1], final_hover_xyz[2]]
+        next_pose = dict(release_pose)
     else:
-        stage = "carry_hover"
-        ratio = min(1.0, _PLACEMENT_CARRY_MAX_STEP_M / xy_distance)
-        safe_hover_xyz = [
-            current_xyz[0] + (release_xyz[0] - current_xyz[0]) * ratio,
-            current_xyz[1] + (release_xyz[1] - current_xyz[1]) * ratio,
-            final_hover_xyz[2],
-        ]
+        stage = "hover"
+        next_pose = dict(hover_pose)
+    next_pose["placement_stage"] = stage
+    motion_parameters = {
+        "target_pose": next_pose,
+        "tolerance": 0.002,
+        "ori_tolerance": 0.05,
+        "velocity_scaling": 0.1,
+        "acceleration_scaling": 0.1,
+        "enable_collision_check": True,
+    }
     return {
         "schema_version": "openeta.placement_motion_guidance.v1",
         "status": "required",
         "stage": stage,
         "candidate_id": execution.get("candidate_id"),
-        "placement_pose_id": world_pose.get("id"),
+        "placement_pose_id": policy.get("active_candidate_id"),
         "current_eef_pose": {"frame": "world", "xyz": current_xyz},
-        "safe_hover_pose": {
-            "frame": "world",
-            "xyz": safe_hover_xyz,
-            "source_grasp_id": execution.get("candidate_id"),
-            "placement_pose_id": world_pose.get("id"),
-            "placement_stage": stage,
-        },
-        "final_hover_pose": {
-            "frame": "world",
-            "xyz": final_hover_xyz,
-            "source_grasp_id": execution.get("candidate_id"),
-            "placement_pose_id": world_pose.get("id"),
-            "placement_stage": "carry_hover_final",
-        },
-        "release_pose": adjusted_release_pose,
-        "anyplace_reference_pose": dict(world_pose),
-        "clearance_m": _PLACEMENT_HOVER_CLEARANCE_M,
-        "release_clearance_m": _PLACEMENT_DROP_RELEASE_CLEARANCE_M,
-        "carry_max_step_m": _PLACEMENT_CARRY_MAX_STEP_M,
-        "carry_remaining_m": xy_distance,
+        "safe_hover_pose": next_pose,
+        "final_hover_pose": dict(hover_pose),
+        "release_pose": dict(release_pose),
+        "required_parameters": motion_parameters,
+        "clearance_m": compiled.get("hover_clearance_m"),
+        "release_clearance_m": compiled.get("release_clearance_m"),
+        "scene_revision": policy.get("scene_revision"),
         "rule": (
-            "Raise vertically to safe clearance, carry through bounded horizontal "
-            "waypoints with the current EEF orientation and fresh attachment review "
-            "after each move, then make only the shallow vertical descent to the "
-            "derived release pose and release. The raw AnyPlace pose remains a low "
-            "reference and must not be used as the direct motion target."
+            "MoveIt plans once from the current joint state directly to the compiled "
+            "pre-place hover with full wrist orientation; then descend to the compiled "
+            "release pose. No fixed wrist orientation or lateral waypoint chain is used."
         ),
     }
 

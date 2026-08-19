@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
-from .m2 import M2Config
-from .m3 import M3Config
+from .robot_control import GazeboControlConfig
+from .native_grasp import NativePickPlaceConfig
 from .observation import RosRgbdCameraConfig
 
 
@@ -34,7 +34,7 @@ class GazeboProfile:
     world_name: str
     cameras: tuple[RosRgbdCameraConfig, ...]
     capabilities: frozenset[str]
-    model_config: M2Config | None = None
+    model_config: GazeboControlConfig | None = None
     unavailable_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -69,29 +69,29 @@ def _camera(*, wrist: bool = False) -> RosRgbdCameraConfig:
 
 _BASE = frozenset({FRESH_OBSERVATION, AUTHORITATIVE_CAMERA})
 _PROFILES: Mapping[str, GazeboProfile] = MappingProxyType({
-    "m1": GazeboProfile(
+    "rgbd_observation": GazeboProfile(
         # The installed demo launch opens Gazebo's GUI, which aborts on
         # headless workers.  The repository-owned equivalent starts the same
         # RGB-D world server-only and keeps its official bridge contract.
-        name="m1", launch_package="openeta_rm75_robotiq2f85_sim",
-        launch_file="m1_gazebo_rgbd.launch.py", world_name="lidar_sensor",
+        name="rgbd_observation", launch_package="openeta_rm75_robotiq2f85_sim",
+        launch_file="gazebo_rgbd.launch.py", world_name="lidar_sensor",
         cameras=(RosRgbdCameraConfig(
             rgb_topic="/rgbd_camera/image", depth_topic="/rgbd_camera/depth_image",
             camera_info_topic="/rgbd_camera/camera_info",
             frame_id="rgbd_camera/link/rgbd_camera", extrinsics=dict(_TOP_EXTRINSICS),
         ),), capabilities=_BASE,
     ),
-    "m2_robotiq2f85": GazeboProfile(
-        name="m2_robotiq2f85", launch_package="openeta_rm75_robotiq2f85_sim",
-        launch_file="m2_gazebo_moveit.launch.py", world_name="m2_rm75_robotiq2f85",
+    "rm75_robotiq2f85_control": GazeboProfile(
+        name="rm75_robotiq2f85_control", launch_package="openeta_rm75_robotiq2f85_sim",
+        launch_file="gazebo_moveit.launch.py", world_name="rm75_robotiq2f85",
         cameras=(_camera(), _camera(wrist=True)),
-        capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT}, model_config=M2Config(),
+        capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT}, model_config=GazeboControlConfig(),
     ),
-    "m3_pickplace": GazeboProfile(
-        name="m3_pickplace", launch_package="openeta_rm75_robotiq2f85_sim",
-        launch_file="m3_gazebo_pickplace.launch.py", world_name="m3_rm75_robotiq2f85_pickplace",
+    "rm75_robotiq2f85_pickplace": GazeboProfile(
+        name="rm75_robotiq2f85_pickplace", launch_package="openeta_rm75_robotiq2f85_sim",
+        launch_file="gazebo_pickplace.launch.py", world_name="rm75_robotiq2f85_pickplace",
         cameras=(_camera(), _camera(wrist=True)),
-        capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT, PHYSICS}, model_config=M3Config(),
+        capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT, PHYSICS}, model_config=NativePickPlaceConfig(),
     ),
 })
 

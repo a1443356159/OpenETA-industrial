@@ -1,26 +1,82 @@
-"""Jazzy MoveIt and ros2_control adapter for M2.
+"""Jazzy MoveIt and ros2_control adapter for motion-control.
 
-All ROS imports occur inside :meth:`RosM2ControllerFactory.create`; importing
+All ROS imports occur inside :meth:`RosGazeboControllerFactory.create`; importing
 OpenETA on a non-ROS test machine remains supported.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import threading
 import time
 from typing import Any, Mapping
 
-from .m2 import (
+from .robot_control import (
     ARM_JOINTS,
-    M2Config,
-    M2Controller,
+    GazeboControlConfig,
+    GazeboController,
     START_STATE_RECOVERY_TRAJECTORY_S,
     assess_start_state_bounds,
-    make_move_group_goal,
     robot_state_from_sources,
     start_state_recovery_record,
 )
+from .planning_scene import CollisionBox, PlanningSceneSynchronizer
+
+
+def _normalized_quaternion(
+    quaternion: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    norm = math.sqrt(sum(value * value for value in quaternion))
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("pose quaternion must be finite and non-zero")
+    return tuple(value / norm for value in quaternion)  # type: ignore[return-value]
+
+
+def _quaternion_multiply(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    return (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+
+
+def _quaternion_rotate(
+    quaternion: tuple[float, float, float, float],
+    vector: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    q = _normalized_quaternion(quaternion)
+    conjugate = (-q[0], -q[1], -q[2], q[3])
+    rotated = _quaternion_multiply(
+        _quaternion_multiply(q, (vector[0], vector[1], vector[2], 0.0)),
+        conjugate,
+    )
+    return rotated[:3]
+
+
+def _relative_pose(
+    *,
+    child_xyz: tuple[float, float, float],
+    child_quat_xyzw: tuple[float, float, float, float],
+    parent_xyz: tuple[float, float, float],
+    parent_quat_xyzw: tuple[float, float, float, float],
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Return ``T_parent^-1 * T_child`` without discarding either rotation."""
+
+    parent_q = _normalized_quaternion(parent_quat_xyzw)
+    child_q = _normalized_quaternion(child_quat_xyzw)
+    parent_inverse = (-parent_q[0], -parent_q[1], -parent_q[2], parent_q[3])
+    delta = tuple(child_xyz[index] - parent_xyz[index] for index in range(3))
+    return (
+        _quaternion_rotate(parent_inverse, delta),
+        _normalized_quaternion(_quaternion_multiply(parent_inverse, child_q)),
+    )
 
 
 def _stamp_seconds(stamp: Any) -> float | None:
@@ -75,8 +131,8 @@ def _populate_recovery_trajectory_goal(
     goal.trajectory.points = [point]
 
 
-class RosM2StateSource:
-    def __init__(self, node: Any, tf_buffer: Any, *, config: M2Config, freshness_s: float = 2.0):
+class RosGazeboStateSource:
+    def __init__(self, node: Any, tf_buffer: Any, *, config: GazeboControlConfig, freshness_s: float = 2.0):
         self.node, self.tf_buffer, self.config = node, tf_buffer, config
         self.freshness_s = float(freshness_s)
         self._lock = threading.Lock()
@@ -155,8 +211,8 @@ class RosM2StateSource:
         raise last_error or RuntimeError("ROBOT_STATE_UNAVAILABLE")
 
 
-class RosM2Controller(M2Controller):
-    def __init__(self, runtime: "_RosRuntime", *, config: M2Config):
+class RosGazeboController(GazeboController):
+    def __init__(self, runtime: "_RosRuntime", *, config: GazeboControlConfig):
         self.runtime = runtime
         super().__init__(
             # Action implementations clear the cached JointState before
@@ -168,6 +224,8 @@ class RosM2Controller(M2Controller):
             start_state_recovery=runtime.recover_start_state,
             cancel_pending=runtime.cancel_pending,
             close_source=runtime.close,
+            scene_revision_provider=lambda: int(runtime.planning_scene.revision),
+            motion_scene_ready=lambda: bool(runtime.planning_scene.ready),
             config=config,
         )
 
@@ -178,24 +236,92 @@ class RosM2Controller(M2Controller):
         self.runtime.cancel_pending()
         self.runtime.state_source.clear()
 
+    @property
+    def planning_scene(self) -> PlanningSceneSynchronizer:
+        return self.runtime.planning_scene
+
+    def sync_planning_scene_reset(self, config: Any) -> int:
+        table = CollisionBox(config.table_id, tuple(config.table_size_m), tuple(config.table_pose_xyz))
+        distractor_size = tuple(config.distractor_size_m)
+        if len(distractor_size) == 2:
+            distractor_size = (distractor_size[0], distractor_size[0], distractor_size[1])
+        revision = self.planning_scene.reset(
+            table=table,
+            distractor=CollisionBox(
+                config.distractor_id,
+                distractor_size,
+                tuple(config.distractor_initial_xyz),
+            ),
+            target=CollisionBox(
+                config.target_id,
+                tuple(config.target_size_m),
+                tuple(config.target_initial_xyz),
+            ),
+        )
+        self.runtime.scene_revision = revision
+        self.runtime.planning_scene_ready = self.planning_scene.ready
+        return revision
+
+    def sync_planning_scene_attach(
+        self,
+        config: Any,
+        *,
+        target_xyz: tuple[float, float, float],
+        target_quat_xyzw: tuple[float, float, float, float],
+        mount_xyz: tuple[float, float, float],
+        mount_quat_xyzw: tuple[float, float, float, float],
+    ) -> int:
+        relative_xyz, relative_quaternion = _relative_pose(
+            child_xyz=target_xyz,
+            child_quat_xyzw=target_quat_xyzw,
+            parent_xyz=mount_xyz,
+            parent_quat_xyzw=mount_quat_xyzw,
+        )
+        revision = self.planning_scene.attach_target(
+            target=CollisionBox(
+                config.target_id,
+                tuple(config.target_size_m),
+                target_xyz,
+                target_quat_xyzw,
+            ),
+            link_name=config.parent_link,
+            relative_pose_xyz=relative_xyz,
+            relative_pose_quat_xyzw=relative_quaternion,
+        )
+        self.runtime.scene_revision = revision
+        self.runtime.planning_scene_ready = self.planning_scene.ready
+        return revision
+
+    def sync_planning_scene_detach(
+        self,
+        config: Any,
+        *,
+        target_xyz: tuple[float, float, float],
+        target_quat_xyzw: tuple[float, float, float, float],
+    ) -> int:
+        revision = self.planning_scene.detach_target(
+            target=CollisionBox(
+                config.target_id,
+                tuple(config.target_size_m),
+                target_xyz,
+                target_quat_xyzw,
+            )
+        )
+        self.runtime.scene_revision = revision
+        self.runtime.planning_scene_ready = self.planning_scene.ready
+        return revision
+
     def observation_barrier_s(self) -> float:
         """Current ROS/simulation timestamp for post-action camera ordering."""
 
         return self.runtime.ros_time_s()
-
-    def plan_pose(self, target_pose: Mapping[str, Any], timeout_s: float = 30.0):
-        """Collision-aware MoveGroup plan-only precheck through production routing."""
-
-        goal = make_move_group_goal(target_pose, config=self.config)
-        goal["plan_only"] = True
-        return dict(self.runtime.move(goal, timeout_s))
 
     def return_home(self, timeout_s: float = 15.0):
         """Drive the arm back to the zero (spawn) joint configuration.
 
         A model-only world reset restores entity poses but leaves the arm at
         whatever configuration the last action ended in, with the trajectory
-        controller still holding the stale setpoint.  M3 resets once per
+        controller still holding the stale setpoint.  native-grasp resets once per
         candidate/round and needs every round to start from the same state.
         """
 
@@ -203,15 +329,15 @@ class RosM2Controller(M2Controller):
 
 
 @dataclass(slots=True)
-class RosM2ControllerFactory:
+class RosGazeboControllerFactory:
     readiness_timeout_s: float = 30.0
 
-    def __call__(self, config: M2Config | None = None) -> RosM2Controller:
+    def __call__(self, config: GazeboControlConfig | None = None) -> RosGazeboController:
         return self.create(config)
 
-    def create(self, config: M2Config | None = None, *, context: Any | None = None,
-               executor: Any | None = None) -> RosM2Controller:
-        cfg = config or M2Config()
+    def create(self, config: GazeboControlConfig | None = None, *, context: Any | None = None,
+               executor: Any | None = None) -> RosGazeboController:
+        cfg = config or GazeboControlConfig()
         cfg.validate_assets()
         try:
             import rclpy
@@ -220,6 +346,14 @@ class RosM2ControllerFactory:
             from moveit_msgs.action import MoveGroup
             from controller_manager_msgs.srv import ListControllers
             from moveit_msgs.srv import GetStateValidity
+            from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
+            from moveit_msgs.msg import (
+                AllowedCollisionEntry,
+                AttachedCollisionObject,
+                CollisionObject,
+                PlanningScene,
+                PlanningSceneComponents,
+            )
             from rcl_interfaces.srv import GetParameters
             from rclpy.action import ActionClient
             from rclpy.executors import MultiThreadedExecutor
@@ -233,13 +367,13 @@ class RosM2ControllerFactory:
             rclpy.init(args=None)
         from rclpy.parameter import Parameter
         node = rclpy.create_node(
-            "openeta_m2_controller",
+            "openeta_gazebo_controller",
             parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)],
             context=context,
         )
         tf_buffer = Buffer(node=node)
         listener = TransformListener(tf_buffer, node, spin_thread=False)
-        source = RosM2StateSource(node, tf_buffer, config=cfg)
+        source = RosGazeboStateSource(node, tf_buffer, config=cfg)
         subscription = node.create_subscription(JointState, "/joint_states", source.joint_state_callback, 10)
         move_client = ActionClient(node, MoveGroup, "/move_action")
         gripper_client = ActionClient(node, ParallelGripperCommand, "/parallel_gripper_controller/gripper_cmd")
@@ -255,6 +389,8 @@ class RosM2ControllerFactory:
         state_validity_client = node.create_client(
             GetStateValidity, "/check_state_validity"
         )
+        apply_scene_client = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
+        get_scene_client = node.create_client(GetPlanningScene, "/get_planning_scene")
         shared_executor = executor is not None
         executor = executor or MultiThreadedExecutor(num_threads=2, context=context)
         executor.add_node(node)
@@ -276,9 +412,24 @@ class RosM2ControllerFactory:
             config=cfg,
             allow_stalling=bool(getattr(cfg, "allow_stalling", False)),
             shared_executor=shared_executor,
+            planning_scene=None,
+            scene_revision=0,
+            planning_scene_ready=True,
+            apply_scene_client=apply_scene_client,
+            get_scene_client=get_scene_client,
+            apply_scene_service_type=ApplyPlanningScene,
+            get_scene_service_type=GetPlanningScene,
+            planning_scene_message_type=PlanningScene,
+            planning_scene_components_type=PlanningSceneComponents,
+            collision_object_type=CollisionObject,
+            attached_collision_object_type=AttachedCollisionObject,
+            allowed_collision_entry_type=AllowedCollisionEntry,
+            solid_primitive_type=__import__("shape_msgs.msg", fromlist=["SolidPrimitive"]).SolidPrimitive,
+            pose_type=__import__("geometry_msgs.msg", fromlist=["Pose"]).Pose,
         )
+        runtime.planning_scene = PlanningSceneSynchronizer(runtime.apply_planning_scene)
         runtime.start()
-        controller = RosM2Controller(runtime, config=cfg)
+        controller = RosGazeboController(runtime, config=cfg)
         try:
             controller.wait_ready(self.readiness_timeout_s)
         except Exception:
@@ -298,7 +449,11 @@ class _RosRuntime:
     def start(self) -> None:
         if self.shared_executor:
             return
-        self._thread = threading.Thread(target=self.executor.spin, name="openeta-m2-ros", daemon=True)
+        self._thread = threading.Thread(
+            target=self.executor.spin,
+            name="openeta-gazebo-ros",
+            daemon=True,
+        )
         self._thread.start()
 
     def ros_time_s(self) -> float:
@@ -371,6 +526,92 @@ class _RosRuntime:
             with self._lock:
                 if future in self._pending:
                     self._pending.remove(future)
+
+    def apply_planning_scene(self, diff: dict[str, Any]) -> Mapping[str, Any]:
+        """Apply one collision-scene diff and prove exact world/attached ids."""
+
+        if not self.apply_scene_client.wait_for_service(timeout_sec=2.0):
+            raise RuntimeError("PLANNING_SCENE_APPLY_UNAVAILABLE")
+        if not self.get_scene_client.wait_for_service(timeout_sec=2.0):
+            raise RuntimeError("PLANNING_SCENE_READBACK_UNAVAILABLE")
+        scene = self.planning_scene_message_type()
+        scene.is_diff = True
+        for object_id in diff.get("remove_world_ids", []):
+            collision = self.collision_object_type()
+            collision.id = str(object_id)
+            collision.header.frame_id = self.config.base_link
+            collision.operation = self.collision_object_type.REMOVE
+            scene.world.collision_objects.append(collision)
+        for spec in diff.get("world_objects", []):
+            collision = self._collision_object_from_spec(spec)
+            scene.world.collision_objects.append(collision)
+        for object_id in diff.get("remove_attached_ids", []):
+            attached = self.attached_collision_object_type()
+            attached.object.id = str(object_id)
+            attached.object.operation = self.collision_object_type.REMOVE
+            scene.robot_state.attached_collision_objects.append(attached)
+        for spec in diff.get("attached_objects", []):
+            attached = self.attached_collision_object_type()
+            attached.link_name = str(spec["link_name"])
+            attached.touch_links = [str(value) for value in spec.get("touch_links", [])]
+            attached.object = self._collision_object_from_spec(spec)
+            scene.robot_state.attached_collision_objects.append(attached)
+        allowed = diff.get("allowed_collisions")
+        if isinstance(allowed, Mapping):
+            names = sorted(
+                {str(key) for key in allowed}
+                | {str(link) for links in allowed.values() for link in links}
+            )
+            scene.allowed_collision_matrix.entry_names = names
+            for row_name in names:
+                row = self.allowed_collision_entry_type()
+                row.enabled = [
+                    bool(
+                        column in allowed.get(row_name, [])
+                        or row_name in allowed.get(column, [])
+                    )
+                    for column in names
+                ]
+                scene.allowed_collision_matrix.entry_values.append(row)
+        apply_request = self.apply_scene_service_type.Request()
+        apply_request.scene = scene
+        applied = self._await(self.apply_scene_client.call_async(apply_request), 5.0)
+        get_request = self.get_scene_service_type.Request()
+        components = self.planning_scene_components_type
+        get_request.components.components = int(components.WORLD_OBJECT_NAMES) | int(
+            components.ROBOT_STATE_ATTACHED_OBJECTS
+        )
+        readback = self._await(self.get_scene_client.call_async(get_request), 5.0)
+        return {
+            "applied": bool(getattr(applied, "success", False)),
+            "world_ids": [item.id for item in readback.scene.world.collision_objects],
+            "attached_ids": [
+                item.object.id for item in readback.scene.robot_state.attached_collision_objects
+            ],
+        }
+
+    def _collision_object_from_spec(self, spec: Mapping[str, Any]) -> Any:
+        collision = self.collision_object_type()
+        collision.id = str(spec["id"])
+        collision.header.frame_id = str(spec.get("frame") or self.config.base_link)
+        primitive = self.solid_primitive_type()
+        primitive.type = self.solid_primitive_type.BOX
+        primitive.dimensions = [float(value) for value in spec["size_xyz"]]
+        pose = self.pose_type()
+        pose.position.x, pose.position.y, pose.position.z = [
+            float(value) for value in spec["pose_xyz"]
+        ]
+        quaternion = spec.get("pose_quat_xyzw", (0.0, 0.0, 0.0, 1.0))
+        (
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        ) = _normalized_quaternion(tuple(float(value) for value in quaternion))
+        collision.primitives = [primitive]
+        collision.primitive_poses = [pose]
+        collision.operation = self.collision_object_type.ADD
+        return collision
 
     def recover_start_state(
         self, state: Any, timeout_s: float
@@ -560,13 +801,13 @@ class _RosRuntime:
         def finish(payload: dict[str, Any]) -> dict[str, Any]:
             payload["action_started_ros_time_s"] = action_started
             payload["action_completed_ros_time_s"] = self.ros_time_s()
-            # M2Controller asks for state immediately after this method.  Drop
+            # GazeboController asks for state immediately after this method.  Drop
             # every sample accumulated during planning/execution so that read
             # must observe a JointState published after the result boundary.
             self.state_source.clear()
             return payload
 
-        # The start state read in M2Controller happened before this call.  Do
+        # The start state read in GazeboController happened before this call.  Do
         # not permit it to double as post-action reconciliation state.
         self.state_source.clear()
         request = MoveGroup.Goal()
@@ -588,7 +829,7 @@ class _RosRuntime:
         )
         # The 7-DOF arm is redundant, so OMPL may legitimately choose a
         # several-radian joint-space path even for the small Cartesian moves
-        # used by M2.  At 10% scaling those collision-checked trajectories can
+        # used by motion-control.  At 10% scaling those collision-checked trajectories can
         # exceed the public action deadline on a software-rendered simulator
         # (which commonly runs below real time).  Thirty percent remains a
         # conservative MoveIt limit while keeping every valid planned path
@@ -618,7 +859,13 @@ class _RosRuntime:
         send = self.move_client.send_goal_async(request)
         handle = self._await(send, min(5.0, timeout_s))
         if not handle.accepted:
-            return finish({"ok": False, "error_code": "MOTION_PLAN_FAILED", "motion_outcome": "failed"})
+            return finish({
+                "ok": False,
+                "error_code": "MOTION_PLAN_FAILED",
+                "motion_outcome": "failed",
+                "planned_point_count": 0,
+                "execution_started": False,
+            })
         result_future = handle.get_result_async()
         try:
             wrapped = self._await(result_future, timeout_s)
@@ -628,14 +875,29 @@ class _RosRuntime:
                 self._await(result_future, 2.0)
             except Exception:
                 pass
-            return finish({"ok": False, "error_code": "MOTION_OUTCOME_UNKNOWN", "motion_outcome": "unknown"})
+            return finish({
+                "ok": False,
+                "error_code": "MOTION_OUTCOME_UNKNOWN",
+                "motion_outcome": "unknown",
+                "planned_point_count": 0,
+                "execution_started": None,
+            })
         code = wrapped.result.error_code.val
+        planned_points = list(
+            getattr(
+                getattr(wrapped.result.planned_trajectory, "joint_trajectory", None),
+                "points",
+                (),
+            )
+        )
         if code == MoveItErrorCodes.SUCCESS:
             return finish({
                 "ok": True,
                 "reached_goal": not request.planning_options.plan_only,
                 "plan_only": request.planning_options.plan_only,
                 "motion_outcome": "planned" if request.planning_options.plan_only else "completed",
+                "planned_point_count": len(planned_points),
+                "execution_started": not request.planning_options.plan_only,
             })
         planning_failures = {
             MoveItErrorCodes.PLANNING_FAILED,
@@ -656,13 +918,6 @@ class _RosRuntime:
             MoveItErrorCodes.UNRECOGNIZED_GOAL_TYPE,
             MoveItErrorCodes.NO_IK_SOLUTION,
         }
-        planned_points = list(
-            getattr(
-                getattr(wrapped.result.planned_trajectory, "joint_trajectory", None),
-                "points",
-                (),
-            )
-        )
         # MoveGroup sometimes collapses a goal-sampling failure to the generic
         # FAILURE code. An empty returned trajectory proves execution never
         # started, so classify it as a planning rejection.
@@ -674,6 +929,8 @@ class _RosRuntime:
                 "error_code": "MOTION_PLAN_FAILED",
                 "motion_outcome": "failed",
                 "moveit_error_code": int(code),
+                "planned_point_count": len(planned_points),
+                "execution_started": False,
             })
         if code == MoveItErrorCodes.TIMED_OUT:
             return finish({
@@ -681,12 +938,16 @@ class _RosRuntime:
                 "error_code": "MOTION_EXECUTION_TIMEOUT",
                 "motion_outcome": "failed",
                 "moveit_error_code": int(code),
+                "planned_point_count": len(planned_points),
+                "execution_started": bool(planned_points),
             })
         return finish({
             "ok": False,
             "error_code": "MOTION_EXECUTION_FAILED",
             "motion_outcome": "failed",
             "moveit_error_code": int(code),
+            "planned_point_count": len(planned_points),
+            "execution_started": bool(planned_points),
         })
 
     def gripper(self, position: float, timeout_s: float) -> Mapping[str, Any]:

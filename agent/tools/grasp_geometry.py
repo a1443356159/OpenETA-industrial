@@ -33,12 +33,15 @@ SUPPORTED_GRASP_CALIBRATION_SCHEMAS = {
     GRASP_CALIBRATION_SCHEMA,
 }
 COMPILED_GRASP_SCHEMA = "openeta.compiled_grasp_seed.v1"
+COMPILED_PLACEMENT_SCHEMA = "openeta.compiled_placement_seed.v1"
 WRIST_ALIGNMENT_SCHEMA = "openeta.wrist_alignment.v1"
 DEFAULT_GRASP_PROFILE = DEFAULT_GRASP_CALIBRATION_PROFILE
 _OPENCV_TO_OPENGL = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
 _PANDA_TOP_DOWN_ROTATION = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
 _WORLD_NEGATIVE_Z = [0.0, 0.0, -1.0]
 _MIN_SAFE_HOVER_DISTANCE_M = 0.15
+_MIN_PLACEMENT_HOVER_CLEARANCE_M = 0.10
+_PLACEMENT_RELEASE_CLEARANCE_M = 0.005
 _DEFAULT_REFINEMENT_HOVER_CLEARANCE_M = 0.20
 _ARTICULATED_HANDLE_APPROACH_MODES = {"top_down", "front", "side"}
 
@@ -79,8 +82,14 @@ def build_compile_grasp_seed_handler(
                 strategy_root(context) if callable(strategy_root) else strategy_root
             )
             profile, profile_sha256 = _load_profile(resolved_profile)
+            parameters = dict(context.parameters)
+            if str(parameters.get("purpose") or "grasp").strip().lower() == "placement":
+                parameters = bind_placement_compile_parameters(
+                    parameters,
+                    supervision_context=context.metadata.get("supervision_context"),
+                )
             outputs = compile_grasp_seed(
-                context.parameters,
+                parameters,
                 profile=profile,
                 profile_sha256=profile_sha256,
                 strategies=load_grasp_strategies(Path(selected_strategy_root)),
@@ -134,7 +143,11 @@ def build_compile_grasp_seed_handler(
         return make_tool_result(
             context,
             success=True,
-            content="normalized grasp seed compiled to staged world-frame EEF poses",
+            content=(
+                "retained placement candidate compiled to world-frame EEF hover/release poses"
+                if outputs.get("purpose") == "placement"
+                else "normalized grasp seed compiled to staged world-frame EEF poses"
+            ),
             outputs=outputs,
         )
 
@@ -178,6 +191,15 @@ def compile_grasp_seed(
     profile_sha256: str,
     strategies: Sequence[Mapping[str, Any]] | None = None,
 ) -> JsonDict:
+    purpose = str(parameters.get("purpose") or "grasp").strip().lower()
+    if purpose not in {"grasp", "placement"}:
+        raise GraspGeometryError("purpose must be 'grasp' or 'placement'")
+    if purpose == "placement":
+        return _compile_placement_seed(
+            parameters,
+            profile=profile,
+            profile_sha256=profile_sha256,
+        )
     candidate = _mapping(parameters.get("camera_pose"), "camera_pose")
     extrinsics = _mapping(parameters.get("camera_extrinsics"), "camera_extrinsics")
     target_geometry_family = str(
@@ -464,6 +486,201 @@ def compile_grasp_seed(
             "Calibration/strategy outputs remain references; hover alignment "
             "and attachment gates are mandatory."
         ),
+    }
+
+
+def bind_placement_compile_parameters(
+    parameters: Mapping[str, Any],
+    *,
+    supervision_context: Any,
+) -> JsonDict:
+    """Bind an id-only placement choice to host-retained perception state.
+
+    Direct callers may provide the host-owned fields explicitly for contract
+    tests and offline compilation.  During an agent episode only ``purpose``
+    and ``placement_candidate_id`` are planner-owned; all geometry is recovered
+    from working memory and checked again by :func:`_compile_placement_seed`.
+    """
+
+    bound = dict(parameters)
+    if all(
+        key in bound
+        for key in ("placement_candidate", "source_grasp", "camera_extrinsics", "scene_epoch")
+    ):
+        return bound
+    context = supervision_context if isinstance(supervision_context, Mapping) else {}
+    memory = context.get("memory") if isinstance(context, Mapping) else None
+    memory = memory if isinstance(memory, Mapping) else {}
+    candidate_id = str(bound.get("placement_candidate_id") or "").strip()
+    if not candidate_id:
+        raise GraspGeometryError("placement_candidate_id is required")
+    working = memory.get("working_memory")
+    artifacts = working.get("artifacts") if isinstance(working, Mapping) else None
+    artifacts = artifacts if isinstance(artifacts, Mapping) else {}
+    placement_artifact: Mapping[str, Any] | None = None
+    camera_artifacts: list[Mapping[str, Any]] = []
+    for entry in artifacts.values():
+        value = entry.get("value") if isinstance(entry, Mapping) else None
+        if not isinstance(value, Mapping) and isinstance(entry, Mapping):
+            value = entry
+        if not isinstance(value, Mapping):
+            continue
+        if value.get("type") == "placement_candidates" and value.get("tool") == "anyplace":
+            placement_artifact = value
+        elif value.get("type") == "camera_packet":
+            camera_artifacts.append(value)
+    if placement_artifact is None:
+        raise GraspGeometryError("no retained AnyPlace candidate set is available")
+    candidates = placement_artifact.get("placement_candidates")
+    selected = next(
+        (
+            dict(item)
+            for item in candidates
+            if isinstance(item, Mapping) and str(item.get("id") or "") == candidate_id
+        ),
+        None,
+    ) if isinstance(candidates, Sequence) else None
+    if selected is None:
+        raise GraspGeometryError("placement_candidate_id is not in the retained AnyPlace set")
+    pose = selected.get("place_grasp_pose")
+    if not isinstance(pose, Mapping):
+        raise GraspGeometryError("retained placement candidate has no place_grasp_pose")
+    source = placement_artifact.get("source")
+    source = source if isinstance(source, Mapping) else {}
+    selected_grasp = source.get("selected_grasp")
+    selected_grasp = selected_grasp if isinstance(selected_grasp, Mapping) else {}
+    source_grasp = selected_grasp.get("candidate")
+    if not isinstance(source_grasp, Mapping):
+        source_grasp = {"id": placement_artifact.get("selected_grasp_id")}
+    source_packet = selected_grasp.get("source")
+    source_packet = source_packet if isinstance(source_packet, Mapping) else {}
+    source_rgb = str(source_packet.get("rgb") or source.get("rgb") or "")
+    camera = next(
+        (
+            packet
+            for packet in camera_artifacts
+            if source_rgb
+            and str(packet.get("rgb_path") or "")
+            and Path(str(packet.get("rgb_path"))).resolve() == Path(source_rgb).resolve()
+        ),
+        None,
+    )
+    if camera is None or not isinstance(camera.get("extrinsics"), Mapping):
+        raise GraspGeometryError("matching original camera extrinsics are unavailable")
+    bound.update(
+        {
+            "placement_candidate": selected,
+            "source_grasp": dict(source_grasp),
+            "camera_extrinsics": dict(camera["extrinsics"]),
+            "camera_frame_id": str(camera.get("frame_id") or ""),
+            "scene_epoch": memory.get("scene_epoch"),
+            "scene_revision": (
+                memory.get("placement_candidate_policy", {}).get("scene_revision")
+                if isinstance(memory.get("placement_candidate_policy"), Mapping)
+                else memory.get("scene_epoch")
+            ),
+        }
+    )
+    return bound
+
+
+def _compile_placement_seed(
+    parameters: Mapping[str, Any],
+    *,
+    profile: Mapping[str, Any],
+    profile_sha256: str,
+) -> JsonDict:
+    _validate_profile(profile, target_class="")
+    candidate = _mapping(parameters.get("placement_candidate"), "placement_candidate")
+    requested_id = str(parameters.get("placement_candidate_id") or "").strip()
+    candidate_id = str(candidate.get("id") or "").strip()
+    if not requested_id or requested_id != candidate_id:
+        raise GraspGeometryError("placement candidate selection does not match retained candidate")
+    pose = _mapping(candidate.get("place_grasp_pose"), "placement_candidate.place_grasp_pose")
+    if str(pose.get("frame") or "") != "camera":
+        raise GraspGeometryError("placement candidate pose must be in the camera frame")
+    if str(pose.get("camera_frame") or "opencv").lower() != "opencv":
+        raise GraspGeometryError("placement candidate camera_frame must be 'opencv'")
+    source_grasp = _mapping(parameters.get("source_grasp"), "source_grasp")
+    source_grasp_id = str(source_grasp.get("id") or "").strip()
+    if not source_grasp_id or str(pose.get("source_grasp_id") or "") != source_grasp_id:
+        raise GraspGeometryError("placement candidate is not bound to the source grasp")
+    scene_epoch = _nonnegative_int(parameters.get("scene_epoch"), "scene_epoch")
+    scene_revision = _nonnegative_int(
+        parameters.get("scene_revision", scene_epoch), "scene_revision"
+    )
+    extrinsics = _mapping(parameters.get("camera_extrinsics"), "camera_extrinsics")
+    r_camera_grasp = _rotation(pose.get("rotation_matrix"), "place_grasp_pose.rotation_matrix")
+    p_camera_grasp = _vector(
+        pose.get("gripper_tip_position_xyz") or pose.get("translation_xyz"),
+        3,
+        "place_grasp_pose.translation_xyz",
+    )
+    r_world_cv, p_world_camera = _opencv_camera_to_world(extrinsics)
+    transform = _mapping(profile.get("T_grasp_eef"), "T_grasp_eef")
+    r_grasp_eef = _rotation(transform.get("rotation_matrix"), "T_grasp_eef.rotation_matrix")
+    p_grasp_eef = _vector(transform.get("translation_xyz"), 3, "T_grasp_eef.translation_xyz")
+    r_world_grasp = _matmul3(r_world_cv, r_camera_grasp)
+    r_world_eef = _matmul3(r_world_grasp, r_grasp_eef)
+    p_world_grasp = _add(_matvec3(r_world_cv, p_camera_grasp), p_world_camera)
+    p_world_eef = _add(p_world_grasp, _matvec3(r_world_grasp, p_grasp_eef))
+    release_clearance = _bounded_float(
+        parameters.get("release_clearance_m", _PLACEMENT_RELEASE_CLEARANCE_M),
+        "release_clearance_m",
+        _PLACEMENT_RELEASE_CLEARANCE_M,
+        _PLACEMENT_RELEASE_CLEARANCE_M,
+    )
+    hover_clearance = _bounded_float(
+        parameters.get("hover_clearance_m", _MIN_PLACEMENT_HOVER_CLEARANCE_M),
+        "hover_clearance_m",
+        _MIN_PLACEMENT_HOVER_CLEARANCE_M,
+        0.30,
+    )
+    release_xyz = [p_world_eef[0], p_world_eef[1], p_world_eef[2] + release_clearance]
+    hover_xyz = [release_xyz[0], release_xyz[1], release_xyz[2] + hover_clearance]
+    identity = {
+        "purpose": "placement",
+        "placement_candidate_id": candidate_id,
+        "placement_candidate": candidate,
+        "source_grasp_id": source_grasp_id,
+        "camera_extrinsics": extrinsics,
+        "profile_sha256": profile_sha256,
+        "scene_epoch": scene_epoch,
+        "scene_revision": scene_revision,
+    }
+    compiled_id = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]
+    common = {
+        "frame": "world",
+        "rotation_matrix": _round_matrix(r_world_eef),
+        "source_grasp_id": source_grasp_id,
+        "placement_candidate_id": candidate_id,
+        "compiled_placement_id": compiled_id,
+        "calibration_id": str(profile.get("calibration_id") or ""),
+        "scene_epoch": scene_epoch,
+        "scene_revision": scene_revision,
+        "compiled_eef_pose": True,
+        "purpose": "placement",
+    }
+    return {
+        "schema_version": COMPILED_PLACEMENT_SCHEMA,
+        "purpose": "placement",
+        "compiled_placement_id": compiled_id,
+        "placement_candidate_id": candidate_id,
+        "candidate_id": candidate_id,
+        "source_grasp_id": source_grasp_id,
+        "camera_frame_id": str(parameters.get("camera_frame_id") or ""),
+        "scene_epoch": scene_epoch,
+        "scene_revision": scene_revision,
+        "selection_source": "main_agent_vlm",
+        "profile_sha256": profile_sha256,
+        "calibration_id": str(profile.get("calibration_id") or ""),
+        "orientation_clamped": False,
+        "hover_clearance_m": hover_clearance,
+        "release_clearance_m": release_clearance,
+        "hover_pose": {**common, "xyz": _round_vector(hover_xyz), "placement_stage": "hover"},
+        "release_pose": {**common, "xyz": _round_vector(release_xyz), "placement_stage": "release"},
     }
 
 

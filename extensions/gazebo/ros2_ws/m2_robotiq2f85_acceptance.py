@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live M2 acceptance driver for the production Robotiq 2F-85 profile.
 
-The direct mode talks to the same ``RosM2ControllerFactory`` used by the
+The direct mode talks to the same ``RosGazeboControllerFactory`` used by the
 Gazebo worker.  The MCP mode talks to the real SSE endpoint through
 ``SseSimulatorMcpTransport``.  Results are compacted into one ignored JSON
 report; camera payload bytes are deliberately omitted from that report.
@@ -134,9 +134,9 @@ def _assert_report_mutable(path: Path) -> None:
 
 def _asset_evidence() -> dict[str, Any]:
     from extensions.gazebo.asset_preflight import validate_asset_root
-    from extensions.gazebo.m2 import M2Config
+    from extensions.gazebo.robot_control import GazeboControlConfig
 
-    config = M2Config()
+    config = GazeboControlConfig()
     roots = (config.asset_root, config.gripper_asset_root)
     evidence: dict[str, Any] = {}
     for root in roots:
@@ -205,7 +205,7 @@ def _preexisting_processes() -> list[dict[str, Any]]:
         "gz sim",
         "sim.mcp_server",
         "bench_worker.py --bench gazebo",
-        "m2_gazebo_moveit.launch.py",
+        "gazebo_moveit.launch.py",
         "move_group",
     )
     rows: list[dict[str, Any]] = []
@@ -525,9 +525,9 @@ def _validate_gripper_state(state: Any, expected: str) -> dict[str, Any]:
 
 def run_direct(report_path: Path) -> None:
     _assert_report_mutable(report_path)
-    from extensions.gazebo.m2 import M2Config
+    from extensions.gazebo.robot_control import GazeboControlConfig
     from extensions.gazebo.observation import RosRgbdCameraSource
-    from extensions.gazebo.ros_control import RosM2ControllerFactory
+    from extensions.gazebo.ros_control import RosGazeboControllerFactory
     from extensions.gazebo.profiles import gazebo_profile
 
     report = _base_report(report_path)
@@ -537,8 +537,8 @@ def run_direct(report_path: Path) -> None:
     controller = None
     cameras: list[Any] = []
     try:
-        config = M2Config()
-        controller = RosM2ControllerFactory(readiness_timeout_s=90.0).create(config)
+        config = GazeboControlConfig()
+        controller = RosGazeboControllerFactory(readiness_timeout_s=90.0).create(config)
         camera_configs = gazebo_profile("m2_robotiq2f85").cameras
         cameras = [
             RosRgbdCameraSource(item, node_name=f"openeta_accept_camera_{index}")
@@ -751,7 +751,7 @@ def run_mcp(report_path: Path, url: str) -> None:
         _assert(created.get("env_id") == ENV_ID, "created env_id mismatch")
         _assert(created.get("backend") == "gazebo", "created backend mismatch")
         control_spec = created.get("control_spec", {})
-        _assert(control_spec.get("m2") is True, "MCP did not select the M2 control branch")
+        _assert(control_spec.get("motion_control") is True, "MCP did not select the M2 control branch")
         _assert(control_spec.get("model_id") == MODEL_ID, "control model_id mismatch")
         gate["create_env"] = _compact(created)
         common = {"handle": handle, "session_id": session_id}

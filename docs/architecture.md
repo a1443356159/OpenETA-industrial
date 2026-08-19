@@ -149,7 +149,6 @@ Safety checks are represented as named `safe_check` capabilities under
 safety sub-agent, but the current repository does not implement a separate
 safety process.
 
-- IK preview check
 - obstacle avoidance
 
 ## foundation skills lab
@@ -209,3 +208,13 @@ The current bridge is synchronous and single-step at the agent decision level.
 This is deliberate: it gives the simulator and agent teams a stable shared
 contract before adding richer session management, promoted project-memory
 workflows, or online RL.
+
+## production asset naming
+
+Milestone labels such as M1, M2, and M3 describe development and acceptance
+progress; they are not architecture boundaries. Production modules, classes,
+profiles, schemas, topics, launch files, worlds, and deployment configuration
+must use capability, device, or task names. Milestone labels may remain in
+tests, acceptance drivers, evidence reports, and historical documentation when
+they identify the gate being verified. `tests/test_production_asset_naming.py`
+enforces this boundary for the production tree.

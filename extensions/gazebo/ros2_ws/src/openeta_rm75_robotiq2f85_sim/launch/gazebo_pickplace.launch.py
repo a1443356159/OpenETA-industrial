@@ -1,4 +1,4 @@
-"""Launch M3 paused so DetachableJoint can be detached before any physics tick."""
+"""Launch native-grasp paused so DetachableJoint can be detached before any physics tick."""
 
 import os
 from pathlib import Path
@@ -35,13 +35,13 @@ def _spawn_robot(context, *, xacro_file, generated_sdfs, post_spawn_actions):
     try:
         rendered = render_detachable_sdf(xacro_file=xacro_file, environment=os.environ.copy())
     except Exception as exc:
-        return [LogInfo(msg=f"M3_DART_UNSUPPORTED: {exc}"), EmitEvent(event=Shutdown(reason="M3_DART_UNSUPPORTED"))]
+        return [LogInfo(msg=f"NATIVE_GRASP_DART_UNSUPPORTED: {exc}"), EmitEvent(event=Shutdown(reason="NATIVE_GRASP_DART_UNSUPPORTED"))]
     generated_sdfs.append(rendered)
     spawn = Node(
         package="ros_gz_sim", executable="create", output="screen",
         arguments=["-name", "rm75_robotiq_2f85_pickplace_sim_v1", "-file", str(rendered)],
     )
-    return [spawn, _after_success(spawn, post_spawn_actions, "M3 Gazebo entity spawn")]
+    return [spawn, _after_success(spawn, post_spawn_actions, "native-grasp Gazebo entity spawn")]
 
 
 def _unlink_generated_sdf(paths):
@@ -56,13 +56,13 @@ def _unlink_generated_sdf(paths):
 def generate_launch_description():
     share = Path(get_package_share_directory("openeta_rm75_robotiq2f85_sim"))
     description_share = Path(get_package_share_directory("openeta_rm75_v_description"))
-    xacro_file = share / "urdf/rm75_robotiq2f85_m3.urdf.xacro"
+    xacro_file = share / "urdf/rm75_robotiq2f85_pickplace.urdf.xacro"
     robot_description_command = Command([FindExecutable(name="xacro"), " ", str(xacro_file)])
     robot_description = ParameterValue(robot_description_command, value_type=str)
     moveit = (
         MoveItConfigsBuilder("rm75_robotiq_2f85_pickplace_sim_v1", package_name="openeta_rm75_robotiq2f85_sim")
-        .robot_description(file_path="urdf/rm75_robotiq2f85_m3.urdf.xacro")
-        .robot_description_semantic(file_path="config/rm75_robotiq2f85_m3.srdf")
+        .robot_description(file_path="urdf/rm75_robotiq2f85_pickplace.urdf.xacro")
+        .robot_description_semantic(file_path="config/rm75_robotiq2f85_pickplace.srdf")
         .robot_description_kinematics(file_path="config/kinematics.yaml")
         .joint_limits(file_path="config/joint_limits.yaml")
         .trajectory_execution(file_path="config/moveit_controllers.yaml")
@@ -73,11 +73,11 @@ def generate_launch_description():
     # confirms the initial detach before it calls world control pause:false.
     gz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(Path(get_package_share_directory("ros_gz_sim")) / "launch/gz_sim.launch.py")),
-        launch_arguments={"gz_args": f"-s {share / 'worlds/m3_rm75_robotiq2f85_pickplace.sdf'} --physics-engine gz-physics-dartsim-plugin"}.items(),
+        launch_arguments={"gz_args": f"-s {share / 'worlds/rm75_robotiq2f85_pickplace.sdf'} --physics-engine gz-physics-dartsim-plugin"}.items(),
     )
     common = [{"use_sim_time": True}]
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher", output="screen", parameters=[{"robot_description": robot_description}, *common])
-    # M3 deliberately starts paused until the runtime obtains the initial
+    # native-grasp deliberately starts paused until the runtime obtains the initial
     # DetachableJoint detach ACK.  Controller activation needs a physics tick,
     # so retain the spawner through that bounded preflight window instead of
     # letting its five-second default tear down the whole launch.

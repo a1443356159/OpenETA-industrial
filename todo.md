@@ -65,7 +65,18 @@ when work advances; do not start later milestones early.
       lift proof. Old soft-adhesion reports remain diagnostic evidence only.
 - [x] M5 control-only real SAM3 → strict RGB-D object summary → M3 physical
       loop (opt-in external SSE MCP; no Planner/LLM/formal TUI claim).
-- [ ] M5 formal remote/PTY acceptance, M6 fine-tuning, and industrial benchmark.
+- [ ] M5 formal remote/PTY acceptance.
+- [x] M6 code/contract implementation: id-only main-VLM placement selection,
+      calibrated full-orientation EEF hover/release, direct MoveIt transport,
+      request fingerprints, candidate recovery, and fail-closed planning scene.
+- [ ] Deploy official GraspGenX and AnyPlace checkpoints, `robotiq_2f_85`
+      assets, and isolated CUDA environments on the approved RTX 4090 service
+      node. Local model deployments do not satisfy this item.
+- [ ] M6 live acceptance uses official GraspGenX checkpoints with the
+      `robotiq_2f_85` embodiment and official AnyPlace checkpoint/config;
+      AnyGrasp, mocks, fixed candidates, and Oracle state cannot satisfy it.
+- [ ] M7 live industrial benchmark after M6 acceptance; the current manifest is
+      offline-only. M8 SAM3 fine-tuning follows measured M7 perception errors.
 
 ## M2 verification
 
@@ -88,7 +99,7 @@ when work advances; do not start later milestones early.
 - [x] Locate and preflight the neighbouring workstation's verified Jazzy RM75
       workspace (`/home/yyysaiko/workstation/external/rm75_ros2_ws`); asset
       validation passes for all four required installed packages.
-- [x] Integrate the execution-capable repository-owned `RosM2ControllerFactory`
+- [x] Integrate the execution-capable repository-owned `RosGazeboControllerFactory`
       and pass the real SSE MCP create/reset/gripper/A-B/observe/unreachable/
       idempotent-close lifecycle.
 - [ ] Pass the formal Robotiq 2F-85 direct and MCP live acceptance. The

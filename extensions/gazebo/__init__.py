@@ -1,4 +1,4 @@
-"""Minimal Gazebo embodiment adapter for the OpenETA M1 milestone.
+"""Gazebo embodiment adapter for observation, motion, and native grasping.
 
 The adapter deliberately keeps Gazebo/ROS optional.  It exposes the same
 reset/observe/close lifecycle and :class:`adapter.protocol.EnvObservation`
@@ -22,16 +22,16 @@ except ModuleNotFoundError as exc:  # keep asset/contracts importable offline
         raise
     GazeboDirectEnv = None  # type: ignore[assignment]
     make_gazebo_direct_env = None  # type: ignore[assignment]
-from .m2 import (M2_ENV_ID, MODEL_ID, ARM_JOINTS, GRIPPER_JOINTS, JOINT_NAMES,
-                  M2Config, Robotiq2F85Calibration,
+from .robot_control import (GAZEBO_CONTROL_ENV_ID, MODEL_ID, ARM_JOINTS, GRIPPER_JOINTS, JOINT_NAMES,
+                  GazeboControlConfig, Robotiq2F85Calibration,
                   robotiq_aperture_to_angle, robotiq_angle_to_aperture,
-                  M2ControlResult, M2Controller, gripper_state,
+                  GazeboControlResult, GazeboController, gripper_state,
                   make_move_group_goal, robot_state_from_sources)
-from .ros_control import RosM2Controller, RosM2ControllerFactory, RosM2StateSource
-from .m3 import M3_ENV_ID, M3_MODEL_ID, M3_DISPLAY_NAME, M3Config
+from .ros_control import RosGazeboController, RosGazeboControllerFactory, RosGazeboStateSource
+from .native_grasp import PICKPLACE_ENV_ID, PICKPLACE_MODEL_ID, PICKPLACE_DISPLAY_NAME, NativePickPlaceConfig
 
 __all__ = ["GazeboConfig", "GazeboObject", "GazeboEnvironment", "GazeboSimulatorAdapter", "GazeboLifecycleError", "GazeboOracleMcpTransport", "GazeboProcess", "GazeboProcessError", "GazeboWorldControl", "Ros2LaunchProcess", "RosGzBridgeProcess", "GazeboObservationError", "RosRgbdCameraConfig", "RosRgbdCameraSource", "GazeboDirectEnv", "make_gazebo_direct_env", "camera_info_intrinsics", "decode_ros_depth", "decode_ros_rgb"]
-__all__ += ["M2_ENV_ID", "MODEL_ID", "ARM_JOINTS", "GRIPPER_JOINTS", "JOINT_NAMES", "M2Config", "M2ControlResult", "M2Controller", "gripper_state", "make_move_group_goal", "robot_state_from_sources"]
+__all__ += ["GAZEBO_CONTROL_ENV_ID", "MODEL_ID", "ARM_JOINTS", "GRIPPER_JOINTS", "JOINT_NAMES", "GazeboControlConfig", "GazeboControlResult", "GazeboController", "gripper_state", "make_move_group_goal", "robot_state_from_sources"]
 __all__ += ["Robotiq2F85Calibration", "robotiq_aperture_to_angle", "robotiq_angle_to_aperture"]
-__all__ += ["RosM2Controller", "RosM2ControllerFactory", "RosM2StateSource"]
-__all__ += ["M3_ENV_ID", "M3_MODEL_ID", "M3_DISPLAY_NAME", "M3Config"]
+__all__ += ["RosGazeboController", "RosGazeboControllerFactory", "RosGazeboStateSource"]
+__all__ += ["PICKPLACE_ENV_ID", "PICKPLACE_MODEL_ID", "PICKPLACE_DISPLAY_NAME", "NativePickPlaceConfig"]

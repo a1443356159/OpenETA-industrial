@@ -6,7 +6,7 @@
 # dependencies and multi-task checkpoint configured by --config-path.
 #
 # Lightweight server/runtime packages:
-mcp
+mcp>=1.0,<1.29
 uvicorn
 starlette
 numpy

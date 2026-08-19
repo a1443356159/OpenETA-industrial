@@ -111,7 +111,7 @@ MAX_LEAD_RAD: Final = 0.06
 # held.  Each joint keeps its own measured position plus at most this offset,
 # so a stressed four-bar linkage is never forced back into the nominal mimic
 # relation (which ejects a held object).  The default stays a pure freeze for
-# the generic contract; the M3 profile layers a positive offset on top of its
+# the generic contract; the native-grasp profile layers a positive offset on top of its
 # per-side freeze and anti-slip scene to keep a sustained pinch through the
 # carry, and the parameter remains for physics tuning.
 STALL_HOLD_EXTRA_RAD: Final = 0.0
@@ -132,7 +132,7 @@ class RobotiqGripperActionAdapter(Node):
         self.declare_parameter("allow_stalling", False)
         self.declare_parameter("stall_velocity_threshold", 0.001)
         self.declare_parameter("stall_timeout", 1.0)
-        # Keep the generic/M3 default short.  M2's live acceptance launch
+        # Keep the generic/native-grasp default short.  motion-control's live acceptance launch
         # explicitly raises this to match its 90-second controller budget.
         self.declare_parameter("action_timeout_s", ACTION_TIMEOUT_S)
         self.declare_parameter("ramp_s", RAMP_S)

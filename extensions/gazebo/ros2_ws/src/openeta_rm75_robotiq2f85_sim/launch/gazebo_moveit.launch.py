@@ -1,4 +1,4 @@
-"""Launch the complete RM75 + Robotiq 2F-85 M2 stack."""
+"""Launch the complete RM75 + Robotiq 2F-85 motion-control stack."""
 
 import os
 from pathlib import Path
@@ -29,7 +29,7 @@ def _after_success(target, actions, label):
 def generate_launch_description():
     share = Path(get_package_share_directory("openeta_rm75_robotiq2f85_sim"))
     description_share = Path(get_package_share_directory("openeta_rm75_v_description"))
-    default_world = str(share / "worlds/m2_rm75_robotiq2f85.sdf")
+    default_world = str(share / "worlds/rm75_robotiq2f85.sdf")
     world_file = LaunchConfiguration("world")
     xacro_file = share / "urdf/rm75_robotiq2f85.urdf.xacro"
     robot_description_command = Command([FindExecutable(name="xacro"), " ", str(xacro_file)])
@@ -70,8 +70,8 @@ def generate_launch_description():
         package="openeta_rm75_robotiq2f85_sim",
         executable="gripper_action_adapter.py",
         output="screen",
-        # M2's certified mimic-relation contract is checked against the legacy
-        # constant-multiplier drive; M3 uses the exact four-bar drive.
+        # motion-control's certified mimic-relation contract is checked against the legacy
+        # constant-multiplier drive; native-grasp uses the exact four-bar drive.
         parameters=[
             {
                 "use_sim_time": True,
@@ -107,7 +107,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "world",
             default_value=default_world,
-            description="Absolute SDF world path; production defaults to the M2 world",
+            description="Absolute SDF world path; production defaults to the motion-control world",
         ),
         SetEnvironmentVariable(
             "GZ_SIM_RESOURCE_PATH",

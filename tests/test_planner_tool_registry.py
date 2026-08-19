@@ -31,7 +31,6 @@ from agent.runtime.planner import (
     ToolCallingPlanner,
     _default_tool_planner_system_prompt,
     _host_obligation_decision,
-    _select_anyplace_candidate,
     _matching_depth_enhancement,
     _grasp_compile_obligation,
     _grasp_sensor_safety_obligation,
@@ -1785,7 +1784,6 @@ def test_planner_context_only_exposes_tools_with_executable_handlers() -> None:
     visible = {reference["name"] for reference in context["tool_references"]}
     assert visible == {"observe"}
     assert {
-        "ik_preview_check",
         "obstacle_avoidance",
         "anydexgrasp",
         "slam",
@@ -3140,7 +3138,7 @@ def test_planner_context_preserves_anyplace_candidates_for_post_pick_motion() ->
     ]
     assert artifact["selected_grasp_id"] == "grasp_000"
     assert artifact["placement_candidates"][0]["place_grasp_pose"]["id"] == ("place_grasp_000")
-    assert "camera_pose_to_world" in artifact["next_tool_hint"]
+    assert "compile_grasp_seed(purpose=placement)" in artifact["next_tool_hint"]
 
 
 def test_anygrasp_policy_activates_highest_score_candidate() -> None:
@@ -3199,7 +3197,7 @@ def test_combined_pick_place_allows_grasp_compilation_before_anyplace() -> None:
     assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
 
 
-def test_anyplace_waits_for_final_attachment_pass() -> None:
+def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
     _record_anygrasp_candidate_policy(memory)
@@ -3253,7 +3251,7 @@ def test_anyplace_waits_for_final_attachment_pass() -> None:
 
     assert decision.action == "compile_grasp_seed"
     first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
-    assert any("must wait until the final grasp candidate" in error for error in first_errors)
+    assert any("only after the source grasp passes" in error for error in first_errors)
 
 
 def test_combined_pick_place_requires_placement_mask_on_retained_rgb() -> None:
@@ -3755,7 +3753,6 @@ def test_passive_views_exhaust_before_active_wrist_refinement(tmp_path: Path) ->
     tools = _tools_with_handlers(
         "sam3",
         "grasp_pose_estimate",
-        "ik_preview_check",
         "obstacle_avoidance",
         "move_to",
     )
@@ -3769,8 +3766,8 @@ def test_passive_views_exhaust_before_active_wrist_refinement(tmp_path: Path) ->
     attempts = context["grasp_candidate_policy"]["fallback_attempts"]
     assert attempts[-1]["outcome"] == "segmentation_no_detection"
     fallback = context["grasp_estimation_fallback_obligation"]
-    assert fallback["stage"] == "wrist_refinement_ik"
-    hover_pose = fallback["required_parameters"]["target_pose"]
+    assert fallback["stage"] == "wrist_refinement_collision_check"
+    hover_pose = fallback["required_parameters"]["path"]["target_pose"]
     assert hover_pose["grasp_stage"] == "grasp_estimation_refinement_hover"
     assert hover_pose["xyz"] == pytest.approx([0.1, -0.2, -0.1])
     decision = ToolCallingPlanner(StaticPlannerBackend([])).plan(
@@ -3779,7 +3776,7 @@ def test_passive_views_exhaust_before_active_wrist_refinement(tmp_path: Path) ->
         tools=tools,
         skills=build_default_skill_registry(),
     )
-    assert decision.action == "ik_preview_check"
+    assert decision.action == "obstacle_avoidance"
     assert decision.parameters == fallback["required_parameters"]
 
     def record_call(name: str, parameters: dict[str, object], outputs: dict[str, object]) -> None:
@@ -3809,16 +3806,6 @@ def test_passive_views_exhaust_before_active_wrist_refinement(tmp_path: Path) ->
                 },
             )
         )
-
-    record_call("ik_preview_check", fallback["required_parameters"], {"feasible": True})
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    fallback = context["grasp_estimation_fallback_obligation"]
-    assert fallback["stage"] == "wrist_refinement_collision_check"
 
     record_call("obstacle_avoidance", fallback["required_parameters"], {"clear": True})
     context = build_tool_context(
@@ -3861,7 +3848,7 @@ def test_passive_views_exhaust_before_active_wrist_refinement(tmp_path: Path) ->
     assert fallback["required_parameters"]["image"] == str(paths["wrist"][0])
 
 
-def test_wrist_refinement_stops_when_ik_is_infeasible(tmp_path: Path) -> None:
+def test_wrist_refinement_stops_when_collision_check_rejects(tmp_path: Path) -> None:
     rgb = tmp_path / "agentview.rgb.png"
     depth = tmp_path / "agentview.depth.png"
     wrist_rgb = tmp_path / "wrist.rgb.png"
@@ -3892,7 +3879,6 @@ def test_wrist_refinement_stops_when_ik_is_infeasible(tmp_path: Path) -> None:
     tools = _tools_with_handlers(
         "sam3",
         "grasp_pose_estimate",
-        "ik_preview_check",
         "obstacle_avoidance",
         "move_to",
     )
@@ -3903,24 +3889,24 @@ def test_wrist_refinement_stops_when_ik_is_infeasible(tmp_path: Path) -> None:
         skills=build_default_skill_registry(),
     )
     fallback = context["grasp_estimation_fallback_obligation"]
-    assert fallback["stage"] == "wrist_refinement_ik"
+    assert fallback["stage"] == "wrist_refinement_collision_check"
     memory.add_action(
         EnvAction(
             action_type="tool_call",
             command={
                 "request": {
                     "kind": "tool_call",
-                    "name": "ik_preview_check",
+                    "name": "obstacle_avoidance",
                     "parameters": fallback["required_parameters"],
                 },
                 "status": "executed",
                 "tool_calls": [
                     {
-                        "name": "ik_preview_check",
+                        "name": "obstacle_avoidance",
                         "status": "executed",
                         "result": {
                             "success": True,
-                            "details": {"outputs": {"feasible": False}},
+                            "details": {"outputs": {"clear": False}},
                         },
                     }
                 ],
@@ -3930,7 +3916,7 @@ def test_wrist_refinement_stops_when_ik_is_infeasible(tmp_path: Path) -> None:
 
     recovery = memory.grasp_estimation_recovery()
     assert recovery["status"] == "blocked"
-    assert recovery["last_failure"]["hard_rejection"] == "ik_unreachable"
+    assert recovery["last_failure"]["hard_rejection"] == "collision_or_unsafe_path"
     context = build_tool_context(
         observation=observation,
         memory=memory,
@@ -4103,9 +4089,9 @@ def test_all_overwidth_backends_activate_highest_scoring_final_candidate(
     assert fallback["stage"] == "final_candidate_activation"
     assert fallback["required_tool"] == "activate_final_grasp_candidate"
     assert fallback["excluded_backends"] == [
+        "graspgenx",
         "anygrasp",
         "contact_graspnet",
-        "graspgenx",
     ]
     action = runtime.act(observation)
     assert action.command["request"]["name"] == "activate_final_grasp_candidate"
@@ -5940,7 +5926,7 @@ def test_placement_obligation_joins_receptacle_mask_to_frozen_grasp() -> None:
     assert decision.metadata["host_obligation"]["tool"] == "anyplace"
 
 
-def test_placement_transform_obligation_joins_rank_zero_pose_after_attachment() -> None:
+def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None:
     place_pose = {
         "id": "place_grasp_000",
         "source_grasp_id": "grasp_003",
@@ -6034,27 +6020,19 @@ def test_placement_transform_obligation_joins_rank_zero_pose_after_attachment() 
         },
         source="test",
     )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
+    context = build_tool_context(
+        observation=observation,
         memory=memory,
         tools=_tools_with_handlers("camera_pose_to_world"),
         skills=build_default_skill_registry(),
     )
-
-    assert decision.action == "camera_pose_to_world"
-    assert decision.parameters == {
-        "camera_pose": place_pose,
-        "camera_extrinsics": extrinsics,
-        "camera_frame_id": "agentview",
+    obligation = context["placement_transform_obligation"]
+    assert obligation["required_tool"] == "compile_grasp_seed"
+    assert obligation["allowed_parameters"] == {
+        "purpose": "placement",
+        "placement_candidate_id": ["placement_000"],
     }
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["tool"] == "camera_pose_to_world"
+    assert obligation["selection_source"] == "main_agent_vlm"
 
     memory.artifacts["camera_pose_to_world_world_pose_latest"] = {
         "source": "tool_result",
@@ -6070,54 +6048,10 @@ def test_placement_transform_obligation_joins_rank_zero_pose_after_attachment() 
         tools=_tools_with_handlers("camera_pose_to_world"),
         skills=build_default_skill_registry(),
     )
-    assert context["placement_transform_obligation"] is None
+    assert context["placement_transform_obligation"] is not None
 
 
-def test_anyplace_candidate_selection_prefers_receptacle_interior_clearance(
-    tmp_path: Path,
-) -> None:
-    mask = tmp_path / "basket-mask.png"
-    image = Image.new("L", (100, 100), 0)
-    for y in range(10, 91):
-        for x in range(10, 91):
-            image.putpixel((x, y), 255)
-    image.save(mask)
-    candidates = [
-        {
-            "id": "placement_edge",
-            "place_grasp_pose": {
-                "source_grasp_id": "grasp_003",
-                "frame": "camera",
-                "gripper_tip_position_xyz": [-0.3, -0.3, 1.0],
-            },
-        },
-        {
-            "id": "placement_center",
-            "place_grasp_pose": {
-                "source_grasp_id": "grasp_003",
-                "frame": "camera",
-                "gripper_tip_position_xyz": [0.0, 0.0, 1.0],
-            },
-        },
-    ]
-
-    selected, selection = _select_anyplace_candidate(
-        candidates,
-        anyplace_output={
-            "source": {
-                "placement_region_mask": {"mask_ref": str(mask)},
-                "intrinsics": {"fx": 100.0, "fy": 100.0, "cx": 50.0, "cy": 50.0},
-            }
-        },
-        source_grasp_id="grasp_003",
-    )
-
-    assert selected["id"] == "placement_center"
-    assert selection["policy"] == "max_receptacle_mask_bbox_clearance"
-    assert selection["original_rank"] == 1
-    assert selection["projected_pixel_xy"] == [50.0, 50.0]
-
-
+@pytest.mark.skip(reason="superseded by direct compiled-hover M6 contract")
 def test_placement_motion_requires_high_hover_before_vertical_descend() -> None:
     release_pose = {
         "id": "place_grasp_000",
@@ -8086,14 +8020,14 @@ def test_pipeline_blocks_skipping_ahead_in_anygrasp_candidate_queue() -> None:
 def test_failed_pre_safety_check_advances_anygrasp_candidate() -> None:
     tools = bind_dummy_tool_handlers(build_default_tool_registry())
 
-    def unsafe_ik(context: ToolExecutionContext) -> ToolResult:
+    def unsafe_path(context: ToolExecutionContext) -> ToolResult:
         return ToolResult(
             False,
             content="IK target is infeasible",
-            details={"feasible": False, "reason": "outside_workspace"},
+            details={"clear": False, "reason": "collision"},
         )
 
-    tools.bind_handler("ik_preview_check", unsafe_ik, replace=True)
+    tools.bind_handler("obstacle_avoidance", unsafe_path, replace=True)
     required_parameters = {
         "target_pose": {
             "frame": "world",
@@ -8116,7 +8050,7 @@ def test_failed_pre_safety_check_advances_anygrasp_candidate() -> None:
         tools=tools,
         pipeline=ActionPipeline(
             checker_subagents=CheckerSubagentConfig(
-                pre_safety_checks={"move_to": "ik_preview_check"}
+                pre_safety_checks={"move_to": "obstacle_avoidance"}
             )
         ),
     )
@@ -9793,7 +9727,7 @@ def test_dummy_tool_handlers_return_standard_result_envelopes() -> None:
         observation=_observation(),
     )
     safety = tools.call(
-        "ik_preview_check",
+        "obstacle_avoidance",
         {"target_pose": {"xyz": [0.4, 0.0, 0.2]}},
         observation=_observation(),
     )
@@ -9814,7 +9748,7 @@ def test_dummy_tool_handlers_return_standard_result_envelopes() -> None:
     assert planning.details["result_type"] == "planning"
     assert planning.details["outputs"]["grasp_candidates"][0]["id"] == "grasp-1"
     assert safety.details["result_type"] == "safety"
-    assert safety.details["outputs"]["feasible"] is True
+    assert safety.details["outputs"]["clear"] is True
     assert world.details["result_type"] == "world_mutating"
     assert world.details["requires_observation_after_call"] is True
     assert world.details["state_delta"]["eef_pose"]["xyz"] == [0.4, 0.0, 0.2]
@@ -9862,7 +9796,7 @@ def test_pipeline_allows_planner_requested_safe_check_tool_call() -> None:
                 "kind": "tool_call",
                 "name": "safe_check",
                 "parameters": {
-                    "tool": "ik_preview_check",
+                    "tool": "obstacle_avoidance",
                     "target_pose": {"xyz": [0.4, 0.0, 0.2]},
                 },
             }
@@ -9876,17 +9810,17 @@ def test_pipeline_allows_planner_requested_safe_check_tool_call() -> None:
     command = action.command
     assert command["request"]["name"] == "safe_check"
     assert command["status"] == "executed"
-    assert command["safety_checks"][0]["name"] == "ik_preview_check"
+    assert command["safety_checks"][0]["name"] == "obstacle_avoidance"
     assert command["safety_checks"][0]["reason"] == "Planner-requested safety check."
     assert command["safety_checks"][0]["result"]["details"]["result_type"] == "safety"
-    assert command["safety_checks"][0]["result"]["details"]["outputs"]["feasible"] is True
+    assert command["safety_checks"][0]["result"]["details"]["outputs"]["clear"] is True
     assert command["tool_calls"] == []
 
 
 def test_pipeline_runs_pre_safety_checker_before_configured_tool_call() -> None:
     tools = bind_dummy_tool_handlers(build_default_tool_registry())
     pipeline = ActionPipeline(
-        checker_subagents=CheckerSubagentConfig(pre_safety_checks={"move_to": "ik_preview_check"})
+        checker_subagents=CheckerSubagentConfig(pre_safety_checks={"move_to": "obstacle_avoidance"})
     )
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
@@ -9904,28 +9838,28 @@ def test_pipeline_runs_pre_safety_checker_before_configured_tool_call() -> None:
 
     command = action.command
     assert command["status"] == "executed"
-    assert command["safety_checks"][0]["name"] == "ik_preview_check"
-    assert command["safety_checks"][0]["result"]["details"]["outputs"]["feasible"] is True
+    assert command["safety_checks"][0]["name"] == "obstacle_avoidance"
+    assert command["safety_checks"][0]["result"]["details"]["outputs"]["clear"] is True
     assert command["tool_calls"][0]["name"] == "move_to"
     assert command["tool_calls"][0]["status"] == "executed"
     assert command["metadata"]["checker_results"]["pre_safety_checks"][0]["name"] == (
-        "ik_preview_check"
+        "obstacle_avoidance"
     )
 
 
 def test_pipeline_blocks_tool_call_when_pre_safety_checker_fails() -> None:
     tools = bind_dummy_tool_handlers(build_default_tool_registry())
 
-    def unsafe_ik(context: ToolExecutionContext) -> ToolResult:
+    def unsafe_path(context: ToolExecutionContext) -> ToolResult:
         return ToolResult(
             False,
-            content="IK target is infeasible",
-            details={"feasible": False, "reason": "outside_workspace"},
+            content="Path intersects an obstacle",
+            details={"clear": False, "reason": "collision"},
         )
 
-    tools.bind_handler("ik_preview_check", unsafe_ik, replace=True)
+    tools.bind_handler("obstacle_avoidance", unsafe_path, replace=True)
     pipeline = ActionPipeline(
-        checker_subagents=CheckerSubagentConfig(pre_safety_checks={"move_to": "ik_preview_check"})
+        checker_subagents=CheckerSubagentConfig(pre_safety_checks={"move_to": "obstacle_avoidance"})
     )
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
@@ -9944,7 +9878,7 @@ def test_pipeline_blocks_tool_call_when_pre_safety_checker_fails() -> None:
     command = action.command
     assert command["status"] == "blocked"
     assert command["safety_checks"][0]["status"] == "failed"
-    assert command["safety_checks"][0]["result"]["details"]["outputs"]["feasible"] is False
+    assert command["safety_checks"][0]["result"]["details"]["outputs"]["clear"] is False
     assert command["tool_calls"][0]["name"] == "move_to"
     assert command["tool_calls"][0]["status"] == "skipped"
 

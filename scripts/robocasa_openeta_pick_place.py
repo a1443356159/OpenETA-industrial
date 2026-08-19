@@ -435,7 +435,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
 
-        bind("ik_preview_check", ik_handler)
         bind("obstacle_avoidance", obstacle_handler)
         bind("move_to", move_handler)
         bind("gripper_control", gripper_handler)
@@ -450,7 +449,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "retreat",
         ):
             target = targets[stage]
-            for safety_name in ("ik_preview_check", "obstacle_avoidance"):
+            for safety_name in ("obstacle_avoidance",):
                 check = record_tool(safety_name, {"stage": stage, "target_xyz": target.tolist()})
                 if not check.success:
                     raise RuntimeError(f"{safety_name} rejected {stage}: {check.content}")

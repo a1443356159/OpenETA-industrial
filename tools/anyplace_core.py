@@ -227,6 +227,7 @@ class AnyPlaceBackend:
 
         if not torch.cuda.is_available():
             raise AnyPlaceInputError("device_unavailable")
+        _configure_cuda_extension_environment(torch)
 
         import numpy as np
         from anyplace.model.transformer.policy import NSMTransformerImplicit
@@ -311,7 +312,6 @@ class AnyPlaceBackend:
             "torch": torch,
         }
         return self._loaded
-
     def _predict_with_loaded_backend(
         self,
         *,
@@ -382,6 +382,40 @@ class AnyPlaceBackend:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         return relative_trans_preds
+
+
+def _configure_cuda_extension_environment(torch: Any) -> None:
+    """Make AnyPlace's legacy JIT extensions reproducible in an isolated env.
+
+    MCP stdio launches preserve only a conservative environment subset, so a
+    Conda-local CUDA compiler cannot rely on caller-provided ``CC``/``CXX``.
+    Prefer tools shipped beside the backend interpreter when they exist. CUDA
+    11.7 also cannot emit native Ada (sm_89) code; PTX for sm_86 is the newest
+    forward-compatible target supported by that compiler.
+    """
+
+    prefix = Path(sys.executable).resolve().parent.parent
+    bin_dir = prefix / "bin"
+    nvcc = bin_dir / "nvcc"
+    cc = bin_dir / "x86_64-conda-linux-gnu-gcc"
+    cxx = bin_dir / "x86_64-conda-linux-gnu-g++"
+    ninja = bin_dir / "ninja"
+    if nvcc.is_file():
+        os.environ.setdefault("CUDA_HOME", str(prefix))
+    if cc.is_file():
+        os.environ.setdefault("CC", str(cc))
+    if cxx.is_file():
+        os.environ.setdefault("CXX", str(cxx))
+    if ninja.is_file():
+        path_entries = os.environ.get("PATH", "").split(os.pathsep)
+        if str(bin_dir) not in path_entries:
+            os.environ["PATH"] = os.pathsep.join((str(bin_dir), *path_entries))
+
+    cuda_version = str(getattr(torch.version, "cuda", "") or "")
+    if cuda_version.startswith("11.7"):
+        capability = tuple(int(item) for item in torch.cuda.get_device_capability())
+        if capability >= (8, 9):
+            os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.6+PTX")
 
 
 def validate_intrinsics(intrinsics: dict[str, Any] | None) -> dict[str, float]:

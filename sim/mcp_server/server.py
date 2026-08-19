@@ -623,7 +623,7 @@ def move_to(handle: str, x: float, y: float, z: float, *,
     backend = meta.get("backend", "")
     use_ori = roll is not None and pitch is not None and yaw is not None
 
-    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("m2"):
+    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("motion_control"):
         import math as _math
         if use_ori:
             quat = _euler_to_quat(_math.radians(roll), _math.radians(pitch), _math.radians(yaw))
@@ -1107,7 +1107,7 @@ def gripper_open(handle: str, *, session_id: str = "") -> dict:
     if not meta:
         return {"error": f"Unknown: {handle}"}
     backend = meta.get("backend", "")
-    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("m2"):
+    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("motion_control"):
         return _proxy_step(meta, {"action_type": "gripper_open"}, num_steps=1)
     meta["_gripper_cmd"] = -1.0  # latch OPEN — held on every subsequent step
     try:
@@ -1136,7 +1136,7 @@ def gripper_close(handle: str, *, session_id: str = "") -> dict:
     if not meta:
         return {"error": f"Unknown: {handle}"}
     backend = meta.get("backend", "")
-    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("m2"):
+    if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("motion_control"):
         return _proxy_step(meta, {"action_type": "gripper_close"}, num_steps=1)
     meta["_gripper_cmd"] = 1.0  # latch CLOSED — held (clamping) on every subsequent step
     try:
@@ -1347,7 +1347,7 @@ def oracle_perceive(handle: str, image_base64: str, prompt: str, *, session_id: 
     ``"gazebo_oracle"`` so oracle output is never silently mixed with learned
     perception.
 
-    Limitations: Gazebo M3 envs only; the static top camera only — wrist
+    Limitations: Gazebo native-grasp envs only; the static top camera only — wrist
     camera frames fail explicitly with reason ``ORACLE_FRAME_UNSUPPORTED``
     because their ``tf_dynamic`` extrinsics are never numerically resolved.
     Occlusion is ignored (oracle is ground truth).

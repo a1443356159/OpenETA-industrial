@@ -468,7 +468,7 @@ class OpenEtaAgentRuntime:
                     content="selection_confidence must be between 0 and 1.",
                     diagnostics=[{"code": "invalid_selection_confidence"}],
                 )
-        # The normal path records a VLM/main-agent semantic choice.  The M5
+        # The normal path records a VLM/main-agent semantic choice.  The perception-bridge
         # control-only acceptance harness is the narrowly-scoped exception:
         # it may select the one and only returned candidate, but only through
         # host-owned execution metadata (never a planner-supplied parameter).
@@ -476,7 +476,7 @@ class OpenEtaAgentRuntime:
         # same pending-result and candidate-id validation for both paths.
         selection_source = "main_agent_vlm"
         if (
-            context.metadata.get("_openeta_control_only_m5") is True
+            context.metadata.get("_openeta_control_only_perception") is True
             and context.metadata.get("_openeta_host_selection_source")
             == "scripted_single_candidate"
         ):

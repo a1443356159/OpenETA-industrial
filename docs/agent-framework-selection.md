@@ -85,7 +85,7 @@ The first runtime should provide these pieces:
    simulator feedback, and compact planning context.
 2. `ToolRegistry`: first-class definitions for tools such as `sam3`,
    `scene_detector`, `anygrasp`, `anydexgrasp`, `move_to`,
-   `gripper_control`, hand-pose database, IK preview check, and obstacle
+   `gripper_control`, hand-pose database, and obstacle
    avoidance. Tools are stable atomic capabilities.
 3. `SkillRegistry`: editable text-guidance documents such as pick, place,
    push, pull, and stack. Skills may recommend tool sequences, but they are not

@@ -76,7 +76,6 @@ _UNATTENDED_PROFILE = SupervisionProfile.REVIEWED_AUTONOMY.value
 _BATCH_UNBOUND_TOOLS = {
     "scene_detector",
     "hand_pose_database",
-    "ik_preview_check",
     "obstacle_avoidance",
     "lower_body_control_policy",
     "anydexgrasp",

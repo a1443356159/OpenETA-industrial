@@ -4,11 +4,11 @@ import time
 
 import pytest
 
-from extensions.gazebo.m2 import (
+from extensions.gazebo.robot_control import (
     JOINT_NAMES,
     START_STATE_BOUNDS_TOLERANCE_RAD,
-    M2Config,
-    M2Controller,
+    GazeboControlConfig,
+    GazeboController,
     MODEL_ID,
     assess_start_state_bounds,
     gripper_state,
@@ -133,7 +133,7 @@ def test_gazebo_environment_uses_canonical_display_name() -> None:
 
 
 def test_m2_names_opening_and_binary_command():
-    cfg = M2Config()
+    cfg = GazeboControlConfig()
     cfg.validate_assets()
     assert cfg.maximum_aperture_m == 0.085
     assert gripper_state(0.0)["aperture_m"] == 0.085
@@ -157,7 +157,7 @@ def test_state_is_fail_closed_and_has_model_metadata():
 
 def test_move_goal_applies_inverse_mount_transform():
     goal = make_move_group_goal(
-        {"xyz": [1, 0, 0], "quat_xyzw": [0, 0, 0, 1]}, config=M2Config(mount_xyz=(0.1, 0, 0))
+        {"xyz": [1, 0, 0], "quat_xyzw": [0, 0, 0, 1]}, config=GazeboControlConfig(mount_xyz=(0.1, 0, 0))
     )
     assert goal["group_name"] == "rm_group" and goal["link_name"] == "link_7"
     assert goal["target_pose"]["xyz"] == pytest.approx([0.9, 0, 0])
@@ -175,7 +175,7 @@ def test_move_goal_accepts_public_tool_tolerance_names() -> None:
 
 def test_controller_routes_actions_and_unknown_outcome():
     sent = []
-    ctl = M2Controller(
+    ctl = GazeboController(
         state_provider=_state,
         move_action=lambda goal, timeout: sent.append((goal, timeout)) or {"ok": True},
         gripper_action=lambda position, timeout: {"ok": True},
@@ -192,7 +192,7 @@ def test_controller_rejects_moveit_success_when_fresh_pose_misses_goal() -> None
     start, end = _state(), _state()
     end.end_effector_pose["xyz"] = [0.02, 0.0, 0.5]
     states = iter((start, end))
-    controller = M2Controller(
+    controller = GazeboController(
         state_provider=lambda: next(states),
         move_action=lambda _goal, _timeout: {
             "ok": True,
@@ -226,7 +226,7 @@ def test_controller_rejects_moveit_success_when_fresh_pose_misses_goal() -> None
     ],
 )
 def test_m2_gripper_never_credits_unreached_stalled_or_timed_out_results(result) -> None:
-    controller = M2Controller(state_provider=_state, gripper_action=lambda _position, _timeout: result)
+    controller = GazeboController(state_provider=_state, gripper_action=lambda _position, _timeout: result)
 
     receipt = controller.execute({"action_type": "gripper_open"}).to_dict()
 
@@ -237,7 +237,7 @@ def test_m2_gripper_never_credits_unreached_stalled_or_timed_out_results(result)
 
 
 def test_m2_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> None:
-    controller = M2Controller(
+    controller = GazeboController(
         state_provider=_state,
         gripper_action=lambda _position, _timeout: {
             "ok": True,
@@ -278,7 +278,7 @@ def test_controller_runs_one_recovery_then_submits_the_original_target_once() ->
             },
         }
 
-    controller = M2Controller(
+    controller = GazeboController(
         state_provider=_bounded_state,
         start_state_recovery=recover,
         move_action=lambda goal, timeout: move_calls.append((goal, timeout))
@@ -358,7 +358,7 @@ def test_controller_recovery_failure_never_submits_user_target(
     recovery_result, expected_code, expected_status, unknown
 ) -> None:
     move_calls = []
-    controller = M2Controller(
+    controller = GazeboController(
         state_provider=_bounded_state,
         start_state_recovery=lambda state, timeout: recovery_result,
         move_action=lambda goal, timeout: move_calls.append(goal) or {"ok": True},
@@ -399,7 +399,7 @@ def test_moveit_start_state_invalid_after_preflight_does_not_loop_recovery() -> 
             "moveit_error_code": -26,
         }
 
-    receipt = M2Controller(
+    receipt = GazeboController(
         state_provider=_bounded_state,
         start_state_recovery=recovery,
         move_action=move,
@@ -417,7 +417,7 @@ def test_moveit_start_state_invalid_after_preflight_does_not_loop_recovery() -> 
 
 
 def test_robotiq_binary_mapping_and_calibrated_aperture() -> None:
-    config = M2Config()
+    config = GazeboControlConfig()
     assert config.model_id == MODEL_ID
     assert config.gripper_position(1) == 0.0
     assert config.gripper_position(0) == pytest.approx(0.7929)
@@ -449,7 +449,7 @@ def test_robotiq_binary_mapping_and_calibrated_aperture() -> None:
 def test_controller_rejection_and_unknown_results_fail_closed(
     action_result, expected_code, expected_outcome
 ) -> None:
-    controller = M2Controller(state_provider=_state, move_action=lambda goal, timeout: action_result)
+    controller = GazeboController(state_provider=_state, move_action=lambda goal, timeout: action_result)
     result = controller.execute(
         {
             "action_type": "move_to",
@@ -467,7 +467,7 @@ def test_controller_timeout_and_missing_reconciliation_state_fail_closed() -> No
     def timeout(_goal, _timeout):
         raise TimeoutError
 
-    timed_out = M2Controller(state_provider=_state, move_action=timeout).execute(
+    timed_out = GazeboController(state_provider=_state, move_action=timeout).execute(
         {
             "action_type": "move_to",
             "target_pose": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
@@ -485,7 +485,7 @@ def test_controller_timeout_and_missing_reconciliation_state_fail_closed() -> No
             raise RuntimeError("JOINT_STATE_TIMEOUT")
         return _state()
 
-    unreconciled = M2Controller(
+    unreconciled = GazeboController(
         state_provider=state_then_fail, move_action=lambda goal, timeout: {"ok": True}
     ).execute(
         {
@@ -499,7 +499,7 @@ def test_controller_timeout_and_missing_reconciliation_state_fail_closed() -> No
 
 def test_controller_close_is_idempotent() -> None:
     calls: list[str] = []
-    controller = M2Controller(
+    controller = GazeboController(
         state_provider=_state,
         cancel_pending=lambda: calls.append("cancel"),
         close_source=lambda: calls.append("close"),

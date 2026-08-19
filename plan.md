@@ -1399,23 +1399,34 @@ same manipulation flow works with SAM3 perception
 
 ---
 
-## M6 — Industrial SAM3 Fine-Tuning
+## M6 — Real GraspGenX/AnyPlace, constraint-correct placement, and recovery
 
-Build dataset and fine-tune.
+Before the first grasp motion, freeze one RGB-D packet and use it for target
+SAM3, GraspGenX with the `robotiq_2f_85` embodiment, and placement-region SAM3.
+Do not run AnyPlace or plan the
+transport yet. Only after close, attach acknowledgement, and the unchanged M3
+lift gate pass, run AnyPlace against that frozen packet and retained source
+grasp. The main VLM then selects only a retained placement candidate id. The
+host binds the full AnyPlace pose, source grasp, original camera extrinsics,
+scene revision, and `T_grasp_eef`, producing world-frame EEF hover/release poses
+with full orientation. MoveIt transport planning begins only after this
+post-grasp placement compilation.
 
-Compare:
+After the unchanged M3 lift gate, MoveIt plans directly to the compiled
+pre-place hover and then to release. There is no fixed world wrist orientation,
+5 cm lateral waypoint chain, preview tool, route planner, or goal-region API.
+Gazebo synchronizes table, distractor, target, allowed fingertip contact, and
+attached payload into the MoveIt planning scene with apply/readback gates.
 
-```text
-upstream SAM3
-vs
-industrial SAM3
-```
-
-using identical Gazebo tasks.
+One planning rejection means only that the request failed for the current joint
+state, target, tolerances, and scene. Reject that candidate when execution did
+not start; never claim its coordinate is permanently unreachable. Do not retry
+an identical request fingerprint. Exhaustion returns along the verified source
+hover/capture path before open/detach/reobserve/regrasp.
 
 ---
 
-## M7 — Industrial Benchmark
+## M7 — Live Industrial Benchmark
 
 Build reproducible task manifests.
 
@@ -1431,6 +1442,15 @@ failure injection
 ```
 
 Use OpenETA rollout/evaluation infrastructure instead of building a second evaluator.
+The checked-in M7 manifest is an offline contract until live M6 evidence exists.
+
+---
+
+## M8 — SAM3 fine-tuning from benchmark perception errors
+
+Fine-tune only from perception-error data measured by live M7. Compare upstream
+and industrial SAM3 on identical held-out Gazebo tasks; do not use Oracle output
+as brain input.
 
 ---
 

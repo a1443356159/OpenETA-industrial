@@ -145,12 +145,7 @@ def bind_dummy_tool_handlers(
         "lower_body_control_policy": _approval_control_handler(approve_world_mutating),
     }
     if include_dummy_safety:
-        handlers.update(
-            {
-                "ik_preview_check": _ik_preview_handler,
-                "obstacle_avoidance": _obstacle_avoidance_handler,
-            }
-        )
+        handlers["obstacle_avoidance"] = _obstacle_avoidance_handler
     registered = {spec.name for spec in tools.list()}
     for name, handler in handlers.items():
         if name not in registered:
@@ -2256,18 +2251,6 @@ def _hand_pose_handler(context: ToolExecutionContext) -> ToolResult:
             "pose_id": "hand-pose-cube-001",
         },
         artifacts=[{"type": "hand_pose", "id": "hand-pose-cube-001"}],
-    )
-
-
-def _ik_preview_handler(context: ToolExecutionContext) -> ToolResult:
-    return make_tool_result(
-        context,
-        success=True,
-        content="IK preview feasible in dummy scene",
-        outputs={
-            "feasible": True,
-            "target_pose": context.parameters.get("target_pose"),
-        },
     )
 
 
@@ -5279,6 +5262,15 @@ def _normalise_anyplace_response(
         run_dir = _new_run_dir(output_root)
         run_dir.mkdir(parents=True, exist_ok=False)
     _write_json(run_dir / "request.json", request)
+    candidate_image_ref, projection_summaries = _write_anyplace_candidate_image(
+        run_dir=run_dir,
+        rgb_path=str(request["rgb"]),
+        placement_mask_path=str(request["placement_region_mask"]["mask_ref"]),
+        intrinsics=request["intrinsics"],
+        candidates=candidates,
+    )
+    for candidate, summary in zip(candidates, projection_summaries, strict=True):
+        candidate["projection_summary"] = summary
     raw_output_ref = run_dir / "response.raw.json"
     _write_json(raw_output_ref, _scrub_anyplace_response(response))
     result = ToolResult(
@@ -5297,12 +5289,25 @@ def _normalise_anyplace_response(
                 "object_mask": request["object_mask"],
                 "placement_region_mask": request["placement_region_mask"],
                 "intrinsics": request["intrinsics"],
+                "selected_grasp": {
+                    "candidate": dict(selected_grasp),
+                    "source": dict(selected_grasp_source),
+                },
             },
             "selected_grasp_source": dict(selected_grasp_source),
             "selected_grasp_id": selected_grasp["id"],
             "raw_output_ref": str(raw_output_ref),
             "candidate_count": 5,
             "placement_candidates": candidates,
+            "candidate_image_ref": candidate_image_ref,
+            "artifacts": [
+                {
+                    "type": "placement_candidate_image",
+                    "kind": "image",
+                    "tool": "anyplace",
+                    "path": candidate_image_ref,
+                }
+            ],
             "metadata": _scrub_anyplace_response(_dict_or_empty(details.get("metadata"))),
         },
     )
@@ -5311,6 +5316,64 @@ def _normalise_anyplace_response(
         {"success": result.success, "content": result.content, "details": result.details},
     )
     return result
+
+
+def _write_anyplace_candidate_image(
+    *,
+    run_dir: Path,
+    rgb_path: str,
+    placement_mask_path: str,
+    intrinsics: Mapping[str, Any],
+    candidates: list[JsonDict],
+) -> tuple[str, list[JsonDict]]:
+    """Attach a compact projection/region-clearance view for VLM selection."""
+
+    from PIL import Image, ImageDraw
+
+    try:
+        with Image.open(rgb_path) as source, Image.open(placement_mask_path) as mask_source:
+            image = source.convert("RGB")
+            mask = mask_source.convert("L")
+            bbox = mask.getbbox()
+    except OSError:
+        # Input decoding was already owned by the remote AnyPlace service. A
+        # local preview failure must not discard otherwise valid candidates.
+        image = Image.new("RGB", (640, 480), (32, 32, 32))
+        bbox = (0, 0, image.width, image.height)
+    if bbox is None:
+        bbox = (0, 0, image.width, image.height)
+    left, top, right, bottom = [float(value) for value in bbox]
+    fx, fy, cx, cy = [float(intrinsics[key]) for key in ("fx", "fy", "cx", "cy")]
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((left, top, right - 1, bottom - 1), outline=(0, 255, 180), width=2)
+    summaries: list[JsonDict] = []
+    for index, candidate in enumerate(candidates):
+        pose = candidate.get("place_grasp_pose")
+        pose = pose if isinstance(pose, Mapping) else {}
+        point = pose.get("gripper_tip_position_xyz") or pose.get("translation_xyz")
+        parsed = _finite_vector(point, length=3)
+        if parsed is None or parsed[2] <= 0:
+            summary = {"projected": False, "inside_region_bbox": False}
+        else:
+            u = fx * parsed[0] / parsed[2] + cx
+            v = fy * parsed[1] / parsed[2] + cy
+            clearance = min(u - left, right - u, v - top, bottom - v)
+            inside = left <= u < right and top <= v < bottom
+            summary = {
+                "projected": True,
+                "projected_pixel_xy": [round(u, 3), round(v, 3)],
+                "region_bbox_xyxy": [left, top, right, bottom],
+                "inside_region_bbox": inside,
+                "region_clearance_px": round(clearance, 3),
+            }
+            radius = 6
+            colour = (255, 210, 0) if inside else (255, 70, 70)
+            draw.ellipse((u - radius, v - radius, u + radius, v + radius), outline=colour, width=3)
+            draw.text((u + 8, v - 8), str(index + 1), fill=colour)
+        summaries.append(summary)
+    path = run_dir / "placement_candidates.png"
+    image.save(path)
+    return str(path), summaries
 
 
 def _scale_anyplace_grasp_candidate(candidate: JsonDict, factor: float) -> JsonDict:

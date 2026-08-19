@@ -119,7 +119,7 @@ def build_dual_http_app():
 
     Streamable HTTP at ``/mcp`` is the current MCP HTTP transport.  The
     separate ``/sse`` and ``/messages/`` routes stay only for existing OpenETA
-    M5 callers that still use the superseded HTTP+SSE transport.  Both route
+    perception-bridge callers that still use the superseded HTTP+SSE transport.  Both route
     sets are constructed through FastMCP's public ASGI APIs; this server does
     not hand-roll JSON-RPC or access its private low-level server.
     """

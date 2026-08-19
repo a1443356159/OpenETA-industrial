@@ -13,9 +13,9 @@ def test_m3_profile_constructs_without_starting_a_worker() -> None:
         gz_executable="gz",
         process_environment={"ROS_DOMAIN_ID": "17"},
     )
-    environment = GazeboDirectEnv(profile=gazebo_profile("m3_pickplace"), deployment=deployment)
+    environment = GazeboDirectEnv(profile=gazebo_profile("rm75_robotiq2f85_pickplace"), deployment=deployment)
     try:
-        assert environment.openeta_control_spec["m3"] is True
+        assert environment.openeta_control_spec["native_grasp"] is True
         motion = environment.openeta_control_spec["validated_pickplace_motion"]
         assert [item["name"] for item in motion["poses"]] == [
             "approach",

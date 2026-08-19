@@ -4,7 +4,7 @@
 # GraspGenX checkout. OpenETA does not install or vendor GraspGenX, PyTorch,
 # CUDA extensions, gripper assets, or generator/discriminator checkpoints.
 
-mcp
+mcp>=1.0,<1.29
 uvicorn
 starlette
 numpy

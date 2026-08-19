@@ -1,4 +1,4 @@
-"""Render the approved fixed-root SDF used by M3's stock DetachableJoint.
+"""Render the approved fixed-root SDF used by native-grasp's stock DetachableJoint.
 
 The generated file exists only for the launched Gazebo process.  It contains
 no custom physics plugin: it merely gives DART the fixed robot root required
@@ -33,7 +33,7 @@ def _normalize_contact_topics(model: ET.Element) -> None:
     ``gz sdf -p`` adds ``<contact><topic>__default_topic__</topic>`` to
     contact sensors even when the SDF sensor already has an explicit topic.
     SDFormat 1.10 requires that nested field for contact sensors, so leaving
-    the placeholder prevents Gazebo from publishing M3's approved per-pad
+    the placeholder prevents Gazebo from publishing native-grasp's approved per-pad
     topics.  Keep the generic sensor topic and contact-specific topic equal.
     """
 
@@ -71,11 +71,11 @@ def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) ->
     plugin = plugins[0]
     expected = {
         "parent_link": "gripper_mount_link",
-        "child_model": "m3_target",
+        "child_model": "target_object",
         "child_link": "target_link",
-        "attach_topic": "/m3/detachable_joint/target/attach",
-        "detach_topic": "/m3/detachable_joint/target/detach",
-        "output_topic": "/m3/detachable_joint/target/state",
+        "attach_topic": "/openeta/native_grasp/detachable_joint/target/attach",
+        "detach_topic": "/openeta/native_grasp/detachable_joint/target/detach",
+        "output_topic": "/openeta/native_grasp/detachable_joint/target/state",
     }
     actual = {key: plugin.findtext(key) for key in expected}
     if actual != expected:
@@ -83,9 +83,9 @@ def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) ->
     if model.find("link[@name='base_link']") is None:
         raise DetachableSdfError("rendered SDF has no base_link for a fixed root")
     _normalize_contact_topics(model)
-    for joint in list(model.findall("joint[@name='openeta_m3_world_to_base']")):
+    for joint in list(model.findall("joint[@name='openeta_world_to_base']")):
         model.remove(joint)
-    root_joint = ET.Element("joint", {"name": "openeta_m3_world_to_base", "type": "fixed"})
+    root_joint = ET.Element("joint", {"name": "openeta_world_to_base", "type": "fixed"})
     ET.SubElement(root_joint, "parent").text = "world"
     ET.SubElement(root_joint, "child").text = "base_link"
     model.append(root_joint)
@@ -118,10 +118,10 @@ def render_detachable_sdf(
             timeout=60.0, check=False,
         )
     except OSError as exc:
-        raise DetachableSdfError("M3_DART_UNSUPPORTED: xacro is unavailable") from exc
+        raise DetachableSdfError("NATIVE_GRASP_DART_UNSUPPORTED: xacro is unavailable") from exc
     if rendered.returncode:
-        raise DetachableSdfError(f"M3_DART_UNSUPPORTED: xacro failed: {rendered.stderr[-800:]}")
-    urdf_fd, urdf_name = tempfile.mkstemp(prefix="openeta-m3-", suffix=".urdf", dir=directory)
+        raise DetachableSdfError(f"NATIVE_GRASP_DART_UNSUPPORTED: xacro failed: {rendered.stderr[-800:]}")
+    urdf_fd, urdf_name = tempfile.mkstemp(prefix="openeta-native-grasp-", suffix=".urdf", dir=directory)
     try:
         with os.fdopen(urdf_fd, "w", encoding="utf-8") as stream:
             stream.write(rendered.stdout)
@@ -131,18 +131,18 @@ def render_detachable_sdf(
                 timeout=60.0, check=False,
             )
         except OSError as exc:
-            raise DetachableSdfError("M3_DART_UNSUPPORTED: gz is unavailable") from exc
+            raise DetachableSdfError("NATIVE_GRASP_DART_UNSUPPORTED: gz is unavailable") from exc
     finally:
         Path(urdf_name).unlink(missing_ok=True)
     if converted.returncode:
         raise DetachableSdfError(
-            f"M3_DART_UNSUPPORTED: URDF-to-SDF conversion failed: {converted.stderr[-800:]}"
+            f"NATIVE_GRASP_DART_UNSUPPORTED: URDF-to-SDF conversion failed: {converted.stderr[-800:]}"
         )
     try:
         root = prepare_detachable_sdf(ET.fromstring(converted.stdout), dart_compatible=True)
     except ET.ParseError as exc:
-        raise DetachableSdfError("M3_DART_UNSUPPORTED: invalid converted SDF") from exc
-    descriptor, sdf_name = tempfile.mkstemp(prefix="openeta-m3-", suffix=".sdf", dir=directory)
+        raise DetachableSdfError("NATIVE_GRASP_DART_UNSUPPORTED: invalid converted SDF") from exc
+    descriptor, sdf_name = tempfile.mkstemp(prefix="openeta-native-grasp-", suffix=".sdf", dir=directory)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(ET.tostring(root, encoding="unicode"))

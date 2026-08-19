@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from extensions.gazebo.m2 import Robotiq2F85Calibration
+from extensions.gazebo.robot_control import Robotiq2F85Calibration
 from extensions.gazebo.robotiq_kinematics import (
     BD_M,
     aperture_from_angle_closed_form,

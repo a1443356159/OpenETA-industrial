@@ -359,6 +359,17 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             command.extend(["--checkpoint-root", checkpoint_root])
         if gripper_root:
             command.extend(["--gripper-descriptions-root", gripper_root])
+        # Set these before the child imports the official package. GraspGenX's
+        # setup hook otherwise attempts to clone/download missing assets at
+        # runtime, which is never an acceptable production fallback.
+        if checkpoint_root:
+            env["GRASPGENX_CHECKPOINT_DIR"] = str(
+                Path(checkpoint_root).expanduser().resolve().parent
+            )
+        if gripper_root:
+            env["GRASPGENX_GRIPPER_CFG_DIR"] = str(
+                Path(gripper_root).expanduser().resolve()
+            )
         return ServiceConfig(
             name=name,
             python=python,

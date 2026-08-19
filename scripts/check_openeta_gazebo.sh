@@ -3,8 +3,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-# shellcheck source=../config/runtime/m0_m2.env
-source "${REPO_DIR}/config/runtime/m0_m2.env"
+# shellcheck source=../config/runtime/gazebo_rm75_robotiq2f85.env
+source "${REPO_DIR}/config/runtime/gazebo_rm75_robotiq2f85.env"
 
 CHECK_PYTHON=1
 CHECK_ROS=1
@@ -43,7 +43,7 @@ if [[ "${CHECK_PYTHON}" == 1 ]]; then
   # coordinator supplies a preflight-validated interpreter explicitly.
   PYTHON_BIN="${OPENETA_ACCEPTANCE_PYTHON:-${REPO_DIR}/.venv/bin/python}"
   if [[ ! -x "${PYTHON_BIN}" ]]; then
-    record_failure PYTHON_NOT_READY "${PYTHON_BIN} does not exist; run scripts/setup_openeta_m2.sh --python-only"
+    record_failure PYTHON_NOT_READY "${PYTHON_BIN} does not exist; run scripts/setup_openeta_gazebo.sh --python-only"
   elif ! "${PYTHON_BIN}" -c 'import sys; assert sys.version_info[:2] == (3, 12); import gymnasium, mcp, numpy, PIL, imageio, prompt_toolkit, tiktoken' >/dev/null 2>&1; then
     record_failure PYTHON_NOT_READY "Python 3.12 or required OpenETA imports are unavailable"
   else
@@ -154,7 +154,7 @@ else
 fi
 
 if ((${#failures[@]})); then
-  printf 'OPENETA_M2_CHECK_FAILED count=%d codes=%s\n' "${#failures[@]}" "$(IFS=,; echo "${failures[*]}")" >&2
+  printf 'OPENETA_GAZEBO_CHECK_FAILED count=%d codes=%s\n' "${#failures[@]}" "$(IFS=,; echo "${failures[*]}")" >&2
   exit 1
 fi
-echo "OPENETA_M2_CHECK_OK"
+echo "OPENETA_GAZEBO_CHECK_OK"

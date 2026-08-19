@@ -1,4 +1,4 @@
-"""Gazebo Sim process lifecycle used by the M1 embodiment boundary."""
+"""Gazebo Sim process lifecycle used by the observation-only embodiment boundary."""
 
 from __future__ import annotations
 
@@ -10,11 +10,18 @@ import signal
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
 class GazeboProcessError(RuntimeError):
     """Raised when the configured Gazebo process cannot be managed."""
+
+
+@dataclass(frozen=True, slots=True)
+class GazeboNativePose:
+    xyz: tuple[float, float, float]
+    quat_xyzw: tuple[float, float, float, float]
 
 
 def _process_group_exists(pgid: int) -> bool:
@@ -202,7 +209,7 @@ class GazeboWorldControl:
 
         A live ``ros2 launch`` process only proves that the launch parent has
         started.  In particular, a cold headless ``sensors_demo.sdf`` can
-        still be registering Gazebo transport services when M1 issues its
+        still be registering Gazebo transport services when observation-only issues its
         first reset.  Listing the exact documented service and sending an
         empty ``WorldControl`` request proves that the server is responsive
         without changing pause, reset, or model state.
@@ -315,7 +322,7 @@ class GazeboWorldControl:
         """Teleport one model through the documented ``set_pose`` service.
 
         Harmonic's ``model_only`` world reset restores neither free-object
-        poses nor robot joint states (verified live on gz-sim 8.11), so M3
+        poses nor robot joint states (verified live on gz-sim 8.11), so native-grasp
         restores its manipulated objects explicitly without rewinding the
         monotonic simulation clock.  The control-plane service can stall
         briefly under simulator load, so one bounded retry is allowed.
@@ -358,7 +365,7 @@ class GazeboWorldControl:
 
 
 class DetachableJointState:
-    """Acknowledged state of M3's one stock Gazebo joint."""
+    """Acknowledged state of native-grasp's one stock Gazebo joint."""
 
     UNKNOWN = "unknown"
     DETACHED = "detached"
@@ -366,7 +373,7 @@ class DetachableJointState:
 
 
 class GazeboDetachableJointControl:
-    """Request and prove M3's stock ``DetachableJoint`` without fallback.
+    """Request and prove native-grasp's stock ``DetachableJoint`` without fallback.
 
     The state topic is an ACK boundary only.  ``child_link_proof`` separately
     reads the native world ``pose/info`` stream and is the only source for the
@@ -379,9 +386,9 @@ class GazeboDetachableJointControl:
         gz_executable: str = "gz",
         timeout_s: float = 5.0,
         environment: dict[str, str] | None = None,
-        world_name: str = "m3_rm75_robotiq2f85_pickplace",
+        world_name: str = "rm75_robotiq2f85_pickplace",
         parent_link: str = "gripper_mount_link",
-        child_model: str = "m3_target",
+        child_model: str = "target_object",
         child_link: str = "target_link",
     ) -> None:
         self.gz_executable = gz_executable
@@ -410,9 +417,9 @@ class GazeboDetachableJointControl:
                 timeout=self.timeout_s,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE") from exc
+            raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE") from exc
         if result.returncode:
-            raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE")
+            raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
 
     def wait_ready(self, *, timeout_s: float) -> None:
         """Wait for the stock joint's three transport endpoints.
@@ -429,9 +436,9 @@ class GazeboDetachableJointControl:
         if timeout_s <= 0:
             raise ValueError("DetachableJoint readiness timeout must be positive")
         required = {
-            "/m3/detachable_joint/target/attach",
-            "/m3/detachable_joint/target/detach",
-            "/m3/detachable_joint/target/state",
+            "/openeta/native_grasp/detachable_joint/target/attach",
+            "/openeta/native_grasp/detachable_joint/target/detach",
+            "/openeta/native_grasp/detachable_joint/target/state",
         }
         deadline = time.monotonic() + float(timeout_s)
         last_error = "endpoint discovery did not run"
@@ -461,23 +468,23 @@ class GazeboDetachableJointControl:
                     + (f" detail={detail}" if detail else "")
                 )
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-        raise GazeboProcessError(f"M3_DETACHABLE_JOINT_NOT_READY: {last_error}")
+        raise GazeboProcessError(f"NATIVE_GRASP_DETACHABLE_JOINT_NOT_READY: {last_error}")
 
     def _request(self, action: str) -> str:
         if action not in {"attach", "detach"}:
             raise ValueError("unsupported DetachableJoint action")
         expected = action + "ed"
-        topic = f"/m3/detachable_joint/target/{action}"
+        topic = f"/openeta/native_grasp/detachable_joint/target/{action}"
         # The plugin emits a transition message once.  Listener first avoids
         # accepting a command for which the state ACK was missed.
         try:
             listener = subprocess.Popen(
-                [self._executable(self.gz_executable), "topic", "-e", "-n", "1", "-t", "/m3/detachable_joint/target/state"],
+                [self._executable(self.gz_executable), "topic", "-e", "-n", "1", "-t", "/openeta/native_grasp/detachable_joint/target/state"],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env=self.environment, start_new_session=True,
             )
         except OSError as exc:
-            raise GazeboProcessError("M3_DETACHABLE_JOINT_UNAVAILABLE") from exc
+            raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE") from exc
         try:
             # Process creation does not mean the transport subscription is
             # discoverable yet.  The state transition is published once, so
@@ -490,7 +497,7 @@ class GazeboDetachableJointControl:
                 try:
                     state_info = subprocess.run(
                         [self._executable(self.gz_executable), "topic", "-i", "-t",
-                         "/m3/detachable_joint/target/state"],
+                         "/openeta/native_grasp/detachable_joint/target/state"],
                         capture_output=True, text=True, check=False,
                         env=self.environment, timeout=min(5.0, max(0.1, remaining)),
                     )
@@ -517,14 +524,14 @@ class GazeboDetachableJointControl:
                 time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
             if not listener_ready:
                 raise GazeboProcessError(
-                    "M3_ATTACH_ACK_MISSING" if action == "attach" else "M3_DETACH_ACK_MISSING"
+                    "NATIVE_GRASP_ATTACH_ACK_MISSING" if action == "attach" else "NATIVE_GRASP_DETACH_ACK_MISSING"
                 )
             self._publish_empty(topic)
             remaining = max(0.1, deadline - time.monotonic())
             output, _ = listener.communicate(timeout=remaining)
         except subprocess.TimeoutExpired as exc:
             raise GazeboProcessError(
-                "M3_ATTACH_ACK_MISSING" if action == "attach" else "M3_DETACH_ACK_MISSING"
+                "NATIVE_GRASP_ATTACH_ACK_MISSING" if action == "attach" else "NATIVE_GRASP_DETACH_ACK_MISSING"
             ) from exc
         finally:
             if listener.poll() is None:
@@ -536,7 +543,7 @@ class GazeboDetachableJointControl:
                     listener.wait(timeout=1.0)
         if not re.search(rf'\bdata:\s*"?{expected}"?', output, flags=re.IGNORECASE):
             raise GazeboProcessError(
-                "M3_ATTACH_ACK_MISSING" if action == "attach" else "M3_DETACH_ACK_MISSING"
+                "NATIVE_GRASP_ATTACH_ACK_MISSING" if action == "attach" else "NATIVE_GRASP_DETACH_ACK_MISSING"
             )
         self._state = DetachableJointState.ATTACHED if action == "attach" else DetachableJointState.DETACHED
         if action == "detach":
@@ -552,7 +559,7 @@ class GazeboDetachableJointControl:
 
     def attach(self) -> str:
         if self._state != DetachableJointState.DETACHED:
-            raise GazeboProcessError("M3_DETACH_ACK_MISSING")
+            raise GazeboProcessError("NATIVE_GRASP_DETACH_ACK_MISSING")
         return self._request("attach")
 
     @staticmethod
@@ -561,7 +568,7 @@ class GazeboDetachableJointControl:
         return float(match.group(1)) if match else default
 
     @staticmethod
-    def _pose_blocks(text: str) -> dict[str, tuple[float, float, float]]:
+    def _pose_records(text: str) -> dict[str, GazeboNativePose]:
         blocks: list[str] = []
         current: list[str] | None = None
         depth = 0
@@ -575,19 +582,45 @@ class GazeboDetachableJointControl:
             if depth == 0:
                 blocks.append("\n".join(current))
                 current = None
-        poses: dict[str, tuple[float, float, float]] = {}
+        poses: dict[str, GazeboNativePose] = {}
         for block in blocks:
             name = re.search(r'\bname:\s*"([^"]+)"', block)
             position = re.search(r"position\s*\{(.*?)\}", block, re.DOTALL)
             if name is None or position is None:
                 continue
-            poses[name.group(1)] = tuple(
+            xyz = tuple(
                 GazeboDetachableJointControl._field(position.group(1), axis)
                 for axis in ("x", "y", "z")
             )
+            orientation = re.search(r"orientation\s*\{(.*?)\}", block, re.DOTALL)
+            orientation_block = orientation.group(1) if orientation is not None else ""
+            quaternion = tuple(
+                GazeboDetachableJointControl._field(
+                    orientation_block,
+                    axis,
+                    1.0 if axis == "w" else 0.0,
+                )
+                for axis in ("x", "y", "z", "w")
+            )
+            norm = math.sqrt(sum(value * value for value in quaternion))
+            if not math.isfinite(norm) or norm <= 1e-12:
+                raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
+            poses[name.group(1)] = GazeboNativePose(
+                xyz=xyz,  # type: ignore[arg-type]
+                quat_xyzw=tuple(value / norm for value in quaternion),  # type: ignore[arg-type]
+            )
         return poses
 
-    def _world_link_positions(self) -> dict[str, tuple[float, float, float]]:
+    @staticmethod
+    def _pose_blocks(text: str) -> dict[str, tuple[float, float, float]]:
+        """Compatibility projection used by lift proof: retain position only."""
+
+        return {
+            name: pose.xyz
+            for name, pose in GazeboDetachableJointControl._pose_records(text).items()
+        }
+
+    def _world_link_poses(self) -> dict[str, GazeboNativePose]:
         try:
             result = subprocess.run(
                 [self._executable(self.gz_executable), "topic", "-e", "-n", "1", "-t", f"/world/{self.world_name}/pose/info"],
@@ -595,10 +628,13 @@ class GazeboDetachableJointControl:
                 timeout=self.timeout_s,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE") from exc
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE") from exc
         if result.returncode or not result.stdout.strip():
-            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
-        return self._pose_blocks(result.stdout)
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
+        return self._pose_records(result.stdout)
+
+    def _world_link_positions(self) -> dict[str, tuple[float, float, float]]:
+        return {name: pose.xyz for name, pose in self._world_link_poses().items()}
 
     @staticmethod
     def _named_position(poses: dict[str, tuple[float, float, float]], link: str) -> tuple[float, float, float]:
@@ -606,17 +642,17 @@ class GazeboDetachableJointControl:
             return poses[link]
         matches = [value for name, value in poses.items() if name.endswith(f"::{link}")]
         if len(matches) != 1:
-            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
         return matches[0]
 
     def _child_world_position(
         self, poses: dict[str, tuple[float, float, float]]
     ) -> tuple[float, float, float]:
-        """Return M3's child-link position in the world frame, or fail closed.
+        """Return native-grasp's child-link position in the world frame, or fail closed.
 
-        Gazebo's native ``Pose_V`` stream reports the M3 target *model* in
+        Gazebo's native ``Pose_V`` stream reports the native-grasp target *model* in
         world coordinates but its sole ``target_link`` in that model's local
-        coordinates.  The approved M3 SDF contract fixes that one link at the
+        coordinates.  The approved native-grasp SDF contract fixes that one link at the
         model origin (validated alongside the asset), so the model pose is the
         native world pose of the child link.  A non-origin link makes this
         assumption invalid and must fail rather than silently mixing frames.
@@ -628,26 +664,58 @@ class GazeboDetachableJointControl:
 
         child_local = self._named_position(poses, self.child_link)
         if any(abs(component) > 1e-6 for component in child_local):
-            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
         return self._named_position(poses, self.child_model)
 
     def capture_baseline(self) -> None:
         """Record native target child-link state after the attach ACK."""
 
         if self._state != DetachableJointState.ATTACHED:
-            raise GazeboProcessError("M3_ATTACH_ACK_MISSING")
+            raise GazeboProcessError("NATIVE_GRASP_ATTACH_ACK_MISSING")
         poses = self._world_link_positions()
         parent = self._named_position(poses, self.parent_link)
         child = self._child_world_position(poses)
         self._baseline = (child[2], tuple(child[index] - parent[index] for index in range(3)))
 
+    def native_target_mount_positions(
+        self,
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        """Read the native Gazebo target and gripper-mount world positions."""
+
+        poses = self._world_link_positions()
+        return self._child_world_position(poses), self._named_position(poses, self.parent_link)
+
+    @staticmethod
+    def _named_pose(
+        poses: dict[str, GazeboNativePose], link: str
+    ) -> GazeboNativePose:
+        if link in poses:
+            return poses[link]
+        matches = [value for name, value in poses.items() if name.endswith(f"::{link}")]
+        if len(matches) != 1:
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
+        return matches[0]
+
+    def native_target_mount_poses(
+        self,
+    ) -> tuple[GazeboNativePose, GazeboNativePose]:
+        """Read full native world poses for planning-scene attach/detach."""
+
+        poses = self._world_link_poses()
+        child_local = self._named_pose(poses, self.child_link)
+        if any(abs(component) > 1e-6 for component in child_local.xyz):
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
+        return self._named_pose(poses, self.child_model), self._named_pose(
+            poses, self.parent_link
+        )
+
     def child_link_proof(self):
         """Return the approved child-link lift proof, or fail closed."""
 
         if self._baseline is None:
-            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE")
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
         try:
-            from .m3 import ChildLinkProof
+            from .native_grasp import ChildLinkProof
             poses = self._world_link_positions()
             parent = self._named_position(poses, self.parent_link)
             child = self._child_world_position(poses)
@@ -661,11 +729,11 @@ class GazeboDetachableJointControl:
         except GazeboProcessError:
             raise
         except Exception as exc:
-            raise GazeboProcessError("M3_CHILD_LINK_STATE_UNAVAILABLE") from exc
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE") from exc
 
 
 class GazeboNativeContactWindow:
-    """Collect only raw Gazebo contact messages for an armed M3 close."""
+    """Collect only raw Gazebo contact messages for an armed native-grasp close."""
 
     def __init__(
         self,
@@ -686,7 +754,7 @@ class GazeboNativeContactWindow:
 
     @staticmethod
     def _contact_message(block: str, side: str):
-        from .m3 import NativeContactSample
+        from .native_grasp import NativeContactSample
         stamp = re.search(r"stamp\s*\{(.*?)\}", block, re.DOTALL)
         if stamp is None:
             return None
@@ -727,10 +795,10 @@ class GazeboNativeContactWindow:
 
     def arm(self) -> None:
         if self._armed:
-            raise GazeboProcessError("M3_CONTACT_WINDOW_ALREADY_ARMED")
+            raise GazeboProcessError("NATIVE_GRASP_CONTACT_WINDOW_ALREADY_ARMED")
         executable = GazeboDetachableJointControl._executable(self.gz_executable)
         try:
-            for side, topic in (("left", "/m3/contacts/left_pad"), ("right", "/m3/contacts/right_pad")):
+            for side, topic in (("left", "/openeta/native_grasp/contacts/left_pad"), ("right", "/openeta/native_grasp/contacts/right_pad")):
                 process = subprocess.Popen(
                     [executable, "topic", "-e", "-t", topic], stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, text=True, env=self.environment,
@@ -745,19 +813,19 @@ class GazeboNativeContactWindow:
             self._armed = True
         except OSError as exc:
             self.close()
-            raise GazeboProcessError("M3_NATIVE_CONTACT_UNAVAILABLE") from exc
+            raise GazeboProcessError("NATIVE_GRASP_NATIVE_CONTACT_UNAVAILABLE") from exc
 
     def begin_post_close(self) -> None:
         """Discard pre-close transport backlog while preserving subscriptions."""
 
         if not self._armed:
-            raise GazeboProcessError("M3_CONTACT_WINDOW_NOT_ARMED")
+            raise GazeboProcessError("NATIVE_GRASP_CONTACT_WINDOW_NOT_ARMED")
         with self._lock:
             self._samples.clear()
 
     def evaluate(self, *, close_completed_sim_time_s: float | None, config=None):
-        from .m3 import M3Config, ReasonCode, confirm_native_bilateral_contact
-        cfg = config or M3Config()
+        from .native_grasp import NativePickPlaceConfig, ReasonCode, confirm_native_bilateral_contact
+        cfg = config or NativePickPlaceConfig()
         deadline = time.monotonic() + self.timeout_s
         result = None
         while time.monotonic() < deadline:
