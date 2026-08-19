@@ -1260,7 +1260,7 @@ def test_close_timeout_reconciliation_accepts_object_between_fingers() -> None:
     assert memory.grasp_execution()["stage"] == "probe"
 
 
-def test_lift_probe_reconciliation_advances_to_attachment_gate() -> None:
+def test_lift_probe_pose_reconciliation_keeps_attachment_unknown() -> None:
     memory = _memory_with_candidates()
     compiled = _compiled(memory)
     memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
@@ -1303,7 +1303,7 @@ def test_lift_probe_reconciliation_advances_to_attachment_gate() -> None:
 
     assert memory.motion_reconciliation()["status"] == "completed"
     assert memory.grasp_lift_probe()["status"] == "completed"
-    assert memory.grasp_lift_probe()["last_attempt_status"] == "reconciled"
+    assert memory.grasp_lift_probe()["last_attempt_status"] == "failed"
     assert memory.grasp_execution()["stage"] == "attachment"
     assert memory.attachment_gate()["verdict"] == "UNKNOWN"
     assert memory.attachment_gate()["status"] == "stopped_requires_human"
