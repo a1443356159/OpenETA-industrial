@@ -3351,16 +3351,90 @@ class AgentMemory:
 
     def _advance_placement_recovery(self, action: EnvAction) -> bool:
         policy = self.placement_candidate_policy()
-        if not isinstance(policy, dict) or policy.get("status") != "exhausted_return_required":
+        if not isinstance(policy, dict):
             return False
         recovery = policy.get("recovery")
         if not isinstance(recovery, dict):
             return False
+        if policy.get("status") == "reobserve_regrasp_required":
+            if _successful_tool_call(action, "observe") is None:
+                return False
+            for key in (
+                PENDING_SAM3_SELECTION_KEY,
+                SELECTED_SAM3_DETECTION_KEY,
+                PENDING_REFERENCE_LOCALIZATION_KEY,
+                REFERENCE_LOCALIZATION_FAILURE_KEY,
+                TARGET_ASSET_REFERENCE_KEY,
+                SAM3_NO_DETECTION_KEY,
+                GRASP_CANDIDATE_POLICY_KEY,
+                LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
+                GRASP_LIFT_PROBE_KEY,
+                ARTICULATED_ATTACHMENT_PROBE_KEY,
+                GRASP_EXECUTION_KEY,
+                GRASP_RECOVERY_KEY,
+                GRASP_ESTIMATION_RECOVERY_KEY,
+                ATTACHMENT_GATE_KEY,
+                PLACEMENT_RELEASE_KEY,
+            ):
+                self.facts.pop(key, None)
+            for key in (
+                "anygrasp_grasp_candidates_latest",
+                "grasp_pose_estimate_grasp_candidates_latest",
+                "graspgenx_grasp_candidates_latest",
+                "contact_graspnet_grasp_candidates_latest",
+                "anyplace_placement_candidates_latest",
+                "camera_pose_to_world_world_pose_latest",
+            ):
+                self.artifacts.pop(key, None)
+            recovery.update(
+                {
+                    "stage": "regrasp",
+                    "fresh_observation_scene_epoch": self.scene_epoch(),
+                    "fresh_observation_at_s": time.time(),
+                }
+            )
+            policy.update(
+                {
+                    "status": "regrasp_required",
+                    "active_candidate_id": None,
+                    "compiled_placement": None,
+                    "recovery": recovery,
+                }
+            )
+            self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy, source="placement_exhaustion_reobserve"
+            )
+            self.record(
+                "placement_recovery_reobserve_completed",
+                {
+                    "scene_epoch": self.scene_epoch(),
+                    "next_stage": "regrasp_and_rerun_anyplace",
+                },
+            )
+            return True
+        if policy.get("status") != "exhausted_return_required":
+            return False
         stage = str(recovery.get("stage") or "")
         if stage in {"return_source_hover", "return_source_capture"}:
-            call = _successful_tool_call(action, "move_to")
-            if call is None:
+            call = _tool_call(action, "move_to")
+            if not isinstance(call, dict):
                 return False
+            successful = _successful_tool_call(action, "move_to")
+            if successful is None:
+                policy.update(
+                    {
+                        "status": "stopped_requires_human",
+                        "stop_reason": "source_return_motion_failed_or_unknown",
+                    }
+                )
+                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                    policy, source="placement_source_return_stopped"
+                )
+                self.record(
+                    "placement_recovery_stopped",
+                    {"stage": stage, "reason": policy["stop_reason"]},
+                )
+                return True
             parameters = call.get("parameters")
             if not isinstance(parameters, dict):
                 command = action.command if isinstance(action.command, dict) else {}
@@ -3373,9 +3447,24 @@ class AgentMemory:
                 "return_source_capture" if stage == "return_source_hover" else "open_detach"
             )
         elif stage == "open_detach":
-            call = _successful_tool_call(action, "gripper_control")
-            if call is None:
+            call = _tool_call(action, "gripper_control")
+            if not isinstance(call, dict):
                 return False
+            if _successful_tool_call(action, "gripper_control") is None:
+                policy.update(
+                    {
+                        "status": "stopped_requires_human",
+                        "stop_reason": "source_detach_failed_or_unknown",
+                    }
+                )
+                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                    policy, source="placement_source_detach_stopped"
+                )
+                self.record(
+                    "placement_recovery_stopped",
+                    {"stage": stage, "reason": policy["stop_reason"]},
+                )
+                return True
             result = call.get("result")
             details = result.get("details") if isinstance(result, dict) else None
             details = details if isinstance(details, dict) else {}
@@ -3389,7 +3478,20 @@ class AgentMemory:
                 or receipt["detachable_joint"].get("state") != "detached"
                 or not isinstance(receipt.get("planning_scene_revision"), int)
             ):
-                return False
+                policy.update(
+                    {
+                        "status": "stopped_requires_human",
+                        "stop_reason": "source_detach_ack_or_scene_revision_missing",
+                    }
+                )
+                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                    policy, source="placement_source_detach_unverified"
+                )
+                self.record(
+                    "placement_recovery_stopped",
+                    {"stage": stage, "reason": policy["stop_reason"]},
+                )
+                return True
             recovery["stage"] = "reobserve_regrasp"
             policy["status"] = "reobserve_regrasp_required"
         else:

@@ -123,6 +123,25 @@ def _tools_with_handlers(*names: str) -> ToolRegistry:
     return tools
 
 
+def test_exhausted_placement_recovery_dispatches_fresh_observation() -> None:
+    decision = _host_obligation_decision(
+        {
+            "placement_candidate_policy": {
+                "status": "reobserve_regrasp_required",
+                "recovery": {"stage": "reobserve_regrasp"},
+            }
+        },
+        tools=_tools_with_handlers("observe"),
+    )
+
+    assert decision is not None
+    assert decision.action == "observe"
+    assert decision.parameters == {
+        "reason": "placement_candidates_exhausted_after_verified_source_detach"
+    }
+    assert decision.metadata["host_obligation"]["stage"] == "reobserve_regrasp"
+
+
 def _record_pending_sam3_selection(
     memory: AgentMemory,
     *,

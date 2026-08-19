@@ -500,6 +500,30 @@ def _host_obligation_decision(
             },
         )
 
+    placement_policy = tool_context.get("placement_candidate_policy")
+    if (
+        isinstance(placement_policy, dict)
+        and placement_policy.get("status") == "reobserve_regrasp_required"
+        and tools.can_execute("observe")
+    ):
+        return PlannerDecision(
+            action_type="tool_call",
+            action="observe",
+            parameters={"reason": "placement_candidates_exhausted_after_verified_source_detach"},
+            reasoning=(
+                "All retained placement candidates failed before execution and the object "
+                "was returned and detached at the source; acquire one fresh observation "
+                "before re-segmentation, re-grasp, and a new AnyPlace inference."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.placement_recovery.v1",
+                    "tool": "observe",
+                    "stage": "reobserve_regrasp",
+                }
+            },
+        )
+
     recovery = tool_context.get("grasp_recovery")
     if isinstance(recovery, dict) and recovery.get("status") == "required":
         required = recovery.get("required_action")
