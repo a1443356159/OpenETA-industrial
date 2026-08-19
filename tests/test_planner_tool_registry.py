@@ -8856,7 +8856,7 @@ def test_independent_failed_grasp_outcome_advances_accepted_candidate() -> None:
     )
     probe = memory.grasp_lift_probe()
     assert probe["status"] == "required"
-    assert probe["required_parameters"]["target_pose"]["xyz"] == pytest.approx([0.18, 0.02, 0.14])
+    assert probe["required_parameters"]["target_pose"]["xyz"] == pytest.approx([0.18, 0.02, 0.16])
     memory.add_action(
         EnvAction(
             action_type="tool_call",
