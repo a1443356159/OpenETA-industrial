@@ -149,7 +149,7 @@ def test_predict_callable_has_complete_schema_and_documentation() -> None:
     assert "GraspGenX" in docstring and "GraspNet/AnyGrasp" in docstring
 
 
-def test_build_mcp_uses_dynamic_gripper_literal(
+def test_build_mcp_uses_dynamic_gripper_enum_annotation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registered: dict[str, Any] = {}
@@ -170,10 +170,14 @@ def test_build_mcp_uses_dynamic_gripper_literal(
     graspgenx_mcp_server.build_mcp(["robotiq_2f_85", "franka_panda"])
 
     predict = registered["predict_grasps"]
-    assert get_args(predict.__annotations__["gripper_name"]) == (
+    annotation_args = get_args(predict.__annotations__["gripper_name"])
+    assert get_args(annotation_args[0]) == (
         "franka_panda",
         "robotiq_2f_85",
     )
+    assert annotation_args[1].json_schema_extra == {
+        "enum": ["franka_panda", "robotiq_2f_85"]
+    }
     assert set(registered) == {"predict_grasps", "list_grippers"}
 
 

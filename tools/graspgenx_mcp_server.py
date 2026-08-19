@@ -7,7 +7,9 @@ import argparse
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -171,7 +173,14 @@ def build_mcp(gripper_names: list[str] | tuple[str, ...]) -> FastMCP:
         "depth": dict[str, Any],
         "object_mask": dict[str, Any],
         "intrinsics": dict[str, Any],
-        "gripper_name": Literal.__getitem__(names),
+        # Pydantic 2.13 renders a one-value Literal as ``const``. MCP clients
+        # consume this field as an enum even when only one validated gripper is
+        # installed, so add the enum explicitly while retaining Literal's
+        # runtime validation.
+        "gripper_name": Annotated[
+            Literal.__getitem__(names),
+            Field(json_schema_extra={"enum": list(names)}),
+        ],
         "up_direction_camera": list[float],
         "return": dict[str, Any],
     }
