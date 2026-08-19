@@ -40,6 +40,7 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert "覆盖完整目标轮廓" in prompt
     assert "红色方块 target_object" in prompt
     assert "不得固定 detection id" in prompt
+    assert "不得调用 python_exec" in prompt
 
 
 def test_m6_order_helper_rejects_anyplace_before_lift() -> None:

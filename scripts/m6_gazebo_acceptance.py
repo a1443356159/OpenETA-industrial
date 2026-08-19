@@ -44,7 +44,7 @@ scene_primary RGB-D；create 返回的 initial observation 不计作这次显式
 同时供 SAM3 分割红色方块 target_object、GraspGenX
 (gripper_name=robotiq_2f_85) 和 SAM3 分割绿色 placement_zone_marker 使用。禁止 Oracle、
 fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增运动工具。抓取前不得运行
-AnyPlace。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
+AnyPlace；不得调用 python_exec 读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
 拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
 GraspGenX 候选并 compile_grasp_seed，执行真实接近、close，
 仅在双垫 native contact 与 attached ACK 后 lift；lift 必须 >=80 mm 且抓持相对漂移 <=10 mm。
@@ -311,7 +311,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ):
             errors.append("stable in-zone placement verification missing")
         fingerprints = [str(value) for value in base._values(events, "request_fingerprint") if value]
-        if _repeated_failed_motion_fingerprints(events):
+        if _repeated_failed_motion_fingerprints(calls):
             errors.append("a failed motion request fingerprint was repeated")
         placement_failures = [
             call
