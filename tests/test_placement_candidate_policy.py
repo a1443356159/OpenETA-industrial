@@ -247,15 +247,20 @@ def test_failed_source_return_stops_instead_of_repeating_motion() -> None:
     )
     memory.add_action(_planning_failure("placement_000", "fingerprint-only"))
 
-    memory.add_action(
-        _planning_failure(
-            "placement_000",
-            "source-return-unknown",
-            execution_started=None,
-            error_code="MOTION_OUTCOME_UNKNOWN",
-            motion_outcome="unknown",
-        )
+    failed_return = _planning_failure(
+        "placement_000",
+        "source-return-unknown",
+        execution_started=None,
+        error_code="MOTION_OUTCOME_UNKNOWN",
+        motion_outcome="unknown",
     )
+    failed_return.command["request"]["parameters"]["target_pose"][
+        "placement_recovery_stage"
+    ] = "return_source_hover"
+    failed_return.command["tool_calls"][0]["parameters"]["target_pose"][
+        "placement_recovery_stage"
+    ] = "return_source_hover"
+    memory.add_action(failed_return)
 
     policy = memory.placement_candidate_policy()
     assert policy["status"] == "stopped_requires_human"

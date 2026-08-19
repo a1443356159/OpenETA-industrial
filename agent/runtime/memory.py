@@ -3419,6 +3419,14 @@ class AgentMemory:
             call = _tool_call(action, "move_to")
             if not isinstance(call, dict):
                 return False
+            parameters = call.get("parameters")
+            if not isinstance(parameters, dict):
+                command = action.command if isinstance(action.command, dict) else {}
+                request = command.get("request")
+                parameters = request.get("parameters") if isinstance(request, dict) else None
+            target = parameters.get("target_pose") if isinstance(parameters, dict) else None
+            if not isinstance(target, dict) or target.get("placement_recovery_stage") != stage:
+                return False
             successful = _successful_tool_call(action, "move_to")
             if successful is None:
                 policy.update(
@@ -3435,14 +3443,6 @@ class AgentMemory:
                     {"stage": stage, "reason": policy["stop_reason"]},
                 )
                 return True
-            parameters = call.get("parameters")
-            if not isinstance(parameters, dict):
-                command = action.command if isinstance(action.command, dict) else {}
-                request = command.get("request")
-                parameters = request.get("parameters") if isinstance(request, dict) else None
-            target = parameters.get("target_pose") if isinstance(parameters, dict) else None
-            if not isinstance(target, dict) or target.get("placement_recovery_stage") != stage:
-                return False
             recovery["stage"] = (
                 "return_source_capture" if stage == "return_source_hover" else "open_detach"
             )
