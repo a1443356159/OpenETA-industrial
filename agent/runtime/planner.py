@@ -4946,6 +4946,11 @@ def _placement_obligation(
             "candidate": candidate,
             "source": source,
         },
+        "scene_revision": (
+            attachment.get("planning_scene_revision")
+            if isinstance(attachment.get("planning_scene_revision"), int)
+            else int(memory_context.get("scene_epoch") or 0)
+        ),
     }
     return {
         "schema_version": "openeta.placement_obligation.v1",
@@ -4953,6 +4958,11 @@ def _placement_obligation(
         "required_parameters": required,
         "sam3_result_id": selected.get("result_id"),
         "detection_id": selected.get("id"),
+        "planning_scene_revision": (
+            attachment.get("planning_scene_revision")
+            if isinstance(attachment.get("planning_scene_revision"), int)
+            else int(memory_context.get("scene_epoch") or 0)
+        ),
         "source_rematerialized": source_image != source_rgb,
     }
 
@@ -5087,6 +5097,7 @@ def _placement_motion_guidance(
             return None
         recovery_pose = dict(pose)
         recovery_pose["placement_recovery_stage"] = recovery_stage
+        recovery_pose["scene_revision"] = policy.get("scene_revision")
         return {
             "schema_version": "openeta.placement_motion_guidance.v1",
             "status": "required",

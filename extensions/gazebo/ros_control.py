@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 import threading
 import time
 from typing import Any, Mapping
@@ -958,8 +959,29 @@ class _RosRuntime:
             goal.get("max_acceleration_scaling_factor", 0.3)
         )
         request.request.start_state.is_diff = True
+        fault_scenario = os.environ.get("OPENETA_M6_ACCEPTANCE_FAULT", "")
+        placement_id = str(goal.get("placement_candidate_id") or "")
+        rejected_ids = getattr(self, "_m6_acceptance_rejected_ids", set())
+        inject_rejection = False
+        if placement_id and fault_scenario == "reject-first" and not rejected_ids:
+            inject_rejection = True
+        elif (
+            placement_id
+            and fault_scenario == "reject-all-recover"
+            and int(self.planning_scene.revision) == 2
+            and placement_id not in rejected_ids
+        ):
+            inject_rejection = True
+        if inject_rejection:
+            rejected_ids.add(placement_id)
+            self._m6_acceptance_rejected_ids = rejected_ids
         pose = Pose()
         pose.position.x, pose.position.y, pose.position.z = goal["target_pose"]["xyz"]
+        if inject_rejection:
+            # Acceptance-only fault fixture: MoveIt receives an unreachable
+            # position constraint and must itself return an empty plan.  No
+            # receipt or AnyPlace candidate is fabricated or rewritten.
+            pose.position.z = 100.0
         pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = goal["target_pose"]["quat_xyzw"]
         primitive = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[2 * goal["position_tolerance_m"]] * 3)
         pc = PositionConstraint()

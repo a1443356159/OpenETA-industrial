@@ -255,6 +255,7 @@ def test_native_grasp_profile_admits_known_stalled_close_to_contact_gate() -> No
     assert receipt["ok"] is True
     assert receipt["reached_goal"] is False
     assert receipt["stalled"] is True
+    assert receipt.get("error_code") is None
 
 
 def test_m2_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> None:

@@ -49,6 +49,7 @@ def _parameters(tmp_path: Path) -> dict[str, Any]:
     object_mask = _write_image(tmp_path / "object-mask.png")
     placement_mask = _write_image(tmp_path / "placement-mask.png")
     return {
+        "scene_revision": 2,
         "rgb": str(rgb),
         "depth": str(depth),
         "object_mask": str(object_mask),
@@ -217,6 +218,7 @@ def test_anyplace_handler_encodes_inputs_and_materializes_success(tmp_path: Path
         for item in result.details["placement_candidates"]
     )
     assert result.details["selected_grasp_id"] == "grasp_003"
+    assert result.details["scene_revision"] == 2
     assert result.details["selected_grasp_source"]["source_tool"] == "anygrasp"
     assert all(
         item["place_grasp_pose"]["source_tool"] == "anygrasp"

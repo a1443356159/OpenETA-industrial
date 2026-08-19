@@ -127,6 +127,14 @@ class GazeboDirectEnv(Env):
         self._latest = raw
         return raw
 
+    def _planning_scene_revision(self) -> int | None:
+        controller = self.controller
+        planning_scene = getattr(controller, "planning_scene", None)
+        revision = getattr(planning_scene, "revision", None)
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            revision = getattr(self.runtime, "scene_revision", None)
+        return revision if isinstance(revision, int) and not isinstance(revision, bool) else None
+
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         del options
         if seed is not None:
@@ -137,10 +145,22 @@ class GazeboDirectEnv(Env):
             self._native_grasp_lift_proof_pending = False
         observation = self.runtime.reset(seed=self._seed)
         raw = self._decorate_robot(self._as_unified(observation))
+        scene_revision = self._planning_scene_revision()
+        if scene_revision is not None:
+            raw.setdefault("metadata", {})["planning_scene_revision"] = scene_revision
         if self._native_grasp_verifier is not None:
             raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
         self._latest = raw
-        return raw, {}
+        reset_receipt = {
+            "ok": True,
+            "reset_seed": self._seed,
+            **(
+                {"planning_scene_revision": scene_revision}
+                if scene_revision is not None
+                else {}
+            ),
+        }
+        return raw, {"_openeta_receipt": reset_receipt}
 
     def step(self, action: Any):
         raw_action = action if isinstance(action, Mapping) else {}
@@ -176,6 +196,10 @@ class GazeboDirectEnv(Env):
                 contact_window.close()
             raise
         raw = self._decorate_robot(self._as_unified(observation))
+        scene_revision = self._planning_scene_revision()
+        if scene_revision is not None:
+            receipt["planning_scene_revision"] = scene_revision
+            raw.setdefault("metadata", {})["planning_scene_revision"] = scene_revision
         if self._native_grasp_config is not None and self._native_grasp_verifier is not None:
             attachment = getattr(self.runtime, "attachment", None)
             if action_type == "gripper_close":
@@ -299,14 +323,39 @@ class GazeboDirectEnv(Env):
                         self._native_grasp_lift_proof_pending = False
                 raw.setdefault("metadata", {})["physical_verification"] = record.to_dict()
                 receipt["physical_verification"] = record.to_dict()
-            elif action_type in {"move_to", "follow_eef_trajectory"} and self._native_grasp_lift_proof_pending:
+            elif (
+                action_type in {"move_to", "follow_eef_trajectory"}
+                and attachment is not None
+                and getattr(attachment, "state", None) == "attached"
+            ):
+                lift_proof_pending = self._native_grasp_lift_proof_pending
                 try:
-                    proof = attachment.child_link_proof() if attachment is not None else None
-                    record = self._native_grasp_verifier.prove_lift(proof, dart_supported=True)
+                    proof = attachment.child_link_proof()
+                    record = (
+                        self._native_grasp_verifier.prove_lift(
+                            proof, dart_supported=True
+                        )
+                        if lift_proof_pending
+                        else self._native_grasp_verifier.prove_retention(
+                            proof, dart_supported=True
+                        )
+                    )
                 except Exception:
-                    record = self._native_grasp_verifier.prove_lift(None, dart_supported=True)
+                    record = (
+                        self._native_grasp_verifier.prove_lift(
+                            None, dart_supported=True
+                        )
+                        if lift_proof_pending
+                        else self._native_grasp_verifier.prove_retention(
+                            None, dart_supported=True
+                        )
+                    )
                 raw.setdefault("metadata", {})["physical_verification"] = record.to_dict()
                 receipt["physical_verification"] = record.to_dict()
+                receipt["detachable_joint"] = {
+                    "state": "attached",
+                    "state_topic": self._native_grasp_config.state_topic,
+                }
                 proof_evidence = dict(record.evidence)
                 receipt["child_link_proof"] = (
                     proof_evidence
@@ -316,17 +365,16 @@ class GazeboDirectEnv(Env):
                 self._native_grasp_lift_proof_pending = False
                 if record.reason_code is not ReasonCode.TARGET_HELD:
                     self._native_grasp_transport_locked = True
-                    try:
-                        if attachment is None:
-                            raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
-                        attachment.ensure_detached(require_ack=True)
-                        receipt["detachable_joint"] = {
-                            "state": "detached",
-                            "detach_topic": self._native_grasp_config.detach_topic,
-                            "state_topic": self._native_grasp_config.state_topic,
-                        }
-                    except Exception:
-                        receipt["detach_cleanup_error"] = ReasonCode.DETACH_ACK_MISSING.value
+                    if lift_proof_pending:
+                        try:
+                            attachment.ensure_detached(require_ack=True)
+                            receipt["detachable_joint"] = {
+                                "state": "detached",
+                                "detach_topic": self._native_grasp_config.detach_topic,
+                                "state_topic": self._native_grasp_config.state_topic,
+                            }
+                        except Exception:
+                            receipt["detach_cleanup_error"] = ReasonCode.DETACH_ACK_MISSING.value
                     receipt.update({"ok": False, "error_code": record.reason_code.value})
             else:
                 raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()

@@ -70,6 +70,32 @@ def test_m6_health_url_preserves_service_root() -> None:
     assert m6._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
 
 
+def test_m6_recovery_scenarios_are_explicit_acceptance_only_fixtures(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = m6.base.Allocation(81, "partition", 18765, "run-id")
+    monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        m6.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {"trusted": True},
+    )
+
+    for scenario in ("reject-first", "reject-all-recover"):
+        paths = m6.prepare_case(
+            tmp_path,
+            tmp_path / scenario,
+            allocation,
+            dict(m6.DEFAULT_SERVICES),
+            scenario=scenario,
+        )
+        prompt = paths.instructions.read_text(encoding="utf-8")
+        assert scenario in prompt
+        assert "execution_started=false" in prompt
+        receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+        assert receipt["m6_scenario"] == scenario
+
+
 def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:
     instructions = tmp_path / "instructions.txt"
     instructions.write_text("task\n", encoding="utf-8")

@@ -5879,6 +5879,7 @@ def test_placement_obligation_joins_receptacle_mask_to_frozen_grasp() -> None:
             "status": "resolved",
             "verdict": "PASS",
             "candidate_id": active_candidate["id"],
+            "planning_scene_revision": 2,
         },
         source="test",
     )
@@ -5908,6 +5909,7 @@ def test_placement_obligation_joins_receptacle_mask_to_frozen_grasp() -> None:
             "candidate": retained["candidate"],
             "source": retained["source"],
         },
+        "scene_revision": 2,
     }
 
     execution = memory.grasp_execution()
@@ -5959,6 +5961,16 @@ def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None
         ],
     }
     memory = AgentMemory()
+    memory.save_fact(
+        "attachment_gate",
+        {
+            "status": "resolved",
+            "verdict": "PASS",
+            "candidate_id": "grasp_003",
+            "planning_scene_revision": 2,
+        },
+        source="test",
+    )
     memory.add_action(
         EnvAction(
             action_type="tool_call",
@@ -5974,6 +5986,7 @@ def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None
                                 "outputs": {
                                     "candidate_count": 1,
                                     "selected_grasp_id": "grasp_003",
+                                    "scene_revision": 2,
                                     "placement_candidates": [
                                         {
                                             "id": "placement_000",
@@ -5997,11 +6010,6 @@ def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None
             "candidate_id": "grasp_005",
             "compiled_grasp": {"camera_frame_id": "agentview"},
         },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {"status": "resolved", "verdict": "PASS"},
         source="test",
     )
     extrinsics = {
@@ -7718,7 +7726,12 @@ def test_anyplace_host_dispatches_exact_final_grasp_packet() -> None:
     )
     memory.save_fact(
         "attachment_gate",
-        {"status": "resolved", "verdict": "PASS", "candidate_id": active["id"]},
+        {
+            "status": "resolved",
+            "verdict": "PASS",
+            "candidate_id": active["id"],
+            "planning_scene_revision": 2,
+        },
         source="test",
     )
     _record_pending_sam3_selection(memory, original_image_ref="tmp/rgb.png")
@@ -7741,6 +7754,7 @@ def test_anyplace_host_dispatches_exact_final_grasp_packet() -> None:
             "candidate": retained["candidate"],
             "source": retained["source"],
         },
+        "scene_revision": 2,
     }
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
@@ -7778,7 +7792,12 @@ def test_anyplace_host_does_not_repeat_a_deterministic_failure() -> None:
     )
     memory.save_fact(
         "attachment_gate",
-        {"status": "resolved", "verdict": "PASS", "candidate_id": active["id"]},
+        {
+            "status": "resolved",
+            "verdict": "PASS",
+            "candidate_id": active["id"],
+            "planning_scene_revision": 2,
+        },
         source="test",
     )
     _record_pending_sam3_selection(memory, original_image_ref="tmp/rgb.png")

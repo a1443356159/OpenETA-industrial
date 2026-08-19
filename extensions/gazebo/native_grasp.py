@@ -532,6 +532,71 @@ class NativeGraspVerifier:
         self.phase = "held_proven"
         return self._remember(self._record(Verdict.PASS, ReasonCode.TARGET_HELD, True, **evidence))
 
+    def prove_retention(
+        self, proof: ChildLinkProof | None, *, dart_supported: bool = True
+    ) -> VerificationRecord:
+        """Revalidate an already-proven attachment during transport or lowering.
+
+        The 80 mm threshold is a one-time lift proof.  Applying it again while
+        descending for placement would incorrectly reject a still-attached
+        object, so subsequent reads require the native attached state (owned by
+        the caller) and the same capture-relative drift bound only.
+        """
+
+        if not self.attached:
+            return self._remember(
+                self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False)
+            )
+        if not dart_supported:
+            self.phase = "dart_unsupported"
+            return self._remember(
+                self._record(Verdict.FAIL, ReasonCode.DART_UNSUPPORTED, False)
+            )
+        if proof is None:
+            self.phase = "child_link_unavailable"
+            return self._remember(
+                self._record(
+                    Verdict.FAIL, ReasonCode.CHILD_LINK_STATE_UNAVAILABLE, False
+                )
+            )
+        prior_lift_proven = self.phase in {"held_proven", "retained_proven"}
+        evidence = {
+            "source": "gazebo_pose_info_child_link",
+            "lift_m": proof.lift_m,
+            "capture_relative_translation_m": proof.capture_relative_translation_m,
+            "minimum_lift_required": False,
+            "prior_lift_proven": prior_lift_proven,
+            "maximum_capture_relative_translation_m": (
+                self.config.maximum_capture_relative_translation_m
+            ),
+        }
+        if not prior_lift_proven:
+            self.phase = "lift_failed"
+            return self._remember(
+                self._record(
+                    Verdict.FAIL,
+                    ReasonCode.TARGET_NOT_LIFTED,
+                    False,
+                    **evidence,
+                )
+            )
+        if proof.capture_relative_translation_m > (
+            self.config.maximum_capture_relative_translation_m
+        ):
+            self.phase = "relative_translation_failed"
+            return self._remember(
+                self._record(
+                    Verdict.FAIL,
+                    ReasonCode.RELATIVE_POSE_DRIFT,
+                    False,
+                    **evidence,
+                )
+            )
+        self.phase = "retained_proven"
+        return self._remember(
+            self._record(Verdict.PASS, ReasonCode.TARGET_HELD, True, **evidence)
+        )
+
     def release_result(self, *, detached_acked: bool) -> VerificationRecord:
         self.attached = False
         self.phase = "released" if detached_acked else "release_unacknowledged"

@@ -72,3 +72,22 @@ def test_m3_verifier_fails_closed_for_preclose_contact_missing_ack_and_bad_proof
     assert verifier.prove_lift(ChildLinkProof(0.43, 0.50, 0.0)).reason_code is ReasonCode.TARGET_NOT_LIFTED
     verifier.close_result(gate, attach_acked=True)
     assert verifier.prove_lift(ChildLinkProof(0.43, 0.52, 0.011)).reason_code is ReasonCode.RELATIVE_POSE_DRIFT
+
+
+def test_transport_retention_does_not_reapply_lift_height_threshold() -> None:
+    gate = confirm_native_bilateral_contact(
+        [
+            *(_sample("left", stamp) for stamp in (10.01, 10.07, 10.12)),
+            *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13)),
+        ],
+        close_completed_sim_time_s=10.0,
+        now_monotonic_s=20.1,
+    )
+    verifier = NativeGraspVerifier()
+    verifier.close_result(gate, attach_acked=True)
+    assert verifier.prove_lift(ChildLinkProof(0.43, 0.52, 0.002)).verdict is Verdict.PASS
+
+    lowered = verifier.prove_retention(ChildLinkProof(0.43, 0.45, 0.003))
+
+    assert lowered.verdict is Verdict.PASS
+    assert lowered.evidence["minimum_lift_required"] is False

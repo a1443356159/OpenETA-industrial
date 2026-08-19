@@ -14,6 +14,8 @@ def _policy(candidate_ids):
         "rejected_candidates": [],
         "failed_request_fingerprints": [],
         "scene_revision": 7,
+        "planning_scene_revision": 7,
+        "revision_provenance": "native_attachment_gate",
         "compiled_placement": {"placement_candidate_id": candidate_ids[0]},
     }
 
@@ -36,6 +38,7 @@ def _planning_failure(
                         "purpose": "placement",
                         "placement_candidate_id": candidate_id,
                         "compiled_eef_pose": True,
+                        "scene_revision": 7,
                         "xyz": [0.4, 0.0, 0.5],
                     }
                 },
@@ -48,6 +51,7 @@ def _planning_failure(
                             "purpose": "placement",
                             "placement_candidate_id": candidate_id,
                             "compiled_eef_pose": True,
+                            "scene_revision": 7,
                             "xyz": [0.4, 0.0, 0.5],
                         }
                     },
@@ -61,7 +65,7 @@ def _planning_failure(
                                 "planned_point_count": 0,
                                 "execution_started": execution_started,
                                 "motion_outcome": motion_outcome,
-                                "scene_revision": 7,
+                                "planning_scene_revision": 7,
                                 "request_fingerprint": fingerprint,
                             }
                         },
@@ -205,7 +209,14 @@ def test_exhausted_recovery_detaches_then_invalidates_stale_perception_on_observ
         memory.add_action(
             _successful_call(
                 "move_to",
-                {"target_pose": {"placement_recovery_stage": stage, "xyz": xyz}},
+                {
+                    "target_pose": {
+                        "placement_recovery_stage": stage,
+                        "scene_revision": 7,
+                        "xyz": xyz,
+                    }
+                },
+                {"planning_scene_revision": 7},
             )
         )
     memory.add_action(
@@ -214,7 +225,7 @@ def test_exhausted_recovery_detaches_then_invalidates_stale_perception_on_observ
             {"position": 1},
             {
                 "detachable_joint": {"state": "detached"},
-                "planning_scene_revision": 9,
+                "planning_scene_revision": 8,
             },
         )
     )

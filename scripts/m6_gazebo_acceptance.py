@@ -34,6 +34,7 @@ REQUIRED_REAL_M6_TOOLS = (
     "anyplace",
     "close_simulator_env",
 )
+SCENARIOS = ("normal", "reject-first", "reject-all-recover")
 
 
 INSTRUCTIONS = """
@@ -55,6 +56,20 @@ hover/release 完整位姿直接调用 MoveIt。规划失败仅当 execution_sta
 成功释放必须有 detach ACK、planning-scene revision、稳定 >=0.5 s、末段漂移 <=5 mm、中心高度
 0.43±0.01 m，且目标 XY 外接圆完全位于标记区域。完成后唯一一次 close_simulator_env。
 """.strip() + "\n"
+
+
+SCENARIO_INSTRUCTIONS = {
+    "normal": "执行正常放置路径；不得主动制造规划失败。",
+    "reject-first": (
+        "验收配置会让第一次 placement MoveIt 请求真实返回无轨迹且 "
+        "execution_started=false。保留该回执，拒绝该候选，由主 VLM 选择另一个候选后完成放置。"
+    ),
+    "reject-all-recover": (
+        "验收配置会让首次抓取周期的五个 placement candidate 各自真实返回唯一的无轨迹失败。"
+        "五个全部耗尽后，真实返回 source hover/capture、open/detach、重新 observe/抓取，"
+        "重新运行 AnyPlace；故障条件随 planning-scene revision 链解除后完成放置。"
+    ),
+}
 
 
 def _health_url(sse_url: str) -> str:
@@ -106,7 +121,10 @@ def prepare_case(
     run_root: Path,
     allocation: base.Allocation,
     services: Mapping[str, str],
+    scenario: str = "normal",
 ) -> base.CasePaths:
+    if scenario not in SCENARIOS:
+        raise ValueError(f"unsupported M6 acceptance scenario: {scenario}")
     paths = base.case_paths(run_root, MILESTONE, MODE)
     paths.root.mkdir(parents=True, exist_ok=False)
     base._json_dump(
@@ -118,15 +136,26 @@ def prepare_case(
             }
         },
     )
-    paths.instructions.write_text(INSTRUCTIONS, encoding="utf-8")
+    paths.instructions.write_text(
+        INSTRUCTIONS
+        + "\n验收场景："
+        + scenario
+        + "。"
+        + SCENARIO_INSTRUCTIONS[scenario]
+        + "\n",
+        encoding="utf-8",
+    )
     base._json_dump(
         paths.receipt,
-        base.environment_receipt(
-            repo,
-            allocation,
-            case_name=f"{MILESTONE}-{MODE}",
-            before=base._process_snapshot(),
-        ),
+        {
+            **base.environment_receipt(
+                repo,
+                allocation,
+                case_name=f"{MILESTONE}-{MODE}",
+                before=base._process_snapshot(),
+            ),
+            "m6_scenario": scenario,
+        },
     )
     return paths
 
@@ -152,7 +181,7 @@ def _ordered(names: Sequence[str], required: Sequence[str]) -> bool:
     return all(any(name == wanted for name in cursor) for wanted in required)
 
 
-def verify_case(paths: base.CasePaths) -> dict[str, Any]:
+def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str, Any]:
     errors: list[str] = []
     try:
         events, trace_paths = base._load_trace_events(paths.trace_root)
@@ -273,6 +302,47 @@ def verify_case(paths: base.CasePaths) -> dict[str, Any]:
         ]
         if len(failed) != len(set(failed)):
             errors.append("a failed motion request fingerprint was repeated")
+        placement_failures = [
+            call
+            for call in calls
+            if _name(call) == "move_to"
+            and base._contains(call, "purpose", "placement")
+            and base._contains(call, "error_code", "MOTION_PLAN_FAILED")
+            and base._contains(call, "execution_started", False)
+        ]
+        if scenario == "normal" and placement_failures:
+            errors.append("normal scenario unexpectedly injected a placement rejection")
+        if scenario == "reject-first":
+            if len(placement_failures) != 1:
+                errors.append("reject-first did not retain exactly one real MoveIt rejection")
+            rejected_ids = {
+                str(value)
+                for call in placement_failures
+                for value in base._values(call, "placement_candidate_id")
+                if value
+            }
+            successful_ids = {
+                str(value)
+                for call in calls
+                if _name(call) == "move_to"
+                and base._contains(call, "purpose", "placement")
+                and base._contains(call, "motion_outcome", "completed")
+                for value in base._values(call, "placement_candidate_id")
+                if value
+            }
+            if not successful_ids - rejected_ids:
+                errors.append("reject-first did not complete a distinct second candidate")
+        if scenario == "reject-all-recover":
+            rejected_ids = {
+                str(value)
+                for call in placement_failures
+                for value in base._values(call, "placement_candidate_id")
+                if value
+            }
+            if len(placement_failures) < 5 or len(rejected_ids) < 5:
+                errors.append("reject-all-recover lacks five unique real MoveIt rejections")
+            if names.count("anyplace") < 2 or names.count("graspgenx") < 2:
+                errors.append("reject-all-recover did not regrasp and rerun AnyPlace")
         if not fingerprints:
             errors.append("motion request fingerprint evidence missing")
         scene_revisions = [
@@ -291,6 +361,7 @@ def verify_case(paths: base.CasePaths) -> dict[str, Any]:
             "errors": list(dict.fromkeys(errors)),
             "trace_paths": [str(path.resolve()) for path in trace_paths],
             "tool_call_count": len(calls),
+            "scenario": scenario,
         }
     except Exception as exc:  # noqa: BLE001 - verifier must return a report.
         return {
@@ -307,6 +378,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--skip-provider-preflight", action="store_true")
+    parser.add_argument("--scenario", choices=SCENARIOS, default="normal")
     for name, url in DEFAULT_SERVICES.items():
         parser.add_argument("--" + name.removeprefix("openeta-") + "-url", default=url)
     return parser
@@ -319,7 +391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_root = Path(args.run_root).resolve() if args.run_root else repo / ".cache/reports" / f"m6-gazebo-{stamp}"
     paths = base.case_paths(run_root, MILESTONE, MODE)
     if args.verify_only:
-        report = verify_case(paths)
+        report = verify_case(paths, scenario=args.scenario)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "passed" else 1
     services = {
@@ -340,7 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(provider, ensure_ascii=False, indent=2))
             return 2
     allocation = base.allocate(f"{MILESTONE}-{MODE}", preflight=not args.prepare_only)
-    paths = prepare_case(repo, run_root, allocation, services)
+    paths = prepare_case(repo, run_root, allocation, services, scenario=args.scenario)
     if args.prepare_only:
         print(run_root)
         return 0
@@ -349,8 +421,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         paths,
         allocation,
         calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
+        extra_environment=(
+            {"OPENETA_M6_ACCEPTANCE_FAULT": args.scenario}
+            if args.scenario != "normal"
+            else None
+        ),
     )
-    report = verify_case(paths)
+    report = verify_case(paths, scenario=args.scenario)
     report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})
     base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)
     print(json.dumps(report, ensure_ascii=False, indent=2))

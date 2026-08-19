@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from adapter.protocol import CameraFrame, EnvAction, EnvObservation, RobotState
 from agent.runtime.memory import AgentMemory
+from agent.runtime import memory as memory_module
 from agent.tools.grasp_geometry import DEFAULT_GRASP_PROFILE, compile_grasp_seed
 
 import json
@@ -154,6 +155,71 @@ def _tool_action(
             ],
         },
     )
+
+
+def _native_proof_receipt(*, revision: int = 2, target_id: str = "target_object") -> dict:
+    evidence = {
+        "source": "gazebo_pose_info_child_link",
+        "lift_m": 0.08945,
+        "capture_relative_translation_m": 0.00756,
+    }
+    return {
+        "ok": True,
+        "motion_outcome": "completed",
+        "planning_scene_revision": revision,
+        "detachable_joint": {"state": "attached"},
+        "child_link_proof": dict(evidence),
+        "physical_verification": {
+            "schema_version": "openeta.gazebo.native_grasp.v1",
+            "verdict": "PASS",
+            "reason_code": "NATIVE_GRASP_TARGET_HELD",
+            "target_id": target_id,
+            "grasp_confirmed": True,
+            "evidence": evidence,
+        },
+    }
+
+
+def test_native_attachment_proof_requires_exact_identity_and_revision() -> None:
+    parameters = {
+        "target_pose": {
+            "source_grasp_id": "grasp_000",
+            "compiled_grasp_id": "compiled-000",
+            "scene_epoch": 4,
+            "scene_revision": 2,
+        }
+    }
+    trusted = memory_module._trusted_native_attachment_proof(
+        _native_proof_receipt(),
+        candidate_id="grasp_000",
+        compiled_grasp_id="compiled-000",
+        scene_epoch=4,
+        planning_scene_revision=2,
+        require_lift=True,
+        request_parameters=parameters,
+    )
+    wrong_revision = memory_module._trusted_native_attachment_proof(
+        _native_proof_receipt(revision=3),
+        candidate_id="grasp_000",
+        compiled_grasp_id="compiled-000",
+        scene_epoch=4,
+        planning_scene_revision=2,
+        require_lift=True,
+        request_parameters=parameters,
+    )
+    wrong_target = memory_module._trusted_native_attachment_proof(
+        _native_proof_receipt(target_id="distractor_object"),
+        candidate_id="grasp_000",
+        compiled_grasp_id="compiled-000",
+        scene_epoch=4,
+        planning_scene_revision=2,
+        require_lift=True,
+        request_parameters=parameters,
+    )
+
+    assert trusted[0] is True
+    assert wrong_revision[:2] == (False, "native_planning_scene_revision_mismatch")
+    assert wrong_target[:2] == (False, "native_proof_target_mismatch")
 
 
 def _memory_with_candidates() -> AgentMemory:
@@ -1240,9 +1306,8 @@ def test_lift_probe_reconciliation_advances_to_attachment_gate() -> None:
     assert memory.grasp_lift_probe()["last_attempt_status"] == "reconciled"
     assert memory.grasp_execution()["stage"] == "attachment"
     assert memory.attachment_gate()["verdict"] == "UNKNOWN"
-    assert memory.grasp_execution()["attachment_actions"]["pass"]["parameters"][
-        "target_pose"
-    ]["xyz"] == [0.1, 0.2, 0.48000000000000004]
+    assert memory.attachment_gate()["status"] == "stopped_requires_human"
+    assert memory.grasp_execution()["attachment_actions"] == {}
 
 
 def test_robotiq_object_detection_resolves_attachment_and_completes_full_lift() -> None:

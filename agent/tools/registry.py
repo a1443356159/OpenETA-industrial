@@ -1260,6 +1260,10 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                     "object with one complete normalized grasp candidate and the "
                     "successful targeted grasp tool's details.source object"
                 ),
+                "scene_revision": (
+                    "integer planning-scene revision inherited from the trusted "
+                    "native attachment gate"
+                ),
             },
             safe_by_default=False,
             effect=ToolEffect.PLANNING,

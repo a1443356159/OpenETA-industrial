@@ -1734,6 +1734,16 @@ def build_anyplace_handler(
         object_mask = _string_param(context.parameters.get("object_mask"))
         placement_region_mask = context.parameters.get("placement_region_mask")
         selected_grasp = context.parameters.get("selected_grasp")
+        scene_revision = context.parameters.get("scene_revision")
+        if (
+            not isinstance(scene_revision, int)
+            or isinstance(scene_revision, bool)
+            or scene_revision < 0
+        ):
+            return _anyplace_failure(
+                "invalid_scene_revision",
+                "AnyPlace placement prediction failed: planning-scene revision is missing.",
+            )
         if not rgb:
             return _anyplace_failure(
                 "missing_rgb", "AnyPlace placement prediction failed: missing rgb."
@@ -1908,6 +1918,7 @@ def build_anyplace_handler(
                     "intrinsics": source_intrinsics,
                 },
             },
+            "scene_revision": scene_revision,
         }
         if source_gripper_name is not None:
             request["selected_grasp"]["source"]["gripper_name"] = source_gripper_name
@@ -5296,6 +5307,7 @@ def _normalise_anyplace_response(
             },
             "selected_grasp_source": dict(selected_grasp_source),
             "selected_grasp_id": selected_grasp["id"],
+            "scene_revision": request["scene_revision"],
             "raw_output_ref": str(raw_output_ref),
             "candidate_count": 5,
             "placement_candidates": candidates,

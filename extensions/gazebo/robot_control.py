@@ -495,6 +495,16 @@ def make_move_group_goal(
             "xyz": list(tool_xyz),
             "quat_xyzw": list(tool_q),
         },
+        **{
+            key: target_pose[key]
+            for key in (
+                "purpose",
+                "placement_candidate_id",
+                "compiled_placement_id",
+                "scene_revision",
+            )
+            if key in target_pose
+        },
         "target_pose": {"frame_id": cfg.base_link, "xyz": link_xyz, "quat_xyzw": list(link_q)},
         "position_tolerance_m": float(
             tolerance_values.get(
@@ -984,7 +994,7 @@ class GazeboController:
                 }
                 return GazeboControlResult(
                     ok,
-                    result.get("error_code") or (None if ok else "GRIPPER_FAILED"),
+                    None if ok else (result.get("error_code") or "GRIPPER_FAILED"),
                     {
                         "gripper_state": state.gripper_state,
                         "reached_goal": reached_goal,

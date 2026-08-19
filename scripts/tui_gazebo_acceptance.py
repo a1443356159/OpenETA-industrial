@@ -2311,6 +2311,7 @@ def run_case(
     *,
     sam3_url: str = "",
     calibration_profile: Path | None = None,
+    extra_environment: Mapping[str, str] | None = None,
 ) -> int:
     milestone = paths.root.parent.name
     scripted = paths.root.name == SCRIPTED_TUI
@@ -2361,6 +2362,8 @@ def run_case(
             "RMW_IMPLEMENTATION": env.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         }
     )
+    if extra_environment:
+        env.update({str(key): str(value) for key, value in extra_environment.items()})
     tui_env = dict(env)
     # Resolve root `.env`/`apikey.md` before the child changes into its
     # isolated case directory.  Both human-gated and scripted TUI cases use
