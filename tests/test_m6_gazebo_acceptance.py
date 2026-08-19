@@ -57,6 +57,11 @@ def test_m6_canonicalizes_public_grasp_tool_only_with_real_graspgenx_backend() -
     assert m6._name({"name": "grasp_pose_estimate"}) == "grasp_pose_estimate"
 
 
+def test_m6_requires_only_executable_public_grasp_tools() -> None:
+    assert "graspgenx" in m6.REQUIRED_REAL_M6_TOOLS
+    assert "list_graspgenx_grippers" not in m6.REQUIRED_REAL_M6_TOOLS
+
+
 def test_m6_health_url_preserves_service_root() -> None:
     assert m6._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
 

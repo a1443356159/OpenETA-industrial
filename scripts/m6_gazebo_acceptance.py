@@ -24,6 +24,16 @@ DEFAULT_SERVICES = {
     "openeta-anyplace": "http://127.0.0.1:8775/sse",
     "openeta-graspgenx": "http://127.0.0.1:8778/sse",
 }
+REQUIRED_REAL_M6_TOOLS = (
+    "create_simulator_env",
+    "observe",
+    "sam3",
+    "graspgenx",
+    "compile_grasp_seed",
+    "gripper_control",
+    "anyplace",
+    "close_simulator_env",
+)
 
 
 INSTRUCTIONS = """
@@ -148,17 +158,7 @@ def verify_case(paths: base.CasePaths) -> dict[str, Any]:
         payloads, mcp_errors = base._mcp_response_payloads(calls, paths)
         errors.extend(mcp_errors)
         names = [_name(call) for call in calls]
-        for required in (
-            "create_simulator_env",
-            "observe",
-            "sam3",
-            "list_graspgenx_grippers",
-            "graspgenx",
-            "compile_grasp_seed",
-            "gripper_control",
-            "anyplace",
-            "close_simulator_env",
-        ):
+        for required in REQUIRED_REAL_M6_TOOLS:
             if required not in names:
                 errors.append(f"required real M6 tool call missing: {required}")
         if names.count("sam3") < 2:
