@@ -21,7 +21,7 @@ from .robot_control import (
     robot_state_from_sources,
     start_state_recovery_record,
 )
-from .planning_scene import CollisionBox, PlanningSceneSynchronizer
+from .planning_scene import CollisionBox, PlanningSceneError, PlanningSceneSynchronizer
 
 
 def _normalized_quaternion(
@@ -269,6 +269,15 @@ class RosGazeboController(GazeboController):
                 tuple(config.target_initial_xyz),
             ),
         )
+        validity = self.runtime.current_state_validity(timeout_s=3.0)
+        self.runtime.planning_scene_validation = validity
+        if validity.get("valid") is not True:
+            self.planning_scene.ready = False
+            pairs = validity.get("collision_pairs") or []
+            raise PlanningSceneError(
+                "planning-scene current state is invalid; collision_pairs="
+                + repr(pairs)
+            )
         self.runtime.scene_revision = revision
         self.runtime.planning_scene_ready = self.planning_scene.ready
         return revision
@@ -432,6 +441,7 @@ class RosGazeboControllerFactory:
             planning_scene=None,
             scene_revision=0,
             planning_scene_ready=True,
+            planning_scene_validation=None,
             apply_scene_client=apply_scene_client,
             get_scene_client=get_scene_client,
             apply_scene_service_type=ApplyPlanningScene,
@@ -462,6 +472,40 @@ class _RosRuntime:
         self._pending: list[Any] = []
         self._lock = threading.Lock()
         self._closed = False
+
+    def current_state_validity(self, *, timeout_s: float) -> Mapping[str, Any]:
+        """Read back MoveIt's verdict and collision pairs for the live arm state."""
+
+        state = self.state_source.wait_fresh(timeout_s)
+        request = self.state_validity_service_type.Request()
+        _populate_state_validity_request(
+            request,
+            [float(value) for value in state.joint_positions[: len(ARM_JOINTS)]],
+            group_name=self.config.move_group,
+        )
+        response = self._await(
+            self.state_validity_client.call_async(request), timeout_s
+        )
+        pairs = sorted(
+            {
+                tuple(
+                    sorted(
+                        (
+                            str(getattr(contact, "contact_body_1", "")),
+                            str(getattr(contact, "contact_body_2", "")),
+                        )
+                    )
+                )
+                for contact in getattr(response, "contacts", ())
+                if getattr(contact, "contact_body_1", "")
+                or getattr(contact, "contact_body_2", "")
+            }
+        )
+        return {
+            "valid": bool(response.valid),
+            "collision_pairs": [list(pair) for pair in pairs],
+            "joint_state_timestamp_s": state.metadata.get("joint_state_timestamp_s"),
+        }
 
     def start(self) -> None:
         if self.shared_executor:

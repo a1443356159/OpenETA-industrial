@@ -304,7 +304,7 @@ class GazeboRuntime:
             try:
                 sync_scene(*scene_args)
             except Exception as exc:
-                raise GazeboProcessError("PLANNING_SCENE_SYNC_FAILED") from exc
+                raise GazeboProcessError(f"PLANNING_SCENE_SYNC_FAILED: {exc}") from exc
         barrier: float | None = None
         if self.controller is not None:
             # A cancelled cold-start action can leave the first open command
