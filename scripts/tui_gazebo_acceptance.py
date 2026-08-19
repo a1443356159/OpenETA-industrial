@@ -3266,7 +3266,13 @@ def _verify_m2(
         # receipt.  It still needs every other post-action freshness barrier.
         if (
             str(call.get("name") or call.get("tool_name") or "") == "move_to"
-            and not _contains(nodes, "schema_version", "m2_start_state_recovery_v1")
+            and not any(
+                _contains(nodes, "schema_version", schema)
+                for schema in (
+                    "openeta.gazebo.start_state_recovery.v1",
+                    "m2_start_state_recovery_v1",
+                )
+            )
         ):
             errors.append("M2 successful move lacks recovery receipt")
         if not _contains(nodes, "action_completed_ros_time_s"):

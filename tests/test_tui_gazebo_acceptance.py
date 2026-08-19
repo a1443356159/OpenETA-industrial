@@ -1162,7 +1162,7 @@ def test_m2_verifier_uses_only_correlated_durable_motion_receipts() -> None:
                 "target": target,
                 "action_completed_ros_time_s": float(index),
                 "start_state_recovery": {
-                    "schema_version": "m2_start_state_recovery_v1"
+                    "schema_version": "openeta.gazebo.start_state_recovery.v1"
                 },
             }
         )
@@ -1267,7 +1267,9 @@ def test_m2_verifier_allows_one_observed_same_position_retry_but_rejects_stalls(
             reached_target=True,
             stalled=False,
             target=target,
-            start_state_recovery={"schema_version": "m2_start_state_recovery_v1"},
+            start_state_recovery={
+                "schema_version": "openeta.gazebo.start_state_recovery.v1"
+            },
         )
     add(
         "gripper_control",
