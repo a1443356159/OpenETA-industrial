@@ -1512,6 +1512,13 @@ class AgentMemory:
             }
             if source_camera_role:
                 base["camera_role"] = source_camera_role
+            host_obligation = _action_host_obligation(action)
+            preserve_scene_target = (
+                not candidates
+                and host_obligation.get("schema_version")
+                == "openeta.wrist_segmentation_obligation.v1"
+                and host_obligation.get("stage") == "wrist_segmentation"
+            )
             self.facts.pop(REFERENCE_LOCALIZATION_FAILURE_KEY, None)
             asset_reference = self.target_asset_reference()
             if isinstance(asset_reference, dict):
@@ -1525,7 +1532,8 @@ class AgentMemory:
                 ):
                     base["reference_verification"] = dict(verification)
             self.facts.pop(PENDING_SAM3_SELECTION_KEY, None)
-            self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
+            if not preserve_scene_target:
+                self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
             if candidates:
                 self.facts.pop(SAM3_NO_DETECTION_KEY, None)
                 self.facts[PENDING_SAM3_SELECTION_KEY] = _memory_fact_entry(

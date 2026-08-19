@@ -860,6 +860,16 @@ def test_host_grasp_execution_accepts_bounded_pose_adjustment_at_contact() -> No
 
 def test_rm75_empty_fresh_wrist_segmentation_preserves_compiled_pose() -> None:
     memory = _memory_with_candidates()
+    memory.save_fact(
+        "selected_sam3_detection",
+        {
+            "id": "detection_000",
+            "source_image": "/frozen/top.rgb.png",
+            "target_prompt": "blue cylinder",
+            "mask_ref": "/frozen/target.mask.png",
+        },
+        source="test",
+    )
     compiled = _compiled(memory)
     compiled["wrist_alignment_policy"] = "optional_if_fresh_segmentation_empty"
     memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
@@ -900,6 +910,7 @@ def test_rm75_empty_fresh_wrist_segmentation_preserves_compiled_pose() -> None:
     assert execution["wrist_alignment_skip_evidence"]["result_id"] == (
         "sam3-empty-wrist"
     )
+    assert memory.selected_sam3_detection()["source_image"] == "/frozen/top.rgb.png"
 
 
 def test_required_wrist_alignment_does_not_accept_empty_segmentation() -> None:
