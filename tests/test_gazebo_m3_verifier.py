@@ -40,6 +40,17 @@ def test_m3_verifier_rejects_unknown_mixed_or_distractor_native_contact() -> Non
     assert not result.accepted and result.reason_code is ReasonCode.CONTACT_DISTRACTOR
 
 
+def test_pregrasp_open_stays_ready_without_detach_ack() -> None:
+    verifier = NativeGraspVerifier()
+
+    record = verifier.pregrasp_open_result()
+
+    assert record.verdict is Verdict.UNKNOWN
+    assert record.reason_code is ReasonCode.READY
+    assert record.phase == "ready"
+    assert verifier.attached is False
+
+
 def test_m3_verifier_fails_closed_for_preclose_contact_missing_ack_and_bad_proof() -> None:
     preclose = confirm_native_bilateral_contact(
         [*(_sample("left", stamp) for stamp in (9.90, 10.01, 10.12)), *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13))],

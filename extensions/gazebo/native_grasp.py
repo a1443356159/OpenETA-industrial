@@ -541,6 +541,13 @@ class NativeGraspVerifier:
             False,
         ))
 
+    def pregrasp_open_result(self) -> VerificationRecord:
+        """Acknowledge an open command when no grasp has ever been attached."""
+
+        self.phase = "ready"
+        self.attached = False
+        return self._remember(self._record(Verdict.UNKNOWN, ReasonCode.READY, False))
+
     def _record(self, verdict: Verdict, reason: ReasonCode, grasp: bool, **evidence: Any) -> VerificationRecord:
         return VerificationRecord(self.phase, verdict, reason, self.config.target_id, grasp, evidence)
 
