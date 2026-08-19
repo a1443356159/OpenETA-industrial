@@ -929,13 +929,41 @@ def _camera_to_world(extrinsics: Mapping[str, Any]) -> tuple[list[list[float]], 
             rotation = [flat[0:3], flat[3:6], flat[6:9]]
         _rotation(rotation, "camera_extrinsics.mat")
         return rotation, position
+    quaternion = extrinsics.get("quat_xyzw")
+    if isinstance(quaternion, list) and len(quaternion) == 4:
+        position = _vector(extrinsics.get("pos"), 3, "camera_extrinsics.pos")
+        qx, qy, qz, qw = _vector(quaternion, 4, "camera_extrinsics.quat_xyzw")
+        norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+        if norm <= 1e-9:
+            raise GraspGeometryError("camera_extrinsics.quat_xyzw must be non-zero")
+        qx, qy, qz, qw = (value / norm for value in (qx, qy, qz, qw))
+        rotation = [
+            [
+                1.0 - 2.0 * (qy * qy + qz * qz),
+                2.0 * (qx * qy - qz * qw),
+                2.0 * (qx * qz + qy * qw),
+            ],
+            [
+                2.0 * (qx * qy + qz * qw),
+                1.0 - 2.0 * (qx * qx + qz * qz),
+                2.0 * (qy * qz - qx * qw),
+            ],
+            [
+                2.0 * (qx * qz - qy * qw),
+                2.0 * (qy * qz + qx * qw),
+                1.0 - 2.0 * (qx * qx + qy * qy),
+            ],
+        ]
+        return _rotation(rotation, "camera_extrinsics.quat_xyzw"), position
     for key in ("camera_to_world", "pose_mat", "matrix"):
         matrix = extrinsics.get(key)
         if isinstance(matrix, list) and len(matrix) == 4:
             rows = [_vector(row, 4, f"camera_extrinsics.{key}") for row in matrix]
             rotation = _rotation([row[:3] for row in rows[:3]], f"camera_extrinsics.{key}")
             return rotation, [rows[0][3], rows[1][3], rows[2][3]]
-    raise GraspGeometryError("camera_extrinsics must contain pos+mat or a 4x4 matrix")
+    raise GraspGeometryError(
+        "camera_extrinsics must contain pos+mat, pos+quat_xyzw, or a 4x4 matrix"
+    )
 
 
 def _opencv_camera_to_world(

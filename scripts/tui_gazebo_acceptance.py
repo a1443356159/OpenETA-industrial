@@ -2361,6 +2361,16 @@ def run_case(
     )
     after = _process_snapshot()
     owned_residuals = _owned_process_residuals(after, run_id=allocation.run_id)
+    residual_deadline = time.monotonic() + 15.0
+    while owned_residuals and time.monotonic() < residual_deadline:
+        time.sleep(0.25)
+        after = _process_snapshot()
+        owned_residuals = _owned_process_residuals(after, run_id=allocation.run_id)
+    # DDS and Gazebo discovery can briefly retain endpoints after every owned
+    # process has exited. Give their leases one bounded settle interval before
+    # recording the authoritative graph/partition cleanup evidence.
+    if not owned_residuals:
+        time.sleep(2.0)
     from extensions.gazebo.ros2_ws.acceptance_isolation import (
         candidate_domain_evidence,
         probe_ros_graph,

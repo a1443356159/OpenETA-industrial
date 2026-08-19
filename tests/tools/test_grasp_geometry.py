@@ -224,6 +224,25 @@ def test_normalized_opencv_and_legacy_opengl_extrinsics_are_equivalent() -> None
     ) == camera_optical_forward_world(normalized_parameters["camera_extrinsics"])
 
 
+def test_compile_accepts_gazebo_position_quaternion_extrinsics() -> None:
+    parameters = _compile_parameters()
+    parameters["camera_extrinsics"] = {
+        "camera_frame": "opencv",
+        "frame_transform": "camera_to_world",
+        "pos": [0.0, 0.0, 1.3],
+        "quat_xyzw": [0.7071067812, -0.7071067812, 0.0, 0.0],
+    }
+
+    result = compile_grasp_seed(
+        parameters,
+        profile=_profile(),
+        profile_sha256="profile-sha",
+    )
+
+    assert result["camera_frame_id"] == "agentview"
+    assert result["contact_pose"]["frame"] == "world"
+
+
 def test_grasp_geometry_rejects_unknown_camera_frame() -> None:
     parameters = _compile_parameters()
     parameters["camera_extrinsics"]["camera_frame"] = "backend_guess"
