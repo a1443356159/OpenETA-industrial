@@ -1473,6 +1473,16 @@ class AgentMemory:
             parameters = details.get("parameters")
             if not isinstance(parameters, dict):
                 parameters = {}
+            source_image = outputs.get("source_image") or parameters.get("image")
+            target_prompt = outputs.get("prompt") or parameters.get("prompt")
+            previous_no_detection = self.sam3_no_detection()
+            if (
+                not target_prompt
+                and isinstance(previous_no_detection, dict)
+                and str(previous_no_detection.get("source_image") or "")
+                == str(source_image or "")
+            ):
+                target_prompt = previous_no_detection.get("target_prompt")
             source_camera_role = str(
                 outputs.get("source_camera_role")
                 or details.get("source_camera_role")
@@ -1490,8 +1500,8 @@ class AgentMemory:
             )
             base = {
                 "result_id": result_id,
-                "target_prompt": outputs.get("prompt") or parameters.get("prompt"),
-                "source_image": outputs.get("source_image") or parameters.get("image"),
+                "target_prompt": target_prompt,
+                "source_image": source_image,
                 "frame_id": source_frame_id,
                 "ranking": outputs.get("ranking") or "score_descending",
                 "candidate_count": len(candidates),

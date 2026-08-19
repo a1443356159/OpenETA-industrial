@@ -928,6 +928,41 @@ def test_required_wrist_alignment_does_not_accept_empty_segmentation() -> None:
     assert memory.grasp_execution()["stage"] == "align"
 
 
+def test_point_segmentation_retains_same_frame_text_target_prompt() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the blue cylinder")
+    image = "/frozen/top.rgb.png"
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": image, "prompt": "blue cylinder"},
+            outputs={"result_id": "empty-text", "detections": []},
+        )
+    )
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": image, "positive_points": [[239, 51]]},
+            outputs={
+                "result_id": "point-result",
+                "source_image": image,
+                "detections": [
+                    {
+                        "id": "detection_000",
+                        "mask_ref": "/frozen/mask.png",
+                    }
+                ],
+            },
+        )
+    )
+    memory.resolve_sam3_selection(
+        result_id="point-result",
+        detection_id="detection_000",
+        selection_source="main_agent_vlm",
+    )
+    assert memory.selected_sam3_detection()["target_prompt"] == "blue cylinder"
+
+
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:
     memory = _memory_with_candidates()
     memory.add_action(_tool_action("gripper_control", {"position": 1}))
