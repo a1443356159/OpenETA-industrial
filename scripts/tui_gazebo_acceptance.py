@@ -736,41 +736,46 @@ def _scripted_tui_trace_state(paths: CasePaths) -> str:
     order so a later human answer or episode result overrides an older pause.
     """
 
-    seen_human_pause = False
-    for trace in paths.trace_root.glob("sessions/*/trace.jsonl"):
+    state = "running"
+    traces = sorted(
+        paths.trace_root.glob("sessions/*/trace.jsonl"),
+        key=lambda path: path.stat().st_mtime_ns,
+    )
+    for trace in traces:
         try:
-            with trace.open("rb") as stream:
-                stream.seek(0, os.SEEK_END)
-                stream.seek(max(0, stream.tell() - 128 * 1024), os.SEEK_SET)
-                tail = stream.read().decode("utf-8", errors="replace")
+            stream = trace.open("r", encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for line in reversed(tail.splitlines()):
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, Mapping):
-                continue
-            event_type = event.get("event_type")
-            if event_type == "episode_result":
-                return "completed"
-            # A newer human answer means an older pause is no longer active.
-            if event_type in {"human_answer", "user_message"}:
-                break
-            if event_type != "episode_step":
-                continue
-            payload = event.get("payload")
-            if not isinstance(payload, Mapping):
-                continue
-            step_result = payload.get("step_result")
-            if not isinstance(step_result, Mapping):
-                continue
-            info = step_result.get("info")
-            if isinstance(info, Mapping) and info.get("pause_reason") == "ask_human":
-                seen_human_pause = True
-                break
-    return "human_input_required" if seen_human_pause else "running"
+        with stream:
+            # Observation-bearing JSONL records can exceed 128 KiB. Stream
+            # complete records instead of seeking into the middle of the last
+            # line, which could hide an unattended ask_human gate.
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, Mapping):
+                    continue
+                event_type = event.get("event_type")
+                if event_type == "episode_result":
+                    state = "completed"
+                    continue
+                if event_type in {"human_answer", "user_message"}:
+                    state = "running"
+                    continue
+                if event_type != "episode_step":
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, Mapping):
+                    continue
+                step_result = payload.get("step_result")
+                if not isinstance(step_result, Mapping):
+                    continue
+                info = step_result.get("info")
+                if isinstance(info, Mapping) and info.get("pause_reason") == "ask_human":
+                    state = "human_input_required"
+    return state
 
 
 def _wait_for_scripted_tui_episode(

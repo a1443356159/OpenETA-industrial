@@ -1748,7 +1748,10 @@ def test_scripted_tui_driver_blocks_instead_of_answering_ask_human(
         json.dumps(
             {
                 "event_type": "episode_step",
-                "payload": {"step_result": {"info": {"pause_reason": "ask_human"}}},
+                "payload": {
+                    "observation": {"large_rgbd_metadata": "x" * (160 * 1024)},
+                    "step_result": {"info": {"pause_reason": "ask_human"}},
+                },
             }
         )
         + "\n",
