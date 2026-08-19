@@ -61,6 +61,32 @@ DEFAULT_MCP_SSE_READ_TIMEOUT_S = 300.0
 MCP_SSE_TIMEOUT_GRACE_S = 5.0
 ENVIRONMENT_RECEIPT_SCHEMA_VERSION = "openeta.environment_receipt.v1"
 
+# Controller-produced evidence that must remain available after the raw MCP
+# response is materialized as an artifact.  The simulator proxy is an
+# environment authority, so copying this bounded set into its host-stamped
+# receipt preserves the control-plane proof without trusting agent-authored
+# parameters or requiring runtime code to reopen an artifact from disk.
+CONTROL_RECEIPT_FIELDS = (
+    "ok",
+    "error_code",
+    "moveit_error_code",
+    "failure_class",
+    "candidate_rejection",
+    "motion_outcome",
+    "execution_started",
+    "request_fingerprint",
+    "planning_scene_revision",
+    "scene_revision",
+    "stalled",
+    "reached_goal",
+    "terminal_status",
+    "terminal_status_code",
+    "detachable_joint",
+    "physical_verification",
+    "child_link_proof",
+    "placement_verification",
+)
+
 SIMULATOR_CONTROL_MCP_TOOL_NAMES = (
     "move_to",
     "follow_eef_trajectory",
@@ -2074,6 +2100,9 @@ def _build_environment_receipt(
         "observation_fresh": bool(observation_snapshot),
     }
     for key in ("reward", "terminated", "truncated", "scene_epoch"):
+        if key in response:
+            receipt[key] = response.get(key)
+    for key in CONTROL_RECEIPT_FIELDS:
         if key in response:
             receipt[key] = response.get(key)
     motion = build_motion_summary(response)

@@ -475,6 +475,85 @@ def test_worker_proxy_carries_existing_control_spec_into_observation_metadata() 
     assert _attach_control_spec({"metadata": {}}, {}) == {"metadata": {}}
 
 
+def test_worker_proxy_retains_native_control_proof_in_trusted_receipt(tmp_path: Path) -> None:
+    proof = {
+        "schema_version": "openeta.gazebo.native_grasp.v1",
+        "verdict": "PASS",
+        "reason_code": "NATIVE_GRASP_TARGET_HELD",
+        "target_id": "target_object",
+        "grasp_confirmed": True,
+        "evidence": {
+            "lift_m": 0.104,
+            "capture_relative_translation_m": 0.005,
+        },
+    }
+    response = {
+        "ok": True,
+        "motion_outcome": "completed",
+        "execution_started": True,
+        "planning_scene_revision": 2,
+        "request_fingerprint": "move-fingerprint",
+        "detachable_joint": {"state": "attached"},
+        "physical_verification": proof,
+        "child_link_proof": dict(proof["evidence"]),
+    }
+    transport = FakeSimulatorMcpTransport(response)
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-native-proof",
+            handle="env-native-proof",
+            response_output_root=tmp_path / "responses",
+        ),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call(
+        "move_to",
+        {"target_pose": {"frame": "world", "xyz": [0.2, 0.0, 0.6]}},
+    )
+
+    receipt = result.details["environment_receipt"]
+    for key, value in response.items():
+        assert receipt[key] == value
+
+
+def test_worker_proxy_retains_moveit_rejection_in_trusted_receipt(tmp_path: Path) -> None:
+    response = {
+        "ok": False,
+        "error_code": "MOTION_PLAN_FAILED",
+        "moveit_error_code": -1,
+        "failure_class": "planning_failure",
+        "candidate_rejection": True,
+        "motion_outcome": "not_started",
+        "execution_started": False,
+        "request_fingerprint": "placement-fingerprint",
+        "planning_scene_revision": 2,
+    }
+    transport = FakeSimulatorMcpTransport(response)
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-placement-rejection",
+            handle="env-placement-rejection",
+            response_output_root=tmp_path / "responses",
+        ),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call(
+        "move_to",
+        {"target_pose": {"frame": "world", "xyz": [0.4, 0.0, 0.5]}},
+    )
+
+    assert result.success is False
+    receipt = result.details["environment_receipt"]
+    for key, value in response.items():
+        assert receipt[key] == value
+
+
 def test_create_simulator_env_requires_env_id() -> None:
     transport = FakeSimulatorMcpTransport({"success": True})
     tools = bind_simulator_mcp_tool_handlers(
