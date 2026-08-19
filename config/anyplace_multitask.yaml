@@ -13,7 +13,7 @@ experiment:
   use_floating_hand_execution: false
   eval:
     pose_refine_model_name: openeta_anyplace_multitask
-    ckpt_path: /root/autodl-tmp/openeta-services/grasp-placement/anyplace/checkpoints/anyplace_ckpts/anyplace_multitask/model.pth
+    ckpt_path: /root/autodl-tmp/openeta-services/anyplace/checkpoints/anyplace_ckpts/anyplace_multitask/model.pth
     use_molmo: false
     remove_redundant_pose: false
     model_type: anyplace_diffusion_molmocrop
