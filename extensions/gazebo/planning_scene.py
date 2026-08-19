@@ -90,7 +90,10 @@ class PlanningSceneSynchronizer:
         return self._commit(
             {
                 "operation": "attach",
-                "remove_world_ids": [target.object_id],
+                # MoveIt automatically removes a same-id world object when an
+                # AttachedCollisionObject ADD is applied. Sending an explicit
+                # REMOVE in the same diff removes it twice and makes the apply
+                # service return success=false.
                 "attached_objects": [
                     {
                         **target.to_dict(),
