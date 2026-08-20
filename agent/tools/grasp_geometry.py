@@ -44,6 +44,7 @@ _MIN_PLACEMENT_HOVER_CLEARANCE_M = 0.10
 _PLACEMENT_RELEASE_CLEARANCE_M = 0.0
 _DEFAULT_REFINEMENT_HOVER_CLEARANCE_M = 0.20
 _ARTICULATED_HANDLE_APPROACH_MODES = {"top_down", "front", "side"}
+_GRASP_QUALIFICATION_LIFT_DISTANCE_M = 0.10
 
 
 class GraspGeometryError(ValueError):
@@ -63,6 +64,38 @@ class GraspCandidateRejected(GraspGeometryError):
         super().__init__(message)
         self.rejection_code = rejection_code
         self.recovery_class = recovery_class
+
+
+def qualification_grasp_pose_chain(outputs: Mapping[str, Any]) -> list[JsonDict]:
+    """Return the exact grasp pose chain bound by MoveIt qualification."""
+
+    hover = outputs.get("hover_pose")
+    contact = outputs.get("contact_pose")
+    if not isinstance(hover, Mapping) or not isinstance(contact, Mapping):
+        raise GraspGeometryError("compiled grasp poses are missing for qualification")
+    chain: list[JsonDict] = [dict(hover)]
+    precontact = outputs.get("precontact_pose")
+    if isinstance(precontact, Mapping):
+        chain.append(dict(precontact))
+    contact_pose = dict(contact)
+    chain.append(contact_pose)
+    contact_xyz = contact_pose.get("xyz")
+    if not isinstance(contact_xyz, list) or len(contact_xyz) != 3:
+        raise GraspGeometryError("compiled grasp contact pose has no xyz for lift qualification")
+    lift_pose = dict(contact_pose)
+    lift_pose.update(
+        {
+            "xyz": [
+                float(contact_xyz[0]),
+                float(contact_xyz[1]),
+                float(contact_xyz[2]) + _GRASP_QUALIFICATION_LIFT_DISTANCE_M,
+            ],
+            "grasp_stage": "lift",
+            "probe_type": "grasp_lift",
+        }
+    )
+    chain.append(lift_pose)
+    return chain
 
 
 def build_compile_grasp_seed_handler(
@@ -136,10 +169,7 @@ def build_compile_grasp_seed_handler(
             )
             qualified_pose_hash = parameters.get("qualified_compiled_pose_sha256")
             if qualified_pose_hash:
-                pose_chain = [dict(outputs["hover_pose"])]
-                if isinstance(outputs.get("precontact_pose"), Mapping):
-                    pose_chain.append(dict(outputs["precontact_pose"]))
-                pose_chain.append(dict(outputs["contact_pose"]))
+                pose_chain = qualification_grasp_pose_chain(outputs)
                 actual_pose_hash = hashlib.sha256(
                     json.dumps(
                         pose_chain, sort_keys=True, separators=(",", ":")

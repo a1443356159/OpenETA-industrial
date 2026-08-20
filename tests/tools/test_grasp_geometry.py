@@ -20,6 +20,7 @@ from agent.tools.grasp_geometry import (
     compute_wrist_alignment,
     grasp_refinement_hover_pose,
     materialize_world_object_goal,
+    qualification_grasp_pose_chain,
 )
 from agent.tools.registry import ToolExecutionContext, build_default_tool_registry
 
@@ -82,6 +83,51 @@ def test_compile_grasp_seed_applies_camera_and_eef_transforms() -> None:
     assert result["strategy_id"] == "top-down-vertical-panda-p8"
     assert result["strategy_selection"] == "automatic_geometry_family"
     assert result["scene_epoch"] == 0
+
+
+def test_qualified_grasp_compile_hash_binds_lift_stage() -> None:
+    profile_bytes = DEFAULT_GRASP_PROFILE.read_bytes()
+    profile_sha = hashlib.sha256(profile_bytes).hexdigest()
+    parameters = _compile_parameters()
+    compiled = compile_grasp_seed(
+        parameters, profile=_profile(), profile_sha256=profile_sha
+    )
+    proof_parameters = {
+        **parameters,
+        "qualification_profile_sha256": profile_sha,
+        "qualified_compiled_pose_sha256": hashlib.sha256(
+            json.dumps(
+                qualification_grasp_pose_chain(compiled),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    }
+
+    class Cache:
+        def resolve(self, **_kwargs):
+            return {
+                "candidate": _candidate(),
+                "proof": {"compile_parameters": proof_parameters},
+                "scene_epoch": 0,
+                "planning_scene_revision": 0,
+            }
+
+    result = build_compile_grasp_seed_handler(qualification_cache=Cache())(
+        ToolExecutionContext(
+            name="compile_grasp_seed",
+            spec=build_default_tool_registry().get("compile_grasp_seed"),
+            parameters={"purpose": "grasp", "grasp_candidate_id": "grasp_000"},
+            observation=EnvObservation(
+                task="test",
+                cameras=[],
+                robot=RobotState(),
+                metadata={"scene_epoch": 0, "planning_scene_revision": 0},
+            ),
+        )
+    )
+
+    assert result.success is True
 
 
 def test_compile_grasp_seed_accepts_rm75_robotiq_profile_and_preserves_rotation() -> None:

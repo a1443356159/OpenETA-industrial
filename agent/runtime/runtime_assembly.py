@@ -100,6 +100,7 @@ from agent.tools.grasp_geometry import (
     compile_placement_seed,
     compile_grasp_seed,
     materialize_world_object_goal,
+    qualification_grasp_pose_chain,
 )
 from agent.tools.grasp_strategies import load_grasp_strategies
 from agent.tools.mcp_registry import load_mcp_server_url
@@ -942,35 +943,16 @@ def _candidate_qualification_compiler(
                 profile_sha256=profile_sha256,
                 strategies=load_grasp_strategies(Path(workspace.grasp_strategy_root)),
             )
-            compiled_pose_chain = [dict(compiled["hover_pose"])]
-            stages = [_qualification_pose("hover", compiled["hover_pose"])]
-            precontact = compiled.get("precontact_pose")
-            if isinstance(precontact, dict):
-                compiled_pose_chain.append(dict(precontact))
-                stages.append(_qualification_pose("precontact", precontact))
-            compiled_pose_chain.append(dict(compiled["contact_pose"]))
-            stages.append(_qualification_pose("contact", compiled["contact_pose"]))
-            # The native attach proof is necessarily obtained only after the
-            # real close.  Still, a release-free lift of the same EEF pose is
-            # a deterministic MoveIt feasibility requirement and must not be
-            # discovered for the first time during world-mutating execution.
-            contact_xyz = compiled["contact_pose"].get("xyz")
-            if not isinstance(contact_xyz, list) or len(contact_xyz) != 3:
-                raise ValueError("compiled grasp contact pose has no xyz for lift qualification")
-            lift_pose = dict(compiled["contact_pose"])
-            lift_pose.update(
-                {
-                    "xyz": [
-                        float(contact_xyz[0]),
-                        float(contact_xyz[1]),
-                        float(contact_xyz[2]) + 0.1,
-                    ],
-                    "grasp_stage": "lift",
-                    "probe_type": "grasp_lift",
-                }
+            compiled_pose_chain = qualification_grasp_pose_chain(compiled)
+            stage_names = (
+                ("hover", "precontact", "contact", "lift")
+                if isinstance(compiled.get("precontact_pose"), Mapping)
+                else ("hover", "contact", "lift")
             )
-            compiled_pose_chain.append(lift_pose)
-            stages.append(_qualification_pose("lift", lift_pose))
+            stages = [
+                _qualification_pose(name, pose)
+                for name, pose in zip(stage_names, compiled_pose_chain, strict=True)
+            ]
         return {
             "qualification_stages": stages,
             "compile_parameters": {
