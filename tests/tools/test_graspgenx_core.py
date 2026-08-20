@@ -15,7 +15,6 @@ import numpy as np
 import pytest
 
 from tools.graspgenx_core import (
-    MAX_RETURNED_CANDIDATES,
     GraspGenXBackend,
     GraspGenXInputError,
     GripperDescription,
@@ -509,7 +508,7 @@ def test_backend_returns_ranked_contract_without_transport_payloads(
     assert "point_cloud" not in serialized
 
 
-def test_collision_selection_checks_ranked_batches_until_twenty(
+def test_collision_selection_checks_source_balanced_ranked_batches(
     tmp_path: Path,
 ) -> None:
     source, checkpoints, grippers = _backend_layout(tmp_path)
@@ -537,10 +536,12 @@ def test_collision_selection_checks_ranked_batches_until_twenty(
         scene_points=np.ones((10, 3), dtype=np.float32),
         camera_native_grasps=poses,
         scores=scores,
+        branch_tags=["diff" if index % 2 else "obb" for index in range(40)],
     )
 
     assert len(selected) == 10
-    assert selected[0] == 37
+    assert selected == sorted(selected, key=lambda index: (-scores[index], index))
+    assert {index % 2 for index in selected} == {0, 1}
     assert calls == [16]
     assert metadata["collision_checked_count"] == 16
     assert metadata["collision_rejected_count"] == 2
@@ -567,10 +568,36 @@ def test_collision_selection_reports_all_grasps_colliding(tmp_path: Path) -> Non
             scene_points=np.ones((10, 3), dtype=np.float32),
             camera_native_grasps=np.tile(np.eye(4), (3, 1, 1)),
             scores=np.array([0.9, 0.8, 0.7]),
+            branch_tags=["diff", "obb", "diff"],
         )
 
     assert raised.value.metadata["collision_rejected_count"] == 3
     assert raised.value.metadata["returned_candidate_count"] == 0
+
+
+def test_no_scene_selection_reserves_both_model_sources(tmp_path: Path) -> None:
+    source, checkpoints, grippers = _backend_layout(tmp_path)
+    backend = GraspGenXBackend(
+        graspgenx_root=source,
+        checkpoint_root=checkpoints,
+        gripper_descriptions_root=grippers,
+    )
+    scores = np.arange(20.0, 0.0, -1.0)
+    tags = ["obb"] * 10 + ["diff"] * 10
+
+    selected, metadata = backend._select_collision_free(
+        loaded={},
+        sampler_entry={},
+        scene_points=np.empty((0, 3), dtype=np.float32),
+        camera_native_grasps=np.tile(np.eye(4), (20, 1, 1)),
+        scores=scores,
+        branch_tags=tags,
+    )
+
+    assert [tags[index] for index in selected].count("obb") == 5
+    assert [tags[index] for index in selected].count("diff") == 5
+    assert selected == sorted(selected, key=lambda index: (-scores[index], index))
+    assert metadata["candidate_selection"] == "source_balanced_then_score_descending"
 
 
 def test_backend_failure_is_atomic_for_inconsistent_model_output(

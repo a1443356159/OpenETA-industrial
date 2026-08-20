@@ -518,6 +518,36 @@ def normalise_grasp_candidates(
     return candidates
 
 
+def _source_balanced_order(
+    ranked_indices: list[int], branch_tags: list[str]
+) -> list[int]:
+    """Interleave model branches while preserving score order inside each branch."""
+
+    if len(ranked_indices) != len(branch_tags):
+        raise GraspGenXInputError("inconsistent_grasp_outputs")
+    queues = {
+        tag: [index for index in ranked_indices if branch_tags[index] == tag]
+        for tag in ("diff", "obb")
+    }
+    first_tag = branch_tags[ranked_indices[0]] if ranked_indices else "diff"
+    tag_order = (first_tag, "obb" if first_tag == "diff" else "diff")
+    balanced: list[int] = []
+    cursor = {"diff": 0, "obb": 0}
+    while len(balanced) < len(ranked_indices):
+        progressed = False
+        for tag in tag_order:
+            position = cursor[tag]
+            if position < len(queues[tag]):
+                balanced.append(queues[tag][position])
+                cursor[tag] = position + 1
+                progressed = True
+        if not progressed:
+            break
+    if len(balanced) != len(ranked_indices):
+        raise GraspGenXInputError("inconsistent_grasp_outputs")
+    return balanced
+
+
 class GraspGenXBackend:
     """Lazy, in-process wrapper around the official GraspGenX Python API."""
 
@@ -675,6 +705,7 @@ class GraspGenXBackend:
                 scene_points=scene_points,
                 camera_native_grasps=camera_native_grasps,
                 scores=scores,
+                branch_tags=tags,
             )
             metadata.update(collision_metadata)
             candidates = normalise_grasp_candidates(
@@ -855,17 +886,23 @@ class GraspGenXBackend:
         scene_points: Any,
         camera_native_grasps: Any,
         scores: Any,
+        branch_tags: list[str],
     ) -> tuple[list[int], dict[str, Any]]:
         np, _Image = _load_image_dependencies()
         score_array = np.asarray(scores, dtype=np.float64)
         ranked = sorted(range(len(score_array)), key=lambda idx: (-score_array[idx], idx))
+        inspection_order = _source_balanced_order(ranked, branch_tags)
         if len(scene_points) == 0:
-            return ranked[: self.max_candidates], {
+            selected = sorted(
+                inspection_order[: self.max_candidates], key=ranked.index
+            )
+            return selected, {
                 "collision_filter_applied": False,
                 "collision_filter_reason": "no_scene_points",
                 "collision_scene_point_count": 0,
                 "collision_checked_count": 0,
                 "collision_rejected_count": 0,
+                "candidate_selection": "source_balanced_then_score_descending",
             }
 
         collision_scene = np.asarray(scene_points, dtype=np.float32)
@@ -879,8 +916,8 @@ class GraspGenXBackend:
         checked = 0
         rejected = 0
         filter_fn = loaded["filter_collisions"]
-        for offset in range(0, len(ranked), COLLISION_BATCH_SIZE):
-            batch_indices = ranked[offset : offset + COLLISION_BATCH_SIZE]
+        for offset in range(0, len(inspection_order), COLLISION_BATCH_SIZE):
+            batch_indices = inspection_order[offset : offset + COLLISION_BATCH_SIZE]
             batch_poses = camera_native_grasps[batch_indices]
             free_mask = np.asarray(
                 filter_fn(
@@ -915,11 +952,13 @@ class GraspGenXBackend:
                     "returned_candidate_count": 0,
                 },
             )
+        selected.sort(key=ranked.index)
         return selected, {
             "collision_filter_applied": True,
             "collision_scene_point_count": int(len(collision_scene)),
             "collision_checked_count": checked,
             "collision_rejected_count": rejected,
+            "candidate_selection": "source_balanced_then_score_descending",
         }
 
     def _metadata_base(self, *, gripper_name: Any) -> dict[str, Any]:
