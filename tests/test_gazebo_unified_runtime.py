@@ -63,6 +63,16 @@ class _Camera:
         self.closed += 1
 
 
+class _RecordingCamera(_Camera):
+    def __init__(self, config, **kwargs):
+        super().__init__(config, **kwargs)
+        self.capture_arguments = []
+
+    def capture(self, **kwargs):
+        self.capture_arguments.append(dict(kwargs))
+        return super().capture(**kwargs)
+
+
 class _World:
     def __init__(self):
         self.resets = []
@@ -195,6 +205,28 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
     runtime.close()
     assert made_launch[0].closed == 1
     assert made_cameras[0].closed == 1
+
+
+def test_runtime_action_observation_uses_ros_completion_barrier_without_callback_race() -> None:
+    """A post-action frame may be queued before ``execute`` returns to Python.
+
+    Camera headers and the controller completion receipt use ROS simulation
+    time, whereas callback arrival uses host monotonic time.  The latter must
+    not reject an otherwise ordered image.
+    """
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+    camera = _RecordingCamera(profile.cameras[0])
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [camera]
+    runtime.controller = _ResetController([
+        {"ok": True, "action_completed_ros_time_s": 42.0},
+    ])
+
+    _observation, receipt = runtime.execute({"action_type": "move_to"})
+
+    assert receipt["action_completed_ros_time_s"] == 42.0
+    assert camera.capture_arguments == [{"timeout_s": pytest.approx(30.0), "min_timestamp_s": 42.0, "min_received_monotonic_s": None}]
 
 
 def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:

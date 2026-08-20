@@ -328,12 +328,19 @@ class GazeboRuntime:
         if self.controller is None:
             raise GazeboProcessError("Gazebo profile is read-only")
         receipt = self.controller.execute(dict(action)).to_dict()
-        completed = time.monotonic()
         barrier_value = receipt.get("action_completed_ros_time_s")
         barrier = float(barrier_value) if barrier_value is not None else None
+        # Header timestamps and ``action_completed_ros_time_s`` share the
+        # simulated ROS clock, and are the ordering proof for a post-action
+        # image.  Do not additionally require the subscriber callback to run
+        # *after this Python method returns*: the executor can have already
+        # queued a correctly post-action image before the action future wakes
+        # this thread.  That wall-clock race used to turn valid images into a
+        # 30-second transport timeout.  ``capture`` still consumes new RGB and
+        # depth sequences, so an image delivered before this action cannot be
+        # reused as its observation.
         observation = self.observe(
             min_camera_timestamp_s=barrier,
-            min_received_monotonic_s=completed,
         )
         return observation, receipt
 
