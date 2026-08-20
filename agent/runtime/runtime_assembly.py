@@ -987,8 +987,12 @@ def _qualifying_handler(
         result = handler(context)
         if not result.success:
             return result
-        scene_epoch_value = (
-            result.details.get("scene_epoch", context.parameters.get("scene_epoch", 0))
+        observation_metadata = (
+            context.observation.metadata if context.observation is not None else {}
+        )
+        scene_epoch_value = observation_metadata.get(
+            "scene_epoch",
+            result.details.get("scene_epoch", context.parameters.get("scene_epoch", 0)),
         )
         scene_epoch = (
             scene_epoch_value
@@ -998,8 +1002,8 @@ def _qualifying_handler(
         revision_value = result.details.get(
             "scene_revision", context.parameters.get("scene_revision")
         )
-        if revision_value is None and context.observation is not None:
-            revision_value = context.observation.metadata.get("planning_scene_revision")
+        if revision_value is None:
+            revision_value = observation_metadata.get("planning_scene_revision")
         if not isinstance(revision_value, int) or isinstance(revision_value, bool):
             revision_value = scene_epoch
         source = result.details.get("source")

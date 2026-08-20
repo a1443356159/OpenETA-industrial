@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from adapter.protocol import CameraFrame, RobotState
+from adapter.protocol import CameraFrame, EnvObservation, RobotState
 from extensions.gazebo.deployment import GazeboDeploymentConfig
 from extensions.gazebo.direct_env import GazeboDirectEnv
 from extensions.gazebo.profiles import gazebo_profile, gazebo_profiles
@@ -139,6 +139,30 @@ def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() ->
         env = GazeboDirectEnv(profile=profile, deployment=_deployment(), runtime=runtime)
         assert type(env) is GazeboDirectEnv
         assert runtime.started is False
+
+
+def test_direct_observe_publishes_current_planning_scene_revision() -> None:
+    runtime = SimpleNamespace(
+        controller=SimpleNamespace(planning_scene=SimpleNamespace(revision=7)),
+        observe=lambda: EnvObservation(
+            task="test",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"scene_epoch": 3},
+        ),
+        close=lambda: None,
+        started=False,
+    )
+    env = GazeboDirectEnv(
+        profile=gazebo_profile("rm75_robotiq2f85_control"),
+        deployment=_deployment(),
+        runtime=runtime,
+    )
+
+    observation = env.observe()
+
+    assert observation["metadata"]["scene_epoch"] == 3
+    assert observation["metadata"]["planning_scene_revision"] == 7
 
 
 def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() -> None:

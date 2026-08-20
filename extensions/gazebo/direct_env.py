@@ -124,6 +124,9 @@ class GazeboDirectEnv(Env):
 
     def observe(self) -> dict[str, Any]:
         raw = self._decorate_robot(self._as_unified(self.runtime.observe()))
+        scene_revision = self._planning_scene_revision()
+        if scene_revision is not None:
+            raw.setdefault("metadata", {})["planning_scene_revision"] = scene_revision
         self._latest = raw
         return raw
 
