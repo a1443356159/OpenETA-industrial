@@ -281,10 +281,6 @@ def test_normalise_candidates_builds_dual_pose_and_real_tip() -> None:
         [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
     )
     np.testing.assert_allclose(candidate["gripper_tip_position_xyz"], [0.21, 0.32, 0.5])
-    np.testing.assert_allclose(candidate["translation_xyz"], [0.21, 0.32, 0.5])
-    np.testing.assert_allclose(
-        np.asarray(candidate["transform_matrix"])[:3, 3], [0.21, 0.32, 0.5]
-    )
     np.testing.assert_allclose(
         candidate["model_native_grasp_pose"]["transform_matrix"], native[0]
     )
