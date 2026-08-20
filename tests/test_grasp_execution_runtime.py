@@ -128,6 +128,40 @@ def _reject_active_candidate(memory: AgentMemory) -> None:
     )
 
 
+def test_zero_moveit_pass_schedules_fresh_observation_without_backend_switch() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the block")
+    memory.add_observation(
+        EnvObservation(task="pick the block", cameras=[], robot=RobotState())
+    )
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "g0",
+                "selected_backend": "graspgenx",
+                "grasp_candidates": [],
+                "generated_candidate_count": 10,
+                "qualification_evidence": {"results": []},
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["reestimate_required"] == {
+        "status": "pending_recovery",
+        "reason": "no_moveit_qualified_candidates",
+        "backend": "graspgenx",
+        "requires_fresh_observation": True,
+        "backend_switch_allowed": False,
+    }
+    recovery = memory.grasp_recovery()
+    assert recovery["status"] == "required"
+    assert recovery["required_action"] == {"name": "observe", "parameters": {}}
+
+
 def _tool_action(
     name: str,
     parameters: dict,

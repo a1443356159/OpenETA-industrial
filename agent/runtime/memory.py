@@ -2003,6 +2003,14 @@ class AgentMemory:
                         policy, source="moveit_qualification"
                     )
                     self.record("grasp_candidates_moveit_rejected", dict(policy))
+                    self._schedule_grasp_recovery(
+                        xyz=None,
+                        rejection={
+                            "source": "moveit_qualification_rejected",
+                            "reason": "no_moveit_qualified_candidates",
+                        },
+                        candidate_id="",
+                    )
                 continue
             capabilities = self._active_grasp_calibration_capabilities()
             max_gripper_width = float(capabilities["max_gripper_width_m"])
@@ -2440,6 +2448,7 @@ class AgentMemory:
             "host_gripper_close_failed",
             "wrist_reference_localization_rejected",
             "articulated_attachment_assessment_failed",
+            "moveit_qualification_rejected",
         }:
             return False
         target_detection = (self.grasp_candidate_policy() or {}).get("target_detection")
