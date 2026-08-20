@@ -278,6 +278,28 @@ def _memory_with_candidates() -> AgentMemory:
     return memory
 
 
+def test_observation_scene_epoch_allows_matching_compiled_grasp_capture() -> None:
+    memory = _memory_with_candidates()
+    memory.add_observation(
+        EnvObservation(
+            task="pick up alphabat soup and place it into basket",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"scene_epoch": 1},
+        )
+    )
+    compiled = {**_compiled(memory), "scene_epoch": 1}
+
+    memory.add_action(
+        _tool_action("compile_grasp_seed", {"scene_epoch": 1}, outputs=compiled)
+    )
+
+    assert memory.scene_epoch() == 1
+    assert memory.grasp_execution()["compiled_grasp_id"] == compiled["compiled_grasp_id"]
+    assert memory.grasp_execution()["scene_epoch"] == 1
+    assert any(event.event_type == "scene_epoch_synchronized" for event in memory.events)
+
+
 def _memory_at_articulated_close() -> AgentMemory:
     memory = AgentMemory()
     memory.start_session(task="open the microwave")

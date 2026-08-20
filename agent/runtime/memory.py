@@ -267,6 +267,19 @@ class AgentMemory:
         return event
 
     def add_observation(self, observation: EnvObservation) -> None:
+        observed_epoch = _optional_int(
+            observation.metadata.get("scene_epoch"),
+            default=self.scene_epoch(),
+        )
+        if observed_epoch > self.scene_epoch():
+            self.facts[SCENE_EPOCH_KEY] = _memory_fact_entry(
+                {"epoch": observed_epoch},
+                source="environment_observation",
+            )
+            self.record(
+                "scene_epoch_synchronized",
+                {"scene_epoch": observed_epoch, "source": "environment_observation"},
+            )
         summary = summarize_observation(observation)
         summary["scene_epoch"] = self.scene_epoch()
         summary["runtime_camera_calibrations"] = [
