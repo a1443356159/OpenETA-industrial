@@ -91,6 +91,7 @@ class AnyPlaceBackend:
         self.depth_truncation = depth_truncation
         self.candidate_count = validate_candidate_count(candidate_count)
         self._loaded: dict[str, Any] | None = None
+        self._prediction_count = 0
 
     def predict_placement(
         self,
@@ -104,6 +105,9 @@ class AnyPlaceBackend:
 
         start = time.perf_counter()
         metadata = _metadata_base()
+        inference_seed = self.seed + self._prediction_count
+        self._prediction_count += 1
+        metadata["inference_seed"] = inference_seed
         try:
             np, Image = _load_numeric_deps()
             object_packet = _observation_packet(object_observation, "object")
@@ -240,6 +244,7 @@ class AnyPlaceBackend:
                 backend=backend,
                 object_pcd=object_pcd,
                 placement_region_pcd=placement_pcd,
+                inference_seed=inference_seed,
             )
             raw_candidates = _model_world_to_placement_camera_transforms(
                 raw_candidates, placement_camera_to_world=placement_to_world, np=np
@@ -392,6 +397,7 @@ class AnyPlaceBackend:
         backend: dict[str, Any],
         object_pcd: Any,
         placement_region_pcd: Any,
+        inference_seed: int,
     ) -> Any:
         args = backend["args"]
         infer_relation_policy = backend["infer_relation_policy"]
@@ -420,8 +426,8 @@ class AnyPlaceBackend:
             "multi": True,
         }
 
-        torch.manual_seed(self.seed)
-        random.seed(self.seed)
+        torch.manual_seed(inference_seed)
+        random.seed(inference_seed)
         with torch.no_grad(), contextlib.redirect_stdout(sys.stderr):
             relative_trans_preds = infer_relation_policy(
                 _NoOpVisualizer(),
