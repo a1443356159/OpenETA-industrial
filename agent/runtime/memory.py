@@ -3487,6 +3487,17 @@ class AgentMemory:
             != scene_revision
         ):
             return False
+        qualification_evidence = outputs.get("qualification_evidence")
+        qualification_scene_epoch = _optional_int(
+            qualification_evidence.get("scene_epoch")
+            if isinstance(qualification_evidence, dict)
+            else None,
+            default=-1,
+        )
+        if qualification_scene_epoch < 0:
+            # The proof's compiled poses are bound to this simulator epoch;
+            # never substitute the internal action counter for it.
+            return False
         policy = {
             "schema_version": "openeta.placement_candidate_policy.v2",
             "status": "selection_required",
@@ -3499,7 +3510,7 @@ class AgentMemory:
             "revision_provenance": (
                 "native_attachment_gate" if native_revision else "scene_epoch"
             ),
-            "scene_epoch": self.scene_epoch(),
+            "scene_epoch": qualification_scene_epoch,
             "selection_source": None,
             "attachment_transform_sha256": hashlib.sha256(
                 json.dumps(
