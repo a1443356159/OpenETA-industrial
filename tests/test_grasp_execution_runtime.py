@@ -228,6 +228,39 @@ def test_single_post_attach_placement_region_is_retained_without_vlm_mask_copy()
     assert memory.pending_sam3_selection() is not None
 
 
+def test_empty_wrist_fallback_accepts_sam3_source_camera_role() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cube")
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "status": "required",
+            "stage": "align",
+            "compiled_grasp": {
+                "wrist_alignment_policy": "optional_if_fresh_segmentation_empty",
+                "contact_pose": {"frame": "world", "xyz": [0.1, 0.2, 0.3]},
+            },
+        },
+        source="test",
+    )
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": "tmp/wrist.png", "mode": "text", "prompt": "cube"},
+            outputs={
+                "result_id": "empty-wrist",
+                "detections": [],
+                "source_image": "tmp/wrist.png",
+                "source_camera_role": "wrist",
+            },
+        )
+    )
+
+    execution = memory.grasp_execution()
+    assert execution["stage"] == "descend"
+    assert execution["wrist_alignment_skipped_reason"] == "fresh_wrist_segmentation_empty"
+
+
 def _native_proof_receipt(*, revision: int = 2, target_id: str = "target_object") -> dict:
     evidence = {
         "source": "gazebo_pose_info_child_link",

@@ -4568,11 +4568,13 @@ class AgentMemory:
             if isinstance(call.get("result"), dict)
             else {}
         )
+        source_camera_role = str(
+            outputs.get("source_camera_role") or outputs.get("camera_role") or ""
+        ).strip().lower()
         is_fresh_wrist_empty = (
-            outputs.get("camera_role") == "wrist"
+            source_camera_role == "wrist"
             and isinstance(outputs.get("source_image"), str)
             and outputs.get("source_image") == parameters.get("image")
-            and outputs.get("scene_epoch") == self.scene_epoch()
         )
         if not (is_host_wrist_segmentation or is_fresh_wrist_empty):
             return False
