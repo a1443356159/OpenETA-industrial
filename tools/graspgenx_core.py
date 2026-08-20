@@ -52,7 +52,7 @@ MMR_TRANSLATION_SCALE_M = 0.03
 MMR_ROTATION_SCALE_RAD = math.radians(30.0)
 MMR_ROTATION_WEIGHT = 1.0
 MMR_SIMILARITY_PENALTY = 0.55
-MMR_DIVERSITY_RESERVE_MULTIPLIER = 4
+MMR_DIVERSITY_RESERVE_MULTIPLIER = 16
 MMR_MIN_SOURCE_COVERAGE = 3
 # A formal candidate must differ in position or orientation from every already
 # selected formal candidate.  This is deliberately a hard gate: MMR is useful
@@ -1084,7 +1084,18 @@ class GraspGenXBackend:
                     selected.append(index)
                 else:
                     diversity_rejected += 1
-            if len(selected) >= self.max_candidates:
+            selected_by_source = {
+                source: sum(1 for index in selected if branch_tags[index] == source)
+                for source in set(branch_tags)
+            }
+            required_source_coverage = min(
+                MMR_MIN_SOURCE_COVERAGE,
+                max(1, self.max_candidates // len(selected_by_source)),
+            )
+            if (
+                len(selected) >= self.max_candidates
+                and all(count >= required_source_coverage for count in selected_by_source.values())
+            ):
                 selected = selected[: self.max_candidates]
                 break
         if not selected:
@@ -1098,6 +1109,7 @@ class GraspGenXBackend:
                     "returned_candidate_count": 0,
                 },
             )
+        selected = selected[: self.max_candidates]
         return selected, {
             "collision_filter_applied": True,
             "collision_scene_point_count": int(len(collision_scene)),
