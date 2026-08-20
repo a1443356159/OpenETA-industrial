@@ -496,6 +496,14 @@ def normalise_grasp_candidates(
         tip_camera = native_pose[:3, :3] @ tip_native + native_pose[:3, 3]
         if not _is_rigid_transform(graspnet_pose) or not np.isfinite(tip_camera).all():
             raise GraspGenXInputError("inconsistent_grasp_outputs")
+        # GraspGenX reports the gripper-base transform.  OpenETA's GraspNet
+        # contract, and the calibrated compiler downstream, define a grasp
+        # translation at the fingertip/contact reference.  Keeping the base
+        # origin here silently adds the gripper's 136 mm depth to every world
+        # contact target.  Preserve the native base pose below for audit, but
+        # expose the true fingertip origin as the formal grasp pose.
+        graspnet_pose = np.array(graspnet_pose, copy=True)
+        graspnet_pose[:3, 3] = tip_camera
         candidate = {
             "id": f"graspgenx_{rank:03d}",
             "source_model": MODEL_NAME,
