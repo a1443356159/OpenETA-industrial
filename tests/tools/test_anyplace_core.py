@@ -15,7 +15,9 @@ from tools.anyplace_core import (
     PLACEMENT_REGION_POINTCLOUD_LIMITS,
     build_masked_pointcloud_from_rgbd,
     normalise_placement_candidates,
+    pad_pointcloud_for_model,
     validate_intrinsics,
+    validate_pointcloud_array,
 )
 
 
@@ -76,6 +78,29 @@ def test_build_one_masked_pointcloud(left, limits, first) -> None:
     )
     assert points.shape == (2048, 3)
     np.testing.assert_allclose(points[0], first)
+
+
+def test_small_but_measured_cloud_is_padded_to_anyplace_model_sample_count() -> None:
+    measured = np.arange(873 * 3, dtype=np.float32).reshape(873, 3)
+
+    model_input = pad_pointcloud_for_model(measured)
+
+    assert model_input.shape == (1024, 3)
+    np.testing.assert_allclose(model_input[0], measured[0])
+    np.testing.assert_allclose(model_input[-1], measured[-1])
+
+
+def test_pointcloud_limits_reject_insufficient_measured_geometry() -> None:
+    points = np.zeros((127, 3), dtype=np.float32)
+
+    _reason(
+        "object_pointcloud_too_small",
+        validate_pointcloud_array,
+        points,
+        limits=OBJECT_POINTCLOUD_LIMITS,
+        empty_reason="empty_object_pointcloud",
+        too_small_reason="object_pointcloud_too_small",
+    )
 
 
 def test_normalise_candidates_returns_only_object_transforms() -> None:

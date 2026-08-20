@@ -41,8 +41,18 @@ class PointCloudLimits:
     max_points: int
 
 
-OBJECT_POINTCLOUD_LIMITS = PointCloudLimits(min_points=1024, max_points=200000)
-PLACEMENT_REGION_POINTCLOUD_LIMITS = PointCloudLimits(min_points=1024, max_points=500000)
+# ``N_crop`` inside the official AnyPlace policy is 1024.  It is the tensor
+# sample size, not a requirement for 1024 distinct sensor pixels: a held
+# object can legitimately occupy fewer pixels in a calibrated placement view.
+# Keep a non-trivial measured-point floor, then deterministically pad only the
+# model input to its fixed sample size below.
+MIN_MEASURED_POINTCLOUD_POINTS = 128
+OBJECT_POINTCLOUD_LIMITS = PointCloudLimits(
+    min_points=MIN_MEASURED_POINTCLOUD_POINTS, max_points=200000
+)
+PLACEMENT_REGION_POINTCLOUD_LIMITS = PointCloudLimits(
+    min_points=MIN_MEASURED_POINTCLOUD_POINTS, max_points=500000
+)
 
 
 class _NoOpVisualizer:
@@ -164,6 +174,18 @@ class AnyPlaceBackend:
                 {
                     "object_point_count": int(object_pcd.shape[0]),
                     "placement_region_point_count": int(placement_pcd.shape[0]),
+                }
+            )
+            object_pcd = pad_pointcloud_for_model(
+                object_pcd, target_count=MODEL_SAMPLE_COUNT
+            )
+            placement_pcd = pad_pointcloud_for_model(
+                placement_pcd, target_count=MODEL_SAMPLE_COUNT
+            )
+            metadata.update(
+                {
+                    "object_model_point_count": int(object_pcd.shape[0]),
+                    "placement_region_model_point_count": int(placement_pcd.shape[0]),
                 }
             )
         except AnyPlaceInputError as exc:
@@ -539,6 +561,27 @@ def validate_pointcloud_array(
     if not np.isfinite(array).all():
         raise AnyPlaceInputError("invalid_pointcloud_shape")
     return array.astype(np.float32, copy=False)
+
+
+def pad_pointcloud_for_model(array: Any, *, target_count: int = MODEL_SAMPLE_COUNT) -> Any:
+    """Pad a validated cloud to AnyPlace's fixed token count deterministically.
+
+    This never manufactures geometry: it only repeats existing, measured
+    points when the visible object/region has fewer samples than the official
+    policy's fixed ``N_crop``.  Callers retain the measured count in metadata.
+    """
+    np, _Image = _load_numeric_deps()
+    if not isinstance(array, np.ndarray) or array.ndim != 2 or array.shape[1] != 3:
+        raise AnyPlaceInputError("invalid_pointcloud_shape")
+    if target_count <= 0:
+        raise ValueError("target_count must be positive")
+    count = int(array.shape[0])
+    if count == 0:
+        raise AnyPlaceInputError("empty_pointcloud")
+    if count >= target_count:
+        return array.astype(np.float32, copy=False)
+    indices = np.linspace(0, count - 1, num=target_count, dtype=np.int64)
+    return array[indices].astype(np.float32, copy=False)
 
 
 def normalise_placement_candidates(
