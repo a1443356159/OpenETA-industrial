@@ -223,6 +223,32 @@ def test_materialize_world_object_goal_uses_current_eef_and_attachment() -> None
     assert candidate["object_goal_pose"]["translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
 
 
+def test_materialize_world_object_goal_projects_anyplace_swing_to_gravity_yaw() -> None:
+    candidate = materialize_world_object_goal(
+        {
+            "id": "placement_000",
+            "object_placement_transform": {
+                "frame": "placement_camera",
+                # A side-lying sample with a 90-degree yaw component.
+                "transform_matrix": [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
+            },
+        },
+        placement_camera_extrinsics={
+            "camera_frame": "opencv",
+            "camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        },
+        current_eef_pose={"xyz": [0, 0, 0], "quat_xyzw": [0, 0, 0, 1]},
+        attachment_transform={"translation_xyz": [0, 0, 0], "quat_xyzw": [0, 0, 0, 1]},
+    )
+
+    assert candidate["object_goal_pose"]["rotation_matrix"] == [
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    assert candidate["orientation_projection"]["type"] == "gravity_yaw_from_anyplace"
+
+
 def test_compile_grasp_seed_rejects_placement_contract() -> None:
     with pytest.raises(GraspGeometryError, match="only compiles grasp"):
         compile_grasp_seed(
