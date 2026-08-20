@@ -3563,9 +3563,14 @@ def _looks_like_placement_region_prompt(value: object) -> bool:
             "bin",
             "receptacle",
             "placement region",
+            "placement zone",
+            "placement marker",
+            "target zone",
             "篮子",
             "篮筐",
             "容器",
+            "放置区",
+            "放置区域",
         )
     )
 

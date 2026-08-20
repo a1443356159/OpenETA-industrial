@@ -3311,6 +3311,40 @@ def test_combined_pick_place_requires_placement_mask_on_retained_rgb() -> None:
     assert canonicalizations[0]["reason"] == ("freeze_placement_mask_to_targeted_grasp_rgb")
 
 
+def test_placement_zone_marker_prompt_is_frozen_to_retained_rgb() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cube and place it in the green placement zone")
+    _record_anygrasp_candidate_policy(memory)
+    planner = ToolCallingPlanner(
+        StaticPlannerBackend(
+            {
+                "kind": "tool_call",
+                "name": "sam3",
+                "parameters": {
+                    "image": "/tmp/misspelled-session/frame.png",
+                    "mode": "text",
+                    "prompt": "green placement zone marker",
+                },
+            }
+        )
+    )
+    observation = _observation()
+    observation.task = "pick cube and place it in the green placement zone"
+
+    decision = planner.plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("sam3", "anyplace"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "sam3"
+    assert decision.parameters["image"] == "tmp/rgb.png"
+    assert decision.metadata["host_parameter_canonicalizations"][0]["reason"] == (
+        "freeze_placement_mask_to_targeted_grasp_rgb"
+    )
+
+
 def test_placement_mask_accepts_byte_identical_same_epoch_rgb_copy(tmp_path) -> None:
     retained_rgb = tmp_path / "observation-0004.png"
     rematerialized_rgb = tmp_path / "observation-0005.png"
