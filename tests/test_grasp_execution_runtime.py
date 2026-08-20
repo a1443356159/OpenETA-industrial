@@ -162,6 +162,42 @@ def test_zero_moveit_pass_schedules_fresh_observation_without_backend_switch() -
     assert recovery["required_action"] == {"name": "observe", "parameters": {}}
 
 
+def test_zero_moveit_pass_reestimates_same_grasp_backend_with_fresh_observation() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the block")
+    memory.add_observation(
+        EnvObservation(task="pick the block", cameras=[], robot=RobotState())
+    )
+    memory.save_fact(
+        "selected_sam3_detection",
+        {"target_prompt": "red block"},
+        source="test",
+    )
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "g0",
+                "selected_backend": "graspgenx",
+                "source_rgb": "fresh-grasp.png",
+                "camera_frame_id": "top",
+                "source": {"rgb": "fresh-grasp.png", "camera_frame_id": "top"},
+                "grasp_candidates": [],
+                "generated_candidate_count": 10,
+                "qualification_evidence": {"results": []},
+            },
+        )
+    )
+
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["status"] == "pending_observation"
+    assert reestimate["reason"] == "moveit_qualification_zero_pass"
+    assert reestimate["source_backend"] == "graspgenx"
+    assert reestimate["attempt_count"] == 1
+
+
 def _tool_action(
     name: str,
     parameters: dict,

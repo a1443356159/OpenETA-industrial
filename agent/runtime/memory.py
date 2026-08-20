@@ -64,6 +64,7 @@ NATIVE_GRASP_MINIMUM_LIFT_M = 0.08
 NATIVE_GRASP_MAXIMUM_DRIFT_M = 0.01
 GRASP_RECOVERY_RETREAT_DISTANCE_M = 0.12
 GRASP_CANDIDATE_MAX_ATTEMPTS = 3
+GRASP_ZERO_PASS_REESTIMATION_LIMIT = 3
 ARTICULATED_HANDLE_APPROACH_MODES = ("top_down", "front", "side")
 GRASP_REFERENCE_POSITION_TOLERANCE_M = 0.05
 GRASP_REFERENCE_ORIENTATION_TOLERANCE_DEG = 20.0
@@ -2105,14 +2106,70 @@ class AgentMemory:
                         policy, source="moveit_qualification"
                     )
                     self.record("grasp_candidates_moveit_rejected", dict(policy))
-                    self._schedule_grasp_recovery(
-                        xyz=None,
-                        rejection={
-                            "source": "moveit_qualification_rejected",
-                            "reason": "no_moveit_qualified_candidates",
-                        },
-                        candidate_id="",
+                    selected_target = self.selected_sam3_detection()
+                    source = outputs.get("source")
+                    source = source if isinstance(source, dict) else {}
+                    target_prompt = (
+                        str(selected_target.get("target_prompt") or "").strip()
+                        if isinstance(selected_target, dict)
+                        else ""
                     )
+                    source_rgb = str(outputs.get("source_rgb") or source.get("rgb") or "")
+                    if target_prompt and source_rgb:
+                        existing = self.grasp_estimation_recovery()
+                        previous_attempts = (
+                            _optional_int(existing.get("attempt_count"), default=0)
+                            if isinstance(existing, dict)
+                            else 0
+                        )
+                        attempt_count = previous_attempts + 1
+                        if attempt_count >= GRASP_ZERO_PASS_REESTIMATION_LIMIT:
+                            policy.update(
+                                {
+                                    "status": "stopped_requires_human",
+                                    "stop_reason": "grasp_moveit_zero_pass_retry_limit",
+                                    "zero_pass_reestimate_attempt_count": attempt_count,
+                                }
+                            )
+                            self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                                policy, source="moveit_qualification_zero_pass_retry_limit"
+                            )
+                            self.facts.pop(GRASP_REESTIMATION_KEY, None)
+                            self.record("grasp_moveit_zero_pass_stopped", dict(policy))
+                        else:
+                            reestimate = {
+                                "schema_version": "openeta.grasp_reestimate.v1",
+                                "status": "pending_observation",
+                                "reason": "moveit_qualification_zero_pass",
+                                "attempt_count": attempt_count,
+                                "max_attempts": GRASP_ZERO_PASS_REESTIMATION_LIMIT,
+                                "scene_epoch": self.scene_epoch(),
+                                "target_prompt": target_prompt,
+                                "source_image": source_rgb,
+                                "previous_view": str(
+                                    outputs.get("camera_frame_id")
+                                    or source.get("camera_frame_id")
+                                    or ""
+                                ),
+                                "source_tool": source_tool,
+                                "source_backend": source_backend,
+                                "created_at_s": time.time(),
+                            }
+                            self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                                reestimate, source="moveit_qualification_zero_pass_reestimate"
+                            )
+                            self.record(
+                                "grasp_moveit_zero_pass_reestimate_required", reestimate
+                            )
+                    else:
+                        self._schedule_grasp_recovery(
+                            xyz=None,
+                            rejection={
+                                "source": "moveit_qualification_rejected",
+                                "reason": "no_moveit_qualified_candidates",
+                            },
+                            candidate_id="",
+                        )
                 continue
             capabilities = self._active_grasp_calibration_capabilities()
             max_gripper_width = float(capabilities["max_gripper_width_m"])
@@ -2332,7 +2389,52 @@ class AgentMemory:
                 policy,
                 source=source_tool,
             )
-            if all_candidates_over_width:
+            zero_pass_reestimate = (
+                not candidates
+                and isinstance(outputs.get("qualification_evidence"), dict)
+                and bool(target_prompt)
+                and bool(source_rgb)
+            )
+            if zero_pass_reestimate:
+                previous_attempts = (
+                    _optional_int(existing_recovery.get("attempt_count"), default=0)
+                    if isinstance(existing_recovery, dict)
+                    else 0
+                )
+                attempt_count = previous_attempts + 1
+                if attempt_count >= GRASP_ZERO_PASS_REESTIMATION_LIMIT:
+                    policy.update(
+                        {
+                            "status": "stopped_requires_human",
+                            "stop_reason": "grasp_moveit_zero_pass_retry_limit",
+                            "zero_pass_reestimate_attempt_count": attempt_count,
+                        }
+                    )
+                    self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                        policy, source=f"{source_tool}_zero_pass_retry_limit"
+                    )
+                    self.facts.pop(GRASP_REESTIMATION_KEY, None)
+                    self.record("grasp_moveit_zero_pass_stopped", dict(policy))
+                else:
+                    reestimate = {
+                        "schema_version": "openeta.grasp_reestimate.v1",
+                        "status": "pending_observation",
+                        "reason": "moveit_qualification_zero_pass",
+                        "attempt_count": attempt_count,
+                        "max_attempts": GRASP_ZERO_PASS_REESTIMATION_LIMIT,
+                        "scene_epoch": self.scene_epoch(),
+                        "target_prompt": target_prompt,
+                        "source_image": source_rgb,
+                        "previous_view": camera_frame_id,
+                        "source_tool": source_tool,
+                        "source_backend": source_backend,
+                        "created_at_s": time.time(),
+                    }
+                    self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                        reestimate, source=f"{source_tool}_zero_pass_reestimate"
+                    )
+                    self.record("grasp_moveit_zero_pass_reestimate_required", reestimate)
+            elif all_candidates_over_width:
                 self._schedule_grasp_estimation_recovery(
                     policy=policy,
                     seed_candidate=policy.get("refinement_seed_candidate"),
