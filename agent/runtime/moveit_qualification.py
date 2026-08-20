@@ -23,6 +23,8 @@ QUALIFICATION_SCHEMA = "openeta.moveit_candidate_qualification.v1"
 PRIVATE_RPC_NAME = "qualify_motion_candidates"
 PLANNING_TIME_S = 30.0
 PLANNING_ATTEMPTS = 3
+KINEMATIC_IK_TIMEOUT_S = 2.0
+STATE_VALIDITY_TIMEOUT_S = 2.0
 
 
 def _hash(value: object) -> str:
@@ -164,6 +166,8 @@ class MoveItCandidateQualifier:
                 "allowed_planning_time_s": PLANNING_TIME_S,
                 "num_planning_attempts": PLANNING_ATTEMPTS,
                 "plan_only": True,
+                "kinematic_ik_timeout_s": KINEMATIC_IK_TIMEOUT_S,
+                "state_validity_timeout_s": STATE_VALIDITY_TIMEOUT_S,
             },
             "source": dict(source or {}),
             "candidates": request_candidates,

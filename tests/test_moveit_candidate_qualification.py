@@ -6,9 +6,11 @@ import json
 import pytest
 
 from agent.runtime.moveit_qualification import (
+    KINEMATIC_IK_TIMEOUT_S,
     PLANNING_ATTEMPTS,
     PLANNING_TIME_S,
     QUALIFICATION_SCHEMA,
+    STATE_VALIDITY_TIMEOUT_S,
     MoveItCandidateQualifier,
     MoveItQualificationEngine,
     QualificationCache,
@@ -84,6 +86,34 @@ def test_engine_chains_segment_start_state_and_has_zero_execution_side_effects()
         {"names": ["j1"], "positions": [1.0]},
     ]
     assert all(stage["execution_started"] is False for stage in result["stages"])
+
+
+def test_qualification_request_binds_short_service_timeouts():
+    captured = {}
+
+    def rpc(name, request, timeout):
+        captured.update(request["planning"])
+        return _engine().qualify(request)
+
+    MoveItCandidateQualifier(
+        rpc,
+        compile_candidate=lambda *args: {
+            "qualification_stages": [{"name": "hover"}]
+        },
+    ).qualify_result(
+        ToolResult(True, "ok", {"grasp_candidates": [{"id": "g0"}]}),
+        purpose="grasp",
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    assert captured == {
+        "allowed_planning_time_s": PLANNING_TIME_S,
+        "num_planning_attempts": PLANNING_ATTEMPTS,
+        "plan_only": True,
+        "kinematic_ik_timeout_s": KINEMATIC_IK_TIMEOUT_S,
+        "state_validity_timeout_s": STATE_VALIDITY_TIMEOUT_S,
+    }
 
 
 @pytest.mark.parametrize(

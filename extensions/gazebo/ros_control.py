@@ -546,7 +546,7 @@ class _RosRuntime:
         }
 
     def qualification_joint_state(self) -> Mapping[str, Any]:
-        state = self.state_source.wait_fresh(15.0)
+        state = self.state_source.wait_fresh(3.0)
         return {
             "names": list(ARM_JOINTS),
             "positions": [
@@ -560,6 +560,7 @@ class _RosRuntime:
         start: Mapping[str, Any],
         avoid_collisions: bool,
     ) -> Mapping[str, Any]:
+        from agent.runtime.moveit_qualification import KINEMATIC_IK_TIMEOUT_S
         from geometry_msgs.msg import PoseStamped
 
         goal = make_move_group_goal(dict(target), config=self.config, tolerances=target)
@@ -572,7 +573,10 @@ class _RosRuntime:
         ik.group_name = self.config.move_group
         ik.ik_link_name = goal["link_name"]
         ik.avoid_collisions = bool(avoid_collisions)
-        ik.timeout.sec = 30
+        ik.timeout.sec = int(KINEMATIC_IK_TIMEOUT_S)
+        ik.timeout.nanosec = int(
+            (KINEMATIC_IK_TIMEOUT_S - int(KINEMATIC_IK_TIMEOUT_S)) * 1_000_000_000
+        )
         ik.robot_state.is_diff = False
         ik.robot_state.joint_state.name = list(start.get("names") or ARM_JOINTS)
         ik.robot_state.joint_state.position = [float(v) for v in start.get("positions") or []]
@@ -581,7 +585,10 @@ class _RosRuntime:
         pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = [float(v) for v in xyz]
         pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = [float(v) for v in quat]
         ik.pose_stamped = pose
-        response = self._await(self.compute_ik_client.call_async(request), 30.0)
+        response = self._await(
+            self.compute_ik_client.call_async(request),
+            KINEMATIC_IK_TIMEOUT_S + 0.5,
+        )
         solution = response.solution.joint_state
         names = list(solution.name)
         positions = list(solution.position)
@@ -601,13 +608,17 @@ class _RosRuntime:
     def qualification_state_validity(
         self, joint_state: Mapping[str, Any]
     ) -> Mapping[str, Any]:
+        from agent.runtime.moveit_qualification import STATE_VALIDITY_TIMEOUT_S
+
         request = self.state_validity_service_type.Request()
         _populate_state_validity_request(
             request,
             [float(value) for value in joint_state.get("positions") or []],
             group_name=self.config.move_group,
         )
-        response = self._await(self.state_validity_client.call_async(request), 30.0)
+        response = self._await(
+            self.state_validity_client.call_async(request), STATE_VALIDITY_TIMEOUT_S
+        )
         pairs = sorted(
             {
                 tuple(sorted((str(c.contact_body_1), str(c.contact_body_2))))
