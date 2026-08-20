@@ -91,7 +91,8 @@ def test_handler_encodes_two_independent_observations(tmp_path: Path) -> None:
     )(_context(_parameters(tmp_path)))
     assert result.success is True
     assert set(calls[0]) == {
-        "object_observation", "placement_observation", "object_camera_to_placement_camera"
+        "object_observation", "placement_observation", "object_camera_to_placement_camera",
+        "placement_camera_to_world",
     }
     assert calls[0]["object_camera_to_placement_camera"][0][3] == pytest.approx(-0.2)
     assert "object_mask" in calls[0]["object_observation"]

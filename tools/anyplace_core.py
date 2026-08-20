@@ -195,6 +195,8 @@ class AnyPlaceBackend:
             )
             object_pcd = (placement_to_world @ object_h.T).T[:, :3].astype(np.float32)
             placement_pcd = (placement_to_world @ placement_h.T).T[:, :3].astype(np.float32)
+            measured_object_pcd = object_pcd.copy()
+            measured_placement_pcd = placement_pcd.copy()
             metadata.update(
                 {
                     "object_point_count": int(object_pcd.shape[0]),
@@ -245,6 +247,12 @@ class AnyPlaceBackend:
                 object_pcd=object_pcd,
                 placement_region_pcd=placement_pcd,
                 inference_seed=inference_seed,
+            )
+            raw_candidates = _project_object_bottoms_to_support(
+                raw_candidates,
+                object_points=measured_object_pcd,
+                support_points=measured_placement_pcd,
+                np=np,
             )
             raw_candidates = _model_world_to_placement_camera_transforms(
                 raw_candidates, placement_camera_to_world=placement_to_world, np=np
@@ -668,6 +676,42 @@ def _model_world_to_placement_camera_transforms(
         np.matmul(inverse[None, :, :], transforms),
         placement_camera_to_world[None, :, :],
     )
+
+
+def _project_object_bottoms_to_support(
+    raw_candidates: Any,
+    *,
+    object_points: Any,
+    support_points: Any,
+    np: Any,
+) -> Any:
+    """Place each predicted object bottom on the measured gravity-aligned support."""
+
+    transforms = np.asarray(raw_candidates, dtype=np.float64)
+    if transforms.ndim != 3 or transforms.shape[1:] != (4, 4):
+        return raw_candidates
+    object_array = np.asarray(object_points, dtype=np.float64)
+    support_array = np.asarray(support_points, dtype=np.float64)
+    if (
+        object_array.ndim != 2
+        or object_array.shape[1] != 3
+        or len(object_array) == 0
+        or support_array.ndim != 2
+        or support_array.shape[1] != 3
+        or len(support_array) == 0
+    ):
+        return raw_candidates
+    # Median is robust to the marker border/depth holes; use a low percentile
+    # for the object bottom so a few noisy depth pixels cannot suspend it.
+    support_height = float(np.median(support_array[:, 2]))
+    homogeneous = np.concatenate(
+        [object_array, np.ones((len(object_array), 1), dtype=np.float64)], axis=1
+    )
+    projected = np.matmul(transforms, homogeneous.T).transpose(0, 2, 1)[:, :, :3]
+    bottoms = np.quantile(projected[:, :, 2], 0.02, axis=1)
+    adjusted = transforms.copy()
+    adjusted[:, 2, 3] += support_height - bottoms
+    return adjusted
 
 
 def _is_rigid_transform(matrix: Any) -> bool:
