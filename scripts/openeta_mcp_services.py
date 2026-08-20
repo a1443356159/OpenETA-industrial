@@ -507,6 +507,16 @@ def _startup_candidate_count(explicit: int | None, env_name: str) -> int:
         raise ConfigError(f"{env_name}: {exc}") from exc
 
 
+def _service_process_env(config: ServiceConfig) -> dict[str, str]:
+    """Expose console scripts installed beside a service's selected Python."""
+
+    env = dict(config.env)
+    python_bin = str(Path(config.python).expanduser().resolve().parent)
+    current_path = env.get("PATH", "")
+    env["PATH"] = python_bin + (os.pathsep + current_path if current_path else "")
+    return env
+
+
 def _validate_start_requirements(configs: Iterable[ServiceConfig]) -> None:
     for config in configs:
         if config.name == "anygrasp":
@@ -603,7 +613,7 @@ def _start_service(config: ServiceConfig, *, dry_run: bool) -> dict[str, Any]:
             process = subprocess.Popen(
                 config.command,
                 cwd=REPO_ROOT,
-                env=config.env,
+                env=_service_process_env(config),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,

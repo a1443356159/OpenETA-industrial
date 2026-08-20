@@ -174,6 +174,28 @@ def test_graspgenx_child_environment_disables_runtime_asset_downloads(
     assert config.env["GRASPGENX_GRIPPER_CFG_DIR"] == "/srv/grippers"
 
 
+def test_service_process_path_starts_with_selected_python_bin(tmp_path: Path) -> None:
+    args = cli.build_parser().parse_args(
+        [
+            "start",
+            "anyplace",
+            "--state-dir",
+            str(tmp_path),
+            "--anyplace-python",
+            "/srv/anyplace/venv/bin/python",
+            "--anyplace-root",
+            "/srv/anyplace",
+            "--anyplace-config-path",
+            "/srv/anyplace/config.yaml",
+        ]
+    )
+    config = cli._build_configs(args)[0]
+
+    child_env = cli._service_process_env(config)
+
+    assert child_env["PATH"].split(":", 1)[0] == "/srv/anyplace/venv/bin"
+
+
 def test_start_all_dry_run_includes_seven_services(tmp_path: Path, capsys) -> None:
     assert (
         cli.main(
