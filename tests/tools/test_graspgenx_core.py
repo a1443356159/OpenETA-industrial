@@ -472,6 +472,7 @@ class _FakeBackend(GraspGenXBackend):
 
     def _run_planner(self, **_kwargs: Any) -> tuple[Any, Any, Any]:
         grasps = np.tile(np.eye(4), (3, 1, 1))
+        grasps[:, 0, 3] = [0.0, 0.02, 0.04]
         grasps[:, 2, 3] = 0.5
         return grasps, np.array([0.2, 0.9, 0.9]), ["diff", "obb", "diff"]
 
@@ -520,6 +521,7 @@ def test_collision_selection_checks_source_balanced_ranked_batches(
         gripper_descriptions_root=grippers,
     )
     poses = np.tile(np.eye(4), (40, 1, 1))
+    poses[:, 0, 3] = np.arange(40) * 0.02
     scores = np.linspace(0.0, 1.0, 40)
     calls: list[int] = []
 
@@ -542,7 +544,6 @@ def test_collision_selection_checks_source_balanced_ranked_batches(
     )
 
     assert len(selected) == 10
-    assert selected == sorted(selected, key=lambda index: (-scores[index], index))
     assert {index % 2 for index in selected} == {0, 1}
     assert calls == [16]
     assert metadata["collision_checked_count"] == 16
@@ -586,22 +587,55 @@ def test_no_scene_selection_seeds_both_model_sources(tmp_path: Path) -> None:
     )
     scores = np.arange(20.0, 0.0, -1.0)
     tags = ["obb"] * 10 + ["diff"] * 10
+    poses = np.tile(np.eye(4), (20, 1, 1))
+    poses[:, 0, 3] = np.arange(20) * 0.02
 
     selected, metadata = backend._select_collision_free(
         loaded={},
         sampler_entry={},
         scene_points=np.empty((0, 3), dtype=np.float32),
-        camera_native_grasps=np.tile(np.eye(4), (20, 1, 1)),
+        camera_native_grasps=poses,
         scores=scores,
         branch_tags=tags,
     )
 
     assert {tags[index] for index in selected} == {"obb", "diff"}
-    assert selected == sorted(selected, key=lambda index: (-scores[index], index))
     assert (
         metadata["candidate_selection"]
-        == "source_aware_se3_mmr_then_score_descending"
+        == "source_aware_se3_mmr_with_minimum_se3_separation"
     )
+
+
+def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
+    tmp_path: Path,
+) -> None:
+    source, checkpoints, grippers = _backend_layout(tmp_path)
+    backend = GraspGenXBackend(
+        graspgenx_root=source,
+        checkpoint_root=checkpoints,
+        gripper_descriptions_root=grippers,
+        max_candidates=3,
+    )
+    poses = np.tile(np.eye(4), (6, 1, 1))
+    poses[3:, 0, 3] = [0.02, 0.04, 0.06]
+
+    selected, metadata = backend._select_collision_free(
+        loaded={
+            "filter_collisions": lambda **kwargs: np.ones(
+                len(kwargs["grasp_poses"]), dtype=bool
+            )
+        },
+        sampler_entry={
+            "collision_surface_points": np.zeros((2000, 3), dtype=np.float32)
+        },
+        scene_points=np.ones((10, 3), dtype=np.float32),
+        camera_native_grasps=poses,
+        scores=np.array([0.99, 0.98, 0.97, 0.7, 0.6, 0.5]),
+        branch_tags=["obb", "obb", "obb", "diff", "diff", "diff"],
+    )
+
+    assert selected == [0, 3, 4]
+    assert metadata["formal_diversity_rejected_count"] == 2
 
 
 def test_no_scene_selection_retains_lower_scored_side_approaches(tmp_path: Path) -> None:

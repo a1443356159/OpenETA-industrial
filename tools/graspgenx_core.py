@@ -53,6 +53,12 @@ MMR_ROTATION_SCALE_RAD = math.radians(30.0)
 MMR_ROTATION_WEIGHT = 1.0
 MMR_SIMILARITY_PENALTY = 0.55
 MMR_DIVERSITY_RESERVE_MULTIPLIER = 4
+# A formal candidate must differ in position or orientation from every already
+# selected formal candidate.  This is deliberately a hard gate: MMR is useful
+# for ordering, but by itself can still admit several score-rich copies of an
+# OBB grasp mode.
+FORMAL_MIN_TRANSLATION_M = 0.015
+FORMAL_MIN_ROTATION_RAD = math.radians(15.0)
 
 _DEPTH_SCALE_GUIDANCE = (
     "Depth in meters is raw_depth / intrinsics.scale; for uint16 millimeter "
@@ -591,6 +597,29 @@ def _se3_mmr_order(
     return [*selected, *(index for index in ranked if index in remaining)]
 
 
+def _is_formally_novel_grasp(
+    *, poses: Any, candidate_index: int, selected_indices: list[int]
+) -> bool:
+    """Whether a pose is sufficiently distinct for the formal candidate pool."""
+
+    np, _Image = _load_image_dependencies()
+    candidate = np.asarray(poses[candidate_index], dtype=np.float64)
+    for selected_index in selected_indices:
+        selected = np.asarray(poses[selected_index], dtype=np.float64)
+        translation = float(
+            np.linalg.norm(candidate[:3, 3] - selected[:3, 3])
+        )
+        relative = candidate[:3, :3].T @ selected[:3, :3]
+        cosine = float(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))
+        rotation = math.acos(cosine)
+        if (
+            translation < FORMAL_MIN_TRANSLATION_M
+            and rotation < FORMAL_MIN_ROTATION_RAD
+        ):
+            return False
+    return True
+
+
 class GraspGenXBackend:
     """Lazy, in-process wrapper around the official GraspGenX Python API."""
 
@@ -952,17 +981,30 @@ class GraspGenXBackend:
             selection_limit=diversity_order_count,
         )
         if len(scene_points) == 0:
-            selected = sorted(
-                inspection_order[: self.max_candidates], key=ranked.index
-            )
+            selected: list[int] = []
+            diversity_rejected = 0
+            for index in inspection_order:
+                if _is_formally_novel_grasp(
+                    poses=poses,
+                    candidate_index=index,
+                    selected_indices=selected,
+                ):
+                    selected.append(index)
+                    if len(selected) >= self.max_candidates:
+                        break
+                else:
+                    diversity_rejected += 1
             return selected, {
                 "collision_filter_applied": False,
                 "collision_filter_reason": "no_scene_points",
                 "collision_scene_point_count": 0,
                 "collision_checked_count": 0,
                 "collision_rejected_count": 0,
-                "candidate_selection": "source_aware_se3_mmr_then_score_descending",
+                "candidate_selection": "source_aware_se3_mmr_with_minimum_se3_separation",
                 "mmr_diversity_order_count": diversity_order_count,
+                "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
+                "formal_min_rotation_rad": FORMAL_MIN_ROTATION_RAD,
+                "formal_diversity_rejected_count": diversity_rejected,
             }
 
         collision_scene = np.asarray(scene_points, dtype=np.float32)
@@ -975,6 +1017,7 @@ class GraspGenXBackend:
         selected: list[int] = []
         checked = 0
         rejected = 0
+        diversity_rejected = 0
         filter_fn = loaded["filter_collisions"]
         for offset in range(0, len(inspection_order), COLLISION_BATCH_SIZE):
             batch_indices = inspection_order[offset : offset + COLLISION_BATCH_SIZE]
@@ -995,9 +1038,17 @@ class GraspGenXBackend:
                 raise GraspGenXInputError("inconsistent_grasp_outputs")
             checked += len(batch_indices)
             rejected += int((~free_mask).sum())
-            selected.extend(
-                idx for idx, is_free in zip(batch_indices, free_mask) if bool(is_free)
-            )
+            for index, is_free in zip(batch_indices, free_mask):
+                if not bool(is_free):
+                    continue
+                if _is_formally_novel_grasp(
+                    poses=poses,
+                    candidate_index=index,
+                    selected_indices=selected,
+                ):
+                    selected.append(index)
+                else:
+                    diversity_rejected += 1
             if len(selected) >= self.max_candidates:
                 selected = selected[: self.max_candidates]
                 break
@@ -1012,14 +1063,16 @@ class GraspGenXBackend:
                     "returned_candidate_count": 0,
                 },
             )
-        selected.sort(key=ranked.index)
         return selected, {
             "collision_filter_applied": True,
             "collision_scene_point_count": int(len(collision_scene)),
             "collision_checked_count": checked,
             "collision_rejected_count": rejected,
-            "candidate_selection": "source_aware_se3_mmr_then_score_descending",
+            "candidate_selection": "source_aware_se3_mmr_with_minimum_se3_separation",
             "mmr_diversity_order_count": diversity_order_count,
+            "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
+            "formal_min_rotation_rad": FORMAL_MIN_ROTATION_RAD,
+            "formal_diversity_rejected_count": diversity_rejected,
         }
 
     def _metadata_base(self, *, gripper_name: Any) -> dict[str, Any]:
