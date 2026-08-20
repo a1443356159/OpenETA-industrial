@@ -52,6 +52,7 @@ MMR_TRANSLATION_SCALE_M = 0.03
 MMR_ROTATION_SCALE_RAD = math.radians(30.0)
 MMR_ROTATION_WEIGHT = 1.0
 MMR_SIMILARITY_PENALTY = 0.55
+MMR_DIVERSITY_RESERVE_MULTIPLIER = 4
 
 _DEPTH_SCALE_GUIDANCE = (
     "Depth in meters is raw_depth / intrinsics.scale; for uint16 millimeter "
@@ -527,6 +528,7 @@ def _se3_mmr_order(
     poses: Any,
     scores: Any,
     branch_tags: list[str],
+    selection_limit: int,
 ) -> list[int]:
     """Return a deterministic, source-aware quality/diversity ordering."""
 
@@ -539,6 +541,7 @@ def _se3_mmr_order(
     ranked = sorted(range(count), key=lambda index: (-score_array[index], index))
     if not ranked:
         return []
+    selection_limit = max(1, min(int(selection_limit), count))
     score_span = float(score_array.max() - score_array.min())
     quality = (
         np.ones(count, dtype=np.float64)
@@ -563,20 +566,29 @@ def _se3_mmr_order(
         rotation = math.acos(cosine) / MMR_ROTATION_SCALE_RAD
         return math.exp(-(translation + MMR_ROTATION_WEIGHT * rotation))
 
-    while remaining:
+    max_similarity = {
+        index: max(similarity(index, chosen) for chosen in selected)
+        for index in remaining
+    }
+    while remaining and len(selected) < selection_limit:
         best = max(
             remaining,
             key=lambda index: (
                 float(quality[index])
                 - MMR_SIMILARITY_PENALTY
-                * max(similarity(index, chosen) for chosen in selected),
+                * max_similarity[index],
                 float(score_array[index]),
                 -index,
             ),
         )
         selected.append(best)
         remaining.remove(best)
-    return selected
+        max_similarity.pop(best)
+        for index in remaining:
+            max_similarity[index] = max(
+                max_similarity[index], similarity(index, best)
+            )
+    return [*selected, *(index for index in ranked if index in remaining)]
 
 
 class GraspGenXBackend:
@@ -926,10 +938,18 @@ class GraspGenXBackend:
         score_array = np.asarray(scores, dtype=np.float64)
         ranked = sorted(range(len(score_array)), key=lambda idx: (-score_array[idx], idx))
         poses = np.asarray(camera_native_grasps, dtype=np.float64)
+        diversity_order_count = min(
+            len(ranked),
+            max(
+                COLLISION_BATCH_SIZE * 2,
+                self.max_candidates * MMR_DIVERSITY_RESERVE_MULTIPLIER,
+            ),
+        )
         inspection_order = _se3_mmr_order(
             poses=poses,
             scores=score_array,
             branch_tags=branch_tags,
+            selection_limit=diversity_order_count,
         )
         if len(scene_points) == 0:
             selected = sorted(
@@ -942,6 +962,7 @@ class GraspGenXBackend:
                 "collision_checked_count": 0,
                 "collision_rejected_count": 0,
                 "candidate_selection": "source_aware_se3_mmr_then_score_descending",
+                "mmr_diversity_order_count": diversity_order_count,
             }
 
         collision_scene = np.asarray(scene_points, dtype=np.float32)
@@ -998,6 +1019,7 @@ class GraspGenXBackend:
             "collision_checked_count": checked,
             "collision_rejected_count": rejected,
             "candidate_selection": "source_aware_se3_mmr_then_score_descending",
+            "mmr_diversity_order_count": diversity_order_count,
         }
 
     def _metadata_base(self, *, gripper_name: Any) -> dict[str, Any]:
