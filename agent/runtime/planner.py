@@ -3034,6 +3034,30 @@ def _validate_grasp_execution_obligation(
                 "The selected wrist mask predates the safe-hover motion. Call sam3 "
                 "with wrist_segmentation_obligation.required_parameters exactly."
             ]
+        if (
+            decision.action == "sam3"
+            and not isinstance(tool_context.get("selected_sam3_detection"), dict)
+            and not isinstance(tool_context.get("selection_obligation"), dict)
+        ):
+            current_wrist_rgb = next(
+                (
+                    artifact.get("path")
+                    for artifact in tool_context.get("current_camera_artifacts", [])
+                    if isinstance(artifact, dict)
+                    and artifact.get("kind") == "rgb"
+                    and _is_wrist_camera(artifact, primary_only=True)
+                ),
+                None,
+            )
+            if (
+                isinstance(current_wrist_rgb, str)
+                and decision.parameters.get("image") == current_wrist_rgb
+                and decision.parameters.get("mode") == "text"
+                and isinstance(decision.parameters.get("prompt"), str)
+                and str(decision.parameters["prompt"]).strip()
+                and set(decision.parameters) == {"image", "mode", "prompt"}
+            ):
+                return []
         if decision.action in {
             "select_sam3_detection",
             "retrieve_asset_reference",

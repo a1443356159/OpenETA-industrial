@@ -6953,6 +6953,52 @@ def test_stale_prehover_wrist_mask_dispatches_current_wrist_sam3(tmp_path: Path)
     assert decision.metadata["host_obligation"]["stage"] == "wrist_segmentation"
 
 
+def test_wrist_align_without_retained_selection_accepts_current_wrist_text_sam3(
+    tmp_path: Path,
+) -> None:
+    wrist = tmp_path / "current-wrist.png"
+    wrist.write_bytes(b"current-wrist-scene")
+    memory = AgentMemory()
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "status": "required",
+            "stage": "align",
+            "compiled_grasp": {"schema_version": "openeta.compiled_grasp_seed.v1"},
+        },
+        source="test",
+    )
+    observation = _observation()
+    observation.metadata["image_artifacts"] = [
+        {
+            "kind": "rgb",
+            "frame_id": "wrist_camera_optical_frame",
+            "role": "wrist",
+            "path": str(wrist),
+        }
+    ]
+    request = {
+        "image": str(wrist),
+        "mode": "text",
+        "prompt": "red block target object",
+    }
+    planner = ToolCallingPlanner(
+        StaticPlannerBackend(
+            {"kind": "tool_call", "name": "sam3", "parameters": request}
+        )
+    )
+
+    decision = planner.plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("sam3", "compute_wrist_alignment"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "sam3"
+    assert decision.parameters == request
+
+
 def test_empty_wrist_sam3_requires_canonical_reference_fallback(tmp_path: Path) -> None:
     previous_wrist = tmp_path / "previous" / "wrist.rgb.png"
     current_wrist = tmp_path / "current" / "wrist.rgb.png"
