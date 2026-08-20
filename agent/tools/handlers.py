@@ -31,6 +31,7 @@ from agent.tools.registry import (
     make_tool_result,
 )
 from agent.tools.sim_mcp import SimulatorMcpTransport, SseSimulatorMcpTransport
+from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count
 
 
 ApprovalCallback = Callable[[ToolExecutionContext], bool]
@@ -846,8 +847,11 @@ def build_anygrasp_handler(
     detect_grasps: AnyGraspDetectCallable,
     *,
     output_root: str | Path = DEFAULT_ANYGRASP_OUTPUT_ROOT,
+    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
 ) -> ToolHandler:
     """Build an AnyGrasp ToolRegistry handler backed by an injected MCP callable."""
+
+    expected_candidate_count = candidate_count(expected_candidate_count)
 
     def handler(context: ToolExecutionContext) -> ToolResult:
         session_id = artifact_session_id(context.metadata)
@@ -1027,6 +1031,7 @@ def build_anygrasp_handler(
             target_mask=target_mask,
             request=request,
             output_root=artifact_session_root(output_root, session_id),
+            expected_candidate_count=expected_candidate_count,
         )
 
     return handler
@@ -1315,10 +1320,12 @@ def build_graspgenx_handler(
     list_grippers: GraspGenXListCallable,
     *,
     output_root: str | Path = DEFAULT_GRASPGENX_OUTPUT_ROOT,
+    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
 ) -> ToolHandler:
     """Build a targeted GraspGenX handler backed by MCP callables."""
 
     root = Path(output_root)
+    expected_candidate_count = candidate_count(expected_candidate_count)
 
     def handler(context: ToolExecutionContext) -> ToolResult:
         run_dir = _create_run_dir(root)
@@ -1499,6 +1506,7 @@ def build_graspgenx_handler(
             intrinsics=intrinsics,
             gripper_name=gripper_name,
             up_direction_camera=up_direction,
+            expected_candidate_count=expected_candidate_count,
         )
         if result.success:
             try:
@@ -1724,8 +1732,11 @@ def build_anyplace_handler(
     predict_placement: AnyPlacePredictCallable,
     *,
     output_root: str | Path = DEFAULT_ANYPLACE_OUTPUT_ROOT,
+    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
 ) -> ToolHandler:
     """Build an AnyPlace ToolRegistry handler backed by an injected MCP callable."""
+
+    expected_candidate_count = candidate_count(expected_candidate_count)
 
     def handler(context: ToolExecutionContext) -> ToolResult:
         session_id = artifact_session_id(context.metadata)
@@ -1955,6 +1966,7 @@ def build_anyplace_handler(
             selected_grasp_source=request["selected_grasp"]["source"],
             request=request,
             output_root=artifact_session_root(output_root, session_id),
+            expected_candidate_count=expected_candidate_count,
         )
 
     return handler
@@ -3632,6 +3644,7 @@ def _normalise_anygrasp_response(
     target_mask: str,
     request: JsonDict,
     output_root: Path,
+    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
 ) -> ToolResult:
     if not isinstance(response, dict):
         return _anygrasp_failure(
@@ -3685,7 +3698,19 @@ def _normalise_anygrasp_response(
         parsed_count = int(candidate_count)
     except (TypeError, ValueError):
         parsed_count = -1
-    if parsed_count != len(candidates_value) or parsed_count <= 0:
+    metadata = _dict_or_empty(details.get("metadata"))
+    registered_count = metadata.get("max_candidates")
+    if (
+        parsed_count != len(candidates_value)
+        or parsed_count <= 0
+        or (
+            registered_count is not None
+            and (
+                registered_count != expected_candidate_count
+                or parsed_count != expected_candidate_count
+            )
+        )
+    ):
         return _anygrasp_inconsistent(
             mode=mode,
             source_rgb=source_rgb,
@@ -4328,6 +4353,7 @@ def _normalise_graspgenx_response(
     intrinsics: JsonDict,
     gripper_name: str,
     up_direction_camera: list[float],
+    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
 ) -> ToolResult:
     if not isinstance(response, Mapping):
         return _graspgenx_failure("mcp_call_failed")
@@ -4397,6 +4423,12 @@ def _normalise_graspgenx_response(
     if not isinstance(metadata_value, Mapping):
         return _graspgenx_failure("inconsistent_grasp_outputs")
     metadata = _scrub_graspgenx_payload(metadata_value)
+    registered_count = metadata.get("max_returned_candidates")
+    if registered_count is not None and (
+        registered_count != expected_candidate_count
+        or candidate_count != expected_candidate_count
+    ):
+        return _graspgenx_failure("inconsistent_grasp_outputs")
     return ToolResult(
         True,
         content=_string_param(response.get("content"))
@@ -5221,6 +5253,7 @@ def _normalise_anyplace_response(
     selected_grasp_source: JsonDict,
     request: JsonDict,
     output_root: Path,
+    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
 ) -> ToolResult:
     if not isinstance(response, dict):
         return _anyplace_failure(
@@ -5250,7 +5283,20 @@ def _normalise_anyplace_response(
         candidate_count = int(details.get("candidate_count"))
     except (TypeError, ValueError):
         candidate_count = -1
-    if not isinstance(candidates_value, list) or candidate_count != 5 or len(candidates_value) != 5:
+    metadata = _dict_or_empty(details.get("metadata"))
+    registered_count = metadata.get("configured_candidate_count")
+    if (
+        not isinstance(candidates_value, list)
+        or candidate_count != len(candidates_value)
+        or candidate_count <= 0
+        or (
+            registered_count is not None
+            and (
+                registered_count != expected_candidate_count
+                or candidate_count != expected_candidate_count
+            )
+        )
+    ):
         return _anyplace_inconsistent()
 
     candidates: list[JsonDict] = []
@@ -5309,7 +5355,7 @@ def _normalise_anyplace_response(
             "selected_grasp_id": selected_grasp["id"],
             "scene_revision": request["scene_revision"],
             "raw_output_ref": str(raw_output_ref),
-            "candidate_count": 5,
+            "candidate_count": len(candidates),
             "placement_candidates": candidates,
             "candidate_image_ref": candidate_image_ref,
             "artifacts": [

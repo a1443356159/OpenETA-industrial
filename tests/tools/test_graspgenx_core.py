@@ -539,11 +539,11 @@ def test_collision_selection_checks_ranked_batches_until_twenty(
         scores=scores,
     )
 
-    assert len(selected) == MAX_RETURNED_CANDIDATES
+    assert len(selected) == 10
     assert selected[0] == 37
-    assert calls == [16, 16]
-    assert metadata["collision_checked_count"] == 32
-    assert metadata["collision_rejected_count"] == 4
+    assert calls == [16]
+    assert metadata["collision_checked_count"] == 16
+    assert metadata["collision_rejected_count"] == 2
 
 
 def test_collision_selection_reports_all_grasps_colliding(tmp_path: Path) -> None:

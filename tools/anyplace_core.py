@@ -13,12 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count as validate_candidate_count
+
 
 MODEL_NAME = "anyplace_multitask"
 FRAME = "camera"
 CAMERA_FRAME = "opencv"
 POSE_CONVENTION = "p_placed = R @ p_current + t"
-DEFAULT_CANDIDATE_LIMIT = 5
+DEFAULT_CANDIDATE_LIMIT = DEFAULT_CANDIDATE_COUNT
 MODEL_SAMPLE_COUNT = 1024
 DEFAULT_DEPTH_TRUNCATION = 1.0
 
@@ -71,11 +73,13 @@ class AnyPlaceBackend:
         config_path: str | Path,
         seed: int = 0,
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
+        candidate_count: int = DEFAULT_CANDIDATE_LIMIT,
     ) -> None:
         self.anyplace_root = Path(anyplace_root)
         self.config_path = Path(config_path)
         self.seed = seed
         self.depth_truncation = depth_truncation
+        self.candidate_count = validate_candidate_count(candidate_count)
         self._loaded: dict[str, Any] | None = None
 
     def predict_placement(
@@ -176,7 +180,7 @@ class AnyPlaceBackend:
             candidates = normalise_placement_candidates(
                 raw_candidates,
                 selected_grasp=parsed_grasp,
-                expected_count=DEFAULT_CANDIDATE_LIMIT,
+                expected_count=self.candidate_count,
             )
         except AnyPlaceInputError as exc:
             return _failure_result(
@@ -205,7 +209,10 @@ class AnyPlaceBackend:
                 "camera_frame": CAMERA_FRAME,
                 "candidate_count": len(candidates),
                 "placement_candidates": candidates,
-                "metadata": _with_duration(metadata, start),
+                "metadata": _with_duration(
+                    {**metadata, "configured_candidate_count": self.candidate_count},
+                    start,
+                ),
             },
         }
 
@@ -240,6 +247,7 @@ class AnyPlaceBackend:
 
         args = config_util.load_config(str(self.config_path), demo_train_eval="eval")
         args = config_util.recursive_attr_dict(args)
+        args.experiment.eval.init_k_val = self.candidate_count
         ckpt_path = Path(args.experiment.eval.ckpt_path)
         if not ckpt_path.is_absolute():
             ckpt_path = self.config_path.parent / ckpt_path
@@ -366,7 +374,7 @@ class AnyPlaceBackend:
                 return_top=(not exp_args.eval.return_rand),
                 with_coll=exp_args.eval.with_coll,
                 run_affordance=exp_args.eval.run_affordance,
-                init_k_val=exp_args.eval.init_k_val,
+                init_k_val=self.candidate_count,
                 no_sc_score=exp_args.eval.no_success_classifier,
                 init_parent_mean=exp_args.eval.init_parent_mean_pos,
                 init_orig_ori=exp_args.eval.init_orig_ori,
@@ -561,7 +569,7 @@ def normalise_placement_candidates(
     raw_candidates: Any,
     *,
     selected_grasp: dict[str, Any],
-    expected_count: int = DEFAULT_CANDIDATE_LIMIT,
+    expected_count: int | None = DEFAULT_CANDIDATE_LIMIT,
 ) -> list[dict[str, Any]]:
     np, _Image = _load_numeric_deps()
     try:
@@ -572,7 +580,7 @@ def normalise_placement_candidates(
         raise AnyPlaceInputError("no_placement_candidates")
     if arr.ndim != 3 or arr.shape[1:] != (4, 4):
         raise AnyPlaceInputError("inconsistent_placement_outputs")
-    if arr.shape[0] != expected_count:
+    if expected_count is not None and arr.shape[0] != expected_count:
         raise AnyPlaceInputError("inconsistent_placement_outputs")
     if not np.isfinite(arr).all():
         raise AnyPlaceInputError("inconsistent_placement_outputs")

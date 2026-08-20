@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from mcp.server.fastmcp import FastMCP
 
 from tools.anyplace_core import AnyPlaceBackend
+from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, argparse_candidate_count
 
 
 mcp = FastMCP("anyplace", log_level="WARNING")
@@ -67,7 +68,7 @@ def predict_placement(
             "selected_grasp": {"id": "grasp_003", "frame": "camera", "camera_frame": "opencv", "...": "..."}
         }
 
-    The tool returns exactly five placement candidates in backend order. Each
+    The tool returns the configured number of placement candidates in backend order. Each
     bundles ``object_placement_transform.transform_matrix`` with the
     corresponding ``place_grasp_pose``. It does not return point clouds, choose
     a best candidate, transform to robot/world frames, or execute motion. Do
@@ -119,6 +120,11 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8775)
     parser.add_argument("--anyplace-root", required=True)
     parser.add_argument("--config-path", required=True)
+    parser.add_argument(
+        "--candidate-count",
+        type=argparse_candidate_count,
+        default=DEFAULT_CANDIDATE_COUNT,
+    )
     args = parser.parse_args()
 
     anyplace_root = Path(args.anyplace_root)
@@ -131,6 +137,7 @@ def main() -> int:
     _BACKEND = AnyPlaceBackend(
         anyplace_root=anyplace_root,
         config_path=config_path,
+        candidate_count=args.candidate_count,
     )
 
     if args.transport == "stdio":
@@ -144,7 +151,13 @@ def main() -> int:
     from starlette.routing import Route
 
     async def health(_request):
-        return JSONResponse({"ok": True, "server": "anyplace"})
+        return JSONResponse(
+            {
+                "ok": True,
+                "server": "anyplace",
+                "candidate_count": _BACKEND.candidate_count,
+            }
+        )
 
     health_app = Starlette(routes=[Route("/", health, methods=["GET"])])
     sse_transport = SseServerTransport("/sse/messages/")

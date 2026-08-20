@@ -717,7 +717,7 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
             calls["anyplace"].append(request)
             grasp = request["selected_grasp"]
             candidates = []
-            for index in range(5):
+            for index in range(10):
                 candidates.append(
                     {
                         "id": f"placement_{index:03d}",
@@ -744,7 +744,7 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
                     "model": "anyplace_multitask",
                     "frame": "camera",
                     "camera_frame": "opencv",
-                    "candidate_count": 5,
+                    "candidate_count": 10,
                     "placement_candidates": candidates,
                     "metadata": {},
                 },
@@ -886,7 +886,7 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
     assert calls["contact"] == []
     assert calls["anyplace"][0]["selected_grasp"]["id"].startswith("gpe-")
     assert anyplace.success is True
-    assert anyplace.details["outputs"]["candidate_count"] == 5
+    assert anyplace.details["outputs"]["candidate_count"] == 10
 
 
 def test_cli_reuses_simulator_mcp_state_for_stable_control_tools(monkeypatch) -> None:

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import hashlib
+import json
 import os
 from pathlib import Path
 import time
-from typing import Callable
+from typing import Callable, Mapping
 from uuid import uuid4
 
 from adapter.protocol import JsonDict
@@ -27,6 +28,12 @@ from agent.runtime.grasp_strategy_lifecycle import (
     GraspStrategyLifecycleManager,
 )
 from agent.runtime.memory import AgentMemory
+from agent.runtime.moveit_qualification import (
+    MoveItCandidateQualifier,
+    QualificationCache,
+    PRIVATE_RPC_NAME,
+    private_qualification_rpc,
+)
 from agent.runtime.memory_store import JsonMemoryStore
 from agent.runtime.pipeline import ActionPipeline
 from agent.runtime.planner import PlannerContextConfig, ToolCallingPlanner
@@ -86,7 +93,12 @@ from agent.tools.handlers import (
     build_sse_molmopoint_mcp_pointer,
     build_sse_sam3_mcp_segmenter,
 )
-from agent.tools.grasp_geometry import build_compile_grasp_seed_handler
+from agent.tools.grasp_geometry import (
+    build_compile_grasp_seed_handler,
+    build_wrist_alignment_handler,
+    compile_grasp_seed,
+)
+from agent.tools.grasp_strategies import load_grasp_strategies
 from agent.tools.mcp_registry import load_mcp_server_url
 from agent.tools.object_memory import (
     ObjectMemoryBankClient,
@@ -110,6 +122,7 @@ from agent.tools.sim_mcp import (
     bind_simulator_mcp_tool_handlers,
 )
 from agent.tools.web_access import WebAccessConfig, bind_configured_web_tool_handlers
+from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count
 
 
 BackendFactory = Callable[..., PlannerBackend]
@@ -283,6 +296,34 @@ class RuntimeMcpEndpoints:
     molmopoint_url: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeCandidateCounts:
+    """Host registration values that must match remote service metadata."""
+
+    graspgenx: int = DEFAULT_CANDIDATE_COUNT
+    anygrasp: int = DEFAULT_CANDIDATE_COUNT
+    anyplace: int = DEFAULT_CANDIDATE_COUNT
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "graspgenx", candidate_count(self.graspgenx))
+        object.__setattr__(self, "anygrasp", candidate_count(self.anygrasp))
+        object.__setattr__(self, "anyplace", candidate_count(self.anyplace))
+
+
+def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
+    return RuntimeCandidateCounts(
+        graspgenx=candidate_count(
+            os.environ.get("OPENETA_GRASPGENX_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT)
+        ),
+        anygrasp=candidate_count(
+            os.environ.get("OPENETA_ANYGRASP_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT)
+        ),
+        anyplace=candidate_count(
+            os.environ.get("OPENETA_ANYPLACE_CANDIDATE_COUNT", DEFAULT_CANDIDATE_COUNT)
+        ),
+    )
+
+
 @dataclass(slots=True)
 class RuntimeAssemblyConfig:
     """Host-owned inputs shared by TUI and batch runtime construction."""
@@ -292,6 +333,9 @@ class RuntimeAssemblyConfig:
     backend_factory: BackendFactory
     supervision_policy: SupervisionPolicy
     endpoints: RuntimeMcpEndpoints = field(default_factory=RuntimeMcpEndpoints)
+    candidate_counts: RuntimeCandidateCounts = field(
+        default_factory=runtime_candidate_counts_from_env
+    )
     simulator_transport: SimulatorMcpTransport | None = None
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None
     web_access_config: WebAccessConfig | None = None
@@ -369,12 +413,29 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         for name in ENVIRONMENT_PLACEHOLDER_TOOLS:
             tools.unbind_handler(name)
 
+    qualification_cache = QualificationCache()
+    qualifier = _runtime_candidate_qualifier(
+        config.simulator_transport,
+        simulator_proxy_config,
+        cache=qualification_cache,
+        artifact_root=config.workspace.artifacts_dir / "moveit_qualification",
+        compile_candidate=_candidate_qualification_compiler(config.workspace),
+    )
     tools.bind_handler(
         "compile_grasp_seed",
         build_compile_grasp_seed_handler(
             workspace.grasp_profile_path,
             strategy_root=workspace.grasp_strategy_root,
+            qualification_cache=qualification_cache if qualifier is not None else None,
         ),
+        replace=True,
+    )
+    wrist_handler = build_wrist_alignment_handler()
+    if qualifier is not None:
+        wrist_handler = _qualifying_wrist_alignment_handler(wrist_handler, qualifier)
+    tools.bind_handler(
+        "compute_wrist_alignment",
+        wrist_handler,
         replace=True,
     )
     tools.bind_handler(
@@ -475,6 +536,8 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         artifact_root=artifact_root,
         simulator_transport=config.simulator_transport,
         simulator_proxy_config=simulator_proxy_config,
+        candidate_qualifier=qualifier,
+        candidate_counts=config.candidate_counts,
     )
 
     planner = ToolCallingPlanner(
@@ -573,7 +636,10 @@ def bind_runtime_perception_tools(
     perception_profile: str | None = None,
     simulator_transport: SimulatorMcpTransport | None = None,
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None,
+    candidate_qualifier: MoveItCandidateQualifier | None = None,
+    candidate_counts: RuntimeCandidateCounts | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
+    counts = candidate_counts or runtime_candidate_counts_from_env()
     segmenter_tool = perception_segmenter_tool_name(
         resolve_perception_profile()
         if perception_profile is None
@@ -694,12 +760,18 @@ def bind_runtime_perception_tools(
             replace=True,
         )
     if endpoints.anyplace_url:
+        anyplace_handler = build_anyplace_handler(
+            build_sse_anyplace_mcp_placer(url=endpoints.anyplace_url),
+            output_root=artifact_root / "anyplace_results",
+            expected_candidate_count=counts.anyplace,
+        )
+        if candidate_qualifier is not None:
+            anyplace_handler = _qualifying_handler(
+                anyplace_handler, candidate_qualifier, purpose="placement"
+            )
         tools.bind_handler(
             "anyplace",
-            build_anyplace_handler(
-                build_sse_anyplace_mcp_placer(url=endpoints.anyplace_url),
-                output_root=artifact_root / "anyplace_results",
-            ),
+            anyplace_handler,
             replace=True,
         )
 
@@ -708,6 +780,7 @@ def bind_runtime_perception_tools(
         grasp_backends["anygrasp"] = build_anygrasp_handler(
             build_sse_anygrasp_mcp_grasper(url=endpoints.anygrasp_url),
             output_root=artifact_root / "anygrasp_results",
+            expected_candidate_count=counts.anygrasp,
         )
     if endpoints.graspgenx_url:
         list_grippers = build_sse_graspgenx_mcp_gripper_lister(
@@ -717,6 +790,7 @@ def bind_runtime_perception_tools(
             build_sse_graspgenx_mcp_predictor(url=endpoints.graspgenx_url),
             list_grippers,
             output_root=artifact_root / "graspgenx_results",
+            expected_candidate_count=counts.graspgenx,
         )
     # Resolve the configured Contact-GraspNet endpoint for startup/discovery,
     # but keep the backend disabled until its planner-facing contract is
@@ -727,16 +801,299 @@ def bind_runtime_perception_tools(
     # Keep its endpoint/configuration and implementation available for a later
     # re-enable, but do not expose it as an executable grasp backend here.
     if grasp_backends:
+        grasp_handler = build_grasp_pose_estimate_handler(
+            grasp_backends,
+            backend_order=("graspgenx", "anygrasp", "contact_graspnet"),
+            graspgenx_gripper_name="robotiq_2f_85",
+        )
+        if candidate_qualifier is not None:
+            grasp_handler = _qualifying_handler(
+                grasp_handler, candidate_qualifier, purpose="grasp"
+            )
         tools.bind_handler(
             "grasp_pose_estimate",
-            build_grasp_pose_estimate_handler(
-                grasp_backends,
-                backend_order=("graspgenx", "anygrasp", "contact_graspnet"),
-                graspgenx_gripper_name="robotiq_2f_85",
-            ),
+            grasp_handler,
             replace=True,
         )
     return depth_prefetch
+
+
+def _runtime_candidate_qualifier(
+    transport: SimulatorMcpTransport | None,
+    proxy_config: SimulatorMcpToolProxyConfig,
+    *,
+    cache: QualificationCache,
+    artifact_root: Path,
+    compile_candidate: Callable,
+) -> MoveItCandidateQualifier | None:
+    """Discover the private RPC without adding it to the planner tool registry."""
+
+    if transport is None:
+        return None
+    try:
+        listing = transport.list_tools(timeout_s=5.0)
+    except Exception:  # noqa: BLE001 - optional private capability discovery.
+        return None
+    tools_value = listing.get("tools") if isinstance(listing, dict) else None
+    names = {
+        str(item.get("name") or "")
+        for item in tools_value or []
+        if isinstance(item, dict)
+    }
+    if PRIVATE_RPC_NAME not in names:
+        return None
+    return MoveItCandidateQualifier(
+        private_qualification_rpc(
+            transport,
+            handle_provider=lambda: proxy_config.handle,
+            session_id_provider=lambda: proxy_config.session_id,
+        ),
+        cache=cache,
+        artifact_root=artifact_root,
+        compile_candidate=compile_candidate,
+    )
+
+
+def _candidate_qualification_compiler(
+    workspace: SessionWorkspace,
+) -> Callable:
+    """Compile immutable candidates to the exact world poses sent to MoveIt."""
+
+    profile_path = Path(workspace.grasp_profile_path)
+
+    def compile_one(
+        candidate: Mapping[str, object],
+        purpose: str,
+        source: Mapping[str, object],
+        scene_epoch: int,
+        planning_scene_revision: int,
+    ) -> JsonDict:
+        profile_bytes = profile_path.read_bytes()
+        profile = json.loads(profile_bytes.decode("utf-8"))
+        profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
+        extrinsics = source.get("camera_extrinsics")
+        if not isinstance(extrinsics, dict):
+            raise ValueError("camera extrinsics unavailable for qualification")
+        if purpose == "placement":
+            selected_grasp = source.get("selected_grasp")
+            selected_grasp = selected_grasp if isinstance(selected_grasp, dict) else {}
+            source_grasp = selected_grasp.get("candidate")
+            if not isinstance(source_grasp, dict):
+                raise ValueError("source grasp unavailable for placement qualification")
+            parameters: JsonDict = {
+                "purpose": "placement",
+                "placement_candidate_id": str(candidate.get("id") or ""),
+                "placement_candidate": dict(candidate),
+                "source_grasp": dict(source_grasp),
+                "camera_extrinsics": dict(extrinsics),
+                "camera_frame_id": str(source.get("camera_frame_id") or ""),
+                "scene_epoch": scene_epoch,
+                "scene_revision": planning_scene_revision,
+            }
+            compiled = compile_grasp_seed(
+                parameters,
+                profile=profile,
+                profile_sha256=profile_sha256,
+            )
+            compiled_pose_chain = [
+                dict(compiled["hover_pose"]),
+                dict(compiled["release_pose"]),
+            ]
+            stages = [
+                _qualification_pose("hover", compiled["hover_pose"]),
+                _qualification_pose("release", compiled["release_pose"]),
+            ]
+        else:
+            parameters = {
+                "purpose": "grasp",
+                "camera_pose": dict(candidate),
+                "camera_extrinsics": dict(extrinsics),
+                "camera_frame_id": str(source.get("camera_frame_id") or ""),
+                "scene_epoch": scene_epoch,
+            }
+            compiled = compile_grasp_seed(
+                parameters,
+                profile=profile,
+                profile_sha256=profile_sha256,
+                strategies=load_grasp_strategies(Path(workspace.grasp_strategy_root)),
+            )
+            compiled_pose_chain = [dict(compiled["hover_pose"])]
+            stages = [_qualification_pose("hover", compiled["hover_pose"])]
+            precontact = compiled.get("precontact_pose")
+            if isinstance(precontact, dict):
+                compiled_pose_chain.append(dict(precontact))
+                stages.append(_qualification_pose("precontact", precontact))
+            compiled_pose_chain.append(dict(compiled["contact_pose"]))
+            stages.append(_qualification_pose("contact", compiled["contact_pose"]))
+        return {
+            "qualification_stages": stages,
+            "compile_parameters": {
+                **parameters,
+                "qualification_profile_sha256": profile_sha256,
+                "qualified_compiled_pose_sha256": hashlib.sha256(
+                    json.dumps(
+                        compiled_pose_chain,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            },
+        }
+
+    return compile_one
+
+
+def _qualification_pose(name: str, pose: object) -> JsonDict:
+    if not isinstance(pose, Mapping):
+        raise ValueError("compiled qualification pose is invalid")
+    result = {"name": name, **dict(pose)}
+    rotation = result.get("rotation_matrix")
+    if not isinstance(rotation, list) or len(rotation) != 3:
+        raise ValueError("compiled qualification rotation is missing")
+    m = [[float(value) for value in row] for row in rotation]
+    trace = m[0][0] + m[1][1] + m[2][2]
+    if trace > 0.0:
+        scale = (trace + 1.0) ** 0.5 * 2.0
+        quat = [
+            (m[2][1] - m[1][2]) / scale,
+            (m[0][2] - m[2][0]) / scale,
+            (m[1][0] - m[0][1]) / scale,
+            0.25 * scale,
+        ]
+    else:
+        index = max(range(3), key=lambda item: m[item][item])
+        if index == 0:
+            scale = (1.0 + m[0][0] - m[1][1] - m[2][2]) ** 0.5 * 2.0
+            quat = [0.25 * scale, (m[0][1] + m[1][0]) / scale, (m[0][2] + m[2][0]) / scale, (m[2][1] - m[1][2]) / scale]
+        elif index == 1:
+            scale = (1.0 + m[1][1] - m[0][0] - m[2][2]) ** 0.5 * 2.0
+            quat = [(m[0][1] + m[1][0]) / scale, 0.25 * scale, (m[1][2] + m[2][1]) / scale, (m[0][2] - m[2][0]) / scale]
+        else:
+            scale = (1.0 + m[2][2] - m[0][0] - m[1][1]) ** 0.5 * 2.0
+            quat = [(m[0][2] + m[2][0]) / scale, (m[1][2] + m[2][1]) / scale, 0.25 * scale, (m[1][0] - m[0][1]) / scale]
+    result["quat_xyzw"] = quat
+    return result
+
+
+def _qualifying_handler(
+    handler: ToolHandler,
+    qualifier: MoveItCandidateQualifier,
+    *,
+    purpose: str,
+) -> ToolHandler:
+    """Apply private MoveIt qualification before a result reaches memory/VLM."""
+
+    def qualified(context: ToolExecutionContext) -> ToolResult:
+        result = handler(context)
+        if not result.success:
+            return result
+        scene_epoch_value = (
+            result.details.get("scene_epoch", context.parameters.get("scene_epoch", 0))
+        )
+        scene_epoch = (
+            scene_epoch_value
+            if isinstance(scene_epoch_value, int) and not isinstance(scene_epoch_value, bool)
+            else 0
+        )
+        revision_value = result.details.get(
+            "scene_revision", context.parameters.get("scene_revision")
+        )
+        if revision_value is None and context.observation is not None:
+            revision_value = context.observation.metadata.get("planning_scene_revision")
+        if not isinstance(revision_value, int) or isinstance(revision_value, bool):
+            revision_value = scene_epoch
+        source = result.details.get("source")
+        source = dict(source) if isinstance(source, dict) else {}
+        if context.observation is not None:
+            source["start_joint_state"] = context.observation.robot.to_dict()
+            frame_id = str(source.get("camera_frame_id") or result.details.get("camera_frame_id") or "")
+            camera = next(
+                (
+                    camera
+                    for camera in context.observation.cameras
+                    if not frame_id or camera.frame_id == frame_id
+                ),
+                None,
+            )
+            if camera is not None:
+                source["camera_frame_id"] = camera.frame_id
+                source["camera_extrinsics"] = dict(camera.extrinsics)
+        return qualifier.qualify_result(
+            result,
+            purpose=purpose,
+            scene_epoch=scene_epoch,
+            planning_scene_revision=revision_value,
+            source=source,
+        )
+
+    return qualified
+
+
+def _qualifying_wrist_alignment_handler(
+    handler: ToolHandler,
+    qualifier: MoveItCandidateQualifier,
+) -> ToolHandler:
+    """Re-qualify the final hover/contact chain after geometry refinement."""
+
+    def qualified(context: ToolExecutionContext) -> ToolResult:
+        result = handler(context)
+        if not result.success:
+            return result
+        outputs = result.details.get("outputs")
+        outputs = outputs if isinstance(outputs, dict) else result.details
+        aligned = outputs.get("aligned_hover_pose")
+        compiled = context.parameters.get("compiled_grasp")
+        contact = compiled.get("contact_pose") if isinstance(compiled, dict) else None
+        if not isinstance(aligned, dict) or not isinstance(contact, dict):
+            return ToolResult(
+                False,
+                "wrist alignment lacks a complete final pose chain",
+                {"reason": "final_pose_qualification_missing"},
+            )
+        scene_epoch = int(aligned.get("scene_epoch", 0))
+        revision = scene_epoch
+        source: JsonDict = {}
+        if context.observation is not None:
+            revision_value = context.observation.metadata.get("planning_scene_revision")
+            if isinstance(revision_value, int) and not isinstance(revision_value, bool):
+                revision = revision_value
+            source["start_joint_state"] = context.observation.robot.to_dict()
+        candidate = {
+            "id": str(aligned.get("alignment_id") or "final-wrist-alignment"),
+            "qualification_stages": [
+                _qualification_pose("aligned_hover", aligned),
+                _qualification_pose("contact", contact),
+            ],
+        }
+        proof_result = qualifier.qualify_result(
+            ToolResult(True, "final pose qualification", {
+                "candidate_count": 1,
+                "grasp_candidates": [candidate],
+            }),
+            purpose="grasp",
+            scene_epoch=scene_epoch,
+            planning_scene_revision=revision,
+            source=source,
+            cache_result=False,
+        )
+        if proof_result.details.get("candidate_count") != 1:
+            return ToolResult(
+                False,
+                "wrist-aligned final pose failed MoveIt qualification",
+                {
+                    "reason": "final_pose_qualification_failed",
+                    "qualification_evidence": proof_result.details.get(
+                        "qualification_evidence"
+                    ),
+                },
+            )
+        outputs["qualification_evidence"] = proof_result.details[
+            "qualification_evidence"
+        ]
+        outputs["final_pose_qualified"] = True
+        return result
+
+    return qualified
 
 
 def _bind_skill_change_tools(

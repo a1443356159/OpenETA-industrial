@@ -17,6 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from tools.candidate_config import (
+    DEFAULT_CANDIDATE_COUNT,
+    argparse_candidate_count,
+    candidate_count,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATE_DIR = Path("outputs/mcp_services")
@@ -120,6 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graspgenx-root")
     parser.add_argument("--graspgenx-checkpoint-root")
     parser.add_argument("--graspgenx-gripper-descriptions-root")
+    parser.add_argument("--graspgenx-max-candidates", type=argparse_candidate_count)
+    parser.add_argument("--anygrasp-max-candidates", type=argparse_candidate_count)
+    parser.add_argument("--anyplace-candidate-count", type=argparse_candidate_count)
     parser.add_argument("--unidepth-v2-model-id")
     parser.add_argument("--unidepth-v2-device")
     parser.add_argument("--unidepth-v2-resolution-level", type=int)
@@ -234,6 +243,13 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             args.host,
             "--port",
             str(args.anygrasp_port),
+            "--max-candidates",
+            str(
+                _startup_candidate_count(
+                    args.anygrasp_max_candidates,
+                    "OPENETA_ANYGRASP_MAX_CANDIDATES",
+                )
+            ),
         ]
         if sdk_root:
             command.extend(["--sdk-root", sdk_root])
@@ -268,6 +284,13 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             args.host,
             "--port",
             str(args.anyplace_port),
+            "--candidate-count",
+            str(
+                _startup_candidate_count(
+                    args.anyplace_candidate_count,
+                    "OPENETA_ANYPLACE_CANDIDATE_COUNT",
+                )
+            ),
         ]
         if anyplace_root:
             command.extend(["--anyplace-root", anyplace_root])
@@ -352,6 +375,13 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             args.host,
             "--port",
             str(args.graspgenx_port),
+            "--max-candidates",
+            str(
+                _startup_candidate_count(
+                    args.graspgenx_max_candidates,
+                    "OPENETA_GRASPGENX_MAX_CANDIDATES",
+                )
+            ),
         ]
         if backend_root:
             command.extend(["--graspgenx-root", backend_root])
@@ -463,6 +493,18 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
         command=command,
         env=env,
     )
+
+
+def _startup_candidate_count(explicit: int | None, env_name: str) -> int:
+    """Resolve immutable startup count with CLI > environment > default precedence."""
+
+    raw: object = explicit if explicit is not None else os.environ.get(
+        env_name, DEFAULT_CANDIDATE_COUNT
+    )
+    try:
+        return candidate_count(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{env_name}: {exc}") from exc
 
 
 def _validate_start_requirements(configs: Iterable[ServiceConfig]) -> None:

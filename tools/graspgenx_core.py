@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count
+
 
 SERVER_NAME = "openeta-graspgenx"
 TOOL_NAME = "predict_grasps"
@@ -527,6 +529,7 @@ class GraspGenXBackend:
         gripper_descriptions_root: str | Path,
         device: str = "cuda:0",
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
+        max_candidates: int = DEFAULT_CANDIDATE_COUNT,
     ) -> None:
         self.graspgenx_root = Path(graspgenx_root).expanduser().resolve()
         self.checkpoint_root = Path(checkpoint_root).expanduser().resolve()
@@ -535,6 +538,7 @@ class GraspGenXBackend:
         )
         self.device = validate_cuda_device_name(device)
         self.depth_truncation = float(depth_truncation)
+        self.max_candidates = candidate_count(max_candidates)
         self.generator_checkpoint, self.discriminator_checkpoint = (
             validate_checkpoint_layout(self.checkpoint_root)
         )
@@ -856,7 +860,7 @@ class GraspGenXBackend:
         score_array = np.asarray(scores, dtype=np.float64)
         ranked = sorted(range(len(score_array)), key=lambda idx: (-score_array[idx], idx))
         if len(scene_points) == 0:
-            return ranked[:MAX_RETURNED_CANDIDATES], {
+            return ranked[: self.max_candidates], {
                 "collision_filter_applied": False,
                 "collision_filter_reason": "no_scene_points",
                 "collision_scene_point_count": 0,
@@ -897,8 +901,8 @@ class GraspGenXBackend:
             selected.extend(
                 idx for idx, is_free in zip(batch_indices, free_mask) if bool(is_free)
             )
-            if len(selected) >= MAX_RETURNED_CANDIDATES:
-                selected = selected[:MAX_RETURNED_CANDIDATES]
+            if len(selected) >= self.max_candidates:
+                selected = selected[: self.max_candidates]
                 break
         if not selected:
             raise GraspGenXInputError(
@@ -929,7 +933,7 @@ class GraspGenXBackend:
             "gripper_name": gripper_name,
             "depth_truncation": self.depth_truncation,
             "min_object_points": MIN_OBJECT_POINTS,
-            "max_returned_candidates": MAX_RETURNED_CANDIDATES,
+            "max_returned_candidates": self.max_candidates,
             "model_loaded": self.model_loaded,
             "intrinsics": {},
             "inference_options": {

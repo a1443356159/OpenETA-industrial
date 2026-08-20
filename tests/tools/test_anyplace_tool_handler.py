@@ -91,7 +91,7 @@ def _place_pose(index: int) -> dict[str, Any]:
 
 def _success_response(*, source_grasp_id: str = "grasp_003") -> dict[str, Any]:
     candidates = []
-    for index in range(5):
+    for index in range(10):
         candidates.append(
             {
                 "id": f"placement_{index:03d}",
@@ -120,9 +120,10 @@ def _success_response(*, source_grasp_id: str = "grasp_003") -> dict[str, Any]:
             "model": "anyplace_multitask",
             "frame": "camera",
             "camera_frame": "opencv",
-            "candidate_count": 5,
+            "candidate_count": 10,
             "placement_candidates": candidates,
             "metadata": {
+                "configured_candidate_count": 10,
                 "raw_object_point_count": 2048,
                 "point_cloud": [[0.0, 0.0, 0.0]],
                 "base64": "must-not-leak",
@@ -209,9 +210,9 @@ def test_anyplace_handler_encodes_inputs_and_materializes_success(tmp_path: Path
     result = handler(_context(parameters, session_id="place-session"))
 
     assert result.success is True
-    assert result.details["candidate_count"] == 5
+    assert result.details["candidate_count"] == 10
     assert [item["id"] for item in result.details["placement_candidates"]] == [
-        f"placement_{index:03d}" for index in range(5)
+        f"placement_{index:03d}" for index in range(10)
     ]
     assert all(
         item["place_grasp_pose"]["source_grasp_id"] == "grasp_003"

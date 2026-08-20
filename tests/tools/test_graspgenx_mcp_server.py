@@ -209,6 +209,7 @@ def test_health_reports_transport_readiness_without_loading_model(
         "tools": ["list_grippers", "predict_grasps"],
         "model_loaded": False,
         "gripper_count": 2,
+        "max_candidates": 10,
     }
 
 

@@ -572,6 +572,54 @@ def _quat_angular_distance(a: list[float], b: list[float]) -> float:
 
 @_blocking_tool
 @_serialized_env_control
+def qualify_motion_candidates(
+    handle: str,
+    schema_version: str,
+    purpose: str,
+    scene_epoch: int,
+    planning_scene_revision: int,
+    planning: dict,
+    source: dict,
+    candidates: list[dict],
+    qualification_binding_sha256: str,
+    *,
+    session_id: str = "",
+) -> dict:
+    """Private host RPC for batch MoveIt qualification; never an AgentTool."""
+
+    sid = session_id or _current_session.get() or ""
+    _touch_session(sid)
+    meta = _session_envs.get(sid, {}).get(handle)
+    if not meta:
+        return {"ok": False, "error": f"Unknown: {handle}"}
+    control_spec = meta.get("control_spec")
+    if not isinstance(control_spec, dict) or not control_spec.get("motion_control"):
+        return {"ok": False, "error": "MoveIt qualification is unavailable"}
+    result = _proxy_step(
+        meta,
+        {
+            "action_type": "qualify_motion_candidates",
+            "schema_version": schema_version,
+            "purpose": purpose,
+            "scene_epoch": scene_epoch,
+            "planning_scene_revision": planning_scene_revision,
+            "planning": planning,
+            "source": source,
+            "candidates": candidates,
+            "qualification_binding_sha256": qualification_binding_sha256,
+        },
+        num_steps=1,
+        render=False,
+    )
+    return {
+        key: value
+        for key, value in result.items()
+        if key not in {"observation", "reward", "terminated", "truncated", "info"}
+    }
+
+
+@_blocking_tool
+@_serialized_env_control
 def move_to(handle: str, x: float, y: float, z: float, *,
             roll: float | None = None, pitch: float | None = None, yaw: float | None = None,
             num_steps: int = 100, tolerance: float = 0.002, ori_tolerance: float = 0.05,

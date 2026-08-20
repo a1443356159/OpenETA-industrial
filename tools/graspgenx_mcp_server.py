@@ -27,6 +27,7 @@ from tools.graspgenx_core import (
     GraspGenXBackend,
     failure_result,
 )
+from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, argparse_candidate_count
 
 
 _BACKEND: GraspGenXBackend | None = None
@@ -89,7 +90,7 @@ def predict_grasps(
     are passed to GraspGenX without wrapper downsampling or padding.
 
     The fixed GraspMoE planner combines diffusion and OBB candidates. Scores are
-    sorted descending without a 0.7 cutoff and at most 20 collision-free grasps
+    sorted descending without a 0.7 cutoff and the configured number of collision-free grasps
     are returned. Collision filtering only covers visible non-target geometry in
     the supplied depth image; it is not robot motion planning. Inference is
     stochastic, so repeated calls can differ.
@@ -199,6 +200,11 @@ def health_payload() -> dict[str, Any]:
         "tools": [LIST_TOOL_NAME, TOOL_NAME],
         "model_loaded": bool(backend is not None and backend.model_loaded),
         "gripper_count": 0 if backend is None else len(backend.grippers),
+        "max_candidates": (
+            0
+            if backend is None
+            else int(getattr(backend, "max_candidates", DEFAULT_CANDIDATE_COUNT))
+        ),
     }
 
 
@@ -221,6 +227,11 @@ def main() -> int:
     parser.add_argument("--checkpoint-root", required=True)
     parser.add_argument("--gripper-descriptions-root", required=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--max-candidates",
+        type=argparse_candidate_count,
+        default=DEFAULT_CANDIDATE_COUNT,
+    )
     args = parser.parse_args()
 
     source_root = Path(args.graspgenx_root).expanduser().resolve()
@@ -234,6 +245,7 @@ def main() -> int:
             checkpoint_root=args.checkpoint_root,
             gripper_descriptions_root=args.gripper_descriptions_root,
             device=args.device,
+            max_candidates=args.max_candidates,
         )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

@@ -1056,6 +1056,16 @@ class AgentMemory:
         source_tool = str(policy.get("source_tool") or "grasp_pose_estimate")
         source_backend = str(policy.get("source_backend") or source_tool)
         source_label = _grasp_backend_label(source_backend)
+        if status == "selection_required" and tool_name == "compile_grasp_seed":
+            candidate_id = _parameters_grasp_candidate_id(parameters)
+            allowed_ids = {
+                str(candidate.get("id") or "")
+                for candidate in policy.get("candidates", [])
+                if isinstance(candidate, dict)
+            }
+            if candidate_id not in allowed_ids:
+                return "compile_grasp_seed requires an id from the MoveIt PASS set."
+            return None
         active = policy.get("active_candidate")
         if status == "exhausted" or not isinstance(active, dict):
             return (
@@ -1962,6 +1972,37 @@ class AgentMemory:
                 if isinstance(candidate, dict) and str(candidate.get("id") or "")
             ]
             if not raw_candidates:
+                if isinstance(outputs.get("qualification_evidence"), dict):
+                    source_backend = str(outputs.get("selected_backend") or source_tool)
+                    policy = {
+                        "result_id": str(outputs.get("result_id") or ""),
+                        "source_tool": source_tool,
+                        "source_backend": source_backend,
+                        "status": "exhausted",
+                        "stop_reason": "no_moveit_qualified_candidates",
+                        "candidate_count": 0,
+                        "raw_candidate_count": int(
+                            outputs.get("generated_candidate_count") or 0
+                        ),
+                        "active_rank": None,
+                        "active_candidate": None,
+                        "remaining_candidate_ids": [],
+                        "candidates": [],
+                        "reestimate_required": {
+                            "status": "pending_recovery",
+                            "reason": "no_moveit_qualified_candidates",
+                            "backend": source_backend,
+                            "requires_fresh_observation": True,
+                            "backend_switch_allowed": False,
+                        },
+                        "qualification_evidence": dict(
+                            outputs["qualification_evidence"]
+                        ),
+                    }
+                    self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                        policy, source="moveit_qualification"
+                    )
+                    self.record("grasp_candidates_moveit_rejected", dict(policy))
                 continue
             capabilities = self._active_grasp_calibration_capabilities()
             max_gripper_width = float(capabilities["max_gripper_width_m"])
@@ -2039,6 +2080,7 @@ class AgentMemory:
             all_candidates_over_width = bool(raw_candidates) and len(width_rejections) == len(
                 raw_candidates
             )
+            selection_required = outputs.get("selection_required") is True
             if all_candidates_over_width:
                 _append_grasp_fallback_attempt(
                     fallback_attempts,
@@ -2060,13 +2102,24 @@ class AgentMemory:
                     if approach_diversified
                     else "score_descending"
                 ),
-                "status": "active" if candidates else "exhausted",
+                "status": (
+                    "selection_required"
+                    if candidates and selection_required
+                    else "active"
+                    if candidates
+                    else "exhausted"
+                ),
                 "candidate_count": len(candidates),
                 "raw_candidate_count": len(raw_candidates),
-                "active_rank": 0 if candidates else None,
-                "active_candidate": candidates[0] if candidates else None,
+                "active_rank": 0 if candidates and not selection_required else None,
+                "active_candidate": (
+                    candidates[0] if candidates and not selection_required else None
+                ),
                 "remaining_candidate_ids": [
-                    str(candidate.get("id")) for candidate in candidates[1:]
+                    str(candidate.get("id"))
+                    for candidate in (
+                        candidates if selection_required else candidates[1:]
+                    )
                 ],
                 "candidates": candidates,
                 "source_rgb": source_rgb,
@@ -3151,9 +3204,33 @@ class AgentMemory:
             return False
         policy = self.anygrasp_candidate_policy() or {}
         active = policy.get("active_candidate")
+        candidate_id = str(outputs.get("candidate_id") or "")
+        if policy.get("status") == "selection_required":
+            active = next(
+                (
+                    candidate
+                    for candidate in policy.get("candidates", [])
+                    if isinstance(candidate, dict)
+                    and str(candidate.get("id") or "") == candidate_id
+                ),
+                None,
+            )
+            if isinstance(active, dict):
+                policy.update(
+                    {
+                        "status": "active",
+                        "active_candidate": active,
+                        "active_rank": active.get("rank"),
+                        "selection_source": "main_agent_vlm",
+                        "remaining_candidate_ids": [],
+                    }
+                )
+                self.facts.pop(LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY, None)
+                self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                    policy, source="compile_grasp_seed"
+                )
         if not isinstance(active, dict):
             return False
-        candidate_id = str(outputs.get("candidate_id") or "")
         if candidate_id != str(active.get("id") or ""):
             return False
         if _optional_int(outputs.get("scene_epoch"), default=-1) != self.scene_epoch():
@@ -3244,6 +3321,37 @@ class AgentMemory:
         outputs = _tool_call_outputs(call)
         candidates = outputs.get("placement_candidates")
         if not isinstance(candidates, list) or not candidates:
+            if isinstance(outputs.get("qualification_evidence"), dict):
+                execution = self.grasp_execution() or {}
+                compiled_grasp = execution.get("compiled_grasp")
+                compiled_grasp = compiled_grasp if isinstance(compiled_grasp, dict) else {}
+                policy = {
+                    "schema_version": "openeta.placement_candidate_policy.v1",
+                    "status": "exhausted_return_required",
+                    "candidate_queue": [],
+                    "source_grasp_id": str(outputs.get("selected_grasp_id") or ""),
+                    "active_candidate_id": None,
+                    "rejected_candidates": list(
+                        outputs.get("qualification_evidence", {}).get("results", [])
+                    ),
+                    "failed_request_fingerprints": [],
+                    "scene_revision": outputs.get("scene_revision"),
+                    "planning_scene_revision": outputs.get("scene_revision"),
+                    "scene_epoch": self.scene_epoch(),
+                    "selection_source": None,
+                    "stop_reason": "no_moveit_qualified_candidates",
+                    "recovery": {
+                        "stage": "return_source_hover",
+                        "source_hover_pose": compiled_grasp.get("hover_pose"),
+                        "source_capture_pose": compiled_grasp.get("contact_pose"),
+                        "then": "open_detach_reobserve_regrasp_and_rerun_anyplace",
+                    },
+                }
+                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                    policy, source="moveit_qualification"
+                )
+                self.record("placement_candidates_moveit_rejected", dict(policy))
+                return True
             return False
         source_grasp_id = str(outputs.get("selected_grasp_id") or "")
         queue = [

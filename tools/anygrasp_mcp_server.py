@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 from mcp.server.fastmcp import FastMCP
 
 from tools.anygrasp_core import AnyGraspBackend
+from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, argparse_candidate_count
 
 
 mcp = FastMCP("anygrasp", log_level="WARNING")
@@ -140,7 +141,11 @@ def main() -> int:
     parser.add_argument("--max-gripper-width", type=float, default=0.1)
     parser.add_argument("--gripper-height", type=float, default=0.03)
     parser.add_argument("--depth-truncation", type=float, default=1.0)
-    parser.add_argument("--max-candidates", type=int, default=20)
+    parser.add_argument(
+        "--max-candidates",
+        type=argparse_candidate_count,
+        default=DEFAULT_CANDIDATE_COUNT,
+    )
     args = parser.parse_args()
 
     _BACKEND = AnyGraspBackend(
@@ -163,7 +168,13 @@ def main() -> int:
     from starlette.routing import Route
 
     async def health(_request):
-        return JSONResponse({"ok": True, "server": "anygrasp"})
+        return JSONResponse(
+            {
+                "ok": True,
+                "server": "anygrasp",
+                "max_candidates": _BACKEND.max_candidates,
+            }
+        )
 
     health_app = Starlette(routes=[Route("/", health, methods=["GET"])])
     sse_transport = SseServerTransport("/sse/messages/")

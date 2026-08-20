@@ -83,7 +83,7 @@ def test_anyplace_mcp_docstring_describes_input_semantics() -> None:
     assert "not local file paths" in flat_docstring
     assert "frame=camera" in docstring
     assert "camera_frame=opencv" in docstring
-    assert "exactly five" in flat_docstring
+    assert "configured number" in flat_docstring
     assert "transform_matrix" in docstring
     assert "truncated at 1 metre by default" in flat_docstring
     assert "does not return point clouds" in flat_docstring

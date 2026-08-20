@@ -71,6 +71,7 @@ def build_compile_grasp_seed_handler(
     strategy_root: (
         str | Path | Callable[[ToolExecutionContext], str | Path]
     ) = DEFAULT_GRASP_STRATEGY_ROOT,
+    qualification_cache: Any | None = None,
 ) -> ToolHandler:
     """Build a compiler with fixed embodiment calibration and task strategies."""
 
@@ -83,7 +84,55 @@ def build_compile_grasp_seed_handler(
             )
             profile, profile_sha256 = _load_profile(resolved_profile)
             parameters = dict(context.parameters)
-            if str(parameters.get("purpose") or "grasp").strip().lower() == "placement":
+            purpose = str(parameters.get("purpose") or "grasp").strip().lower()
+            if qualification_cache is not None and purpose in {"grasp", "placement"}:
+                candidate_id = str(
+                    parameters.get(
+                        "grasp_candidate_id"
+                        if purpose == "grasp"
+                        else "placement_candidate_id"
+                    )
+                    or ""
+                ).strip()
+                requested_epoch = parameters.get("scene_epoch")
+                scene_epoch = (
+                    _nonnegative_int(requested_epoch, "scene_epoch")
+                    if requested_epoch is not None
+                    else None
+                )
+                revision = parameters.get("planning_scene_revision")
+                if isinstance(revision, bool) or (
+                    revision is not None and not isinstance(revision, int)
+                ):
+                    raise GraspGeometryError("planning_scene_revision must be an integer")
+                entry = qualification_cache.resolve(
+                    purpose=purpose,
+                    candidate_id=candidate_id,
+                    scene_epoch=scene_epoch,
+                    planning_scene_revision=revision,
+                )
+                if entry is None:
+                    raise GraspGeometryError(
+                        f"{purpose} candidate id has no current MoveIt PASS proof"
+                    )
+                scene_epoch = int(entry["scene_epoch"])
+                proof_parameters = entry["proof"].get("compile_parameters")
+                if not isinstance(proof_parameters, Mapping):
+                    raise GraspGeometryError("qualified compile parameters are missing")
+                parameters = dict(proof_parameters)
+                parameters["purpose"] = purpose
+                if purpose == "grasp":
+                    parameters["grasp_candidate_id"] = candidate_id
+                    parameters["camera_pose"] = dict(entry["candidate"])
+                else:
+                    parameters["placement_candidate_id"] = candidate_id
+                    parameters["placement_candidate"] = dict(entry["candidate"])
+                parameters["scene_epoch"] = scene_epoch
+                if parameters.get("qualification_profile_sha256") != profile_sha256:
+                    raise GraspGeometryError(
+                        "MoveIt qualification calibration proof is stale"
+                    )
+            if purpose == "placement" and qualification_cache is None:
                 parameters = bind_placement_compile_parameters(
                     parameters,
                     supervision_context=context.metadata.get("supervision_context"),
@@ -94,6 +143,24 @@ def build_compile_grasp_seed_handler(
                 profile_sha256=profile_sha256,
                 strategies=load_grasp_strategies(Path(selected_strategy_root)),
             )
+            qualified_pose_hash = parameters.get("qualified_compiled_pose_sha256")
+            if qualified_pose_hash:
+                pose_chain = [dict(outputs["hover_pose"])]
+                if purpose == "placement":
+                    pose_chain.append(dict(outputs["release_pose"]))
+                else:
+                    if isinstance(outputs.get("precontact_pose"), Mapping):
+                        pose_chain.append(dict(outputs["precontact_pose"]))
+                    pose_chain.append(dict(outputs["contact_pose"]))
+                actual_pose_hash = hashlib.sha256(
+                    json.dumps(
+                        pose_chain, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                ).hexdigest()
+                if actual_pose_hash != qualified_pose_hash:
+                    raise GraspGeometryError(
+                        "compiled grasp pose differs from MoveIt qualification proof"
+                    )
         except GraspCandidateRejected as exc:
             camera_pose = context.parameters.get("camera_pose")
             camera_pose = camera_pose if isinstance(camera_pose, Mapping) else {}

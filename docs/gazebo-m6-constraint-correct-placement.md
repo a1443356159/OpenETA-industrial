@@ -29,7 +29,7 @@ AnyPlace inference, placement candidate
 selection, placement compilation, or transport planning occurs yet. After
 close, Gazebo attach acknowledgement, and the unchanged M3 lift gate pass,
 AnyPlace runs against that frozen packet and retained source grasp. Every one of
-its five candidates retains that source grasp and carries a
+its ten generated candidates retain that source grasp, receive MoveIt qualification, and carry a
 projection/region-clearance summary plus a candidate image attachment.
 
 Only then does the main VLM call `compile_grasp_seed` with:

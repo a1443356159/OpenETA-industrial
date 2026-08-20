@@ -2872,6 +2872,16 @@ def _validate_anygrasp_candidate_policy(
         ]
     if status == "accepted":
         return []
+    if status == "selection_required" and decision.action == "compile_grasp_seed":
+        candidate_id = _planner_grasp_candidate_id(decision.parameters)
+        pass_ids = {
+            str(candidate.get("id") or "")
+            for candidate in policy.get("candidates", [])
+            if isinstance(candidate, dict)
+        }
+        if candidate_id in pass_ids:
+            return []
+        return ["Select one grasp_candidate_id from the host-qualified MoveIt PASS set."]
     target_tool = (
         _safety_decision_tool_name(decision) if _is_safety_decision(decision) else decision.action
     )

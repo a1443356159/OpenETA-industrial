@@ -76,8 +76,8 @@ def test_anyplace_mcp_stdio_predicts_aligned_rgbd_sample() -> None:
     details = payload["details"]
     assert details["frame"] == "camera"
     assert details["camera_frame"] == "opencv"
-    assert details["candidate_count"] == 5
-    assert len(details["placement_candidates"]) == 5
+    assert details["candidate_count"] == 10
+    assert len(details["placement_candidates"]) == 10
     for index, candidate in enumerate(details["placement_candidates"]):
         assert candidate["id"] == f"placement_{index:03d}"
         assert candidate["source_grasp_id"] == request["selected_grasp"]["id"]

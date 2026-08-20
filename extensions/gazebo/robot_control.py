@@ -618,6 +618,7 @@ class GazeboController:
         close_source: Callable[[], None] | None = None,
         scene_revision_provider: Callable[[], int] | None = None,
         motion_scene_ready: Callable[[], bool] | None = None,
+        candidate_qualifier: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         config: GazeboControlConfig | None = None,
     ):
         self.config = config or GazeboControlConfig()
@@ -627,6 +628,7 @@ class GazeboController:
         self.cancel_pending, self.close_source = cancel_pending, close_source
         self.scene_revision_provider = scene_revision_provider or (lambda: 0)
         self.motion_scene_ready = motion_scene_ready or (lambda: True)
+        self.candidate_qualifier = candidate_qualifier
         self._closed = False
 
     def close(self) -> None:
@@ -641,6 +643,11 @@ class GazeboController:
     def execute(self, action: Mapping[str, Any]) -> GazeboControlResult:
         kind = action.get("action_type")
         try:
+            if kind == "qualify_motion_candidates":
+                if self.candidate_qualifier is None:
+                    return GazeboControlResult(False, "MOVE_GROUP_UNAVAILABLE")
+                result = dict(self.candidate_qualifier(action))
+                return GazeboControlResult(True, payload=result)
             if kind == "move_to":
                 if self.move_action is None:
                     return GazeboControlResult(False, "MOVE_GROUP_UNAVAILABLE")

@@ -48,8 +48,8 @@ AnyPlace；不得调用 python_exec 读取或处理感知 artifact。SAM3 点提
 拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
 GraspGenX 候选并 compile_grasp_seed，执行真实接近、close，
 仅在双垫 native contact 与 attached ACK 后 lift；lift 必须 >=80 mm 且抓持相对漂移 <=10 mm。
-之后才用同一冻结 RGB-D、区域 mask 和已抓取的完整 source grasp 运行 AnyPlace；五个候选
-必须全部绑定该 source grasp 并保留完整旋转与候选图。主 VLM 只能通过
+之后才用同一冻结 RGB-D、区域 mask 和已抓取的完整 source grasp 运行 AnyPlace；十个原始候选
+必须全部绑定该 source grasp、送入宿主 MoveIt 资格筛选并保留完整旋转与候选图。主 VLM 只能看到 PASS 集合并通过
 compile_grasp_seed(purpose=placement, placement_candidate_id=...) 选择一个候选，再按编译出的
 hover/release 完整位姿直接调用 MoveIt。规划失败仅当 execution_started=false 时拒绝当前候选，
 不得重复失败 fingerprint；若 execution_started=true 或结果 unknown，立即停止并请求人工。
@@ -65,8 +65,8 @@ SCENARIO_INSTRUCTIONS = {
         "execution_started=false。保留该回执，拒绝该候选，由主 VLM 选择另一个候选后完成放置。"
     ),
     "reject-all-recover": (
-        "验收配置会让首次抓取周期的五个 placement candidate 各自真实返回唯一的无轨迹失败。"
-        "五个全部耗尽后，真实返回 source hover/capture、open/detach、重新 observe/抓取，"
+        "验收配置会让首次抓取周期的十个 placement candidate 在资格阶段各自真实失败。"
+        "十个全部耗尽且无运动后，真实返回 source hover/capture、open/detach、重新 observe/抓取，"
         "重新运行 AnyPlace；故障条件随 planning-scene revision 链解除后完成放置。"
     ),
 }
@@ -91,6 +91,15 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                 isinstance(payload, Mapping)
                 and payload.get("ok") is True
                 and payload.get("server") == expected[name]
+                and (
+                    name == "openeta-sam3"
+                    or payload.get(
+                        "candidate_count"
+                        if name == "openeta-anyplace"
+                        else "max_candidates"
+                    )
+                    == 10
+                )
             )
             rows[name] = {
                 "status": "passed" if ok else "failed",
@@ -98,6 +107,11 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                 "server": payload.get("server") if isinstance(payload, Mapping) else None,
                 "model_loaded": payload.get("model_loaded") if isinstance(payload, Mapping) else None,
                 "tools": payload.get("tools") if isinstance(payload, Mapping) else None,
+                "candidate_count": (
+                    payload.get("candidate_count", payload.get("max_candidates"))
+                    if isinstance(payload, Mapping)
+                    else None
+                ),
             }
         except Exception as exc:  # noqa: BLE001 - bounded preflight evidence.
             rows[name] = {
@@ -220,12 +234,16 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             errors.append("frozen perception, grasp/lift, AnyPlace, and placement compilation order is invalid")
         if any(base._contains(event, "perception_source", "gazebo_oracle") for event in events):
             errors.append("Oracle perception is forbidden")
+        if any(base._contains(event, "fake_grasp_candidate") for event in events):
+            errors.append("fake candidate evidence is forbidden")
         if any(
-            base._contains(event, "fake_grasp_candidate")
-            or base._contains(event, "plan_only", True)
+            base._contains(event, "plan_only", True)
+            and not base._contains(
+                event, "schema_version", "openeta.moveit_candidate_qualification.v1"
+            )
             for event in events
         ):
-            errors.append("fake candidate or motion preview evidence is forbidden")
+            errors.append("agent-visible motion preview evidence is forbidden")
         create = next((call for call in calls if _name(call) == "create_simulator_env"), {})
         if not base._contains(create, "env_id", ENV_ID):
             errors.append("pick-place Gazebo environment identity missing")
@@ -237,21 +255,29 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             base._contains(call, "placement_candidate_id") for call in placement_compiles
         ):
             errors.append("main VLM placement candidate selection/compilation evidence missing")
-        anyplace = next((call for call in calls if _name(call) == "anyplace"), {})
+        anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
+        anyplace = anyplace_calls[-1] if anyplace_calls else {}
+        first_anyplace = anyplace_calls[0] if anyplace_calls else {}
         candidate_ids = {
             str(value)
             for value in base._values(anyplace, "id")
             if str(value).startswith("placement_")
         }
-        if len(candidate_ids) != 5:
-            errors.append("AnyPlace did not retain exactly five placement candidates")
+        if not base._contains(anyplace, "generated_candidate_count", 10):
+            errors.append("AnyPlace did not generate exactly ten placement candidates")
+        if not base._contains(anyplace, "qualified_candidate_count", 10):
+            errors.append("AnyPlace did not qualify all ten placement candidates")
+        if not candidate_ids:
+            errors.append("AnyPlace exposed no MoveIt PASS placement candidate")
         source_ids = {
             str(value) for value in base._values(anyplace, "source_grasp_id") if str(value)
         }
         if len(source_ids) != 1:
             errors.append("AnyPlace candidates are not bound to one source grasp")
-        if not base._contains(anyplace, "candidate_count", 5):
-            errors.append("AnyPlace candidate_count is not five")
+        if not base._contains(
+            anyplace, "schema_version", "openeta.moveit_candidate_qualification.v1"
+        ):
+            errors.append("AnyPlace qualification evidence is missing")
         if not base._contains(anyplace, "type", "placement_candidate_image"):
             errors.append("AnyPlace candidate image attachment is missing")
         rotations = [
@@ -261,8 +287,8 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             and len(value) == 3
             and all(isinstance(row, list) and len(row) == 3 for row in value)
         ]
-        if len(rotations) < 5:
-            errors.append("AnyPlace candidates do not retain five full rotations")
+        if len(rotations) < len(candidate_ids):
+            errors.append("AnyPlace PASS candidates do not retain full rotations")
         grasp_call = next((call for call in calls if _name(call) == "graspgenx"), {})
         grasp_parameters = _parameters(grasp_call)
         anyplace_parameters = _parameters(anyplace)
@@ -324,34 +350,17 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         if scenario == "normal" and placement_failures:
             errors.append("normal scenario unexpectedly injected a placement rejection")
         if scenario == "reject-first":
-            if len(placement_failures) != 1:
-                errors.append("reject-first did not retain exactly one real MoveIt rejection")
-            rejected_ids = {
-                str(value)
-                for call in placement_failures
-                for value in base._values(call, "placement_candidate_id")
-                if value
-            }
-            successful_ids = {
-                str(value)
-                for call in calls
-                if _name(call) == "move_to"
-                and base._contains(call, "purpose", "placement")
-                and base._contains(call, "motion_outcome", "completed")
-                for value in base._values(call, "placement_candidate_id")
-                if value
-            }
-            if not successful_ids - rejected_ids:
-                errors.append("reject-first did not complete a distinct second candidate")
+            verdicts = [str(value) for value in base._values(first_anyplace, "verdict")]
+            if verdicts.count("FAIL") != 1:
+                errors.append("reject-first did not retain exactly one qualification rejection")
+            if placement_failures:
+                errors.append("reject-first reached execution planning with a rejected candidate")
         if scenario == "reject-all-recover":
-            rejected_ids = {
-                str(value)
-                for call in placement_failures
-                for value in base._values(call, "placement_candidate_id")
-                if value
-            }
-            if len(placement_failures) < 5 or len(rejected_ids) < 5:
-                errors.append("reject-all-recover lacks five unique real MoveIt rejections")
+            verdicts = [str(value) for value in base._values(first_anyplace, "verdict")]
+            if verdicts.count("FAIL") < 10:
+                errors.append("reject-all-recover lacks ten real qualification rejections")
+            if placement_failures:
+                errors.append("reject-all-recover executed a qualification-rejected candidate")
             if names.count("anyplace") < 2 or names.count("graspgenx") < 2:
                 errors.append("reject-all-recover did not regrasp and rerun AnyPlace")
         if not fingerprints:

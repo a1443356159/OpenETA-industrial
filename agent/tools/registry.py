@@ -1244,7 +1244,7 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             name="anyplace",
             category="manipulation",
             description=(
-                "Predict five camera-frame object placement transforms and the "
+                "Predict the configured set of camera-frame object placement transforms and the "
                 "corresponding placed grasp poses from one RGBD observation."
             ),
             parameters={
@@ -1405,6 +1405,10 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             ),
             parameters={
                 "purpose": "grasp (default) or placement",
+                "grasp_candidate_id": (
+                    "for purpose=grasp, the only planner-selected field; the host "
+                    "binds the qualified candidate geometry"
+                ),
                 "placement_candidate_id": (
                     "for purpose=placement, the only planner-selected field; the host "
                     "binds pose, source grasp, calibration, camera extrinsics, and scene epoch"
@@ -1432,7 +1436,10 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                     "articulated-handle modes fail"
                 ),
                 "fallback_reason": "host-owned structured fallback provenance",
-                "scene_epoch": "current host-owned non-negative scene epoch",
+                "scene_epoch": (
+                    "legacy non-qualified path only; qualified selection binds the "
+                    "current host-owned epoch"
+                ),
                 "pregrasp_distance_m": (
                     "optional requested approach standoff in [0.04, 0.16] m; "
                     "the host enforces at least 0.15 m along the world-frame grasp normal"

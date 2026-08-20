@@ -209,7 +209,7 @@ def test_normalise_selected_grasp_rejects_invalid_candidates(candidate: Any) -> 
 
 
 def test_normalise_placement_candidates_composes_transform_with_selected_grasp() -> None:
-    poses = np.tile(np.eye(4, dtype=np.float64), (5, 1, 1))
+    poses = np.tile(np.eye(4, dtype=np.float64), (10, 1, 1))
     rotation = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
     poses[0, :3, :3] = rotation
     poses[0, :3, 3] = [1.0, 2.0, 3.0]
@@ -223,6 +223,11 @@ def test_normalise_placement_candidates_composes_transform_with_selected_grasp()
         "placement_002",
         "placement_003",
         "placement_004",
+        "placement_005",
+        "placement_006",
+        "placement_007",
+        "placement_008",
+        "placement_009",
     ]
     first = candidates[0]
     assert first["source_grasp_id"] == "grasp_003"
@@ -246,11 +251,11 @@ def test_normalise_placement_candidates_composes_transform_with_selected_grasp()
     [
         [],
         np.eye(4),
-        np.tile(np.eye(4), (4, 1, 1)),
-        np.ones((5, 3, 4)),
+        np.tile(np.eye(4), (9, 1, 1)),
+        np.ones((10, 3, 4)),
     ],
 )
-def test_normalise_placement_candidates_requires_exactly_five_transforms(
+def test_normalise_placement_candidates_requires_configured_transforms(
     raw_candidates: Any,
 ) -> None:
     expected = "no_placement_candidates" if isinstance(raw_candidates, list) else "inconsistent_placement_outputs"
@@ -266,7 +271,7 @@ def test_normalise_placement_candidates_requires_exactly_five_transforms(
 def test_normalise_placement_candidates_fails_atomically_for_invalid_transform(
     failure: str,
 ) -> None:
-    poses = np.tile(np.eye(4, dtype=np.float64), (5, 1, 1))
+    poses = np.tile(np.eye(4, dtype=np.float64), (10, 1, 1))
     if failure == "non_finite":
         poses[3, 0, 0] = np.inf
     elif failure == "bad_bottom_row":
@@ -327,7 +332,7 @@ def test_backend_returns_composed_candidates_without_pointcloud_payloads(tmp_pat
     monkeypatch.setattr(
         backend,
         "_predict_with_loaded_backend",
-        lambda **_kwargs: np.tile(np.eye(4, dtype=np.float64), (5, 1, 1)),
+        lambda **_kwargs: np.tile(np.eye(4, dtype=np.float64), (10, 1, 1)),
     )
 
     result = backend.predict_placement(**_request())
@@ -336,7 +341,7 @@ def test_backend_returns_composed_candidates_without_pointcloud_payloads(tmp_pat
     details = result["details"]
     assert details["frame"] == "camera"
     assert details["camera_frame"] == "opencv"
-    assert details["candidate_count"] == 5
+    assert details["candidate_count"] == 10
     assert details["metadata"]["object_point_count"] == 2048
     assert details["metadata"]["placement_region_point_count"] == 2048
     assert details["metadata"]["model_sample_count"] == 1024

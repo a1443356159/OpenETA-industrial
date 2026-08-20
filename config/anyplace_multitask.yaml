@@ -26,7 +26,8 @@ experiment:
     with_coll: false
     n_refine_iters: 50
     init_orig_ori: false
-    init_k_val: 5
+    # Overridden by the OpenETA AnyPlace service's startup-only candidate count.
+    init_k_val: 10
     no_success_classifier: true
     variable_size_crop: true
     timestep_emb_decay_factor: 20

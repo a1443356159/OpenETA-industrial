@@ -19,6 +19,7 @@ from .robot_control import (
     GazeboController,
     START_STATE_RECOVERY_TRAJECTORY_S,
     assess_start_state_bounds,
+    make_move_group_goal,
     robot_state_from_sources,
     start_state_recovery_record,
 )
@@ -265,6 +266,7 @@ class RosGazeboController(GazeboController):
             close_source=runtime.close,
             scene_revision_provider=lambda: int(runtime.planning_scene.revision),
             motion_scene_ready=lambda: bool(runtime.planning_scene.ready),
+            candidate_qualifier=runtime.qualify_motion_candidates,
             config=config,
         )
 
@@ -404,7 +406,7 @@ class RosGazeboControllerFactory:
             from control_msgs.action import FollowJointTrajectory, ParallelGripperCommand
             from moveit_msgs.action import MoveGroup
             from controller_manager_msgs.srv import ListControllers
-            from moveit_msgs.srv import GetStateValidity
+            from moveit_msgs.srv import GetPositionIK, GetStateValidity
             from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene
             from moveit_msgs.msg import (
                 AllowedCollisionEntry,
@@ -448,6 +450,7 @@ class RosGazeboControllerFactory:
         state_validity_client = node.create_client(
             GetStateValidity, "/check_state_validity"
         )
+        compute_ik_client = node.create_client(GetPositionIK, "/compute_ik")
         apply_scene_client = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
         get_scene_client = node.create_client(GetPlanningScene, "/get_planning_scene")
         shared_executor = executor is not None
@@ -460,9 +463,11 @@ class RosGazeboControllerFactory:
             controller_list_client=controller_list_client,
             controller_parameter_client=controller_parameter_client,
             state_validity_client=state_validity_client,
+            compute_ik_client=compute_ik_client,
             controller_service_type=ListControllers,
             controller_parameter_service_type=GetParameters,
             state_validity_service_type=GetStateValidity,
+            compute_ik_service_type=GetPositionIK,
             follow_trajectory_action_type=FollowJointTrajectory,
             duration_type=Duration,
             trajectory_point_type=JointTrajectoryPoint,
@@ -540,6 +545,108 @@ class _RosRuntime:
             "joint_state_timestamp_s": state.metadata.get("joint_state_timestamp_s"),
         }
 
+    def qualification_joint_state(self) -> Mapping[str, Any]:
+        state = self.state_source.wait_fresh(15.0)
+        return {
+            "names": list(ARM_JOINTS),
+            "positions": [
+                float(value) for value in state.joint_positions[: len(ARM_JOINTS)]
+            ],
+        }
+
+    def qualification_compute_ik(
+        self,
+        target: Mapping[str, Any],
+        start: Mapping[str, Any],
+        avoid_collisions: bool,
+    ) -> Mapping[str, Any]:
+        from geometry_msgs.msg import PoseStamped
+
+        goal = make_move_group_goal(dict(target), config=self.config, tolerances=target)
+        xyz = goal["target_pose"].get("xyz")
+        quat = goal["target_pose"].get("quat_xyzw")
+        if not isinstance(xyz, list) or len(xyz) != 3 or not isinstance(quat, list) or len(quat) != 4:
+            return {"ok": False}
+        request = self.compute_ik_service_type.Request()
+        ik = request.ik_request
+        ik.group_name = self.config.move_group
+        ik.ik_link_name = goal["link_name"]
+        ik.avoid_collisions = bool(avoid_collisions)
+        ik.attempts = 3
+        ik.timeout.sec = 30
+        ik.robot_state.is_diff = False
+        ik.robot_state.joint_state.name = list(start.get("names") or ARM_JOINTS)
+        ik.robot_state.joint_state.position = [float(v) for v in start.get("positions") or []]
+        pose = PoseStamped()
+        pose.header.frame_id = goal["base_frame"]
+        pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = [float(v) for v in xyz]
+        pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = [float(v) for v in quat]
+        ik.pose_stamped = pose
+        response = self._await(self.compute_ik_client.call_async(request), 30.0)
+        solution = response.solution.joint_state
+        names = list(solution.name)
+        positions = list(solution.position)
+        by_name = dict(zip(names, positions))
+        ordered = [float(by_name[name]) for name in ARM_JOINTS if name in by_name]
+        ok = int(response.error_code.val) == 1 and len(ordered) == len(ARM_JOINTS)
+        return {
+            "ok": ok,
+            "moveit_error_code": int(response.error_code.val),
+            **(
+                {"joint_state": {"names": list(ARM_JOINTS), "positions": ordered}}
+                if ok
+                else {}
+            ),
+        }
+
+    def qualification_state_validity(
+        self, joint_state: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        request = self.state_validity_service_type.Request()
+        _populate_state_validity_request(
+            request,
+            [float(value) for value in joint_state.get("positions") or []],
+            group_name=self.config.move_group,
+        )
+        response = self._await(self.state_validity_client.call_async(request), 30.0)
+        pairs = sorted(
+            {
+                tuple(sorted((str(c.contact_body_1), str(c.contact_body_2))))
+                for c in getattr(response, "contacts", ())
+            }
+        )
+        return {"valid": bool(response.valid), "collision_pairs": [list(p) for p in pairs]}
+
+    def qualification_plan_only(
+        self,
+        target: Mapping[str, Any],
+        start: Mapping[str, Any],
+        planning_time_s: float,
+        planning_attempts: int,
+    ) -> Mapping[str, Any]:
+        goal = make_move_group_goal(dict(target), config=self.config, tolerances=target)
+        goal.update(
+            {
+                "plan_only": True,
+                "start_joint_state": dict(start),
+                "allowed_planning_time_s": planning_time_s,
+                "num_planning_attempts": planning_attempts,
+            }
+        )
+        return self.move(goal, planning_time_s + 5.0)
+
+    def qualify_motion_candidates(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        from agent.runtime.moveit_qualification import MoveItQualificationEngine
+
+        engine = MoveItQualificationEngine(
+            current_joint_state=self.qualification_joint_state,
+            scene_revision=lambda: int(self.planning_scene.revision),
+            compute_ik=self.qualification_compute_ik,
+            check_state_validity=self.qualification_state_validity,
+            plan_only=self.qualification_plan_only,
+        )
+        return engine.qualify(request)
+
     def start(self) -> None:
         if self.shared_executor:
             return
@@ -568,11 +675,12 @@ class _RosRuntime:
                 )
             )
             if actions_ready:
-                services = (
+                services = tuple(client for client in (
                     self.controller_list_client,
                     self.controller_parameter_client,
                     self.state_validity_client,
-                )
+                    getattr(self, "compute_ik_client", None),
+                ) if client is not None)
                 if not all(
                     client.wait_for_service(timeout_sec=min(0.2, remaining))
                     for client in services
@@ -934,12 +1042,12 @@ class _RosRuntime:
         # outright on an unlucky sample.  MoveGroup evaluates several attempts
         # and executes the shortest solution, which keeps both Cartesian hops
         # and physical approaches tidy without changing the goal contract.
-        request.request.num_planning_attempts = 3
+        request.request.num_planning_attempts = int(goal.get("num_planning_attempts", 3))
         # Keep the action client's deadline strictly outside MoveIt's own
         # planning deadline. Equal deadlines race cancellation against a
         # terminal result and can trigger an invalid goal-state transition in
-        # MoveIt Jazzy. Plan-only reachability probes are deliberately short.
-        planning_limit_s = 8.0 if goal.get("plan_only", False) else 30.0
+        # MoveIt Jazzy. Qualification uses the same planning budget as execution.
+        planning_limit_s = float(goal.get("allowed_planning_time_s", 30.0))
         request.request.allowed_planning_time = min(
             planning_limit_s, max(0.1, timeout_s - 2.0)
         )
@@ -958,7 +1066,17 @@ class _RosRuntime:
         request.request.max_acceleration_scaling_factor = float(
             goal.get("max_acceleration_scaling_factor", 0.3)
         )
-        request.request.start_state.is_diff = True
+        start_joint_state = goal.get("start_joint_state")
+        if isinstance(start_joint_state, Mapping):
+            request.request.start_state.is_diff = False
+            request.request.start_state.joint_state.name = list(
+                start_joint_state.get("names") or ARM_JOINTS
+            )
+            request.request.start_state.joint_state.position = [
+                float(value) for value in start_joint_state.get("positions") or []
+            ]
+        else:
+            request.request.start_state.is_diff = True
         fault_scenario = os.environ.get("OPENETA_ACCEPTANCE_PLACEMENT_FAULT", "")
         placement_id = str(goal.get("placement_candidate_id") or "")
         rejected_ids = getattr(self, "_acceptance_rejected_placement_ids", set())
@@ -1028,6 +1146,23 @@ class _RosRuntime:
             )
         )
         if code == MoveItErrorCodes.SUCCESS:
+            end_joint_state = None
+            trajectory_points = []
+            if planned_points:
+                trajectory_points = [
+                    {"positions": [float(value) for value in point.positions]}
+                    for point in planned_points
+                ]
+                end_joint_state = {
+                    "names": list(
+                        getattr(
+                            wrapped.result.planned_trajectory.joint_trajectory,
+                            "joint_names",
+                            ARM_JOINTS,
+                        )
+                    ),
+                    "positions": trajectory_points[-1]["positions"],
+                }
             return finish({
                 "ok": True,
                 "reached_goal": not request.planning_options.plan_only,
@@ -1035,6 +1170,14 @@ class _RosRuntime:
                 "motion_outcome": "planned" if request.planning_options.plan_only else "completed",
                 "planned_point_count": len(planned_points),
                 "execution_started": not request.planning_options.plan_only,
+                **(
+                    {
+                        "trajectory_points": trajectory_points,
+                        "end_joint_state": end_joint_state,
+                    }
+                    if request.planning_options.plan_only
+                    else {}
+                ),
             })
         planning_failures = {
             MoveItErrorCodes.PLANNING_FAILED,
