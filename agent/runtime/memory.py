@@ -1605,6 +1605,41 @@ class AgentMemory:
                     base,
                     source=segmenter_tool_name,
                 )
+                # A single post-attachment placement-region detection is already
+                # unambiguous (SAM3 explicitly reports selection_required=false).
+                # Keep the normal pending-selection record for traceability, but
+                # also retain this host-determined input so the AnyPlace join does
+                # not depend on the VLM copying a nested mask artifact verbatim.
+                # Object detections deliberately remain VLM-selected: their
+                # identity must be checked against the held object.
+                attachment = self.attachment_gate()
+                if (
+                    len(candidates) == 1
+                    and outputs.get("selection_required") is False
+                    and isinstance(attachment, dict)
+                    and attachment.get("status") == "resolved"
+                    and str(attachment.get("verdict") or "").upper() == "PASS"
+                    and _placement_region_prompt(target_prompt)
+                ):
+                    region = dict(candidates[0])
+                    region.update(
+                        {
+                            "result_id": result_id,
+                            "source_image": source_image,
+                            "source_frame_id": source_frame_id,
+                            "target_prompt": target_prompt,
+                            "segmentation_mode": outputs.get("segmentation_mode"),
+                            "selection_source": "host_single_detection",
+                            "selected_at_s": time.time(),
+                            "scene_epoch": self.scene_epoch(),
+                        }
+                    )
+                    if source_camera_role:
+                        region["source_camera_role"] = source_camera_role
+                    self.facts[PLACEMENT_REGION_DETECTION_KEY] = _memory_fact_entry(
+                        region,
+                        source="sam3_single_placement_region",
+                    )
                 self.record(
                     "sam3_detection_selection_required",
                     {

@@ -194,6 +194,40 @@ def _tool_action(
     )
 
 
+def test_single_post_attach_placement_region_is_retained_without_vlm_mask_copy() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cube and place it in green marker")
+    memory.save_fact(
+        "attachment_gate",
+        {"status": "resolved", "verdict": "PASS", "planning_scene_revision": 2},
+        source="test",
+    )
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": "tmp/placement-rgb.png", "prompt": "green placement_zone_marker"},
+            outputs={
+                "result_id": "placement-region",
+                "prompt": "green placement_zone_marker",
+                "source_image": "tmp/placement-rgb.png",
+                "frame_id": "top_camera",
+                "selection_required": False,
+                "detections": [
+                    {"id": "detection_000", "mask_ref": "tmp/placement-mask.png"}
+                ],
+            },
+        )
+    )
+
+    region = memory.placement_region_detection()
+    assert region is not None
+    assert region["mask_ref"] == "tmp/placement-mask.png"
+    assert region["source_image"] == "tmp/placement-rgb.png"
+    assert region["selection_source"] == "host_single_detection"
+    # The raw result is still retained for auditable visual selection semantics.
+    assert memory.pending_sam3_selection() is not None
+
+
 def _native_proof_receipt(*, revision: int = 2, target_id: str = "target_object") -> dict:
     evidence = {
         "source": "gazebo_pose_info_child_link",
