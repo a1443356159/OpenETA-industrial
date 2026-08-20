@@ -127,6 +127,24 @@ def _success_response() -> dict[str, Any]:
     }
 
 
+def test_graspgenx_handler_accepts_formal_se3_mmr_order(tmp_path: Path) -> None:
+    response = _success_response()
+    response["details"]["ranking"] = "source_aware_se3_mmr_with_minimum_se3_separation"
+    response["details"]["grasp_candidates"] = [
+        _candidate(0, score=0.7),
+        _candidate(1, score=0.9),
+    ]
+    handler = build_graspgenx_handler(
+        lambda _request: response,
+        _listing_response,
+    )
+
+    result = handler(_context(_parameters(tmp_path)))
+
+    assert result.success is True
+    assert result.details["ranking"] == "source_aware_se3_mmr_with_minimum_se3_separation"
+
+
 def _listing_response() -> dict[str, Any]:
     return {
         "success": True,

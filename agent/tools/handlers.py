@@ -4219,7 +4219,11 @@ def _normalise_graspgenx_response(
         or details.get("camera_frame") != "opencv"
         or details.get("grasp_frame") != "graspnet"
         or details.get("gripper_name") != gripper_name
-        or details.get("ranking") != "score_descending"
+        or details.get("ranking")
+        not in {
+            "score_descending",
+            "source_aware_se3_mmr_with_minimum_se3_separation",
+        }
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
 
@@ -4242,6 +4246,7 @@ def _normalise_graspgenx_response(
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
 
+    ranking = str(details["ranking"])
     candidates: list[JsonDict] = []
     previous_score = math.inf
     candidate_ids: set[str] = set()
@@ -4254,7 +4259,10 @@ def _normalise_graspgenx_response(
         if (
             candidate is None
             or candidate["id"] in candidate_ids
-            or float(candidate["score"]) > previous_score
+            or (
+                ranking == "score_descending"
+                and float(candidate["score"]) > previous_score
+            )
         ):
             return _graspgenx_failure("inconsistent_grasp_outputs")
         candidate_ids.add(candidate["id"])
@@ -4305,7 +4313,7 @@ def _normalise_graspgenx_response(
             "grasp_candidates": candidates,
             "best_grasp_candidate": candidates[0],
             "active_grasp_candidate": candidates[0],
-            "ranking": "score_descending",
+            "ranking": ranking,
             "artifacts": [],
             "diagnostics": [],
             "metadata": metadata,
