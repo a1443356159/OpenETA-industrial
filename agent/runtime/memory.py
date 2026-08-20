@@ -3744,7 +3744,12 @@ class AgentMemory:
             policy.get("status") != "selection_required"
             or candidate_id not in policy.get("candidate_queue", [])
             or candidate_id in rejected
-            or _optional_int(outputs.get("scene_epoch"), default=-1) != self.scene_epoch()
+            # The compiled seed must match the epoch captured by the retained
+            # qualification proof.  ``self.scene_epoch()`` may already have
+            # advanced while attaching the object (which also changes the
+            # planning-scene revision) without invalidating this proof.
+            or _optional_int(outputs.get("scene_epoch"), default=-1)
+            != _optional_int(policy.get("scene_epoch"), default=-1)
             or _optional_int(outputs.get("scene_revision"), default=-1)
             != _optional_int(policy.get("scene_revision"), default=-2)
         ):
