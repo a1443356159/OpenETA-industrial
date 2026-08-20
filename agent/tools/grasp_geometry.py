@@ -94,13 +94,18 @@ def build_compile_grasp_seed_handler(
                     )
                     or ""
                 ).strip()
-                requested_epoch = parameters.get("scene_epoch")
+                observation_metadata = (
+                    context.observation.metadata
+                    if context.observation is not None
+                    else {}
+                )
+                requested_epoch = observation_metadata.get("scene_epoch")
                 scene_epoch = (
                     _nonnegative_int(requested_epoch, "scene_epoch")
                     if requested_epoch is not None
                     else None
                 )
-                revision = parameters.get("planning_scene_revision")
+                revision = observation_metadata.get("planning_scene_revision")
                 if isinstance(revision, bool) or (
                     revision is not None and not isinstance(revision, int)
                 ):

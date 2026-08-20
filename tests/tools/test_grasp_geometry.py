@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from adapter.protocol import EnvObservation, RobotState
 from agent.tools.grasp_geometry import (
     DEFAULT_GRASP_PROFILE,
     build_compile_grasp_seed_handler,
@@ -447,6 +448,44 @@ def test_bowl_candidate_filter_returns_structured_candidate_rejection() -> None:
         "recovery_class": "perception_refinable",
     }
     assert result.details["diagnostics"][0]["candidate_rejection"] is True
+
+
+def test_qualified_compile_uses_host_observation_scene_identity() -> None:
+    calls = []
+
+    class Cache:
+        def resolve(self, **kwargs):
+            calls.append(kwargs)
+            return None
+
+    spec = build_default_tool_registry().get("compile_grasp_seed")
+    build_compile_grasp_seed_handler(qualification_cache=Cache())(
+        ToolExecutionContext(
+            name="compile_grasp_seed",
+            spec=spec,
+            parameters={
+                "purpose": "grasp",
+                "grasp_candidate_id": "g0",
+                "scene_epoch": 0,
+                "planning_scene_revision": 0,
+            },
+            observation=EnvObservation(
+                task="test",
+                cameras=[],
+                robot=RobotState(),
+                metadata={"scene_epoch": 3, "planning_scene_revision": 7},
+            ),
+        )
+    )
+
+    assert calls == [
+        {
+            "purpose": "grasp",
+            "candidate_id": "g0",
+            "scene_epoch": 3,
+            "planning_scene_revision": 7,
+        }
+    ]
 
 
 def test_final_refinable_candidate_bypasses_only_strategy_filter() -> None:
