@@ -1470,6 +1470,47 @@ def test_failed_lift_probe_is_single_attempt_and_stops_without_replay() -> None:
     ) is not None
 
 
+def test_native_lift_probe_pass_completes_attachment_without_second_lift() -> None:
+    memory = _memory_with_candidates()
+    execution = {
+        "schema_version": "openeta.grasp_execution.v1",
+        "status": "required",
+        "stage": "probe",
+        "candidate_id": "grasp_000",
+        "compiled_grasp_id": "compiled-000",
+        "planning_scene_revision": 2,
+    }
+    proof = {
+        "physical_verification": {
+            "verdict": "PASS",
+            "evidence": {
+                "lift_m": 0.107,
+                "capture_relative_translation_m": 0.008,
+            },
+        }
+    }
+    memory.save_fact("grasp_execution", execution, source="test")
+    memory.save_fact(
+        "grasp_lift_probe",
+        {
+            "status": "completed",
+            "proof_verdict": "PASS",
+            "proof": proof,
+        },
+        source="test",
+    )
+
+    assert memory._advance_probe_to_attachment(execution) is True
+
+    assert memory.grasp_execution()["status"] == "completed"
+    assert memory.grasp_execution()["stage"] == "attached"
+    gate = memory.attachment_gate()
+    assert gate["verdict"] == "PASS"
+    assert gate["full_lift_satisfied_by_probe"] is True
+    assert gate["full_lift_proof"] == proof
+    assert "pass" not in memory.grasp_execution()["attachment_actions"]
+
+
 def test_planning_scene_unavailable_stops_grasp_without_candidate_replay() -> None:
     memory = _memory_with_candidates()
     required = {

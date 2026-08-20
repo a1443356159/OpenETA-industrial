@@ -56,7 +56,6 @@ ACTIVE_ENVIRONMENT_TASK_KEY = "active_environment_task"
 # independent 80 mm measured child-link threshold.  An 80 mm EEF command can
 # truthfully yield less than 80 mm object travel and must not be credited.
 GRASP_LIFT_PROBE_DISTANCE_M = 0.10
-GRASP_FULL_LIFT_DISTANCE_M = 0.08
 NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
 NATIVE_GRASP_MINIMUM_LIFT_M = 0.08
 NATIVE_GRASP_MAXIMUM_DRIFT_M = 0.01
@@ -4674,22 +4673,6 @@ class AgentMemory:
         probe = self.grasp_lift_probe()
         if not isinstance(probe, dict) or probe.get("status") != "completed":
             return False
-        target = ((probe.get("required_parameters") or {}).get("target_pose") or {}).get("xyz")
-        if not _finite_xyz(target):
-            return False
-        full_lift_pose = {
-            "frame": "world",
-            "xyz": [
-                float(target[0]),
-                float(target[1]),
-                float(target[2]) + GRASP_FULL_LIFT_DISTANCE_M,
-            ],
-            "source_grasp_id": execution.get("candidate_id"),
-            "compiled_grasp_id": execution.get("compiled_grasp_id"),
-            "grasp_stage": "full_lift",
-            "scene_epoch": self.scene_epoch(),
-            "scene_revision": execution.get("planning_scene_revision"),
-        }
         proof_ok = probe.get("proof_verdict") == "PASS"
         gate = {
             "status": "resolved" if proof_ok else "stopped_requires_human",
@@ -4701,6 +4684,16 @@ class AgentMemory:
             "evidence_source": "gazebo_native_attachment_proof",
             "probe_proof": probe.get("proof"),
         }
+        if proof_ok:
+            gate.update(
+                {
+                    "pass_action_attempt_count": 0,
+                    "pass_action_completed": True,
+                    "pass_action_completed_at_s": time.time(),
+                    "full_lift_proof": probe.get("proof"),
+                    "full_lift_satisfied_by_probe": True,
+                }
+            )
         if not proof_ok:
             gate["stop_reason"] = probe.get("proof_reason") or "native_attachment_proof_unknown"
         execution.update(
@@ -4709,16 +4702,7 @@ class AgentMemory:
                 "scene_epoch": self.scene_epoch(),
                 "required_action": None,
                 "attachment_actions": (
-                    {
-                        "pass": {
-                            "name": "move_to",
-                            "parameters": {"target_pose": full_lift_pose},
-                        },
-                        "fail": {
-                            "name": "gripper_control",
-                            "parameters": {"position": 1},
-                        },
-                    }
+                    {"fail": {"name": "gripper_control", "parameters": {"position": 1}}}
                     if proof_ok
                     else {}
                 ),
@@ -4738,6 +4722,11 @@ class AgentMemory:
                 "scene_epoch": self.scene_epoch(),
             },
         )
+        if proof_ok:
+            self._complete_attachment_execution(
+                execution,
+                source="runtime_native_lift_probe_pass",
+            )
         return True
 
     def _advance_articulated_probe_to_attachment(self, execution: JsonDict) -> bool:
