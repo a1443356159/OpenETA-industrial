@@ -1150,13 +1150,8 @@ def test_rm75_empty_fresh_wrist_segmentation_preserves_compiled_pose() -> None:
                 "result_id": "sam3-empty-wrist",
                 "source_image": "/fresh/wrist.rgb.png",
                 "detections": [],
-            },
-            planner_metadata={
-                "host_obligation": {
-                    "schema_version": "openeta.wrist_segmentation_obligation.v1",
-                    "tool": "sam3",
-                    "stage": "wrist_segmentation",
-                }
+                "camera_role": "wrist",
+                "scene_epoch": memory.scene_epoch(),
             },
         )
     )
@@ -1174,7 +1169,9 @@ def test_rm75_empty_fresh_wrist_segmentation_preserves_compiled_pose() -> None:
     assert execution["wrist_alignment_skip_evidence"]["result_id"] == (
         "sam3-empty-wrist"
     )
-    assert memory.selected_sam3_detection()["source_image"] == "/frozen/top.rgb.png"
+    # The current wrist result is intentionally a fresh empty result; the
+    # compiled grasp retains the frozen pre-hover geometry needed downstream.
+    assert memory.selected_sam3_detection() is None
 
 
 def test_required_wrist_alignment_does_not_accept_empty_segmentation() -> None:

@@ -4504,19 +4504,31 @@ class AgentMemory:
         ):
             return False
         obligation = _action_host_obligation(action)
-        if (
-            obligation.get("schema_version")
-            != "openeta.wrist_segmentation_obligation.v1"
-            or obligation.get("tool") != "sam3"
-            or obligation.get("stage") != "wrist_segmentation"
-        ):
-            return False
         call = _successful_tool_call(action, "sam3")
         if call is None:
             return False
         outputs = _tool_call_outputs(call)
         detections = outputs.get("detections")
         if not isinstance(detections, list) or detections:
+            return False
+        is_host_wrist_segmentation = (
+            obligation.get("schema_version")
+            == "openeta.wrist_segmentation_obligation.v1"
+            and obligation.get("tool") == "sam3"
+            and obligation.get("stage") == "wrist_segmentation"
+        )
+        parameters = (
+            call.get("result", {}).get("details", {}).get("parameters", {})
+            if isinstance(call.get("result"), dict)
+            else {}
+        )
+        is_fresh_wrist_empty = (
+            outputs.get("camera_role") == "wrist"
+            and isinstance(outputs.get("source_image"), str)
+            and outputs.get("source_image") == parameters.get("image")
+            and outputs.get("scene_epoch") == self.scene_epoch()
+        )
+        if not (is_host_wrist_segmentation or is_fresh_wrist_empty):
             return False
         contact = compiled.get("contact_pose")
         if not isinstance(contact, dict):
