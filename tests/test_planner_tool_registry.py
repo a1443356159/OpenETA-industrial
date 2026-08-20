@@ -5440,7 +5440,7 @@ def test_failed_anygrasp_mask_invalidates_sam3_selection_before_retry(
 
 @pytest.mark.parametrize(
     "reported_reason",
-    ["all_backends_failed", "insufficient_object_points"],
+    ["all_backends_failed", "all_grasps_colliding", "insufficient_object_points"],
 )
 def test_unified_no_candidates_retries_same_verified_mask_once_with_dense_sampling(
     tmp_path: Path,

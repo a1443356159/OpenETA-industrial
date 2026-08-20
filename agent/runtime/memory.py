@@ -511,7 +511,11 @@ class AgentMemory:
             return False
         outputs = _tool_call_outputs(call)
         reason = str(outputs.get("reason") or "")
-        if reason in {"insufficient_object_points", "empty_point_cloud"}:
+        if reason in {
+            "all_grasps_colliding",
+            "insufficient_object_points",
+            "empty_point_cloud",
+        }:
             reason = "no_grasp_candidates"
         if reason == "all_backends_failed":
             attempts = outputs.get("backend_attempts")
