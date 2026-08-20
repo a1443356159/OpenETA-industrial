@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import io
+import os
+import sys
 from typing import Any
 
 import numpy as np
@@ -17,6 +19,7 @@ from tools.anyplace_core import (
     normalise_placement_candidates,
     pad_pointcloud_for_model,
     _project_object_bottoms_to_support,
+    _configure_cuda_extension_environment,
     validate_intrinsics,
     validate_pointcloud_array,
 )
@@ -63,6 +66,24 @@ def _reason(expected: str, function, *args, **kwargs) -> None:
 def test_validate_intrinsics() -> None:
     assert validate_intrinsics(_intrinsics()) == _intrinsics()
     _reason("missing_intrinsics", validate_intrinsics, None)
+
+
+def test_cuda_extension_environment_keeps_symlinked_venv_bin(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JIT tools must be found beside a symlinked virtualenv interpreter."""
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to("/usr/bin/python3")
+    (venv_bin / "ninja").touch()
+    monkeypatch.setattr(sys, "executable", str(venv_bin / "python"))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    fake_torch = type("Torch", (), {"version": type("Version", (), {"cuda": ""})})
+
+    _configure_cuda_extension_environment(fake_torch)
+
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(venv_bin)
 
 
 @pytest.mark.parametrize(

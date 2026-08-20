@@ -482,7 +482,11 @@ def _configure_cuda_extension_environment(torch: Any) -> None:
     forward-compatible target supported by that compiler.
     """
 
-    prefix = Path(sys.executable).resolve().parent.parent
+    # Keep the interpreter's *invocation* directory.  A virtualenv's
+    # ``python`` is normally a symlink to the system interpreter; resolving
+    # it here would incorrectly turn ``<venv>/bin/python`` into
+    # ``/usr/bin/python`` and hide sibling tools such as ``ninja``.
+    prefix = Path(sys.executable).parent.parent
     bin_dir = prefix / "bin"
     nvcc = bin_dir / "nvcc"
     cc = bin_dir / "x86_64-conda-linux-gnu-gcc"
