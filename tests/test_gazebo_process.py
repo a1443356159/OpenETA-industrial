@@ -210,7 +210,7 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> Non
     control = gazebo_process.GazeboDetachableJointControl()
     control._state = gazebo_process.DetachableJointState.ATTACHED
     control._world_link_positions = lambda: dict(poses)  # type: ignore[method-assign]
-    control.capture_baseline()
+    control.capture_baseline(settle_duration_s=0.0)
 
     poses.update(
         {
@@ -222,6 +222,25 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> Non
 
     assert proof.lift_m == pytest.approx(0.10)
     assert proof.capture_relative_translation_m == pytest.approx(0.0)
+
+
+def test_detachable_joint_baseline_uses_the_final_settled_pose(monkeypatch) -> None:
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._state = gazebo_process.DetachableJointState.ATTACHED
+    readings = iter(
+        [
+            {"gripper_mount_link": (0.0, 0.0, 0.5), "target_object": (0.0, 0.0, 0.4), "target_link": (0.0, 0.0, 0.0)},
+            {"gripper_mount_link": (0.0, 0.0, 0.5), "target_object": (0.0, 0.0, 0.41), "target_link": (0.0, 0.0, 0.0)},
+        ]
+    )
+    control._world_link_positions = lambda: next(readings)  # type: ignore[method-assign]
+    monotonic = iter([0.0, 0.0, 0.02, 0.02])
+    monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(gazebo_process.time, "sleep", lambda _seconds: None)
+
+    control.capture_baseline(settle_duration_s=0.01, sample_interval_s=0.01)
+
+    assert control._baseline == pytest.approx((0.41, (0.0, 0.0, -0.09)))
 
 
 def test_native_pose_parser_preserves_and_normalizes_quaternion() -> None:

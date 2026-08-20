@@ -667,12 +667,29 @@ class GazeboDetachableJointControl:
             raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
         return self._named_position(poses, self.child_model)
 
-    def capture_baseline(self) -> None:
-        """Record native target child-link state after the attach ACK."""
+    def capture_baseline(
+        self, *, settle_duration_s: float = 0.10, sample_interval_s: float = 0.02
+    ) -> None:
+        """Record the settled native child-link state after an attach ACK.
+
+        Gazebo acknowledges a detachable joint before the next physics tick has
+        necessarily propagated the new fixed constraint into Pose_V.  Freezing
+        the baseline on that first pre-settle sample makes harmless constraint
+        convergence look like post-grasp slip.  The gripper is stationary at
+        this call site; consume a short, bounded settling window and retain
+        the final native pose.  This does not relax the later 10 mm drift
+        proof: it merely defines capture at the first settled attached state.
+        """
 
         if self._state != DetachableJointState.ATTACHED:
             raise GazeboProcessError("NATIVE_GRASP_ATTACH_ACK_MISSING")
+        if settle_duration_s < 0.0 or sample_interval_s <= 0.0:
+            raise ValueError("attachment baseline settling values are invalid")
+        deadline = time.monotonic() + settle_duration_s
         poses = self._world_link_positions()
+        while time.monotonic() < deadline:
+            time.sleep(min(sample_interval_s, max(0.0, deadline - time.monotonic())))
+            poses = self._world_link_positions()
         parent = self._named_position(poses, self.parent_link)
         child = self._child_world_position(poses)
         self._baseline = (child[2], tuple(child[index] - parent[index] for index in range(3)))
