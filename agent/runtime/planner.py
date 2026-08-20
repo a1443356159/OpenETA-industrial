@@ -2900,6 +2900,15 @@ def _validate_grasp_execution_obligation(
     execution = tool_context.get("grasp_execution")
     if not isinstance(execution, dict) or execution.get("status") != "required":
         return []
+    attachment = tool_context.get("attachment_gate")
+    if (
+        decision.action_type.lower().strip() == "response"
+        and decision.action == "ask_human"
+        and isinstance(attachment, dict)
+        and attachment.get("status") == "stopped_requires_human"
+        and str(attachment.get("verdict") or "").upper() == "UNKNOWN"
+    ):
+        return []
     if decision.action_type.lower().strip() != "tool_call":
         return ["A host-owned grasp execution stage is pending; do not end the task."]
     if decision.action == "observe":

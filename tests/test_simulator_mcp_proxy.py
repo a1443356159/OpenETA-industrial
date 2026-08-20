@@ -494,6 +494,14 @@ def test_worker_proxy_retains_native_control_proof_in_trusted_receipt(tmp_path: 
         "planning_scene_revision": 2,
         "request_fingerprint": "move-fingerprint",
         "detachable_joint": {"state": "attached"},
+        "attachment_transform": {
+            "schema_version": "openeta.attachment_transform.v1",
+            "parent_frame": "eef",
+            "child_frame": "object",
+            "translation_xyz": [0.01, 0.02, 0.16],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            "measurement_boundary": "native_attach_ack",
+        },
         "physical_verification": proof,
         "child_link_proof": dict(proof["evidence"]),
     }

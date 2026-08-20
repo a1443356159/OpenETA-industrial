@@ -82,6 +82,7 @@ CONTROL_RECEIPT_FIELDS = (
     "terminal_status",
     "terminal_status_code",
     "detachable_joint",
+    "attachment_transform",
     "physical_verification",
     "child_link_proof",
     "placement_verification",

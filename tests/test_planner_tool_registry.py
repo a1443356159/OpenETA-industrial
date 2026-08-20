@@ -5246,6 +5246,47 @@ def test_attachment_full_lift_uses_host_dispatch_for_independent_review() -> Non
     assert decision.metadata["host_obligation"]["stage"] == "attachment_verification"
 
 
+def test_unknown_native_attachment_allows_immediate_human_stop() -> None:
+    memory = AgentMemory()
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "schema_version": "openeta.grasp_execution.v1",
+            "status": "required",
+            "stage": "probe",
+            "candidate_id": "grasp_003",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "attachment_gate",
+        {
+            "status": "stopped_requires_human",
+            "verdict": "UNKNOWN",
+            "candidate_id": "grasp_003",
+            "reason": "native_attachment_transform_missing",
+        },
+        source="test",
+    )
+    requested = {
+        "kind": "response",
+        "name": "ask_human",
+        "parameters": {"question": "Attachment state is unknown; please inspect."},
+    }
+    planner = ToolCallingPlanner(StaticPlannerBackend(requested))
+
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("move_to", "gripper_control"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "ask_human"
+    assert decision.parameters == requested["parameters"]
+    assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
+
+
 @pytest.mark.parametrize("stage", ["hover", "align_move"])
 def test_host_generated_safe_grasp_motion_uses_host_dispatch(stage: str) -> None:
     memory = AgentMemory()
