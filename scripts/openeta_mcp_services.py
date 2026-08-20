@@ -511,7 +511,11 @@ def _service_process_env(config: ServiceConfig) -> dict[str, str]:
     """Expose console scripts installed beside a service's selected Python."""
 
     env = dict(config.env)
-    python_bin = str(Path(config.python).expanduser().resolve().parent)
+    # Keep the selected interpreter path lexical here.  Virtualenv Python is
+    # commonly a symlink to the system interpreter; resolving that symlink
+    # would prepend /usr/bin (or /usr/local/bin) instead of the virtualenv's
+    # bin directory and hide console scripts such as ``ninja``.
+    python_bin = str(Path(os.path.abspath(os.path.expanduser(config.python))).parent)
     current_path = env.get("PATH", "")
     env["PATH"] = python_bin + (os.pathsep + current_path if current_path else "")
     return env

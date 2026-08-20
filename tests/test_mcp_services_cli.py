@@ -196,6 +196,28 @@ def test_service_process_path_starts_with_selected_python_bin(tmp_path: Path) ->
     assert child_env["PATH"].split(":", 1)[0] == "/srv/anyplace/venv/bin"
 
 
+def test_service_process_path_preserves_virtualenv_bin_for_symlinked_python(
+    tmp_path: Path,
+) -> None:
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    python = venv_bin / "python"
+    python.symlink_to("/usr/bin/python3")
+    config = cli.ServiceConfig(
+        name="anyplace",
+        python=str(python),
+        host="127.0.0.1",
+        port=8775,
+        state_dir=tmp_path,
+        command=[str(python)],
+        env={"PATH": "/usr/bin"},
+    )
+
+    child_env = cli._service_process_env(config)
+
+    assert child_env["PATH"].split(":", 1)[0] == str(venv_bin)
+
+
 def test_start_all_dry_run_includes_seven_services(tmp_path: Path, capsys) -> None:
     assert (
         cli.main(
