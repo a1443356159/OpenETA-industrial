@@ -39,9 +39,13 @@ def _packet(mask_left: bool) -> dict[str, Any]:
 
 
 def _request() -> dict[str, Any]:
+    object_packet = _packet(True)
+    object_packet["object_mask"] = object_packet.pop("mask")
+    placement_packet = _packet(False)
+    placement_packet["placement_region_mask"] = placement_packet.pop("mask")
     return {
-        "object_observation": _packet(True),
-        "placement_observation": _packet(False),
+        "object_observation": object_packet,
+        "placement_observation": placement_packet,
         "object_camera_to_placement_camera": np.eye(4).tolist(),
     }
 

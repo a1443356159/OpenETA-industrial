@@ -508,10 +508,11 @@ def build_masked_pointcloud_from_rgbd(
 def _observation_packet(value: Any, kind: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AnyPlaceInputError(f"missing_{kind}_observation")
-    required = {"rgb", "depth", "mask", "intrinsics"}
+    mask_key = "object_mask" if kind == "object" else "placement_region_mask"
+    required = {"rgb", "depth", mask_key, "intrinsics"}
     if not required <= value.keys():
         raise AnyPlaceInputError(f"invalid_{kind}_observation")
-    return value
+    return {**value, "mask": value[mask_key]}
 
 
 def validate_pointcloud_array(

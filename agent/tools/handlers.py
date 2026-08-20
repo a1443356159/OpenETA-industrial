@@ -1766,8 +1766,12 @@ def build_anyplace_handler(
                 placement_packet["camera_extrinsics"],
             )
             mcp_request = {
-                "object_observation": _encode_anyplace_observation(object_packet),
-                "placement_observation": _encode_anyplace_observation(placement_packet),
+                "object_observation": _encode_anyplace_observation(
+                    object_packet, mask_key="object_mask"
+                ),
+                "placement_observation": _encode_anyplace_observation(
+                    placement_packet, mask_key="placement_region_mask"
+                ),
                 "object_camera_to_placement_camera": transform,
             }
         except (ValueError, FileNotFoundError, OSError) as exc:
@@ -5807,11 +5811,13 @@ def _normalise_anyplace_observation(value: Any, *, mask_key: str) -> JsonDict:
     }
 
 
-def _encode_anyplace_observation(value: Mapping[str, Any]) -> JsonDict:
+def _encode_anyplace_observation(
+    value: Mapping[str, Any], *, mask_key: str
+) -> JsonDict:
     return {
         "rgb": _encode_file_payload(str(value["rgb"])),
         "depth": _encode_file_payload(str(value["depth"])),
-        "mask": _encode_file_payload(str(value["mask"])),
+        mask_key: _encode_file_payload(str(value["mask"])),
         "intrinsics": dict(value["intrinsics"]),
     }
 

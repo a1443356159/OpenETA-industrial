@@ -94,6 +94,10 @@ def test_handler_encodes_two_independent_observations(tmp_path: Path) -> None:
         "object_observation", "placement_observation", "object_camera_to_placement_camera"
     }
     assert calls[0]["object_camera_to_placement_camera"][0][3] == pytest.approx(-0.2)
+    assert "object_mask" in calls[0]["object_observation"]
+    assert "mask" not in calls[0]["object_observation"]
+    assert "placement_region_mask" in calls[0]["placement_observation"]
+    assert "mask" not in calls[0]["placement_observation"]
     assert "selected_grasp" not in str(calls[0])
     assert result.details["candidate_count"] == 10
     assert all("place_grasp_pose" not in candidate for candidate in result.details["placement_candidates"])
