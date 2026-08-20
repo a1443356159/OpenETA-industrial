@@ -53,6 +53,7 @@ MMR_ROTATION_SCALE_RAD = math.radians(30.0)
 MMR_ROTATION_WEIGHT = 1.0
 MMR_SIMILARITY_PENALTY = 0.55
 MMR_DIVERSITY_RESERVE_MULTIPLIER = 4
+MMR_MIN_SOURCE_COVERAGE = 3
 # A formal candidate must differ in position or orientation from every already
 # selected formal candidate.  This is deliberately a hard gate: MMR is useful
 # for ordering, but by itself can still admit several score-rich copies of an
@@ -554,15 +555,6 @@ def _se3_mmr_order(
         if score_span <= 1e-12
         else (score_array - score_array.min()) / score_span
     )
-    selected = [ranked[0]]
-    first_source = branch_tags[selected[0]]
-    other_source = next(
-        (index for index in ranked if branch_tags[index] != first_source), None
-    )
-    if other_source is not None:
-        selected.append(other_source)
-    remaining = set(ranked) - set(selected)
-
     def similarity(left: int, right: int) -> float:
         translation = float(
             np.linalg.norm(pose_array[left, :3, 3] - pose_array[right, :3, 3])
@@ -579,6 +571,40 @@ def _se3_mmr_order(
         )
         approach = math.acos(cosine) / MMR_ROTATION_SCALE_RAD
         return math.exp(-(translation + MMR_ROTATION_WEIGHT * approach))
+
+    # Seed each model source with its own quality/diversity modes before the
+    # global MMR pass.  This is a floor, not a fixed OBB/diffusion quota: a
+    # source that has no novel modes naturally contributes fewer candidates.
+    selected: list[int] = []
+    sources = sorted(
+        set(branch_tags),
+        key=lambda source: next(
+            rank for rank, index in enumerate(ranked) if branch_tags[index] == source
+        ),
+    )
+    source_limit = min(MMR_MIN_SOURCE_COVERAGE, max(1, selection_limit // len(sources)))
+    for source in sources:
+        pool = [index for index in ranked if branch_tags[index] == source]
+        local: list[int] = []
+        while pool and len(local) < source_limit:
+            if not local:
+                best = pool[0]
+            else:
+                best = max(
+                    pool,
+                    key=lambda index: (
+                        float(quality[index])
+                        - MMR_SIMILARITY_PENALTY
+                        * max(similarity(index, chosen) for chosen in local),
+                        float(score_array[index]),
+                        -index,
+                    ),
+                )
+            local.append(best)
+            pool.remove(best)
+        selected.extend(local)
+    selected = selected[:selection_limit]
+    remaining = set(ranked) - set(selected)
 
     max_similarity = {
         index: max(similarity(index, chosen) for chosen in selected)
