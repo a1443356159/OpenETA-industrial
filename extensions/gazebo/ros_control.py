@@ -572,7 +572,6 @@ class _RosRuntime:
         ik.group_name = self.config.move_group
         ik.ik_link_name = goal["link_name"]
         ik.avoid_collisions = bool(avoid_collisions)
-        ik.attempts = 3
         ik.timeout.sec = 30
         ik.robot_state.is_diff = False
         ik.robot_state.joint_state.name = list(start.get("names") or ARM_JOINTS)
