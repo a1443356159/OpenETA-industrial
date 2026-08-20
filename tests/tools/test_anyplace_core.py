@@ -49,6 +49,7 @@ def _request() -> dict[str, Any]:
         "object_observation": object_packet,
         "placement_observation": placement_packet,
         "object_camera_to_placement_camera": np.eye(4).tolist(),
+        "placement_camera_to_world": np.eye(4).tolist(),
     }
 
 
@@ -140,6 +141,38 @@ def test_backend_uses_independent_observations_and_transform(tmp_path, monkeypat
     assert "selected_grasp" not in str(result)
 
 
+def test_backend_uses_gravity_aligned_model_frame_and_restores_camera_output(
+    tmp_path, monkeypatch
+) -> None:
+    backend = AnyPlaceBackend(anyplace_root=tmp_path, config_path=tmp_path / "config.yaml")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(backend, "_get_loaded_backend", lambda: {})
+    raw = np.tile(np.eye(4), (10, 1, 1))
+    # This is a world-frame relation: move +10 cm along gravity/world Z.
+    raw[:, 2, 3] = 0.1
+    monkeypatch.setattr(
+        backend,
+        "_predict_with_loaded_backend",
+        lambda **kwargs: captured.update(kwargs) or raw,
+    )
+    request = _request()
+    # OpenCV +Z points down in this top-camera calibration; world +Z points up.
+    request["placement_camera_to_world"] = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+    result = backend.predict_placement(**request)
+
+    assert result["success"] is True
+    assert captured["placement_region_pcd"][0, 2] == pytest.approx(0.5)
+    # The returned public transform is back in placement-camera axes.
+    assert result["details"]["placement_candidates"][0]["object_placement_transform"]["transform_matrix"][2][3] == pytest.approx(-0.1)
+    assert result["details"]["metadata"]["model_frame"] == "world_gravity_aligned"
+
+
 def test_backend_rejects_missing_or_invalid_observation_transform(tmp_path) -> None:
     backend = AnyPlaceBackend(anyplace_root=tmp_path, config_path=tmp_path / "config.yaml")
     request = _request()
@@ -147,6 +180,15 @@ def test_backend_rejects_missing_or_invalid_observation_transform(tmp_path) -> N
     result = backend.predict_placement(**request)
     assert result["success"] is False
     assert result["details"]["reason"] == "invalid_observation_transform"
+
+
+def test_backend_rejects_invalid_placement_camera_to_world(tmp_path) -> None:
+    backend = AnyPlaceBackend(anyplace_root=tmp_path, config_path=tmp_path / "config.yaml")
+    request = _request()
+    request["placement_camera_to_world"] = [[1.0]]
+    result = backend.predict_placement(**request)
+    assert result["success"] is False
+    assert result["details"]["reason"] == "invalid_placement_camera_to_world"
 
 
 def test_mcp_unconfigured_failure_has_no_candidates(monkeypatch) -> None:

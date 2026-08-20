@@ -1765,6 +1765,9 @@ def build_anyplace_handler(
                 object_packet["camera_extrinsics"],
                 placement_packet["camera_extrinsics"],
             )
+            placement_camera_to_world = _camera_to_world_opencv_transform(
+                placement_packet["camera_extrinsics"]
+            )
             mcp_request = {
                 "object_observation": _encode_anyplace_observation(
                     object_packet, mask_key="object_mask"
@@ -1773,6 +1776,7 @@ def build_anyplace_handler(
                     placement_packet, mask_key="placement_region_mask"
                 ),
                 "object_camera_to_placement_camera": transform,
+                "placement_camera_to_world": placement_camera_to_world,
             }
         except (ValueError, FileNotFoundError, OSError) as exc:
             return _anyplace_failure(
@@ -5838,18 +5842,6 @@ def _camera_frame_transform(
 ) -> list[list[float]]:
     """Return T_placement_camera_object_camera in OpenCV optical axes."""
 
-    def world_cv(extrinsics: Mapping[str, Any]) -> list[list[float]]:
-        parsed = _parse_camera_extrinsics(extrinsics)
-        if parsed is None:
-            raise ValueError("camera extrinsics are invalid")
-        rotation, position, _source, default_frame = parsed
-        frame = (_camera_frame_from_extrinsics(extrinsics) or default_frame).lower()
-        if frame in {"opengl", "opengl_renderer", "renderer", "mujoco"}:
-            rotation = _mat3_mat3(rotation, [[1, 0, 0], [0, -1, 0], [0, 0, -1]])
-        elif frame not in {"opencv", "opencv_optical", "cv"}:
-            raise ValueError(f"unsupported camera frame {frame!r}")
-        return [rotation[row] + [position[row]] for row in range(3)] + [[0, 0, 0, 1]]
-
     def inverse_rigid(matrix: list[list[float]]) -> list[list[float]]:
         rotation_t = [[matrix[column][row] for column in range(3)] for row in range(3)]
         translation = [matrix[row][3] for row in range(3)]
@@ -5859,7 +5851,27 @@ def _camera_frame_transform(
     def multiply(left: list[list[float]], right: list[list[float]]) -> list[list[float]]:
         return [[sum(left[row][k] * right[k][column] for k in range(4)) for column in range(4)] for row in range(4)]
 
-    return multiply(inverse_rigid(world_cv(placement_extrinsics)), world_cv(object_extrinsics))
+    return multiply(
+        inverse_rigid(_camera_to_world_opencv_transform(placement_extrinsics)),
+        _camera_to_world_opencv_transform(object_extrinsics),
+    )
+
+
+def _camera_to_world_opencv_transform(
+    extrinsics: Mapping[str, Any],
+) -> list[list[float]]:
+    """Return a camera-to-world transform in OpenCV optical axes."""
+
+    parsed = _parse_camera_extrinsics(extrinsics)
+    if parsed is None:
+        raise ValueError("camera extrinsics are invalid")
+    rotation, position, _source, default_frame = parsed
+    frame = (_camera_frame_from_extrinsics(extrinsics) or default_frame).lower()
+    if frame in {"opengl", "opengl_renderer", "renderer", "mujoco"}:
+        rotation = _mat3_mat3(rotation, [[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+    elif frame not in {"opencv", "opencv_optical", "cv"}:
+        raise ValueError(f"unsupported camera frame {frame!r}")
+    return [rotation[row] + [position[row]] for row in range(3)] + [[0, 0, 0, 1]]
 
 
 def _normalise_depth_prior_response(

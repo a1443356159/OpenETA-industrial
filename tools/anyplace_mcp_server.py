@@ -32,6 +32,7 @@ def predict_placement(
     object_observation: dict[str, Any] | None = None,
     placement_observation: dict[str, Any] | None = None,
     object_camera_to_placement_camera: list[list[float]] | None = None,
+    placement_camera_to_world: list[list[float]] | None = None,
 ) -> dict[str, Any]:
     """Predict object placement transforms from two independent observations.
 
@@ -39,19 +40,22 @@ def predict_placement(
     intrinsics. ``placement_observation`` independently contains aligned RGB,
     depth, ``placement_region_mask``, and intrinsics. They may come from
     different cameras or times. The host supplies the calibrated rigid
-    transform between their OpenCV camera frames; no grasp candidate is
-    accepted by this service.
+    transform between their OpenCV camera frames and the calibrated
+    placement-camera-to-world transform used to gravity-align official model
+    inputs; no grasp candidate is accepted by this service.
 
     Args:
         object_observation: Independent object RGB-D/mask packet.
         placement_observation: Independent target-region RGB-D/mask packet.
         object_camera_to_placement_camera: Calibrated row-major 4x4 transform.
+        placement_camera_to_world: Calibrated OpenCV-camera-to-world row-major 4x4 transform.
 
     Example:
         {
             "object_observation": {"rgb": {"format": "png", "base64": "..."}, "depth": {}, "object_mask": {}, "intrinsics": {}},
             "placement_observation": {"rgb": {"format": "png", "base64": "..."}, "depth": {}, "placement_region_mask": {}, "intrinsics": {}},
-            "object_camera_to_placement_camera": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+            "object_camera_to_placement_camera": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+            "placement_camera_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
         }
 
     The tool returns the configured number of placement candidates in backend order. Each
@@ -82,6 +86,7 @@ def predict_placement(
                 object_observation=object_observation,
                 placement_observation=placement_observation,
                 object_camera_to_placement_camera=object_camera_to_placement_camera,
+                placement_camera_to_world=placement_camera_to_world,
             )
         finally:
             _release_cuda_cache()

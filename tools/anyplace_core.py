@@ -98,6 +98,7 @@ class AnyPlaceBackend:
         object_observation: dict[str, Any] | None,
         placement_observation: dict[str, Any] | None,
         object_camera_to_placement_camera: list[list[float]] | None,
+        placement_camera_to_world: list[list[float]] | None,
     ) -> dict[str, Any]:
         """Predict object-goal transforms from independent RGB-D observations."""
 
@@ -166,14 +167,35 @@ class AnyPlaceBackend:
             transform = np.asarray(object_camera_to_placement_camera, dtype=np.float64)
             if not _is_rigid_transform(transform):
                 raise AnyPlaceInputError("invalid_observation_transform")
+            placement_to_world = np.asarray(
+                placement_camera_to_world, dtype=np.float64
+            )
+            if not _is_rigid_transform(placement_to_world):
+                raise AnyPlaceInputError("invalid_placement_camera_to_world")
             object_h = np.concatenate(
                 [object_pcd.astype(np.float64), np.ones((object_pcd.shape[0], 1))], axis=1
             )
             object_pcd = (transform @ object_h.T).T[:, :3].astype(np.float32)
+            # The official AnyPlace policy was trained on gravity-aligned world
+            # point clouds (its documented output transforms child/B "in the
+            # world frame").  OpenCV optical axes instead have +Z forward and
+            # +Y down.  Giving raw camera clouds to the policy reverses its
+            # notion of vertical and produces goals below a horizontal support.
+            # Keep the public result in placement-camera coordinates by
+            # conjugating the policy transforms back below.
+            object_h = np.concatenate(
+                [object_pcd.astype(np.float64), np.ones((object_pcd.shape[0], 1))], axis=1
+            )
+            placement_h = np.concatenate(
+                [placement_pcd.astype(np.float64), np.ones((placement_pcd.shape[0], 1))], axis=1
+            )
+            object_pcd = (placement_to_world @ object_h.T).T[:, :3].astype(np.float32)
+            placement_pcd = (placement_to_world @ placement_h.T).T[:, :3].astype(np.float32)
             metadata.update(
                 {
                     "object_point_count": int(object_pcd.shape[0]),
                     "placement_region_point_count": int(placement_pcd.shape[0]),
+                    "model_frame": "world_gravity_aligned",
                 }
             )
             object_pcd = pad_pointcloud_for_model(
@@ -218,6 +240,9 @@ class AnyPlaceBackend:
                 backend=backend,
                 object_pcd=object_pcd,
                 placement_region_pcd=placement_pcd,
+            )
+            raw_candidates = _model_world_to_placement_camera_transforms(
+                raw_candidates, placement_camera_to_world=placement_to_world, np=np
             )
             candidates = normalise_placement_candidates(
                 raw_candidates,
@@ -618,6 +643,25 @@ def normalise_placement_candidates(
             }
         )
     return candidates
+
+
+def _model_world_to_placement_camera_transforms(
+    raw_candidates: Any,
+    *,
+    placement_camera_to_world: Any,
+    np: Any,
+) -> Any:
+    """Convert official world-frame transforms back to the public camera frame."""
+
+    transforms = np.asarray(raw_candidates, dtype=np.float64)
+    if transforms.ndim != 3 or transforms.shape[1:] != (4, 4):
+        # Leave shape validation and its public error reason to the normalizer.
+        return raw_candidates
+    inverse = np.linalg.inv(placement_camera_to_world)
+    return np.matmul(
+        np.matmul(inverse[None, :, :], transforms),
+        placement_camera_to_world[None, :, :],
+    )
 
 
 def _is_rigid_transform(matrix: Any) -> bool:
