@@ -13,10 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from tools.anyplace_core import AnyPlaceBackend
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, argparse_candidate_count
+from tools.anyplace_core import AnyPlaceBackend  # noqa: E402
+from tools.candidate_config import (  # noqa: E402
+    DEFAULT_CANDIDATE_COUNT,
+    argparse_candidate_count,
+)
 
 
 mcp = FastMCP("anyplace", log_level="WARNING")
@@ -26,52 +29,34 @@ _PREDICT_LOCK = threading.Lock()
 
 @mcp.tool()
 def predict_placement(
-    rgb: dict[str, Any] | None = None,
-    depth: dict[str, Any] | None = None,
-    object_mask: dict[str, Any] | None = None,
-    placement_region_mask: dict[str, Any] | None = None,
-    intrinsics: dict[str, Any] | None = None,
-    selected_grasp: dict[str, Any] | None = None,
+    object_observation: dict[str, Any] | None = None,
+    placement_observation: dict[str, Any] | None = None,
+    object_camera_to_placement_camera: list[list[float]] | None = None,
 ) -> dict[str, Any]:
-    """Predict AnyPlace transforms and corresponding camera-frame grasp poses.
+    """Predict object placement transforms from two independent observations.
 
-    All image payloads must come from one aligned RGBD observation. The MCP
-    wire contract uses base64-encoded image bytes, not local file paths and not
-    OpenETA artifact refs. Depth is converted to metres as
-    ``raw_depth / intrinsics["scale"]`` and projected in the OpenCV camera
-    frame. Valid depth is truncated at 1 metre by default. The object and
-    placement-region masks select the two AnyPlace point clouds internally.
+    ``object_observation`` contains aligned RGB, depth, ``object_mask``, and
+    intrinsics. ``placement_observation`` independently contains aligned RGB,
+    depth, ``placement_region_mask``, and intrinsics. They may come from
+    different cameras or times. The host supplies the calibrated rigid
+    transform between their OpenCV camera frames; no grasp candidate is
+    accepted by this service.
 
     Args:
-        rgb: RGB image payload such as
-            ``{"format": "png", "base64": "<base64-encoded rgb png>"}``.
-        depth: Aligned raw depth image payload such as
-            ``{"format": "png", "base64": "<base64-encoded depth png>"}``.
-        object_mask: Binary mask used by AnyGrasp for the selected object,
-            encoded as ``<base64-encoded object mask png>``.
-        placement_region_mask: Binary mask for valid local placement geometry,
-            encoded as ``<base64-encoded placement-region mask png>``.
-        intrinsics: Pinhole camera values ``fx``, ``fy``, ``cx``, ``cy``, and
-            depth ``scale``. For uint16 millimetre depth, use ``scale=1000``.
-        selected_grasp: One normalized model-native grasp candidate in
-            ``frame=camera`` and ``camera_frame=opencv``. The agent handler is
-            responsible for unwrapping local Selected Grasp provenance before
-            this MCP call.
+        object_observation: Independent object RGB-D/mask packet.
+        placement_observation: Independent target-region RGB-D/mask packet.
+        object_camera_to_placement_camera: Calibrated row-major 4x4 transform.
 
     Example:
         {
-            "rgb": {"format": "png", "base64": "<base64-encoded rgb png>"},
-            "depth": {"format": "png", "base64": "<base64-encoded depth png>"},
-            "object_mask": {"format": "png", "base64": "<base64-encoded object mask png>"},
-            "placement_region_mask": {"format": "png", "base64": "<base64-encoded placement-region mask png>"},
-            "intrinsics": {"fx": 618.0, "fy": 618.0, "cx": 256.0, "cy": 256.0, "scale": 1000.0},
-            "selected_grasp": {"id": "grasp_003", "frame": "camera", "camera_frame": "opencv", "...": "..."}
+            "object_observation": {"rgb": {"format": "png", "base64": "..."}, "depth": {}, "object_mask": {}, "intrinsics": {}},
+            "placement_observation": {"rgb": {"format": "png", "base64": "..."}, "depth": {}, "placement_region_mask": {}, "intrinsics": {}},
+            "object_camera_to_placement_camera": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
         }
 
     The tool returns the configured number of placement candidates in backend order. Each
-    bundles ``object_placement_transform.transform_matrix`` with the
-    corresponding ``place_grasp_pose``. It does not return point clouds, choose
-    a best candidate, transform to robot/world frames, or execute motion. Do
+    contains only ``object_placement_transform``. It does not accept a grasp,
+    return an EEF pose, choose a best candidate, or execute motion. Do
     not materialize input base64 payloads in planner, memory, or action logs.
     """
 
@@ -83,7 +68,7 @@ def predict_placement(
                 "tool": "anyplace",
                 "backend": "anyplace_mcp",
                 "model": "anyplace_multitask",
-                "frame": "camera",
+                "frame": "placement_camera",
                 "camera_frame": "opencv",
                 "candidate_count": 0,
                 "placement_candidates": [],
@@ -94,12 +79,9 @@ def predict_placement(
     with _PREDICT_LOCK:
         try:
             return _BACKEND.predict_placement(
-                rgb=rgb,
-                depth=depth,
-                object_mask=object_mask,
-                placement_region_mask=placement_region_mask,
-                intrinsics=intrinsics,
-                selected_grasp=selected_grasp,
+                object_observation=object_observation,
+                placement_observation=placement_observation,
+                object_camera_to_placement_camera=object_camera_to_placement_camera,
             )
         finally:
             _release_cuda_cache()

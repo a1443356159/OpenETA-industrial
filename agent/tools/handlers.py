@@ -21,6 +21,7 @@ from agent.runtime.artifact_paths import artifact_session_id, artifact_session_r
 from agent.tools.attachment_probe import build_prepare_attachment_probe_handler
 from agent.tools.grasp_geometry import (
     build_compile_grasp_seed_handler,
+    build_compile_placement_seed_handler,
     build_wrist_alignment_handler,
 )
 from agent.tools.registry import (
@@ -137,6 +138,7 @@ def bind_dummy_tool_handlers(
         "anygrasp": _anygrasp_handler,
         "camera_pose_to_world": _camera_pose_to_world_handler,
         "compile_grasp_seed": build_compile_grasp_seed_handler(),
+        "compile_placement_seed": build_compile_placement_seed_handler(),
         "prepare_attachment_probe": build_prepare_attachment_probe_handler(),
         "compute_wrist_alignment": build_wrist_alignment_handler(),
         "hand_pose_database": _hand_pose_handler,
@@ -1740,11 +1742,8 @@ def build_anyplace_handler(
 
     def handler(context: ToolExecutionContext) -> ToolResult:
         session_id = artifact_session_id(context.metadata)
-        rgb = _string_param(context.parameters.get("rgb"))
-        depth = _string_param(context.parameters.get("depth"))
-        object_mask = _string_param(context.parameters.get("object_mask"))
-        placement_region_mask = context.parameters.get("placement_region_mask")
-        selected_grasp = context.parameters.get("selected_grasp")
+        object_observation = context.parameters.get("object_observation")
+        placement_observation = context.parameters.get("placement_observation")
         scene_revision = context.parameters.get("scene_revision", 0)
         if (
             not isinstance(scene_revision, int)
@@ -1755,201 +1754,31 @@ def build_anyplace_handler(
                 "invalid_scene_revision",
                 "AnyPlace placement prediction failed: planning-scene revision is missing.",
             )
-        if not rgb:
-            return _anyplace_failure(
-                "missing_rgb", "AnyPlace placement prediction failed: missing rgb."
-            )
-        if not depth:
-            return _anyplace_failure(
-                "missing_depth", "AnyPlace placement prediction failed: missing depth."
-            )
-        if not object_mask:
-            return _anyplace_failure(
-                "missing_object_mask",
-                "AnyPlace placement prediction failed: missing object mask.",
-            )
-        if not isinstance(placement_region_mask, Mapping):
-            return _anyplace_failure(
-                "invalid_placement_region_mask",
-                "AnyPlace placement prediction failed: invalid placement region mask artifact.",
-            )
-        placement_mask_ref = _string_param(placement_region_mask.get("mask_ref"))
-        placement_source_image = _string_param(placement_region_mask.get("source_image"))
-        if not placement_mask_ref or not placement_source_image:
-            return _anyplace_failure(
-                "invalid_placement_region_mask",
-                "AnyPlace placement prediction failed: placement mask requires "
-                "mask_ref and source_image.",
-            )
-        if not isinstance(selected_grasp, Mapping):
-            return _anyplace_failure(
-                "selected_grasp_requires_targeted_source",
-                "AnyPlace placement prediction failed: selected grasp requires "
-                "targeted source provenance.",
-            )
-        candidate_value = selected_grasp.get("candidate")
-        source_value = selected_grasp.get("source")
-        if (
-            not isinstance(source_value, Mapping)
-            or _string_param(source_value.get("mode")) != "targeted"
-        ):
-            return _anyplace_failure(
-                "selected_grasp_requires_targeted_source",
-                "AnyPlace placement prediction failed: selected grasp requires "
-                "targeted source provenance.",
-            )
-        source_rgb = _string_param(source_value.get("rgb"))
-        source_depth = _string_param(source_value.get("depth"))
-        source_object_mask = _string_param(source_value.get("object_mask"))
         try:
-            depth_cutoff_factor = float(source_value.get("depth_cutoff_factor", 1.0))
-        except (TypeError, ValueError):
-            depth_cutoff_factor = math.nan
-        raw_source_tool = _string_param(source_value.get("source_tool"))
-        source_tool = raw_source_tool or "anygrasp"
-        if source_tool not in {"grasp_pose_estimate", "anygrasp", "graspgenx"}:
+            object_packet = _normalise_anyplace_observation(
+                object_observation, mask_key="object_mask"
+            )
+            placement_packet = _normalise_anyplace_observation(
+                placement_observation, mask_key="placement_region_mask"
+            )
+            transform = _camera_frame_transform(
+                object_packet["camera_extrinsics"],
+                placement_packet["camera_extrinsics"],
+            )
+            mcp_request = {
+                "object_observation": _encode_anyplace_observation(object_packet),
+                "placement_observation": _encode_anyplace_observation(placement_packet),
+                "object_camera_to_placement_camera": transform,
+            }
+        except (ValueError, FileNotFoundError, OSError) as exc:
             return _anyplace_failure(
-                "selected_grasp_requires_targeted_source",
-                "AnyPlace placement prediction failed: unsupported grasp source.",
+                "invalid_independent_observation",
+                f"AnyPlace placement prediction failed: {exc}",
             )
-        source_backend = _string_param(source_value.get("source_backend")) or source_tool
-        if not source_rgb or not source_depth or not source_object_mask:
-            return _anyplace_failure(
-                "selected_grasp_requires_targeted_source",
-                "AnyPlace placement prediction failed: selected grasp source is incomplete.",
-            )
-        if (
-            not math.isfinite(depth_cutoff_factor)
-            or depth_cutoff_factor < 1.0
-            or depth_cutoff_factor > 4.0
-        ):
-            return _anyplace_failure(
-                "invalid_depth_cutoff_factor",
-                "AnyPlace placement prediction failed: depth cutoff factor "
-                "must be finite and in [1, 4].",
-            )
-
-        normalized_candidate = _normalise_anygrasp_candidate(candidate_value)
-        if (
-            not isinstance(candidate_value, dict)
-            or normalized_candidate is None
-            or normalized_candidate.get("camera_frame") != "opencv"
-            or not _is_rotation_matrix3(normalized_candidate.get("rotation_matrix"))
-            or any(normalized_candidate[key] < 0 for key in ("depth", "width", "height"))
-        ):
-            return _anyplace_failure(
-                "invalid_selected_grasp",
-                "AnyPlace placement prediction failed: invalid selected grasp candidate.",
-            )
-        source_gripper_name: str | None = None
-        source_up_direction: list[float] | None = None
-        if source_backend == "graspgenx":
-            source_gripper_name = _string_param(source_value.get("gripper_name")) or None
-            source_up_direction = _normalise_graspgenx_up_direction(
-                source_value.get("up_direction_camera")
-            )
-            if (
-                source_gripper_name is None
-                or source_up_direction is None
-                or normalized_candidate.get("gripper_name") != source_gripper_name
-            ):
-                return _anyplace_failure(
-                    "selected_grasp_requires_targeted_source",
-                    "AnyPlace placement prediction failed: incomplete GraspGenX source.",
-                )
-        normalized_candidate["source_tool"] = source_tool
-        if source_gripper_name is not None:
-            normalized_candidate["gripper_name"] = source_gripper_name
-        intrinsics = _normalise_camera_intrinsics(context.parameters.get("intrinsics"))
-        source_intrinsics = _normalise_camera_intrinsics(source_value.get("intrinsics"))
-        if intrinsics is None:
-            return _anyplace_failure(
-                "invalid_intrinsics",
-                "AnyPlace placement prediction failed: invalid intrinsics.",
-            )
-        if source_intrinsics is None or not _intrinsics_equal(intrinsics, source_intrinsics):
-            return _anyplace_failure(
-                "source_intrinsics_mismatch",
-                "AnyPlace placement prediction failed: selected grasp intrinsics do not match.",
-            )
-
-        for left, right, reason, label in (
-            (rgb, source_rgb, "source_rgb_mismatch", "rgb"),
-            (depth, source_depth, "source_depth_mismatch", "depth"),
-            (object_mask, source_object_mask, "source_object_mask_mismatch", "object mask"),
-            (
-                rgb,
-                placement_source_image,
-                "placement_mask_source_mismatch",
-                "placement mask source",
-            ),
-        ):
-            if not _same_resolved_path(left, right):
-                return _anyplace_failure(
-                    reason,
-                    f"AnyPlace placement prediction failed: {label} provenance does not match.",
-                )
-
-        payloads: dict[str, JsonDict] = {}
-        for key, path_value, reason in (
-            ("rgb", rgb, "rgb_not_found"),
-            ("depth", depth, "depth_not_found"),
-            ("object_mask", object_mask, "object_mask_not_found"),
-            ("placement_region_mask", placement_mask_ref, "placement_region_mask_not_found"),
-        ):
-            try:
-                payloads[key] = _encode_file_payload(path_value)
-            except FileNotFoundError:
-                return _anyplace_failure(
-                    reason,
-                    f"AnyPlace placement prediction failed: {key} file not found.",
-                )
-            except OSError as exc:
-                return _anyplace_failure(
-                    "input_encode_failed",
-                    f"AnyPlace placement prediction failed: input encode failed: {exc}",
-                    metadata={"error_type": type(exc).__name__},
-                )
-
         request: JsonDict = {
-            "rgb": rgb,
-            "depth": depth,
-            "object_mask": object_mask,
-            "placement_region_mask": dict(placement_region_mask),
-            "intrinsics": intrinsics,
-            "selected_grasp": {
-                "candidate": dict(candidate_value),
-                "source": {
-                    "source_tool": source_tool,
-                    "source_backend": source_backend,
-                    "mode": "targeted",
-                    "rgb": source_rgb,
-                    "depth": source_depth,
-                    "object_mask": source_object_mask,
-                    "intrinsics": source_intrinsics,
-                },
-            },
+            "object_observation": object_packet,
+            "placement_observation": placement_packet,
             "scene_revision": scene_revision,
-        }
-        if source_gripper_name is not None:
-            request["selected_grasp"]["source"]["gripper_name"] = source_gripper_name
-        if source_up_direction is not None:
-            request["selected_grasp"]["source"][
-                "up_direction_camera"
-            ] = source_up_direction
-        request = _scrub_anyplace_response(request)
-        service_intrinsics = dict(intrinsics)
-        service_intrinsics["scale"] = (
-            float(service_intrinsics["scale"]) * depth_cutoff_factor
-        )
-        service_candidate = _scale_anyplace_grasp_candidate(
-            normalized_candidate,
-            depth_cutoff_factor,
-        )
-        mcp_request: JsonDict = {
-            **payloads,
-            "intrinsics": service_intrinsics,
-            "selected_grasp": service_candidate,
         }
         try:
             response = predict_placement(mcp_request)
@@ -1959,11 +1788,8 @@ def build_anyplace_handler(
                 f"AnyPlace placement prediction failed: MCP call failed: {exc}",
                 metadata={"error_type": type(exc).__name__},
             )
-        response = _restore_anyplace_length_scale(response, depth_cutoff_factor)
         return _normalise_anyplace_response(
             response,
-            selected_grasp=normalized_candidate,
-            selected_grasp_source=request["selected_grasp"]["source"],
             request=request,
             output_root=artifact_session_root(output_root, session_id),
             expected_candidate_count=expected_candidate_count,
@@ -5249,8 +5075,6 @@ def _anygrasp_inconsistent(
 def _normalise_anyplace_response(
     response: JsonDict,
     *,
-    selected_grasp: JsonDict,
-    selected_grasp_source: JsonDict,
     request: JsonDict,
     output_root: Path,
     expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
@@ -5276,7 +5100,7 @@ def _normalise_anyplace_response(
             content,
             metadata=_scrub_anyplace_response(_dict_or_empty(details.get("metadata"))),
         )
-    if details.get("frame") != "camera" or details.get("camera_frame") != "opencv":
+    if details.get("frame") != "placement_camera" or details.get("camera_frame") != "opencv":
         return _anyplace_inconsistent()
     candidates_value = details.get("placement_candidates")
     try:
@@ -5302,11 +5126,7 @@ def _normalise_anyplace_response(
     candidates: list[JsonDict] = []
     candidate_ids: set[str] = set()
     for candidate in candidates_value:
-        normalized = _normalise_anyplace_candidate(
-            candidate,
-            selected_grasp=selected_grasp,
-            selected_grasp_source=selected_grasp_source,
-        )
+        normalized = _normalise_anyplace_candidate(candidate)
         if normalized is None or normalized["id"] in candidate_ids:
             return _anyplace_inconsistent()
         candidate_ids.add(normalized["id"])
@@ -5321,9 +5141,9 @@ def _normalise_anyplace_response(
     _write_json(run_dir / "request.json", request)
     candidate_image_ref, projection_summaries = _write_anyplace_candidate_image(
         run_dir=run_dir,
-        rgb_path=str(request["rgb"]),
-        placement_mask_path=str(request["placement_region_mask"]["mask_ref"]),
-        intrinsics=request["intrinsics"],
+        rgb_path=str(request["placement_observation"]["rgb"]),
+        placement_mask_path=str(request["placement_observation"]["mask"]),
+        intrinsics=request["placement_observation"]["intrinsics"],
         candidates=candidates,
     )
     for candidate, summary in zip(candidates, projection_summaries, strict=True):
@@ -5338,21 +5158,15 @@ def _normalise_anyplace_response(
             "tool": "anyplace",
             "backend": _string_param(details.get("backend")) or "anyplace_mcp",
             "model": _string_param(details.get("model")) or "anyplace_multitask",
-            "frame": "camera",
+            "frame": "placement_camera",
             "camera_frame": "opencv",
             "source": {
-                "rgb": request["rgb"],
-                "depth": request["depth"],
-                "object_mask": request["object_mask"],
-                "placement_region_mask": request["placement_region_mask"],
-                "intrinsics": request["intrinsics"],
-                "selected_grasp": {
-                    "candidate": dict(selected_grasp),
-                    "source": dict(selected_grasp_source),
-                },
+                "object_observation": dict(request["object_observation"]),
+                "placement_observation": dict(request["placement_observation"]),
+                "placement_camera_extrinsics": dict(
+                    request["placement_observation"]["camera_extrinsics"]
+                ),
             },
-            "selected_grasp_source": dict(selected_grasp_source),
-            "selected_grasp_id": selected_grasp["id"],
             "scene_revision": request["scene_revision"],
             "raw_output_ref": str(raw_output_ref),
             "candidate_count": len(candidates),
@@ -5406,154 +5220,46 @@ def _write_anyplace_candidate_image(
     draw.rectangle((left, top, right - 1, bottom - 1), outline=(0, 255, 180), width=2)
     summaries: list[JsonDict] = []
     for index, candidate in enumerate(candidates):
-        pose = candidate.get("place_grasp_pose")
-        pose = pose if isinstance(pose, Mapping) else {}
-        point = pose.get("gripper_tip_position_xyz") or pose.get("translation_xyz")
-        parsed = _finite_vector(point, length=3)
-        if parsed is None or parsed[2] <= 0:
-            summary = {"projected": False, "inside_region_bbox": False}
-        else:
-            u = fx * parsed[0] / parsed[2] + cx
-            v = fy * parsed[1] / parsed[2] + cy
-            clearance = min(u - left, right - u, v - top, bottom - v)
-            inside = left <= u < right and top <= v < bottom
-            summary = {
-                "projected": True,
-                "projected_pixel_xy": [round(u, 3), round(v, 3)],
-                "region_bbox_xyxy": [left, top, right, bottom],
-                "inside_region_bbox": inside,
-                "region_clearance_px": round(clearance, 3),
-            }
-            radius = 6
-            colour = (255, 210, 0) if inside else (255, 70, 70)
-            draw.ellipse((u - radius, v - radius, u + radius, v + radius), outline=colour, width=3)
-            draw.text((u + 8, v - 8), str(index + 1), fill=colour)
+        summary = {
+            "projected": False,
+            "region_bbox_xyxy": [left, top, right, bottom],
+            "candidate_index": index,
+        }
         summaries.append(summary)
     path = run_dir / "placement_candidates.png"
     image.save(path)
     return str(path), summaries
 
 
-def _scale_anyplace_grasp_candidate(candidate: JsonDict, factor: float) -> JsonDict:
-    """Match AnyPlace's fixed depth cutoff without changing camera geometry."""
-
-    if factor == 1.0:
-        return dict(candidate)
-    scaled = dict(candidate)
-    for key in ("depth", "width", "height"):
-        scaled[key] = float(scaled[key]) / factor
-    for key in ("translation_xyz", "gripper_tip_position_xyz"):
-        scaled[key] = [float(component) / factor for component in scaled[key]]
-    return scaled
-
-
-def _restore_anyplace_length_scale(response: JsonDict, factor: float) -> JsonDict:
-    """Restore placement transforms produced from uniformly scaled RGB-D."""
-
-    if factor == 1.0 or not isinstance(response, dict):
-        return response
-    details = response.get("details")
-    if not isinstance(details, dict):
-        return response
-    candidates = details.get("placement_candidates")
-    if isinstance(candidates, list):
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            transform = candidate.get("object_placement_transform")
-            matrix = (
-                transform.get("transform_matrix")
-                if isinstance(transform, dict)
-                else None
-            )
-            if isinstance(matrix, list) and len(matrix) == 4:
-                for row_index in range(3):
-                    row = matrix[row_index]
-                    if isinstance(row, list) and len(row) == 4:
-                        row[3] = float(row[3]) * factor
-            place = candidate.get("place_grasp_pose")
-            if not isinstance(place, dict):
-                continue
-            for key in ("depth", "width", "height"):
-                if key in place:
-                    place[key] = float(place[key]) * factor
-            for key in ("translation_xyz", "gripper_tip_position_xyz"):
-                vector = place.get(key)
-                if isinstance(vector, list) and len(vector) == 3:
-                    place[key] = [float(component) * factor for component in vector]
-    metadata = details.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
-        details["metadata"] = metadata
-    metadata.update(
-        {
-            "depth_cutoff_factor": factor,
-            "length_scale_correction": factor,
-            "lengths_restored_to_metres": True,
-        }
-    )
-    return response
-
-
 def _normalise_anyplace_candidate(
     candidate: Any,
-    *,
-    selected_grasp: JsonDict,
-    selected_grasp_source: JsonDict,
 ) -> JsonDict | None:
     if not isinstance(candidate, Mapping):
         return None
+    if set(candidate) != {"id", "object_placement_transform"}:
+        return None
     candidate_id = _string_param(candidate.get("id"))
-    if not candidate_id or _string_param(candidate.get("source_grasp_id")) != selected_grasp["id"]:
+    if not candidate_id:
         return None
     transform_value = candidate.get("object_placement_transform")
-    place_value = candidate.get("place_grasp_pose")
-    if not isinstance(transform_value, Mapping) or not isinstance(place_value, Mapping):
+    if not isinstance(transform_value, Mapping):
         return None
     transform = _finite_matrix4(transform_value.get("transform_matrix"))
     if (
         transform is None
-        or transform_value.get("frame") != "camera"
+        or transform_value.get("frame") != "placement_camera"
         or transform_value.get("camera_frame") != "opencv"
         or transform_value.get("convention") != "p_placed = R @ p_current + t"
         or not _is_rigid_transform4(transform)
     ):
         return None
-    place = _normalise_anygrasp_candidate(place_value)
-    if (
-        place is None
-        or place.get("camera_frame") != "opencv"
-        or not _is_rotation_matrix3(place.get("rotation_matrix"))
-        or not _same_gripper_shape(place, selected_grasp)
-    ):
-        return None
-    source_tool = (
-        _string_param(selected_grasp_source.get("source_tool"))
-        or "anygrasp"
-    )
-    source_backend = (
-        _string_param(selected_grasp_source.get("source_backend"))
-        or source_tool
-    )
-    place["source_tool"] = source_tool
-    place["source_backend"] = source_backend
-    if source_backend == "graspgenx":
-        gripper_name = _string_param(selected_grasp_source.get("gripper_name"))
-        if not gripper_name or selected_grasp.get("gripper_name") != gripper_name:
-            return None
-        place["gripper_name"] = gripper_name
     return {
         "id": candidate_id,
-        "source_grasp_id": selected_grasp["id"],
         "object_placement_transform": {
-            "frame": "camera",
+            "frame": "placement_camera",
             "camera_frame": "opencv",
             "convention": "p_placed = R @ p_current + t",
             "transform_matrix": transform,
-        },
-        "place_grasp_pose": {
-            **place,
-            "source_grasp_id": selected_grasp["id"],
         },
     }
 
@@ -6066,6 +5772,78 @@ def _encode_image_path(image: str) -> tuple[str, str]:
 def _encode_file_payload(path_value: str) -> JsonDict:
     encoded, file_format = _encode_image_path(path_value)
     return {"format": file_format, "base64": encoded}
+
+
+def _normalise_anyplace_observation(value: Any, *, mask_key: str) -> JsonDict:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{mask_key} observation is required")
+    rgb = _string_param(value.get("rgb"))
+    depth = _string_param(value.get("depth"))
+    mask_value = value.get(mask_key)
+    if isinstance(mask_value, Mapping):
+        mask_ref = _string_param(mask_value.get("mask_ref"))
+        source_image = _string_param(mask_value.get("source_image"))
+    else:
+        mask_ref = _string_param(mask_value)
+        source_image = rgb
+    intrinsics = _normalise_camera_intrinsics(value.get("intrinsics"))
+    extrinsics = value.get("camera_extrinsics")
+    if not rgb or not depth or not mask_ref:
+        raise ValueError(f"{mask_key} observation paths are incomplete")
+    if not source_image or not _same_resolved_path(source_image, rgb):
+        raise ValueError(f"{mask_key} mask is not aligned with its own RGB observation")
+    if intrinsics is None or not isinstance(extrinsics, Mapping):
+        raise ValueError(f"{mask_key} observation calibration is invalid")
+    if _parse_camera_extrinsics(extrinsics) is None:
+        raise ValueError(f"{mask_key} camera extrinsics are invalid")
+    return {
+        "rgb": rgb,
+        "depth": depth,
+        "mask": mask_ref,
+        "mask_artifact": {"mask_ref": mask_ref, "source_image": source_image},
+        "intrinsics": intrinsics,
+        "camera_extrinsics": dict(extrinsics),
+        "camera_frame_id": _string_param(value.get("camera_frame_id")),
+    }
+
+
+def _encode_anyplace_observation(value: Mapping[str, Any]) -> JsonDict:
+    return {
+        "rgb": _encode_file_payload(str(value["rgb"])),
+        "depth": _encode_file_payload(str(value["depth"])),
+        "mask": _encode_file_payload(str(value["mask"])),
+        "intrinsics": dict(value["intrinsics"]),
+    }
+
+
+def _camera_frame_transform(
+    object_extrinsics: Mapping[str, Any],
+    placement_extrinsics: Mapping[str, Any],
+) -> list[list[float]]:
+    """Return T_placement_camera_object_camera in OpenCV optical axes."""
+
+    def world_cv(extrinsics: Mapping[str, Any]) -> list[list[float]]:
+        parsed = _parse_camera_extrinsics(extrinsics)
+        if parsed is None:
+            raise ValueError("camera extrinsics are invalid")
+        rotation, position, _source, default_frame = parsed
+        frame = (_camera_frame_from_extrinsics(extrinsics) or default_frame).lower()
+        if frame in {"opengl", "opengl_renderer", "renderer", "mujoco"}:
+            rotation = _mat3_mat3(rotation, [[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+        elif frame not in {"opencv", "opencv_optical", "cv"}:
+            raise ValueError(f"unsupported camera frame {frame!r}")
+        return [rotation[row] + [position[row]] for row in range(3)] + [[0, 0, 0, 1]]
+
+    def inverse_rigid(matrix: list[list[float]]) -> list[list[float]]:
+        rotation_t = [[matrix[column][row] for column in range(3)] for row in range(3)]
+        translation = [matrix[row][3] for row in range(3)]
+        inverse_translation = [-value for value in _mat3_vec3(rotation_t, translation)]
+        return [rotation_t[row] + [inverse_translation[row]] for row in range(3)] + [[0, 0, 0, 1]]
+
+    def multiply(left: list[list[float]], right: list[list[float]]) -> list[list[float]]:
+        return [[sum(left[row][k] * right[k][column] for k in range(4)) for column in range(4)] for row in range(4)]
+
+    return multiply(inverse_rigid(world_cv(placement_extrinsics)), world_cv(object_extrinsics))
 
 
 def _normalise_depth_prior_response(

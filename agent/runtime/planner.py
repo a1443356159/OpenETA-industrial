@@ -506,23 +506,22 @@ def _host_obligation_decision(
     placement_policy = tool_context.get("placement_candidate_policy")
     if (
         isinstance(placement_policy, dict)
-        and placement_policy.get("status") == "reobserve_regrasp_required"
+        and placement_policy.get("status") == "reobserve_required"
         and tools.can_execute("observe")
     ):
         return PlannerDecision(
             action_type="tool_call",
             action="observe",
-            parameters={"reason": "placement_candidates_exhausted_after_verified_source_detach"},
+            parameters={"reason": "placement_candidates_exhausted_attachment_preserved"},
             reasoning=(
-                "All retained placement candidates failed before execution and the object "
-                "was returned and detached at the source; acquire one fresh observation "
-                "before re-segmentation, re-grasp, and a new AnyPlace inference."
+                "All placement candidates failed before execution; keep the verified "
+                "attachment and acquire a fresh placement observation before rerunning AnyPlace."
             ),
             metadata={
                 "host_obligation": {
-                    "schema_version": "openeta.placement_recovery.v1",
+                    "schema_version": "openeta.placement_recovery.v2",
                     "tool": "observe",
-                    "stage": "reobserve_regrasp",
+                    "stage": "reobserve_placement",
                 }
             },
         )
@@ -1463,7 +1462,6 @@ def _host_obligation_decision(
         and placement_motion.get("stage") in {
             "attachment_lost",
             "placement_drop_detected",
-            "recovery_open_detach",
         }
         and tools.can_execute("gripper_control")
     ):
@@ -1480,7 +1478,7 @@ def _host_obligation_decision(
                     "Post-lift telemetry shows an empty closed gripper; reopen through "
                     "independent review so the ranked candidate can be rejected."
                     if placement_motion.get("stage") == "attachment_lost"
-                    else "The verified source return completed; open and require detach ACK."
+                    else "Attachment evidence is invalid; reopen before regrasping."
                 )
             ),
             metadata={
@@ -1560,8 +1558,8 @@ def _host_obligation_decision(
         action=tool_name,
         parameters=parameters,
         reasoning=(
-            "Host joined the selected receptacle mask with the frozen pre-grasp "
-            "RGB-D and targeted grasp packet; dispatch the unique AnyPlace input."
+            "Host joined the independently calibrated post-attachment object and "
+            "placement-region observations; dispatch the unique AnyPlace input."
         ),
         metadata={
             "host_obligation": {
@@ -2276,96 +2274,31 @@ def _required_skill_inspection_error(required_name: str) -> str:
 
 def _validate_anyplace_parameters(parameters: JsonDict) -> list[str]:
     errors: list[str] = []
-    for key in ("rgb", "depth", "object_mask"):
-        value = parameters.get(key)
-        if not isinstance(value, str) or not value.strip() or _looks_like_placeholder_path(value):
-            errors.append(f"anyplace requires `parameters.{key}` as a concrete local file path.")
-
-    placement_mask = parameters.get("placement_region_mask")
-    if not isinstance(placement_mask, dict):
-        errors.append(
-            "anyplace requires `parameters.placement_region_mask` as a SAM3 artifact "
-            "containing mask_ref and source_image."
-        )
-    else:
-        for key in ("mask_ref", "source_image"):
-            value = placement_mask.get(key)
-            if (
-                not isinstance(value, str)
-                or not value.strip()
-                or _looks_like_placeholder_path(value)
-            ):
-                errors.append(
-                    f"anyplace placement_region_mask requires a concrete `{key}` local path."
-                )
-
-    _validate_required_intrinsics(
-        parameters.get("intrinsics"),
-        label="anyplace `parameters.intrinsics`",
-        errors=errors,
-    )
-    selected = parameters.get("selected_grasp")
-    if not isinstance(selected, dict):
-        errors.append(
-            "anyplace requires `parameters.selected_grasp` with candidate and source objects."
-        )
-        return errors
-    candidate = selected.get("candidate")
-    if not isinstance(candidate, dict):
-        errors.append("anyplace selected_grasp requires a normalized `candidate` object.")
-    else:
-        required_candidate = (
-            "id",
-            "frame",
-            "camera_frame",
-            "score",
-            "translation_xyz",
-            "rotation_matrix",
-            "gripper_tip_position_xyz",
-            "depth",
-            "width",
-            "height",
-        )
-        missing = [key for key in required_candidate if key not in candidate]
-        if missing:
-            errors.append(
-                "anyplace selected_grasp.candidate is missing required fields: "
-                + ", ".join(missing)
-                + "."
-            )
-    source = selected.get("source")
-    if not isinstance(source, dict) or source.get("mode") != "targeted":
-        errors.append("anyplace selected_grasp.source must come from a targeted grasp tool.")
-    else:
-        source_tool = str(source.get("source_tool") or "anygrasp").strip()
-        if source_tool not in {"grasp_pose_estimate", "anygrasp", "graspgenx"}:
-            errors.append(
-                "anyplace selected_grasp.source.source_tool must be "
-                "grasp_pose_estimate, anygrasp, or graspgenx."
-            )
-        for key in ("rgb", "depth", "object_mask"):
-            value = source.get(key)
-            if (
-                not isinstance(value, str)
-                or not value.strip()
-                or _looks_like_placeholder_path(value)
-            ):
-                errors.append(
-                    f"anyplace selected_grasp.source requires a concrete `{key}` local path."
-                )
+    for packet_name, mask_name in (
+        ("object_observation", "object_mask"),
+        ("placement_observation", "placement_region_mask"),
+    ):
+        packet = parameters.get(packet_name)
+        if not isinstance(packet, dict):
+            errors.append(f"anyplace requires `parameters.{packet_name}`.")
+            continue
+        for key in ("rgb", "depth"):
+            value = packet.get(key)
+            if not isinstance(value, str) or not value.strip() or _looks_like_placeholder_path(value):
+                errors.append(f"anyplace {packet_name}.{key} must be a concrete local path.")
+        mask = packet.get(mask_name)
+        if not isinstance(mask, dict) or any(
+            not isinstance(mask.get(key), str) or not str(mask.get(key)).strip()
+            for key in ("mask_ref", "source_image")
+        ):
+            errors.append(f"anyplace {packet_name}.{mask_name} must be a SAM3 mask artifact.")
         _validate_required_intrinsics(
-            source.get("intrinsics"),
-            label="anyplace `parameters.selected_grasp.source.intrinsics`",
+            packet.get("intrinsics"),
+            label=f"anyplace `{packet_name}.intrinsics`",
             errors=errors,
         )
-        source_backend = str(source.get("source_backend") or source_tool).strip()
-        if source_backend == "graspgenx":
-            gripper_name = source.get("gripper_name")
-            if not isinstance(gripper_name, str) or not gripper_name.strip():
-                errors.append("anyplace GraspGenX source requires a concrete `gripper_name`.")
-            up = source.get("up_direction_camera")
-            if not isinstance(up, list) or len(up) != 3:
-                errors.append("anyplace GraspGenX source requires `up_direction_camera`.")
+        if not isinstance(packet.get("camera_extrinsics"), dict):
+            errors.append(f"anyplace {packet_name}.camera_extrinsics is required.")
     return errors
 
 
@@ -2905,7 +2838,7 @@ def _validate_anygrasp_candidate_policy(
     if target_tool == "camera_pose_to_world" and _planner_is_anyplace_pose(decision.parameters):
         return [
             "Raw AnyPlace poses are not valid EEF targets; select an id with "
-            "compile_grasp_seed(purpose=placement)."
+            "compile_placement_seed."
         ]
     if (
         source_tool in {"grasp_pose_estimate", "anygrasp"}
@@ -3198,19 +3131,17 @@ def _validate_pick_place_anyplace_obligation(
     )
     if decision.action == "anyplace" and not attachment_passed:
         return [
-            "AnyPlace placement inference starts only after the source grasp passes "
-            "attach and lift verification. Preserve the frozen pre-grasp RGB-D until then."
+            "AnyPlace placement inference starts only after attach and lift verification. "
+            "Acquire independent placement object/region observations after attachment."
         ]
     if decision.action == "camera_pose_to_world" and _planner_is_anyplace_pose(
         decision.parameters
     ):
         return [
             "Raw AnyPlace poses cannot be transformed or executed directly. Select a "
-            "retained id with compile_grasp_seed(purpose=placement)."
+            "retained id with compile_placement_seed."
         ]
-    if decision.action == "compile_grasp_seed" and str(
-        decision.parameters.get("purpose") or "grasp"
-    ) == "placement":
+    if decision.action == "compile_placement_seed":
         if not isinstance(placement_policy, dict):
             return ["No retained AnyPlace candidate set is available for placement compilation."]
         allowed = list(placement_policy.get("candidate_queue") or [])
@@ -3220,26 +3151,23 @@ def _validate_pick_place_anyplace_obligation(
             if isinstance(item, dict)
         }
         candidate_id = str(decision.parameters.get("placement_candidate_id") or "")
-        if set(decision.parameters) != {"purpose", "placement_candidate_id"}:
+        if set(decision.parameters) != {"placement_candidate_id"}:
             return [
-                "For purpose=placement the main VLM selects only placement_candidate_id; "
-                "the host owns pose, source grasp, extrinsics, calibration, and scene state."
+                "The main VLM selects only placement_candidate_id; the host owns the "
+                "object goal, attachment transform, calibration, and scene state."
             ]
         if candidate_id not in allowed or candidate_id in rejected:
             return ["Select one non-rejected id from the retained AnyPlace candidate queue."]
         return []
     policy = tool_context.get("grasp_candidate_policy")
-    retained = tool_context.get("retained_targeted_grasp")
-    retained_source = retained.get("source") if isinstance(retained, dict) else None
     placement = tool_context.get("placement_obligation")
     required_placement = (
         placement.get("required_parameters") if isinstance(placement, dict) else None
     )
     if decision.action == "anyplace" and not isinstance(required_placement, dict):
         return [
-            "AnyPlace requires a placement_obligation built from the frozen pre-grasp "
-            "RGB-D. Segment the receptacle on retained_targeted_grasp.source.rgb, "
-            "then copy the host-joined parameters exactly."
+            "AnyPlace requires independent post-attachment object and placement-region "
+            "segmentations before the host can build placement_obligation."
         ]
     if (
         decision.action == "anyplace"
@@ -3248,22 +3176,8 @@ def _validate_pick_place_anyplace_obligation(
     ):
         return [
             "AnyPlace must exactly copy placement_obligation.required_parameters; "
-            "the host has already joined the selected receptacle mask with the frozen "
-            "targeted grasp and aligned pre-grasp RGB-D packet."
+            "the host has already joined the two independently calibrated observations."
         ]
-    if (
-        decision.action == "sam3"
-        and isinstance(policy, dict)
-        and isinstance(retained_source, dict)
-        and _looks_like_placement_region_prompt(decision.parameters.get("prompt"))
-    ):
-        required_image = retained_source.get("rgb")
-        if not _same_local_artifact(decision.parameters.get("image"), required_image):
-            return [
-                "Placement-region SAM3 must use retained_targeted_grasp.source.rgb or "
-                "a byte-identical materialization from the same scene epoch so its mask "
-                "stays aligned with the targeted grasp-estimation RGB-D packet."
-            ]
     if (
         decision.action == "sam3"
         and not isinstance(policy, dict)
@@ -3276,42 +3190,6 @@ def _validate_pick_place_anyplace_obligation(
             "grasp_pose_estimate "
             "with the selected object mask and its aligned RGBD observation first."
         ]
-    if decision.action == "anyplace" and isinstance(retained, dict):
-        source = retained.get("source")
-        candidate = retained.get("candidate")
-        parameters = decision.parameters
-        selected = parameters.get("selected_grasp")
-        mismatches: list[str] = []
-        if not isinstance(source, dict) or not isinstance(candidate, dict):
-            return [
-                "retained_targeted_grasp is incomplete; rerun targeted grasp estimation before "
-                "calling AnyPlace."
-            ]
-        for parameter_key, source_key in (
-            ("rgb", "rgb"),
-            ("depth", "depth"),
-            ("object_mask", "object_mask"),
-            ("intrinsics", "intrinsics"),
-        ):
-            if parameters.get(parameter_key) != source.get(source_key):
-                mismatches.append(parameter_key)
-        if not isinstance(selected, dict) or selected.get("candidate") != candidate:
-            mismatches.append("selected_grasp.candidate")
-        if not isinstance(selected, dict) or selected.get("source") != source:
-            mismatches.append("selected_grasp.source")
-        placement_mask = parameters.get("placement_region_mask")
-        if not isinstance(placement_mask, dict) or not _same_local_artifact(
-            placement_mask.get("source_image"), source.get("rgb")
-        ):
-            mismatches.append("placement_region_mask.source_image")
-        if mismatches:
-            return [
-                "AnyPlace inputs must copy retained_targeted_grasp without editing. "
-                "Mismatched fields: "
-                + ", ".join(mismatches)
-                + ". Segment the placement region on retained_targeted_grasp.source.rgb "
-                "and copy candidate/source/path/intrinsics fields exactly."
-            ]
     return []
 
 
@@ -3416,27 +3294,9 @@ def _canonicalize_host_parameters(
         return []
     if not _looks_like_placement_region_prompt(decision.parameters.get("prompt")):
         return []
-    if "positive_points" in decision.parameters or "roi_bbox_xyxy" in decision.parameters:
-        return []
-    policy = tool_context.get("grasp_candidate_policy")
-    retained = tool_context.get("retained_targeted_grasp")
-    source = retained.get("source") if isinstance(retained, dict) else None
-    required_image = source.get("rgb") if isinstance(source, dict) else None
-    supplied_image = decision.parameters.get("image")
-    if not isinstance(policy, dict) or not isinstance(required_image, str):
-        return []
-    if _same_local_artifact(supplied_image, required_image):
-        return []
-    decision.parameters = {**decision.parameters, "image": required_image}
-    return [
-        {
-            "field": "image",
-            "tool": "sam3",
-            "reason": "freeze_placement_mask_to_targeted_grasp_rgb",
-            "supplied": supplied_image,
-            "canonical": required_image,
-        }
-    ]
+    # Placement perception is intentionally independent from grasp perception.
+    # Never rewrite a placement SAM3 call onto the pre-grasp RGB-D packet.
+    return []
 
 
 def _validate_closed_gripper_recovery(
@@ -3829,8 +3689,10 @@ def _build_tool_context_payload(
             ),
         ),
         "placement_obligation": _placement_obligation(
-            selected=memory_context.get("selected_sam3_detection"),
-            retained=memory_context.get("retained_targeted_grasp"),
+            observation=observation,
+            object_detection=memory_context.get("placement_object_detection"),
+            region_detection=memory_context.get("placement_region_detection"),
+            camera_artifacts=camera_artifacts,
             memory_context=memory_context,
         ),
         "placement_transform_obligation": _placement_transform_obligation(
@@ -4916,13 +4778,15 @@ def _target_depth_cutoff_factor(
 
 def _placement_obligation(
     *,
-    selected: object,
-    retained: object,
+    observation: EnvObservation,
+    object_detection: object,
+    region_detection: object,
+    camera_artifacts: list[JsonDict],
     memory_context: JsonDict,
 ) -> JsonDict | None:
-    """Build one complete AnyPlace request from the frozen pre-grasp packet."""
+    """Build AnyPlace input from independent post-attachment observations."""
 
-    if not isinstance(selected, dict) or not isinstance(retained, dict):
+    if not isinstance(object_detection, dict) or not isinstance(region_detection, dict):
         return None
     execution = memory_context.get("grasp_execution")
     attachment = memory_context.get("attachment_gate")
@@ -4936,28 +4800,46 @@ def _placement_obligation(
         or attachment.get("verdict") != "PASS"
     ):
         return None
-    source = retained.get("source")
-    candidate = retained.get("candidate")
-    mask_ref = selected.get("mask_ref")
-    source_image = selected.get("source_image")
-    if (
-        not isinstance(source, dict)
-        or not isinstance(candidate, dict)
-        or not isinstance(mask_ref, str)
-        or not isinstance(source_image, str)
-    ):
-        return None
-    if any(candidate.get(key) is None for key in ("depth", "width", "height")):
-        return None
-    if str(candidate.get("id") or "") != str(execution.get("candidate_id") or ""):
-        return None
-    source_rgb = source.get("rgb")
-    target_mask = source.get("object_mask")
-    if (
-        not isinstance(source_rgb, str)
-        or not _same_local_artifact(source_image, source_rgb)
-        or _same_local_artifact(mask_ref, target_mask)
-    ):
+    def packet(detection: JsonDict, mask_name: str) -> JsonDict | None:
+        source_image = detection.get("source_image")
+        mask_ref = detection.get("mask_ref")
+        if not isinstance(source_image, str) or not isinstance(mask_ref, str):
+            return None
+        rgb_artifact = next(
+            (
+                artifact
+                for artifact in camera_artifacts
+                if artifact.get("kind") == "rgb"
+                and _same_local_artifact(artifact.get("path"), source_image)
+            ),
+            None,
+        )
+        if not isinstance(rgb_artifact, dict):
+            return None
+        frame_id = str(rgb_artifact.get("frame_id") or detection.get("source_frame_id") or "")
+        depth_artifact = next(
+            (
+                artifact
+                for artifact in camera_artifacts
+                if artifact.get("kind") == "depth" and artifact.get("frame_id") == frame_id
+            ),
+            None,
+        )
+        camera = next((item for item in observation.cameras if item.frame_id == frame_id), None)
+        if not isinstance(depth_artifact, dict) or camera is None:
+            return None
+        return {
+            "rgb": source_image,
+            "depth": depth_artifact["path"],
+            mask_name: {"mask_ref": mask_ref, "source_image": source_image},
+            "intrinsics": dict(camera.intrinsics),
+            "camera_extrinsics": dict(camera.extrinsics),
+            "camera_frame_id": frame_id,
+        }
+
+    object_packet = packet(object_detection, "object_mask")
+    placement_packet = packet(region_detection, "placement_region_mask")
+    if not isinstance(object_packet, dict) or not isinstance(placement_packet, dict):
         return None
     working = memory_context.get("working_memory")
     artifacts = working.get("artifacts") if isinstance(working, dict) else None
@@ -4973,18 +4855,8 @@ def _placement_obligation(
         return None
 
     required = {
-        "rgb": source.get("rgb"),
-        "depth": source.get("depth"),
-        "object_mask": source.get("object_mask"),
-        "placement_region_mask": {
-            "mask_ref": mask_ref,
-            "source_image": source_rgb,
-        },
-        "intrinsics": source.get("intrinsics"),
-        "selected_grasp": {
-            "candidate": candidate,
-            "source": source,
-        },
+        "object_observation": object_packet,
+        "placement_observation": placement_packet,
         "scene_revision": (
             attachment.get("planning_scene_revision")
             if isinstance(attachment.get("planning_scene_revision"), int)
@@ -4992,17 +4864,17 @@ def _placement_obligation(
         ),
     }
     return {
-        "schema_version": "openeta.placement_obligation.v1",
+        "schema_version": "openeta.placement_obligation.v2",
         "required_tool": "anyplace",
         "required_parameters": required,
-        "sam3_result_id": selected.get("result_id"),
-        "detection_id": selected.get("id"),
+        "object_detection_id": object_detection.get("id"),
+        "placement_region_detection_id": region_detection.get("id"),
         "planning_scene_revision": (
             attachment.get("planning_scene_revision")
             if isinstance(attachment.get("planning_scene_revision"), int)
             else int(memory_context.get("scene_epoch") or 0)
         ),
-        "source_rematerialized": source_image != source_rgb,
+        "independent_from_grasp": True,
     }
 
 
@@ -5057,8 +4929,6 @@ def _placement_transform_obligation(
     policy = memory.placement_candidate_policy()
     if not isinstance(policy, dict) or policy.get("status") != "selection_required":
         return None
-    if str(policy.get("source_grasp_id") or "") != str(execution.get("candidate_id") or ""):
-        return None
     rejected = {
         str(item.get("candidate_id") or "")
         for item in policy.get("rejected_candidates", [])
@@ -5072,18 +4942,17 @@ def _placement_transform_obligation(
     if not remaining:
         return None
     return {
-        "schema_version": "openeta.placement_selection_obligation.v1",
+        "schema_version": "openeta.placement_selection_obligation.v2",
         "status": "selection_required",
-        "required_tool": "compile_grasp_seed",
+        "required_tool": "compile_placement_seed",
         "allowed_parameters": {
-            "purpose": "placement",
             "placement_candidate_id": remaining,
         },
-        "source_grasp_id": policy.get("source_grasp_id"),
+        "attachment_transform_sha256": policy.get("attachment_transform_sha256"),
         "selection_source": "main_agent_vlm",
         "rule": (
             "The main VLM must choose one retained candidate id. The host binds pose, "
-            "source grasp, original camera extrinsics, scene revision, and calibration."
+            "world object goal, measured attachment transform, scene revision, and calibration."
         ),
     }
 
@@ -5114,45 +4983,6 @@ def _placement_motion_guidance(
     except (TypeError, ValueError):
         parsed_openness = None
     policy = memory.placement_candidate_policy()
-    if isinstance(policy, dict) and policy.get("status") == "exhausted_return_required":
-        recovery = policy.get("recovery")
-        recovery = recovery if isinstance(recovery, dict) else {}
-        recovery_stage = str(recovery.get("stage") or "")
-        if recovery_stage == "open_detach":
-            return {
-                "schema_version": "openeta.placement_motion_guidance.v1",
-                "status": "required",
-                "stage": "recovery_open_detach",
-                "required_action": {"name": "gripper_control", "parameters": {"position": 1}},
-                "candidate_id": execution.get("candidate_id"),
-                "rule": "Safe source return completed; open and require Gazebo detach ACK.",
-            }
-        pose_key = {
-            "return_source_hover": "source_hover_pose",
-            "return_source_capture": "source_capture_pose",
-        }.get(recovery_stage)
-        pose = recovery.get(pose_key) if pose_key else None
-        if not isinstance(pose, dict):
-            return None
-        recovery_pose = dict(pose)
-        recovery_pose["placement_recovery_stage"] = recovery_stage
-        recovery_pose["scene_revision"] = policy.get("scene_revision")
-        return {
-            "schema_version": "openeta.placement_motion_guidance.v1",
-            "status": "required",
-            "stage": recovery_stage,
-            "candidate_id": execution.get("candidate_id"),
-            "safe_hover_pose": recovery_pose,
-            "required_parameters": {
-                "target_pose": recovery_pose,
-                "tolerance": 0.002,
-                "ori_tolerance": 0.05,
-                "velocity_scaling": 0.1,
-                "acceleration_scaling": 0.1,
-                "enable_collision_check": True,
-            },
-            "rule": "Return only through the source grasp's previously verified geometry.",
-        }
     compiled = policy.get("compiled_placement") if isinstance(policy, dict) else None
     if not isinstance(compiled, dict) or policy.get("status") != "active":
         return None
@@ -5278,7 +5108,7 @@ def _placement_release_obligation(
             current_xyz[1],
             max(current_xyz[2], release_xyz[2]) + _PLACEMENT_POST_RELEASE_RETREAT_M,
         ],
-        "source_grasp_id": release.get("candidate_id"),
+        "placement_candidate_id": release.get("candidate_id"),
         "placement_pose_id": release.get("placement_pose_id"),
         "placement_stage": "retreat",
     }

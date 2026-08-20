@@ -30,6 +30,8 @@
         <visual name="distractor_visual"><geometry><cylinder><radius>0.025</radius><length>0.08</length></cylinder></geometry><material><ambient>0.08 0.20 0.75 1</ambient><diffuse>0.10 0.28 0.95 1</diffuse></material></visual>
       </link>
     </model>
-    <model name="openeta_top_camera"><static>true</static><pose>0 0 1.30 0 1.5707963 0</pose><link name="top_camera_link"><sensor name="openeta_rgbd" type="rgbd_camera"><camera><horizontal_fov>1.047</horizontal_fov><image><width>640</width><height>480</height><format>R8G8B8</format></image><clip><near>0.1</near><far>10.0</far></clip></camera><always_on>true</always_on><update_rate>15</update_rate><topic>openeta_rgbd</topic><gz_frame_id>top_camera_optical_frame</gz_frame_id></sensor></link></model>
+    <!-- Center the independent placement view over the work surface so the
+         attached object and the complete placement marker remain observable. -->
+    <model name="openeta_top_camera"><static>true</static><pose>0.35 0 1.30 0 1.5707963 0</pose><link name="top_camera_link"><sensor name="openeta_rgbd" type="rgbd_camera"><camera><horizontal_fov>1.047</horizontal_fov><image><width>640</width><height>480</height><format>R8G8B8</format></image><clip><near>0.1</near><far>10.0</far></clip></camera><always_on>true</always_on><update_rate>15</update_rate><topic>openeta_rgbd</topic><gz_frame_id>top_camera_optical_frame</gz_frame_id></sensor></link></model>
   </world>
 </sdf>

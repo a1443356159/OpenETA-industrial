@@ -13,7 +13,7 @@ allowed_tools:
   - select_sam3_detection
   - reject_sam3_detections
   - anyplace
-  - compile_grasp_seed
+  - compile_placement_seed
   - move_to
   - gripper_control
 ---
@@ -25,33 +25,24 @@ before choosing the next tool call.
 
 ## Recommended Tool Sequence
 
-1. For a combined pick-and-place task, freeze one aligned pre-grasp RGB-D
-   observation, but do not infer or plan placement before the grasp succeeds.
-   Use the frozen packet for the object and placement-region evidence so it
-   remains valid after the object has moved.
-2. Retain the targeted `grasp_pose_estimate` result used for pickup, including its selected
-   candidate and `details.outputs.source`. On the same original RGB image, call
-   `sam3` for the basket, bin, or other placement region and resolve its
-   selection obligation with `select_sam3_detection`. Do not segment or select
-   the placement region before targeted grasp estimation succeeds: the runtime has one
-   active SAM3 selection slot, and doing so would overwrite the selected object
-   mask. After object selection, use the RGB, depth, intrinsics, and mask from
-   that aligned observation directly; do not call `observe` merely to refresh
-   unchanged artifact paths.
+1. Complete object segmentation, grasp estimation, and pickup from a grasp
+   observation. Placement perception is an independent stage and must not be
+   bound to this frozen RGB-D packet.
 3. Complete the pickup using the selected grasp. After closing the gripper,
    require the native attach acknowledgement, fixed lift, and attachment PASS.
    AnyPlace, candidate selection, placement compilation, and transport planning
    remain blocked until this gate completes.
-4. Call `anyplace` only now, using the exact host-provided
-   `placement_obligation.required_parameters`. These join the original RGB,
-   depth, intrinsics, object mask, placement-region artifact, and
-   `selected_grasp={candidate, source}` from the successful grasp.
-   Never run grasp estimation on the receptacle as a substitute for AnyPlace.
+4. After attachment PASS, observe the placement scene independently. Segment
+   the held object and the target region from placement observations and call
+   `anyplace` with the exact host-provided object/placement observation packets.
+   AnyPlace predicts only object goal poses; it never accepts a selected grasp
+   or produces an EEF pose. Never run grasp estimation on the receptacle as a
+   substitute for AnyPlace.
 5. Select one retained AnyPlace candidate id using its projection, region
-   clearance, score, and candidate image. Call `compile_grasp_seed` with only
-   `purpose=placement` and that `placement_candidate_id`. The host binds the
-   full pose, source grasp, original camera extrinsics, scene revision, and
-   calibrated grasp-to-EEF transform. Never send a raw AnyPlace pose to
+   clearance, score, and candidate image. Call `compile_placement_seed` with
+   only that `placement_candidate_id`. The host binds the full object goal,
+   measured attachment transform, current start state, camera calibration, and
+   planning-scene revision. Never send a raw AnyPlace pose to
    `camera_pose_to_world` or `move_to`.
 6. Move directly to the compiled pre-place hover, then descend to the compiled
    release pose. Preserve its full wrist rotation and use the placement motion
@@ -74,9 +65,9 @@ before choosing the next tool call.
 
 - If the target receptacle or surface is ambiguous, call `ask_human` before
   moving.
-- If an already-held object has no retained targeted grasp-estimation provenance or
-  pre-grasp aligned placement mask, do not fabricate AnyPlace inputs. Ask for a
-  new supported plan or use an explicit task-provided release pose.
+- If placement perception is stale or all placement candidates fail before
+  execution, keep the verified attachment and reobserve/resegment/rerun
+  AnyPlace. Regrasp only if attachment evidence is lost.
 - If the target is occluded, observe from another camera or request a broader
   scene query before choosing a release pose.
 - If MoveIt rejects a plan before execution starts, reject only that candidate

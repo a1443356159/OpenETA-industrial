@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import time
@@ -47,6 +48,8 @@ GRIPPER_COMMAND_STATE_KEY = "gripper_command_state"
 ATTACHMENT_GATE_KEY = "attachment_gate"
 PLACEMENT_RELEASE_KEY = "placement_release"
 PLACEMENT_CANDIDATE_POLICY_KEY = "placement_candidate_policy"
+PLACEMENT_OBJECT_DETECTION_KEY = "placement_object_detection"
+PLACEMENT_REGION_DETECTION_KEY = "placement_region_detection"
 COMPLETED_PLACEMENT_SUBGOALS_KEY = "completed_placement_subgoals"
 MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
@@ -944,6 +947,12 @@ class AgentMemory:
     def placement_candidate_policy(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(PLACEMENT_CANDIDATE_POLICY_KEY))
 
+    def placement_object_detection(self) -> JsonDict | None:
+        return _memory_fact_value(self.facts.get(PLACEMENT_OBJECT_DETECTION_KEY))
+
+    def placement_region_detection(self) -> JsonDict | None:
+        return _memory_fact_value(self.facts.get(PLACEMENT_REGION_DETECTION_KEY))
+
     def motion_reconciliation(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(MOTION_RECONCILIATION_KEY))
 
@@ -1342,6 +1351,20 @@ class AgentMemory:
             selected,
             source="select_sam3_detection",
         )
+        attachment = self.attachment_gate()
+        if (
+            isinstance(attachment, dict)
+            and attachment.get("status") == "resolved"
+            and str(attachment.get("verdict") or "").upper() == "PASS"
+        ):
+            placement_key = (
+                PLACEMENT_REGION_DETECTION_KEY
+                if _placement_region_prompt(selected.get("target_prompt"))
+                else PLACEMENT_OBJECT_DETECTION_KEY
+            )
+            self.facts[placement_key] = _memory_fact_entry(
+                selected, source="select_sam3_detection"
+            )
         self.facts.pop(TARGET_LOCALIZATION_BUDGET_KEY, None)
         self.record(
             "sam3_detection_selected",
@@ -3231,12 +3254,15 @@ class AgentMemory:
         return True
 
     def _capture_compiled_grasp(self, action: EnvAction) -> bool:
+        placement_call = _successful_tool_call(action, "compile_placement_seed")
+        if placement_call is not None:
+            outputs = _tool_call_outputs(placement_call)
+            if outputs.get("schema_version") == "openeta.compiled_placement_seed.v2":
+                return self._capture_compiled_placement(outputs)
         call = _successful_tool_call(action, "compile_grasp_seed")
         if call is None:
             return False
         outputs = _tool_call_outputs(call)
-        if outputs.get("schema_version") == "openeta.compiled_placement_seed.v1":
-            return self._capture_compiled_placement(outputs)
         if outputs.get("schema_version") != "openeta.compiled_grasp_seed.v1":
             return False
         policy = self.anygrasp_candidate_policy() or {}
@@ -3359,14 +3385,10 @@ class AgentMemory:
         candidates = outputs.get("placement_candidates")
         if not isinstance(candidates, list) or not candidates:
             if isinstance(outputs.get("qualification_evidence"), dict):
-                execution = self.grasp_execution() or {}
-                compiled_grasp = execution.get("compiled_grasp")
-                compiled_grasp = compiled_grasp if isinstance(compiled_grasp, dict) else {}
                 policy = {
-                    "schema_version": "openeta.placement_candidate_policy.v1",
-                    "status": "exhausted_return_required",
+                    "schema_version": "openeta.placement_candidate_policy.v2",
+                    "status": "reobserve_required",
                     "candidate_queue": [],
-                    "source_grasp_id": str(outputs.get("selected_grasp_id") or ""),
                     "active_candidate_id": None,
                     "rejected_candidates": list(
                         outputs.get("qualification_evidence", {}).get("results", [])
@@ -3376,12 +3398,11 @@ class AgentMemory:
                     "planning_scene_revision": outputs.get("scene_revision"),
                     "scene_epoch": self.scene_epoch(),
                     "selection_source": None,
-                    "stop_reason": "no_moveit_qualified_candidates",
+                    "stop_reason": "no_moveit_qualified_placement_candidates",
                     "recovery": {
-                        "stage": "return_source_hover",
-                        "source_hover_pose": compiled_grasp.get("hover_pose"),
-                        "source_capture_pose": compiled_grasp.get("contact_pose"),
-                        "then": "open_detach_reobserve_regrasp_and_rerun_anyplace",
+                        "stage": "observe_placement",
+                        "then": "resegment_placement_region_and_rerun_anyplace",
+                        "preserve_attachment": True,
                     },
                 }
                 self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
@@ -3390,24 +3411,27 @@ class AgentMemory:
                 self.record("placement_candidates_moveit_rejected", dict(policy))
                 return True
             return False
-        source_grasp_id = str(outputs.get("selected_grasp_id") or "")
         queue = [
             str(candidate.get("id") or "")
             for candidate in candidates
             if isinstance(candidate, dict) and str(candidate.get("id") or "")
         ]
-        if not source_grasp_id or not queue:
+        if not queue:
             return False
         attachment = self.attachment_gate()
         if (
             not isinstance(attachment, dict)
             or attachment.get("status") != "resolved"
             or str(attachment.get("verdict") or "").upper() != "PASS"
-            or (
-                str(attachment.get("candidate_id") or "")
-                and str(attachment.get("candidate_id") or "") != source_grasp_id
-            )
         ):
+            return False
+        full_proof = attachment.get("full_lift_proof")
+        attachment_transform = (
+            full_proof.get("attachment_transform")
+            if isinstance(full_proof, dict)
+            else None
+        )
+        if not _valid_attachment_transform(attachment_transform):
             return False
         native_revision = (
             attachment.get("evidence_source")
@@ -3436,10 +3460,9 @@ class AgentMemory:
         ):
             return False
         policy = {
-            "schema_version": "openeta.placement_candidate_policy.v1",
+            "schema_version": "openeta.placement_candidate_policy.v2",
             "status": "selection_required",
             "candidate_queue": queue,
-            "source_grasp_id": source_grasp_id,
             "active_candidate_id": None,
             "rejected_candidates": [],
             "failed_request_fingerprints": [],
@@ -3450,6 +3473,11 @@ class AgentMemory:
             ),
             "scene_epoch": self.scene_epoch(),
             "selection_source": None,
+            "attachment_transform_sha256": hashlib.sha256(
+                json.dumps(
+                    attachment_transform, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest(),
         }
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
             policy, source="anyplace"
@@ -3471,7 +3499,6 @@ class AgentMemory:
             policy.get("status") != "selection_required"
             or candidate_id not in policy.get("candidate_queue", [])
             or candidate_id in rejected
-            or str(outputs.get("source_grasp_id") or "") != str(policy.get("source_grasp_id") or "")
             or _optional_int(outputs.get("scene_epoch"), default=-1) != self.scene_epoch()
             or _optional_int(outputs.get("scene_revision"), default=-1)
             != _optional_int(policy.get("scene_revision"), default=-2)
@@ -3486,13 +3513,13 @@ class AgentMemory:
             }
         )
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-            policy, source="compile_grasp_seed"
+            policy, source="compile_placement_seed"
         )
         self.record(
             "placement_candidate_selected",
             {
                 "placement_candidate_id": candidate_id,
-                "source_grasp_id": outputs.get("source_grasp_id"),
+                "attachment_transform_sha256": outputs.get("attachment_transform_sha256"),
                 "scene_revision": policy.get("scene_revision"),
                 "selection_source": "main_agent_vlm",
             },
@@ -3626,23 +3653,14 @@ class AgentMemory:
                 "compiled_placement": None,
                 "rejected_candidates": rejected,
                 "failed_request_fingerprints": failed,
-                "status": "selection_required" if remaining else "exhausted_return_required",
+                "status": "selection_required" if remaining else "reobserve_required",
             }
         )
         if not remaining:
-            execution = self.grasp_execution() or {}
-            compiled_grasp = execution.get("compiled_grasp")
-            source_hover = (
-                compiled_grasp.get("hover_pose") if isinstance(compiled_grasp, dict) else None
-            )
-            source_capture = (
-                compiled_grasp.get("contact_pose") if isinstance(compiled_grasp, dict) else None
-            )
             policy["recovery"] = {
-                "stage": "return_source_hover",
-                "source_hover_pose": source_hover,
-                "source_capture_pose": source_capture,
-                "then": "open_detach_reobserve_regrasp_and_rerun_anyplace",
+                "stage": "observe_placement",
+                "then": "resegment_placement_region_and_rerun_anyplace",
+                "preserve_attachment": True,
             }
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
             policy, source="placement_candidate_rejected"
@@ -3657,180 +3675,33 @@ class AgentMemory:
         recovery = policy.get("recovery")
         if not isinstance(recovery, dict):
             return False
-        if policy.get("status") == "reobserve_regrasp_required":
+        if policy.get("status") == "reobserve_required":
             if _successful_tool_call(action, "observe") is None:
                 return False
+            # Placement recovery is independent from grasp recovery. Preserve
+            # the verified attachment and completed grasp execution; invalidate
+            # only placement perception/candidates so AnyPlace can be rerun.
             for key in (
                 PENDING_SAM3_SELECTION_KEY,
                 SELECTED_SAM3_DETECTION_KEY,
-                PENDING_REFERENCE_LOCALIZATION_KEY,
-                REFERENCE_LOCALIZATION_FAILURE_KEY,
-                TARGET_ASSET_REFERENCE_KEY,
                 SAM3_NO_DETECTION_KEY,
-                GRASP_CANDIDATE_POLICY_KEY,
-                LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
-                GRASP_LIFT_PROBE_KEY,
-                ARTICULATED_ATTACHMENT_PROBE_KEY,
-                GRASP_EXECUTION_KEY,
-                GRASP_RECOVERY_KEY,
-                GRASP_ESTIMATION_RECOVERY_KEY,
-                ATTACHMENT_GATE_KEY,
+                PLACEMENT_CANDIDATE_POLICY_KEY,
                 PLACEMENT_RELEASE_KEY,
+                PLACEMENT_OBJECT_DETECTION_KEY,
+                PLACEMENT_REGION_DETECTION_KEY,
             ):
                 self.facts.pop(key, None)
-            for key in (
-                "anygrasp_grasp_candidates_latest",
-                "grasp_pose_estimate_grasp_candidates_latest",
-                "graspgenx_grasp_candidates_latest",
-                "contact_graspnet_grasp_candidates_latest",
-                "anyplace_placement_candidates_latest",
-                "camera_pose_to_world_world_pose_latest",
-            ):
-                self.artifacts.pop(key, None)
-            recovery.update(
-                {
-                    "stage": "regrasp",
-                    "fresh_observation_scene_epoch": self.scene_epoch(),
-                    "fresh_observation_at_s": time.time(),
-                }
-            )
-            policy.update(
-                {
-                    "status": "regrasp_required",
-                    "active_candidate_id": None,
-                    "compiled_placement": None,
-                    "recovery": recovery,
-                }
-            )
-            self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                policy, source="placement_exhaustion_reobserve"
-            )
+            self.artifacts.pop("anyplace_placement_candidates_latest", None)
             self.record(
-                "placement_recovery_reobserve_completed",
+                "placement_reobserve_completed",
                 {
                     "scene_epoch": self.scene_epoch(),
-                    "next_stage": "regrasp_and_rerun_anyplace",
+                    "attachment_preserved": True,
+                    "next_stage": "segment_placement_region_and_rerun_anyplace",
                 },
             )
             return True
-        if policy.get("status") != "exhausted_return_required":
-            return False
-        stage = str(recovery.get("stage") or "")
-        if stage in {"return_source_hover", "return_source_capture"}:
-            call = _tool_call(action, "move_to")
-            if not isinstance(call, dict):
-                return False
-            parameters = call.get("parameters")
-            if not isinstance(parameters, dict):
-                command = action.command if isinstance(action.command, dict) else {}
-                request = command.get("request")
-                parameters = request.get("parameters") if isinstance(request, dict) else None
-            target = parameters.get("target_pose") if isinstance(parameters, dict) else None
-            if not isinstance(target, dict) or target.get("placement_recovery_stage") != stage:
-                return False
-            successful = _successful_tool_call(action, "move_to")
-            if successful is None:
-                policy.update(
-                    {
-                        "status": "stopped_requires_human",
-                        "stop_reason": "source_return_motion_failed_or_unknown",
-                    }
-                )
-                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                    policy, source="placement_source_return_stopped"
-                )
-                self.record(
-                    "placement_recovery_stopped",
-                    {"stage": stage, "reason": policy["stop_reason"]},
-                )
-                return True
-            receipt = _environment_receipt(successful)
-            expected_revision = _optional_int(
-                policy.get("scene_revision"), default=-1
-            )
-            if policy.get("revision_provenance") == "native_attachment_gate" and (
-                _optional_int(target.get("scene_revision"), default=-2)
-                != expected_revision
-                or _optional_int(
-                    receipt.get("planning_scene_revision"), default=-3
-                )
-                != expected_revision
-            ):
-                policy.update(
-                    {
-                        "status": "stopped_requires_human",
-                        "stop_reason": "source_return_scene_revision_mismatch",
-                    }
-                )
-                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                    policy, source="placement_source_return_revision_stopped"
-                )
-                return True
-            recovery["stage"] = (
-                "return_source_capture" if stage == "return_source_hover" else "open_detach"
-            )
-        elif stage == "open_detach":
-            call = _tool_call(action, "gripper_control")
-            if not isinstance(call, dict):
-                return False
-            if _successful_tool_call(action, "gripper_control") is None:
-                policy.update(
-                    {
-                        "status": "stopped_requires_human",
-                        "stop_reason": "source_detach_failed_or_unknown",
-                    }
-                )
-                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                    policy, source="placement_source_detach_stopped"
-                )
-                self.record(
-                    "placement_recovery_stopped",
-                    {"stage": stage, "reason": policy["stop_reason"]},
-                )
-                return True
-            result = call.get("result")
-            details = result.get("details") if isinstance(result, dict) else None
-            details = details if isinstance(details, dict) else {}
-            receipt = details.get("environment_receipt")
-            if not isinstance(receipt, dict):
-                outputs = details.get("outputs")
-                receipt = outputs.get("response") if isinstance(outputs, dict) else None
-            if (
-                not isinstance(receipt, dict)
-                or not isinstance(receipt.get("detachable_joint"), dict)
-                or receipt["detachable_joint"].get("state") != "detached"
-                or not isinstance(receipt.get("planning_scene_revision"), int)
-                or (
-                    policy.get("revision_provenance")
-                    == "native_attachment_gate"
-                    and receipt.get("planning_scene_revision")
-                    != _optional_int(policy.get("scene_revision"), default=-2) + 1
-                )
-            ):
-                policy.update(
-                    {
-                        "status": "stopped_requires_human",
-                        "stop_reason": "source_detach_ack_or_scene_revision_missing",
-                    }
-                )
-                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                    policy, source="placement_source_detach_unverified"
-                )
-                self.record(
-                    "placement_recovery_stopped",
-                    {"stage": stage, "reason": policy["stop_reason"]},
-                )
-                return True
-            recovery["stage"] = "reobserve_regrasp"
-            policy["status"] = "reobserve_regrasp_required"
-        else:
-            return False
-        policy["recovery"] = recovery
-        self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-            policy, source="placement_exhaustion_recovery"
-        )
-        self.record("placement_recovery_advanced", {"stage": recovery["stage"]})
-        return True
+        return False
 
     def _capture_articulated_attachment_probe(self, action: EnvAction) -> bool:
         call = _successful_tool_call(action, "prepare_attachment_probe")
@@ -4093,7 +3964,7 @@ class AgentMemory:
                 if (
                     not isinstance(release, dict)
                     or release.get("status") != "released"
-                    or str(target_pose.get("source_grasp_id") or "")
+                    or str(target_pose.get("placement_candidate_id") or "")
                     != str(release.get("candidate_id") or "")
                 ):
                     return False
@@ -4118,7 +3989,7 @@ class AgentMemory:
             release = {
                 "schema_version": "openeta.placement_release.v1",
                 "status": "ready",
-                "candidate_id": target_pose.get("source_grasp_id"),
+                "candidate_id": target_pose.get("placement_candidate_id"),
                 "placement_pose_id": target_pose.get("placement_pose_id"),
                 "release_pose": release_pose,
                 "scene_epoch": self.scene_epoch(),
@@ -5720,6 +5591,8 @@ class AgentMemory:
             "attachment_gate": self.attachment_gate(),
             "placement_release": self.placement_release(),
             "placement_candidate_policy": self.placement_candidate_policy(),
+            "placement_object_detection": self.placement_object_detection(),
+            "placement_region_detection": self.placement_region_detection(),
             "motion_reconciliation": self.motion_reconciliation(),
             "scene_epoch": self.scene_epoch(),
             "transition_ledger": self.transition_ledger()[-12:],
@@ -6725,6 +6598,7 @@ def _trusted_native_attachment_proof(
     proof = receipt.get("physical_verification")
     child = receipt.get("child_link_proof")
     attached = receipt.get("detachable_joint")
+    attachment_transform = receipt.get("attachment_transform")
     request = request_parameters if isinstance(request_parameters, dict) else {}
     target = request.get("target_pose")
     target = target if isinstance(target, dict) else {}
@@ -6747,6 +6621,8 @@ def _trusted_native_attachment_proof(
         reasons.append("native_proof_target_mismatch")
     if not isinstance(attached, dict) or attached.get("state") != "attached":
         reasons.append("native_attach_ack_missing")
+    if not _valid_attachment_transform(attachment_transform):
+        reasons.append("native_attachment_transform_missing")
     if (
         planning_scene_revision < 0
         or receipt.get("planning_scene_revision") != planning_scene_revision
@@ -6794,12 +6670,51 @@ def _trusted_native_attachment_proof(
         "physical_verification": dict(proof) if isinstance(proof, dict) else {},
         "child_link_proof": dict(child) if isinstance(child, dict) else {},
         "detachable_joint": dict(attached) if isinstance(attached, dict) else {},
+        "attachment_transform": (
+            dict(attachment_transform) if isinstance(attachment_transform, dict) else {}
+        ),
         "planning_scene_revision": receipt.get("planning_scene_revision"),
         "candidate_id": candidate_id,
         "compiled_grasp_id": compiled_grasp_id,
         "scene_epoch": scene_epoch,
     }
     return not reasons, reasons[0] if reasons else "trusted_native_attachment_proof", retained
+
+
+def _valid_attachment_transform(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if (
+        value.get("schema_version") != "openeta.attachment_transform.v1"
+        or value.get("parent_frame") != "eef"
+        or value.get("child_frame") != "object"
+        or value.get("measurement_boundary") != "native_attach_ack"
+    ):
+        return False
+    xyz = value.get("translation_xyz")
+    quat = value.get("quat_xyzw")
+    if not _finite_xyz(xyz) or not isinstance(quat, list) or len(quat) != 4:
+        return False
+    if any(
+        isinstance(component, bool)
+        or not isinstance(component, int | float)
+        or not math.isfinite(float(component))
+        for component in quat
+    ):
+        return False
+    norm = math.sqrt(sum(float(component) ** 2 for component in quat))
+    return abs(norm - 1.0) <= 1e-5
+
+
+def _placement_region_prompt(value: object) -> bool:
+    prompt = str(value or "").strip().lower()
+    return any(
+        token in prompt
+        for token in (
+            "placement", "place", "destination", "target region", "target area",
+            "marker", "receptacle", "bin", "basket", "zone", "放置", "目标区域",
+        )
+    )
 
 
 def _assigned_task_from_tool_call(call: JsonDict) -> tuple[str, str] | None:
@@ -7887,7 +7802,7 @@ def _extract_grasp_candidate_artifacts(call: JsonDict, details: JsonDict) -> lis
     if not isinstance(candidates, list) or not candidates:
         return []
     compact_candidates = [
-        dict(candidate) for candidate in candidates[:5] if isinstance(candidate, dict)
+        dict(candidate) for candidate in candidates[:20] if isinstance(candidate, dict)
     ]
     if not compact_candidates:
         return []
@@ -7947,7 +7862,7 @@ def _extract_placement_candidate_artifacts(
     if not isinstance(candidates, list) or not candidates:
         return []
     compact_candidates = [
-        dict(candidate) for candidate in candidates[:5] if isinstance(candidate, dict)
+        dict(candidate) for candidate in candidates[:20] if isinstance(candidate, dict)
     ]
     if not compact_candidates:
         return []
@@ -7958,14 +7873,13 @@ def _extract_placement_candidate_artifacts(
             "tool": "anyplace",
             "index": "latest",
             "candidate_count": len(candidates),
-            "selected_grasp_id": source.get("selected_grasp_id"),
             "placement_candidates": compact_candidates,
             "source": source.get("source"),
             "candidate_image_ref": source.get("candidate_image_ref"),
             "raw_output_ref": source.get("raw_output_ref"),
             "next_tool_hint": (
                 "Choose a retained placement candidate id with the main VLM, then call "
-                "compile_grasp_seed(purpose=placement); raw AnyPlace poses are not executable."
+                "compile_placement_seed; raw AnyPlace transforms are not executable EEF poses."
             ),
         }
     ]

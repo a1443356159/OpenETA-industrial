@@ -127,8 +127,8 @@ def test_exhausted_placement_recovery_dispatches_fresh_observation() -> None:
     decision = _host_obligation_decision(
         {
             "placement_candidate_policy": {
-                "status": "reobserve_regrasp_required",
-                "recovery": {"stage": "reobserve_regrasp"},
+                "status": "reobserve_required",
+                "recovery": {"stage": "observe_placement"},
             }
         },
         tools=_tools_with_handlers("observe"),
@@ -137,9 +137,9 @@ def test_exhausted_placement_recovery_dispatches_fresh_observation() -> None:
     assert decision is not None
     assert decision.action == "observe"
     assert decision.parameters == {
-        "reason": "placement_candidates_exhausted_after_verified_source_detach"
+        "reason": "placement_candidates_exhausted_attachment_preserved"
     }
-    assert decision.metadata["host_obligation"]["stage"] == "reobserve_regrasp"
+    assert decision.metadata["host_obligation"]["stage"] == "reobserve_placement"
 
 
 def _record_pending_sam3_selection(
@@ -1181,37 +1181,17 @@ def test_graspgenx_validation_requires_complete_targeted_inputs() -> None:
 
 def test_anyplace_validation_rejects_placeholders_then_accepts_structured_handoff() -> None:
     valid_intrinsics = {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5, "scale": 1000.0}
-    candidate = {
-        "id": "grasp_000",
-        "frame": "camera",
-        "camera_frame": "opencv",
-        "score": 0.5,
-        "translation_xyz": [0.1, 0.2, 0.3],
-        "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        "gripper_tip_position_xyz": [0.13, 0.2, 0.3],
-        "depth": 0.03,
-        "width": 0.06,
-        "height": 0.03,
-    }
+    extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
     valid_parameters = {
-        "rgb": "tmp/rgb.png",
-        "depth": "tmp/depth.png",
-        "object_mask": "tmp/object-mask.png",
-        "placement_region_mask": {
-            "mask_ref": "tmp/placement-mask.png",
-            "source_image": "tmp/rgb.png",
-            "label": "rack slot",
+        "object_observation": {
+            "rgb": "tmp/object-rgb.png", "depth": "tmp/object-depth.png",
+            "object_mask": {"mask_ref": "tmp/object-mask.png", "source_image": "tmp/object-rgb.png"},
+            "intrinsics": valid_intrinsics, "camera_extrinsics": extrinsics,
         },
-        "intrinsics": valid_intrinsics,
-        "selected_grasp": {
-            "candidate": candidate,
-            "source": {
-                "mode": "targeted",
-                "rgb": "tmp/rgb.png",
-                "depth": "tmp/depth.png",
-                "object_mask": "tmp/object-mask.png",
-                "intrinsics": valid_intrinsics,
-            },
+        "placement_observation": {
+            "rgb": "tmp/place-rgb.png", "depth": "tmp/place-depth.png",
+            "placement_region_mask": {"mask_ref": "tmp/place-mask.png", "source_image": "tmp/place-rgb.png"},
+            "intrinsics": valid_intrinsics, "camera_extrinsics": extrinsics,
         },
     }
     planner = ToolCallingPlanner(
@@ -1221,12 +1201,8 @@ def test_anyplace_validation_rejects_placeholders_then_accepts_structured_handof
                     "kind": "tool_call",
                     "name": "anyplace",
                     "parameters": {
-                        "rgb": "latest_rgb",
-                        "depth": "latest_depth",
-                        "object_mask": "latest_mask",
-                        "placement_region_mask": {"mask_ref": "mask_ref"},
-                        "intrinsics": {},
-                        "selected_grasp": {},
+                            "object_observation": {},
+                            "placement_observation": {},
                     },
                 },
                 {"kind": "tool_call", "name": "anyplace", "parameters": valid_parameters},
@@ -1249,46 +1225,12 @@ def test_anyplace_validation_rejects_placeholders_then_accepts_structured_handof
     assert decision.metadata["validation_attempts"] == 2
 
 
-def test_anyplace_validation_accepts_complete_graspgenx_source() -> None:
+def test_anyplace_validation_accepts_independent_observations_without_grasp() -> None:
     intrinsics = {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5, "scale": 1000.0}
+    extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
     parameters = {
-        "rgb": "tmp/rgb.png",
-        "depth": "tmp/depth.png",
-        "object_mask": "tmp/object-mask.png",
-        "placement_region_mask": {
-            "mask_ref": "tmp/placement-mask.png",
-            "source_image": "tmp/rgb.png",
-        },
-        "intrinsics": intrinsics,
-        "selected_grasp": {
-            "candidate": {
-                "id": "graspgenx_000",
-                "frame": "camera",
-                "camera_frame": "opencv",
-                "score": 0.8,
-                "translation_xyz": [0.1, 0.2, 0.3],
-                "rotation_matrix": [
-                    [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [0.0, 0.0, 1.0],
-                ],
-                "gripper_tip_position_xyz": [0.2, 0.2, 0.3],
-                "depth": 0.1,
-                "width": 0.08,
-                "height": 0.04,
-                "gripper_name": "franka_panda",
-            },
-            "source": {
-                "source_tool": "graspgenx",
-                "mode": "targeted",
-                "rgb": "tmp/rgb.png",
-                "depth": "tmp/depth.png",
-                "object_mask": "tmp/object-mask.png",
-                "intrinsics": intrinsics,
-                "gripper_name": "franka_panda",
-                "up_direction_camera": [0.0, 0.0, -1.0],
-            },
-        },
+        "object_observation": {"rgb": "tmp/o.png", "depth": "tmp/od.png", "object_mask": {"mask_ref": "tmp/om.png", "source_image": "tmp/o.png"}, "intrinsics": intrinsics, "camera_extrinsics": extrinsics},
+        "placement_observation": {"rgb": "tmp/p.png", "depth": "tmp/pd.png", "placement_region_mask": {"mask_ref": "tmp/pm.png", "source_image": "tmp/p.png"}, "intrinsics": intrinsics, "camera_extrinsics": extrinsics},
     }
     planner = ToolCallingPlanner(
         StaticPlannerBackend({"kind": "tool_call", "name": "anyplace", "parameters": parameters})
@@ -3095,18 +3037,6 @@ def test_planner_context_preserves_anygrasp_candidates_for_followup_motion() -> 
 
 
 def test_planner_context_preserves_anyplace_candidates_for_post_pick_motion() -> None:
-    place_pose = {
-        "id": "place_grasp_000",
-        "source_grasp_id": "grasp_000",
-        "frame": "camera",
-        "camera_frame": "opencv",
-        "translation_xyz": [0.2, 0.1, 0.4],
-        "rotation_matrix": [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-    }
     memory = AgentMemory()
     memory.start_session(task="pick can and place it in basket")
     memory.add_action(
@@ -3127,12 +3057,13 @@ def test_planner_context_preserves_anyplace_candidates_for_post_pick_motion() ->
                                 "result_type": "planning",
                                 "outputs": {
                                     "candidate_count": 1,
-                                    "selected_grasp_id": "grasp_000",
-                                    "placement_candidates": [
-                                        {
-                                            "id": "placement_000",
-                                            "source_grasp_id": "grasp_000",
-                                            "place_grasp_pose": place_pose,
+                                        "placement_candidates": [
+                                            {
+                                                "id": "placement_000",
+                                                "object_placement_transform": {
+                                                    "frame": "placement_camera",
+                                                    "transform_matrix": [[1, 0, 0, 0.1], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                                                },
                                         }
                                     ],
                                 },
@@ -3155,9 +3086,9 @@ def test_planner_context_preserves_anyplace_candidates_for_post_pick_motion() ->
     artifact = context["memory"]["working_memory"]["artifacts"][
         "anyplace_placement_candidates_latest"
     ]
-    assert artifact["selected_grasp_id"] == "grasp_000"
-    assert artifact["placement_candidates"][0]["place_grasp_pose"]["id"] == ("place_grasp_000")
-    assert "compile_grasp_seed(purpose=placement)" in artifact["next_tool_hint"]
+    assert "selected_grasp_id" not in artifact
+    assert artifact["placement_candidates"][0]["object_placement_transform"]["frame"] == "placement_camera"
+    assert "compile_placement_seed" in artifact["next_tool_hint"]
 
 
 def test_anygrasp_policy_activates_highest_score_candidate() -> None:
@@ -3222,19 +3153,10 @@ def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
     _record_anygrasp_candidate_policy(memory)
     active = memory.anygrasp_candidate_policy()["active_candidate"]
     retained = memory.retained_targeted_grasp()
+    extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
     anyplace_parameters = {
-        "rgb": retained["source"]["rgb"],
-        "depth": retained["source"]["depth"],
-        "object_mask": retained["source"]["object_mask"],
-        "intrinsics": retained["source"]["intrinsics"],
-        "placement_region_mask": {
-            "mask_ref": "tmp/mask_000.png",
-            "source_image": retained["source"]["rgb"],
-        },
-        "selected_grasp": {
-            "candidate": retained["candidate"],
-            "source": retained["source"],
-        },
+        "object_observation": {"rgb": "tmp/o.png", "depth": "tmp/od.png", "object_mask": {"mask_ref": "tmp/om.png", "source_image": "tmp/o.png"}, "intrinsics": retained["source"]["intrinsics"], "camera_extrinsics": extrinsics},
+        "placement_observation": {"rgb": "tmp/p.png", "depth": "tmp/pd.png", "placement_region_mask": {"mask_ref": "tmp/pm.png", "source_image": "tmp/p.png"}, "intrinsics": retained["source"]["intrinsics"], "camera_extrinsics": extrinsics},
     }
     compile_parameters = {
         "camera_pose": active,
@@ -3270,10 +3192,10 @@ def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
 
     assert decision.action == "compile_grasp_seed"
     first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
-    assert any("only after the source grasp passes" in error for error in first_errors)
+    assert any("only after attach and lift verification" in error for error in first_errors)
 
 
-def test_combined_pick_place_requires_placement_mask_on_retained_rgb() -> None:
+def test_combined_pick_place_keeps_independent_placement_rgb() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
     _record_anygrasp_candidate_policy(memory)
@@ -3305,13 +3227,12 @@ def test_combined_pick_place_requires_placement_mask_on_retained_rgb() -> None:
     )
 
     assert decision.action == "sam3"
-    assert decision.parameters["image"] == "tmp/rgb.png"
+    assert decision.parameters["image"] == "tmp/latest.png"
     assert decision.metadata["validation_attempts"] == 1
-    canonicalizations = decision.metadata["host_parameter_canonicalizations"]
-    assert canonicalizations[0]["reason"] == ("freeze_placement_mask_to_targeted_grasp_rgb")
+    assert decision.metadata.get("host_parameter_canonicalizations", []) == []
 
 
-def test_placement_zone_marker_prompt_is_frozen_to_retained_rgb() -> None:
+def test_placement_zone_marker_prompt_is_not_frozen_to_grasp_rgb() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in the green placement zone")
     _record_anygrasp_candidate_policy(memory)
@@ -3339,10 +3260,8 @@ def test_placement_zone_marker_prompt_is_frozen_to_retained_rgb() -> None:
     )
 
     assert decision.action == "sam3"
-    assert decision.parameters["image"] == "tmp/rgb.png"
-    assert decision.metadata["host_parameter_canonicalizations"][0]["reason"] == (
-        "freeze_placement_mask_to_targeted_grasp_rgb"
-    )
+    assert decision.parameters["image"] == "/tmp/misspelled-session/frame.png"
+    assert decision.metadata.get("host_parameter_canonicalizations", []) == []
 
 
 def test_placement_mask_accepts_byte_identical_same_epoch_rgb_copy(tmp_path) -> None:
@@ -5877,33 +5796,29 @@ def test_sparse_point_mask_uses_selected_bbox_for_roi_retry(tmp_path: Path) -> N
     )
 
 
-def test_placement_obligation_joins_receptacle_mask_to_frozen_grasp() -> None:
+def test_placement_obligation_joins_independent_post_attach_observations() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
-    _record_anygrasp_candidate_policy(memory)
-    _record_pending_sam3_selection(
-        memory,
-        original_image_ref="tmp/rgb.png",
-    )
-    memory.resolve_sam3_selection(
-        result_id="sam3-run-selection",
-        detection_id="detection_000",
-        selection_source="main_agent_vlm",
+    memory.save_fact("placement_object_detection", {"id": "object-mask", "mask_ref": "tmp/object-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
+    memory.save_fact("placement_region_detection", {"id": "region-mask", "mask_ref": "tmp/region-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
+    observation = _rgbd_observation(
+        task="pick cube and place it in basket",
+        views=[("placement", Path("tmp/place-rgb.png"), Path("tmp/place-depth.png"))],
+        with_extrinsics=True,
     )
     pre_attachment_context = build_tool_context(
-        observation=_observation(),
+        observation=observation,
         memory=memory,
         tools=_tools_with_handlers("anyplace"),
         skills=build_default_skill_registry(),
     )
     assert pre_attachment_context["placement_obligation"] is None
-    active_candidate = memory.anygrasp_candidate_policy()["active_candidate"]
     memory.save_fact(
         "grasp_execution",
         {
             "status": "completed",
             "stage": "attached",
-            "candidate_id": active_candidate["id"],
+            "candidate_id": "grasp_000",
         },
         source="test",
     )
@@ -5912,14 +5827,12 @@ def test_placement_obligation_joins_receptacle_mask_to_frozen_grasp() -> None:
         {
             "status": "resolved",
             "verdict": "PASS",
-            "candidate_id": active_candidate["id"],
+            "candidate_id": "grasp_000",
             "planning_scene_revision": 2,
         },
         source="test",
     )
 
-    observation = _observation()
-    observation.task = "pick cube and place it in basket"
     context = build_tool_context(
         observation=observation,
         memory=memory,
@@ -5927,24 +5840,13 @@ def test_placement_obligation_joins_receptacle_mask_to_frozen_grasp() -> None:
         skills=build_default_skill_registry(),
     )
 
-    retained = context["retained_targeted_grasp"]
     obligation = context["placement_obligation"]
     assert obligation["required_tool"] == "anyplace"
-    assert obligation["required_parameters"] == {
-        "rgb": retained["source"]["rgb"],
-        "depth": retained["source"]["depth"],
-        "object_mask": retained["source"]["object_mask"],
-        "placement_region_mask": {
-            "mask_ref": "tmp/mask_000.png",
-            "source_image": retained["source"]["rgb"],
-        },
-        "intrinsics": retained["source"]["intrinsics"],
-        "selected_grasp": {
-            "candidate": retained["candidate"],
-            "source": retained["source"],
-        },
-        "scene_revision": 2,
-    }
+    required = obligation["required_parameters"]
+    assert required["object_observation"]["object_mask"]["mask_ref"] == "tmp/object-mask.png"
+    assert required["placement_observation"]["placement_region_mask"]["mask_ref"] == "tmp/region-mask.png"
+    assert required["scene_revision"] == 2
+    assert "selected_grasp" not in str(required)
 
     execution = memory.grasp_execution()
     execution["attachment_mode"] = "articulated_handle"
@@ -5982,18 +5884,6 @@ def test_placement_obligation_joins_receptacle_mask_to_frozen_grasp() -> None:
 
 
 def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None:
-    place_pose = {
-        "id": "place_grasp_000",
-        "source_grasp_id": "grasp_003",
-        "frame": "camera",
-        "camera_frame": "opencv",
-        "translation_xyz": [0.2, 0.1, 0.4],
-        "rotation_matrix": [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-    }
     memory = AgentMemory()
     memory.save_fact(
         "attachment_gate",
@@ -6005,36 +5895,16 @@ def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None
         },
         source="test",
     )
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request_name": "anyplace",
-                "tool_calls": [
-                    {
-                        "name": "anyplace",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {
-                                "outputs": {
-                                    "candidate_count": 1,
-                                    "selected_grasp_id": "grasp_003",
-                                    "scene_revision": 2,
-                                    "placement_candidates": [
-                                        {
-                                            "id": "placement_000",
-                                            "source_grasp_id": "grasp_003",
-                                            "place_grasp_pose": place_pose,
-                                        }
-                                    ],
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
+    memory.save_fact(
+        "placement_candidate_policy",
+        {
+            "schema_version": "openeta.placement_candidate_policy.v2",
+            "status": "selection_required",
+            "candidate_queue": ["placement_000"],
+            "rejected_candidates": [],
+            "attachment_transform_sha256": "attachment-sha",
+        },
+        source="test",
     )
     memory.save_fact(
         "grasp_execution",
@@ -6064,52 +5934,18 @@ def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None
         ],
         robot=RobotState(),
     )
-    mismatched_context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("camera_pose_to_world"),
-        skills=build_default_skill_registry(),
-    )
-    assert mismatched_context["placement_transform_obligation"] is None
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "completed",
-            "stage": "attached",
-            "candidate_id": "grasp_003",
-            "compiled_grasp": {"camera_frame_id": "agentview"},
-        },
-        source="test",
-    )
     context = build_tool_context(
         observation=observation,
         memory=memory,
-        tools=_tools_with_handlers("camera_pose_to_world"),
+        tools=_tools_with_handlers("compile_placement_seed"),
         skills=build_default_skill_registry(),
     )
     obligation = context["placement_transform_obligation"]
-    assert obligation["required_tool"] == "compile_grasp_seed"
+    assert obligation["required_tool"] == "compile_placement_seed"
     assert obligation["allowed_parameters"] == {
-        "purpose": "placement",
         "placement_candidate_id": ["placement_000"],
     }
     assert obligation["selection_source"] == "main_agent_vlm"
-
-    memory.artifacts["camera_pose_to_world_world_pose_latest"] = {
-        "source": "tool_result",
-        "value": {
-            "tool": "camera_pose_to_world",
-            "type": "world_pose",
-            "source_grasp_id": "place_grasp_000",
-        },
-    }
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("camera_pose_to_world"),
-        skills=build_default_skill_registry(),
-    )
-    assert context["placement_transform_obligation"] is not None
 
 
 @pytest.mark.skip(reason="superseded by direct compiled-hover M6 contract")
@@ -6525,7 +6361,7 @@ def test_successful_placement_release_clears_stale_attachment_state() -> None:
     release_pose = {
         "frame": "world",
         "xyz": [0.07, 0.30, 0.21],
-        "source_grasp_id": "grasp_003",
+        "placement_candidate_id": "placement_000",
         "placement_pose_id": "place_grasp_000",
         "placement_stage": "release",
     }
@@ -6644,7 +6480,7 @@ def test_successful_placement_release_clears_stale_attachment_state() -> None:
     retreat_pose = {
         "frame": "world",
         "xyz": [0.07, 0.30, 0.31],
-        "source_grasp_id": "grasp_003",
+        "placement_candidate_id": "placement_000",
         "placement_pose_id": "place_grasp_000",
         "placement_stage": "retreat",
     }
@@ -7790,7 +7626,7 @@ def test_failed_wrist_reference_localization_advances_anygrasp_candidate() -> No
     assert memory.grasp_execution() is None
 
 
-def test_anyplace_host_dispatches_exact_final_grasp_packet() -> None:
+def test_anyplace_host_dispatches_exact_independent_observation_packet() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
     _record_anygrasp_candidate_policy(memory)
@@ -7814,35 +7650,22 @@ def test_anyplace_host_dispatches_exact_final_grasp_packet() -> None:
         },
         source="test",
     )
-    _record_pending_sam3_selection(memory, original_image_ref="tmp/rgb.png")
-    memory.resolve_sam3_selection(
-        result_id="sam3-run-selection",
-        detection_id="detection_000",
-        selection_source="main_agent_vlm",
-    )
-    retained = memory.retained_targeted_grasp()
-    exact = {
-        "rgb": retained["source"]["rgb"],
-        "depth": retained["source"]["depth"],
-        "object_mask": retained["source"]["object_mask"],
-        "intrinsics": retained["source"]["intrinsics"],
-        "placement_region_mask": {
-            "mask_ref": "tmp/mask_000.png",
-            "source_image": retained["source"]["rgb"],
-        },
-        "selected_grasp": {
-            "candidate": retained["candidate"],
-            "source": retained["source"],
-        },
-        "scene_revision": 2,
-    }
+    memory.save_fact("placement_object_detection", {"id": "object", "mask_ref": "tmp/object-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
+    memory.save_fact("placement_region_detection", {"id": "region", "mask_ref": "tmp/region-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
             {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
         )
     )
-    observation = _observation()
-    observation.task = "pick cube and place it in basket"
+    observation = _rgbd_observation(
+        task="pick cube and place it in basket",
+        views=[("placement", Path("tmp/place-rgb.png"), Path("tmp/place-depth.png"))],
+        with_extrinsics=True,
+    )
+    exact = build_tool_context(
+        observation=observation, memory=memory,
+        tools=_tools_with_handlers("anyplace"), skills=build_default_skill_registry(),
+    )["placement_obligation"]["required_parameters"]
 
     decision = planner.plan(
         observation,
@@ -7853,6 +7676,7 @@ def test_anyplace_host_dispatches_exact_final_grasp_packet() -> None:
 
     assert decision.action == "anyplace"
     assert decision.parameters == exact
+    assert "selected_grasp" not in str(decision.parameters)
     assert decision.metadata["execution_model"] == "host_obligation_dispatch"
 
 

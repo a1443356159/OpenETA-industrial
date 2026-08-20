@@ -715,15 +715,13 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
 
         def predict_placement(request):
             calls["anyplace"].append(request)
-            grasp = request["selected_grasp"]
             candidates = []
             for index in range(10):
                 candidates.append(
                     {
                         "id": f"placement_{index:03d}",
-                        "source_grasp_id": grasp["id"],
                         "object_placement_transform": {
-                            "frame": "camera",
+                            "frame": "placement_camera",
                             "camera_frame": "opencv",
                             "convention": "p_placed = R @ p_current + t",
                             "transform_matrix": [
@@ -733,7 +731,6 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
                                 [0.0, 0.0, 0.0, 1.0],
                             ],
                         },
-                        "place_grasp_pose": {**grasp, "id": f"place_grasp_{index:03d}"},
                     }
                 )
             return {
@@ -742,7 +739,7 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
                     "tool": "anyplace",
                     "backend": "anyplace_mcp",
                     "model": "anyplace_multitask",
-                    "frame": "camera",
+                    "frame": "placement_camera",
                     "camera_frame": "opencv",
                     "candidate_count": 10,
                     "placement_candidates": candidates,
@@ -844,29 +841,45 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
             "scene_epoch": 0,
         },
     )
-    grasp_outputs = grasp.details["outputs"]
+    extrinsics = {
+        "camera_frame": "opencv",
+        "camera_to_world": [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    }
+    intrinsics = {
+        "fx": 1.0,
+        "fy": 1.0,
+        "cx": 0.5,
+        "cy": 0.5,
+        "scale": 1000.0,
+    }
     anyplace = runtime.tools.call(
         "anyplace",
         {
-            "rgb": str(image),
-            "depth": str(depth),
-            "object_mask": str(mask),
-            "placement_region_mask": {
-                "mask_ref": str(placement_mask),
-                "source_image": str(image),
-                "label": "target region",
+            "object_observation": {
+                "rgb": str(image),
+                "depth": str(depth),
+                "object_mask": {"mask_ref": str(mask), "source_image": str(image)},
+                "intrinsics": intrinsics,
+                "camera_extrinsics": extrinsics,
+                "camera_frame_id": "object-camera",
             },
-            "intrinsics": {
-                "fx": 1.0,
-                "fy": 1.0,
-                "cx": 0.5,
-                "cy": 0.5,
-                "scale": 1000.0,
+            "placement_observation": {
+                "rgb": str(image),
+                "depth": str(depth),
+                "placement_region_mask": {
+                    "mask_ref": str(placement_mask),
+                    "source_image": str(image),
+                },
+                "intrinsics": intrinsics,
+                "camera_extrinsics": extrinsics,
+                "camera_frame_id": "placement-camera",
             },
-            "selected_grasp": {
-                "candidate": grasp_outputs["grasp_candidates"][0],
-                "source": grasp_outputs["source"],
-            },
+            "scene_revision": 0,
         },
     )
 
@@ -884,7 +897,12 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
     assert runtime.tools.can_execute("anygrasp") is False
     assert runtime.tools.can_execute("contact_graspnet") is False
     assert calls["contact"] == []
-    assert calls["anyplace"][0]["selected_grasp"]["id"].startswith("gpe-")
+    assert "selected_grasp" not in calls["anyplace"][0]
+    assert set(calls["anyplace"][0]) == {
+        "object_observation",
+        "placement_observation",
+        "object_camera_to_placement_camera",
+    }
     assert anyplace.success is True
     assert anyplace.details["outputs"]["candidate_count"] == 10
 

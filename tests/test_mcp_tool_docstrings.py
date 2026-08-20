@@ -78,15 +78,12 @@ def test_anyplace_mcp_docstring_describes_input_semantics() -> None:
     assert "object_mask" in docstring
     assert "placement_region_mask" in docstring
     assert "intrinsics" in docstring
-    assert "selected_grasp" in docstring
-    assert "raw_depth / intrinsics" in docstring
-    assert "not local file paths" in flat_docstring
-    assert "frame=camera" in docstring
-    assert "camera_frame=opencv" in docstring
+    assert "selected_grasp" not in docstring
+    assert "no grasp candidate" in flat_docstring
+    assert "calibrated rigid transform" in flat_docstring
+    assert "OpenCV camera frames" in flat_docstring
     assert "configured number" in flat_docstring
-    assert "transform_matrix" in docstring
-    assert "truncated at 1 metre by default" in flat_docstring
-    assert "does not return point clouds" in flat_docstring
+    assert "object_placement_transform" in docstring
 
 
 def test_contact_graspnet_mcp_docstring_describes_input_semantics() -> None:

@@ -22,6 +22,7 @@ from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazeb
 from .process import GazeboProcessError
 from .process import GazeboNativeContactWindow
 from .runtime import GazeboRuntime
+from .ros_control import _relative_pose
 
 
 def build_gazebo_control_spec(profile: GazeboProfile) -> dict[str, Any]:
@@ -79,6 +80,7 @@ class GazeboDirectEnv(Env):
         self._native_grasp_verifier = NativeGraspVerifier(self._native_grasp_config) if self._native_grasp_config is not None else None
         self._native_grasp_transport_locked = False
         self._native_grasp_lift_proof_pending = False
+        self._attachment_transform: dict[str, Any] | None = None
 
     @property
     def controller(self) -> Any | None:
@@ -146,6 +148,7 @@ class GazeboDirectEnv(Env):
             self._native_grasp_verifier.reset()
             self._native_grasp_transport_locked = False
             self._native_grasp_lift_proof_pending = False
+            self._attachment_transform = None
         observation = self.runtime.reset(seed=self._seed)
         raw = self._decorate_robot(self._as_unified(observation))
         scene_revision = self._planning_scene_revision()
@@ -222,6 +225,20 @@ class GazeboDirectEnv(Env):
                     else:
                         attachment.attach()
                         target_pose, mount_pose = attachment.native_target_mount_poses()
+                        relative_xyz, relative_quat = _relative_pose(
+                            child_xyz=target_pose.xyz,
+                            child_quat_xyzw=target_pose.quat_xyzw,
+                            parent_xyz=mount_pose.xyz,
+                            parent_quat_xyzw=mount_pose.quat_xyzw,
+                        )
+                        self._attachment_transform = {
+                            "schema_version": "openeta.attachment_transform.v1",
+                            "parent_frame": "eef",
+                            "child_frame": "object",
+                            "translation_xyz": list(relative_xyz),
+                            "quat_xyzw": list(relative_quat),
+                            "measurement_boundary": "native_attach_ack",
+                        }
                         sync_attach = getattr(self.controller, "sync_planning_scene_attach", None)
                         if not callable(sync_attach):
                             raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
@@ -248,6 +265,7 @@ class GazeboDirectEnv(Env):
                                 "state_topic": self._native_grasp_config.state_topic,
                             },
                             "planning_scene_revision": scene_revision,
+                            "attachment_transform": dict(self._attachment_transform),
                         })
                 except Exception as exc:
                     attached_before_cleanup = getattr(attachment, "state", None) == "attached"
@@ -306,6 +324,7 @@ class GazeboDirectEnv(Env):
                     receipt.update({"ok": False, "error_code": record.reason_code.value, "physical_verification": record.to_dict(), "detail": str(exc)})
                     self._native_grasp_transport_locked = True
                     self._native_grasp_lift_proof_pending = False
+                    self._attachment_transform = None
                 finally:
                     if contact_window is not None:
                         contact_window.close()
@@ -355,6 +374,7 @@ class GazeboDirectEnv(Env):
                         receipt["placement_verification"] = placement.to_dict()
                         self._native_grasp_transport_locked = False
                         self._native_grasp_lift_proof_pending = False
+                        self._attachment_transform = None
                     except Exception as exc:
                         record = self._native_grasp_verifier.release_result(detached_acked=False)
                         receipt.update({"ok": False, "error_code": str(exc)})
@@ -395,6 +415,8 @@ class GazeboDirectEnv(Env):
                     "state": "attached",
                     "state_topic": self._native_grasp_config.state_topic,
                 }
+                if self._attachment_transform is not None:
+                    receipt["attachment_transform"] = dict(self._attachment_transform)
                 proof_evidence = dict(record.evidence)
                 receipt["child_link_proof"] = (
                     proof_evidence
@@ -415,6 +437,7 @@ class GazeboDirectEnv(Env):
                         except Exception:
                             receipt["detach_cleanup_error"] = ReasonCode.DETACH_ACK_MISSING.value
                     receipt.update({"ok": False, "error_code": record.reason_code.value})
+                    self._attachment_transform = None
             else:
                 raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
         self._latest = raw

@@ -33,7 +33,7 @@ SUPPORTED_GRASP_CALIBRATION_SCHEMAS = {
     GRASP_CALIBRATION_SCHEMA,
 }
 COMPILED_GRASP_SCHEMA = "openeta.compiled_grasp_seed.v1"
-COMPILED_PLACEMENT_SCHEMA = "openeta.compiled_placement_seed.v1"
+COMPILED_PLACEMENT_SCHEMA = "openeta.compiled_placement_seed.v2"
 WRIST_ALIGNMENT_SCHEMA = "openeta.wrist_alignment.v1"
 DEFAULT_GRASP_PROFILE = DEFAULT_GRASP_CALIBRATION_PROFILE
 _OPENCV_TO_OPENGL = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
@@ -41,7 +41,7 @@ _PANDA_TOP_DOWN_ROTATION = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
 _WORLD_NEGATIVE_Z = [0.0, 0.0, -1.0]
 _MIN_SAFE_HOVER_DISTANCE_M = 0.15
 _MIN_PLACEMENT_HOVER_CLEARANCE_M = 0.10
-_PLACEMENT_RELEASE_CLEARANCE_M = 0.005
+_PLACEMENT_RELEASE_CLEARANCE_M = 0.0
 _DEFAULT_REFINEMENT_HOVER_CLEARANCE_M = 0.20
 _ARTICULATED_HANDLE_APPROACH_MODES = {"top_down", "front", "side"}
 
@@ -85,15 +85,10 @@ def build_compile_grasp_seed_handler(
             profile, profile_sha256 = _load_profile(resolved_profile)
             parameters = dict(context.parameters)
             purpose = str(parameters.get("purpose") or "grasp").strip().lower()
-            if qualification_cache is not None and purpose in {"grasp", "placement"}:
-                candidate_id = str(
-                    parameters.get(
-                        "grasp_candidate_id"
-                        if purpose == "grasp"
-                        else "placement_candidate_id"
-                    )
-                    or ""
-                ).strip()
+            if purpose != "grasp":
+                raise GraspGeometryError("compile_grasp_seed only accepts grasp candidates")
+            if qualification_cache is not None:
+                candidate_id = str(parameters.get("grasp_candidate_id") or "").strip()
                 observation_metadata = (
                     context.observation.metadata
                     if context.observation is not None
@@ -126,22 +121,13 @@ def build_compile_grasp_seed_handler(
                     raise GraspGeometryError("qualified compile parameters are missing")
                 parameters = dict(proof_parameters)
                 parameters["purpose"] = purpose
-                if purpose == "grasp":
-                    parameters["grasp_candidate_id"] = candidate_id
-                    parameters["camera_pose"] = dict(entry["candidate"])
-                else:
-                    parameters["placement_candidate_id"] = candidate_id
-                    parameters["placement_candidate"] = dict(entry["candidate"])
+                parameters["grasp_candidate_id"] = candidate_id
+                parameters["camera_pose"] = dict(entry["candidate"])
                 parameters["scene_epoch"] = scene_epoch
                 if parameters.get("qualification_profile_sha256") != profile_sha256:
                     raise GraspGeometryError(
                         "MoveIt qualification calibration proof is stale"
                     )
-            if purpose == "placement" and qualification_cache is None:
-                parameters = bind_placement_compile_parameters(
-                    parameters,
-                    supervision_context=context.metadata.get("supervision_context"),
-                )
             outputs = compile_grasp_seed(
                 parameters,
                 profile=profile,
@@ -151,12 +137,9 @@ def build_compile_grasp_seed_handler(
             qualified_pose_hash = parameters.get("qualified_compiled_pose_sha256")
             if qualified_pose_hash:
                 pose_chain = [dict(outputs["hover_pose"])]
-                if purpose == "placement":
-                    pose_chain.append(dict(outputs["release_pose"]))
-                else:
-                    if isinstance(outputs.get("precontact_pose"), Mapping):
-                        pose_chain.append(dict(outputs["precontact_pose"]))
-                    pose_chain.append(dict(outputs["contact_pose"]))
+                if isinstance(outputs.get("precontact_pose"), Mapping):
+                    pose_chain.append(dict(outputs["precontact_pose"]))
+                pose_chain.append(dict(outputs["contact_pose"]))
                 actual_pose_hash = hashlib.sha256(
                     json.dumps(
                         pose_chain, sort_keys=True, separators=(",", ":")
@@ -226,6 +209,114 @@ def build_compile_grasp_seed_handler(
     return handler
 
 
+def build_compile_placement_seed_handler(
+    profile_path: str | Path = DEFAULT_GRASP_PROFILE,
+    *,
+    qualification_cache: Any | None = None,
+) -> ToolHandler:
+    """Build the id-only placement compiler backed by host qualification proof."""
+
+    resolved_profile = Path(profile_path)
+
+    def handler(context: ToolExecutionContext) -> ToolResult:
+        try:
+            profile, profile_sha256 = _load_profile(resolved_profile)
+            candidate_id = str(context.parameters.get("placement_candidate_id") or "").strip()
+            if not candidate_id:
+                raise GraspGeometryError("placement_candidate_id is required")
+            if qualification_cache is None:
+                raise GraspGeometryError("placement compilation requires a MoveIt PASS proof")
+            observation_metadata = context.observation.metadata if context.observation else {}
+            epoch_value = observation_metadata.get("scene_epoch")
+            revision_value = observation_metadata.get("planning_scene_revision")
+            entry = qualification_cache.resolve(
+                purpose="placement",
+                candidate_id=candidate_id,
+                scene_epoch=(epoch_value if isinstance(epoch_value, int) and not isinstance(epoch_value, bool) else None),
+                planning_scene_revision=(revision_value if isinstance(revision_value, int) and not isinstance(revision_value, bool) else None),
+            )
+            if entry is None:
+                raise GraspGeometryError("placement candidate id has no current MoveIt PASS proof")
+            proof_parameters = entry["proof"].get("compile_parameters")
+            if not isinstance(proof_parameters, Mapping):
+                raise GraspGeometryError("qualified placement compile parameters are missing")
+            parameters = dict(proof_parameters)
+            parameters["placement_candidate_id"] = candidate_id
+            parameters["placement_candidate"] = dict(entry["candidate"])
+            if parameters.get("qualification_profile_sha256") != profile_sha256:
+                raise GraspGeometryError("MoveIt qualification calibration proof is stale")
+            expected_start_hash = parameters.get("qualified_start_state_sha256")
+            if expected_start_hash:
+                if context.observation is None:
+                    raise GraspGeometryError("current robot state is unavailable")
+                robot = context.observation.robot.to_dict()
+                current_start_hash = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "joint_positions": robot.get("joint_positions", []),
+                            "gripper_state": robot.get("gripper_state", {}),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                if current_start_hash != expected_start_hash:
+                    raise GraspGeometryError(
+                        "MoveIt qualification start joint or gripper state is stale"
+                    )
+            expected_attachment_hash = parameters.get(
+                "qualified_attachment_transform_sha256"
+            )
+            if expected_attachment_hash:
+                supervision = context.metadata.get("supervision_context")
+                memory = supervision.get("memory") if isinstance(supervision, Mapping) else None
+                gate = memory.get("attachment_gate") if isinstance(memory, Mapping) else None
+                full_proof = gate.get("full_lift_proof") if isinstance(gate, Mapping) else None
+                live_attachment = (
+                    full_proof.get("attachment_transform")
+                    if isinstance(full_proof, Mapping)
+                    else None
+                )
+                if not isinstance(live_attachment, Mapping):
+                    raise GraspGeometryError("current attachment transform is unavailable")
+                live_attachment_hash = hashlib.sha256(
+                    json.dumps(
+                        live_attachment, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                ).hexdigest()
+                if live_attachment_hash != expected_attachment_hash:
+                    raise GraspGeometryError(
+                        "MoveIt qualification attachment transform is stale"
+                    )
+            outputs = compile_placement_seed(
+                parameters, profile=profile, profile_sha256=profile_sha256
+            )
+            pose_hash = hashlib.sha256(
+                json.dumps(
+                    [outputs["hover_pose"], outputs["release_pose"]],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if pose_hash != parameters.get("qualified_compiled_pose_sha256"):
+                raise GraspGeometryError("compiled placement pose differs from MoveIt qualification proof")
+        except (GraspGeometryError, OSError, ValueError) as exc:
+            return make_tool_result(
+                context,
+                success=False,
+                content=f"placement seed compilation failed: {exc}",
+                outputs={"reason": "placement_seed_compile_failed"},
+            )
+        return make_tool_result(
+            context,
+            success=True,
+            content="placement seed compiled from object goal and measured attachment",
+            outputs=outputs,
+        )
+
+    return handler
+
+
 def build_wrist_alignment_handler() -> ToolHandler:
     """Build a read-only mask/depth wrist alignment calculator."""
 
@@ -264,14 +355,8 @@ def compile_grasp_seed(
     strategies: Sequence[Mapping[str, Any]] | None = None,
 ) -> JsonDict:
     purpose = str(parameters.get("purpose") or "grasp").strip().lower()
-    if purpose not in {"grasp", "placement"}:
-        raise GraspGeometryError("purpose must be 'grasp' or 'placement'")
-    if purpose == "placement":
-        return _compile_placement_seed(
-            parameters,
-            profile=profile,
-            profile_sha256=profile_sha256,
-        )
+    if purpose != "grasp":
+        raise GraspGeometryError("compile_grasp_seed only compiles grasp candidates")
     candidate = _mapping(parameters.get("camera_pose"), "camera_pose")
     extrinsics = _mapping(parameters.get("camera_extrinsics"), "camera_extrinsics")
     target_geometry_family = str(
@@ -583,146 +668,43 @@ def compile_grasp_seed(
     }
 
 
-def bind_placement_compile_parameters(
-    parameters: Mapping[str, Any],
-    *,
-    supervision_context: Any,
-) -> JsonDict:
-    """Bind an id-only placement choice to host-retained perception state.
-
-    Direct callers may provide the host-owned fields explicitly for contract
-    tests and offline compilation.  During an agent episode only ``purpose``
-    and ``placement_candidate_id`` are planner-owned; all geometry is recovered
-    from working memory and checked again by :func:`_compile_placement_seed`.
-    """
-
-    bound = dict(parameters)
-    if all(
-        key in bound
-        for key in ("placement_candidate", "source_grasp", "camera_extrinsics", "scene_epoch")
-    ):
-        return bound
-    context = supervision_context if isinstance(supervision_context, Mapping) else {}
-    memory = context.get("memory") if isinstance(context, Mapping) else None
-    memory = memory if isinstance(memory, Mapping) else {}
-    candidate_id = str(bound.get("placement_candidate_id") or "").strip()
-    if not candidate_id:
-        raise GraspGeometryError("placement_candidate_id is required")
-    working = memory.get("working_memory")
-    artifacts = working.get("artifacts") if isinstance(working, Mapping) else None
-    artifacts = artifacts if isinstance(artifacts, Mapping) else {}
-    placement_artifact: Mapping[str, Any] | None = None
-    camera_artifacts: list[Mapping[str, Any]] = []
-    for entry in artifacts.values():
-        value = entry.get("value") if isinstance(entry, Mapping) else None
-        if not isinstance(value, Mapping) and isinstance(entry, Mapping):
-            value = entry
-        if not isinstance(value, Mapping):
-            continue
-        if value.get("type") == "placement_candidates" and value.get("tool") == "anyplace":
-            placement_artifact = value
-        elif value.get("type") == "camera_packet":
-            camera_artifacts.append(value)
-    if placement_artifact is None:
-        raise GraspGeometryError("no retained AnyPlace candidate set is available")
-    candidates = placement_artifact.get("placement_candidates")
-    selected = next(
-        (
-            dict(item)
-            for item in candidates
-            if isinstance(item, Mapping) and str(item.get("id") or "") == candidate_id
-        ),
-        None,
-    ) if isinstance(candidates, Sequence) else None
-    if selected is None:
-        raise GraspGeometryError("placement_candidate_id is not in the retained AnyPlace set")
-    pose = selected.get("place_grasp_pose")
-    if not isinstance(pose, Mapping):
-        raise GraspGeometryError("retained placement candidate has no place_grasp_pose")
-    source = placement_artifact.get("source")
-    source = source if isinstance(source, Mapping) else {}
-    selected_grasp = source.get("selected_grasp")
-    selected_grasp = selected_grasp if isinstance(selected_grasp, Mapping) else {}
-    source_grasp = selected_grasp.get("candidate")
-    if not isinstance(source_grasp, Mapping):
-        source_grasp = {"id": placement_artifact.get("selected_grasp_id")}
-    source_packet = selected_grasp.get("source")
-    source_packet = source_packet if isinstance(source_packet, Mapping) else {}
-    source_rgb = str(source_packet.get("rgb") or source.get("rgb") or "")
-    camera = next(
-        (
-            packet
-            for packet in camera_artifacts
-            if source_rgb
-            and str(packet.get("rgb_path") or "")
-            and Path(str(packet.get("rgb_path"))).resolve() == Path(source_rgb).resolve()
-        ),
-        None,
-    )
-    if camera is None or not isinstance(camera.get("extrinsics"), Mapping):
-        raise GraspGeometryError("matching original camera extrinsics are unavailable")
-    bound.update(
-        {
-            "placement_candidate": selected,
-            "source_grasp": dict(source_grasp),
-            "camera_extrinsics": dict(camera["extrinsics"]),
-            "camera_frame_id": str(camera.get("frame_id") or ""),
-            "scene_epoch": memory.get("scene_epoch"),
-            "scene_revision": (
-                memory.get("placement_candidate_policy", {}).get("scene_revision")
-                if isinstance(memory.get("placement_candidate_policy"), Mapping)
-                else memory.get("scene_epoch")
-            ),
-        }
-    )
-    return bound
-
-
-def _compile_placement_seed(
+def compile_placement_seed(
     parameters: Mapping[str, Any],
     *,
     profile: Mapping[str, Any],
     profile_sha256: str,
 ) -> JsonDict:
+    """Compile an object goal through the frozen measured attachment transform."""
+
     _validate_profile(profile, target_class="")
     candidate = _mapping(parameters.get("placement_candidate"), "placement_candidate")
     requested_id = str(parameters.get("placement_candidate_id") or "").strip()
     candidate_id = str(candidate.get("id") or "").strip()
     if not requested_id or requested_id != candidate_id:
         raise GraspGeometryError("placement candidate selection does not match retained candidate")
-    pose = _mapping(candidate.get("place_grasp_pose"), "placement_candidate.place_grasp_pose")
-    if str(pose.get("frame") or "") != "camera":
-        raise GraspGeometryError("placement candidate pose must be in the camera frame")
-    if str(pose.get("camera_frame") or "opencv").lower() != "opencv":
-        raise GraspGeometryError("placement candidate camera_frame must be 'opencv'")
-    source_grasp = _mapping(parameters.get("source_grasp"), "source_grasp")
-    source_grasp_id = str(source_grasp.get("id") or "").strip()
-    if not source_grasp_id or str(pose.get("source_grasp_id") or "") != source_grasp_id:
-        raise GraspGeometryError("placement candidate is not bound to the source grasp")
+    pose = _mapping(candidate.get("object_goal_pose"), "placement_candidate.object_goal_pose")
+    if str(pose.get("frame") or "") != "world":
+        raise GraspGeometryError("placement object goal must be in the world frame")
+    attachment = _mapping(parameters.get("attachment_transform"), "attachment_transform")
+    if (
+        str(attachment.get("parent_frame") or "") != "eef"
+        or str(attachment.get("child_frame") or "") != "object"
+    ):
+        raise GraspGeometryError("attachment transform must be T_eef_object_attached")
     scene_epoch = _nonnegative_int(parameters.get("scene_epoch"), "scene_epoch")
     scene_revision = _nonnegative_int(
         parameters.get("scene_revision", scene_epoch), "scene_revision"
     )
-    extrinsics = _mapping(parameters.get("camera_extrinsics"), "camera_extrinsics")
-    r_camera_grasp = _rotation(pose.get("rotation_matrix"), "place_grasp_pose.rotation_matrix")
-    p_camera_grasp = _vector(
-        pose.get("gripper_tip_position_xyz") or pose.get("translation_xyz"),
-        3,
-        "place_grasp_pose.translation_xyz",
-    )
-    r_world_cv, p_world_camera = _opencv_camera_to_world(extrinsics)
-    transform = _mapping(profile.get("T_grasp_eef"), "T_grasp_eef")
-    r_grasp_eef = _rotation(transform.get("rotation_matrix"), "T_grasp_eef.rotation_matrix")
-    p_grasp_eef = _vector(transform.get("translation_xyz"), 3, "T_grasp_eef.translation_xyz")
-    r_world_grasp = _matmul3(r_world_cv, r_camera_grasp)
-    r_world_eef = _matmul3(r_world_grasp, r_grasp_eef)
-    p_world_grasp = _add(_matvec3(r_world_cv, p_camera_grasp), p_world_camera)
-    p_world_eef = _add(p_world_grasp, _matvec3(r_world_grasp, p_grasp_eef))
+    t_world_object = _pose_transform(pose, "object_goal_pose")
+    t_eef_object = _pose_transform(attachment, "attachment_transform")
+    t_world_eef = _matmul4(t_world_object, _inverse_rigid_transform(t_eef_object))
+    r_world_eef = [row[:3] for row in t_world_eef[:3]]
+    p_world_eef = [row[3] for row in t_world_eef[:3]]
     release_clearance = _bounded_float(
         parameters.get("release_clearance_m", _PLACEMENT_RELEASE_CLEARANCE_M),
         "release_clearance_m",
-        _PLACEMENT_RELEASE_CLEARANCE_M,
-        _PLACEMENT_RELEASE_CLEARANCE_M,
+        0.0,
+        0.05,
     )
     hover_clearance = _bounded_float(
         parameters.get("hover_clearance_m", _MIN_PLACEMENT_HOVER_CLEARANCE_M),
@@ -736,8 +718,7 @@ def _compile_placement_seed(
         "purpose": "placement",
         "placement_candidate_id": candidate_id,
         "placement_candidate": candidate,
-        "source_grasp_id": source_grasp_id,
-        "camera_extrinsics": extrinsics,
+        "attachment_transform": attachment,
         "profile_sha256": profile_sha256,
         "scene_epoch": scene_epoch,
         "scene_revision": scene_revision,
@@ -748,7 +729,6 @@ def _compile_placement_seed(
     common = {
         "frame": "world",
         "rotation_matrix": _round_matrix(r_world_eef),
-        "source_grasp_id": source_grasp_id,
         "placement_candidate_id": candidate_id,
         "compiled_placement_id": compiled_id,
         "calibration_id": str(profile.get("calibration_id") or ""),
@@ -763,8 +743,9 @@ def _compile_placement_seed(
         "compiled_placement_id": compiled_id,
         "placement_candidate_id": candidate_id,
         "candidate_id": candidate_id,
-        "source_grasp_id": source_grasp_id,
-        "camera_frame_id": str(parameters.get("camera_frame_id") or ""),
+        "attachment_transform_sha256": hashlib.sha256(
+            json.dumps(attachment, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest(),
         "scene_epoch": scene_epoch,
         "scene_revision": scene_revision,
         "selection_source": "main_agent_vlm",
@@ -776,6 +757,47 @@ def _compile_placement_seed(
         "hover_pose": {**common, "xyz": _round_vector(hover_xyz), "placement_stage": "hover"},
         "release_pose": {**common, "xyz": _round_vector(release_xyz), "placement_stage": "release"},
     }
+
+
+def materialize_world_object_goal(
+    candidate: Mapping[str, Any],
+    *,
+    placement_camera_extrinsics: Mapping[str, Any],
+    current_eef_pose: Mapping[str, Any],
+    attachment_transform: Mapping[str, Any],
+) -> JsonDict:
+    """Bind an AnyPlace transform to current measured robot/attachment state."""
+
+    placement = _mapping(
+        candidate.get("object_placement_transform"),
+        "object_placement_transform",
+    )
+    if str(placement.get("frame") or "") != "placement_camera":
+        raise GraspGeometryError("AnyPlace transform must use the placement camera frame")
+    raw = placement.get("transform_matrix")
+    if not isinstance(raw, list) or len(raw) != 4:
+        raise GraspGeometryError("object placement transform must be a 4x4 matrix")
+    t_place_goal = [_vector(row, 4, "object_placement_transform") for row in raw]
+    _rotation([row[:3] for row in t_place_goal[:3]], "object_placement_transform")
+    if any(abs(a - b) > 1e-6 for a, b in zip(t_place_goal[3], [0, 0, 0, 1])):
+        raise GraspGeometryError("object placement transform is not rigid")
+    r_world_camera, p_world_camera = _opencv_camera_to_world(placement_camera_extrinsics)
+    t_world_camera = _transform_matrix(r_world_camera, p_world_camera)
+    t_world_eef = _pose_transform(current_eef_pose, "current_eef_pose")
+    t_eef_object = _pose_transform(attachment_transform, "attachment_transform")
+    t_world_object_current = _matmul4(t_world_eef, t_eef_object)
+    t_world_object_goal = _matmul4(
+        _matmul4(_matmul4(t_world_camera, t_place_goal), _inverse_rigid_transform(t_world_camera)),
+        t_world_object_current,
+    )
+    result = dict(candidate)
+    result["object_goal_pose"] = {
+        "frame": "world",
+        "translation_xyz": _round_vector([row[3] for row in t_world_object_goal[:3]]),
+        "rotation_matrix": _round_matrix([row[:3] for row in t_world_object_goal[:3]]),
+        "convention": "T_world_object_goal",
+    }
+    return result
 
 
 def grasp_candidate_approach_world(
@@ -1082,6 +1104,53 @@ def _opencv_camera_to_world(
     )
 
 
+def _pose_transform(value: Mapping[str, Any], label: str) -> list[list[float]]:
+    translation = _vector(
+        value.get("translation_xyz", value.get("xyz")), 3, f"{label}.translation_xyz"
+    )
+    rotation_value = value.get("rotation_matrix")
+    if rotation_value is not None:
+        rotation = _rotation(rotation_value, f"{label}.rotation_matrix")
+    else:
+        quaternion = _vector(value.get("quat_xyzw"), 4, f"{label}.quat_xyzw")
+        qx, qy, qz, qw = quaternion
+        norm = math.sqrt(sum(component * component for component in quaternion))
+        if norm <= 1e-9:
+            raise GraspGeometryError(f"{label}.quat_xyzw must be non-zero")
+        qx, qy, qz, qw = [component / norm for component in quaternion]
+        rotation = [
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ]
+    return _transform_matrix(rotation, translation)
+
+
+def _transform_matrix(
+    rotation: Sequence[Sequence[float]], translation: Sequence[float]
+) -> list[list[float]]:
+    return [
+        [float(rotation[row][column]) for column in range(3)] + [float(translation[row])]
+        for row in range(3)
+    ] + [[0.0, 0.0, 0.0, 1.0]]
+
+
+def _matmul4(
+    left: Sequence[Sequence[float]], right: Sequence[Sequence[float]]
+) -> list[list[float]]:
+    return [
+        [sum(float(left[row][k]) * float(right[k][column]) for k in range(4)) for column in range(4)]
+        for row in range(4)
+    ]
+
+
+def _inverse_rigid_transform(matrix: Sequence[Sequence[float]]) -> list[list[float]]:
+    rotation_t = [[float(matrix[column][row]) for column in range(3)] for row in range(3)]
+    translation = [float(matrix[row][3]) for row in range(3)]
+    inverse_translation = [-value for value in _matvec3(rotation_t, translation)]
+    return _transform_matrix(rotation_t, inverse_translation)
+
+
 def _mask_depth_target(
     mask_path: Path,
     depth_path: Path,
@@ -1101,8 +1170,8 @@ def _mask_depth_target(
             raise GraspGeometryError("target mask and depth dimensions differ")
         width, height = mask.size
         foreground: list[tuple[int, int, float]] = []
-        mask_values = list(mask.get_flattened_data())
-        depth_values = list(depth.get_flattened_data())
+        mask_values = list(mask.getdata())
+        depth_values = list(depth.getdata())
         for index, mask_value in enumerate(mask_values):
             if int(mask_value) <= 0:
                 continue

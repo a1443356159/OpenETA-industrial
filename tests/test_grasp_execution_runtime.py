@@ -205,6 +205,14 @@ def _native_proof_receipt(*, revision: int = 2, target_id: str = "target_object"
         "motion_outcome": "completed",
         "planning_scene_revision": revision,
         "detachable_joint": {"state": "attached"},
+        "attachment_transform": {
+            "schema_version": "openeta.attachment_transform.v1",
+            "parent_frame": "eef",
+            "child_frame": "object",
+            "translation_xyz": [0.136, 0.0, 0.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            "measurement_boundary": "native_attach_ack",
+        },
         "child_link_proof": dict(evidence),
         "physical_verification": {
             "schema_version": "openeta.gazebo.native_grasp.v1",

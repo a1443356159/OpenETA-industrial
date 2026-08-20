@@ -1244,21 +1244,17 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             name="anyplace",
             category="manipulation",
             description=(
-                "Predict the configured set of camera-frame object placement transforms and the "
-                "corresponding placed grasp poses from one RGBD observation."
+                "Predict object-goal transforms from independent object and placement "
+                "RGB-D observations. It never accepts grasp geometry or emits EEF poses."
             ),
             parameters={
-                "rgb": "local RGB image file path from the selected grasp observation",
-                "depth": "aligned local depth image file path from the same observation",
-                "object_mask": "local object mask path used by the selected grasp call",
-                "placement_region_mask": (
-                    "SAM3 segmentation artifact containing mask_ref and source_image; "
-                    "additional SAM3 detection metadata is allowed"
+                "object_observation": (
+                    "independent RGB-D object packet with rgb, depth, object_mask, "
+                    "intrinsics, camera_extrinsics, and camera_frame_id"
                 ),
-                "intrinsics": "pinhole intrinsics with finite fx, fy, cx, cy, and scale",
-                "selected_grasp": (
-                    "object with one complete normalized grasp candidate and the "
-                    "successful targeted grasp tool's details.source object"
+                "placement_observation": (
+                    "independent RGB-D target packet with rgb, depth, "
+                    "placement_region_mask, intrinsics, camera_extrinsics, and camera_frame_id"
                 ),
                 "scene_revision": (
                     "integer planning-scene revision inherited from the trusted "
@@ -1396,22 +1392,17 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             name="compile_grasp_seed",
             category="geometry",
             description=(
-                "Compile one active normalized camera-frame grasp seed, or one "
-                "retained AnyPlace candidate selected by id, into staged world-frame "
-                "EEF poses with the host-owned "
+                "Compile one active normalized camera-frame grasp seed into staged "
+                "world-frame EEF poses with the host-owned "
                 "read-only embodiment calibration and an optional task-family "
                 "strategy. Unknown geometry families use the generic calibrated "
                 "transform instead of being rejected."
             ),
             parameters={
-                "purpose": "grasp (default) or placement",
+                "purpose": "grasp (default); placement is not supported",
                 "grasp_candidate_id": (
                     "for purpose=grasp, the only planner-selected field; the host "
                     "binds the qualified candidate geometry"
-                ),
-                "placement_candidate_id": (
-                    "for purpose=placement, the only planner-selected field; the host "
-                    "binds pose, source grasp, calibration, camera extrinsics, and scene epoch"
                 ),
                 "camera_pose": "complete active normalized camera-frame grasp candidate",
                 "camera_extrinsics": ("matching camera calibration from the estimator observation"),
@@ -1444,6 +1435,20 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                     "optional requested approach standoff in [0.04, 0.16] m; "
                     "the host enforces at least 0.15 m along the world-frame grasp normal"
                 ),
+            },
+            effect=ToolEffect.READ_ONLY,
+            batchable=False,
+        ),
+        ToolSpec(
+            name="compile_placement_seed",
+            category="geometry",
+            description=(
+                "Select one MoveIt-PASS AnyPlace object-goal candidate by id. The host "
+                "binds its world object pose to the measured frozen T_eef_object_attached "
+                "and returns newly compiled EEF hover/release poses."
+            ),
+            parameters={
+                "placement_candidate_id": "the only planner-selected field",
             },
             effect=ToolEffect.READ_ONLY,
             batchable=False,

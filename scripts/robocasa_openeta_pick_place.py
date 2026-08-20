@@ -276,7 +276,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
         )
         sam3_obj = record_tool("sam3", {"image": str(rgb_path.resolve()), "prompt": "mug"})
-        sam3_sink = record_tool("sam3", {"image": str(rgb_path.resolve()), "prompt": "sink basin"})
+        record_tool("sam3", {"image": str(rgb_path.resolve()), "prompt": "sink basin"})
 
         # Bind real-format handlers to unavailable backends so the trace keeps
         # the same structured contract as a deployed installation.
@@ -305,10 +305,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         placement = record_tool(
             "anyplace",
             {
-                "rgb": str(rgb_path.resolve()),
-                "object_mask": "sam3 mug mask" if sam3_obj.success else "unavailable",
-                "placement_region_mask": {"mask_ref": "sam3 sink mask"} if sam3_sink.success else {},
-                "selected_grasp": {},
+                "object_observation": {},
+                "placement_observation": {},
+                "scene_revision": 0,
             },
         )
 

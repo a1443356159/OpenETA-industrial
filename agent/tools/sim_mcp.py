@@ -687,7 +687,7 @@ class SimulatorMcpToolProxy:
         if is_anyplace_pose:
             raise ValueError(
                 "Raw AnyPlace poses are not executable; select the retained candidate "
-                "with compile_grasp_seed(purpose=placement) and use only its EEF poses."
+                "with compile_placement_seed and use only its host-compiled EEF poses."
             )
         elif is_grasp_candidate and self.config.forward_grasp_candidate_orientation:
             arguments.update(
@@ -2203,10 +2203,6 @@ def _is_ranked_grasp_candidate_pose(parameters: JsonDict) -> bool:
     source_model = str(pose.get("source_model") or "").strip().lower()
     if source_model in {"anygrasp", "contact_graspnet"}:
         return True
-    if candidate_id.startswith("place_grasp_") and str(
-        pose.get("source_grasp_id") or ""
-    ).startswith("grasp_"):
-        return True
     if candidate_id.startswith("grasp_") and any(
         key in pose for key in ("rank", "backend_index", "score", "gripper_tip_position_xyz")
     ):
@@ -2233,10 +2229,12 @@ def _is_anyplace_pose(parameters: JsonDict) -> bool:
         or pose.get("placement_candidate_id")
         or ""
     ).strip()
-    source_grasp_id = str(pose.get("source_grasp_id") or "").strip()
     source_tool = str(pose.get("source_tool") or "").strip().lower()
-    return source_tool == "anyplace" or (
-        candidate_id.startswith("place_grasp_") and bool(source_grasp_id)
+    return (
+        source_tool == "anyplace"
+        or "object_placement_transform" in pose
+        or ("object_goal_pose" in pose and pose.get("compiled_eef_pose") is not True)
+        or candidate_id.startswith("placement_")
     )
 
 

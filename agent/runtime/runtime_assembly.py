@@ -95,8 +95,11 @@ from agent.tools.handlers import (
 )
 from agent.tools.grasp_geometry import (
     build_compile_grasp_seed_handler,
+    build_compile_placement_seed_handler,
     build_wrist_alignment_handler,
+    compile_placement_seed,
     compile_grasp_seed,
+    materialize_world_object_goal,
 )
 from agent.tools.grasp_strategies import load_grasp_strategies
 from agent.tools.mcp_registry import load_mcp_server_url
@@ -108,6 +111,7 @@ from agent.tools.object_memory import (
 from agent.tools.registry import (
     ToolEventListener,
     ToolExecutionContext,
+    ToolHandler,
     ToolRegistry,
     ToolResult,
     ToolSpec,
@@ -426,6 +430,14 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         build_compile_grasp_seed_handler(
             workspace.grasp_profile_path,
             strategy_root=workspace.grasp_strategy_root,
+            qualification_cache=qualification_cache if qualifier is not None else None,
+        ),
+        replace=True,
+    )
+    tools.bind_handler(
+        "compile_placement_seed",
+        build_compile_placement_seed_handler(
+            workspace.grasp_profile_path,
             qualification_cache=qualification_cache if qualifier is not None else None,
         ),
         replace=True,
@@ -871,26 +883,36 @@ def _candidate_qualification_compiler(
         profile_bytes = profile_path.read_bytes()
         profile = json.loads(profile_bytes.decode("utf-8"))
         profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
-        extrinsics = source.get("camera_extrinsics")
-        if not isinstance(extrinsics, dict):
-            raise ValueError("camera extrinsics unavailable for qualification")
         if purpose == "placement":
-            selected_grasp = source.get("selected_grasp")
-            selected_grasp = selected_grasp if isinstance(selected_grasp, dict) else {}
-            source_grasp = selected_grasp.get("candidate")
-            if not isinstance(source_grasp, dict):
-                raise ValueError("source grasp unavailable for placement qualification")
+            attachment_transform = source.get("attachment_transform")
+            if not isinstance(attachment_transform, dict):
+                raise ValueError("measured attachment transform unavailable")
+            start_joint_state = source.get("start_joint_state")
+            if not isinstance(start_joint_state, dict):
+                raise ValueError("placement qualification start state unavailable")
             parameters: JsonDict = {
-                "purpose": "placement",
                 "placement_candidate_id": str(candidate.get("id") or ""),
                 "placement_candidate": dict(candidate),
-                "source_grasp": dict(source_grasp),
-                "camera_extrinsics": dict(extrinsics),
-                "camera_frame_id": str(source.get("camera_frame_id") or ""),
+                "attachment_transform": dict(attachment_transform),
                 "scene_epoch": scene_epoch,
                 "scene_revision": planning_scene_revision,
+                "qualified_attachment_transform_sha256": hashlib.sha256(
+                    json.dumps(
+                        attachment_transform, sort_keys=True, separators=(",", ":")
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "qualified_start_state_sha256": hashlib.sha256(
+                    json.dumps(
+                        {
+                            "joint_positions": start_joint_state.get("joint_positions", []),
+                            "gripper_state": start_joint_state.get("gripper_state", {}),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
             }
-            compiled = compile_grasp_seed(
+            compiled = compile_placement_seed(
                 parameters,
                 profile=profile,
                 profile_sha256=profile_sha256,
@@ -904,6 +926,9 @@ def _candidate_qualification_compiler(
                 _qualification_pose("release", compiled["release_pose"]),
             ]
         else:
+            extrinsics = source.get("camera_extrinsics")
+            if not isinstance(extrinsics, dict):
+                raise ValueError("camera extrinsics unavailable for qualification")
             parameters = {
                 "purpose": "grasp",
                 "camera_pose": dict(candidate),
@@ -1022,6 +1047,59 @@ def _qualifying_handler(
             if camera is not None:
                 source["camera_frame_id"] = camera.frame_id
                 source["camera_extrinsics"] = dict(camera.extrinsics)
+        if purpose == "placement":
+            supervision = context.metadata.get("supervision_context")
+            memory = supervision.get("memory") if isinstance(supervision, dict) else None
+            attachment_gate = memory.get("attachment_gate") if isinstance(memory, dict) else None
+            full_proof = (
+                attachment_gate.get("full_lift_proof")
+                if isinstance(attachment_gate, dict)
+                else None
+            )
+            attachment_transform = (
+                full_proof.get("attachment_transform")
+                if isinstance(full_proof, dict)
+                else None
+            )
+            current_eef_pose = (
+                context.observation.robot.end_effector_pose
+                if context.observation is not None
+                else None
+            )
+            placement_extrinsics = source.get("placement_camera_extrinsics")
+            candidates = result.details.get("placement_candidates")
+            if not (
+                isinstance(attachment_transform, dict)
+                and isinstance(current_eef_pose, dict)
+                and isinstance(placement_extrinsics, dict)
+                and isinstance(candidates, list)
+            ):
+                return ToolResult(
+                    False,
+                    "placement qualification lacks measured attachment or observation pose",
+                    {"reason": "placement_binding_evidence_missing"},
+                )
+            try:
+                materialized = [
+                    materialize_world_object_goal(
+                        candidate,
+                        placement_camera_extrinsics=placement_extrinsics,
+                        current_eef_pose=current_eef_pose,
+                        attachment_transform=attachment_transform,
+                    )
+                    for candidate in candidates
+                    if isinstance(candidate, Mapping)
+                ]
+            except Exception as exc:  # noqa: BLE001 - fail closed at evidence boundary.
+                return ToolResult(
+                    False,
+                    f"placement object-goal binding failed: {exc}",
+                    {"reason": "placement_binding_invalid"},
+                )
+            result.details["placement_candidates"] = materialized
+            result.details["candidate_count"] = len(materialized)
+            source["attachment_transform"] = dict(attachment_transform)
+            source["current_eef_pose"] = dict(current_eef_pose)
         return qualifier.qualify_result(
             result,
             purpose=purpose,

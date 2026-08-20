@@ -23,12 +23,9 @@ class _Backend:
 
 def _request() -> dict[str, Any]:
     return {
-        "rgb": {},
-        "depth": {},
-        "object_mask": {},
-        "placement_region_mask": {},
-        "intrinsics": {},
-        "selected_grasp": {},
+        "object_observation": {},
+        "placement_observation": {},
+        "object_camera_to_placement_camera": [],
     }
 
 

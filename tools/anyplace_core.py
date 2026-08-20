@@ -17,7 +17,7 @@ from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count as v
 
 
 MODEL_NAME = "anyplace_multitask"
-FRAME = "camera"
+FRAME = "placement_camera"
 CAMERA_FRAME = "opencv"
 POSE_CONVENTION = "p_placed = R @ p_current + t"
 DEFAULT_CANDIDATE_LIMIT = DEFAULT_CANDIDATE_COUNT
@@ -85,61 +85,81 @@ class AnyPlaceBackend:
     def predict_placement(
         self,
         *,
-        rgb: dict[str, Any] | None,
-        depth: dict[str, Any] | None,
-        object_mask: dict[str, Any] | None,
-        placement_region_mask: dict[str, Any] | None,
-        intrinsics: dict[str, Any] | None,
-        selected_grasp: dict[str, Any] | None,
+        object_observation: dict[str, Any] | None,
+        placement_observation: dict[str, Any] | None,
+        object_camera_to_placement_camera: list[list[float]] | None,
     ) -> dict[str, Any]:
-        """Predict camera-frame placement poses from one aligned RGBD snapshot."""
+        """Predict object-goal transforms from independent RGB-D observations."""
 
         start = time.perf_counter()
         metadata = _metadata_base()
         try:
-            parsed_intrinsics = validate_intrinsics(intrinsics)
             np, Image = _load_numeric_deps()
-            rgb_array = _decode_image_payload(
-                rgb,
+            object_packet = _observation_packet(object_observation, "object")
+            placement_packet = _observation_packet(placement_observation, "placement")
+            object_rgb = _decode_image_payload(
+                object_packet["rgb"],
                 Image=Image,
                 np=np,
                 convert="RGB",
-                missing_reason="missing_rgb",
-                decode_reason="rgb_decode_failed",
+                missing_reason="missing_object_rgb",
+                decode_reason="object_rgb_decode_failed",
             )
-            depth_array = _decode_image_payload(
-                depth,
+            object_depth = _decode_image_payload(
+                object_packet["depth"],
                 Image=Image,
                 np=np,
                 convert=None,
-                missing_reason="missing_depth",
-                decode_reason="depth_decode_failed",
+                missing_reason="missing_object_depth",
+                decode_reason="object_depth_decode_failed",
             )
             object_mask_array = _decode_image_payload(
-                object_mask,
+                object_packet["mask"],
                 Image=Image,
                 np=np,
                 convert="L",
                 missing_reason="missing_object_mask",
                 decode_reason="object_mask_decode_failed",
             )
+            placement_rgb = _decode_image_payload(
+                placement_packet["rgb"], Image=Image, np=np, convert="RGB",
+                missing_reason="missing_placement_rgb", decode_reason="placement_rgb_decode_failed",
+            )
+            placement_depth = _decode_image_payload(
+                placement_packet["depth"], Image=Image, np=np, convert=None,
+                missing_reason="missing_placement_depth", decode_reason="placement_depth_decode_failed",
+            )
             placement_mask_array = _decode_image_payload(
-                placement_region_mask,
+                placement_packet["mask"],
                 Image=Image,
                 np=np,
                 convert="L",
                 missing_reason="missing_placement_region_mask",
                 decode_reason="placement_region_mask_decode_failed",
             )
-            object_pcd, placement_pcd = build_masked_pointclouds_from_rgbd(
-                rgb=rgb_array,
-                depth=depth_array,
-                object_mask=object_mask_array,
-                placement_region_mask=placement_mask_array,
-                intrinsics=parsed_intrinsics,
+            object_pcd = build_masked_pointcloud_from_rgbd(
+                rgb=object_rgb, depth=object_depth, mask=object_mask_array,
+                intrinsics=validate_intrinsics(object_packet["intrinsics"]),
+                limits=OBJECT_POINTCLOUD_LIMITS,
+                empty_reason="empty_object_pointcloud",
+                too_small_reason="object_pointcloud_too_small",
                 depth_truncation=self.depth_truncation,
             )
-            parsed_grasp = normalise_selected_grasp(selected_grasp)
+            placement_pcd = build_masked_pointcloud_from_rgbd(
+                rgb=placement_rgb, depth=placement_depth, mask=placement_mask_array,
+                intrinsics=validate_intrinsics(placement_packet["intrinsics"]),
+                limits=PLACEMENT_REGION_POINTCLOUD_LIMITS,
+                empty_reason="empty_placement_region_pointcloud",
+                too_small_reason="placement_region_pointcloud_too_small",
+                depth_truncation=self.depth_truncation,
+            )
+            transform = np.asarray(object_camera_to_placement_camera, dtype=np.float64)
+            if not _is_rigid_transform(transform):
+                raise AnyPlaceInputError("invalid_observation_transform")
+            object_h = np.concatenate(
+                [object_pcd.astype(np.float64), np.ones((object_pcd.shape[0], 1))], axis=1
+            )
+            object_pcd = (transform @ object_h.T).T[:, :3].astype(np.float32)
             metadata.update(
                 {
                     "object_point_count": int(object_pcd.shape[0]),
@@ -179,7 +199,6 @@ class AnyPlaceBackend:
             )
             candidates = normalise_placement_candidates(
                 raw_candidates,
-                selected_grasp=parsed_grasp,
                 expected_count=self.candidate_count,
             )
         except AnyPlaceInputError as exc:
@@ -443,22 +462,23 @@ def validate_intrinsics(intrinsics: dict[str, Any] | None) -> dict[str, float]:
     return parsed
 
 
-def build_masked_pointclouds_from_rgbd(
+def build_masked_pointcloud_from_rgbd(
     *,
     rgb: Any,
     depth: Any,
-    object_mask: Any,
-    placement_region_mask: Any,
+    mask: Any,
     intrinsics: dict[str, float],
+    limits: PointCloudLimits,
+    empty_reason: str,
+    too_small_reason: str,
     depth_truncation: float,
-) -> tuple[Any, Any]:
-    """Project aligned RGBD masks into independent camera-frame point clouds."""
+) -> Any:
+    """Project one aligned RGB-D mask into a camera-frame point cloud."""
 
     np, _Image = _load_numeric_deps()
     rgb_array = np.asarray(rgb)
     depth_array = np.asarray(depth)
-    object_mask_2d = np.asarray(object_mask) > 0
-    placement_mask_2d = np.asarray(placement_region_mask) > 0
+    mask_2d = np.asarray(mask) > 0
 
     if rgb_array.ndim != 3 or rgb_array.shape[2] < 3:
         raise AnyPlaceInputError("image_shape_mismatch")
@@ -466,12 +486,10 @@ def build_masked_pointclouds_from_rgbd(
         raise AnyPlaceInputError("unsupported_depth_format")
     if rgb_array.shape[:2] != depth_array.shape:
         raise AnyPlaceInputError("image_shape_mismatch")
-    if object_mask_2d.shape != depth_array.shape or placement_mask_2d.shape != depth_array.shape:
+    if mask_2d.shape != depth_array.shape:
         raise AnyPlaceInputError("image_shape_mismatch")
-    if not object_mask_2d.any():
-        raise AnyPlaceInputError("empty_object_mask")
-    if not placement_mask_2d.any():
-        raise AnyPlaceInputError("empty_placement_region_mask")
+    if not mask_2d.any():
+        raise AnyPlaceInputError(empty_reason.replace("pointcloud", "mask"))
 
     height, width = depth_array.shape
     u, v = np.meshgrid(np.arange(width), np.arange(height))
@@ -481,21 +499,19 @@ def build_masked_pointclouds_from_rgbd(
     points = np.stack([points_x, points_y, points_z], axis=-1)
     valid_depth = (points_z > 0) & (points_z < depth_truncation)
 
-    object_points = points[valid_depth & object_mask_2d].astype(np.float32)
-    placement_points = points[valid_depth & placement_mask_2d].astype(np.float32)
-    object_points = validate_pointcloud_array(
-        object_points,
-        limits=OBJECT_POINTCLOUD_LIMITS,
-        empty_reason="empty_object_pointcloud",
-        too_small_reason="object_pointcloud_too_small",
+    return validate_pointcloud_array(
+        points[valid_depth & mask_2d].astype(np.float32), limits=limits,
+        empty_reason=empty_reason, too_small_reason=too_small_reason,
     )
-    placement_points = validate_pointcloud_array(
-        placement_points,
-        limits=PLACEMENT_REGION_POINTCLOUD_LIMITS,
-        empty_reason="empty_placement_region_pointcloud",
-        too_small_reason="placement_region_pointcloud_too_small",
-    )
-    return object_points, placement_points
+
+
+def _observation_packet(value: Any, kind: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AnyPlaceInputError(f"missing_{kind}_observation")
+    required = {"rgb", "depth", "mask", "intrinsics"}
+    if not required <= value.keys():
+        raise AnyPlaceInputError(f"invalid_{kind}_observation")
+    return value
 
 
 def validate_pointcloud_array(
@@ -524,51 +540,9 @@ def validate_pointcloud_array(
     return array.astype(np.float32, copy=False)
 
 
-def normalise_selected_grasp(selected_grasp: Any) -> dict[str, Any]:
-    np, _Image = _load_numeric_deps()
-    if not isinstance(selected_grasp, dict):
-        raise AnyPlaceInputError("missing_selected_grasp")
-    if selected_grasp.get("frame") != FRAME or selected_grasp.get("camera_frame") != CAMERA_FRAME:
-        raise AnyPlaceInputError("invalid_selected_grasp")
-    grasp_id = selected_grasp.get("id")
-    if not isinstance(grasp_id, str) or not grasp_id:
-        raise AnyPlaceInputError("invalid_selected_grasp")
-    try:
-        rotation = np.asarray(selected_grasp["rotation_matrix"], dtype=np.float64)
-        translation = np.asarray(selected_grasp["translation_xyz"], dtype=np.float64)
-        tip = np.asarray(selected_grasp["gripper_tip_position_xyz"], dtype=np.float64)
-        score = float(selected_grasp["score"])
-        depth = float(selected_grasp["depth"])
-        width = float(selected_grasp["width"])
-        height = float(selected_grasp["height"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise AnyPlaceInputError("invalid_selected_grasp") from exc
-    if rotation.shape != (3, 3) or translation.shape != (3,) or tip.shape != (3,):
-        raise AnyPlaceInputError("invalid_selected_grasp")
-    if not all(np.isfinite(value).all() for value in (rotation, translation, tip)):
-        raise AnyPlaceInputError("invalid_selected_grasp")
-    if not np.isfinite([score, depth, width, height]).all():
-        raise AnyPlaceInputError("invalid_selected_grasp")
-    if depth < 0 or width < 0 or height < 0 or not _is_rotation_matrix(rotation):
-        raise AnyPlaceInputError("invalid_selected_grasp")
-    return {
-        "id": grasp_id,
-        "frame": FRAME,
-        "camera_frame": CAMERA_FRAME,
-        "score": score,
-        "translation_xyz": _float_list(translation),
-        "rotation_matrix": _float_matrix(rotation),
-        "depth": depth,
-        "width": width,
-        "height": height,
-        "gripper_tip_position_xyz": _float_list(tip),
-    }
-
-
 def normalise_placement_candidates(
     raw_candidates: Any,
     *,
-    selected_grasp: dict[str, Any],
     expected_count: int | None = DEFAULT_CANDIDATE_LIMIT,
 ) -> list[dict[str, Any]]:
     np, _Image = _load_numeric_deps()
@@ -584,39 +558,18 @@ def normalise_placement_candidates(
         raise AnyPlaceInputError("inconsistent_placement_outputs")
     if not np.isfinite(arr).all():
         raise AnyPlaceInputError("inconsistent_placement_outputs")
-    grasp_rotation = np.asarray(selected_grasp["rotation_matrix"], dtype=np.float64)
-    grasp_translation = np.asarray(selected_grasp["translation_xyz"], dtype=np.float64)
-    grasp_tip = np.asarray(selected_grasp["gripper_tip_position_xyz"], dtype=np.float64)
     candidates = []
     for idx, pose in enumerate(arr):
         if not _is_rigid_transform(pose):
             raise AnyPlaceInputError("inconsistent_placement_outputs")
-        placement_rotation = pose[:3, :3]
-        placement_translation = pose[:3, 3]
-        place_rotation = placement_rotation @ grasp_rotation
-        place_translation = placement_rotation @ grasp_translation + placement_translation
-        place_tip = placement_rotation @ grasp_tip + placement_translation
         candidates.append(
             {
                 "id": f"placement_{idx:03d}",
-                "source_grasp_id": selected_grasp["id"],
                 "object_placement_transform": {
                     "frame": FRAME,
                     "camera_frame": CAMERA_FRAME,
                     "convention": POSE_CONVENTION,
                     "transform_matrix": _float_matrix(pose),
-                },
-                "place_grasp_pose": {
-                    "id": f"place_grasp_{idx:03d}",
-                    "frame": FRAME,
-                    "camera_frame": CAMERA_FRAME,
-                    "score": selected_grasp["score"],
-                    "translation_xyz": _float_list(place_translation),
-                    "rotation_matrix": _float_matrix(place_rotation),
-                    "depth": selected_grasp["depth"],
-                    "width": selected_grasp["width"],
-                    "height": selected_grasp["height"],
-                    "gripper_tip_position_xyz": _float_list(place_tip),
                 },
             }
         )

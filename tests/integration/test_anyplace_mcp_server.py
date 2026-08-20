@@ -26,15 +26,28 @@ def test_anyplace_mcp_stdio_predicts_aligned_rgbd_sample() -> None:
     python = _required_env("OPENETA_ANYPLACE_PYTHON")
     anyplace_root = _required_env("OPENETA_ANYPLACE_ROOT")
     config_path = _required_env("OPENETA_ANYPLACE_CONFIG_PATH")
+    intrinsics = _json_file("OPENETA_ANYPLACE_SAMPLE_INTRINSICS_JSON")
     request = {
-        "rgb": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_RGB"))),
-        "depth": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_DEPTH"))),
-        "object_mask": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_OBJECT_MASK"))),
-        "placement_region_mask": _image_payload(
-            Path(_required_env("OPENETA_ANYPLACE_SAMPLE_PLACEMENT_REGION_MASK"))
-        ),
-        "intrinsics": _json_file("OPENETA_ANYPLACE_SAMPLE_INTRINSICS_JSON"),
-        "selected_grasp": _json_file("OPENETA_ANYPLACE_SAMPLE_SELECTED_GRASP_JSON"),
+        "object_observation": {
+            "rgb": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_RGB"))),
+            "depth": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_DEPTH"))),
+            "object_mask": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_OBJECT_MASK"))),
+            "intrinsics": intrinsics,
+        },
+        "placement_observation": {
+            "rgb": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_RGB"))),
+            "depth": _image_payload(Path(_required_env("OPENETA_ANYPLACE_SAMPLE_DEPTH"))),
+            "placement_region_mask": _image_payload(
+                Path(_required_env("OPENETA_ANYPLACE_SAMPLE_PLACEMENT_REGION_MASK"))
+            ),
+            "intrinsics": intrinsics,
+        },
+        "object_camera_to_placement_camera": [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
     }
 
     async def run_call() -> dict:
@@ -74,19 +87,16 @@ def test_anyplace_mcp_stdio_predicts_aligned_rgbd_sample() -> None:
 
     assert payload["success"] is True
     details = payload["details"]
-    assert details["frame"] == "camera"
+    assert details["frame"] == "placement_camera"
     assert details["camera_frame"] == "opencv"
     assert details["candidate_count"] == 10
     assert len(details["placement_candidates"]) == 10
     for index, candidate in enumerate(details["placement_candidates"]):
         assert candidate["id"] == f"placement_{index:03d}"
-        assert candidate["source_grasp_id"] == request["selected_grasp"]["id"]
+        assert set(candidate) == {"id", "object_placement_transform"}
         transform = candidate["object_placement_transform"]
         assert transform["convention"] == "p_placed = R @ p_current + t"
         _assert_transform_matrix(transform["transform_matrix"])
-        place_grasp = candidate["place_grasp_pose"]
-        assert place_grasp["frame"] == "camera"
-        assert place_grasp["camera_frame"] == "opencv"
 
 
 def _required_env(name: str) -> str:

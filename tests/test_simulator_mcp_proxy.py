@@ -955,8 +955,8 @@ def test_move_to_rejects_raw_anyplace_pose_by_default() -> None:
         "move_to",
         {
             "target_pose": {
-                "id": "place_grasp_000",
-                "source_grasp_id": "grasp_003",
+                "id": "placement_000",
+                "object_goal_pose": {"frame": "world"},
                 "frame": "world",
                 "translation_xyz": [0.1, 0.2, 0.3],
                 "rotation_matrix": [
@@ -990,8 +990,8 @@ def test_move_to_rejects_raw_anyplace_pose_when_grasp_forwarding_enabled() -> No
         "move_to",
         {
             "target_pose": {
-                "id": "place_grasp_000",
-                "source_grasp_id": "grasp_003",
+                "id": "placement_000",
+                "object_goal_pose": {"frame": "world"},
                 "frame": "world",
                 "translation_xyz": [0.1, 0.2, 0.3],
                 "rotation_matrix": [
@@ -1024,7 +1024,6 @@ def test_move_to_forwards_full_compiled_placement_eef_rotation() -> None:
                 "purpose": "placement",
                 "compiled_eef_pose": True,
                 "placement_candidate_id": "placement_002",
-                "source_grasp_id": "grasp_003",
                 "frame": "world",
                 "xyz": [0.1, 0.2, 0.3],
                 "rotation_matrix": [

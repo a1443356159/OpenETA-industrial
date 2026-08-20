@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from copy import deepcopy
 from pathlib import Path
 
@@ -11,11 +12,14 @@ from adapter.protocol import EnvObservation, RobotState
 from agent.tools.grasp_geometry import (
     DEFAULT_GRASP_PROFILE,
     build_compile_grasp_seed_handler,
+    build_compile_placement_seed_handler,
     camera_optical_forward_world,
     GraspGeometryError,
+    compile_placement_seed,
     compile_grasp_seed,
     compute_wrist_alignment,
     grasp_refinement_hover_pose,
+    materialize_world_object_goal,
 )
 from agent.tools.registry import ToolExecutionContext, build_default_tool_registry
 
@@ -116,33 +120,26 @@ def test_compile_grasp_seed_accepts_rm75_robotiq_profile_and_preserves_rotation(
     assert "fresh empty wrist segmentation preserves" in result["warning"]
 
 
-def test_compile_placement_reuses_eef_calibration_and_preserves_rotation() -> None:
-    source = _candidate()
-    pose = {
-        **source,
-        "id": "place_grasp_002",
-        "source_grasp_id": source["id"],
-        "rotation_matrix": [
-            [0.0, -1.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-    }
-    result = compile_grasp_seed(
+def test_compile_placement_uses_object_goal_and_attachment_transform() -> None:
+    result = compile_placement_seed(
         {
-            "purpose": "placement",
             "placement_candidate_id": "placement_002",
             "placement_candidate": {
                 "id": "placement_002",
-                "place_grasp_pose": pose,
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [0.48, -0.1, 0.43],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                },
             },
-            "source_grasp": source,
-            "camera_extrinsics": {
-                "camera_frame": "opencv",
-                "pos": [0.0, 0.0, 0.0],
-                "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "attachment_transform": {
+                "parent_frame": "eef",
+                "child_frame": "object",
+                "translation_xyz": [0.136, 0.0, 0.0],
+                "quat_xyzw": [0, 0, 0, 1],
             },
             "scene_epoch": 4,
+            "scene_revision": 2,
         },
         profile=_profile(),
         profile_sha256="profile-sha",
@@ -152,38 +149,146 @@ def test_compile_placement_reuses_eef_calibration_and_preserves_rotation() -> No
     assert result["selection_source"] == "main_agent_vlm"
     assert result["orientation_clamped"] is False
     assert result["hover_pose"]["rotation_matrix"] == result["release_pose"]["rotation_matrix"]
-    assert result["hover_pose"]["rotation_matrix"] != _profile()["T_grasp_eef"]["rotation_matrix"]
+    assert result["release_pose"]["xyz"] == pytest.approx([0.344, -0.1, 0.43])
     assert result["hover_pose"]["xyz"][2] - result["release_pose"]["xyz"][2] == pytest.approx(0.1)
-    assert result["release_clearance_m"] == pytest.approx(0.005)
+    assert result["release_clearance_m"] == pytest.approx(0.0)
     assert result["hover_pose"]["compiled_eef_pose"] is True
+    assert "source_grasp_id" not in result
 
 
-def test_compile_placement_rejects_source_grasp_mismatch() -> None:
-    source = _candidate()
-    with pytest.raises(GraspGeometryError, match="source grasp"):
-        compile_grasp_seed(
-            {
-                "purpose": "placement",
-                "placement_candidate_id": "placement_000",
-                "placement_candidate": {
-                    "id": "placement_000",
-                    "place_grasp_pose": {
-                        **source,
-                        "id": "place_grasp_000",
-                        "source_grasp_id": "grasp_other",
-                    },
-                },
-                "source_grasp": source,
-                "camera_extrinsics": {
-                    "camera_frame": "opencv",
-                    "pos": [0.0, 0.0, 0.0],
-                    "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-                },
-                "scene_epoch": 4,
+def test_materialize_world_object_goal_uses_current_eef_and_attachment() -> None:
+    candidate = materialize_world_object_goal(
+        {
+            "id": "placement_000",
+            "object_placement_transform": {
+                "frame": "placement_camera",
+                "transform_matrix": [[1, 0, 0, 0.144], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
             },
-            profile=_profile(),
-            profile_sha256="profile-sha",
+        },
+        placement_camera_extrinsics={
+            "camera_frame": "opencv",
+            "camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        },
+        current_eef_pose={"xyz": [0.2, -0.1, 0.43], "quat_xyzw": [0, 0, 0, 1]},
+        attachment_transform={
+            "translation_xyz": [0.136, 0, 0], "quat_xyzw": [0, 0, 0, 1]
+        },
+    )
+    assert candidate["object_goal_pose"]["translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
+
+
+def test_compile_grasp_seed_rejects_placement_contract() -> None:
+    with pytest.raises(GraspGeometryError, match="only compiles grasp"):
+        compile_grasp_seed(
+            {"purpose": "placement"}, profile=_profile(), profile_sha256="profile-sha"
         )
+
+
+def _qualified_placement_handler_fixture(*, joint_positions=None, attachment_x=0.136):
+    candidate = {
+        "id": "placement_000",
+        "object_goal_pose": {
+            "frame": "world",
+            "translation_xyz": [0.48, -0.1, 0.43],
+            "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        },
+    }
+    attachment = {
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": [attachment_x, 0.0, 0.0],
+        "quat_xyzw": [0, 0, 0, 1],
+    }
+    robot = RobotState(
+        joint_positions=list(joint_positions or [0.1, 0.2]),
+        gripper_state={"openness": 0.2},
+    )
+    profile_bytes = DEFAULT_GRASP_PROFILE.read_bytes()
+    profile_sha = hashlib.sha256(profile_bytes).hexdigest()
+    parameters = {
+        "placement_candidate_id": "placement_000",
+        "placement_candidate": candidate,
+        "attachment_transform": attachment,
+        "scene_epoch": 4,
+        "scene_revision": 2,
+        "qualification_profile_sha256": profile_sha,
+        "qualified_attachment_transform_sha256": hashlib.sha256(
+            json.dumps(attachment, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "qualified_start_state_sha256": hashlib.sha256(
+            json.dumps(
+                {
+                    "joint_positions": robot.joint_positions,
+                    "gripper_state": robot.gripper_state,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    }
+    compiled = compile_placement_seed(
+        parameters, profile=_profile(), profile_sha256=profile_sha
+    )
+    parameters["qualified_compiled_pose_sha256"] = hashlib.sha256(
+        json.dumps(
+            [compiled["hover_pose"], compiled["release_pose"]],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+    class Cache:
+        def resolve(self, **_kwargs):
+            return {
+                "candidate": candidate,
+                "proof": {"compile_parameters": parameters},
+                "scene_epoch": 4,
+                "planning_scene_revision": 2,
+            }
+
+    context = ToolExecutionContext(
+        name="compile_placement_seed",
+        spec=build_default_tool_registry().get("compile_placement_seed"),
+        parameters={"placement_candidate_id": "placement_000"},
+        observation=EnvObservation(
+            task="place",
+            cameras=[],
+            robot=robot,
+            metadata={"scene_epoch": 4, "planning_scene_revision": 2},
+        ),
+        metadata={
+            "supervision_context": {
+                "memory": {
+                    "attachment_gate": {
+                        "full_lift_proof": {"attachment_transform": attachment}
+                    }
+                }
+            }
+        },
+    )
+    return build_compile_placement_seed_handler(qualification_cache=Cache()), context
+
+
+def test_compile_placement_handler_rejects_changed_start_state() -> None:
+    handler, context = _qualified_placement_handler_fixture()
+    context.observation.robot.joint_positions[0] += 0.01
+
+    result = handler(context)
+
+    assert result.success is False
+    assert "start joint or gripper state is stale" in result.content
+
+
+def test_compile_placement_handler_rejects_changed_attachment_transform() -> None:
+    handler, context = _qualified_placement_handler_fixture()
+    context.metadata["supervision_context"]["memory"]["attachment_gate"][
+        "full_lift_proof"
+    ]["attachment_transform"]["translation_xyz"][0] += 0.01
+
+    result = handler(context)
+
+    assert result.success is False
+    assert "attachment transform is stale" in result.content
 
 
 def test_normalized_opencv_and_legacy_opengl_extrinsics_are_equivalent() -> None:

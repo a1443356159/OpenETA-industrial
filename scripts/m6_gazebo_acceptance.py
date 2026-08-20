@@ -7,7 +7,6 @@ import argparse
 from datetime import UTC, datetime
 import json
 from pathlib import Path
-import sys
 from typing import Any, Mapping, Sequence
 import urllib.request
 
@@ -30,6 +29,7 @@ REQUIRED_REAL_M6_TOOLS = (
     "sam3",
     "graspgenx",
     "compile_grasp_seed",
+    "compile_placement_seed",
     "gripper_control",
     "anyplace",
     "close_simulator_env",
@@ -39,19 +39,20 @@ SCENARIOS = ("normal", "reject-first", "reject-all-recover")
 
 INSTRUCTIONS = """
 [automation=scripted_tui] 在隔离 Gazebo pick-place 环境中完成一次真实约束放置验收。
-创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 一次并冻结这一个
-scene_primary RGB-D；create 返回的 initial observation 不计作这次显式 observe。此冻结帧必须
-同时供 SAM3 分割红色方块 target_object、GraspGenX
-(gripper_name=robotiq_2f_85) 和 SAM3 分割绿色 placement_zone_marker 使用。禁止 Oracle、
+创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 并用该抓取观察供 SAM3
+分割红色方块 target_object 与 GraspGenX(gripper_name=robotiq_2f_85) 使用；create 返回的
+initial observation 不计作这次显式 observe。禁止 Oracle、
 fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增运动工具。抓取前不得运行
 AnyPlace；不得调用 python_exec 读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
 拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
 GraspGenX 候选并 compile_grasp_seed，执行真实接近、close，
 仅在双垫 native contact 与 attached ACK 后 lift；lift 必须 >=80 mm 且抓持相对漂移 <=10 mm。
-之后才用同一冻结 RGB-D、区域 mask 和已抓取的完整 source grasp 运行 AnyPlace；十个原始候选
-必须全部绑定该 source grasp、送入宿主 MoveIt 资格筛选并保留完整旋转与候选图。主 VLM 只能看到 PASS 集合并通过
-compile_grasp_seed(purpose=placement, placement_candidate_id=...) 选择一个候选，再按编译出的
-hover/release 完整位姿直接调用 MoveIt。规划失败仅当 execution_started=false 时拒绝当前候选，
+之后重新 observe 获取独立 placement RGB-D，分别用 SAM3 分割被抓物体和绿色
+placement_zone_marker，再把两个独立观察交给 AnyPlace。AnyPlace 只输出物体目标位姿，禁止接收
+selected_grasp/source_grasp_id 或输出 place_grasp_pose。十个原始候选全部送入宿主 MoveIt 资格筛选；
+宿主使用 attach ACK 时冻结的 T_eef_object_attached 编译 EEF hover/release。主 VLM 只能看到 PASS
+集合并通过 compile_placement_seed(placement_candidate_id=...) 选择候选。资格轨迹必须丢弃，真实
+动作重新规划。规划失败仅当 execution_started=false 时拒绝当前候选，
 不得重复失败 fingerprint；若 execution_started=true 或结果 unknown，立即停止并请求人工。
 成功释放必须有 detach ACK、planning-scene revision、稳定 >=0.5 s、末段漂移 <=5 mm、中心高度
 0.43±0.01 m，且目标 XY 外接圆完全位于标记区域。完成后唯一一次 close_simulator_env。
@@ -66,8 +67,8 @@ SCENARIO_INSTRUCTIONS = {
     ),
     "reject-all-recover": (
         "验收配置会让首次抓取周期的十个 placement candidate 在资格阶段各自真实失败。"
-        "十个全部耗尽且无运动后，真实返回 source hover/capture、open/detach、重新 observe/抓取，"
-        "重新运行 AnyPlace；故障条件随 planning-scene revision 链解除后完成放置。"
+        "十个全部耗尽且无运动后保持 native attachment，重新 observe placement、重新分割并运行 "
+        "AnyPlace；不得 detach 或重新运行 GraspGenX，随后完成放置。"
     ),
 }
 
@@ -225,13 +226,13 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         for required in REQUIRED_REAL_M6_TOOLS:
             if required not in names:
                 errors.append(f"required real M6 tool call missing: {required}")
-        if names.count("sam3") < 2:
-            errors.append("target and placement-region SAM3 calls are both required")
+        if names.count("sam3") < 3:
+            errors.append("grasp object plus placement object/region SAM3 calls are required")
         if not _ordered(
             names,
-            ("observe", "graspgenx", "gripper_control", "move_to", "anyplace", "compile_grasp_seed"),
+            ("observe", "graspgenx", "gripper_control", "move_to", "anyplace", "compile_placement_seed"),
         ):
-            errors.append("frozen perception, grasp/lift, AnyPlace, and placement compilation order is invalid")
+            errors.append("grasp/lift, independent AnyPlace, and placement compilation order is invalid")
         if any(base._contains(event, "perception_source", "gazebo_oracle") for event in events):
             errors.append("Oracle perception is forbidden")
         if any(base._contains(event, "fake_grasp_candidate") for event in events):
@@ -247,9 +248,8 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         create = next((call for call in calls if _name(call) == "create_simulator_env"), {})
         if not base._contains(create, "env_id", ENV_ID):
             errors.append("pick-place Gazebo environment identity missing")
-        compile_calls = [call for call in calls if _name(call) == "compile_grasp_seed"]
         placement_compiles = [
-            call for call in compile_calls if base._contains(call, "purpose", "placement")
+            call for call in calls if _name(call) == "compile_placement_seed"
         ]
         if not placement_compiles or not any(
             base._contains(call, "placement_candidate_id") for call in placement_compiles
@@ -265,15 +265,16 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         }
         if not base._contains(anyplace, "generated_candidate_count", 10):
             errors.append("AnyPlace did not generate exactly ten placement candidates")
-        if not base._contains(anyplace, "qualified_candidate_count", 10):
-            errors.append("AnyPlace did not qualify all ten placement candidates")
+        expected_qualified = 9 if scenario == "reject-first" else 10
+        if not base._contains(anyplace, "qualified_candidate_count", expected_qualified):
+            errors.append(
+                f"final AnyPlace result did not expose {expected_qualified} qualified candidates"
+            )
         if not candidate_ids:
             errors.append("AnyPlace exposed no MoveIt PASS placement candidate")
-        source_ids = {
-            str(value) for value in base._values(anyplace, "source_grasp_id") if str(value)
-        }
-        if len(source_ids) != 1:
-            errors.append("AnyPlace candidates are not bound to one source grasp")
+        for legacy_key in ("selected_grasp", "source_grasp_id", "place_grasp_pose"):
+            if base._contains(anyplace, legacy_key):
+                errors.append(f"AnyPlace leaked forbidden grasp-coupled field: {legacy_key}")
         if not base._contains(
             anyplace, "schema_version", "openeta.moveit_candidate_qualification.v1"
         ):
@@ -289,27 +290,24 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ]
         if len(rotations) < len(candidate_ids):
             errors.append("AnyPlace PASS candidates do not retain full rotations")
-        grasp_call = next((call for call in calls if _name(call) == "graspgenx"), {})
-        grasp_parameters = _parameters(grasp_call)
         anyplace_parameters = _parameters(anyplace)
-        frozen_rgb = grasp_parameters.get("rgb")
-        frozen_depth = grasp_parameters.get("depth")
-        if (
-            not isinstance(frozen_rgb, str)
-            or not isinstance(frozen_depth, str)
-            or anyplace_parameters.get("rgb") != frozen_rgb
-            or anyplace_parameters.get("depth") != frozen_depth
+        object_observation = anyplace_parameters.get("object_observation")
+        placement_observation = anyplace_parameters.get("placement_observation")
+        if not isinstance(object_observation, Mapping) or not isinstance(
+            placement_observation, Mapping
         ):
-            errors.append("GraspGenX and AnyPlace do not share the frozen RGB-D packet")
-        sam_images = {
-            str(_parameters(call).get("image") or "")
-            for call in calls
-            if _name(call) == "sam3"
-        }
-        if frozen_rgb not in sam_images:
-            errors.append("SAM3 calls are not linked to the frozen RGB image")
+            errors.append("AnyPlace independent object/placement observations are missing")
+        elif not base._contains(object_observation, "object_mask") or not base._contains(
+            placement_observation, "placement_region_mask"
+        ):
+            errors.append("AnyPlace independent masks are missing")
         if not any(base._contains(payload, "state", "attached") for payload in payloads):
             errors.append("native attach ACK evidence missing")
+        if not any(
+            base._contains(payload, "schema_version", "openeta.attachment_transform.v1")
+            for payload in payloads
+        ):
+            errors.append("measured T_eef_object_attached evidence missing")
         if not any(
             any(float(value) >= 0.08 for value in base._values(payload, "lift_m") if isinstance(value, (int, float)))
             and any(
@@ -361,8 +359,8 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
                 errors.append("reject-all-recover lacks ten real qualification rejections")
             if placement_failures:
                 errors.append("reject-all-recover executed a qualification-rejected candidate")
-            if names.count("anyplace") < 2 or names.count("graspgenx") < 2:
-                errors.append("reject-all-recover did not regrasp and rerun AnyPlace")
+            if names.count("anyplace") < 2 or names.count("graspgenx") != 1:
+                errors.append("reject-all-recover did not preserve attachment and rerun only AnyPlace")
         if not fingerprints:
             errors.append("motion request fingerprint evidence missing")
         scene_revisions = [

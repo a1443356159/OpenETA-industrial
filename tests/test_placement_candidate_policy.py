@@ -6,10 +6,9 @@ from agent.runtime.memory import AgentMemory
 
 def _policy(candidate_ids):
     return {
-        "schema_version": "openeta.placement_candidate_policy.v1",
+        "schema_version": "openeta.placement_candidate_policy.v2",
         "status": "active",
         "candidate_queue": list(candidate_ids),
-        "source_grasp_id": "grasp_000",
         "active_candidate_id": candidate_ids[0],
         "rejected_candidates": [],
         "failed_request_fingerprints": [],
@@ -110,7 +109,7 @@ def test_planning_failure_rejects_only_active_placement_candidate() -> None:
     assert "current joint state" in policy["rejected_candidates"][0]["reason"]
 
 
-def test_all_placement_candidates_failed_requires_verified_source_return() -> None:
+def test_all_placement_candidates_failed_requires_independent_reobservation() -> None:
     memory = AgentMemory()
     memory.save_fact("placement_candidate_policy", _policy(["placement_000"]), source="test")
     memory.save_fact(
@@ -130,9 +129,12 @@ def test_all_placement_candidates_failed_requires_verified_source_return() -> No
     memory.add_action(_planning_failure("placement_000", "fingerprint-only"))
 
     policy = memory.placement_candidate_policy()
-    assert policy["status"] == "exhausted_return_required"
-    assert policy["recovery"]["stage"] == "return_source_hover"
-    assert policy["recovery"]["source_capture_pose"]["xyz"] == [0.2, 0.0, 0.45]
+    assert policy["status"] == "reobserve_required"
+    assert policy["recovery"] == {
+        "stage": "observe_placement",
+        "then": "resegment_placement_region_and_rerun_anyplace",
+        "preserve_attachment": True,
+    }
 
 
 def test_failed_first_candidate_allows_only_the_second_candidate() -> None:
@@ -182,7 +184,7 @@ def test_repeated_failure_fingerprint_stops_fail_closed() -> None:
     assert policy["rejected_candidates"] == []
 
 
-def test_exhausted_recovery_detaches_then_invalidates_stale_perception_on_observe() -> None:
+def test_exhausted_recovery_reobserves_placement_and_preserves_attachment() -> None:
     memory = AgentMemory()
     memory.save_fact("placement_candidate_policy", _policy(["placement_000"]), source="test")
     memory.save_fact(
@@ -202,46 +204,17 @@ def test_exhausted_recovery_detaches_then_invalidates_stale_perception_on_observ
     memory.save_fact("attachment_gate", {"status": "resolved", "verdict": "PASS"}, source="test")
     memory.add_action(_planning_failure("placement_000", "fingerprint-only"))
 
-    for stage, xyz in (
-        ("return_source_hover", [0.2, 0.0, 0.6]),
-        ("return_source_capture", [0.2, 0.0, 0.45]),
-    ):
-        memory.add_action(
-            _successful_call(
-                "move_to",
-                {
-                    "target_pose": {
-                        "placement_recovery_stage": stage,
-                        "scene_revision": 7,
-                        "xyz": xyz,
-                    }
-                },
-                {"planning_scene_revision": 7},
-            )
-        )
-    memory.add_action(
-        _successful_call(
-            "gripper_control",
-            {"position": 1},
-            {
-                "detachable_joint": {"state": "detached"},
-                "planning_scene_revision": 8,
-            },
-        )
-    )
-    assert memory.placement_candidate_policy()["status"] == "reobserve_regrasp_required"
+    assert memory.placement_candidate_policy()["status"] == "reobserve_required"
 
     memory.add_action(_successful_call("observe", {"reason": "fresh"}))
 
-    policy = memory.placement_candidate_policy()
-    assert policy["status"] == "regrasp_required"
-    assert policy["recovery"]["stage"] == "regrasp"
+    assert memory.placement_candidate_policy() is None
     assert memory.selected_sam3_detection() is None
-    assert memory.grasp_execution() is None
-    assert memory.attachment_gate() is None
+    assert memory.grasp_execution()["stage"] == "attached"
+    assert memory.attachment_gate() == {"status": "resolved", "verdict": "PASS"}
 
 
-def test_failed_source_return_stops_instead_of_repeating_motion() -> None:
+def test_reobserve_recovery_does_not_require_source_return_or_detach() -> None:
     memory = AgentMemory()
     memory.save_fact("placement_candidate_policy", _policy(["placement_000"]), source="test")
     memory.save_fact(
@@ -258,21 +231,7 @@ def test_failed_source_return_stops_instead_of_repeating_motion() -> None:
     )
     memory.add_action(_planning_failure("placement_000", "fingerprint-only"))
 
-    failed_return = _planning_failure(
-        "placement_000",
-        "source-return-unknown",
-        execution_started=None,
-        error_code="MOTION_OUTCOME_UNKNOWN",
-        motion_outcome="unknown",
-    )
-    failed_return.command["request"]["parameters"]["target_pose"][
-        "placement_recovery_stage"
-    ] = "return_source_hover"
-    failed_return.command["tool_calls"][0]["parameters"]["target_pose"][
-        "placement_recovery_stage"
-    ] = "return_source_hover"
-    memory.add_action(failed_return)
-
     policy = memory.placement_candidate_policy()
-    assert policy["status"] == "stopped_requires_human"
-    assert policy["stop_reason"] == "source_return_motion_failed_or_unknown"
+    assert policy["status"] == "reobserve_required"
+    assert policy["recovery"]["preserve_attachment"] is True
+    assert memory.grasp_execution()["stage"] == "attached"
