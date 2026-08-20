@@ -3754,6 +3754,9 @@ def _build_tool_context_payload(
         "grasp_estimation_recovery": memory_context.get("grasp_estimation_recovery"),
         "gripper_command_state": memory_context.get("gripper_command_state"),
         "attachment_gate": memory_context.get("attachment_gate"),
+        "placement_candidate_policy": memory_context.get(
+            "placement_candidate_policy"
+        ),
         "placement_release": memory_context.get("placement_release"),
         "placement_release_obligation": _placement_release_obligation(
             observation,
