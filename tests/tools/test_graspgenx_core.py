@@ -639,6 +639,43 @@ def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
     assert metadata["formal_diversity_rejected_count"] == 2
 
 
+def test_formal_selection_treats_same_point_yaw_as_one_grasp_mode(
+    tmp_path: Path,
+) -> None:
+    source, checkpoints, grippers = _backend_layout(tmp_path)
+    backend = GraspGenXBackend(
+        graspgenx_root=source,
+        checkpoint_root=checkpoints,
+        gripper_descriptions_root=grippers,
+        max_candidates=2,
+    )
+    poses = np.tile(np.eye(4), (3, 1, 1))
+    poses[1, :3, :3] = np.array(
+        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    poses[2, :3, :3] = np.array(
+        [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]
+    )
+
+    selected, metadata = backend._select_collision_free(
+        loaded={
+            "filter_collisions": lambda **kwargs: np.ones(
+                len(kwargs["grasp_poses"]), dtype=bool
+            )
+        },
+        sampler_entry={
+            "collision_surface_points": np.zeros((2000, 3), dtype=np.float32)
+        },
+        scene_points=np.ones((10, 3), dtype=np.float32),
+        camera_native_grasps=poses,
+        scores=np.array([0.99, 0.98, 0.7]),
+        branch_tags=["obb", "obb", "diff"],
+    )
+
+    assert selected == [0, 2]
+    assert metadata["formal_diversity_rejected_count"] == 1
+
+
 def test_no_scene_selection_retains_lower_scored_side_approaches(tmp_path: Path) -> None:
     source, checkpoints, grippers = _backend_layout(tmp_path)
     backend = GraspGenXBackend(

@@ -58,7 +58,7 @@ MMR_DIVERSITY_RESERVE_MULTIPLIER = 4
 # for ordering, but by itself can still admit several score-rich copies of an
 # OBB grasp mode.
 FORMAL_MIN_TRANSLATION_M = 0.015
-FORMAL_MIN_ROTATION_RAD = math.radians(15.0)
+FORMAL_MIN_APPROACH_SEPARATION_RAD = math.radians(20.0)
 
 _DEPTH_SCALE_GUIDANCE = (
     "Depth in meters is raw_depth / intrinsics.scale; for uint16 millimeter "
@@ -567,10 +567,18 @@ def _se3_mmr_order(
         translation = float(
             np.linalg.norm(pose_array[left, :3, 3] - pose_array[right, :3, 3])
         ) / MMR_TRANSLATION_SCALE_M
-        relative = pose_array[left, :3, :3].T @ pose_array[right, :3, :3]
-        cosine = float(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))
-        rotation = math.acos(cosine) / MMR_ROTATION_SCALE_RAD
-        return math.exp(-(translation + MMR_ROTATION_WEIGHT * rotation))
+        # GraspGenX native +Z is the approach axis.  A parallel-jaw gripper's
+        # yaw about that axis is a weaker diversity signal than a genuinely
+        # different top/side/oblique approach direction.
+        cosine = float(
+            np.clip(
+                np.dot(pose_array[left, :3, 2], pose_array[right, :3, 2]),
+                -1.0,
+                1.0,
+            )
+        )
+        approach = math.acos(cosine) / MMR_ROTATION_SCALE_RAD
+        return math.exp(-(translation + MMR_ROTATION_WEIGHT * approach))
 
     max_similarity = {
         index: max(similarity(index, chosen) for chosen in selected)
@@ -609,12 +617,13 @@ def _is_formally_novel_grasp(
         translation = float(
             np.linalg.norm(candidate[:3, 3] - selected[:3, 3])
         )
-        relative = candidate[:3, :3].T @ selected[:3, :3]
-        cosine = float(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))
-        rotation = math.acos(cosine)
+        cosine = float(
+            np.clip(np.dot(candidate[:3, 2], selected[:3, 2]), -1.0, 1.0)
+        )
+        approach_separation = math.acos(cosine)
         if (
             translation < FORMAL_MIN_TRANSLATION_M
-            and rotation < FORMAL_MIN_ROTATION_RAD
+            and approach_separation < FORMAL_MIN_APPROACH_SEPARATION_RAD
         ):
             return False
     return True
@@ -1003,7 +1012,7 @@ class GraspGenXBackend:
                 "candidate_selection": "source_aware_se3_mmr_with_minimum_se3_separation",
                 "mmr_diversity_order_count": diversity_order_count,
                 "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
-                "formal_min_rotation_rad": FORMAL_MIN_ROTATION_RAD,
+                "formal_min_approach_separation_rad": FORMAL_MIN_APPROACH_SEPARATION_RAD,
                 "formal_diversity_rejected_count": diversity_rejected,
             }
 
@@ -1071,7 +1080,7 @@ class GraspGenXBackend:
             "candidate_selection": "source_aware_se3_mmr_with_minimum_se3_separation",
             "mmr_diversity_order_count": diversity_order_count,
             "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
-            "formal_min_rotation_rad": FORMAL_MIN_ROTATION_RAD,
+            "formal_min_approach_separation_rad": FORMAL_MIN_APPROACH_SEPARATION_RAD,
             "formal_diversity_rejected_count": diversity_rejected,
         }
 
