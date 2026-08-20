@@ -950,6 +950,27 @@ def _candidate_qualification_compiler(
                 stages.append(_qualification_pose("precontact", precontact))
             compiled_pose_chain.append(dict(compiled["contact_pose"]))
             stages.append(_qualification_pose("contact", compiled["contact_pose"]))
+            # The native attach proof is necessarily obtained only after the
+            # real close.  Still, a release-free lift of the same EEF pose is
+            # a deterministic MoveIt feasibility requirement and must not be
+            # discovered for the first time during world-mutating execution.
+            contact_xyz = compiled["contact_pose"].get("xyz")
+            if not isinstance(contact_xyz, list) or len(contact_xyz) != 3:
+                raise ValueError("compiled grasp contact pose has no xyz for lift qualification")
+            lift_pose = dict(compiled["contact_pose"])
+            lift_pose.update(
+                {
+                    "xyz": [
+                        float(contact_xyz[0]),
+                        float(contact_xyz[1]),
+                        float(contact_xyz[2]) + 0.1,
+                    ],
+                    "grasp_stage": "lift",
+                    "probe_type": "grasp_lift",
+                }
+            )
+            compiled_pose_chain.append(lift_pose)
+            stages.append(_qualification_pose("lift", lift_pose))
         return {
             "qualification_stages": stages,
             "compile_parameters": {
