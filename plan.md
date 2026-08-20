@@ -1401,16 +1401,26 @@ same manipulation flow works with SAM3 perception
 
 ## M6 — Real GraspGenX/AnyPlace, constraint-correct placement, and recovery
 
-Before the first grasp motion, freeze one RGB-D packet and use it for target
-SAM3, GraspGenX with the `robotiq_2f_85` embodiment, and placement-region SAM3.
-Do not run AnyPlace or plan the
-transport yet. Only after close, attach acknowledgement, and the unchanged M3
-lift gate pass, run AnyPlace against that frozen packet and retained source
-grasp. The main VLM then selects only a retained placement candidate id. The
-host binds the full AnyPlace pose, source grasp, original camera extrinsics,
-scene revision, and `T_grasp_eef`, producing world-frame EEF hover/release poses
-with full orientation. MoveIt transport planning begins only after this
-post-grasp placement compilation.
+Grasp and placement perception are independent. A fresh grasp RGB-D packet
+feeds target SAM3 and GraspGenX with the `robotiq_2f_85` embodiment. GraspGenX
+may produce 50--200 raw poses; the host performs source-aware SE(3) diversity
+selection and registers exactly ten formal candidates before sending all ten
+through private MoveIt qualification. The main VLM sees only PASS ids.
+
+Only after close, attach acknowledgement, and the unchanged M3 lift gate pass
+does the host measure and freeze `T_eef_object_attached`. A new placement RGB-D
+observation independently feeds SAM3 for the attached object and destination
+region, then AnyPlace. AnyPlace outputs only `T_world_object_goal`; it neither
+accepts a source grasp nor produces an EEF/grasp pose. The host composes
+`T_world_eef_goal = T_world_object_goal * inverse(T_eef_object_attached)`, sends
+all ten formal placement candidates through private MoveIt qualification, and
+lets the main VLM select only a PASS id with `compile_placement_seed`.
+
+Counts remain distinct: `raw_candidate_count` is model output before diversity,
+`generated_candidate_count` is the formal pool, `submitted_candidate_count` is
+the MoveIt-qualified pool, and both `qualified_candidate_count` and public
+`candidate_count` count PASS candidates. Qualification trajectories are proof
+only and are discarded; execution always replans from current state.
 
 After the unchanged M3 lift gate, MoveIt plans directly to the compiled
 pre-place hover and then to release. There is no fixed world wrist orientation,
@@ -1421,8 +1431,10 @@ attached payload into the MoveIt planning scene with apply/readback gates.
 One planning rejection means only that the request failed for the current joint
 state, target, tolerances, and scene. Reject that candidate when execution did
 not start; never claim its coordinate is permanently unreachable. Do not retry
-an identical request fingerprint. Exhaustion returns along the verified source
-hover/capture path before open/detach/reobserve/regrasp.
+an identical request fingerprint. Zero grasp PASS causes a fresh observation
+and rerun of the configured grasp backend. Zero placement PASS preserves the
+attachment and reruns only placement observation, SAM3, and AnyPlace; it does
+not rerun GraspGenX or detach the object.
 
 ---
 

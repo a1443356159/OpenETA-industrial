@@ -4221,11 +4221,19 @@ def _normalise_graspgenx_response(
 
     candidates_value = details.get("grasp_candidates")
     candidate_count = details.get("candidate_count")
+    raw_candidate_count = details.get("raw_candidate_count")
+    generated_candidate_count = details.get("generated_candidate_count")
     if (
         isinstance(candidate_count, bool)
         or not isinstance(candidate_count, int)
+        or isinstance(raw_candidate_count, bool)
+        or not isinstance(raw_candidate_count, int)
+        or isinstance(generated_candidate_count, bool)
+        or not isinstance(generated_candidate_count, int)
         or not isinstance(candidates_value, list)
         or candidate_count != len(candidates_value)
+        or generated_candidate_count != candidate_count
+        or raw_candidate_count < generated_candidate_count
         or not 1 <= candidate_count <= GRASPGENX_MAX_CANDIDATES
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
@@ -4287,6 +4295,8 @@ def _normalise_graspgenx_response(
                 "gripper_name": gripper_name,
                 "up_direction_camera": list(up_direction_camera),
             },
+            "raw_candidate_count": raw_candidate_count,
+            "generated_candidate_count": generated_candidate_count,
             "candidate_count": len(candidates),
             "grasp_candidates": candidates,
             "best_grasp_candidate": candidates[0],

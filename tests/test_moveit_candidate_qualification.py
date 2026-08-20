@@ -155,7 +155,15 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
         artifact_root=tmp_path,
         compile_candidate=compile_candidate,
     ).qualify_result(
-        ToolResult(True, "ok", {"grasp_candidates": candidates, "candidate_count": 2}),
+        ToolResult(
+            True,
+            "ok",
+            {
+                "grasp_candidates": candidates,
+                "candidate_count": 2,
+                "raw_candidate_count": 100,
+            },
+        ),
         purpose="grasp",
         scene_epoch=3,
         planning_scene_revision=4,
@@ -164,6 +172,7 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
 
     assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == ["g0"]
     assert result.details["candidate_count"] == 1
+    assert result.details["raw_candidate_count"] == 100
     assert result.details["generated_candidate_count"] == 2
     assert result.details["submitted_candidate_count"] == 2
     assert result.details["qualified_candidate_count"] == 1

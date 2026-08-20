@@ -64,7 +64,6 @@ NATIVE_GRASP_MINIMUM_LIFT_M = 0.08
 NATIVE_GRASP_MAXIMUM_DRIFT_M = 0.01
 GRASP_RECOVERY_RETREAT_DISTANCE_M = 0.12
 GRASP_CANDIDATE_MAX_ATTEMPTS = 3
-GRASP_RETRY_APPROACH_DIVERSITY_DEG = 15.0
 ARTICULATED_HANDLE_APPROACH_MODES = ("top_down", "front", "side")
 GRASP_REFERENCE_POSITION_TOLERANCE_M = 0.05
 GRASP_REFERENCE_ORIENTATION_TOLERANCE_DEG = 20.0
@@ -2006,6 +2005,38 @@ class AgentMemory:
                 for candidate in candidates_value
                 if isinstance(candidate, dict) and str(candidate.get("id") or "")
             ]
+            generated_count_value = outputs.get("generated_candidate_count")
+            generated_candidate_count = (
+                generated_count_value
+                if isinstance(generated_count_value, int)
+                and not isinstance(generated_count_value, bool)
+                and generated_count_value >= 0
+                else len(raw_candidates)
+            )
+            raw_count_value = outputs.get("raw_candidate_count")
+            raw_candidate_count = (
+                raw_count_value
+                if isinstance(raw_count_value, int)
+                and not isinstance(raw_count_value, bool)
+                and raw_count_value >= generated_candidate_count
+                else generated_candidate_count
+            )
+            submitted_count_value = outputs.get("submitted_candidate_count")
+            submitted_candidate_count = (
+                submitted_count_value
+                if isinstance(submitted_count_value, int)
+                and not isinstance(submitted_count_value, bool)
+                and submitted_count_value >= 0
+                else generated_candidate_count
+            )
+            qualified_count_value = outputs.get("qualified_candidate_count")
+            qualified_candidate_count = (
+                qualified_count_value
+                if isinstance(qualified_count_value, int)
+                and not isinstance(qualified_count_value, bool)
+                and qualified_count_value >= 0
+                else len(raw_candidates)
+            )
             if not raw_candidates:
                 if isinstance(outputs.get("qualification_evidence"), dict):
                     source_backend = str(outputs.get("selected_backend") or source_tool)
@@ -2016,9 +2047,10 @@ class AgentMemory:
                         "status": "exhausted",
                         "stop_reason": "no_moveit_qualified_candidates",
                         "candidate_count": 0,
-                        "raw_candidate_count": int(
-                            outputs.get("generated_candidate_count") or 0
-                        ),
+                        "raw_candidate_count": raw_candidate_count,
+                        "generated_candidate_count": generated_candidate_count,
+                        "submitted_candidate_count": submitted_candidate_count,
+                        "qualified_candidate_count": qualified_candidate_count,
                         "active_rank": None,
                         "active_candidate": None,
                         "remaining_candidate_ids": [],
@@ -2068,9 +2100,6 @@ class AgentMemory:
             candidates.sort(key=_grasp_candidate_sort_key)
             for score_rank, candidate in enumerate(candidates):
                 candidate["score_rank"] = score_rank
-            approach_diversified = source_backend == "graspgenx"
-            if approach_diversified:
-                candidates = _diversify_grasp_retry_approaches(candidates)
             for rank, candidate in enumerate(candidates):
                 candidate["rank"] = rank
             result_id = str(outputs.get("result_id") or "")
@@ -2140,11 +2169,7 @@ class AgentMemory:
                 "result_id": result_id,
                 "source_tool": source_tool,
                 "source_backend": source_backend,
-                "ranking": (
-                    "score_descending_with_approach_diversity"
-                    if approach_diversified
-                    else "score_descending"
-                ),
+                "ranking": str(outputs.get("ranking") or "score_descending"),
                 "status": (
                     "selection_required"
                     if candidates and selection_required
@@ -2153,7 +2178,10 @@ class AgentMemory:
                     else "exhausted"
                 ),
                 "candidate_count": len(candidates),
-                "raw_candidate_count": len(raw_candidates),
+                "raw_candidate_count": raw_candidate_count,
+                "generated_candidate_count": generated_candidate_count,
+                "submitted_candidate_count": submitted_candidate_count,
+                "qualified_candidate_count": qualified_candidate_count,
                 "active_rank": 0 if candidates and not selection_required else None,
                 "active_candidate": (
                     candidates[0] if candidates and not selection_required else None
@@ -6052,45 +6080,6 @@ def _parameters_grasp_candidate_id(parameters: JsonDict) -> str:
             if isinstance(value, str) and value:
                 return value
     return ""
-
-
-def _diversify_grasp_retry_approaches(candidates: list[JsonDict]) -> list[JsonDict]:
-    """Keep score order while exposing distinct approach axes to bounded retries."""
-
-    if len(candidates) < 2:
-        return candidates
-    cosine_limit = math.cos(math.radians(GRASP_RETRY_APPROACH_DIVERSITY_DEG))
-    selected: list[JsonDict] = []
-    selected_axes: list[list[float]] = []
-    deferred: list[JsonDict] = []
-    for candidate in candidates:
-        rotation = candidate.get("rotation_matrix")
-        axis: list[float] | None = None
-        if (
-            isinstance(rotation, list)
-            and len(rotation) == 3
-            and all(isinstance(row, list) and len(row) == 3 for row in rotation)
-        ):
-            try:
-                raw_axis = [float(rotation[row][0]) for row in range(3)]
-                norm = math.sqrt(sum(value * value for value in raw_axis))
-                if norm > 1e-9 and all(math.isfinite(value) for value in raw_axis):
-                    axis = [value / norm for value in raw_axis]
-            except (TypeError, ValueError):
-                axis = None
-        if axis is None:
-            deferred.append(candidate)
-            continue
-        if not selected_axes or all(
-            abs(sum(axis[index] * existing[index] for index in range(3)))
-            <= cosine_limit
-            for existing in selected_axes
-        ):
-            selected.append(candidate)
-            selected_axes.append(axis)
-        else:
-            deferred.append(candidate)
-    return [*selected, *deferred]
 
 
 def _candidate_linked_rejection(

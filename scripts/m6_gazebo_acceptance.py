@@ -256,6 +256,19 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             base._contains(call, "placement_candidate_id") for call in placement_compiles
         ):
             errors.append("main VLM placement candidate selection/compilation evidence missing")
+        grasp_calls = [call for call in calls if _name(call) == "graspgenx"]
+        final_grasp = grasp_calls[-1] if grasp_calls else {}
+        raw_grasp_counts = [
+            int(value)
+            for value in base._values(final_grasp, "raw_candidate_count")
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        if not raw_grasp_counts or raw_grasp_counts[-1] < 10:
+            errors.append("GraspGenX raw candidate count evidence is missing")
+        if not base._contains(final_grasp, "generated_candidate_count", 10):
+            errors.append("GraspGenX did not retain exactly ten formal candidates")
+        if not base._contains(final_grasp, "submitted_candidate_count", 10):
+            errors.append("GraspGenX did not submit all ten formal candidates")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}

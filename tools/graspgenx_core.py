@@ -48,6 +48,10 @@ COLLISION_THRESHOLD = 0.02
 MAX_COLLISION_SCENE_POINTS = 8192
 NUM_COLLISION_SAMPLES = 2000
 COLLISION_BATCH_SIZE = 16
+MMR_TRANSLATION_SCALE_M = 0.03
+MMR_ROTATION_SCALE_RAD = math.radians(30.0)
+MMR_ROTATION_WEIGHT = 1.0
+MMR_SIMILARITY_PENALTY = 0.55
 
 _DEPTH_SCALE_GUIDANCE = (
     "Depth in meters is raw_depth / intrinsics.scale; for uint16 millimeter "
@@ -518,34 +522,61 @@ def normalise_grasp_candidates(
     return candidates
 
 
-def _source_balanced_order(
-    ranked_indices: list[int], branch_tags: list[str]
+def _se3_mmr_order(
+    *,
+    poses: Any,
+    scores: Any,
+    branch_tags: list[str],
 ) -> list[int]:
-    """Interleave model branches while preserving score order inside each branch."""
+    """Return a deterministic, source-aware quality/diversity ordering."""
 
-    if len(ranked_indices) != len(branch_tags):
+    np, _Image = _load_image_dependencies()
+    pose_array = np.asarray(poses, dtype=np.float64)
+    score_array = np.asarray(scores, dtype=np.float64)
+    count = len(score_array)
+    if pose_array.shape != (count, 4, 4) or len(branch_tags) != count:
         raise GraspGenXInputError("inconsistent_grasp_outputs")
-    queues = {
-        tag: [index for index in ranked_indices if branch_tags[index] == tag]
-        for tag in ("diff", "obb")
-    }
-    first_tag = branch_tags[ranked_indices[0]] if ranked_indices else "diff"
-    tag_order = (first_tag, "obb" if first_tag == "diff" else "diff")
-    balanced: list[int] = []
-    cursor = {"diff": 0, "obb": 0}
-    while len(balanced) < len(ranked_indices):
-        progressed = False
-        for tag in tag_order:
-            position = cursor[tag]
-            if position < len(queues[tag]):
-                balanced.append(queues[tag][position])
-                cursor[tag] = position + 1
-                progressed = True
-        if not progressed:
-            break
-    if len(balanced) != len(ranked_indices):
-        raise GraspGenXInputError("inconsistent_grasp_outputs")
-    return balanced
+    ranked = sorted(range(count), key=lambda index: (-score_array[index], index))
+    if not ranked:
+        return []
+    score_span = float(score_array.max() - score_array.min())
+    quality = (
+        np.ones(count, dtype=np.float64)
+        if score_span <= 1e-12
+        else (score_array - score_array.min()) / score_span
+    )
+    selected = [ranked[0]]
+    first_source = branch_tags[selected[0]]
+    other_source = next(
+        (index for index in ranked if branch_tags[index] != first_source), None
+    )
+    if other_source is not None:
+        selected.append(other_source)
+    remaining = set(ranked) - set(selected)
+
+    def similarity(left: int, right: int) -> float:
+        translation = float(
+            np.linalg.norm(pose_array[left, :3, 3] - pose_array[right, :3, 3])
+        ) / MMR_TRANSLATION_SCALE_M
+        relative = pose_array[left, :3, :3].T @ pose_array[right, :3, :3]
+        cosine = float(np.clip((np.trace(relative) - 1.0) / 2.0, -1.0, 1.0))
+        rotation = math.acos(cosine) / MMR_ROTATION_SCALE_RAD
+        return math.exp(-(translation + MMR_ROTATION_WEIGHT * rotation))
+
+    while remaining:
+        best = max(
+            remaining,
+            key=lambda index: (
+                float(quality[index])
+                - MMR_SIMILARITY_PENALTY
+                * max(similarity(index, chosen) for chosen in selected),
+                float(score_array[index]),
+                -index,
+            ),
+        )
+        selected.append(best)
+        remaining.remove(best)
+    return selected
 
 
 class GraspGenXBackend:
@@ -694,7 +725,7 @@ class GraspGenXBackend:
             )
             metadata.update(
                 {
-                    "generated_candidate_count": int(len(scores)),
+                    "raw_candidate_count": int(len(scores)),
                     "diffusion_candidate_count": tags.count("diff"),
                     "obb_candidate_count": tags.count("obb"),
                 }
@@ -718,6 +749,7 @@ class GraspGenXBackend:
             if len(candidates) != len(selected_indices):
                 raise GraspGenXInputError("inconsistent_grasp_outputs")
             metadata["returned_candidate_count"] = len(candidates)
+            metadata["generated_candidate_count"] = len(candidates)
         except GraspGenXInputError as exc:
             metadata.update(exc.metadata)
             return failure_result(
@@ -745,6 +777,8 @@ class GraspGenXBackend:
                 "camera_frame": CAMERA_FRAME,
                 "grasp_frame": GRASP_FRAME,
                 "gripper_name": gripper.name,
+                "raw_candidate_count": int(len(scores)),
+                "generated_candidate_count": len(candidates),
                 "candidate_count": len(candidates),
                 "grasp_candidates": candidates,
                 "ranking": "score_descending",
@@ -891,7 +925,12 @@ class GraspGenXBackend:
         np, _Image = _load_image_dependencies()
         score_array = np.asarray(scores, dtype=np.float64)
         ranked = sorted(range(len(score_array)), key=lambda idx: (-score_array[idx], idx))
-        inspection_order = _source_balanced_order(ranked, branch_tags)
+        poses = np.asarray(camera_native_grasps, dtype=np.float64)
+        inspection_order = _se3_mmr_order(
+            poses=poses,
+            scores=score_array,
+            branch_tags=branch_tags,
+        )
         if len(scene_points) == 0:
             selected = sorted(
                 inspection_order[: self.max_candidates], key=ranked.index
@@ -902,7 +941,7 @@ class GraspGenXBackend:
                 "collision_scene_point_count": 0,
                 "collision_checked_count": 0,
                 "collision_rejected_count": 0,
-                "candidate_selection": "source_balanced_then_score_descending",
+                "candidate_selection": "source_aware_se3_mmr_then_score_descending",
             }
 
         collision_scene = np.asarray(scene_points, dtype=np.float32)
@@ -958,7 +997,7 @@ class GraspGenXBackend:
             "collision_scene_point_count": int(len(collision_scene)),
             "collision_checked_count": checked,
             "collision_rejected_count": rejected,
-            "candidate_selection": "source_balanced_then_score_descending",
+            "candidate_selection": "source_aware_se3_mmr_then_score_descending",
         }
 
     def _metadata_base(self, *, gripper_name: Any) -> dict[str, Any]:

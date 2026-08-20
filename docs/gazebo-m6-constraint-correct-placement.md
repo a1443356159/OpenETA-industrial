@@ -23,27 +23,39 @@ or human handling.
 
 ## Perception and compilation boundary
 
-Before the first grasp motion, one RGB-D packet is frozen and feeds target SAM3,
-GraspGenX for the `robotiq_2f_85` embodiment, and placement-region SAM3. No
-AnyPlace inference, placement candidate
-selection, placement compilation, or transport planning occurs yet. After
-close, Gazebo attach acknowledgement, and the unchanged M3 lift gate pass,
-AnyPlace runs against that frozen packet and retained source grasp. Every one of
-its ten generated candidates retain that source grasp, receive MoveIt qualification, and carry a
-projection/region-clearance summary plus a candidate image attachment.
+Grasp and placement use independent observations. A fresh grasp RGB-D packet
+feeds target SAM3 and GraspGenX for the `robotiq_2f_85` embodiment. GraspGenX's
+raw pool is reduced to ten formal candidates with deterministic source-aware
+SE(3) MMR over translation, SO(3) geodesic angle, backend score, and branch
+provenance. This does not rewrite poses or use robot IK. All ten formal
+candidates then receive private MoveIt qualification, and only PASS candidates
+are exposed to the main VLM.
 
-Only then does the main VLM call `compile_grasp_seed` with:
+After close, Gazebo attach acknowledgement, and the unchanged M3 lift gate,
+the host measures and freezes `T_eef_object_attached`. It then acquires a new
+placement RGB-D packet, independently segments the attached object and target
+region with SAM3, and calls AnyPlace. AnyPlace accepts those observations and
+outputs only object goal poses `T_world_object_goal`; it does not accept
+`selected_grasp`/`source_grasp_id` or output `place_grasp_pose`.
+
+Only then does the main VLM call `compile_placement_seed` with:
 
 ```json
-{"purpose":"placement","placement_candidate_id":"placement_002"}
+{"placement_candidate_id":"placement_002"}
 ```
 
-The host resolves that id against retained working memory and binds the full
-camera-frame pose, source grasp, original camera extrinsics, scene epoch, and
-embodiment `T_grasp_eef`. The output is a world-frame EEF hover/release pair
-with the candidate's full rotation. Grasp-strategy orientation clamps are not
-applied to placement. Raw AnyPlace and grasp-estimator poses fail closed at the
-motion proxy.
+The host resolves that id from its qualification cache and computes
+`T_world_eef_goal = T_world_object_goal * inverse(T_eef_object_attached)`. The
+output is a world-frame EEF hover/release pair with the candidate's full
+rotation. Any attachment-transform, pose, calibration, joint-state, scene-epoch,
+or planning-scene-revision change invalidates the proof. Raw AnyPlace and grasp
+estimator poses fail closed at the motion proxy.
+
+Candidate accounting is explicit: `raw_candidate_count` is GraspGenX output
+before diversity, `generated_candidate_count` is the ten-candidate formal pool,
+`submitted_candidate_count` is the pool sent to MoveIt, and
+`qualified_candidate_count`/`candidate_count` count PASS candidates exposed to
+the VLM.
 
 ## Motion and scene constraints
 
@@ -66,10 +78,12 @@ participates in table and distractor collision checking.
 
 ## Recovery and acceptance
 
-Candidate rejection retains the grasp and asks the main VLM to select another
-retained candidate. If all fail, return through the verified source hover and
-capture geometry, then open/detach, reobserve, select a new GraspGenX candidate,
-and rerun AnyPlace. Unsafe return or uncertain motion stops for human handling.
+Candidate rejection retains the current state and asks the main VLM to select
+another PASS candidate. Zero grasp PASS triggers a fresh grasp observation and
+reruns GraspGenX without switching backends. Zero placement PASS keeps the
+native attachment, acquires a new placement observation, resegments both
+placement inputs, and reruns AnyPlace only. `execution_started=true`, UNKNOWN,
+or unsafe recovery stops for human handling.
 
 ## Remote real-model deployment
 

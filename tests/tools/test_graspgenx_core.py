@@ -498,6 +498,8 @@ def test_backend_returns_ranked_contract_without_transport_payloads(
 
     assert result["success"] is True
     details = result["details"]
+    assert details["raw_candidate_count"] == 3
+    assert details["generated_candidate_count"] == 3
     assert details["candidate_count"] == 3
     assert [item["score"] for item in details["grasp_candidates"]] == [0.9, 0.9, 0.2]
     assert [item["backend_index"] for item in details["grasp_candidates"]] == [1, 2, 0]
@@ -575,7 +577,7 @@ def test_collision_selection_reports_all_grasps_colliding(tmp_path: Path) -> Non
     assert raised.value.metadata["returned_candidate_count"] == 0
 
 
-def test_no_scene_selection_reserves_both_model_sources(tmp_path: Path) -> None:
+def test_no_scene_selection_seeds_both_model_sources(tmp_path: Path) -> None:
     source, checkpoints, grippers = _backend_layout(tmp_path)
     backend = GraspGenXBackend(
         graspgenx_root=source,
@@ -594,10 +596,38 @@ def test_no_scene_selection_reserves_both_model_sources(tmp_path: Path) -> None:
         branch_tags=tags,
     )
 
-    assert [tags[index] for index in selected].count("obb") == 5
-    assert [tags[index] for index in selected].count("diff") == 5
+    assert {tags[index] for index in selected} == {"obb", "diff"}
     assert selected == sorted(selected, key=lambda index: (-scores[index], index))
-    assert metadata["candidate_selection"] == "source_balanced_then_score_descending"
+    assert (
+        metadata["candidate_selection"]
+        == "source_aware_se3_mmr_then_score_descending"
+    )
+
+
+def test_no_scene_selection_retains_lower_scored_side_approaches(tmp_path: Path) -> None:
+    source, checkpoints, grippers = _backend_layout(tmp_path)
+    backend = GraspGenXBackend(
+        graspgenx_root=source,
+        checkpoint_root=checkpoints,
+        gripper_descriptions_root=grippers,
+    )
+    poses = np.tile(np.eye(4), (20, 1, 1))
+    poses[10:, :3, :3] = np.array(
+        [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]
+    )
+    scores = np.arange(20.0, 0.0, -1.0)
+
+    selected, _metadata = backend._select_collision_free(
+        loaded={},
+        sampler_entry={},
+        scene_points=np.empty((0, 3), dtype=np.float32),
+        camera_native_grasps=poses,
+        scores=scores,
+        branch_tags=["diff"] * 20,
+    )
+
+    assert any(index < 10 for index in selected)
+    assert any(index >= 10 for index in selected)
 
 
 def test_backend_failure_is_atomic_for_inconsistent_model_output(

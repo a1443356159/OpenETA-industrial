@@ -727,7 +727,7 @@ def test_anygrasp_filters_non_executable_width_before_score_ranking() -> None:
     ]
 
 
-def test_graspgenx_bounded_retry_queue_diversifies_approach_axes() -> None:
+def test_graspgenx_memory_preserves_formal_counts_without_post_moveit_reordering() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick red block")
     candidates = [
@@ -761,23 +761,31 @@ def test_graspgenx_bounded_retry_queue_diversifies_approach_axes() -> None:
             outputs={
                 "result_id": "diverse-graspgenx",
                 "selected_backend": "graspgenx",
+                "raw_candidate_count": 100,
+                "generated_candidate_count": 10,
+                "submitted_candidate_count": 10,
+                "qualified_candidate_count": 5,
                 "grasp_candidates": candidates,
             },
         )
     )
 
     policy = memory.grasp_candidate_policy()
-    assert policy["ranking"] == "score_descending_with_approach_diversity"
+    assert policy["ranking"] == "score_descending"
     assert [candidate["id"] for candidate in policy["candidates"][:3]] == [
         "vertical-0",
-        "side",
-        "tilted",
+        "vertical-1",
+        "vertical-2",
     ]
     assert [candidate["score_rank"] for candidate in policy["candidates"][:3]] == [
         0,
-        3,
-        4,
+        1,
+        2,
     ]
+    assert policy["raw_candidate_count"] == 100
+    assert policy["generated_candidate_count"] == 10
+    assert policy["submitted_candidate_count"] == 10
+    assert policy["qualified_candidate_count"] == 5
 
 
 def test_selected_mask_geometry_becomes_task_strategy_compile_hint() -> None:

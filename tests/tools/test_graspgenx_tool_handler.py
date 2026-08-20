@@ -112,6 +112,8 @@ def _success_response() -> dict[str, Any]:
             "camera_frame": "opencv",
             "grasp_frame": "graspnet",
             "gripper_name": "franka_panda",
+            "raw_candidate_count": 20,
+            "generated_candidate_count": len(candidates),
             "candidate_count": len(candidates),
             "grasp_candidates": candidates,
             "ranking": "score_descending",
@@ -209,6 +211,8 @@ def test_handler_sends_geometry_only_and_generates_audited_visuals(tmp_path: Pat
     assert base64.b64decode(calls[0]["object_mask"]["base64"])
     assert calls[0]["up_direction_camera"] == [0.0, 0.0, -1.0]
     assert result.details["candidate_count"] == 2
+    assert result.details["raw_candidate_count"] == 20
+    assert result.details["generated_candidate_count"] == 2
     assert [item["id"] for item in result.details["grasp_candidates"]] == [
         "graspgenx_000",
         "graspgenx_001",
@@ -364,6 +368,8 @@ def test_handler_preserves_backend_failure_and_scrubs_raw_response(tmp_path: Pat
     "mutate",
     [
         lambda value: value["details"].update(candidate_count=3),
+        lambda value: value["details"].update(raw_candidate_count=1),
+        lambda value: value["details"].update(generated_candidate_count=3),
         lambda value: value["details"].update(camera_frame="opengl"),
         lambda value: value["details"]["grasp_candidates"][1].update(
             id="graspgenx_000"
