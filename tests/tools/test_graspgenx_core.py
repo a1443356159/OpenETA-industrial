@@ -502,6 +502,7 @@ def test_backend_returns_ranked_contract_without_transport_payloads(
     assert details["raw_candidate_count"] == 3
     assert details["generated_candidate_count"] == 3
     assert details["candidate_count"] == 3
+    assert details["ranking"] == "source_aware_se3_mmr_with_minimum_se3_separation"
     assert [item["score"] for item in details["grasp_candidates"]] == [0.9, 0.9, 0.2]
     assert [item["backend_index"] for item in details["grasp_candidates"]] == [1, 2, 0]
     assert details["metadata"]["collision_filter_applied"] is False

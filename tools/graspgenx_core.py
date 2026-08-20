@@ -822,7 +822,7 @@ class GraspGenXBackend:
                 "generated_candidate_count": len(candidates),
                 "candidate_count": len(candidates),
                 "grasp_candidates": candidates,
-                "ranking": "score_descending",
+                "ranking": "source_aware_se3_mmr_with_minimum_se3_separation",
                 "artifacts": [],
                 "metadata": _with_duration(metadata, start),
             },
