@@ -1264,6 +1264,56 @@ def test_known_failed_host_close_rejects_candidate_without_repeating() -> None:
     }
 
 
+def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None:
+    memory = _memory_with_candidates()
+    policy = memory.grasp_candidate_policy()
+    policy.update(
+        {
+            "status": "accepted",
+            "scene_epoch": 0,
+            "qualification_evidence": {
+                "schema_version": "openeta.moveit_candidate_qualification.v1"
+            },
+        }
+    )
+    memory.save_fact("grasp_candidate_policy", policy, source="test")
+    memory.save_fact("scene_epoch", {"epoch": 3}, source="test")
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "schema_version": "openeta.grasp_execution.v1",
+            "status": "required",
+            "stage": "close",
+            "candidate_id": "grasp_000",
+            "required_action": {
+                "name": "gripper_control",
+                "parameters": {"position": 0},
+            },
+        },
+        source="test",
+    )
+
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 0},
+            success=False,
+            outputs={"motion_outcome": "failed", "error_code": "CONTACT_REJECTED"},
+        )
+    )
+
+    updated = memory.grasp_candidate_policy()
+    assert updated["status"] == "exhausted"
+    assert updated["active_candidate"] is None
+    assert updated["reestimate_required"]["reason"] == (
+        "moveit_qualification_scene_changed"
+    )
+    assert memory.grasp_recovery()["required_action"] == {
+        "name": "observe",
+        "parameters": {},
+    }
+
+
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:
     memory = _memory_with_candidates()
     memory.add_action(_tool_action("gripper_control", {"position": 1}))

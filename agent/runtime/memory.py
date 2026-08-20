@@ -2170,6 +2170,10 @@ class AgentMemory:
                 "scene_epoch": self.scene_epoch(),
                 "activated_at_s": time.time(),
             }
+            if isinstance(outputs.get("qualification_evidence"), dict):
+                policy["qualification_evidence"] = dict(
+                    outputs["qualification_evidence"]
+                )
             if target_prompt:
                 policy["fallback_target_prompt"] = target_prompt
             if fallback_attempts:
@@ -2811,6 +2815,13 @@ class AgentMemory:
             and isinstance(candidates[next_rank], dict)
             else None
         )
+        qualification_invalidated = (
+            isinstance(policy.get("qualification_evidence"), dict)
+            and _optional_int(policy.get("scene_epoch"), default=-1)
+            != self.scene_epoch()
+        )
+        if qualification_invalidated:
+            next_candidate = None
         source_tool = str(policy.get("source_tool") or "grasp_pose_estimate")
         policy.update(
             {
@@ -2907,13 +2918,18 @@ class AgentMemory:
                     },
                 )
                 return True
-            policy["reestimate_required"] = {
-                "status": "pending_recovery",
-                "reason": (
+            reestimate_reason = (
+                "moveit_qualification_scene_changed"
+                if qualification_invalidated
+                else (
                     "candidate_retry_limit_exceeded"
                     if retry_exhausted
                     else "ranked_candidate_queue_exhausted"
-                ),
+                )
+            )
+            policy["reestimate_required"] = {
+                "status": "pending_recovery",
+                "reason": reestimate_reason,
                 "candidate_id": active.get("id"),
                 "attempt_count": attempts,
                 "max_attempts": max_attempts,
