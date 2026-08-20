@@ -676,6 +676,73 @@ def test_exhausted_motion_candidate_queue_requires_fresh_reestimation() -> None:
     assert memory.grasp_recovery()["status"] == "required"
 
 
+def test_failed_descend_returns_to_recorded_source_before_reobservation() -> None:
+    memory = _memory_with_candidates()
+    policy = memory.grasp_candidate_policy()
+    policy["candidates"] = [policy["active_candidate"]]
+    policy["remaining_candidate_ids"] = []
+    policy["target_detection"] = {
+        "target_prompt": "black bowl",
+        "source_image": "/tmp/current.rgb.png",
+    }
+    memory.save_fact("grasp_candidate_policy", policy, source="test")
+    source_pose = {"frame": "world", "xyz": [0.42, -0.18, 0.61]}
+    memory.add_observation(
+        EnvObservation(
+            task="pick up alphabat soup and place it into basket",
+            cameras=[],
+            robot=RobotState(end_effector_pose=source_pose),
+        )
+    )
+    compiled = {**_compiled(memory), "scene_epoch": memory.scene_epoch()}
+    memory.add_action(
+        _tool_action(
+            "compile_grasp_seed",
+            {"scene_epoch": memory.scene_epoch()},
+            outputs=compiled,
+        )
+    )
+    execution = memory.grasp_execution()
+    execution.update(
+        {
+            "stage": "descend",
+            "required_action": {
+                "name": "move_to",
+                "parameters": {"target_pose": {"source_grasp_id": "grasp_000"}},
+            },
+        }
+    )
+    memory.save_fact("grasp_execution", execution, source="test")
+
+    memory.add_action(
+        _tool_action(
+            "move_to",
+            {"target_pose": {"source_grasp_id": "grasp_000"}},
+            success=False,
+            outputs={"motion_summary": {"reached_target": False}},
+            environment_receipt={"execution_started": False, "motion_outcome": "failed"},
+        )
+    )
+
+    recovery = memory.grasp_recovery()
+    assert recovery["status"] == "required"
+    assert recovery["stage"] == "source_return"
+    source_return = recovery["required_action"]
+    assert source_return["name"] == "move_to"
+    assert source_return["parameters"]["target_pose"]["xyz"] == source_pose["xyz"]
+    assert memory.grasp_candidate_gate_error(
+        tool_name="move_to", parameters=source_return["parameters"]
+    ) is None
+
+    memory.add_action(_tool_action("move_to", source_return["parameters"]))
+    recovery = memory.grasp_recovery()
+    assert recovery["stage"] == "observe"
+    assert recovery["required_action"] == {"name": "observe", "parameters": {}}
+    memory.add_action(_tool_action("observe", {}))
+    assert memory.grasp_recovery()["status"] == "completed"
+    assert memory.grasp_reestimation()["status"] == "pending_observation"
+
+
 def test_candidate_attempt_limit_requires_fresh_reestimation() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick bowl")

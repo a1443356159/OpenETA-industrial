@@ -531,23 +531,32 @@ def _host_obligation_decision(
         required = recovery.get("required_action")
         if (
             isinstance(required, dict)
-            and required.get("name") == "observe"
+            and required.get("name") in {"move_to", "observe"}
             and isinstance(required.get("parameters"), dict)
-            and tools.can_execute("observe")
+            and tools.can_execute(str(required.get("name")))
         ):
+            action = str(required["name"])
+            is_source_return = action == "move_to"
             return PlannerDecision(
                 action_type="tool_call",
-                action="observe",
+                action=action,
                 parameters=dict(required["parameters"]),
                 reasoning=(
-                    "The retained grasp candidates are exhausted; obtain a fresh "
+                    "A failed approach left the arm at safe hover; use a fresh MoveIt "
+                    "plan to return to the recorded source pose before re-observing."
+                    if is_source_return
+                    else "The retained grasp candidates are exhausted; obtain a fresh "
                     "observation before re-estimating from an alternate camera view."
                 ),
                 metadata={
                     "host_obligation": {
                         "schema_version": recovery.get("schema_version"),
-                        "tool": "observe",
-                        "stage": "candidate_reestimate_observation",
+                        "tool": action,
+                        "stage": (
+                            "candidate_source_return"
+                            if is_source_return
+                            else "candidate_reestimate_observation"
+                        ),
                         "candidate_id": recovery.get("candidate_id"),
                         "reestimate_strategy": recovery.get("reestimate_strategy"),
                         "previous_view": recovery.get("previous_view"),

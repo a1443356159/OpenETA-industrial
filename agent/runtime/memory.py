@@ -2581,6 +2581,9 @@ class AgentMemory:
                 )
         if rejection is None:
             return False
+        execution = self.grasp_execution()
+        if isinstance(execution, dict) and str(execution.get("candidate_id") or "") == active_candidate_id:
+            rejection = {**rejection, "grasp_stage": execution.get("stage")}
 
         advanced = self._apply_anygrasp_candidate_rejection(
             policy=policy,
@@ -2595,6 +2598,7 @@ class AgentMemory:
                 xyz=self._action_end_effector_xyz(action),
                 rejection=rejection,
                 candidate_id=active_candidate_id,
+                execution=execution,
             )
             recovery_class = _grasp_estimation_recovery_class(rejection)
             if (
@@ -2644,6 +2648,7 @@ class AgentMemory:
         xyz: object,
         rejection: JsonDict,
         candidate_id: str,
+        execution: JsonDict | None = None,
     ) -> bool:
         if str(rejection.get("source") or "") not in {
             "candidate_motion_rejected",
@@ -2662,9 +2667,22 @@ class AgentMemory:
         target_detection = (self.grasp_candidate_policy() or {}).get("target_detection")
         target_detection = target_detection if isinstance(target_detection, dict) else {}
         previous_view = str(target_detection.get("frame_id") or "agentview")
+        source_return_pose = _grasp_recovery_source_return_pose(execution)
+        failed_stage = str(rejection.get("grasp_stage") or "")
+        # A failed approach after hover leaves the arm in a known but camera-
+        # occluding pose.  Return to the recorded pre-grasp EEF pose through a
+        # fresh MoveIt request before collecting the next perception packet.
+        # This deliberately does not apply to zero-qualified candidates: that
+        # path never moved the robot and must remain observation-only.
+        needs_source_return = (
+            failed_stage in {"align_move", "precontact", "descend"}
+            and isinstance(source_return_pose, dict)
+        )
+        recovery_id = f"grasp-recovery-{uuid4()}"
         recovery = {
             "schema_version": "openeta.grasp_recovery.v1",
             "status": "required",
+            "recovery_id": recovery_id,
             "candidate_id": candidate_id,
             "rejection_source": rejection.get("source"),
             "rejection_reason": rejection.get("reason"),
@@ -2680,10 +2698,22 @@ class AgentMemory:
             "previous_view": previous_view,
             "observation_views": ["agentview", "wrist", "render"],
             "scene_epoch": self.scene_epoch(),
-            "required_action": {
-                "name": "observe",
-                "parameters": {},
-            },
+            "stage": "source_return" if needs_source_return else "observe",
+            "required_action": (
+                {
+                    "name": "move_to",
+                    "parameters": {
+                        "target_pose": {
+                            **source_return_pose,
+                            "grasp_recovery_id": recovery_id,
+                            "grasp_recovery_stage": "source_return",
+                            "source_grasp_id": candidate_id,
+                        }
+                    },
+                }
+                if needs_source_return
+                else {"name": "observe", "parameters": {}}
+            ),
             "created_at_s": time.time(),
         }
         self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
@@ -2705,6 +2735,35 @@ class AgentMemory:
         if not isinstance(call, dict):
             return False
         completed = _call_result_success(call) and not _motion_call_rejects_candidate(call)
+        if recovery.get("stage") == "source_return":
+            if not completed:
+                receipt = _environment_receipt(call)
+                recovery.update(
+                    {
+                        "status": "stopped_requires_human",
+                        "required_action": None,
+                        "stop_reason": "source_return_motion_not_completed",
+                        "receipt": receipt,
+                        "completed_at_s": time.time(),
+                    }
+                )
+                self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+                    recovery, source="candidate_source_return_stopped"
+                )
+                self.record("grasp_source_return_stopped", dict(recovery))
+                return True
+            recovery.update(
+                {
+                    "stage": "observe",
+                    "required_action": {"name": "observe", "parameters": {}},
+                    "source_return_completed_at_s": time.time(),
+                }
+            )
+            self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+                recovery, source="candidate_source_return_completed"
+            )
+            self.record("grasp_source_return_completed", dict(recovery))
+            return True
         recovery.update(
             {
                 "status": "completed" if completed else "failed",
@@ -2919,6 +2978,11 @@ class AgentMemory:
         return xyz if _finite_xyz(xyz) else self._latest_observed_end_effector_xyz()
 
     def _latest_observed_end_effector_xyz(self) -> object:
+        pose = self._latest_observed_end_effector_pose()
+        xyz = pose.get("xyz") if isinstance(pose, dict) else None
+        return xyz if _finite_xyz(xyz) else None
+
+    def _latest_observed_end_effector_pose(self) -> JsonDict | None:
         for event in reversed(self.events):
             if event.event_type != "observation":
                 continue
@@ -2926,7 +2990,7 @@ class AgentMemory:
             pose = robot.get("end_effector_pose") if isinstance(robot, dict) else None
             xyz = pose.get("xyz") if isinstance(pose, dict) else None
             if _finite_xyz(xyz):
-                return xyz
+                return dict(pose)
         return None
 
     def _apply_anygrasp_candidate_rejection(
@@ -3515,6 +3579,7 @@ class AgentMemory:
             "compiled_grasp_id": outputs.get("compiled_grasp_id"),
             "scene_epoch": self.scene_epoch(),
             "compiled_grasp": dict(outputs),
+            "source_eef_pose": self._latest_observed_end_effector_pose(),
             "required_action": required_action,
             "transition_conditions": {
                 "hover": (
@@ -6246,6 +6311,23 @@ def _parameters_grasp_candidate_id(parameters: JsonDict) -> str:
             if isinstance(value, str) and value:
                 return value
     return ""
+
+
+def _grasp_recovery_source_return_pose(execution: JsonDict | None) -> JsonDict | None:
+    """Return a previously observed, finite EEF pose for post-failure recovery."""
+
+    if not isinstance(execution, dict):
+        return None
+    pose = execution.get("source_eef_pose")
+    if not isinstance(pose, dict):
+        return None
+    xyz = pose.get("xyz")
+    if not _finite_xyz(xyz):
+        return None
+    result = dict(pose)
+    result["frame"] = str(result.get("frame") or "world")
+    result["xyz"] = [float(value) for value in xyz[:3]]
+    return result
 
 
 def _candidate_linked_rejection(
