@@ -165,6 +165,8 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
     assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == ["g0"]
     assert result.details["candidate_count"] == 1
     assert result.details["generated_candidate_count"] == 2
+    assert result.details["submitted_candidate_count"] == 2
+    assert result.details["qualified_candidate_count"] == 1
     assert cache.resolve(purpose="grasp", candidate_id="g0", scene_epoch=3, planning_scene_revision=4)
     assert cache.resolve(purpose="grasp", candidate_id="g1", scene_epoch=3) is None
     assert result.details["qualification_artifact"]["path"].endswith(".json")

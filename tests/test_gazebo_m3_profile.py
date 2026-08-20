@@ -25,7 +25,24 @@ def test_m3_registration_exposes_the_approved_detachable_joint_profile() -> None
     assert profile.unavailable_reason is None
     assert {CONTROL, PHYSICS, STRUCTURED_RECEIPT} <= profile.capabilities
     assert profile.launch_file == "gazebo_pickplace.launch.py"
-    assert profile.cameras[0].extrinsics["pos"] == [0.0, 0.0, 1.3]
+    assert profile.cameras[0].extrinsics["pos"] == [0.35, 0.0, 1.3]
+
+
+def test_m3_top_camera_profile_matches_the_world_model_pose() -> None:
+    config = NativePickPlaceConfig()
+    world_path = (
+        config.ros_workspace
+        / "src"
+        / config.ros_package_name
+        / "worlds/rm75_robotiq2f85_pickplace.sdf"
+    )
+    root = ET.parse(world_path).getroot()
+    camera = root.find(".//model[@name='openeta_top_camera']")
+    assert camera is not None
+    world_xyz = [float(value) for value in camera.findtext("pose", "").split()[:3]]
+
+    profile_xyz = gazebo_profile("rm75_robotiq2f85_pickplace").cameras[0].extrinsics["pos"]
+    assert profile_xyz == world_xyz
 
 
 def test_m3_assets_are_required_before_manipulation_starts() -> None:

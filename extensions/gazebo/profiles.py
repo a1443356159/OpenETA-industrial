@@ -52,7 +52,12 @@ class GazeboProfile:
             raise ValueError("control capability requires a robot model config")
 
 
-def _camera(*, wrist: bool = False, top_height_m: float = 1.8) -> RosRgbdCameraConfig:
+def _camera(
+    *,
+    wrist: bool = False,
+    top_x_m: float = 0.0,
+    top_height_m: float = 1.8,
+) -> RosRgbdCameraConfig:
     prefix = "/openeta_wrist_rgbd" if wrist else "/openeta_rgbd"
     return RosRgbdCameraConfig(
         rgb_topic=f"{prefix}/image",
@@ -62,7 +67,10 @@ def _camera(*, wrist: bool = False, top_height_m: float = 1.8) -> RosRgbdCameraC
         extrinsics=(
             {"frame_transform": "tf_dynamic", "camera_frame": "opencv"}
             if wrist
-            else {**_TOP_EXTRINSICS, "pos": [0.0, 0.0, float(top_height_m)]}
+            else {
+                **_TOP_EXTRINSICS,
+                "pos": [float(top_x_m), 0.0, float(top_height_m)],
+            }
         ),
         role="wrist" if wrist else "scene_primary",
     )
@@ -91,7 +99,7 @@ _PROFILES: Mapping[str, GazeboProfile] = MappingProxyType({
     "rm75_robotiq2f85_pickplace": GazeboProfile(
         name="rm75_robotiq2f85_pickplace", launch_package="openeta_rm75_robotiq2f85_sim",
         launch_file="gazebo_pickplace.launch.py", world_name="rm75_robotiq2f85_pickplace",
-        cameras=(_camera(top_height_m=1.3), _camera(wrist=True)),
+        cameras=(_camera(top_x_m=0.35, top_height_m=1.3), _camera(wrist=True)),
         capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT, PHYSICS}, model_config=NativePickPlaceConfig(),
     ),
 })

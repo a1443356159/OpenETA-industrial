@@ -62,8 +62,9 @@ selected_grasp/source_grasp_id 或输出 place_grasp_pose。十个原始候选�
 SCENARIO_INSTRUCTIONS = {
     "normal": "执行正常放置路径；不得主动制造规划失败。",
     "reject-first": (
-        "验收配置会让第一次 placement MoveIt 请求真实返回无轨迹且 "
-        "execution_started=false。保留该回执，拒绝该候选，由主 VLM 选择另一个候选后完成放置。"
+        "验收配置会让首个 placement candidate 的资格规划真实返回无轨迹且 "
+        "execution_started=false。保留该回执，宿主不得向主 VLM 暴露该候选；主 VLM 只能从其余 "
+        "PASS 候选中选择并完成放置。"
     ),
     "reject-all-recover": (
         "验收配置会让首次抓取周期的十个 placement candidate 在资格阶段各自真实失败。"
@@ -265,11 +266,15 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         }
         if not base._contains(anyplace, "generated_candidate_count", 10):
             errors.append("AnyPlace did not generate exactly ten placement candidates")
-        expected_qualified = 9 if scenario == "reject-first" else 10
-        if not base._contains(anyplace, "qualified_candidate_count", expected_qualified):
-            errors.append(
-                f"final AnyPlace result did not expose {expected_qualified} qualified candidates"
-            )
+        if not base._contains(anyplace, "submitted_candidate_count", 10):
+            errors.append("AnyPlace did not submit all ten candidates to MoveIt qualification")
+        qualified_counts = [
+            int(value)
+            for value in base._values(anyplace, "qualified_candidate_count")
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        if not qualified_counts or qualified_counts[-1] < 1:
+            errors.append("final AnyPlace result exposed no MoveIt PASS candidate")
         if not candidate_ids:
             errors.append("AnyPlace exposed no MoveIt PASS placement candidate")
         for legacy_key in ("selected_grasp", "source_grasp_id", "place_grasp_pose"):

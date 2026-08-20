@@ -240,7 +240,8 @@ class MoveItCandidateQualifier:
             {
                 "selection_required": bool(passed),
                 "generated_candidate_count": generated,
-                "qualified_candidate_count": generated,
+                "submitted_candidate_count": generated,
+                "qualified_candidate_count": len(passed),
                 "rejection_reason_counts": dict(sorted(counts.items())),
                 "qualification_evidence": evidence,
             }
