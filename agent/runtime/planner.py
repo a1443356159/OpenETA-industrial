@@ -2969,7 +2969,6 @@ def _validate_grasp_execution_obligation(
             ]
         if (
             decision.action == "sam3"
-            and not isinstance(tool_context.get("selected_sam3_detection"), dict)
             and not isinstance(tool_context.get("selection_obligation"), dict)
         ):
             current_wrist_rgb = next(

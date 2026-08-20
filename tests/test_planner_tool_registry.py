@@ -6869,6 +6869,67 @@ def test_wrist_align_without_retained_selection_accepts_current_wrist_text_sam3(
     assert decision.parameters == request
 
 
+def test_top_camera_selection_does_not_block_current_wrist_sam3(tmp_path: Path) -> None:
+    top_rgb = tmp_path / "prehover" / "top.rgb.png"
+    current_wrist_rgb = tmp_path / "hover" / "wrist.rgb.png"
+    top_rgb.parent.mkdir()
+    current_wrist_rgb.parent.mkdir()
+    top_rgb.write_bytes(b"top-camera-target")
+    current_wrist_rgb.write_bytes(b"current-wrist-scene")
+    memory = AgentMemory()
+    memory.save_fact(
+        "selected_sam3_detection",
+        {
+            "result_id": "top-camera-result",
+            "id": "detection_000",
+            "mask_ref": "top-mask.png",
+            "source_image": str(top_rgb),
+            # A point-prompt selection need not retain a reusable text prompt.
+            "segmentation_mode": "point_prompt",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "status": "required",
+            "stage": "align",
+            "compiled_grasp": {"schema_version": "openeta.compiled_grasp_seed.v1"},
+        },
+        source="test",
+    )
+    observation = _observation()
+    observation.metadata["image_artifacts"] = [
+        {
+            "kind": "rgb",
+            "frame_id": "wrist_camera_optical_frame",
+            "role": "wrist",
+            "path": str(current_wrist_rgb),
+        }
+    ]
+    request = {
+        "image": str(current_wrist_rgb),
+        "mode": "text",
+        "prompt": "red square target object",
+    }
+    planner = ToolCallingPlanner(
+        StaticPlannerBackend(
+            {"kind": "tool_call", "name": "sam3", "parameters": request}
+        )
+    )
+
+    decision = planner.plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("sam3", "compute_wrist_alignment"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "sam3"
+    assert decision.parameters == request
+    assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
+
+
 def test_empty_wrist_sam3_requires_canonical_reference_fallback(tmp_path: Path) -> None:
     previous_wrist = tmp_path / "previous" / "wrist.rgb.png"
     current_wrist = tmp_path / "current" / "wrist.rgb.png"
