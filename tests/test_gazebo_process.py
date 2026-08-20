@@ -240,7 +240,9 @@ def test_detachable_joint_baseline_uses_the_final_settled_pose(monkeypatch) -> N
 
     control.capture_baseline(settle_duration_s=0.01, sample_interval_s=0.01)
 
-    assert control._baseline == pytest.approx((0.41, (0.0, 0.0, -0.09)))
+    assert control._baseline is not None
+    assert control._baseline[0] == pytest.approx(0.41)
+    assert control._baseline[1] == pytest.approx((0.0, 0.0, -0.09))
 
 
 def test_native_pose_parser_preserves_and_normalizes_quaternion() -> None:
