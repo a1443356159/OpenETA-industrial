@@ -902,7 +902,11 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
         "object_observation",
         "placement_observation",
         "object_camera_to_placement_camera",
+        "placement_camera_to_world",
     }
+    assert calls["anyplace"][0]["placement_camera_to_world"] == extrinsics[
+        "camera_to_world"
+    ]
     assert anyplace.success is True
     assert anyplace.details["outputs"]["candidate_count"] == 10
 
