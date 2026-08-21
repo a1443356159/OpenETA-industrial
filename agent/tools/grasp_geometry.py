@@ -820,30 +820,18 @@ def materialize_world_object_goal(
         _matmul4(_matmul4(t_world_camera, t_place_goal), _inverse_rigid_transform(t_world_camera)),
         t_world_object_current,
     )
-    # AnyPlace's raw SE(3) samples can include a swing that tips an already
-    # stably-held object onto its side.  The placement-region model frame is
-    # gravity aligned, so only yaw about gravity is meaningful for a level
-    # support.  Preserve the model's target translation and yaw diversity, but
-    # retain the measured object's stable attitude for the swing component.
-    # This remains an object-goal constraint: EEF geometry is derived later
-    # and only from the native T_eef_object attachment measurement.
-    r_world_object_current = [row[:3] for row in t_world_object_current[:3]]
-    r_world_object_raw = [row[:3] for row in t_world_object_goal[:3]]
-    r_delta = _matmul3(r_world_object_raw, _transpose3(r_world_object_current))
-    r_yaw = _gravity_yaw_rotation(r_delta)
-    r_world_object_goal = _matmul3(r_yaw, r_world_object_current)
-    for row in range(3):
-        t_world_object_goal[row][:3] = r_world_object_goal[row]
+    # Preserve the complete SE(3) object goal predicted by AnyPlace.  Whether
+    # that goal is feasible for the currently attached object is decided only
+    # after deriving T_world_eef_goal with the measured T_eef_object and
+    # running MoveIt qualification.  The host must not silently substitute a
+    # gravity/yaw projection for the model's object orientation.
+    r_world_object_goal = [row[:3] for row in t_world_object_goal[:3]]
     result = dict(candidate)
     result["object_goal_pose"] = {
         "frame": "world",
         "translation_xyz": _round_vector([row[3] for row in t_world_object_goal[:3]]),
         "rotation_matrix": _round_matrix(r_world_object_goal),
         "convention": "T_world_object_goal",
-    }
-    result["orientation_projection"] = {
-        "type": "gravity_yaw_from_anyplace",
-        "support_assumption": "gravity_aligned_placement_region",
     }
     return result
 
@@ -1354,25 +1342,6 @@ def _matmul3(
         [sum(left[row][k] * right[k][col] for k in range(3)) for col in range(3)]
         for row in range(3)
     ]
-
-
-def _transpose3(matrix: Sequence[Sequence[float]]) -> list[list[float]]:
-    return [[matrix[row][col] for row in range(3)] for col in range(3)]
-
-
-def _gravity_yaw_rotation(rotation: Sequence[Sequence[float]]) -> list[list[float]]:
-    """Project a world-frame relative rotation onto its yaw about +Z."""
-
-    heading_x = float(rotation[0][0])
-    heading_y = float(rotation[1][0])
-    if math.hypot(heading_x, heading_y) < 1e-9:
-        # A 180-degree swing leaves the first axis vertical.  The second axis
-        # still determines an unambiguous horizontal heading.
-        heading_x = float(rotation[0][1])
-        heading_y = float(rotation[1][1])
-    yaw = math.atan2(heading_y, heading_x)
-    cosine, sine = math.cos(yaw), math.sin(yaw)
-    return [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]]
 
 
 def _matvec3(matrix: Sequence[Sequence[float]], vector: Sequence[float]) -> list[float]:
