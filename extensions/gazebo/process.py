@@ -24,6 +24,32 @@ class GazeboNativePose:
     quat_xyzw: tuple[float, float, float, float]
 
 
+def _relative_translation(
+    *, child: GazeboNativePose, parent: GazeboNativePose
+) -> tuple[float, float, float]:
+    """Express the parent-to-child translation in the parent link frame."""
+
+    x, y, z, w = parent.quat_xyzw
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
+    x, y, z, w = (-x / norm, -y / norm, -z / norm, w / norm)
+    dx, dy, dz = (child.xyz[index] - parent.xyz[index] for index in range(3))
+    # Rotate the world-frame displacement by the inverse parent quaternion.
+    # This is the translation component of T_world_parent^-1 T_world_child.
+    return (
+        (1.0 - 2.0 * (y * y + z * z)) * dx
+        + 2.0 * (x * y - z * w) * dy
+        + 2.0 * (x * z + y * w) * dz,
+        2.0 * (x * y + z * w) * dx
+        + (1.0 - 2.0 * (x * x + z * z)) * dy
+        + 2.0 * (y * z - x * w) * dz,
+        2.0 * (x * z - y * w) * dx
+        + 2.0 * (y * z + x * w) * dy
+        + (1.0 - 2.0 * (x * x + y * y)) * dz,
+    )
+
+
 def _process_group_exists(pgid: int) -> bool:
     """Return whether an owned POSIX process group still has members."""
 
@@ -686,13 +712,14 @@ class GazeboDetachableJointControl:
         if settle_duration_s < 0.0 or sample_interval_s <= 0.0:
             raise ValueError("attachment baseline settling values are invalid")
         deadline = time.monotonic() + settle_duration_s
-        poses = self._world_link_positions()
+        child, parent = self.native_target_mount_poses()
         while time.monotonic() < deadline:
             time.sleep(min(sample_interval_s, max(0.0, deadline - time.monotonic())))
-            poses = self._world_link_positions()
-        parent = self._named_position(poses, self.parent_link)
-        child = self._child_world_position(poses)
-        self._baseline = (child[2], tuple(child[index] - parent[index] for index in range(3)))
+            child, parent = self.native_target_mount_poses()
+        self._baseline = (
+            child.xyz[2],
+            _relative_translation(child=child, parent=parent),
+        )
 
     def native_target_mount_positions(
         self,
@@ -763,14 +790,12 @@ class GazeboDetachableJointControl:
             raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
         try:
             from .native_grasp import ChildLinkProof
-            poses = self._world_link_positions()
-            parent = self._named_position(poses, self.parent_link)
-            child = self._child_world_position(poses)
+            child, parent = self.native_target_mount_poses()
             baseline_z, baseline_relative = self._baseline
-            relative = tuple(child[index] - parent[index] for index in range(3))
+            relative = _relative_translation(child=child, parent=parent)
             return ChildLinkProof(
                 baseline_target_z_m=baseline_z,
-                target_z_m=child[2],
+                target_z_m=child.xyz[2],
                 capture_relative_translation_m=math.dist(baseline_relative, relative),
             )
         except GazeboProcessError:

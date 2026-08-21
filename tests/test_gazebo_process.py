@@ -209,7 +209,10 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> Non
     }
     control = gazebo_process.GazeboDetachableJointControl()
     control._state = gazebo_process.DetachableJointState.ATTACHED
-    control._world_link_positions = lambda: dict(poses)  # type: ignore[method-assign]
+    control._world_link_poses = lambda: {
+        name: gazebo_process.GazeboNativePose(value, (0.0, 0.0, 0.0, 1.0))
+        for name, value in poses.items()
+    }  # type: ignore[method-assign]
     control.capture_baseline(settle_duration_s=0.0)
 
     poses.update(
@@ -233,7 +236,10 @@ def test_detachable_joint_baseline_uses_the_final_settled_pose(monkeypatch) -> N
             {"gripper_mount_link": (0.0, 0.0, 0.5), "target_object": (0.0, 0.0, 0.41), "target_link": (0.0, 0.0, 0.0)},
         ]
     )
-    control._world_link_positions = lambda: next(readings)  # type: ignore[method-assign]
+    control._world_link_poses = lambda: {
+        name: gazebo_process.GazeboNativePose(value, (0.0, 0.0, 0.0, 1.0))
+        for name, value in next(readings).items()
+    }  # type: ignore[method-assign]
     monotonic = iter([0.0, 0.0, 0.02, 0.02])
     monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: next(monotonic))
     monkeypatch.setattr(gazebo_process.time, "sleep", lambda _seconds: None)
@@ -243,6 +249,70 @@ def test_detachable_joint_baseline_uses_the_final_settled_pose(monkeypatch) -> N
     assert control._baseline is not None
     assert control._baseline[0] == pytest.approx(0.41)
     assert control._baseline[1] == pytest.approx((0.0, 0.0, -0.09))
+
+
+def test_detachable_joint_rigid_rotation_has_zero_relative_translation_drift() -> None:
+    """A rigid object rotates with its EEF without being misclassified as slip."""
+
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._state = gazebo_process.DetachableJointState.ATTACHED
+    poses = {
+        "gripper_mount_link": gazebo_process.GazeboNativePose(
+            (0.10, -0.20, 0.50), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "target_object": gazebo_process.GazeboNativePose(
+            (0.26, -0.20, 0.50), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "target_link": gazebo_process.GazeboNativePose(
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+        ),
+    }
+    control._world_link_poses = lambda: dict(poses)  # type: ignore[method-assign]
+    control.capture_baseline(settle_duration_s=0.0)
+
+    # Rotate the parent and its 160 mm attachment lever arm together by 90°.
+    half_sqrt = 2**-0.5
+    poses["gripper_mount_link"] = gazebo_process.GazeboNativePose(
+        (0.30, -0.10, 0.60), (0.0, 0.0, half_sqrt, half_sqrt)
+    )
+    poses["target_object"] = gazebo_process.GazeboNativePose(
+        (0.30, 0.06, 0.60), (0.0, 0.0, half_sqrt, half_sqrt)
+    )
+
+    proof = control.child_link_proof()
+
+    assert proof.capture_relative_translation_m == pytest.approx(0.0, abs=1e-9)
+
+
+def test_detachable_joint_real_parent_frame_slip_exceeds_ten_mm() -> None:
+    """A true 20 mm child displacement in the EEF frame remains detectable."""
+
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._state = gazebo_process.DetachableJointState.ATTACHED
+    poses = {
+        "gripper_mount_link": gazebo_process.GazeboNativePose(
+            (0.10, -0.20, 0.50), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "target_object": gazebo_process.GazeboNativePose(
+            (0.10, -0.20, 0.34), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "target_link": gazebo_process.GazeboNativePose(
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+        ),
+    }
+    control._world_link_poses = lambda: dict(poses)  # type: ignore[method-assign]
+    control.capture_baseline(settle_duration_s=0.0)
+    poses["target_object"] = gazebo_process.GazeboNativePose(
+        (0.10, -0.20, 0.32), (0.0, 0.0, 0.0, 1.0)
+    )
+
+    proof = control.child_link_proof()
+
+    assert proof.capture_relative_translation_m == pytest.approx(0.02)
+    assert (
+        proof.capture_relative_translation_m
+        > NativePickPlaceConfig().maximum_capture_relative_translation_m
+    )
 
 
 def test_native_pose_parser_preserves_and_normalizes_quaternion() -> None:
@@ -265,10 +335,16 @@ pose {
 def test_detachable_joint_proof_rejects_a_noncanonical_child_link_frame() -> None:
     control = gazebo_process.GazeboDetachableJointControl()
     control._state = gazebo_process.DetachableJointState.ATTACHED
-    control._world_link_positions = lambda: {
-        "gripper_mount_link": (0.0, 0.0, 0.50),
-        "target_object": (0.0, 0.0, 0.40),
-        "target_link": (0.0, 0.0, 0.01),
+    control._world_link_poses = lambda: {
+        "gripper_mount_link": gazebo_process.GazeboNativePose(
+            (0.0, 0.0, 0.50), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "target_object": gazebo_process.GazeboNativePose(
+            (0.0, 0.0, 0.40), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "target_link": gazebo_process.GazeboNativePose(
+            (0.0, 0.0, 0.01), (0.0, 0.0, 0.0, 1.0)
+        ),
     }  # type: ignore[method-assign]
 
     with pytest.raises(gazebo_process.GazeboProcessError, match="NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"):
