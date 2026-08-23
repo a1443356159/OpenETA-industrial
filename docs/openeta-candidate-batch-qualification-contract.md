@@ -221,14 +221,14 @@ collision pairs, and scene-revision checks. It must not call the Gazebo
 DetachableJoint, apply the cloned scene to the live PlanningScene, send a
 controller goal, or change the real scene revision.
 
-For pregrasp grasp-goal pair batches, L1 and L2 evaluate the complete
-constructed batch first. L3/L4 then traverse the stable grasp-branch
-round-robin order progressively. Traversal stops when it has produced as many
-endpoint-PASS pairs as the downstream L5 submission capacity, or after the
-batch is exhausted. Structurally valid pairs not visited after capacity is
-filled are `NOT_EVALUATED`, never FAIL. This scheduling bound does not change
-the IK seed set, endpoint budgets, collision checks, or PASS requirements for
-any visited pair.
+For every standard and pregrasp batch, L1 and L2 evaluate the complete selected
+batch first. L3/L4 then traverse its stable order progressively and stop when
+they have produced as many endpoint-PASS candidates as the downstream L5
+submission capacity, or after the batch is exhausted. Pregrasp grasp-goal pairs
+use the stable grasp-branch round-robin order. Structurally valid candidates not
+visited after capacity is filled are `NOT_EVALUATED`, never FAIL. This
+scheduling bound does not change the IK seed set, endpoint budgets, collision
+checks, or PASS requirements for any visited candidate.
 
 The current implementation must not be assumed to satisfy this target
 boundary merely because individual endpoint IK passed. Sequential transition

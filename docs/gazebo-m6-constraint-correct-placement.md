@@ -30,7 +30,9 @@ deterministic source-aware SE(3) diversity retains at most 64 candidates across
 translation, approach, complete wrist rotation, score, and branch provenance.
 The private `openeta.moveit_candidate_funnel.v2` submits at most two complete
 plans. Every full-plan PASS is retained in one equal-status qualified queue;
-there is no separate VLM exposure subset.
+there is no separate VLM exposure subset. Every selected candidate completes
+the cheap structural layers; expensive endpoint traversal stops after the two
+L5 submission slots are filled, or exhausts the batch when fewer pass.
 
 In a combined task, a pregrasp AnyPlace call first freezes up to 96 absolute
 world object goals. With the default grasp L5 bound, the host screens at most

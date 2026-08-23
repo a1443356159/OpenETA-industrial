@@ -117,6 +117,47 @@ def test_qualification_request_binds_short_service_timeouts():
     }
 
 
+def test_qualifier_prepares_candidate_compiler_once_per_batch():
+    class BatchCompiler:
+        def __init__(self):
+            self.prepare_calls = 0
+            self.compile_calls = 0
+
+        def __call__(self, *args):
+            raise AssertionError("batch-aware compiler must be prepared first")
+
+        def prepare_batch(self, *, purpose):
+            assert purpose == "grasp"
+            self.prepare_calls += 1
+
+            def compile_candidate(candidate, *_args):
+                self.compile_calls += 1
+                return {"qualification_stages": [{"name": candidate["id"]}]}
+
+            return compile_candidate
+
+    compiler = BatchCompiler()
+    result = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: _engine().qualify(request),
+        compile_candidate=compiler,
+    ).qualify_result(
+        ToolResult(
+            True,
+            "ok",
+            {"grasp_candidates": [{"id": f"g{index}"} for index in range(3)]},
+        ),
+        purpose="grasp",
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    assert compiler.prepare_calls == 1
+    assert compiler.compile_calls == 3
+    assert result.details["workspace_pass_count"] == 3
+    assert result.details["endpoint_evaluated_count"] == 2
+    assert result.details["endpoint_not_evaluated_count"] == 1
+
+
 def test_qualification_rpc_deadline_covers_screening_pool_and_plan_tail():
     captured = {}
 

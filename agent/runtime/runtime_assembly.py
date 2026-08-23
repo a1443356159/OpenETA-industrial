@@ -941,16 +941,17 @@ def _candidate_qualification_compiler(
 
     profile_path = Path(workspace.grasp_profile_path)
 
-    def compile_one(
+    def compile_with_snapshot(
         candidate: Mapping[str, object],
         purpose: str,
         source: Mapping[str, object],
         scene_epoch: int,
         planning_scene_revision: int,
+        *,
+        profile: Mapping[str, object],
+        profile_sha256: str,
+        strategies: list[JsonDict],
     ) -> JsonDict:
-        profile_bytes = profile_path.read_bytes()
-        profile = json.loads(profile_bytes.decode("utf-8"))
-        profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
         if purpose == "placement":
             pregrasp_contact = candidate.get("pregrasp_contact_pose")
             if isinstance(pregrasp_contact, Mapping):
@@ -1046,7 +1047,7 @@ def _candidate_qualification_compiler(
                 parameters,
                 profile=profile,
                 profile_sha256=profile_sha256,
-                strategies=load_grasp_strategies(Path(workspace.grasp_strategy_root)),
+                strategies=strategies,
             )
             compiled_pose_chain = qualification_grasp_pose_chain(compiled)
             stage_names = (
@@ -1087,6 +1088,61 @@ def _candidate_qualification_compiler(
             },
         }
 
+    def prepare_batch(*, purpose: str) -> Callable:
+        """Freeze calibration and strategies once for one qualification batch."""
+
+        if purpose not in {"grasp", "placement"}:
+            raise ValueError("candidate qualification purpose is invalid")
+        profile_bytes = profile_path.read_bytes()
+        profile = json.loads(profile_bytes.decode("utf-8"))
+        profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
+        strategies = (
+            load_grasp_strategies(Path(workspace.grasp_strategy_root))
+            if purpose == "grasp"
+            else []
+        )
+
+        def prepared(
+            candidate: Mapping[str, object],
+            candidate_purpose: str,
+            source: Mapping[str, object],
+            scene_epoch: int,
+            planning_scene_revision: int,
+        ) -> JsonDict:
+            if candidate_purpose != purpose:
+                raise ValueError("prepared candidate compiler purpose changed")
+            return compile_with_snapshot(
+                candidate,
+                candidate_purpose,
+                source,
+                scene_epoch,
+                planning_scene_revision,
+                profile=profile,
+                profile_sha256=profile_sha256,
+                strategies=strategies,
+            )
+
+        return prepared
+
+    def compile_one(
+        candidate: Mapping[str, object],
+        purpose: str,
+        source: Mapping[str, object],
+        scene_epoch: int,
+        planning_scene_revision: int,
+    ) -> JsonDict:
+        return prepare_batch(purpose=purpose)(
+            candidate,
+            purpose,
+            source,
+            scene_epoch,
+            planning_scene_revision,
+        )
+
+    # MoveItCandidateQualifier detects this host-private hook and prepares one
+    # immutable snapshot before compiling the batch.  Plain compiler callables
+    # remain supported for tests and other integrations.
+    setattr(compile_one, "prepare_batch", prepare_batch)
     return compile_one
 
 

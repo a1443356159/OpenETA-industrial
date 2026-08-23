@@ -589,13 +589,14 @@ def test_second_zero_pass_round_has_no_source_return_recovery():
     assert requested_candidate_ids == [["p0"], ["p1"]]
 
 
-def test_default_anyplace_pool_screens_all_96_but_only_plans_top_2():
+def test_default_anyplace_pool_structurally_screens_all_96_then_stops_endpoint_at_2():
     captured = {}
 
     def rpc(name, request, timeout):
         captured["candidate_ids"] = [
             item["candidate_id"] for item in request["candidates"]
         ]
+        captured["funnel"] = dict(request["funnel"])
         return _engine().qualify(request)
 
     candidates = [
@@ -642,13 +643,24 @@ def test_default_anyplace_pool_screens_all_96_but_only_plans_top_2():
     )
 
     assert len(captured["candidate_ids"]) == 96
+    assert captured["funnel"] == {
+        "ik_seed_count": 8,
+        "full_plan_limit": 2,
+        "screening_mode": PROGRESSIVE_SCREENING_MODE,
+        "endpoint_pass_target": 2,
+    }
     assert result.details["diversity_selected_count"] == 96
     assert result.details["workspace_pass_count"] == 96
-    assert result.details["pure_ik_pass_count"] == 96
-    assert result.details["collision_ik_pass_count"] == 96
-    assert result.details["endpoint_pass_count"] == 96
+    assert result.details["pure_ik_pass_count"] == 2
+    assert result.details["collision_ik_pass_count"] == 2
+    assert result.details["endpoint_pass_count"] == 2
+    assert result.details["endpoint_evaluated_count"] == 2
+    assert result.details["endpoint_not_evaluated_count"] == 94
     assert result.details["full_plan_submitted_count"] == 2
     assert result.details["candidate_count"] == 2
+    assert result.details["rejection_reason_counts"] == {
+        PROGRESSIVE_NOT_EVALUATED_REASON: 94
+    }
 
 
 def test_pregrasp_joint_progressive_counts_distinguish_produced_and_evaluated():

@@ -36,8 +36,11 @@ before choosing the next tool call.
    pool. These are not executable placement candidates and are not shown to the
    VLM.
 2. Call grasp estimation only after that pool is ready. The host first runs the
-   normal complete grasp funnel, then performs a bounded look-ahead over at most
-   two grasp PASS candidates and the current complete 96-goal pool. All
+   normal grasp funnel: every selected candidate completes structural checks,
+   while expensive endpoint checks stop after two PASS candidates fill the
+   plan-only capacity or exhaust the batch. It then performs a bounded
+   look-ahead over at most two grasp PASS candidates and the current complete
+   96-goal pool. All
    constructed pairs pass through exact coordinate compilation and conservative
    structural screening. The host then performs branch-fair endpoint screening
    until two endpoint-PASS pairs fill the plan-only capacity, or exhausts the

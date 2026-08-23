@@ -250,14 +250,28 @@ class MoveItCandidateQualifier:
         generated = len(raw)
         compiled_descriptors = []
         compile_rejections: list[JsonDict] = []
+        compile_candidate = self.compile_candidate
+        compile_prepare_error: Exception | None = None
+        if compile_candidate is not None:
+            prepare_batch = getattr(compile_candidate, "prepare_batch", None)
+            if callable(prepare_batch):
+                try:
+                    prepared = prepare_batch(purpose=purpose)
+                    if not callable(prepared):
+                        raise TypeError("prepared candidate compiler is not callable")
+                    compile_candidate = prepared
+                except Exception as exc:  # noqa: BLE001 - fail closed per candidate.
+                    compile_prepare_error = exc
         for candidate in raw:
             if not isinstance(candidate, Mapping):
                 continue
             compiled: Mapping[str, Any] = {}
             precompiled_stages = candidate.get("qualification_stages")
-            if self.compile_candidate is not None:
+            if compile_candidate is not None:
                 try:
-                    compiled = self.compile_candidate(
+                    if compile_prepare_error is not None:
+                        raise compile_prepare_error
+                    compiled = compile_candidate(
                         candidate,
                         purpose,
                         source or {},
@@ -327,19 +341,15 @@ class MoveItCandidateQualifier:
             "funnel": {
                 "ik_seed_count": self.ik_seed_count,
                 "full_plan_limit": full_plan_limit,
+                "screening_mode": PROGRESSIVE_SCREENING_MODE,
+                # This is derived from L5 capacity.  L1/L2 still cover the
+                # complete submitted batch; only candidates with no remaining
+                # chance to reach L5 skip the expensive L3/L4 tail.
+                "endpoint_pass_target": full_plan_limit,
             },
             "source": dict(source or {}),
             "candidates": request_candidates,
         }
-        if qualification_mode == "pregrasp_joint":
-            request["funnel"].update(
-                {
-                    "screening_mode": PROGRESSIVE_SCREENING_MODE,
-                    # This is a value derived from L5 capacity, not a new
-                    # independently tunable candidate-screen limit.
-                    "endpoint_pass_target": full_plan_limit,
-                }
-            )
         request["qualification_binding_sha256"] = _hash(
             {
                 "purpose": purpose,

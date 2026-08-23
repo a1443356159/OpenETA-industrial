@@ -565,8 +565,10 @@ truth.
 
 ### O11. Cache immutable geometry and reduce repeated ROS payload work
 
-Status: partially implemented for the measured producer duplication and
-progressive endpoint stop; geometry/ROS caches remain recorded only.
+Status: partially implemented for measured producer duplication, progressive
+endpoint stopping in all qualification modes, and batch-frozen
+calibration/strategy compiler snapshots; broader geometry/ROS caches remain
+recorded only.
 
 Current issue:
 
@@ -576,6 +578,8 @@ service payloads can be serialized or recomputed across qualification phases.
 Possible optimizations:
 
 - cache absolute object-goal materialization by observation/calibration hash;
+- batch-freeze calibration and grasp strategies so candidates in one run share
+  one immutable snapshot without repeated file parsing (implemented);
 - cache coordinate/TCP compilation by candidate/profile/scene binding;
 - reuse immutable PlanningScene base snapshots while applying candidate-local
   diffs;
@@ -688,7 +692,7 @@ Use this table during later discussion. `Recorded` means documented only.
 | O8 | Candidate-batch lineage and layered qualification schema | Approved | Remove exposure settings; immutable lineage/current-run accounting; `candidate_count` is the complete L5 PASS queue |
 | O9 | Planning backend / optional MTC tail | Recorded | No implementation authorized |
 | O10 | Append-only evidence ledger | Supporting refactor approved | Introduce only the minimal internal selection/compilation events needed for O7/O12; retain legacy evidence during migration |
-| O11 | Performance and immutable-geometry work | Partially implemented | Progressive endpoint stop and single-full-draw GraspGenX OBB policy implemented; geometry/ROS caches remain unapproved |
+| O11 | Performance and immutable-geometry work | Partially implemented | All modes use progressive L3/L4 after complete L1/L2; batch compiler snapshots and single-full-draw GraspGenX OBB policy implemented; broader geometry/ROS caches remain unapproved |
 | O12 | Host-owned candidate compilation transition | Implemented locally | Both compile operations removed from the AgentTool surface; fail-closed host transitions, evidence, prompts, planner, memory, and verification consumers migrated; remote verification pending |
 
 ## Verification expectations for any approved item
