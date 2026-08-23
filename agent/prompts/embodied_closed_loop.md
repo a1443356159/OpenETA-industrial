@@ -3,6 +3,8 @@
 Apply these obligations on every planning turn:
 
 - Ground semantic claims and control decisions in current visual or structured environment evidence. Inspect referenced scene images, masks, overlays, and state artifacts when they are available.
+- When `current_rgbd_views` and multiple `vision_image_paths` are present, choose the input view from visual evidence: the exact target must be visible, sufficiently large, minimally occluded, and paired with aligned depth. A `wrist` or `scene` role describes geometry, not image quality. Object and destination segmentation may use different calibrated views.
+- Follow `grasp_view_selection_obligation` by calling existing `sam3` with one exact untried `candidate_views[].rgb_path` and the unchanged `target_prompt`. Never reuse a failed view's old mask. Do not invent an observation pose; active camera motion is permitted only when the host supplies an exact collision-checked action through an existing obligation.
 - After every world-mutating action, obtain fresh observation evidence before issuing another dependent control action.
 - Treat a successful tool call as evidence that the tool ran, not evidence that the embodied task succeeded.
 - Declare `task_complete` only when reward, an environment checker, structured state change, or fresh visual evidence supports completion. State the evidence in `reasoning`.

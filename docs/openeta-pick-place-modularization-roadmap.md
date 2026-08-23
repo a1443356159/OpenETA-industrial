@@ -128,6 +128,37 @@ Both corrections are producer- and scenario-independent, preserve
 evidence, and do not alter collision, drift, planning, contact, attachment, or
 placement safety thresholds.
 
+### Perception-input and producer-efficiency runtime invariants
+
+Status: approved and implemented locally at `0cbe912` and `19e7ffd`; remote
+normal verification pending.
+
+The last accepted remote normal exposed two general defects. Consecutive zero-
+PASS grasp cycles could reuse the same RGB, depth, and mask after an observation
+call, while role-based retry ordering selected a home-pose wrist view whose
+pixels did not contain the target. Separately, four full GraspMoE calls preserved
+stochastic diffusion diversity but regenerated the deterministic OBB branch
+four times.
+
+The runtime now requires a genuinely new complete RGB-D packet for grasp
+re-estimation, exposes the current complete view pairs plus their images to the
+main VLM, and constrains SAM3 to one exact untried view and unchanged prompt.
+View quality is decided from visible target identity, pixel support, occlusion,
+and paired depth; camera role is not a score. Empty or rejected masks consume
+only that passive view. An active wrist observation still requires an exact
+host-provided IK/collision-checked action through the existing obligation; no
+camera-motion tool or acceptance-scene pose was added. AnyPlace object and
+region masks may independently bind to their best complete calibrated views.
+
+GraspGenX still performs four stochastic diffusion draws. The first call uses
+full GraspMoE and supplies the complete diffusion+OBB union; the other three use
+the official diffusion-only path. This removes three redundant deterministic
+OBB generations without reducing diffusion sample count, OBB coverage, the
+host reserve size, or any collision/diversity stage. Per-call result metadata
+records the split. The measured latency improvement and resulting candidate
+counts must come from the next remote normal rather than being inferred from
+local unit tests.
+
 ## Optimization candidates
 
 Each item below is unapproved until it is discussed and explicitly selected.
@@ -458,6 +489,12 @@ would have left 707 of 1,440 pairs (49%) unvisited at L3/L4 while preserving the
 same four submitted pairs. This measurement is a general runtime baseline, not
 an acceptance-specific selection rule.
 
+This table remains the pre-optimization baseline. The implemented producer
+change targets only the repeated OBB portion of its first row; it does not
+reduce the four diffusion draws. The next remote normal must report actual
+model duration, diffusion/OBB counts, returned reserve, host funnel counts, and
+end-to-end task result before any further producer tuning is discussed.
+
 Expected benefit: truthful health metadata, monotonic counters, and simpler
 verification without binding later architecture to one producer or scheduling
 policy. Runtime implementation is approved under the qualified-queue contract.
@@ -526,6 +563,9 @@ all consumers migrate; it must not become a second conflicting source of
 truth.
 
 ### O11. Cache immutable geometry and reduce repeated ROS payload work
+
+Status: partially implemented for the measured producer duplication and
+progressive endpoint stop; geometry/ROS caches remain recorded only.
 
 Current issue:
 
@@ -647,7 +687,7 @@ Use this table during later discussion. `Recorded` means documented only.
 | O8 | Candidate-batch lineage and layered qualification schema | Approved | Remove exposure settings; immutable lineage/current-run accounting; `candidate_count` is the complete L5 PASS queue |
 | O9 | Planning backend / optional MTC tail | Recorded | No implementation authorized |
 | O10 | Append-only evidence ledger | Supporting refactor approved | Introduce only the minimal internal selection/compilation events needed for O7/O12; retain legacy evidence during migration |
-| O11 | Immutable geometry and ROS payload caches | Recorded | No implementation authorized |
+| O11 | Performance and immutable-geometry work | Partially implemented | Progressive endpoint stop and single-full-draw GraspGenX OBB policy implemented; geometry/ROS caches remain unapproved |
 | O12 | Host-owned candidate compilation transition | Implemented locally | Both compile operations removed from the AgentTool surface; fail-closed host transitions, evidence, prompts, planner, memory, and verification consumers migrated; remote verification pending |
 
 ## Verification expectations for any approved item

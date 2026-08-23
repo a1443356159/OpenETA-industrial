@@ -274,6 +274,15 @@ safety/failure checker verdict.
 
 AnyGrasp and GraspGenX pose ambiguity use the same existing greedy policy.
 
+Current perception context also exposes complete `current_rgbd_views` and up to
+four corresponding planner images. The main VLM chooses an RGB input only after
+checking target identity, visible size, occlusion, and paired depth; camera role
+does not determine quality. A zero-qualified grasp batch requires a fresh
+packet and publishes `grasp_view_selection_obligation`, which permits SAM3 only
+on an exact untried RGB path with the unchanged target prompt. Empty or rejected
+masks advance to another passive view without reusing old pixels. The host does
+not invent or automatically prefer a wrist view.
+
 Physical gripper-width rejection has a bounded host-owned recovery path. When
 every raw candidate from a successful estimator response exceeds the calibrated
 Panda width limit, memory records the backend, camera artifact, and outcome.

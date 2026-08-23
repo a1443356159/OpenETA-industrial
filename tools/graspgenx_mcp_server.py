@@ -92,10 +92,12 @@ def predict_grasps(
     points are required; larger point clouds, including those above 3500 points,
     are passed to GraspGenX without wrapper downsampling or padding.
 
-    The fixed GraspMoE planner combines diffusion and OBB candidates. Scores are
-    sorted descending without a 0.7 cutoff and the configured number of collision-free grasps
-    are returned. Collision filtering only covers visible non-target geometry in
-    the supplied depth image; it is not robot motion planning. Inference is
+    One full GraspMoE draw combines diffusion and OBB candidates; three
+    additional official diffusion-only draws preserve stochastic mode coverage
+    without repeating the deterministic OBB branch. Scores are sorted descending
+    without a 0.7 cutoff and the configured number of collision-free grasps are
+    returned. Collision filtering only covers visible non-target geometry in the
+    supplied depth image; it is not robot motion planning. Inference is
     stochastic, so repeated calls can differ.
 
     Returned poses are in ``camera/opencv``. Each candidate contains both the

@@ -39,8 +39,13 @@ Use as text guidance only, not an executable macro. Inspect each result.
    - "把桌上的罐子抓起来" -> `can`
    - "拿起牛奶盒" -> `milk box`
    - "抓取方块" -> `cube`
-3. Call `sam3` on the exact local RGB path from `current_camera_artifacts` with
-   the normalized `prompt`, for example `milk box` or `can`.
+3. Inspect every image attached through `vision_image_paths` and match it to
+   `current_rgbd_views`. Call `sam3` on the exact local RGB path whose view
+   visibly contains the correct target with useful pixel area, minimal
+   occlusion, and an aligned `depth_path`. A wrist camera is not preferred just
+   because it is attached to the arm; at the current pose it may see only the
+   robot or background. Preserve the normalized `prompt`, for example `milk
+   box` or `can`.
    Do not pass a non-English user phrase directly to `sam3` if a clear English object name is available.
    If direct text segmentation is empty or clearly fails to identify an unusual
    simulator asset, and `retrieve_asset_reference` is executable, call it with
@@ -135,6 +140,13 @@ Use as text guidance only, not an executable macro. Inspect each result.
 
 ## Recovery Notes
 
+- When `grasp_view_selection_obligation` is present, inspect its candidate
+  images and call `sam3` with one exact untried `rgb_path` plus its unchanged
+  `target_prompt`. A no-detection or visually rejected mask consumes only that
+  passive view; select another offered view without reusing the failed mask.
+  Move the arm for a closer camera view only when the host provides the exact
+  IK/collision-checked action through an existing obligation; never invent an
+  observation pose.
 - If exact-task `sam3` returns an empty mask and `retrieve_asset_reference` is
   executable, use reference localization before changing the prompt. Do not
   broaden an unusual asset name such as `alphabet soup` to `soup can`: that can

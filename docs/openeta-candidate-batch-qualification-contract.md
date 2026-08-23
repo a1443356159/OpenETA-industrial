@@ -576,9 +576,13 @@ A `GraspGenXProducerProfile` should bind:
 - backend-local source-aware ordering before the reserve cap;
 - model, checkpoint, gripper-description, and producer revisions.
 
-The current implementation uses four stochastic inference draws and requests
-200 grasps per draw before union/filtering. These are inventory values, not new
-global CLI settings and not approved tuning targets.
+The current implementation preserves four stochastic diffusion draws and
+requests 200 diffusion grasps per draw before union/filtering. The first call
+uses full GraspMoE so its deterministic OBB branch is included once; the other
+three calls use the official diffusion-only planner. This avoids generating the
+same deterministic OBB set four times. Result metadata records the full/diffusion-
+only draw counts and policy. These are producer-profile inventory values, not
+new global CLI settings or VLM arguments.
 
 An `AnyGraspProducerProfile` should bind its SDK/model revision, requested raw
 generation behavior, backend-local score/filter settings, and returned-reserve

@@ -27,7 +27,11 @@ before choosing the next tool call.
 
 1. Before grasp estimation in a combined pick-place task, segment and select
    the target object, then segment and select the destination region from the
-   same calibrated, unchanged RGB-D scene. Follow the host
+   calibrated, unchanged RGB-D scene. Inspect all attached
+   `current_rgbd_views`; the object and destination may use different complete
+   views when each selected mask remains bound to its own RGB, aligned depth,
+   intrinsics, and extrinsics. Choose by visibility, pixel support, and
+   occlusion rather than camera role. Follow the host
    `placement_obligation` once to let AnyPlace retain a host-private object-goal
    pool. These are not executable placement candidates and are not shown to the
    VLM.
@@ -47,7 +51,8 @@ before choosing the next tool call.
    Executable placement candidate selection, placement compilation, and motion
    remain blocked until this gate completes.
 4. After attachment PASS, observe the placement scene independently. Segment
-   the held object and the target region from placement observations and call
+   the held object and the target region from the best available complete
+   placement observations and call
    `anyplace` with the exact host-provided object/placement observation packets.
    AnyPlace predicts only object goal poses; it never accepts a selected grasp
    or produces an EEF pose. Never run grasp estimation on the receptacle as a

@@ -28,8 +28,17 @@ feeds target SAM3 and GraspGenX for the `robotiq_2f_85` embodiment. The service
 returns a host-only reserve pool of up to 200. After world-EEF compilation,
 deterministic source-aware SE(3) diversity retains at most 64 candidates across
 translation, approach, complete wrist rotation, score, and branch provenance.
-The private `openeta.moveit_candidate_funnel.v2` submits at most 12 complete
-plans and exposes at most ten PASS candidates to the main VLM.
+The private `openeta.moveit_candidate_funnel.v2` submits at most four complete
+plans. Every full-plan PASS is retained in one equal-status qualified queue;
+there is no separate VLM exposure subset.
+
+In a combined task, a pregrasp AnyPlace call first freezes up to 96 absolute
+world object goals. The host screens at most four qualified grasp modes against
+the complete goal batch, performs shallow compilation/structural checks for
+every constructed pair, and progressively runs endpoint checks until the
+four-slot plan-only capacity is filled or the batch is exhausted. This look-
+ahead selects a grasp compatible with at least one object goal; it does not
+authorize placement execution.
 
 After close, Gazebo attach acknowledgement, and the unchanged M3 lift gate,
 the host measures and freezes `T_eef_object_attached`. It then acquires a new
@@ -60,6 +69,41 @@ collision IK, endpoint, full-plan, and qualification counts.
 `candidate_count == full_plan_pass_count` counts the complete stored PASS queue;
 there is no separate exposure subset.
 
+### Camera-input selection
+
+The observation may contain multiple calibrated RGB-D views. The runtime pairs
+RGB, aligned depth, intrinsics, frame id, and available extrinsics into
+`current_rgbd_views` without guessing across cameras. During perception turns,
+the planner receives the corresponding current RGB images and selects a view
+from visual evidence: correct target identity, useful pixel area, low
+occlusion, and valid paired depth. `scene_primary` and `wrist_primary` describe
+camera geometry; neither is a quality score. In particular, a wrist view at a
+home pose may contain only the arm or background.
+
+After a zero-PASS grasp batch, the host first requires a genuinely fresh RGB-D
+packet. `grasp_view_selection_obligation` then constrains the VLM to one exact,
+untried RGB path and the unchanged target prompt. Empty or visually rejected
+masks consume only that passive view; an old mask is never reused. Active
+camera motion remains available only through an existing host-generated,
+IK/collision-checked obligation and pose. This logic is scene-independent and
+does not add a tool.
+
+Object and destination-region SAM3 selections for AnyPlace may come from
+different complete calibrated views. Each mask remains bound to its own RGB,
+depth, intrinsics, extrinsics, and frame; AnyPlace still receives the exact two
+host-built observation packets.
+
+### GraspGenX producer work
+
+Four stochastic diffusion draws are preserved. The first invocation uses the
+full GraspMoE union (diffusion plus deterministic OBB); the remaining three use
+the official diffusion-only planner. This removes three repeated deterministic
+OBB generations without reducing diffusion samples, OBB coverage, the returned
+200-candidate reserve, scene collision filtering, or SE(3) diversity. Result
+metadata reports the total draw count, one GraspMoE draw, three diffusion-only
+draws, and the single-full-draw OBB policy so remote timing and candidate counts
+remain auditable.
+
 ## Motion and scene constraints
 
 M3 approach/capture/lift and its `0.0002 m / 0.002 rad` gate are unchanged.
@@ -82,11 +126,15 @@ participates in table and distractor collision checking.
 ## Recovery and acceptance
 
 Candidate rejection retains the current state and lets the host advance to the
-next retained PASS candidate. Zero grasp PASS triggers a fresh grasp observation and
-reruns GraspGenX without switching backends. Zero placement PASS keeps the
-native attachment, acquires a new placement observation, resegments both
-placement inputs, and reruns AnyPlace only. `execution_started=true`, UNKNOWN,
-or unsafe recovery stops for human handling.
+next retained PASS candidate. Zero grasp PASS triggers a fresh grasp observation,
+an untried complete view selection, and another ordinary GraspGenX cycle without
+switching backends. After attachment, an independent placement observation and
+SAM3 selection are still mandatory. The first placement round recompiles and
+fully requalifies the frozen pregrasp object goals with the measured attachment
+without model inference. Only zero PASS permits one real new-seed AnyPlace call
+on that same independent observation; failed frozen goals are not merged into
+the new batch. `execution_started=true`, UNKNOWN, or unsafe recovery stops for
+human handling.
 
 ## Remote real-model deployment
 
