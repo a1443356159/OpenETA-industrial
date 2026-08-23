@@ -682,94 +682,6 @@ def _host_obligation_decision(
                 }
             },
         )
-    if isinstance(reestimate, dict) and reestimate.get("status") == "ready":
-        previous_view = str(reestimate.get("previous_view") or "agentview")
-        current_artifacts = [
-            artifact
-            for artifact in tool_context.get("current_camera_artifacts", [])
-            if isinstance(artifact, dict) and artifact.get("kind") == "rgb"
-        ]
-        if any(
-            _camera_item_role(artifact) in _CAMERA_ROLE_PREFERENCE
-            for artifact in current_artifacts
-        ):
-            alternate_role_order = {
-                "wrist_primary": 0,
-                "scene_secondary": 1,
-                "scene_primary": 2,
-                "wrist_secondary": 3,
-            }
-            alternate_frame_order = {"wrist": 0, "render": 1, "agentview": 2}
-            ranked_artifacts = sorted(
-                current_artifacts,
-                key=lambda artifact: (
-                    _camera_item_frame_id(artifact) == previous_view,
-                    alternate_role_order.get(
-                        _camera_item_role(artifact),
-                        alternate_frame_order.get(_camera_item_frame_id(artifact), 4),
-                    ),
-                ),
-            )
-            selected_artifact = ranked_artifacts[0] if ranked_artifacts else None
-            current_rgb = (
-                selected_artifact.get("path")
-                if isinstance(selected_artifact, dict)
-                else None
-            )
-            selected_view = (
-                _camera_item_frame_id(selected_artifact)
-                if isinstance(selected_artifact, dict)
-                else previous_view
-            )
-        else:
-            preferred_views = [
-                view for view in ("wrist", "render", "agentview") if view != previous_view
-            ] + [previous_view]
-            current_rgb = next(
-                (
-                    artifact.get("path")
-                    for view in preferred_views
-                    for artifact in current_artifacts
-                    if artifact.get("frame_id") == view
-                ),
-                None,
-            )
-            selected_view = next(
-                (
-                    artifact.get("frame_id")
-                    for view in preferred_views
-                    for artifact in current_artifacts
-                    if artifact.get("frame_id") == view
-                ),
-                previous_view,
-            )
-        image = current_rgb or reestimate.get("source_image")
-        prompt = reestimate.get("target_prompt")
-        if (
-            isinstance(image, str)
-            and isinstance(prompt, str)
-            and prompt
-            and tools.can_execute("sam3")
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action="sam3",
-                parameters={"image": image, "prompt": prompt},
-                reasoning=(
-                    "Fresh observation is ready after the candidate retry limit; "
-                    "reacquire the target mask before re-estimating grasps."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": "openeta.grasp_reestimate.v1",
-                        "stage": "reestimate_sam3",
-                        "reestimate_strategy": "alternate_camera_view",
-                        "selected_view": selected_view,
-                        "previous_view": previous_view,
-                    }
-                },
-            )
-
     execution = tool_context.get("grasp_execution")
     if isinstance(execution, dict) and execution.get("status") == "required":
         stage = str(execution.get("stage") or "")
@@ -3626,6 +3538,10 @@ def _build_tool_context_payload(
         task=effective_task,
     )
     camera_artifacts = _current_camera_artifacts(observation)
+    current_rgbd_views = _current_complete_rgbd_views(
+        observation,
+        camera_artifacts=camera_artifacts,
+    )
     working_memory = memory_context.get("working_memory")
     working_artifacts = (
         working_memory.get("artifacts", {}) if isinstance(working_memory, dict) else {}
@@ -3645,12 +3561,17 @@ def _build_tool_context_payload(
     reestimate_status = (
         str(reestimate.get("status") or "") if isinstance(reestimate, dict) else ""
     )
+    grasp_view_selection = _grasp_view_selection_obligation(
+        reestimate,
+        current_rgbd_views=current_rgbd_views,
+    )
     if pregrasp_pool_required or reestimate_status in {
         "pending_observation",
         "ready",
         "selection_pending",
         "segmentation_failed",
         "selection_rejected",
+        "passive_views_exhausted",
     }:
         grasp_target_selection = None
     elif reestimate_status == "target_ready":
@@ -3662,12 +3583,55 @@ def _build_tool_context_payload(
             else memory_context.get("selected_sam3_detection")
         )
     grasp_visual_stage = _grasp_visual_stage_for_context(execution)
-    if grasp_visual_stage:
+    attached_placement_perception = (
+        isinstance(execution, dict)
+        and execution.get("status") == "completed"
+        and execution.get("stage") == "attached"
+        and (
+            not isinstance(memory_context.get("placement_object_detection"), dict)
+            or not isinstance(memory_context.get("placement_region_detection"), dict)
+        )
+    )
+    initial_pick_perception = (
+        "pick" in selected_skill_names
+        and not isinstance(execution, dict)
+        and not isinstance(memory_context.get("selected_sam3_detection"), dict)
+    )
+    if reestimate_status == "ready" and isinstance(grasp_view_selection, dict):
+        offered_views = grasp_view_selection.get("candidate_views")
         vision_image_paths = [
-            artifact["path"]
-            for artifact in camera_artifacts
-            if artifact["kind"] == "rgb" and _is_primary_planner_camera(artifact)
-        ][:2]
+            str(view["rgb_path"])
+            for view in (offered_views if isinstance(offered_views, list) else [])
+            if isinstance(view, dict) and isinstance(view.get("rgb_path"), str)
+        ][:4]
+    elif (
+        grasp_visual_stage
+        or pregrasp_pool_required
+        or attached_placement_perception
+        or initial_pick_perception
+    ):
+        vision_image_paths = [
+            str(view["rgb_path"])
+            for view in current_rgbd_views
+            if view.get("primary") is True
+        ][:4]
+        if not vision_image_paths:
+            vision_image_paths = [
+                str(view["rgb_path"]) for view in current_rgbd_views
+            ][:4]
+        if not vision_image_paths and grasp_visual_stage:
+            vision_image_paths = [
+                str(artifact["path"])
+                for artifact in camera_artifacts
+                if artifact.get("kind") == "rgb"
+                and _is_primary_planner_camera(artifact)
+            ][:4]
+        if not vision_image_paths:
+            vision_image_paths = [
+                str(artifact["path"])
+                for artifact in camera_artifacts
+                if artifact.get("kind") == "rgb"
+            ][:1]
     else:
         primary_rgb = next(
             (artifact["path"] for artifact in camera_artifacts if artifact["kind"] == "rgb"),
@@ -3683,6 +3647,17 @@ def _build_tool_context_payload(
         "observation": _observation_summary(observation),
         "vision_image_paths": vision_image_paths,
         "current_camera_artifacts": camera_artifacts,
+        "current_rgbd_views": [
+            {
+                **view,
+                **(
+                    {"vision_image_index": vision_image_paths.index(view["rgb_path"]) + 1}
+                    if view.get("rgb_path") in vision_image_paths
+                    else {}
+                ),
+            }
+            for view in current_rgbd_views
+        ],
         "current_camera_calibrations": _current_camera_calibrations(observation),
         "memory": memory_context,
         "selection_obligation": memory_context.get("selection_obligation"),
@@ -3693,6 +3668,30 @@ def _build_tool_context_payload(
             "pregrasp_placement_goal_pool"
         ),
         "sam3_no_detection": memory_context.get("sam3_no_detection"),
+        "grasp_view_selection_obligation": (
+            {
+                **grasp_view_selection,
+                "candidate_views": [
+                    {
+                        **view,
+                        **(
+                            {
+                                "vision_image_index": vision_image_paths.index(
+                                    view["rgb_path"]
+                                )
+                                + 1
+                            }
+                            if view.get("rgb_path") in vision_image_paths
+                            else {}
+                        ),
+                    }
+                    for view in grasp_view_selection.get("candidate_views", [])
+                    if isinstance(view, dict)
+                ],
+            }
+            if isinstance(grasp_view_selection, dict)
+            else None
+        ),
         "grasp_estimation_fallback_obligation": _grasp_estimation_fallback_obligation(
             observation,
             camera_artifacts=camera_artifacts,
@@ -3704,7 +3703,11 @@ def _build_tool_context_payload(
             working_artifacts=working_artifacts,
         ),
         "molmopoint_fallback_obligation": _molmopoint_fallback_obligation(
-            no_detection=memory_context.get("sam3_no_detection"),
+            no_detection=(
+                None
+                if reestimate_status == "ready"
+                else memory_context.get("sam3_no_detection")
+            ),
             reference_failure=memory_context.get("reference_localization_failure"),
             pending_selection=memory_context.get("selection_obligation"),
             pending_localization=memory_context.get("reference_localization_obligation"),
@@ -3712,7 +3715,11 @@ def _build_tool_context_payload(
         "target_reference_obligation": _target_reference_obligation(
             observation,
             camera_artifacts=camera_artifacts,
-            no_detection=memory_context.get("sam3_no_detection"),
+            no_detection=(
+                None
+                if reestimate_status == "ready"
+                else memory_context.get("sam3_no_detection")
+            ),
             pending_selection=memory_context.get("selection_obligation"),
             selected=memory_context.get("selected_sam3_detection"),
             pending_localization=memory_context.get("reference_localization_obligation"),
@@ -3893,6 +3900,11 @@ def _current_camera_artifacts(observation: EnvObservation) -> list[JsonDict]:
     if not isinstance(raw_artifacts, list):
         return []
     preferred_frames = {"agentview": 0, "render": 1, "wrist": 2}
+    camera_roles = {
+        camera.frame_id: _normalise_camera_role(camera.role)
+        for camera in observation.cameras
+        if _normalise_camera_role(camera.role)
+    }
     artifacts: list[JsonDict] = []
     for index, raw in enumerate(raw_artifacts):
         if not isinstance(raw, dict) or raw.get("kind") not in {"rgb", "depth"}:
@@ -3907,7 +3919,7 @@ def _current_camera_artifacts(observation: EnvObservation) -> list[JsonDict]:
             "kind": kind,
             "path": path,
         }
-        role = _normalise_camera_role(raw.get("role"))
+        role = _normalise_camera_role(raw.get("role")) or camera_roles.get(frame_id, "")
         if role:
             artifact["role"] = role
         for artifact_field in ("width", "height", "format", "index"):
@@ -3924,6 +3936,93 @@ def _current_camera_artifacts(observation: EnvObservation) -> list[JsonDict]:
     for artifact in artifacts:
         artifact.pop("_sort_key", None)
     return artifacts
+
+
+def _current_complete_rgbd_views(
+    observation: EnvObservation,
+    *,
+    camera_artifacts: list[JsonDict],
+) -> list[JsonDict]:
+    """Pair current RGB, depth and calibration without guessing across cameras."""
+
+    cameras = {camera.frame_id: camera for camera in observation.cameras}
+    views: list[JsonDict] = []
+    for rgb in camera_artifacts:
+        if rgb.get("kind") != "rgb":
+            continue
+        frame_id = str(rgb.get("frame_id") or "")
+        depth = next(
+            (
+                artifact
+                for artifact in camera_artifacts
+                if artifact.get("kind") == "depth"
+                and str(artifact.get("frame_id") or "") == frame_id
+            ),
+            None,
+        )
+        camera = cameras.get(frame_id)
+        if not isinstance(depth, dict) or camera is None or not camera.intrinsics:
+            continue
+        view: JsonDict = {
+            "frame_id": frame_id,
+            "rgb_path": str(rgb["path"]),
+            "depth_path": str(depth["path"]),
+            "primary": _is_primary_planner_camera(rgb),
+            "intrinsics_available": True,
+            "extrinsics_available": bool(camera.extrinsics),
+        }
+        role = _camera_item_role(rgb) or _camera_item_role(camera)
+        if role:
+            view["role"] = role
+        views.append(view)
+    return views
+
+
+def _grasp_view_selection_obligation(
+    reestimate: object,
+    *,
+    current_rgbd_views: list[JsonDict],
+) -> JsonDict | None:
+    """Offer only fresh, complete and not-yet-failed grasp re-estimation views."""
+
+    if not isinstance(reestimate, dict) or reestimate.get("status") != "ready":
+        return None
+    prompt = str(reestimate.get("target_prompt") or "").strip()
+    recorded_views = {
+        str(view.get("rgb_path") or "")
+        for view in reestimate.get("observation_views", [])
+        if isinstance(view, dict) and str(view.get("rgb_path") or "")
+    }
+    attempted = {
+        str(path)
+        for path in reestimate.get("attempted_view_images", [])
+        if isinstance(path, str) and path
+    }
+    candidates = [
+        dict(view)
+        for view in current_rgbd_views
+        if str(view.get("rgb_path") or "") in recorded_views
+        and str(view.get("rgb_path") or "") not in attempted
+    ]
+    if not prompt or not candidates:
+        return None
+    return {
+        "schema_version": "openeta.grasp_view_selection.v1",
+        "status": "required",
+        "required_tool": "sam3",
+        "target_prompt": prompt,
+        "candidate_views": candidates,
+        "attempted_rgb_paths": sorted(attempted),
+        "selection_rule": (
+            "Inspect every attached candidate image. Choose one exact rgb_path where "
+            "the target identity is visible, occupies useful pixel area, is minimally "
+            "occluded, and has the paired depth_path. Camera role alone is not quality."
+        ),
+        "tool_parameters": {
+            "image": "<one exact candidate_views[].rgb_path>",
+            "prompt": prompt,
+        },
+    }
 
 
 def _current_camera_calibrations(observation: EnvObservation) -> list[JsonDict]:

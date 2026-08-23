@@ -234,6 +234,232 @@ def test_pregrasp_reestimate_never_falls_back_to_stale_object_mask(
     assert required["object_mask"]["mask_ref"] == str(fresh_mask)
 
 
+def test_grasp_retry_exposes_complete_views_for_model_choice(tmp_path: Path) -> None:
+    scene_rgb = tmp_path / "scene.rgb.png"
+    scene_depth = tmp_path / "scene.depth.png"
+    wrist_rgb = tmp_path / "wrist.rgb.png"
+    wrist_depth = tmp_path / "wrist.depth.png"
+    for path in (scene_rgb, scene_depth, wrist_rgb, wrist_depth):
+        path.write_bytes(path.name.encode())
+    observation = _rgbd_observation(
+        task="pick the red block",
+        views=[
+            ("agentview", scene_rgb, scene_depth),
+            ("wrist", wrist_rgb, wrist_depth),
+        ],
+    )
+    memory = AgentMemory()
+    memory.start_session(task=observation.task)
+    memory.save_fact(
+        "grasp_reestimation",
+        {
+            "schema_version": "openeta.grasp_reestimate.v1",
+            "status": "ready",
+            "target_prompt": "red block",
+            "previous_view": "agentview",
+            "observation_views": [
+                {
+                    "frame_id": "agentview",
+                    "rgb_path": str(scene_rgb),
+                    "depth_path": str(scene_depth),
+                },
+                {
+                    "frame_id": "wrist",
+                    "rgb_path": str(wrist_rgb),
+                    "depth_path": str(wrist_depth),
+                },
+            ],
+        },
+        source="test",
+    )
+    tools = _tools_with_handlers("sam3")
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=tools,
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["vision_image_paths"] == [str(scene_rgb), str(wrist_rgb)]
+    offered = context["grasp_view_selection_obligation"]
+    assert [view["rgb_path"] for view in offered["candidate_views"]] == [
+        str(scene_rgb),
+        str(wrist_rgb),
+    ]
+    assert [view["vision_image_index"] for view in offered["candidate_views"]] == [1, 2]
+    assert context["target_reference_obligation"] is None
+    # The host constrains the choice but does not choose a camera role for the model.
+    assert _host_obligation_decision(context, tools=tools) is None
+
+    planner = ToolCallingPlanner(
+        StaticPlannerBackend(
+            {
+                "kind": "tool_call",
+                "name": "sam3",
+                "parameters": {"image": str(scene_rgb), "prompt": "red block"},
+                "reasoning": "The target is visible and unoccluded in Image 1.",
+            }
+        )
+    )
+    decision = planner.plan(
+        observation,
+        memory=memory,
+        tools=tools,
+        skills=build_default_skill_registry(),
+    )
+    assert decision.action == "sam3"
+    assert decision.parameters["image"] == str(scene_rgb)
+    assert decision.metadata["execution_model"] != "host_obligation_dispatch"
+
+
+def test_failed_grasp_retry_view_advances_without_reusing_pixels(tmp_path: Path) -> None:
+    scene_rgb = tmp_path / "scene.rgb.png"
+    scene_depth = tmp_path / "scene.depth.png"
+    wrist_rgb = tmp_path / "wrist.rgb.png"
+    wrist_depth = tmp_path / "wrist.depth.png"
+    for path in (scene_rgb, scene_depth, wrist_rgb, wrist_depth):
+        path.write_bytes(path.name.encode())
+    observation = _rgbd_observation(
+        task="pick the red block",
+        views=[
+            ("agentview", scene_rgb, scene_depth),
+            ("wrist", wrist_rgb, wrist_depth),
+        ],
+    )
+    memory = AgentMemory()
+    memory.start_session(task=observation.task)
+    memory.save_fact(
+        "grasp_reestimation",
+        {
+            "schema_version": "openeta.grasp_reestimate.v1",
+            "status": "ready",
+            "target_prompt": "red block",
+            "observation_views": [
+                {"frame_id": "agentview", "rgb_path": str(scene_rgb)},
+                {"frame_id": "wrist", "rgb_path": str(wrist_rgb)},
+            ],
+        },
+        source="test",
+    )
+    parameters = {"image": str(scene_rgb), "prompt": "red block"}
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {"name": "sam3", "parameters": parameters},
+                "tool_calls": [
+                    {
+                        "name": "sam3",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "parameters": parameters,
+                                "outputs": {
+                                    "result_id": "empty-scene-view",
+                                    "source_image": str(scene_rgb),
+                                    "prompt": "red block",
+                                    "frame_id": "agentview",
+                                    "detections": [],
+                                },
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["status"] == "ready"
+    assert reestimate["attempted_view_images"] == [str(scene_rgb)]
+    assert reestimate["remaining_view_count"] == 1
+    assert (
+        memory.detection_selection_gate_error(
+            tool_name="sam3",
+            parameters={"image": str(scene_rgb), "prompt": "red block"},
+        )
+        is not None
+    )
+    assert (
+        memory.detection_selection_gate_error(
+            tool_name="sam3",
+            parameters={"image": str(wrist_rgb), "prompt": "red block"},
+        )
+        is None
+    )
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("sam3", "retrieve_asset_reference"),
+        skills=build_default_skill_registry(),
+    )
+    assert context["vision_image_paths"] == [str(wrist_rgb)]
+    assert [
+        view["rgb_path"]
+        for view in context["grasp_view_selection_obligation"]["candidate_views"]
+    ] == [str(wrist_rgb)]
+    assert context["target_reference_obligation"] is None
+
+
+def test_rejected_grasp_retry_mask_advances_to_another_view(tmp_path: Path) -> None:
+    scene_rgb = tmp_path / "scene.rgb.png"
+    wrist_rgb = tmp_path / "wrist.rgb.png"
+    for path in (scene_rgb, wrist_rgb):
+        path.write_bytes(path.name.encode())
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block")
+    memory.save_fact(
+        "grasp_reestimation",
+        {
+            "status": "ready",
+            "target_prompt": "red block",
+            "observation_views": [
+                {"frame_id": "agentview", "rgb_path": str(scene_rgb)},
+                {"frame_id": "wrist", "rgb_path": str(wrist_rgb)},
+            ],
+        },
+        source="test",
+    )
+    parameters = {"image": str(scene_rgb), "prompt": "red block"}
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "tool_calls": [
+                    {
+                        "name": "sam3",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "parameters": parameters,
+                                "outputs": {
+                                    "result_id": "wrong-scene-mask",
+                                    "source_image": str(scene_rgb),
+                                    "prompt": "red block",
+                                    "detections": [{"id": "neighbor", "score": 0.9}],
+                                },
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+    )
+    assert memory.grasp_reestimation()["status"] == "selection_pending"
+
+    memory.reject_sam3_detections(
+        result_id="wrong-scene-mask",
+        reason="The mask covers the neighboring object.",
+    )
+
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["status"] == "ready"
+    assert reestimate["attempted_view_images"] == [str(scene_rgb)]
+    assert reestimate["remaining_view_count"] == 1
+
+
 def test_terminal_placement_recovery_hands_off_without_repeating_inference() -> None:
     decision = _host_obligation_decision(
         {

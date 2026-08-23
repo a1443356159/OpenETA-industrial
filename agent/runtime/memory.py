@@ -1526,10 +1526,14 @@ class AgentMemory:
         ):
             reestimate.update(
                 {
-                    "status": "selection_rejected",
                     "selection_rejection_reason": rejection_reason,
                     "selection_rejected_at_s": time.time(),
                 }
+            )
+            _record_failed_grasp_reestimate_view(
+                reestimate,
+                source_image=str(pending.get("source_image") or ""),
+                failure="selection_rejected",
             )
             self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
                 reestimate,
@@ -1591,6 +1595,36 @@ class AgentMemory:
                         "Reference-guided SAM3 requires roi_bbox_xyxy in original-image "
                         "pixel coordinates."
                     )
+        reestimate = self.grasp_reestimation()
+        if (
+            tool_name == "sam3"
+            and isinstance(reestimate, dict)
+            and reestimate.get("status") == "ready"
+        ):
+            attempted = {
+                str(path)
+                for path in reestimate.get("attempted_view_images", [])
+                if isinstance(path, str) and path
+            }
+            allowed_images = {
+                str(view.get("rgb_path") or "")
+                for view in reestimate.get("observation_views", [])
+                if isinstance(view, dict)
+                and str(view.get("rgb_path") or "")
+                and str(view.get("rgb_path") or "") not in attempted
+            }
+            supplied_image = str(parameters.get("image") or "")
+            if supplied_image not in allowed_images:
+                return (
+                    "Grasp re-estimation SAM3 must use one exact, untried rgb_path "
+                    "from grasp_view_selection_obligation.candidate_views."
+                )
+            expected_prompt = str(reestimate.get("target_prompt") or "").strip()
+            if expected_prompt and str(parameters.get("prompt") or "").strip() != expected_prompt:
+                return (
+                    "Grasp re-estimation SAM3 must preserve the exact target_prompt "
+                    "from grasp_view_selection_obligation."
+                )
         pending = self.pending_sam3_selection()
         mode = str(parameters.get("mode") or "targeted").strip().lower()
         if pending is not None and tool_name == "anygrasp" and mode != "scene":
@@ -1723,9 +1757,7 @@ class AgentMemory:
             if reestimate_segmentation:
                 reestimate.update(
                     {
-                        "status": (
-                            "selection_pending" if candidates else "segmentation_failed"
-                        ),
+                        "status": "selection_pending",
                         "segmentation_result_id": result_id,
                         "segmentation_source_image": source_image,
                         "segmentation_frame_id": source_frame_id,
@@ -1733,6 +1765,12 @@ class AgentMemory:
                         "segmented_at_s": time.time(),
                     }
                 )
+                if not candidates:
+                    _record_failed_grasp_reestimate_view(
+                        reestimate,
+                        source_image=str(source_image or ""),
+                        failure="segmentation_failed",
+                    )
                 self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
                     reestimate,
                     source="grasp_reestimate_segmentation",
@@ -9392,6 +9430,38 @@ def _complete_observation_rgbd_views(observation: EnvObservation) -> list[JsonDi
             view["role"] = role
         views.append(view)
     return views
+
+
+def _record_failed_grasp_reestimate_view(
+    reestimate: JsonDict,
+    *,
+    source_image: str,
+    failure: str,
+) -> None:
+    """Advance a grasp retry to another passive view without reusing failed pixels."""
+
+    attempted = [
+        str(path)
+        for path in reestimate.get("attempted_view_images", [])
+        if isinstance(path, str) and path
+    ]
+    if source_image and source_image not in attempted:
+        attempted.append(source_image)
+    remaining = [
+        view
+        for view in reestimate.get("observation_views", [])
+        if isinstance(view, dict)
+        and str(view.get("rgb_path") or "")
+        and str(view.get("rgb_path") or "") not in attempted
+    ]
+    reestimate.update(
+        {
+            "status": "ready" if remaining else "passive_views_exhausted",
+            "attempted_view_images": attempted,
+            "remaining_view_count": len(remaining),
+            "last_view_failure": failure,
+        }
+    )
 
 
 def summarize_observation(observation: EnvObservation) -> JsonDict:
