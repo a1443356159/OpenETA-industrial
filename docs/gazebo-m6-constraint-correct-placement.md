@@ -1,4 +1,4 @@
-# Gazebo M6: real GraspGenX/AnyPlace constraint-correct placement and recovery
+# Gazebo M6: real AnyGrasp/AnyPlace constraint-correct placement and recovery
 
 M6 keeps the existing AgentTool surface. `move_to` remains one MoveIt request
 that performs IK, collision-aware planning, and execution. There is no separate
@@ -24,7 +24,8 @@ or human handling.
 ## Perception and compilation boundary
 
 Grasp and placement use independent observations. A fresh grasp RGB-D packet
-feeds target SAM3 and GraspGenX for the `robotiq_2f_85` embodiment. The service
+feeds target SAM3 and host-selected AnyGrasp for the `robotiq_2f_85`
+parallel-jaw embodiment. The service
 returns a host-only reserve pool of up to 200. After world-EEF compilation,
 deterministic source-aware SE(3) diversity retains at most 64 candidates across
 translation, approach, complete wrist rotation, score, and branch provenance.
@@ -96,7 +97,16 @@ different complete calibrated views. Each mask remains bound to its own RGB,
 depth, intrinsics, extrinsics, and frame; AnyPlace still receives the exact two
 host-built observation packets.
 
-### GraspGenX producer work
+### Grasp producer work
+
+AnyGrasp is the primary parallel-jaw backend. It consumes the selected mask as
+SDK region steering, keeps SDK collision detection enabled on sensor depth, and
+returns a score-sorted reserve pool for the unchanged host qualification
+funnel. The normalized public result remains backend-neutral
+`grasp_pose_estimate`; backend selection and fallback are host-owned.
+
+The following optimization remains available when GraspGenX is configured as a
+fallback:
 
 Four stochastic diffusion draws are preserved. The first invocation uses the
 full GraspMoE union (diffusion plus deterministic OBB); the remaining three use
@@ -130,8 +140,8 @@ participates in table and distractor collision checking.
 
 Candidate rejection retains the current state and lets the host advance to the
 next retained PASS candidate. Zero grasp PASS triggers a fresh grasp observation,
-an untried complete view selection, and another ordinary GraspGenX cycle without
-switching backends. After attachment, an independent placement observation and
+an untried complete view selection, and another ordinary grasp cycle. After
+attachment, an independent placement observation and
 SAM3 selection are still mandatory. The first placement round recompiles and
 fully requalifies the frozen pregrasp object goals with the measured attachment
 without model inference. Only zero PASS permits one real new-seed AnyPlace call
@@ -141,29 +151,33 @@ human handling.
 
 ## Remote real-model deployment
 
-GraspGenX and AnyPlace source, isolated environments, gripper assets, and
+AnyGrasp and AnyPlace source, isolated environments, SDK license, and
 checkpoints belong under `/root/autodl-tmp/openeta-services/` on the approved
 RTX 4090 service node, beside but isolated from the existing SAM3 service.
 Nothing below `third_party/` in a developer checkout is an accepted model
-deployment. GraspGenX and AnyPlace must use separate environments because their
+deployment. AnyGrasp and AnyPlace must use separate environments because their
 official PyTorch stacks are incompatible.
 
-The pinned revisions are GraspGenX `b9429097`, model repository `7c834043`,
-gripper assets `19a03c00`, and AnyPlace `3049f78a`. The canonical working tree
+The pinned revisions are AnyGrasp SDK `b8eaafc9`, its modified
+MinkowskiEngine `35862757`, graspnetAPI `eb57dd20`, and AnyPlace `3049f78a`.
+The supplied AnyGrasp checkpoint SHA-256 is
+`a05c3690b95c8b65e78b1bb8a28f1d5ca96613391946e450afacae840bbcf7b2`.
+The canonical working tree
 is `/root/autodl-tmp/OpenETA-industrial`; model sources, environments, assets,
 and checkpoints are deployed separately under
 `/root/autodl-tmp/openeta-services/m6`. Checkpoint SHA-256 values and real MCP
 smoke results must be recorded from that server. Local workstation artifacts
 are never M6 evidence.
 
-Live acceptance requires real SAM3, official GraspGenX checkpoints and
-`robotiq_2f_85` gripper assets, official AnyPlace, a
+Live acceptance requires real SAM3, licensed official AnyGrasp with the
+`robotiq_2f_85` width bound, official AnyPlace, a
 main-VLM selection with no Oracle, native bilateral contact, attach ACK, at
 least 80 mm lift, at most 10 mm relative drift, end-to-end candidate/calibration/
 scene-revision provenance, fresh receipts, no repeated fingerprint, detach ACK,
-and stable marked-zone placement. Any missing or incompatible GraspGenX,
+and stable marked-zone placement. Any missing or incompatible AnyGrasp,
 AnyPlace, SAM3, MoveIt, or Gazebo dependency blocks live M6 rather than being
-substituted with AnyGrasp, mocks, fixed candidates, or Oracle state.
+substituted with another grasp backend, mocks, fixed candidates, or Oracle
+state.
 
 ## Portable launch and reproduction
 
@@ -192,7 +206,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install --no-build-isolation .
 ```
 
-With SAM3, AnyPlace, and GraspGenX already serving their health/SSE endpoints,
+With SAM3, AnyPlace, and AnyGrasp already serving their health/SSE endpoints,
 run a case from the repository root:
 
 ```bash
@@ -200,8 +214,8 @@ scripts/run_m6_gazebo_acceptance.sh \
   --scenario normal \
   --run-root /absolute/path/to/acceptance-runs/normal-1 \
   --sam3-url http://127.0.0.1:8773/sse \
-  --anyplace-url http://127.0.0.1:8875/sse \
-  --graspgenx-url http://127.0.0.1:8878/sse
+  --anygrasp-url http://127.0.0.1:8874/sse \
+  --anyplace-url http://127.0.0.1:8875/sse
 ```
 
 The wrapper selects `OPENETA_PYTHON_EXECUTABLE` when explicitly supplied,

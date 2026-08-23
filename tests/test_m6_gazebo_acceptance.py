@@ -33,11 +33,11 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert set(config) == {
         "openeta-sim",
         "openeta-sam3",
+        "openeta-anygrasp",
         "openeta-anyplace",
-        "openeta-graspgenx",
     }
     prompt = paths.instructions.read_text(encoding="utf-8")
-    assert "GraspGenX" in prompt and "AnyPlace" in prompt
+    assert "AnyGrasp" in prompt and "AnyPlace" in prompt
     assert "execution_started=false" in prompt
     assert "最终\n0.5 s 判断稳定" in prompt
     assert "禁止 Oracle" in prompt
@@ -53,27 +53,27 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
 
 
 def test_m6_order_helper_rejects_anyplace_before_lift() -> None:
-    valid = ["observe", "graspgenx", "gripper_control", "move_to", "anyplace"]
-    invalid = ["observe", "graspgenx", "anyplace", "gripper_control", "move_to"]
+    valid = ["observe", "anygrasp", "gripper_control", "move_to", "anyplace"]
+    invalid = ["observe", "anygrasp", "anyplace", "gripper_control", "move_to"]
 
-    required = ("observe", "graspgenx", "gripper_control", "move_to", "anyplace")
+    required = ("observe", "anygrasp", "gripper_control", "move_to", "anyplace")
     assert m6._ordered(valid, required)
     assert not m6._ordered(invalid, required)
 
 
-def test_m6_canonicalizes_public_grasp_tool_only_with_real_graspgenx_backend() -> None:
+def test_m6_canonicalizes_public_grasp_tool_only_with_real_anygrasp_backend() -> None:
     assert m6._name(
         {
             "name": "grasp_pose_estimate",
-            "result": {"details": {"backend": "graspgenx_mcp"}},
+            "result": {"details": {"backend": "anygrasp_mcp"}},
         }
-    ) == "graspgenx"
+    ) == "anygrasp"
     assert m6._name({"name": "grasp_pose_estimate"}) == "grasp_pose_estimate"
 
 
 def test_m6_requires_only_executable_public_grasp_tools() -> None:
-    assert "graspgenx" in m6.REQUIRED_REAL_M6_TOOLS
-    assert "list_graspgenx_grippers" not in m6.REQUIRED_REAL_M6_TOOLS
+    assert "anygrasp" in m6.REQUIRED_REAL_M6_TOOLS
+    assert "grasp_pose_estimate" not in m6.REQUIRED_REAL_M6_TOOLS
 
 
 def test_m6_health_url_preserves_service_root() -> None:

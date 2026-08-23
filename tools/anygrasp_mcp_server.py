@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -151,9 +152,18 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # The official SDK resolves ``license/licenseCfg.json`` from the process
+    # working directory.  This is a dedicated service process, so enter the
+    # documented SDK detection directory after first freezing all CLI paths as
+    # absolute paths.  Service-manager and stdio launches therefore share the
+    # same license semantics regardless of the caller's cwd.
+    sdk_root = Path(args.sdk_root).expanduser().resolve()
+    checkpoint_path = Path(args.checkpoint_path).expanduser().resolve()
+    os.chdir(sdk_root / "grasp_detection")
+
     _BACKEND = AnyGraspBackend(
-        sdk_root=args.sdk_root,
-        checkpoint_path=args.checkpoint_path,
+        sdk_root=sdk_root,
+        checkpoint_path=checkpoint_path,
         max_gripper_width=args.max_gripper_width,
         gripper_height=args.gripper_height,
         depth_truncation=args.depth_truncation,

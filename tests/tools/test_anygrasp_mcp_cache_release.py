@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -77,3 +78,48 @@ def test_release_cuda_cache_only_calls_torch_when_cuda_is_available(
     anygrasp_mcp_server._release_cuda_cache()
 
     assert calls == (["empty_cache"] if cuda_available else [])
+
+
+def test_stdio_main_enters_official_sdk_detection_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caller = tmp_path / "caller"
+    sdk_root = tmp_path / "sdk"
+    detection_root = sdk_root / "grasp_detection"
+    checkpoint = tmp_path / "checkpoint.tar"
+    caller.mkdir()
+    detection_root.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    captured: dict[str, Any] = {}
+
+    class Backend:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.chdir(caller)
+    monkeypatch.setattr(anygrasp_mcp_server, "AnyGraspBackend", Backend)
+    monkeypatch.setattr(
+        anygrasp_mcp_server.mcp,
+        "run",
+        lambda *, transport: captured.update(transport=transport),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "anygrasp_mcp_server.py",
+            "--transport",
+            "stdio",
+            "--sdk-root",
+            "../sdk",
+            "--checkpoint-path",
+            "../checkpoint.tar",
+        ],
+    )
+
+    assert anygrasp_mcp_server.main() == 0
+    assert Path.cwd() == detection_root
+    assert captured["sdk_root"] == sdk_root
+    assert captured["checkpoint_path"] == checkpoint
+    assert captured["transport"] == "stdio"

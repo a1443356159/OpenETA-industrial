@@ -591,11 +591,17 @@ def test_cli_binds_graspgenx_behind_unified_grasp_tool(
         else pytest.fail("unexpected GraspGenX callables"),
     )
     facade_backends = {}
+    facade_options = {}
+
+    def fake_facade(handlers, **kwargs):
+        facade_backends.update(handlers)
+        facade_options.update(kwargs)
+        return prediction_handler
+
     monkeypatch.setattr(
         runtime_assembly,
         "build_grasp_pose_estimate_handler",
-        lambda handlers, **_kwargs: facade_backends.update(handlers)
-        or prediction_handler,
+        fake_facade,
     )
 
     tools = build_default_tool_registry()
@@ -612,6 +618,11 @@ def test_cli_binds_graspgenx_behind_unified_grasp_tool(
     assert tools.can_execute("graspgenx") is False
     assert tools.can_execute("list_graspgenx_grippers") is False
     assert facade_backends == {"graspgenx": prediction_handler}
+    assert facade_options["backend_order"] == (
+        "anygrasp",
+        "contact_graspnet",
+        "graspgenx",
+    )
     assert calls == [
         ("list", "http://graspgenx.example/sse", "list_grippers", 600.0),
         ("predict", "http://graspgenx.example/sse", "predict_grasps", 600.0),

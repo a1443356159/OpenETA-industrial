@@ -47,7 +47,7 @@ The normal pick-place sequence is:
 pregrasp observe
 → target and destination SAM3 selection
 → host-private 96-goal AnyPlace pool in absolute world object SE(3)
-→ GraspGenX reserve pool
+→ AnyGrasp reserve pool (parallel-jaw primary; GraspGenX optional fallback)
 → grasp world-EEF compilation and MoveIt funnel
 → bounded pregrasp grasp-place compatibility qualification
 → host activates and compiles the stable head of the equal-status PASS grasp queue

@@ -4436,9 +4436,9 @@ def test_all_overwidth_backends_activate_highest_scoring_final_candidate(
     assert fallback["stage"] == "final_candidate_activation"
     assert fallback["required_tool"] == "activate_final_grasp_candidate"
     assert fallback["excluded_backends"] == [
-        "graspgenx",
         "anygrasp",
         "contact_graspnet",
+        "graspgenx",
     ]
     action = runtime.act(observation)
     assert action.command["request"]["name"] == "activate_final_grasp_candidate"

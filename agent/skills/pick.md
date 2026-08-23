@@ -86,8 +86,10 @@ Use as text guidance only, not an executable macro. Inspect each result.
    - `object_mask`: selected artifact with exact `mask_ref` and `source_image`;
      never pass a bare path or default to `detections[0]`.
    - `camera_frame_id` and `scene_epoch`: exact host provenance.
-   Backend-specific options and fallback are host-owned. Do not call AnyGrasp,
-   Contact-GraspNet, or GraspGenX directly.
+   Backend-specific options and fallback are host-owned. For the parallel-jaw
+   profile the current host order is AnyGrasp first, then configured fallbacks;
+   do not encode that choice in the request or call AnyGrasp, Contact-GraspNet,
+   or GraspGenX directly.
    If candidate depth was used, follow the host-generated
    `grasp_sensor_safety_obligation`: `obstacle_avoidance` must return
    `clear=true` for the exact candidate, scene epoch, report, and sensor-only

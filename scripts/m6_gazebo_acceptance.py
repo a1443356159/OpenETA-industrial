@@ -22,14 +22,14 @@ MODE = base.SCRIPTED_TUI
 ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
 DEFAULT_SERVICES = {
     "openeta-sam3": "http://127.0.0.1:8773/sse",
+    "openeta-anygrasp": "http://127.0.0.1:8774/sse",
     "openeta-anyplace": "http://127.0.0.1:8775/sse",
-    "openeta-graspgenx": "http://127.0.0.1:8778/sse",
 }
 REQUIRED_REAL_M6_TOOLS = (
     "create_simulator_env",
     "observe",
     "sam3",
-    "graspgenx",
+    "anygrasp",
     "gripper_control",
     "anyplace",
     "close_simulator_env",
@@ -41,9 +41,9 @@ GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 INSTRUCTIONS = """
 [automation=scripted_tui] 在隔离 Gazebo pick-place 环境中完成一次真实约束放置验收。
 创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 并用该抓取观察供 SAM3
-分割红色方块 target_object 与 GraspGenX(gripper_name=robotiq_2f_85) 使用；create 返回的
+分割红色方块 target_object，并让宿主通过统一 grasp_pose_estimate 调用真实 AnyGrasp；create 返回的
 initial observation 不计作这次显式 observe。禁止 Oracle、
-fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增运动工具。不得调用 python_exec
+fake candidate、直接调用后端工具、固定抓法、固定腕姿、IK preview 或新增运动工具。不得调用 python_exec
 读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
 拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
 目标 mask；运动前再分割绿色 placement_zone_marker 并按宿主 obligation 调用一次 AnyPlace，形成
@@ -87,8 +87,8 @@ def _health_url(sse_url: str) -> str:
 def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
     expected = {
         "openeta-sam3": "sam3",
+        "openeta-anygrasp": "anygrasp",
         "openeta-anyplace": "anyplace",
-        "openeta-graspgenx": "openeta-graspgenx",
     }
     rows: dict[str, Any] = {}
     for name, url in services.items():
@@ -251,12 +251,19 @@ def prepare_case(
 
 def _name(call: Mapping[str, Any]) -> str:
     name = str(call.get("name") or call.get("tool_name") or "")
-    if name == "grasp_pose_estimate" and (
-        base._contains(call, "backend", "graspgenx_mcp")
-        or base._contains(call, "source_backend", "graspgenx")
-        or "GraspGenX" in str(call)
-    ):
-        return "graspgenx"
+    if name == "grasp_pose_estimate":
+        if (
+            base._contains(call, "backend", "anygrasp_mcp")
+            or base._contains(call, "source_backend", "anygrasp")
+            or base._contains(call, "selected_backend", "anygrasp")
+        ):
+            return "anygrasp"
+        if (
+            base._contains(call, "backend", "graspgenx_mcp")
+            or base._contains(call, "source_backend", "graspgenx")
+            or base._contains(call, "selected_backend", "graspgenx")
+        ):
+            return "graspgenx"
     return name
 
 
@@ -357,7 +364,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             (
                 "observe",
                 "anyplace",
-                "graspgenx",
+                "anygrasp",
                 "gripper_control",
                 "move_to",
                 "anyplace",
@@ -393,7 +400,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             for event in events
         ):
             errors.append("host grasp candidate compilation evidence missing")
-        grasp_calls = [call for call in calls if _name(call) == "graspgenx"]
+        grasp_calls = [call for call in calls if _name(call) == "anygrasp"]
         final_grasp = grasp_calls[-1] if grasp_calls else {}
         raw_grasp_counts = [
             int(value)
@@ -401,15 +408,15 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             if isinstance(value, int) and not isinstance(value, bool)
         ]
         if not raw_grasp_counts or raw_grasp_counts[-1] < 10:
-            errors.append("GraspGenX raw candidate count evidence is missing")
+            errors.append("AnyGrasp raw candidate count evidence is missing")
         if not any(
             1 <= value <= 64
             for value in base._values(final_grasp, "diversity_selected_count")
             if isinstance(value, int) and not isinstance(value, bool)
         ):
-            errors.append("GraspGenX diversity pool evidence is missing")
+            errors.append("AnyGrasp diversity pool evidence is missing")
         if not any(1 <= value <= 2 for value in base._values(final_grasp, "full_plan_submitted_count") if isinstance(value, int)):
-            errors.append("GraspGenX full-plan submission bound is missing")
+            errors.append("AnyGrasp full-plan submission bound is missing")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}
@@ -601,8 +608,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     services = {
         "openeta-sam3": args.sam3_url,
+        "openeta-anygrasp": args.anygrasp_url,
         "openeta-anyplace": args.anyplace_url,
-        "openeta-graspgenx": args.graspgenx_url,
     }
     run_root.mkdir(parents=True, exist_ok=False)
     preflight = service_preflight(services)

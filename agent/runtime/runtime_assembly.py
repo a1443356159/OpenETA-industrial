@@ -75,6 +75,7 @@ from agent.tools.attachment_probe import (
 from agent.tools.coding import PythonExecConfig, PythonExecRuntime
 from agent.tools.depth_prefetch import DepthPriorPrefetchCoordinator
 from agent.tools.handlers import (
+    DEFAULT_GRASP_POSE_BACKEND_ORDER,
     bind_dummy_tool_handlers,
     build_anygrasp_handler,
     build_anyplace_handler,
@@ -870,7 +871,7 @@ def bind_runtime_perception_tools(
     if grasp_backends:
         grasp_handler = build_grasp_pose_estimate_handler(
             grasp_backends,
-            backend_order=("graspgenx", "anygrasp", "contact_graspnet"),
+            backend_order=DEFAULT_GRASP_POSE_BACKEND_ORDER,
             graspgenx_gripper_name="robotiq_2f_85",
         )
         if candidate_qualifier is not None:
