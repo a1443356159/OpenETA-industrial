@@ -132,6 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anyplace-diversity-pool-size", type=int)
     parser.add_argument("--grasp-full-plan-limit", type=int)
     parser.add_argument("--anyplace-full-plan-limit", type=int)
+    parser.add_argument("--pregrasp-joint-grasp-branch-limit", type=int)
+    parser.add_argument("--pregrasp-joint-full-plan-limit", type=int)
     parser.add_argument("--moveit-ik-seed-count", type=int)
     parser.add_argument("--anyplace-max-qualification-rounds", type=int)
     parser.add_argument("--unidepth-v2-model-id")
@@ -510,6 +512,18 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
             anyplace_diversity_pool_size=_startup_value(args, "anyplace_diversity_pool_size", "OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96),
             grasp_full_plan_limit=_startup_value(args, "grasp_full_plan_limit", "OPENETA_GRASP_FULL_PLAN_LIMIT", grasp_full_default),
             anyplace_full_plan_limit=_startup_value(args, "anyplace_full_plan_limit", "OPENETA_ANYPLACE_FULL_PLAN_LIMIT", anyplace_full_default),
+            pregrasp_joint_grasp_branch_limit=_startup_value(
+                args,
+                "pregrasp_joint_grasp_branch_limit",
+                "OPENETA_PREGRASP_JOINT_GRASP_BRANCH_LIMIT",
+                4,
+            ),
+            pregrasp_joint_full_plan_limit=_startup_value(
+                args,
+                "pregrasp_joint_full_plan_limit",
+                "OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT",
+                4,
+            ),
             moveit_ik_seed_count=_startup_value(args, "moveit_ik_seed_count", "OPENETA_MOVEIT_IK_SEED_COUNT", 8),
             anyplace_max_qualification_rounds=_startup_value(args, "anyplace_max_qualification_rounds", "OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
         )

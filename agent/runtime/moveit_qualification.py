@@ -26,6 +26,7 @@ from tools.candidate_config import (
     DEFAULT_GRASP_DIVERSITY_POOL_SIZE,
     DEFAULT_GRASP_FULL_PLAN_LIMIT,
     DEFAULT_MOVEIT_IK_SEED_COUNT,
+    DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT,
 )
 
 
@@ -116,6 +117,7 @@ class MoveItCandidateQualifier:
         placement_diversity_limit: int = DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE,
         grasp_full_plan_limit: int = DEFAULT_GRASP_FULL_PLAN_LIMIT,
         placement_full_plan_limit: int = DEFAULT_ANYPLACE_FULL_PLAN_LIMIT,
+        pregrasp_joint_full_plan_limit: int = DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT,
         ik_seed_count: int = DEFAULT_MOVEIT_IK_SEED_COUNT,
         placement_max_rounds: int = 2,
     ) -> None:
@@ -131,6 +133,7 @@ class MoveItCandidateQualifier:
             "grasp": int(grasp_full_plan_limit),
             "placement": int(placement_full_plan_limit),
         }
+        self.pregrasp_joint_full_plan_limit = int(pregrasp_joint_full_plan_limit)
         self.ik_seed_count = int(ik_seed_count)
         self.placement_max_rounds = int(placement_max_rounds)
         self._placement_rounds: dict[str, int] = {}
@@ -256,11 +259,19 @@ class MoveItCandidateQualifier:
                     "candidate": rpc_candidate,
                 }
             )
-        request_candidates = diversify_compiled_candidates(
-            compiled_descriptors,
-            purpose=purpose,
-            limit=self.diversity_limits[purpose],
-        )
+        if qualification_mode == "pregrasp_joint":
+            # Every constructed grasp/object-goal pair must reach the cheap and
+            # IK layers.  Pair diversity before IK can discard the only goal
+            # compatible with a particular measured grasp relationship.
+            request_candidates = compiled_descriptors
+            full_plan_limit = self.pregrasp_joint_full_plan_limit
+        else:
+            request_candidates = diversify_compiled_candidates(
+                compiled_descriptors,
+                purpose=purpose,
+                limit=self.diversity_limits[purpose],
+            )
+            full_plan_limit = self.full_plan_limits[purpose]
         request: JsonDict = {
             "schema_version": QUALIFICATION_SCHEMA,
             "purpose": purpose,
@@ -275,7 +286,7 @@ class MoveItCandidateQualifier:
             },
             "funnel": {
                 "ik_seed_count": self.ik_seed_count,
-                "full_plan_limit": self.full_plan_limits[purpose],
+                "full_plan_limit": full_plan_limit,
             },
             "source": dict(source or {}),
             "candidates": request_candidates,
@@ -302,7 +313,7 @@ class MoveItCandidateQualifier:
                 request,
                 _qualification_rpc_timeout_s(
                     request_candidates,
-                    full_plan_limit=self.full_plan_limits[purpose],
+                    full_plan_limit=full_plan_limit,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - private transport boundary.

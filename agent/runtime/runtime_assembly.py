@@ -314,6 +314,8 @@ class RuntimeCandidateCounts:
     anyplace_diversity_pool_size: int = 96
     grasp_full_plan_limit: int = 4
     anyplace_full_plan_limit: int = 4
+    pregrasp_joint_grasp_branch_limit: int = 4
+    pregrasp_joint_full_plan_limit: int = 4
     moveit_ik_seed_count: int = 8
     anyplace_max_qualification_rounds: int = 2
 
@@ -326,6 +328,8 @@ class RuntimeCandidateCounts:
             anyplace_diversity_pool_size=self.anyplace_diversity_pool_size,
             grasp_full_plan_limit=self.grasp_full_plan_limit,
             anyplace_full_plan_limit=self.anyplace_full_plan_limit,
+            pregrasp_joint_grasp_branch_limit=self.pregrasp_joint_grasp_branch_limit,
+            pregrasp_joint_full_plan_limit=self.pregrasp_joint_full_plan_limit,
             moveit_ik_seed_count=self.moveit_ik_seed_count,
             anyplace_max_qualification_rounds=self.anyplace_max_qualification_rounds,
         )
@@ -333,6 +337,7 @@ class RuntimeCandidateCounts:
             "graspgenx_raw_pool_size", "anygrasp_raw_pool_size", "anyplace_raw_pool_size",
             "grasp_diversity_pool_size", "anyplace_diversity_pool_size",
             "grasp_full_plan_limit", "anyplace_full_plan_limit", "moveit_ik_seed_count",
+            "pregrasp_joint_grasp_branch_limit", "pregrasp_joint_full_plan_limit",
             "anyplace_max_qualification_rounds",
         ):
             object.__setattr__(self, name, getattr(validated, name))
@@ -347,6 +352,12 @@ def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
         anyplace_diversity_pool_size=os.environ.get("OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96),
         grasp_full_plan_limit=os.environ.get("OPENETA_GRASP_FULL_PLAN_LIMIT", 4),
         anyplace_full_plan_limit=os.environ.get("OPENETA_ANYPLACE_FULL_PLAN_LIMIT", 4),
+        pregrasp_joint_grasp_branch_limit=os.environ.get(
+            "OPENETA_PREGRASP_JOINT_GRASP_BRANCH_LIMIT", 4
+        ),
+        pregrasp_joint_full_plan_limit=os.environ.get(
+            "OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT", 4
+        ),
         moveit_ik_seed_count=os.environ.get("OPENETA_MOVEIT_IK_SEED_COUNT", 8),
         anyplace_max_qualification_rounds=os.environ.get("OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
     )
@@ -678,7 +689,10 @@ def bind_runtime_perception_tools(
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
     pregrasp_coordinator = (
-        _PregraspGraspPlaceCoordinator(candidate_qualifier)
+        _PregraspGraspPlaceCoordinator(
+            candidate_qualifier,
+            grasp_branch_limit=counts.pregrasp_joint_grasp_branch_limit,
+        )
         if candidate_qualifier is not None
         else None
     )
@@ -914,6 +928,7 @@ def _runtime_candidate_qualifier(
         placement_diversity_limit=counts.anyplace_diversity_pool_size,
         grasp_full_plan_limit=counts.grasp_full_plan_limit,
         placement_full_plan_limit=counts.anyplace_full_plan_limit,
+        pregrasp_joint_full_plan_limit=counts.pregrasp_joint_full_plan_limit,
         ik_seed_count=counts.moveit_ik_seed_count,
         placement_max_rounds=counts.anyplace_max_qualification_rounds,
     )
@@ -1112,6 +1127,7 @@ class _PregraspGraspPlaceCoordinator:
     """Host-private bounded look-ahead used only to rank executable grasps."""
 
     qualifier: MoveItCandidateQualifier
+    grasp_branch_limit: int = 4
     object_goals: list[JsonDict] = field(default_factory=list)
     object_current_pose: JsonDict | None = None
     scene_epoch: int = -1
@@ -1226,7 +1242,7 @@ class _PregraspGraspPlaceCoordinator:
         # attachment-aware reachable goal before MoveIt sees it.  The qualifier
         # still enforces the global full-plan limit after endpoint screening.
         current_goals = [dict(goal) for goal in self.object_goals]
-        for grasp in grasps[:4]:
+        for grasp in grasps[: self.grasp_branch_limit]:
             if not isinstance(grasp, Mapping):
                 continue
             grasp_id = str(grasp.get("id") or "")

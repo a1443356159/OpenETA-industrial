@@ -10,6 +10,8 @@ from tools.anyplace_core import AnyPlaceBackend
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     DEFAULT_GRASP_RAW_POOL_SIZE,
+    DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT,
+    DEFAULT_PREGRASP_JOINT_GRASP_BRANCH_LIMIT,
     CandidateFunnelConfig,
 )
 from tools.graspgenx_core import GraspGenXBackend
@@ -25,6 +27,8 @@ def test_candidate_services_have_only_reserve_defaults(tmp_path):
         anyplace_root=tmp_path, config_path=tmp_path
     ).raw_pool_size == 96
     assert inspect.signature(GraspGenXBackend).parameters["raw_pool_size"].default == 200
+    assert DEFAULT_PREGRASP_JOINT_GRASP_BRANCH_LIMIT == 4
+    assert DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT == 4
     assert not hasattr(CandidateFunnelConfig(), "graspgenx_exposure_limit")
 
 
@@ -77,3 +81,37 @@ def test_invalid_raw_pool_environment_fails_startup(monkeypatch, tmp_path):
     )
     with pytest.raises(services.ConfigError):
         services._build_configs(args)
+
+
+def test_pregrasp_joint_cli_precedes_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENETA_PREGRASP_JOINT_GRASP_BRANCH_LIMIT", "2")
+    monkeypatch.setenv("OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT", "3")
+    args = services.build_parser().parse_args(
+        [
+            "status",
+            "anyplace",
+            "--state-dir",
+            str(tmp_path),
+            "--pregrasp-joint-grasp-branch-limit",
+            "4",
+            "--pregrasp-joint-full-plan-limit",
+            "4",
+        ]
+    )
+
+    config = services._startup_funnel_config(args)
+
+    assert config.pregrasp_joint_grasp_branch_limit == 4
+    assert config.pregrasp_joint_full_plan_limit == 4
+
+
+def test_pregrasp_joint_limits_are_validated() -> None:
+    with pytest.raises(ValueError):
+        CandidateFunnelConfig(pregrasp_joint_grasp_branch_limit=5)
+    with pytest.raises(ValueError):
+        CandidateFunnelConfig(
+            anyplace_raw_pool_size=10,
+            anyplace_diversity_pool_size=10,
+            pregrasp_joint_grasp_branch_limit=1,
+            pregrasp_joint_full_plan_limit=11,
+        )

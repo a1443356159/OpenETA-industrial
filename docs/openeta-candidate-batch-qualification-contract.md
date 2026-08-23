@@ -512,16 +512,16 @@ proposals; adding a CLI/environment interface requires separate approval.
 | Proposed canonical setting | Owner | Current effective value | Proposed domain | Reason it must be separate |
 |---|---|---:|---|---|
 | `pregrasp_joint.grasp_branch_limit` | pregrasp scheduler | 4 | integer `1..4` | Controls how many qualified grasp modes receive goal compatibility checks |
-| `pregrasp_joint.full_plan_submission_limit` | L5 pregrasp-pair scheduler | 4 through a borrowed placement limit | integer `1..constructed_pair_count` | Joint proof budgeting is distinct from post-attach placement planning |
+| `pregrasp_joint.full_plan_submission_limit` | L5 pregrasp-pair scheduler | 4 | integer `1..constructed_pair_count` | Joint proof budgeting is distinct from post-attach placement planning |
 | `endpoint.pure_ik_budget_s` | L3a | 2.0 s | finite positive duration | Total shared budget across pure-IK seeds for one endpoint |
 | `endpoint.collision_ik_budget_s` | L3b | 2.0 s | finite positive duration | Total shared budget across collision-IK seeds for one endpoint |
 | `endpoint.state_validity_timeout_s` | L3b | 2.0 s | finite positive duration | Bounds each state-validity service operation without changing its verdict semantics |
 | `full_plan.segment_timeout_s` | L5 | 30.0 s | finite positive duration | Planning budget belongs to one segment, not to the entire batch |
 | `full_plan.attempt_count` | L5 | 3 | integer `1..10` | Attempts belong to each submitted segment |
 
-No value in this table is approved for runtime migration by this document.
-The current effective values are recorded so later refactoring cannot silently
-change behavior.
+The two `pregrasp_joint` values are approved for runtime migration. The
+remaining timing values are recorded only so later refactoring cannot silently
+change behavior; they are not approved as new configuration in this phase.
 
 O2 is decided: every constructed pregrasp pair enters L1-L4. With four grasp
 branches and a 96-goal batch this is at most `4 × 96 = 384` pair traversals.

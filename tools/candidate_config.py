@@ -13,6 +13,8 @@ DEFAULT_GRASP_DIVERSITY_POOL_SIZE = 64
 DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE = 96
 DEFAULT_GRASP_FULL_PLAN_LIMIT = 4
 DEFAULT_ANYPLACE_FULL_PLAN_LIMIT = 4
+DEFAULT_PREGRASP_JOINT_GRASP_BRANCH_LIMIT = 4
+DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT = 4
 DEFAULT_MOVEIT_IK_SEED_COUNT = 8
 DEFAULT_ANYPLACE_MAX_QUALIFICATION_ROUNDS = 2
 
@@ -69,6 +71,8 @@ class CandidateFunnelConfig:
     anyplace_diversity_pool_size: int = DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE
     grasp_full_plan_limit: int = DEFAULT_GRASP_FULL_PLAN_LIMIT
     anyplace_full_plan_limit: int = DEFAULT_ANYPLACE_FULL_PLAN_LIMIT
+    pregrasp_joint_grasp_branch_limit: int = DEFAULT_PREGRASP_JOINT_GRASP_BRANCH_LIMIT
+    pregrasp_joint_full_plan_limit: int = DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT
     moveit_ik_seed_count: int = DEFAULT_MOVEIT_IK_SEED_COUNT
     anyplace_max_qualification_rounds: int = DEFAULT_ANYPLACE_MAX_QUALIFICATION_ROUNDS
 
@@ -81,6 +85,8 @@ class CandidateFunnelConfig:
             ("anyplace_diversity_pool_size", 256),
             ("grasp_full_plan_limit", 512),
             ("anyplace_full_plan_limit", 256),
+            ("pregrasp_joint_grasp_branch_limit", 4),
+            ("pregrasp_joint_full_plan_limit", 512),
             ("moveit_ik_seed_count", 64),
             ("anyplace_max_qualification_rounds", 16),
         ):
@@ -107,6 +113,12 @@ class CandidateFunnelConfig:
             self.anyplace_diversity_pool_size,
             self.anyplace_full_plan_limit,
         )
+        if self.pregrasp_joint_full_plan_limit > (
+            self.pregrasp_joint_grasp_branch_limit * self.anyplace_raw_pool_size
+        ):
+            raise ValueError(
+                "pregrasp joint full-plan limit cannot exceed its constructed pair ceiling"
+            )
 
     @staticmethod
     def _validate_chain(name: str, raw: int, diversity: int, full_plan: int) -> None:

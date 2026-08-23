@@ -134,7 +134,7 @@ def test_pregrasp_joint_search_keeps_full_pool_round_robin_and_filters_grasps() 
                 "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
             },
         }
-        for index in range(16)
+        for index in range(96)
     ]
     coordinator.scene_epoch = 3
     coordinator.planning_scene_revision = 7
@@ -146,7 +146,7 @@ def test_pregrasp_joint_search_keeps_full_pool_round_robin_and_filters_grasps() 
         source={},
     )
 
-    assert len(captured["candidates"]) == 64
+    assert len(captured["candidates"]) == 384
     assert captured["funnel"]["full_plan_limit"] == 4
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0", "g2"]
     assert cache.resolve(purpose="grasp", candidate_id="g1") is None

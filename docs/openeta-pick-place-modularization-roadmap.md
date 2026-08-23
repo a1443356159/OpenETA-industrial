@@ -77,11 +77,10 @@ candidates.
 
 For pregrasp compatibility, the host constructs pairs from at most four grasp
 PASS candidates and the complete current 96-goal pool. Pair ordering is
-round-robin by grasp. The current implementation then reuses the placement
-diversity cap, so at most 96 pairs globally enter the private MoveIt screen and
-at most four pairs globally enter full plan-only. This distinction must remain
-visible in later discussion: constructing `4 x 96` pairs is not the same as
-running IK on all 384 pairs.
+round-robin by grasp. Every constructed pair enters the coordinate, workspace,
+pure-IK, collision-IK, and endpoint layers, so the default ceiling is
+`4 x 96 = 384` screened pairs. Only full plan-only remains bounded to four
+fairly interleaved submissions.
 
 After a real attach, only the absolute object goals that passed for the
 actually executed grasp are retained. They are recompiled using:
