@@ -186,6 +186,40 @@ def test_m6_qualification_blocks_resolve_relative_to_case_root(tmp_path) -> None
     assert m6._qualification_blocks(call, artifact_root=tmp_path) == [proof]
 
 
+def test_m6_qualification_blocks_include_pregrasp_joint_proof(tmp_path) -> None:
+    artifact = (
+        tmp_path
+        / ".openeta_memory"
+        / "sessions"
+        / "session-a"
+        / "artifacts"
+        / "moveit_qualification"
+        / "pregrasp-joint.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    proof = {
+        "purpose": "placement",
+        "results": [
+            {
+                "candidate_id": "pregrasp_pair_grasp_000_placement_000",
+                "verdict": "FAIL",
+                "reason": "plan_only_failed",
+                "execution_started": False,
+                "full_plan_submitted": True,
+            }
+        ],
+    }
+    artifact.write_text(json.dumps(proof), encoding="utf-8")
+    call = {
+        "pregrasp_joint_qualification_artifact": {
+            "kind": "json",
+            "path": str(artifact.relative_to(tmp_path)),
+        }
+    }
+
+    assert m6._qualification_blocks(call, artifact_root=tmp_path) == [proof]
+
+
 def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:
     instructions = tmp_path / "instructions.txt"
     instructions.write_text("task\n", encoding="utf-8")

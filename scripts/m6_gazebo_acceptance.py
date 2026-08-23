@@ -242,26 +242,30 @@ def _qualification_blocks(
         if isinstance(value, Mapping) and isinstance(value.get("results"), list)
     ]
     seen_paths: set[str] = set()
-    for artifact in base._values(call, "qualification_artifact"):
-        if not isinstance(artifact, Mapping):
-            continue
-        path_value = artifact.get("path")
-        if not isinstance(path_value, str) or not path_value.endswith(".json"):
-            continue
-        if path_value in seen_paths:
-            continue
-        seen_paths.add(path_value)
-        try:
-            path = Path(path_value)
-            if not path.is_absolute():
-                path = artifact_root / path
-            if not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+    for field in (
+        "qualification_artifact",
+        "pregrasp_joint_qualification_artifact",
+    ):
+        for artifact in base._values(call, field):
+            if not isinstance(artifact, Mapping):
                 continue
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, Mapping) and isinstance(payload.get("results"), list):
-            blocks.append(payload)
+            path_value = artifact.get("path")
+            if not isinstance(path_value, str) or not path_value.endswith(".json"):
+                continue
+            if path_value in seen_paths:
+                continue
+            seen_paths.add(path_value)
+            try:
+                path = Path(path_value)
+                if not path.is_absolute():
+                    path = artifact_root / path
+                if not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+                    continue
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, Mapping) and isinstance(payload.get("results"), list):
+                blocks.append(payload)
     return blocks
 
 
@@ -447,14 +451,16 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ]
         if scenario == "normal" and placement_failures:
             errors.append("normal scenario unexpectedly injected a placement rejection")
-        first_qualification_blocks = _qualification_blocks(
-            first_anyplace, artifact_root=paths.root
-        )
-        qualification_results = (
-            first_qualification_blocks[-1].get("results", [])
-            if first_qualification_blocks
-            else []
-        )
+        pregrasp_qualification_blocks = [
+            block
+            for block in _qualification_blocks(final_grasp, artifact_root=paths.root)
+            if block.get("purpose") == "placement"
+        ]
+        qualification_results = [
+            result
+            for block in pregrasp_qualification_blocks
+            for result in block.get("results", [])
+        ]
         first_full_plan_rejections = [
             value
             for value in qualification_results
