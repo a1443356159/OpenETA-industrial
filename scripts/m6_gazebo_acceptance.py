@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
+import shutil
 from typing import Any, Mapping, Sequence
 import urllib.request
 
@@ -33,6 +35,7 @@ REQUIRED_REAL_M6_TOOLS = (
     "close_simulator_env",
 )
 SCENARIOS = ("normal", "reject-first")
+GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
 
 INSTRUCTIONS = """
@@ -137,6 +140,72 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
         and all(row.get("status") == "passed" for row in rows.values())
         else "blocked",
         "services": rows,
+    }
+
+
+def _ros_python_import_error() -> str:
+    try:
+        import rclpy  # noqa: F401 - explicit ABI/import preflight.
+        from rosgraph_msgs.msg import Clock  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - bounded preflight diagnostic.
+        return f"{type(exc).__name__}: {exc}"[:500]
+    return ""
+
+
+def _gazebo_package_prefix(package: str) -> Path:
+    from ament_index_python.packages import get_package_prefix
+
+    return Path(get_package_prefix(package)).resolve()
+
+
+def gazebo_runtime_preflight(repo: Path) -> dict[str, Any]:
+    """Fail before allocation when the ROS underlay/overlay was not loaded.
+
+    Shell setup files cannot safely be applied to an already-running Python
+    process. The canonical M6 wrapper sources them before exec; this check
+    makes an accidental direct invocation fail immediately and precisely.
+    """
+
+    expected_overlay = Path(
+        os.environ.get("OPENETA_GAZEBO_OVERLAY")
+        or repo / "extensions/gazebo/ros2_ws/install"
+    ).resolve()
+    errors: list[str] = []
+    import_error = _ros_python_import_error()
+    if import_error:
+        errors.append("OPENETA_ROS_PYTHON_ABI_UNAVAILABLE")
+    actual_prefix: Path | None = None
+    package_error = ""
+    try:
+        actual_prefix = _gazebo_package_prefix(GAZEBO_SIM_PACKAGE)
+    except Exception as exc:  # noqa: BLE001 - bounded preflight diagnostic.
+        package_error = f"{type(exc).__name__}: {exc}"[:500]
+        errors.append("OPENETA_GAZEBO_OVERLAY_PACKAGE_UNAVAILABLE")
+    else:
+        if (
+            actual_prefix != expected_overlay
+            and expected_overlay not in actual_prefix.parents
+        ):
+            errors.append("OPENETA_GAZEBO_OVERLAY_PACKAGE_MISMATCH")
+    missing_commands = [
+        name for name in ("ros2", "gz") if shutil.which(name) is None
+    ]
+    if missing_commands:
+        errors.append("OPENETA_GAZEBO_COMMAND_UNAVAILABLE")
+    return {
+        "schema_version": "openeta.gazebo_runtime_preflight.v1",
+        "status": "passed" if not errors else "blocked",
+        "reason_codes": errors,
+        "canonical_runner": str(
+            (repo / "scripts/run_m6_gazebo_acceptance.sh").resolve()
+        ),
+        "expected_overlay": str(expected_overlay),
+        "declared_overlay": os.environ.get("OPENETA_GAZEBO_OVERLAY", ""),
+        "package": GAZEBO_SIM_PACKAGE,
+        "package_prefix": str(actual_prefix) if actual_prefix is not None else None,
+        "package_error": package_error or None,
+        "python_import_error": import_error or None,
+        "missing_commands": missing_commands,
     }
 
 
@@ -526,6 +595,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = verify_case(paths, scenario=args.scenario)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "passed" else 1
+    runtime = gazebo_runtime_preflight(repo)
+    if runtime["status"] != "passed":
+        print(json.dumps(runtime, ensure_ascii=False, indent=2))
+        return 2
     services = {
         "openeta-sam3": args.sam3_url,
         "openeta-anyplace": args.anyplace_url,

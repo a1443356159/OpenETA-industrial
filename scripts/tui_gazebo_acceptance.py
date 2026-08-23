@@ -385,7 +385,11 @@ def environment_receipt(
     before: list[dict[str, Any]],
     capture_protected: bool = True,
 ) -> dict[str, Any]:
-    overlay = repo / "extensions/gazebo/ros2_ws/install/setup.bash"
+    overlay_prefix = Path(
+        os.environ.get("OPENETA_GAZEBO_OVERLAY")
+        or repo / "extensions/gazebo/ros2_ws/install"
+    )
+    overlay = overlay_prefix / "setup.bash"
     payload: dict[str, Any] = {
         "schema_version": "openeta.gazebo_environment_receipt.v1",
         "trusted": True,

@@ -113,3 +113,71 @@ scene-revision provenance, fresh receipts, no repeated fingerprint, detach ACK,
 and stable marked-zone placement. Any missing or incompatible GraspGenX,
 AnyPlace, SAM3, MoveIt, or Gazebo dependency blocks live M6 rather than being
 substituted with AnyGrasp, mocks, fixed candidates, or Oracle state.
+
+## Portable launch and reproduction
+
+`scripts/m6_gazebo_acceptance.py` is an acceptance/test coordinator, not a
+production pick-place feature entry point.  Its canonical launcher is
+`scripts/run_m6_gazebo_acceptance.sh`.  Always use the launcher for a live M6
+case: a Python process cannot retroactively source ROS shell setup files, so a
+direct `python scripts/m6_gazebo_acceptance.py` invocation can import the ROS
+underlay while still hiding the checkout-specific simulation package.  That
+misconfiguration previously surfaced only after the 90-second Gazebo startup
+deadline.
+
+For a fresh checkout on an Ubuntu 24.04/Jazzy host, build the overlay with the
+same system Python used by ROS, then create the independent OpenETA application
+environment:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd extensions/gazebo/ros2_ws
+colcon build --symlink-install --cmake-args \
+  -DPython3_EXECUTABLE=/usr/bin/python3 \
+  -DPYTHON_EXECUTABLE=/usr/bin/python3
+cd ../../..
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip setuptools wheel
+.venv/bin/python -m pip install --no-build-isolation .
+```
+
+With SAM3, AnyPlace, and GraspGenX already serving their health/SSE endpoints,
+run a case from the repository root:
+
+```bash
+scripts/run_m6_gazebo_acceptance.sh \
+  --scenario normal \
+  --run-root /absolute/path/to/acceptance-runs/normal-1 \
+  --sam3-url http://127.0.0.1:8773/sse \
+  --anyplace-url http://127.0.0.1:8875/sse \
+  --graspgenx-url http://127.0.0.1:8878/sse
+```
+
+The wrapper selects `OPENETA_PYTHON_EXECUTABLE` when explicitly supplied,
+otherwise the checkout's `.venv/bin/python`, sources the ROS underlay and
+selected overlay, and verifies all of the following before allocating an
+isolated ROS domain or starting Gazebo:
+
+- CPython 3.12 and the declared application runtime imports;
+- `rclpy` plus Jazzy generated message types in that interpreter;
+- `ros2` and `gz` commands;
+- `openeta_rm75_robotiq2f85_sim` resolving from the selected overlay.
+
+Non-default installation locations are portable through absolute prefixes:
+
+```bash
+OPENETA_PYTHON_EXECUTABLE=/srv/openeta/venv/bin/python \
+OPENETA_GAZEBO_SYSTEM_ROS_PREFIX=/opt/ros/jazzy \
+OPENETA_GAZEBO_OVERLAY=/srv/openeta/ros2_ws/install \
+scripts/run_m6_gazebo_acceptance.sh --scenario normal
+```
+
+The Python coordinator repeats the import, command, package-prefix, and
+checkout/overlay-consistency preflight.  Accidental direct invocation therefore
+now exits immediately with structured `openeta.gazebo_runtime_preflight.v1`
+evidence.  `OPENETA_GAZEBO_OVERLAY_PACKAGE_UNAVAILABLE` means the overlay is
+not sourced or not built; `OPENETA_GAZEBO_OVERLAY_PACKAGE_MISMATCH` means a
+different checkout's overlay is winning `AMENT_PREFIX_PATH`.  Rebuild/source
+the intended overlay instead of extending the Gazebo timeout.  `--verify-only`
+remains usable without ROS because it reads existing evidence and starts no
+environment.

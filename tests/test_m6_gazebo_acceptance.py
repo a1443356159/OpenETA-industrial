@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import subprocess
 from types import SimpleNamespace
 
 from scripts import m6_gazebo_acceptance as m6
+
+
+M6_RUNNER = Path(__file__).resolve().parents[1] / "scripts/run_m6_gazebo_acceptance.sh"
 
 
 def test_m6_prepare_registers_real_services_and_constraint_prompt(
@@ -73,6 +78,59 @@ def test_m6_requires_only_executable_public_grasp_tools() -> None:
 
 def test_m6_health_url_preserves_service_root() -> None:
     assert m6._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
+
+
+def test_m6_runtime_preflight_accepts_the_selected_overlay(
+    tmp_path, monkeypatch
+) -> None:
+    overlay = tmp_path / "external-overlay"
+    package_prefix = overlay / m6.GAZEBO_SIM_PACKAGE
+    monkeypatch.setenv("OPENETA_GAZEBO_OVERLAY", str(overlay))
+    monkeypatch.setattr(m6, "_ros_python_import_error", lambda: "")
+    monkeypatch.setattr(m6, "_gazebo_package_prefix", lambda _package: package_prefix)
+    monkeypatch.setattr(m6.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    result = m6.gazebo_runtime_preflight(tmp_path)
+
+    assert result["status"] == "passed"
+    assert result["expected_overlay"] == str(overlay.resolve())
+    assert result["package_prefix"] == str(package_prefix.resolve())
+    assert result["reason_codes"] == []
+
+
+def test_m6_runtime_preflight_rejects_an_overlay_from_another_checkout(
+    tmp_path, monkeypatch
+) -> None:
+    expected = tmp_path / "extensions/gazebo/ros2_ws/install"
+    monkeypatch.delenv("OPENETA_GAZEBO_OVERLAY", raising=False)
+    monkeypatch.setattr(m6, "_ros_python_import_error", lambda: "")
+    monkeypatch.setattr(
+        m6,
+        "_gazebo_package_prefix",
+        lambda _package: (
+            tmp_path / "stale-checkout/install" / m6.GAZEBO_SIM_PACKAGE
+        ),
+    )
+    monkeypatch.setattr(m6.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    result = m6.gazebo_runtime_preflight(tmp_path)
+
+    assert result["status"] == "blocked"
+    assert result["expected_overlay"] == str(expected.resolve())
+    assert result["reason_codes"] == [
+        "OPENETA_GAZEBO_OVERLAY_PACKAGE_MISMATCH"
+    ]
+
+
+def test_m6_canonical_runner_sources_ros_and_executes_m6() -> None:
+    source = M6_RUNNER.read_text(encoding="utf-8")
+
+    assert os.access(M6_RUNNER, os.X_OK)
+    assert 'source "${SYSTEM_ROS_SETUP}"' in source
+    assert 'source "${OVERLAY_SETUP}"' in source
+    assert "import rclpy; from rosgraph_msgs.msg import Clock" in source
+    assert "ros2 pkg prefix openeta_rm75_robotiq2f85_sim" in source
+    assert 'm6_gazebo_acceptance.py" "$@"' in source
 
 
 def test_m6_verifier_uses_model_raw_count_for_frozen_goal_requalification() -> None:
