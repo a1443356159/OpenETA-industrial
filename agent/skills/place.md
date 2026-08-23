@@ -109,8 +109,11 @@ before choosing the next tool call.
   `CURRENT_GRASP_PLACE_INFEASIBLE` and request human intervention. Do not alter
   the attachment or start another grasp cycle automatically.
 - After a known grasp-close failure, execute the host-provided return to that
-  grasp's compiled hover before observing or estimating another grasp. Never
-  collect a recovery observation while the gripper remains at contact.
+  grasp's compiled hover before observing or estimating another grasp. The
+  host must also confirm that the detached target's native world pose has been
+  synchronized into the new PlanningScene revision before it unlocks the next
+  ordinary grasp cycle. Never collect a recovery observation while the gripper
+  remains at contact, and do not invent a regrasp-specific action or mode.
 - If the target is occluded, observe from another camera or request a broader
   scene query before choosing a release pose.
 - If MoveIt rejects a plan before execution starts, reject only that candidate

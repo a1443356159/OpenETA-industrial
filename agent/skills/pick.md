@@ -95,6 +95,12 @@ Use as text guidance only, not an executable macro. Inspect each result.
    queue order. Candidates
    that passed full plan-only have equal qualification status; the host
    deterministically activates the stable queue head.
+   For a configured coupled parallel gripper, the host may derive an auditable
+   closing-axis-centered pose from the selected mask and aligned depth before
+   qualification. This changes translation only along the candidate's local
+   closing axis; it does not change approach, wrist rotation, depth, or width.
+   Do not reconstruct, undo, rank, or directly execute that correction: use
+   only the host-retained full-plan PASS candidate ID.
    When selecting the SAM3 mask, include truthful
    `target_geometry_family` (`upright_can`, `upright_bottle`, `boxed_item`,
    `bowl`, `apple`, `drawer_handle`, or `other`) only when visually clear. It is
@@ -141,6 +147,11 @@ Use as text guidance only, not an executable macro. Inspect each result.
 - Do not advance the grasp queue for transport errors, missing calibration,
   malformed parameters, or unrelated gripper failures. Automatic fallback is
   limited to rejection explicitly linked to the active grasp pose.
+- After a known close rejection, the exact compiled-hover withdrawal is not by
+  itself permission for another grasp. Require the host receipt to confirm
+  that the detached target's measured world pose was synchronized into a new
+  PlanningScene revision; a failed or missing sync is a hard stop. A successful
+  sync returns to the ordinary grasp flow, not a regrasp-specific mode.
 - Never move from stale perception. Observe after every world-mutating tool call.
   Keep `scene_epoch` with artifact provenance; do not reuse old masks, depth, or poses.
 

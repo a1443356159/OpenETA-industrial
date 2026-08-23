@@ -1,8 +1,9 @@
 # OpenETA pick-place modularization discussion record
 
-Status: discussion draft. This document records optimization candidates only.
-Nothing here authorizes a runtime, ROS, tool-surface, safety-gate, or acceptance
-change.
+Status: active decision record. Only entries explicitly marked approved or
+implemented authorize work; recorded optimization candidates remain discussion
+items and do not authorize runtime, ROS, tool-surface, safety-gate, or
+acceptance changes.
 
 ## Purpose and decision boundary
 
@@ -92,6 +93,38 @@ T_world_eef_goal =
 
 and pass through the complete placement qualification chain again. The
 pregrasp trajectory is never treated as executable proof.
+
+### Parallel-gripper and rejected-close runtime invariants
+
+Repeated physical-chain verification exposed two implementation defects in
+the existing grasp path, not a new workflow or acceptance policy:
+
+1. A GraspNet pose fixes approach, roll, depth, and opening, but can leave the
+   selected object's projected midplane offset from a coupled parallel
+   gripper's closing plane. One pad then contacts first and the coupled fingers
+   can stop before the opposite pad produces native contact. For a configured
+   parallel gripper and a real selected mask with aligned depth, the host now
+   derives a provenance-marked translation only along GraspNet local `+Y`
+   (closing axis). The target interval is the deterministic 2%-98% projection
+   interval of the selected mask/depth point cloud. Approach, full wrist
+   rotation, insertion depth, and opening width are unchanged. The raw pose is
+   not executed alongside the derived pose: the centered pose and its existing
+   symmetry variants enter the same complete workspace, multi-seed IK,
+   collision IK, endpoint, and plan-only funnel. Missing or invalid sensor
+   evidence falls back to the unmodified model pose and never bypasses a gate.
+2. A physically rejected close can push a detached object. After the exact
+   compiled-hover withdrawal succeeds, the Gazebo adapter reads the target's
+   native world pose and updates the same PlanningScene collision object before
+   unlocking the next ordinary grasp cycle. Readback and current-state
+   validity remain mandatory, the scene revision advances, and any pose-read,
+   apply, readback, or validity failure keeps transport locked. This is normal
+   world-state reconciliation; it adds neither a regrasp mode nor a recovery
+   tool.
+
+Both corrections are producer- and scenario-independent, preserve
+`execution_started=false` for the derived qualification/synchronization
+evidence, and do not alter collision, drift, planning, contact, attachment, or
+placement safety thresholds.
 
 ## Optimization candidates
 
