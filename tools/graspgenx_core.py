@@ -18,9 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.candidate_config import (
-    DEFAULT_CANDIDATE_COUNT,
     DEFAULT_GRASP_RAW_POOL_SIZE,
-    candidate_count,
     raw_pool_size as validate_raw_pool_size,
 )
 
@@ -698,7 +696,6 @@ class GraspGenXBackend:
         gripper_descriptions_root: str | Path,
         device: str = "cuda:0",
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
-        max_candidates: int = DEFAULT_CANDIDATE_COUNT,
         raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
     ) -> None:
         self.graspgenx_root = Path(graspgenx_root).expanduser().resolve()
@@ -708,10 +705,7 @@ class GraspGenXBackend:
         )
         self.device = validate_cuda_device_name(device)
         self.depth_truncation = float(depth_truncation)
-        self.max_candidates = candidate_count(max_candidates)
         self.raw_pool_size = validate_raw_pool_size(raw_pool_size)
-        if self.raw_pool_size < self.max_candidates:
-            raise ValueError("raw pool size must be >= max candidates")
         self.last_returned_candidate_count = 0
         self.generator_checkpoint, self.discriminator_checkpoint = (
             validate_checkpoint_layout(self.checkpoint_root)
@@ -1063,7 +1057,7 @@ class GraspGenXBackend:
         score_array = np.asarray(scores, dtype=np.float64)
         ranked = sorted(range(len(score_array)), key=lambda idx: (-score_array[idx], idx))
         poses = np.asarray(camera_native_grasps, dtype=np.float64)
-        limit = self.max_candidates if selection_limit is None else int(selection_limit)
+        limit = self.raw_pool_size if selection_limit is None else int(selection_limit)
         diversity_order_count = min(
             len(ranked),
             max(
@@ -1200,7 +1194,6 @@ class GraspGenXBackend:
             "min_object_points": MIN_OBJECT_POINTS,
             "max_returned_candidates": self.raw_pool_size,
             "raw_pool_size": self.raw_pool_size,
-            "exposure_limit": self.max_candidates,
             "model_loaded": self.model_loaded,
             "intrinsics": {},
             "inference_options": {

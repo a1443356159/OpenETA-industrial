@@ -18,11 +18,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from tools.candidate_config import (
-    DEFAULT_CANDIDATE_COUNT,
     CandidateFunnelConfig,
-    argparse_candidate_count,
     argparse_raw_pool_size,
-    candidate_count,
 )
 
 
@@ -128,9 +125,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graspgenx-root")
     parser.add_argument("--graspgenx-checkpoint-root")
     parser.add_argument("--graspgenx-gripper-descriptions-root")
-    parser.add_argument("--graspgenx-max-candidates", type=argparse_candidate_count)
-    parser.add_argument("--anygrasp-max-candidates", type=argparse_candidate_count)
-    parser.add_argument("--anyplace-candidate-count", type=argparse_candidate_count)
     parser.add_argument("--graspgenx-raw-pool-size", type=argparse_raw_pool_size())
     parser.add_argument("--anygrasp-raw-pool-size", type=argparse_raw_pool_size())
     parser.add_argument("--anyplace-raw-pool-size", type=argparse_raw_pool_size(placement=True))
@@ -260,8 +254,6 @@ def _build_config(
             args.host,
             "--port",
             str(args.anygrasp_port),
-            "--max-candidates",
-            str(funnel.anygrasp_exposure_limit),
             "--raw-pool-size",
             str(funnel.anygrasp_raw_pool_size),
         ]
@@ -298,8 +290,6 @@ def _build_config(
             args.host,
             "--port",
             str(args.anyplace_port),
-            "--candidate-count",
-            str(funnel.anyplace_exposure_limit),
             "--raw-pool-size",
             str(funnel.anyplace_raw_pool_size),
         ]
@@ -386,8 +376,6 @@ def _build_config(
             args.host,
             "--port",
             str(args.graspgenx_port),
-            "--max-candidates",
-            str(funnel.graspgenx_exposure_limit),
             "--raw-pool-size",
             str(funnel.graspgenx_raw_pool_size),
         ]
@@ -503,18 +491,6 @@ def _build_config(
     )
 
 
-def _startup_candidate_count(explicit: int | None, env_name: str) -> int:
-    """Resolve immutable startup count with CLI > environment > default precedence."""
-
-    raw: object = explicit if explicit is not None else os.environ.get(
-        env_name, DEFAULT_CANDIDATE_COUNT
-    )
-    try:
-        return candidate_count(raw)
-    except ValueError as exc:
-        raise ConfigError(f"{env_name}: {exc}") from exc
-
-
 def _startup_value(args: argparse.Namespace, attribute: str, env_name: str, default: int) -> object:
     explicit = getattr(args, attribute, None)
     return explicit if explicit is not None else os.environ.get(env_name, default)
@@ -524,15 +500,9 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
     """Resolve every related field together so invalid chains fail at startup."""
 
     try:
-        graspgenx_exposure = _startup_value(args, "graspgenx_max_candidates", "OPENETA_GRASPGENX_MAX_CANDIDATES", 10)
-        anygrasp_exposure = _startup_value(args, "anygrasp_max_candidates", "OPENETA_ANYGRASP_MAX_CANDIDATES", 10)
-        anyplace_exposure = _startup_value(args, "anyplace_candidate_count", "OPENETA_ANYPLACE_CANDIDATE_COUNT", 10)
         grasp_full_default = 4
         anyplace_full_default = 4
         return CandidateFunnelConfig(
-            graspgenx_exposure_limit=graspgenx_exposure,
-            anygrasp_exposure_limit=anygrasp_exposure,
-            anyplace_exposure_limit=anyplace_exposure,
             graspgenx_raw_pool_size=_startup_value(args, "graspgenx_raw_pool_size", "OPENETA_GRASPGENX_RAW_POOL_SIZE", 200),
             anygrasp_raw_pool_size=_startup_value(args, "anygrasp_raw_pool_size", "OPENETA_ANYGRASP_RAW_POOL_SIZE", 200),
             anyplace_raw_pool_size=_startup_value(args, "anyplace_raw_pool_size", "OPENETA_ANYPLACE_RAW_POOL_SIZE", 96),

@@ -18,8 +18,6 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 from tools.anyplace_core import AnyPlaceBackend  # noqa: E402
 from tools.candidate_config import (  # noqa: E402
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
-    DEFAULT_CANDIDATE_COUNT,
-    argparse_candidate_count,
     argparse_raw_pool_size,
 )
 
@@ -60,7 +58,7 @@ def predict_placement(
             "placement_camera_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
         }
 
-    The tool returns the configured number of placement candidates in backend order. Each
+    The tool returns the configured reserve of placement candidates in backend order. Each
     contains only ``object_placement_transform``. It does not accept a grasp,
     return an EEF pose, choose a best candidate, or execute motion. Do
     not materialize input base64 payloads in planner, memory, or action logs.
@@ -110,11 +108,6 @@ def main() -> int:
     parser.add_argument("--anyplace-root", required=True)
     parser.add_argument("--config-path", required=True)
     parser.add_argument(
-        "--candidate-count",
-        type=argparse_candidate_count,
-        default=DEFAULT_CANDIDATE_COUNT,
-    )
-    parser.add_argument(
         "--raw-pool-size",
         type=argparse_raw_pool_size(placement=True),
         default=DEFAULT_ANYPLACE_RAW_POOL_SIZE,
@@ -131,7 +124,6 @@ def main() -> int:
     _BACKEND = AnyPlaceBackend(
         anyplace_root=anyplace_root,
         config_path=config_path,
-        candidate_count=args.candidate_count,
         raw_pool_size=args.raw_pool_size,
     )
 
@@ -150,8 +142,6 @@ def main() -> int:
             {
                 "ok": True,
                 "server": "anyplace",
-                "candidate_count": _BACKEND.candidate_count,
-                "exposure_limit": _BACKEND.candidate_count,
                 "raw_pool_size": _BACKEND.raw_pool_size,
                 "returned_candidate_count": _BACKEND.last_returned_candidate_count,
             }

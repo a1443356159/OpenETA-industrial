@@ -97,13 +97,10 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                 and (
                     name == "openeta-sam3"
                     or (
-                        payload.get(
-                        "candidate_count"
-                        if name == "openeta-anyplace"
-                        else "max_candidates"
-                        ) == 10
-                        and payload.get("raw_pool_size")
+                        payload.get("raw_pool_size")
                         == (96 if name == "openeta-anyplace" else 200)
+                        and isinstance(payload.get("returned_candidate_count"), int)
+                        and payload.get("returned_candidate_count") >= 0
                     )
                 )
             )
@@ -113,8 +110,13 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                 "server": payload.get("server") if isinstance(payload, Mapping) else None,
                 "model_loaded": payload.get("model_loaded") if isinstance(payload, Mapping) else None,
                 "tools": payload.get("tools") if isinstance(payload, Mapping) else None,
-                "candidate_count": (
-                    payload.get("candidate_count", payload.get("max_candidates"))
+                "returned_candidate_count": (
+                    payload.get("returned_candidate_count")
+                    if isinstance(payload, Mapping)
+                    else None
+                ),
+                "raw_pool_size": (
+                    payload.get("raw_pool_size")
                     if isinstance(payload, Mapping)
                     else None
                 ),

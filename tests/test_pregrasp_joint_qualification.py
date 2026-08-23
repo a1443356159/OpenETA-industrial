@@ -364,7 +364,6 @@ def _postattachment_handler(
     raw = build_anyplace_handler(
         predictor,
         output_root=tmp_path / "anyplace-runs",
-        expected_candidate_count=1,
         pre_inference=lambda context, request: _prepare_postattachment_frozen_goals(
             context,
             request,
@@ -614,10 +613,10 @@ def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
     regenerated = handler(retry_context)
     repeated_retry = handler(retry_context)
 
-    assert frozen.success and frozen.details["qualified_candidate_count"] == 0
+    assert frozen.success and frozen.details["candidate_count"] == 0
     assert frozen.details["qualification_round"] == 1
     assert len(predictor_calls) == 1
-    assert regenerated.success and regenerated.details["qualified_candidate_count"] == 1
+    assert regenerated.success and regenerated.details["candidate_count"] == 1
     assert regenerated.details["qualification_round"] == 2
     assert repeated_retry.success is False
     assert repeated_retry.details["reason"] == "placement_model_retry_already_consumed"
@@ -652,7 +651,6 @@ def test_no_attachment_or_matching_frozen_pool_calls_model_normally(
     raw = build_anyplace_handler(
         lambda request: predictor_calls.append(request) or _model_response(),
         output_root=tmp_path / "anyplace-runs",
-        expected_candidate_count=1,
         pre_inference=lambda context, request: _prepare_postattachment_frozen_goals(
             context,
             request,

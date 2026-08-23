@@ -12,9 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.candidate_config import (
-    DEFAULT_CANDIDATE_COUNT,
     DEFAULT_GRASP_RAW_POOL_SIZE,
-    candidate_count,
     raw_pool_size as validate_raw_pool_size,
 )
 
@@ -49,7 +47,6 @@ class AnyGraspBackend:
         max_gripper_width: float = 0.1,
         gripper_height: float = 0.03,
         depth_truncation: float = 1.0,
-        max_candidates: int = DEFAULT_CANDIDATE_COUNT,
         raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
     ) -> None:
         self.sdk_root = Path(sdk_root)
@@ -57,10 +54,7 @@ class AnyGraspBackend:
         self.max_gripper_width = max_gripper_width
         self.gripper_height = gripper_height
         self.depth_truncation = depth_truncation
-        self.max_candidates = candidate_count(max_candidates)
         self.raw_pool_size = validate_raw_pool_size(raw_pool_size)
-        if self.raw_pool_size < self.max_candidates:
-            raise ValueError("raw pool size must be >= max candidates")
         self._detector: Any | None = None
         self.last_returned_candidate_count = 0
 
@@ -238,8 +232,6 @@ class AnyGraspBackend:
             "gripper_height": self.gripper_height,
             "workspace_limits": None,
             "depth_truncation": self.depth_truncation,
-            "max_candidates": self.max_candidates,
-            "exposure_limit": self.max_candidates,
             "raw_pool_size": self.raw_pool_size,
         }
 

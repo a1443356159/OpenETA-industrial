@@ -29,14 +29,13 @@ def _candidate(index: int):
     return {"id": f"g{index}", "qualification_stages": [{"name": "hover"}]}
 
 
-def _request(candidates, *, full_plan_limit=12, exposure_limit=10, seed_count=8):
+def _request(candidates, *, full_plan_limit=12, seed_count=8):
     return {
         "schema_version": QUALIFICATION_SCHEMA,
         "planning_scene_revision": 4,
         "qualification_binding_sha256": "binding",
         "planning": {
             "full_plan_limit": full_plan_limit,
-            "exposure_limit": exposure_limit,
             "ik_seed_count": seed_count,
         },
         "source": {"joint_limits": {"lower": [-1.0], "upper": [1.0]}},
@@ -84,7 +83,7 @@ def test_v2_defaults_and_cross_field_constraints():
     with pytest.raises(ValueError):
         CandidateFunnelConfig(graspgenx_raw_pool_size=63)
     with pytest.raises(ValueError):
-        CandidateFunnelConfig(anyplace_diversity_pool_size=9)
+        CandidateFunnelConfig(anyplace_diversity_pool_size=97)
 
 
 def test_multi_seed_ik_is_deterministic_and_can_recover_after_first_seed():
@@ -126,7 +125,7 @@ def test_multi_seed_ik_splits_the_total_budget_across_remaining_seeds():
     assert all(0.0 < value <= 2.0 for value in budgets)
 
 
-def test_full_planning_is_bounded_and_stops_at_exposure_limit():
+def test_full_planning_is_bounded_and_retains_every_pass():
     calls = []
 
     def plan(target, start, timeout, attempts):
@@ -139,11 +138,16 @@ def test_full_planning_is_bounded_and_stops_at_exposure_limit():
         }
 
     response = _engine(plan_only=plan).qualify(
-        _request([_candidate(i) for i in range(20)], full_plan_limit=4, exposure_limit=10)
+        _request([_candidate(i) for i in range(20)], full_plan_limit=4)
     )
     assert len(calls) == 4
     assert sum(item["verdict"] == "PASS" for item in response["results"]) == 4
-    assert all(item.get("full_plan_submitted") is False for item in response["results"][4:])
+    assert all(
+        item.get("full_plan_submitted") is False
+        and item["verdict"] == "NOT_EVALUATED"
+        and item["reason"] == "full_plan_limit_not_submitted"
+        for item in response["results"][4:]
+    )
 
 
 def test_virtual_scene_transition_uses_clone_without_real_revision_change():
@@ -172,7 +176,7 @@ def test_virtual_scene_transition_uses_clone_without_real_revision_change():
     assert real_revision["value"] == 4
 
 
-def test_qualifier_reports_monotonic_funnel_counts_and_only_exposes_pass():
+def test_qualifier_reports_monotonic_funnel_counts_and_retains_every_pass():
     candidates = [{"id": f"g{i}"} for i in range(15)]
 
     def rpc(name, request, timeout):
@@ -182,7 +186,6 @@ def test_qualifier_reports_monotonic_funnel_counts_and_only_exposes_pass():
         rpc,
         grasp_diversity_limit=12,
         grasp_full_plan_limit=12,
-        grasp_exposure_limit=10,
         compile_candidate=lambda *args: {"qualification_stages": [{"name": "hover"}]},
     ).qualify_result(
         ToolResult(True, "ok", {"grasp_candidates": candidates, "model_raw_candidate_count": 20}),
@@ -191,10 +194,11 @@ def test_qualifier_reports_monotonic_funnel_counts_and_only_exposes_pass():
         planning_scene_revision=4,
     )
     details = result.details
-    assert details["candidate_count"] == details["qualified_candidate_count"] == 10
+    assert details["candidate_count"] == 12
+    assert "qualified_candidate_count" not in details
     assert details["raw_candidate_count"] == details["generated_candidate_count"] == 15
     assert details["diversity_selected_count"] == 12
-    assert details["full_plan_submitted_count"] == details["full_plan_pass_count"] == 10
+    assert details["full_plan_submitted_count"] == details["full_plan_pass_count"] == 12
     assert details["coordinate_tcp_pass_count"] >= details["workspace_pass_count"] >= details["pure_ik_pass_count"]
 
 
@@ -310,7 +314,6 @@ def test_second_zero_pass_round_has_no_source_return_recovery():
         rpc,
         placement_diversity_limit=12,
         placement_full_plan_limit=12,
-        placement_exposure_limit=10,
         placement_max_rounds=2,
         compile_candidate=lambda *args: {
             "qualification_stages": [{"name": "hover"}]
@@ -346,10 +349,11 @@ def test_second_zero_pass_round_has_no_source_return_recovery():
             scene_epoch=1,
             planning_scene_revision=4,
             source=source,
-    )
+        )
     assert result.details["qualification_round"] == 2
     assert "source_return_qualification" not in result.details
-    assert result.details["qualified_candidate_count"] == 0
+    assert result.details["candidate_count"] == 0
+    assert result.details["full_plan_pass_count"] == 0
     assert requested_candidate_ids == [["p0"], ["p1"]]
 
 

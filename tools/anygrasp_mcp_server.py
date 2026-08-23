@@ -16,9 +16,7 @@ from mcp.server.fastmcp import FastMCP
 
 from tools.anygrasp_core import AnyGraspBackend
 from tools.candidate_config import (
-    DEFAULT_CANDIDATE_COUNT,
     DEFAULT_GRASP_RAW_POOL_SIZE,
-    argparse_candidate_count,
     argparse_raw_pool_size,
 )
 
@@ -147,11 +145,6 @@ def main() -> int:
     parser.add_argument("--gripper-height", type=float, default=0.03)
     parser.add_argument("--depth-truncation", type=float, default=1.0)
     parser.add_argument(
-        "--max-candidates",
-        type=argparse_candidate_count,
-        default=DEFAULT_CANDIDATE_COUNT,
-    )
-    parser.add_argument(
         "--raw-pool-size",
         type=argparse_raw_pool_size(),
         default=DEFAULT_GRASP_RAW_POOL_SIZE,
@@ -164,7 +157,6 @@ def main() -> int:
         max_gripper_width=args.max_gripper_width,
         gripper_height=args.gripper_height,
         depth_truncation=args.depth_truncation,
-        max_candidates=args.max_candidates,
         raw_pool_size=args.raw_pool_size,
     )
 
@@ -183,8 +175,6 @@ def main() -> int:
             {
                 "ok": True,
                 "server": "anygrasp",
-                "max_candidates": _BACKEND.max_candidates,
-                "exposure_limit": _BACKEND.max_candidates,
                 "raw_pool_size": _BACKEND.raw_pool_size,
                 "returned_candidate_count": _BACKEND.last_returned_candidate_count,
             }

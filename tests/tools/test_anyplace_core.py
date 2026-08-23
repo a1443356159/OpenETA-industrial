@@ -135,12 +135,16 @@ def test_normalise_candidates_returns_only_object_transforms() -> None:
     assert "place_grasp_pose" not in candidates[0]
 
 
-@pytest.mark.parametrize("raw", [[], np.eye(4), np.tile(np.eye(4), (9, 1, 1))])
+@pytest.mark.parametrize("raw", [[], np.eye(4)])
 def test_normalise_candidates_checks_dynamic_count(raw) -> None:
     _reason(
         "no_placement_candidates" if isinstance(raw, list) else "inconsistent_placement_outputs",
         normalise_placement_candidates, raw,
     )
+
+
+def test_normalise_candidates_accepts_nonempty_dynamic_count() -> None:
+    assert len(normalise_placement_candidates(np.tile(np.eye(4), (9, 1, 1)))) == 9
 
 
 def test_backend_uses_independent_observations_and_transform(tmp_path, monkeypatch) -> None:

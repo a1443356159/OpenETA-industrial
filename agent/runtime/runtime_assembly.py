@@ -129,10 +129,7 @@ from agent.tools.sim_mcp import (
     bind_simulator_mcp_tool_handlers,
 )
 from agent.tools.web_access import WebAccessConfig, bind_configured_web_tool_handlers
-from tools.candidate_config import (
-    DEFAULT_CANDIDATE_COUNT,
-    CandidateFunnelConfig,
-)
+from tools.candidate_config import CandidateFunnelConfig
 
 
 BackendFactory = Callable[..., PlannerBackend]
@@ -310,9 +307,6 @@ class RuntimeMcpEndpoints:
 class RuntimeCandidateCounts:
     """Host registration values that must match remote service metadata."""
 
-    graspgenx: int = DEFAULT_CANDIDATE_COUNT
-    anygrasp: int = DEFAULT_CANDIDATE_COUNT
-    anyplace: int = DEFAULT_CANDIDATE_COUNT
     graspgenx_raw_pool_size: int = 200
     anygrasp_raw_pool_size: int = 200
     anyplace_raw_pool_size: int = 96
@@ -325,9 +319,6 @@ class RuntimeCandidateCounts:
 
     def __post_init__(self) -> None:
         validated = CandidateFunnelConfig(
-            graspgenx_exposure_limit=self.graspgenx,
-            anygrasp_exposure_limit=self.anygrasp,
-            anyplace_exposure_limit=self.anyplace,
             graspgenx_raw_pool_size=self.graspgenx_raw_pool_size,
             anygrasp_raw_pool_size=self.anygrasp_raw_pool_size,
             anyplace_raw_pool_size=self.anyplace_raw_pool_size,
@@ -338,9 +329,6 @@ class RuntimeCandidateCounts:
             moveit_ik_seed_count=self.moveit_ik_seed_count,
             anyplace_max_qualification_rounds=self.anyplace_max_qualification_rounds,
         )
-        object.__setattr__(self, "graspgenx", validated.graspgenx_exposure_limit)
-        object.__setattr__(self, "anygrasp", validated.anygrasp_exposure_limit)
-        object.__setattr__(self, "anyplace", validated.anyplace_exposure_limit)
         for name in (
             "graspgenx_raw_pool_size", "anygrasp_raw_pool_size", "anyplace_raw_pool_size",
             "grasp_diversity_pool_size", "anyplace_diversity_pool_size",
@@ -352,9 +340,6 @@ class RuntimeCandidateCounts:
 
 def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
     return RuntimeCandidateCounts(
-        graspgenx=os.environ.get("OPENETA_GRASPGENX_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT),
-        anygrasp=os.environ.get("OPENETA_ANYGRASP_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT),
-        anyplace=os.environ.get("OPENETA_ANYPLACE_CANDIDATE_COUNT", DEFAULT_CANDIDATE_COUNT),
         graspgenx_raw_pool_size=os.environ.get("OPENETA_GRASPGENX_RAW_POOL_SIZE", 200),
         anygrasp_raw_pool_size=os.environ.get("OPENETA_ANYGRASP_RAW_POOL_SIZE", 200),
         anyplace_raw_pool_size=os.environ.get("OPENETA_ANYPLACE_RAW_POOL_SIZE", 96),
@@ -820,7 +805,7 @@ def bind_runtime_perception_tools(
         anyplace_handler = build_anyplace_handler(
             build_sse_anyplace_mcp_placer(url=endpoints.anyplace_url),
             output_root=artifact_root / "anyplace_results",
-            expected_candidate_count=counts.anyplace,
+            expected_raw_pool_size=counts.anyplace_raw_pool_size,
             pre_inference=(
                 lambda context, request: _prepare_postattachment_frozen_goals(
                     context,
@@ -849,7 +834,7 @@ def bind_runtime_perception_tools(
         grasp_backends["anygrasp"] = build_anygrasp_handler(
             build_sse_anygrasp_mcp_grasper(url=endpoints.anygrasp_url),
             output_root=artifact_root / "anygrasp_results",
-            expected_candidate_count=counts.anygrasp,
+            expected_raw_pool_size=counts.anygrasp_raw_pool_size,
         )
     if endpoints.graspgenx_url:
         list_grippers = build_sse_graspgenx_mcp_gripper_lister(
@@ -859,7 +844,7 @@ def bind_runtime_perception_tools(
             build_sse_graspgenx_mcp_predictor(url=endpoints.graspgenx_url),
             list_grippers,
             output_root=artifact_root / "graspgenx_results",
-            expected_candidate_count=counts.graspgenx,
+            expected_raw_pool_size=counts.graspgenx_raw_pool_size,
         )
     # Resolve the configured Contact-GraspNet endpoint for startup/discovery,
     # but keep the backend disabled until its planner-facing contract is
@@ -925,8 +910,6 @@ def _runtime_candidate_qualifier(
         cache=cache,
         artifact_root=artifact_root,
         compile_candidate=compile_candidate,
-        grasp_exposure_limit=min(counts.graspgenx, counts.anygrasp),
-        placement_exposure_limit=counts.anyplace,
         grasp_diversity_limit=counts.grasp_diversity_pool_size,
         placement_diversity_limit=counts.anyplace_diversity_pool_size,
         grasp_full_plan_limit=counts.grasp_full_plan_limit,

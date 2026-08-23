@@ -32,7 +32,11 @@ from agent.tools.registry import (
     make_tool_result,
 )
 from agent.tools.sim_mcp import SimulatorMcpTransport, SseSimulatorMcpTransport
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count
+from tools.candidate_config import (
+    DEFAULT_ANYPLACE_RAW_POOL_SIZE,
+    DEFAULT_GRASP_RAW_POOL_SIZE,
+    raw_pool_size,
+)
 
 
 ApprovalCallback = Callable[[ToolExecutionContext], bool]
@@ -94,7 +98,6 @@ MOLMOPOINT_COORDINATE_CONVENTION = {
 GRASPGENX_MODEL = "graspgenx"
 GRASPGENX_BACKEND = "graspgenx_mcp"
 GRASPGENX_PLANNER = "graspmoe"
-GRASPGENX_MAX_CANDIDATES = 20
 GRASPGENX_POSE_CONVENTION = "p_camera = R @ p_grasp + t"
 GRASPGENX_VISUAL_LIMIT = 10
 GRASPGENX_BOX_EDGES = (
@@ -852,11 +855,11 @@ def build_anygrasp_handler(
     detect_grasps: AnyGraspDetectCallable,
     *,
     output_root: str | Path = DEFAULT_ANYGRASP_OUTPUT_ROOT,
-    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
+    expected_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
 ) -> ToolHandler:
     """Build an AnyGrasp ToolRegistry handler backed by an injected MCP callable."""
 
-    expected_candidate_count = candidate_count(expected_candidate_count)
+    expected_raw_pool_size = raw_pool_size(expected_raw_pool_size)
 
     def handler(context: ToolExecutionContext) -> ToolResult:
         session_id = artifact_session_id(context.metadata)
@@ -1036,7 +1039,7 @@ def build_anygrasp_handler(
             target_mask=target_mask,
             request=request,
             output_root=artifact_session_root(output_root, session_id),
-            expected_candidate_count=expected_candidate_count,
+            expected_raw_pool_size=expected_raw_pool_size,
         )
 
     return handler
@@ -1325,12 +1328,12 @@ def build_graspgenx_handler(
     list_grippers: GraspGenXListCallable,
     *,
     output_root: str | Path = DEFAULT_GRASPGENX_OUTPUT_ROOT,
-    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
+    expected_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
 ) -> ToolHandler:
     """Build a targeted GraspGenX handler backed by MCP callables."""
 
     root = Path(output_root)
-    expected_candidate_count = candidate_count(expected_candidate_count)
+    expected_raw_pool_size = raw_pool_size(expected_raw_pool_size)
 
     def handler(context: ToolExecutionContext) -> ToolResult:
         run_dir = _create_run_dir(root)
@@ -1511,7 +1514,7 @@ def build_graspgenx_handler(
             intrinsics=intrinsics,
             gripper_name=gripper_name,
             up_direction_camera=up_direction,
-            expected_candidate_count=expected_candidate_count,
+            expected_raw_pool_size=expected_raw_pool_size,
         )
         if result.success:
             try:
@@ -1737,12 +1740,12 @@ def build_anyplace_handler(
     predict_placement: AnyPlacePredictCallable,
     *,
     output_root: str | Path = DEFAULT_ANYPLACE_OUTPUT_ROOT,
-    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
+    expected_raw_pool_size: int = DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     pre_inference: AnyPlacePreInferenceCallable | None = None,
 ) -> ToolHandler:
     """Build an AnyPlace ToolRegistry handler backed by an injected MCP callable."""
 
-    expected_candidate_count = candidate_count(expected_candidate_count)
+    expected_raw_pool_size = raw_pool_size(expected_raw_pool_size, placement=True)
 
     def handler(context: ToolExecutionContext) -> ToolResult:
         session_id = artifact_session_id(context.metadata)
@@ -1810,7 +1813,7 @@ def build_anyplace_handler(
             response,
             request=request,
             output_root=artifact_session_root(output_root, session_id),
-            expected_candidate_count=expected_candidate_count,
+            expected_raw_pool_size=expected_raw_pool_size,
         )
 
     return handler
@@ -3488,7 +3491,7 @@ def _normalise_anygrasp_response(
     target_mask: str,
     request: JsonDict,
     output_root: Path,
-    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
+    expected_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
 ) -> ToolResult:
     if not isinstance(response, dict):
         return _anygrasp_failure(
@@ -3543,26 +3546,16 @@ def _normalise_anygrasp_response(
     except (TypeError, ValueError):
         parsed_count = -1
     metadata = _dict_or_empty(details.get("metadata"))
-    registered_count = metadata.get("max_candidates")
     registered_raw_pool = metadata.get("raw_pool_size")
     if (
         parsed_count != len(candidates_value)
         or parsed_count <= 0
+        or parsed_count > expected_raw_pool_size
         or (
-            registered_count is not None
+            registered_raw_pool is not None
             and (
-                registered_count != expected_candidate_count
-                or (
-                    registered_raw_pool is None
-                    and parsed_count != expected_candidate_count
-                )
-                or (
-                    registered_raw_pool is not None
-                    and (
-                        not isinstance(registered_raw_pool, int)
-                        or parsed_count > registered_raw_pool
-                    )
-                )
+                registered_raw_pool != expected_raw_pool_size
+                or parsed_count > registered_raw_pool
             )
         )
     ):
@@ -4217,7 +4210,7 @@ def _normalise_graspgenx_response(
     intrinsics: JsonDict,
     gripper_name: str,
     up_direction_camera: list[float],
-    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
+    expected_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
 ) -> ToolResult:
     if not isinstance(response, Mapping):
         return _graspgenx_failure("mcp_call_failed")
@@ -4310,21 +4303,18 @@ def _normalise_graspgenx_response(
         return _graspgenx_failure("inconsistent_grasp_outputs")
     metadata = _scrub_graspgenx_payload(metadata_value)
     registered_count = metadata.get("max_returned_candidates")
-    exposure_limit = metadata.get("exposure_limit")
     if (
-        exposure_limit is not None and exposure_limit != expected_candidate_count
-    ) or (
         registered_count is not None
         and (
-            not isinstance(registered_count, int)
+            registered_count != expected_raw_pool_size
             or candidate_count > registered_count
-            or (exposure_limit is None and registered_count != expected_candidate_count)
         )
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
-    v2_reserve_contract = (
-        "raw_pool_size" in metadata or "exposure_limit" in metadata
-    )
+    registered_raw_pool = metadata.get("raw_pool_size")
+    if registered_raw_pool is not None and registered_raw_pool != expected_raw_pool_size:
+        return _graspgenx_failure("inconsistent_grasp_outputs")
+    v2_reserve_contract = "raw_pool_size" in metadata
     return ToolResult(
         True,
         content=_string_param(response.get("content"))
@@ -5152,7 +5142,7 @@ def _normalise_anyplace_response(
     *,
     request: JsonDict,
     output_root: Path,
-    expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
+    expected_raw_pool_size: int = DEFAULT_ANYPLACE_RAW_POOL_SIZE,
 ) -> ToolResult:
     if not isinstance(response, dict):
         return _anyplace_failure(
@@ -5184,28 +5174,18 @@ def _normalise_anyplace_response(
         candidate_count = -1
     metadata = _dict_or_empty(details.get("metadata"))
     object_current_pose = details.get("object_current_pose")
-    registered_count = metadata.get("configured_candidate_count")
     registered_raw_pool = metadata.get("raw_pool_size")
     if (
         not isinstance(candidates_value, list)
         or not isinstance(object_current_pose, Mapping)
         or candidate_count != len(candidates_value)
         or candidate_count <= 0
+        or candidate_count > expected_raw_pool_size
         or (
-            registered_count is not None
+            registered_raw_pool is not None
             and (
-                registered_count != expected_candidate_count
-                or (
-                    registered_raw_pool is None
-                    and candidate_count != expected_candidate_count
-                )
-                or (
-                    registered_raw_pool is not None
-                    and (
-                        not isinstance(registered_raw_pool, int)
-                        or candidate_count > registered_raw_pool
-                    )
-                )
+                registered_raw_pool != expected_raw_pool_size
+                or candidate_count > registered_raw_pool
             )
         )
     ):

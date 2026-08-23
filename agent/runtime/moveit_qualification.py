@@ -23,7 +23,6 @@ from agent.tools.registry import ToolResult
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE,
     DEFAULT_ANYPLACE_FULL_PLAN_LIMIT,
-    DEFAULT_CANDIDATE_COUNT,
     DEFAULT_GRASP_DIVERSITY_POOL_SIZE,
     DEFAULT_GRASP_FULL_PLAN_LIMIT,
     DEFAULT_MOVEIT_IK_SEED_COUNT,
@@ -101,7 +100,7 @@ class QualificationCache:
 
 
 class MoveItCandidateQualifier:
-    """Validate one batch response and expose only candidates proven PASS."""
+    """Validate one batch response and retain every candidate proven PASS."""
 
     def __init__(
         self,
@@ -113,8 +112,6 @@ class MoveItCandidateQualifier:
             [Mapping[str, Any], str, Mapping[str, Any], int, int], Mapping[str, Any]
         ]
         | None = None,
-        grasp_exposure_limit: int = DEFAULT_CANDIDATE_COUNT,
-        placement_exposure_limit: int = DEFAULT_CANDIDATE_COUNT,
         grasp_diversity_limit: int = DEFAULT_GRASP_DIVERSITY_POOL_SIZE,
         placement_diversity_limit: int = DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE,
         grasp_full_plan_limit: int = DEFAULT_GRASP_FULL_PLAN_LIMIT,
@@ -126,10 +123,6 @@ class MoveItCandidateQualifier:
         self.cache = cache or QualificationCache()
         self.artifact_root = Path(artifact_root) if artifact_root is not None else None
         self.compile_candidate = compile_candidate
-        self.exposure_limits = {
-            "grasp": int(grasp_exposure_limit),
-            "placement": int(placement_exposure_limit),
-        }
         self.diversity_limits = {
             "grasp": int(grasp_diversity_limit),
             "placement": int(placement_diversity_limit),
@@ -283,7 +276,6 @@ class MoveItCandidateQualifier:
             "funnel": {
                 "ik_seed_count": self.ik_seed_count,
                 "full_plan_limit": self.full_plan_limits[purpose],
-                "exposure_limit": self.exposure_limits[purpose],
             },
             "source": dict(source or {}),
             "candidates": request_candidates,
@@ -345,7 +337,7 @@ class MoveItCandidateQualifier:
             for candidate in raw
             if isinstance(candidate, Mapping)
             and proofs.get(str(candidate.get("id") or ""), {}).get("verdict") == "PASS"
-        ][: self.exposure_limits[purpose]]
+        ]
         pass_proofs = {
             str(candidate["id"]): proofs[str(candidate["id"])] for candidate in passed
         }
@@ -395,7 +387,6 @@ class MoveItCandidateQualifier:
                 "full_plan_pass_count": stage_counts["full_plan"],
                 "generated_candidate_count": raw_count if has_v2_raw else generated,
                 "submitted_candidate_count": stage_counts["submitted"],
-                "qualified_candidate_count": len(passed),
                 "rejection_reason_counts": dict(sorted(counts.items())),
                 "qualification_evidence": public_evidence,
             }
@@ -445,7 +436,7 @@ class MoveItCandidateQualifier:
             )
             if verdict == "PASS" and not valid_pass:
                 verdict, reason = "UNKNOWN", "qualification_evidence_incomplete"
-            elif verdict not in {"PASS", "FAIL", "UNKNOWN"} or not valid_identity:
+            elif verdict not in {"PASS", "FAIL", "UNKNOWN", "NOT_EVALUATED"} or not valid_identity:
                 verdict, reason = "UNKNOWN", "qualification_evidence_incomplete"
             record = dict(item or {})
             record.update(
@@ -1004,7 +995,6 @@ class MoveItQualificationEngine:
         funnel = funnel if isinstance(funnel, Mapping) else planning
         seed_count = int(funnel.get("ik_seed_count", DEFAULT_MOVEIT_IK_SEED_COUNT))
         full_plan_limit = int(funnel.get("full_plan_limit", DEFAULT_GRASP_FULL_PLAN_LIMIT))
-        exposure_limit = int(funnel.get("exposure_limit", DEFAULT_CANDIDATE_COUNT))
         source = request.get("source") if isinstance(request.get("source"), Mapping) else {}
         screened: list[JsonDict] = []
         ik_reservoir: list[Mapping[str, Any]] = []
@@ -1028,20 +1018,24 @@ class MoveItQualificationEngine:
                         ik_reservoir.append(dict(state))
         results: list[JsonDict] = []
         submitted = 0
-        passed = 0
         for descriptor, screen in zip(candidates, screened, strict=True):
             if screen.get("endpoint_pass") is not True:
                 results.append(screen)
                 continue
-            if submitted >= full_plan_limit or passed >= exposure_limit:
-                results.append({**screen, "verdict": "FAIL", "reason": "full_plan_limit_not_submitted", "full_plan_submitted": False})
+            if submitted >= full_plan_limit:
+                results.append(
+                    {
+                        **screen,
+                        "verdict": "NOT_EVALUATED",
+                        "reason": "full_plan_limit_not_submitted",
+                        "full_plan_submitted": False,
+                    }
+                )
                 continue
             submitted += 1
             planned = self._plan_candidate(descriptor, revision, screen=screen)
             planned["full_plan_submitted"] = True
             results.append(planned)
-            if planned.get("verdict") == "PASS":
-                passed += 1
         binding = str(request.get("qualification_binding_sha256") or "")
         for result in results:
             result["qualification_binding_sha256"] = binding

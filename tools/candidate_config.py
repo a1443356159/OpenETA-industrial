@@ -7,10 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_CANDIDATE_COUNT = 10
-MIN_CANDIDATE_COUNT = 1
-MAX_CANDIDATE_COUNT = 20
-
 DEFAULT_GRASP_RAW_POOL_SIZE = 200
 DEFAULT_ANYPLACE_RAW_POOL_SIZE = 96
 DEFAULT_GRASP_DIVERSITY_POOL_SIZE = 64
@@ -19,32 +15,6 @@ DEFAULT_GRASP_FULL_PLAN_LIMIT = 4
 DEFAULT_ANYPLACE_FULL_PLAN_LIMIT = 4
 DEFAULT_MOVEIT_IK_SEED_COUNT = 8
 DEFAULT_ANYPLACE_MAX_QUALIFICATION_ROUNDS = 2
-
-
-def candidate_count(value: Any) -> int:
-    """Parse one strict candidate count in the supported startup range."""
-
-    if isinstance(value, bool):
-        raise ValueError("candidate count must be an integer in [1, 20]")
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("candidate count must be an integer in [1, 20]") from exc
-    if isinstance(value, float) and not value.is_integer():
-        raise ValueError("candidate count must be an integer in [1, 20]")
-    if isinstance(value, str) and value.strip() != str(parsed):
-        raise ValueError("candidate count must be an integer in [1, 20]")
-    if not MIN_CANDIDATE_COUNT <= parsed <= MAX_CANDIDATE_COUNT:
-        raise ValueError("candidate count must be an integer in [1, 20]")
-    return parsed
-
-
-def argparse_candidate_count(value: str) -> int:
-    try:
-        return candidate_count(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(str(exc)) from exc
-
 
 def bounded_int(value: Any, *, name: str, minimum: int, maximum: int) -> int:
     """Parse a strict (non-boolean) integer bounded at startup."""
@@ -92,9 +62,6 @@ def argparse_raw_pool_size(*, placement: bool = False):
 class CandidateFunnelConfig:
     """Immutable host configuration for reserve pools and bounded planning."""
 
-    graspgenx_exposure_limit: int = DEFAULT_CANDIDATE_COUNT
-    anygrasp_exposure_limit: int = DEFAULT_CANDIDATE_COUNT
-    anyplace_exposure_limit: int = DEFAULT_CANDIDATE_COUNT
     graspgenx_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE
     anygrasp_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE
     anyplace_raw_pool_size: int = DEFAULT_ANYPLACE_RAW_POOL_SIZE
@@ -106,12 +73,6 @@ class CandidateFunnelConfig:
     anyplace_max_qualification_rounds: int = DEFAULT_ANYPLACE_MAX_QUALIFICATION_ROUNDS
 
     def __post_init__(self) -> None:
-        for field_name in (
-            "graspgenx_exposure_limit",
-            "anygrasp_exposure_limit",
-            "anyplace_exposure_limit",
-        ):
-            object.__setattr__(self, field_name, candidate_count(getattr(self, field_name)))
         object.__setattr__(self, "graspgenx_raw_pool_size", raw_pool_size(self.graspgenx_raw_pool_size))
         object.__setattr__(self, "anygrasp_raw_pool_size", raw_pool_size(self.anygrasp_raw_pool_size))
         object.__setattr__(self, "anyplace_raw_pool_size", raw_pool_size(self.anyplace_raw_pool_size, placement=True))
@@ -133,27 +94,23 @@ class CandidateFunnelConfig:
             self.graspgenx_raw_pool_size,
             self.grasp_diversity_pool_size,
             self.grasp_full_plan_limit,
-            self.graspgenx_exposure_limit,
         )
         self._validate_chain(
             "AnyGrasp",
             self.anygrasp_raw_pool_size,
             self.grasp_diversity_pool_size,
             self.grasp_full_plan_limit,
-            self.anygrasp_exposure_limit,
         )
         self._validate_chain(
             "AnyPlace",
             self.anyplace_raw_pool_size,
             self.anyplace_diversity_pool_size,
             self.anyplace_full_plan_limit,
-            self.anyplace_exposure_limit,
         )
 
     @staticmethod
-    def _validate_chain(name: str, raw: int, diversity: int, full_plan: int, exposure: int) -> None:
-        if not raw >= diversity >= max(full_plan, exposure):
+    def _validate_chain(name: str, raw: int, diversity: int, full_plan: int) -> None:
+        if not raw >= diversity >= full_plan:
             raise ValueError(
-                f"{name} requires raw_pool >= diversity_pool and diversity_pool >= "
-                "both full_plan_limit and exposure_limit"
+                f"{name} requires raw_pool >= diversity_pool >= full_plan_limit"
             )

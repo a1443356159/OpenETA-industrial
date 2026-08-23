@@ -15,8 +15,6 @@ from typing import Any
 
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
-    DEFAULT_CANDIDATE_COUNT,
-    candidate_count as validate_candidate_count,
     raw_pool_size as validate_raw_pool_size,
 )
 
@@ -25,7 +23,6 @@ MODEL_NAME = "anyplace_multitask"
 FRAME = "placement_camera"
 CAMERA_FRAME = "opencv"
 POSE_CONVENTION = "p_placed = R @ p_current + t"
-DEFAULT_CANDIDATE_LIMIT = DEFAULT_CANDIDATE_COUNT
 MODEL_SAMPLE_COUNT = 1024
 DEFAULT_DEPTH_TRUNCATION = 1.0
 
@@ -88,17 +85,13 @@ class AnyPlaceBackend:
         config_path: str | Path,
         seed: int = 0,
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
-        candidate_count: int = DEFAULT_CANDIDATE_LIMIT,
         raw_pool_size: int = DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     ) -> None:
         self.anyplace_root = Path(anyplace_root)
         self.config_path = Path(config_path)
         self.seed = seed
         self.depth_truncation = depth_truncation
-        self.candidate_count = validate_candidate_count(candidate_count)
         self.raw_pool_size = validate_raw_pool_size(raw_pool_size, placement=True)
-        if self.raw_pool_size < self.candidate_count:
-            raise ValueError("raw pool size must be >= candidate count")
         self.last_returned_candidate_count = 0
         self._loaded: dict[str, Any] | None = None
         self._prediction_count = 0
@@ -275,7 +268,7 @@ class AnyPlaceBackend:
                 raw_candidates,
                 expected_count=None,
             )
-            if not self.candidate_count <= len(candidates) <= self.raw_pool_size:
+            if not 1 <= len(candidates) <= self.raw_pool_size:
                 raise AnyPlaceInputError("inconsistent_placement_outputs")
             self.last_returned_candidate_count = len(candidates)
         except AnyPlaceInputError as exc:
@@ -312,8 +305,6 @@ class AnyPlaceBackend:
                 "metadata": _with_duration(
                     {
                         **metadata,
-                        "configured_candidate_count": self.candidate_count,
-                        "exposure_limit": self.candidate_count,
                         "raw_pool_size": self.raw_pool_size,
                         "returned_candidate_count": len(candidates),
                     },
@@ -657,7 +648,7 @@ def pad_pointcloud_for_model(array: Any, *, target_count: int = MODEL_SAMPLE_COU
 def normalise_placement_candidates(
     raw_candidates: Any,
     *,
-    expected_count: int | None = DEFAULT_CANDIDATE_LIMIT,
+    expected_count: int | None = None,
 ) -> list[dict[str, Any]]:
     np, _Image = _load_numeric_deps()
     try:
@@ -766,7 +757,6 @@ def _float_matrix(values: Any) -> list[list[float]]:
 def _metadata_base() -> dict[str, Any]:
     return {
         "pose_convention": POSE_CONVENTION,
-        "candidate_limit": DEFAULT_CANDIDATE_LIMIT,
         "model_sample_count": MODEL_SAMPLE_COUNT,
     }
 

@@ -562,6 +562,7 @@ def test_collision_selection_checks_source_balanced_ranked_batches(
         graspgenx_root=source,
         checkpoint_root=checkpoints,
         gripper_descriptions_root=grippers,
+        raw_pool_size=10,
     )
     poses = np.tile(np.eye(4), (40, 1, 1))
     poses[:, 0, 3] = np.arange(40) * 0.02
@@ -657,7 +658,6 @@ def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
         graspgenx_root=source,
         checkpoint_root=checkpoints,
         gripper_descriptions_root=grippers,
-        max_candidates=3,
     )
     poses = np.tile(np.eye(4), (6, 1, 1))
     poses[3:, 0, 3] = [0.02, 0.04, 0.06]
@@ -677,7 +677,7 @@ def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
         branch_tags=["obb", "obb", "obb", "diff", "diff", "diff"],
     )
 
-    assert selected == [0, 3, 4]
+    assert selected == [0, 3, 4, 5]
     assert metadata["formal_diversity_rejected_count"] == 2
 
 
@@ -689,7 +689,6 @@ def test_formal_selection_retains_same_approach_with_distinct_wrist_rotation(
         graspgenx_root=source,
         checkpoint_root=checkpoints,
         gripper_descriptions_root=grippers,
-        max_candidates=3,
     )
     poses = np.tile(np.eye(4), (3, 1, 1))
     poses[1, :3, :3] = np.array(
