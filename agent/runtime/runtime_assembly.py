@@ -312,10 +312,10 @@ class RuntimeCandidateCounts:
     anyplace_raw_pool_size: int = 96
     grasp_diversity_pool_size: int = 64
     anyplace_diversity_pool_size: int = 96
-    grasp_full_plan_limit: int = 4
-    anyplace_full_plan_limit: int = 4
+    grasp_full_plan_limit: int = 2
+    anyplace_full_plan_limit: int = 2
     pregrasp_joint_grasp_branch_limit: int = 4
-    pregrasp_joint_full_plan_limit: int = 4
+    pregrasp_joint_full_plan_limit: int = 2
     moveit_ik_seed_count: int = 8
     anyplace_max_qualification_rounds: int = 2
 
@@ -350,13 +350,13 @@ def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
         anyplace_raw_pool_size=os.environ.get("OPENETA_ANYPLACE_RAW_POOL_SIZE", 96),
         grasp_diversity_pool_size=os.environ.get("OPENETA_GRASP_DIVERSITY_POOL_SIZE", 64),
         anyplace_diversity_pool_size=os.environ.get("OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96),
-        grasp_full_plan_limit=os.environ.get("OPENETA_GRASP_FULL_PLAN_LIMIT", 4),
-        anyplace_full_plan_limit=os.environ.get("OPENETA_ANYPLACE_FULL_PLAN_LIMIT", 4),
+        grasp_full_plan_limit=os.environ.get("OPENETA_GRASP_FULL_PLAN_LIMIT", 2),
+        anyplace_full_plan_limit=os.environ.get("OPENETA_ANYPLACE_FULL_PLAN_LIMIT", 2),
         pregrasp_joint_grasp_branch_limit=os.environ.get(
             "OPENETA_PREGRASP_JOINT_GRASP_BRANCH_LIMIT", 4
         ),
         pregrasp_joint_full_plan_limit=os.environ.get(
-            "OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT", 4
+            "OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT", 2
         ),
         moveit_ik_seed_count=os.environ.get("OPENETA_MOVEIT_IK_SEED_COUNT", 8),
         anyplace_max_qualification_rounds=os.environ.get("OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
@@ -1241,7 +1241,7 @@ class _PregraspGraspPlaceCoordinator:
         # farthest-first SE(3) overrepresents extreme object rotations and can
         # discard every attachment-aware reachable goal before MoveIt sees it.
         # L3/L4 then traverse the round-robin pair order progressively until
-        # the four-slot plan-only capacity is filled or the batch is exhausted.
+        # the two-slot plan-only capacity is filled or the batch is exhausted.
         current_goals = [dict(goal) for goal in self.object_goals]
         for grasp in grasps[: self.grasp_branch_limit]:
             if not isinstance(grasp, Mapping):
@@ -1287,7 +1287,7 @@ class _PregraspGraspPlaceCoordinator:
                 pairs.append(pair)
             per_grasp_pairs.append(pairs)
 
-        # Round-robin ordering ensures the global top-four plan-only tail does
+        # Round-robin ordering ensures the global top-two plan-only tail does
         # not get consumed by several goals from the first grasp alone.
         pair_depth = max((len(group) for group in per_grasp_pairs), default=0)
         pairs = [

@@ -81,7 +81,7 @@ def test_v2_defaults_and_cross_field_constraints():
         config.anyplace_raw_pool_size,
     ) == (200, 200, 96)
     assert (config.grasp_diversity_pool_size, config.anyplace_diversity_pool_size) == (64, 96)
-    assert (config.grasp_full_plan_limit, config.anyplace_full_plan_limit) == (4, 4)
+    assert (config.grasp_full_plan_limit, config.anyplace_full_plan_limit) == (2, 2)
     assert config.moveit_ik_seed_count == 8
     with pytest.raises(ValueError):
         CandidateFunnelConfig(graspgenx_raw_pool_size=63)
@@ -526,7 +526,7 @@ def test_robotiq_measured_centering_replaces_raw_pose_before_full_funnel():
     base = captured["candidates"][0]["candidate"]
     assert base["translation_xyz"] == pytest.approx([0.1, 0.19, 0.3])
     assert base["provenance"] == "host_parallel_gripper_closing_centering"
-    assert result.details["candidate_count"] == 4
+    assert result.details["candidate_count"] == 2
 
 
 def test_second_zero_pass_round_has_no_source_return_recovery():
@@ -589,7 +589,7 @@ def test_second_zero_pass_round_has_no_source_return_recovery():
     assert requested_candidate_ids == [["p0"], ["p1"]]
 
 
-def test_default_anyplace_pool_screens_all_96_but_only_plans_top_4():
+def test_default_anyplace_pool_screens_all_96_but_only_plans_top_2():
     captured = {}
 
     def rpc(name, request, timeout):
@@ -647,8 +647,8 @@ def test_default_anyplace_pool_screens_all_96_but_only_plans_top_4():
     assert result.details["pure_ik_pass_count"] == 96
     assert result.details["collision_ik_pass_count"] == 96
     assert result.details["endpoint_pass_count"] == 96
-    assert result.details["full_plan_submitted_count"] == 4
-    assert result.details["candidate_count"] == 4
+    assert result.details["full_plan_submitted_count"] == 2
+    assert result.details["candidate_count"] == 2
 
 
 def test_pregrasp_joint_progressive_counts_distinguish_produced_and_evaluated():
@@ -663,16 +663,13 @@ def test_pregrasp_joint_progressive_counts_distinguish_produced_and_evaluated():
     def rpc(name, request, timeout):
         assert request["funnel"] == {
             "ik_seed_count": 8,
-            "full_plan_limit": 4,
+            "full_plan_limit": 2,
             "screening_mode": PROGRESSIVE_SCREENING_MODE,
-            "endpoint_pass_target": 4,
+            "endpoint_pass_target": 2,
         }
         return _engine().qualify(request)
 
-    result = MoveItCandidateQualifier(
-        rpc,
-        pregrasp_joint_full_plan_limit=4,
-    ).qualify_result(
+    result = MoveItCandidateQualifier(rpc).qualify_result(
         ToolResult(
             True,
             "ok",
@@ -689,14 +686,14 @@ def test_pregrasp_joint_progressive_counts_distinguish_produced_and_evaluated():
 
     assert result.details["coordinate_tcp_pass_count"] == 12
     assert result.details["workspace_pass_count"] == 12
-    assert result.details["endpoint_evaluated_count"] == 4
-    assert result.details["endpoint_not_evaluated_count"] == 8
-    assert result.details["endpoint_pass_count"] == 4
-    assert result.details["full_plan_submitted_count"] == 4
-    assert result.details["full_plan_pass_count"] == 4
-    assert result.details["candidate_count"] == 4
+    assert result.details["endpoint_evaluated_count"] == 2
+    assert result.details["endpoint_not_evaluated_count"] == 10
+    assert result.details["endpoint_pass_count"] == 2
+    assert result.details["full_plan_submitted_count"] == 2
+    assert result.details["full_plan_pass_count"] == 2
+    assert result.details["candidate_count"] == 2
     assert result.details["rejection_reason_counts"] == {
-        PROGRESSIVE_NOT_EVALUATED_REASON: 8
+        PROGRESSIVE_NOT_EVALUATED_REASON: 10
     }
 
 

@@ -502,8 +502,8 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
     """Resolve every related field together so invalid chains fail at startup."""
 
     try:
-        grasp_full_default = 4
-        anyplace_full_default = 4
+        grasp_full_default = 2
+        anyplace_full_default = 2
         return CandidateFunnelConfig(
             graspgenx_raw_pool_size=_startup_value(args, "graspgenx_raw_pool_size", "OPENETA_GRASPGENX_RAW_POOL_SIZE", 200),
             anygrasp_raw_pool_size=_startup_value(args, "anygrasp_raw_pool_size", "OPENETA_ANYGRASP_RAW_POOL_SIZE", 200),
@@ -522,7 +522,7 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
                 args,
                 "pregrasp_joint_full_plan_limit",
                 "OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT",
-                4,
+                2,
             ),
             moveit_ik_seed_count=_startup_value(args, "moveit_ik_seed_count", "OPENETA_MOVEIT_IK_SEED_COUNT", 8),
             anyplace_max_qualification_rounds=_startup_value(args, "anyplace_max_qualification_rounds", "OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),

@@ -67,22 +67,23 @@ Default pool and funnel limits are:
 |---|---:|---:|
 | Model reserve/raw pool | 200 | 96 |
 | Diversity pool | 64 | 96 |
-| Full plan-only submissions | 4 | 4 |
+| Full plan-only submissions | 2 | 2 |
 | Deterministic IK seeds per endpoint | 8 | 8 |
 | Qualification rounds | 1 | 2 |
 
 Every full plan-only PASS is stored in the qualified candidate queue and
 returned as selectable. There is no separate exposure limit or exposure
-truncation; with the current planning bound, one run returns at most four PASS
+truncation; with the current planning bound, one run returns at most two PASS
 candidates.
 
-For pregrasp compatibility, the host constructs pairs from at most four grasp
-PASS candidates and the complete current 96-goal pool. Pair ordering is
-round-robin by grasp. Every constructed pair enters coordinate compilation and
-the conservative workspace/structural layer, so the default ceiling is
-`4 x 96 = 384` shallow-screened pairs. Multi-seed endpoint traversal stops
-after four endpoint PASS pairs have filled the downstream plan-only capacity,
-or exhausts the batch when fewer than four pass. Only those four fairly
+For pregrasp compatibility, the scheduler retains a four-branch implementation
+ceiling, while the default grasp L5 bound supplies at most two grasp PASS
+candidates to the complete current 96-goal pool. Pair ordering is round-robin
+by grasp. Every constructed pair enters coordinate compilation and the
+conservative workspace/structural layer, so the default effective ceiling is
+`2 x 96 = 192` shallow-screened pairs. Multi-seed endpoint traversal stops
+after two endpoint PASS pairs have filled the downstream plan-only capacity,
+or exhausts the batch when fewer than two pass. Only those two fairly
 interleaved pairs enter full plan-only.
 
 After a real attach, only the absolute object goals that passed for the
@@ -198,7 +199,7 @@ Status: approved and implemented.
 Current issue:
 
 Joint grasp-place qualification implicitly reuses the normal placement
-diversity limit. The global 96-pair cap and global top-four plan tail are real,
+diversity limit. The global 96-goal input and global top-two plan tail are real,
 but per-grasp coverage is not expressed as a first-class contract.
 
 Approved contract:
@@ -208,24 +209,24 @@ JointQualificationBudget
   max_grasps = 4
   goals_considered_per_grasp = complete active goal batch (at most 96)
   L1-L2 pair input = every constructed pair (at most 4 × 96)
-  L3-L4 schedule = deterministic round-robin until four endpoint PASS
-  L5 full_plan_submission_limit = 4
+  L3-L4 schedule = deterministic round-robin until two endpoint PASS
+  L5 full_plan_submission_limit = 2
 ```
 
 There is no independently configurable pair-screen limit and the ordinary
 placement diversity limit is not reused. Compilation and conservative
 structural checks run for the complete constructed pair batch. L3/L4 then
-traverse the existing branch-fair order until the four-slot L5 capacity is
-filled. If fewer than four endpoint-PASS pairs exist, traversal exhausts the
+traverse the existing branch-fair order until the two-slot L5 capacity is
+filled. If fewer than two endpoint-PASS pairs exist, traversal exhausts the
 remaining batch. If capacity is filled, structurally valid unvisited pairs are
 recorded as `NOT_EVALUATED` with
 `progressive_endpoint_capacity_reached`; they are not failures and cannot enter
 the qualified queue.
 
-All four selected submissions are attempted even if an earlier one passes.
+Both selected submissions are attempted even if the first one passes.
 They are insurance against individual full-planning failure, not a quality
 ranking, and all L5 PASS results have equal qualification status. The endpoint
-target is derived from the L5 capacity of four and is not a new hyperparameter.
+target is derived from the L5 capacity of two and is not a new hyperparameter.
 
 Expected benefit: complete cheap structural coverage, fair grasp-branch
 coverage, and no multi-seed work for pairs that cannot be submitted to L5.
@@ -351,14 +352,14 @@ For joint candidates, the approved hierarchy is:
 ```text
 all constructed pairs through L1-L2
 → deterministic L3/L4 traversal across grasp branches
-→ stop at four eligible pairs or exhaust the batch
+→ stop at two eligible pairs or exhaust the batch
 → submit the eligible set to L5
 → every L5 PASS stored with equal qualification status
 ```
 
 Source scores and diversity remain useful for forming finite model/host pools,
 but there is no post-L4 `best` score and no need to optimize the relative rank
-of the four submitted candidates. Expected benefit: simpler policy and clearer
+of the two submitted candidates. Expected benefit: simpler policy and clearer
 proof semantics. Risk: deterministic ordering still needs stable tie-breaking
 and branch-fair tests.
 
@@ -425,7 +426,7 @@ Current issue:
 
 `model_raw_candidate_count`, `raw_candidate_count`, diversity counts, and
 compatibility aliases can be overwritten by different layers. The difference
-between a 96-candidate model pool and a four-goal frozen requalification pool
+between a 96-candidate model pool and a two-goal frozen requalification pool
 has already exposed ambiguity in verification code.
 
 The agreed direction is recorded in
@@ -456,7 +457,7 @@ The same decision record separates startup count/budget parameters, versioned
 producer/diversity profiles, derived values, and non-tunable safety or
 calibration invariants. The redundant VLM exposure settings are removed. O2
 requires every constructed pregrasp pair to enter L1-L2. L3/L4 use the approved
-progressive schedule whose endpoint target is derived from the four-slot L5
+progressive schedule whose endpoint target is derived from the two-slot L5
 capacity, so there is still no independent pregrasp pair-screen parameter.
 
 The six accepted remote chains at commits `4b90a5c` and `20e10ca` provide the
@@ -472,8 +473,8 @@ following pre-optimization production/consumption baseline:
 | Grasp full-plan and joint-compatible modes | 8 | six were ultimately executed, one per task |
 | AnyPlace model object goals | 960 | nine 96-goal pregrasp batches plus one real retry |
 | Constructed grasp-goal pairs | 1,440 | attachment-aware compatibility inputs |
-| Pair endpoint PASS | 102 | before the four-submission L5 bound |
-| Pair plan-only submissions / PASS | 24 / 21 | the three failures were the requested reject-first injections |
+| Pair endpoint PASS | 102 | before the historical four-submission L5 bound used by these runs |
+| Pair plan-only submissions / PASS | 24 / 21 | historical four-slot runs; the three failures were the requested reject-first injections |
 | Executed placements | 6 | one per accepted chain |
 
 The ratio is intentionally wide because the final consumer needs one grasp and
@@ -649,8 +650,8 @@ runtime dependency:
 1. **O8 Qualified-queue accounting** — remove the redundant exposure layer and
    make L5 PASS the single selectable candidate set.
 2. **O2/O6 joint coverage and scheduling** — compile and structurally screen
-   every constructed pair, traverse L3/L4 fairly until four endpoint PASS are
-   found (or the batch is exhausted), submit those four deterministically to
+   every constructed pair, traverse L3/L4 fairly until two endpoint PASS are
+   found (or the batch is exhausted), submit those two deterministically to
    L5, and treat all L5 PASS candidates as equivalent.
 3. **O10 minimal internal event vocabulary** — establish the immutable
    candidate-selection and host-compilation evidence needed by O7/O12 while
@@ -678,11 +679,11 @@ Use this table during later discussion. `Recorded` means documented only.
 | ID | Topic | Status | Decision / constraints |
 |---|---|---|---|
 | O1 | Split pregrasp coordinator | Recorded | No implementation authorized |
-| O2 | Explicit joint qualification budget | Implemented | All constructed pairs enter L1-L2; branch-fair L3/L4 stops at the derived four-slot L5 capacity or exhausts the batch; unvisited pairs are NOT_EVALUATED |
+| O2 | Explicit joint qualification budget | Implemented | All constructed pairs enter L1-L2; branch-fair L3/L4 stops at the derived two-slot L5 capacity or exhausts the batch; unvisited pairs are NOT_EVALUATED |
 | O3 | Skip redundant post-attach inference | Implemented locally | Approved flow; independent observation retained, frozen-first qualification, one new-only model round on zero PASS; remote verification pending |
 | O4 | Typed geometry layer | Recorded | No implementation authorized |
 | O5 | Qualification-stage decomposition | Recorded | No implementation authorized |
-| O6 | Separate diversity and scheduling | Approved | No post-L4 quality ranking; deterministic branch-fair selection of four; all L5 PASS candidates have equal status |
+| O6 | Separate diversity and scheduling | Approved | No post-L4 quality ranking; deterministic branch-fair selection of two; all L5 PASS candidates have equal status |
 | O7 | Private runtime projections | Implemented locally | Coding-agent-style host reduction and obligations only; no VLM-visible FSM, state tool, or explicit workflow-state interface; remote verification pending |
 | O8 | Candidate-batch lineage and layered qualification schema | Approved | Remove exposure settings; immutable lineage/current-run accounting; `candidate_count` is the complete L5 PASS queue |
 | O9 | Planning backend / optional MTC tail | Recorded | No implementation authorized |

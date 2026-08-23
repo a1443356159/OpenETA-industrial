@@ -123,6 +123,10 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
         ]
         assert first_ids == ["g0", "g1", "g2", "g3"]
         passed_grasps = {"g0", "g2"}
+        submitted = [
+            item["candidate"]["source_grasp_id"] in passed_grasps and index < 3
+            for index, item in enumerate(request["candidates"])
+        ]
         return {
             "schema_version": QUALIFICATION_SCHEMA,
             "planning_scene_revision": request["planning_scene_revision"],
@@ -135,15 +139,10 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
                         "qualification_binding_sha256"
                     ],
                     "execution_started": False,
-                    "verdict": (
-                        "PASS"
-                        if item["candidate"]["source_grasp_id"] in passed_grasps
-                        and index < 4
-                        else "FAIL"
-                    ),
-                    "reason": "qualified" if index < 4 else "not_submitted",
-                    "stages": [_pass_stage()] if index < 4 else [],
-                    "full_plan_submitted": index < 4,
+                    "verdict": "PASS" if submitted[index] else "FAIL",
+                    "reason": "qualified" if submitted[index] else "not_submitted",
+                    "stages": [_pass_stage()] if submitted[index] else [],
+                    "full_plan_submitted": submitted[index],
                 }
                 for index, item in enumerate(request["candidates"])
             ],
@@ -225,11 +224,11 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
     )
 
     assert len(captured["candidates"]) == 384
-    assert captured["funnel"]["full_plan_limit"] == 4
+    assert captured["funnel"]["full_plan_limit"] == 2
     assert captured["funnel"]["screening_mode"] == (
         "progressive_until_full_plan_capacity"
     )
-    assert captured["funnel"]["endpoint_pass_target"] == 4
+    assert captured["funnel"]["endpoint_pass_target"] == 2
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0", "g2"]
     assert cache.resolve(purpose="grasp", candidate_id="g1") is None
     retained_cache = cache.resolve(purpose="grasp", candidate_id="g0")

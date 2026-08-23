@@ -28,15 +28,16 @@ feeds target SAM3 and GraspGenX for the `robotiq_2f_85` embodiment. The service
 returns a host-only reserve pool of up to 200. After world-EEF compilation,
 deterministic source-aware SE(3) diversity retains at most 64 candidates across
 translation, approach, complete wrist rotation, score, and branch provenance.
-The private `openeta.moveit_candidate_funnel.v2` submits at most four complete
+The private `openeta.moveit_candidate_funnel.v2` submits at most two complete
 plans. Every full-plan PASS is retained in one equal-status qualified queue;
 there is no separate VLM exposure subset.
 
 In a combined task, a pregrasp AnyPlace call first freezes up to 96 absolute
-world object goals. The host screens at most four qualified grasp modes against
+world object goals. With the default grasp L5 bound, the host screens at most
+two qualified grasp modes against
 the complete goal batch, performs shallow compilation/structural checks for
 every constructed pair, and progressively runs endpoint checks until the
-four-slot plan-only capacity is filled or the batch is exhausted. This look-
+two-slot plan-only capacity is filled or the batch is exhausted. This look-
 ahead selects a grasp compatible with at least one object goal; it does not
 authorize placement execution.
 

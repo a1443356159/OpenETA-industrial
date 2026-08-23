@@ -37,12 +37,12 @@ before choosing the next tool call.
    VLM.
 2. Call grasp estimation only after that pool is ready. The host first runs the
    normal complete grasp funnel, then performs a bounded look-ahead over at most
-   four grasp PASS candidates and the current complete 96-goal pool. All
+   two grasp PASS candidates and the current complete 96-goal pool. All
    constructed pairs pass through exact coordinate compilation and conservative
    structural screening. The host then performs branch-fair endpoint screening
-   until four endpoint-PASS pairs fill the plan-only capacity, or exhausts the
-   pool when fewer than four pass. Unvisited pairs are NOT_EVALUATED, not failed;
-   globally at most four grasp-goal pairs receive plan-only. Only grasps
+   until two endpoint-PASS pairs fill the plan-only capacity, or exhausts the
+   pool when fewer than two pass. Unvisited pairs are NOT_EVALUATED, not failed;
+   globally at most two grasp-goal pairs receive plan-only. Only grasps
    compatible with at least one placement goal remain in the qualified queue,
    and the host activates its stable head; this look-ahead does not prove the
    later real execution.

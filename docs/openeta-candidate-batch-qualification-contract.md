@@ -490,8 +490,8 @@ the historical handler name.
 | `OPENETA_GRASP_DIVERSITY_POOL_SIZE` | Maximum compiled grasp batch selected by the current diversity policy | L1→L2 policy | 64 | integer `1..prepared grasp count` |
 | `OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE` | Maximum compiled placement batch selected by the current diversity policy | L1→L2 policy | 96 | integer `1..prepared placement count` |
 | `OPENETA_MOVEIT_IK_SEED_COUNT` | Deterministic seed count per endpoint | L3 | 8 | integer `1..64` |
-| `OPENETA_GRASP_FULL_PLAN_LIMIT` | Grasp full-plan submission limit per qualification run | L5 | 4 | integer `1..L4 eligible count` |
-| `OPENETA_ANYPLACE_FULL_PLAN_LIMIT` | Placement full-plan submission limit per qualification run | L5 | 4 | integer `1..L4 eligible count` |
+| `OPENETA_GRASP_FULL_PLAN_LIMIT` | Grasp full-plan submission limit per qualification run | L5 | 2 | integer `1..L4 eligible count` |
+| `OPENETA_ANYPLACE_FULL_PLAN_LIMIT` | Placement full-plan submission limit per qualification run | L5 | 2 | integer `1..L4 eligible count` |
 | `OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS` | Total post-attach placement qualification-run cap | workflow policy | 2 | proposed integer `1..2` |
 
 The redundant startup settings `OPENETA_GRASPGENX_MAX_CANDIDATES`,
@@ -522,7 +522,7 @@ proposals; adding a CLI/environment interface requires separate approval.
 | Proposed canonical setting | Owner | Current effective value | Proposed domain | Reason it must be separate |
 |---|---|---:|---|---|
 | `pregrasp_joint.grasp_branch_limit` | pregrasp scheduler | 4 | integer `1..4` | Controls how many qualified grasp modes receive goal compatibility checks |
-| `pregrasp_joint.full_plan_submission_limit` | L5 pregrasp-pair scheduler | 4 | integer `1..constructed_pair_count` | Joint proof budgeting is distinct from post-attach placement planning |
+| `pregrasp_joint.full_plan_submission_limit` | L5 pregrasp-pair scheduler | 2 | integer `1..constructed_pair_count` | Joint proof budgeting is distinct from post-attach placement planning |
 | `endpoint.pure_ik_budget_s` | L3a | 2.0 s | finite positive duration | Total shared budget across pure-IK seeds for one endpoint |
 | `endpoint.collision_ik_budget_s` | L3b | 2.0 s | finite positive duration | Total shared budget across collision-IK seeds for one endpoint |
 | `endpoint.state_validity_timeout_s` | L3b | 2.0 s | finite positive duration | Bounds each state-validity service operation without changing its verdict semantics |
@@ -536,10 +536,10 @@ change behavior; they are not approved as new configuration in this phase.
 O2 is decided: every constructed pregrasp pair enters L1-L2. With four grasp
 branches and a 96-goal batch this is at most `4 × 96 = 384` materialized and
 structurally checked pairs. L3/L4 traverse them in deterministic branch-fair
-order until four endpoint-PASS pairs have filled the downstream L5 capacity;
+order until two endpoint-PASS pairs have filled the downstream L5 capacity;
 if capacity is not filled, traversal exhausts the batch. There is no separate
 pair-screen hyperparameter: the progressive endpoint target is derived from
-the existing L5 capacity. L5 remains bounded to the same four pairs.
+the existing L5 capacity. L5 remains bounded to the same two pairs.
 
 ### Derived values that must not become independent knobs
 
@@ -626,10 +626,10 @@ A `QualificationSchedulingPolicy` needs fields for:
 - deterministic source and grasp-branch fairness;
 - complete L1/L2 structural coverage before progressive endpoint work;
 - a pregrasp L3/L4 stop target derived from downstream L5 capacity;
-- stable full-plan submission order for at most four L4-PASS candidates;
+- stable full-plan submission order for at most two L4-PASS candidates;
 - treatment of L4-PASS candidates that remain `NOT_EVALUATED_AT_L5`.
 
-It does not assign a semantic quality rank to the selected four. They are
+It does not assign a semantic quality rank to the selected two. They are
 submitted as insurance against individual planning failure, and every L5 PASS
 has equal qualification status. All selected submissions are attempted; a PASS
 does not stop evaluation of the remaining selected submissions.

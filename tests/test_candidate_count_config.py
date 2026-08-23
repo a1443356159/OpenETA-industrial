@@ -28,8 +28,26 @@ def test_candidate_services_have_only_reserve_defaults(tmp_path):
     ).raw_pool_size == 96
     assert inspect.signature(GraspGenXBackend).parameters["raw_pool_size"].default == 200
     assert DEFAULT_PREGRASP_JOINT_GRASP_BRANCH_LIMIT == 4
-    assert DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT == 4
+    assert DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT == 2
     assert not hasattr(CandidateFunnelConfig(), "graspgenx_exposure_limit")
+
+
+def test_service_full_plan_defaults_resolve_to_two(monkeypatch, tmp_path):
+    for name in (
+        "OPENETA_GRASP_FULL_PLAN_LIMIT",
+        "OPENETA_ANYPLACE_FULL_PLAN_LIMIT",
+        "OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    args = services.build_parser().parse_args(
+        ["status", "anyplace", "--state-dir", str(tmp_path)]
+    )
+
+    config = services._startup_funnel_config(args)
+
+    assert config.grasp_full_plan_limit == 2
+    assert config.anyplace_full_plan_limit == 2
+    assert config.pregrasp_joint_full_plan_limit == 2
 
 
 def test_removed_exposure_cli_is_not_registered(tmp_path):

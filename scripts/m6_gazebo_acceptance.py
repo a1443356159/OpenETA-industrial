@@ -47,8 +47,8 @@ fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增�
 读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
 拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
 目标 mask；运动前再分割绿色 placement_zone_marker 并按宿主 obligation 调用一次 AnyPlace，形成
-不向 VLM 暴露的 object-goal 池。宿主先完成普通 grasp 漏斗，再对最多 4 个 grasp PASS × 当前轮
-完整 96 个 object goal 做分层有限联查，全局最多 4 对进入 plan-only；仅保留至少有一个 place PASS
+不向 VLM 暴露的 object-goal 池。宿主先完成普通 grasp 漏斗，再对最多 2 个 grasp PASS × 当前轮
+完整 96 个 object goal 做分层有限联查，全局最多 2 对进入 plan-only；仅保留至少有一个 place PASS
 的 grasp。宿主按稳定资格队列激活首个等价 PASS，并完成不可执行的内部
 host_candidate_compilation grasp event，
 随后主 VLM 执行真实接近、close，
@@ -408,7 +408,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             if isinstance(value, int) and not isinstance(value, bool)
         ):
             errors.append("GraspGenX diversity pool evidence is missing")
-        if not any(1 <= value <= 4 for value in base._values(final_grasp, "full_plan_submitted_count") if isinstance(value, int)):
+        if not any(1 <= value <= 2 for value in base._values(final_grasp, "full_plan_submitted_count") if isinstance(value, int)):
             errors.append("GraspGenX full-plan submission bound is missing")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
@@ -420,7 +420,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         }
         if not _has_minimum_int_value(anyplace, "model_raw_candidate_count", 96):
             errors.append("AnyPlace model raw pool evidence is missing")
-        if not any(1 <= value <= 4 for value in base._values(anyplace, "full_plan_submitted_count") if isinstance(value, int)):
+        if not any(1 <= value <= 2 for value in base._values(anyplace, "full_plan_submitted_count") if isinstance(value, int)):
             errors.append("AnyPlace full-plan submission bound is missing")
         candidate_counts = [
             int(value)
