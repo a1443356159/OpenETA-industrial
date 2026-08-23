@@ -1471,33 +1471,6 @@ def _host_obligation_decision(
                 }
             },
         )
-    grasp_compile = tool_context.get("grasp_compile_obligation")
-    if (
-        isinstance(grasp_compile, dict)
-        and grasp_compile.get("semantic_hints_reusable") is True
-        and grasp_compile.get("required_tool") == "compile_grasp_seed"
-        and isinstance(grasp_compile.get("required_parameters"), dict)
-        and tools.can_execute("compile_grasp_seed")
-    ):
-        return PlannerDecision(
-            action_type="tool_call",
-            action="compile_grasp_seed",
-            parameters=dict(grasp_compile["required_parameters"]),
-            reasoning=(
-                "The active fallback candidate uses the previously established "
-                "semantic grasp hints; host joins it to exact current calibration "
-                "and scene state without model JSON transcription."
-            ),
-            metadata={
-                "host_obligation": {
-                    "schema_version": grasp_compile.get("schema_version"),
-                    "tool": "compile_grasp_seed",
-                    "candidate_id": grasp_compile.get("candidate_id"),
-                    "stage": "grasp_compile",
-                }
-            },
-        )
-    placement_transform = tool_context.get("placement_transform_obligation")
     placement_motion = tool_context.get("placement_motion_guidance")
     placement_release = tool_context.get("placement_release_obligation")
     if isinstance(placement_release, dict):
@@ -1576,29 +1549,6 @@ def _host_obligation_decision(
                 }
             },
         )
-    if isinstance(placement_transform, dict):
-        tool_name = str(placement_transform.get("required_tool") or "")
-        parameters = placement_transform.get("required_parameters")
-        if (
-            tool_name == "camera_pose_to_world"
-            and isinstance(parameters, dict)
-            and tools.can_execute(tool_name)
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action=tool_name,
-                parameters=parameters,
-                reasoning=(
-                    "Attachment passed; host joined the retained rank-0 AnyPlace "
-                    "pose with its camera extrinsics for deterministic transformation."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": placement_transform.get("schema_version"),
-                        "tool": tool_name,
-                    }
-                },
-            )
     if isinstance(placement_motion, dict):
         stage = str(placement_motion.get("stage") or "")
         parameters = placement_motion.get("required_parameters")
@@ -2884,26 +2834,16 @@ def _validate_anygrasp_candidate_policy(
         return [
             "A retained ranked grasp-estimation result already has active candidate "
             f"{active_id!r}. Do not replace or rerank the candidate queue after fresh "
-            "segmentation. Continue this candidate with compile_grasp_seed, or wait for "
-            "a structured candidate-specific rejection to activate the next retained "
+            "segmentation. Continue from the host-generated candidate compilation, or "
+            "wait for a structured candidate-specific rejection to activate the next retained "
             "candidate. Rerun grasp_pose_estimate only after the retained queue is exhausted."
         ]
     if status == "accepted":
         return []
-    if status == "selection_required" and decision.action == "compile_grasp_seed":
-        candidate_id = _planner_grasp_candidate_id(decision.parameters)
-        pass_ids = {
-            str(candidate.get("id") or "")
-            for candidate in policy.get("candidates", [])
-            if isinstance(candidate, dict)
-        }
-        if candidate_id in pass_ids:
-            return []
-        return ["Select one grasp_candidate_id from the host-qualified MoveIt PASS set."]
     target_tool = (
         _safety_decision_tool_name(decision) if _is_safety_decision(decision) else decision.action
     )
-    if target_tool not in {"compile_grasp_seed", "camera_pose_to_world", "move_to"}:
+    if target_tool not in {"camera_pose_to_world", "move_to"}:
         return []
     source_tool = str(policy.get("source_tool") or "grasp_pose_estimate")
     source_backend = str(policy.get("source_backend") or source_tool)
@@ -2922,8 +2862,8 @@ def _validate_anygrasp_candidate_policy(
     active_id = str(active.get("id") or "")
     if target_tool == "camera_pose_to_world" and _planner_is_anyplace_pose(decision.parameters):
         return [
-            "Raw AnyPlace poses are not valid EEF targets; select an id with "
-            "compile_placement_seed."
+            "Raw AnyPlace poses are not valid EEF targets; wait for the host-owned "
+            "qualified-candidate compilation event."
         ]
     if (
         source_tool in {"grasp_pose_estimate", "anygrasp"}
@@ -2932,7 +2872,7 @@ def _validate_anygrasp_candidate_policy(
     ):
         return [
             "camera_pose_to_world does not compile the GraspNet grasp frame into the "
-            "Panda EEF frame. Call compile_grasp_seed with the active candidate."
+            "robot EEF frame. Use only the host-generated compiled grasp."
         ]
     if (
         source_tool in {"grasp_pose_estimate", "anygrasp"}
@@ -2940,14 +2880,13 @@ def _validate_anygrasp_candidate_policy(
         and not isinstance(tool_context.get("grasp_execution"), dict)
     ):
         return [
-            "Raw grasp-estimator move_to is blocked. Call compile_grasp_seed and follow the "
-            "host-generated grasp_execution stages."
+            "Raw grasp-estimator move_to is blocked. The host compilation event is "
+            "missing; use only host-generated grasp_execution stages."
         ]
     supplied_id = _planner_grasp_candidate_id(decision.parameters)
     if not supplied_id:
         route = (
-            "Pass the complete candidate to compile_grasp_seed and use only its "
-            "host-generated staged EEF poses."
+            "Use only the host-generated staged EEF poses."
             if source_tool in {"grasp_pose_estimate", "anygrasp"}
             else "Pass the complete candidate to camera_pose_to_world and the "
             "complete world_pose result to safety/motion tools."
@@ -3210,7 +3149,6 @@ def _validate_pick_place_anyplace_obligation(
     }
     if "anyplace" not in executable_tools:
         return []
-    placement_policy = tool_context.get("placement_candidate_policy")
     execution = tool_context.get("grasp_execution")
     attachment = tool_context.get("attachment_gate")
     attachment_passed = (
@@ -3246,27 +3184,9 @@ def _validate_pick_place_anyplace_obligation(
         decision.parameters
     ):
         return [
-            "Raw AnyPlace poses cannot be transformed or executed directly. Select a "
-            "retained id with compile_placement_seed."
+            "Raw AnyPlace poses cannot be transformed or executed directly. Use only "
+            "the host-generated placement compilation event."
         ]
-    if decision.action == "compile_placement_seed":
-        if not isinstance(placement_policy, dict):
-            return ["No retained AnyPlace candidate set is available for placement compilation."]
-        allowed = list(placement_policy.get("candidate_queue") or [])
-        rejected = {
-            str(item.get("candidate_id") or "")
-            for item in placement_policy.get("rejected_candidates", [])
-            if isinstance(item, dict)
-        }
-        candidate_id = str(decision.parameters.get("placement_candidate_id") or "")
-        if set(decision.parameters) != {"placement_candidate_id"}:
-            return [
-                "The main VLM selects only placement_candidate_id; the host owns the "
-                "object goal, attachment transform, calibration, and scene state."
-            ]
-        if candidate_id not in allowed or candidate_id in rejected:
-            return ["Select one non-rejected id from the retained AnyPlace candidate queue."]
-        return []
     policy = tool_context.get("grasp_candidate_policy")
     required_placement = (
         placement.get("required_parameters") if isinstance(placement, dict) else None
@@ -3307,51 +3227,6 @@ def _canonicalize_host_parameters(
 
     if decision.action_type.lower().strip() != "tool_call":
         return []
-    if decision.action == "compile_grasp_seed":
-        obligation = tool_context.get("grasp_compile_obligation")
-        required = obligation.get("required_parameters") if isinstance(obligation, dict) else None
-        if not isinstance(required, dict):
-            return []
-        parameters = dict(decision.parameters)
-        canonicalizations: list[JsonDict] = []
-        for field in ("approach_mode", "candidate_fallback", "fallback_reason"):
-            if field in required or field not in parameters:
-                continue
-            parameters.pop(field, None)
-            canonicalizations.append(
-                {
-                    "field": field,
-                    "tool": "compile_grasp_seed",
-                    "reason": "remove_unowned_grasp_compile_parameter",
-                }
-            )
-        for field in (
-            "camera_pose",
-            "camera_extrinsics",
-            "camera_frame_id",
-            "scene_epoch",
-            "target_geometry_family",
-            "strategy_id",
-            "pregrasp_distance_m",
-            "approach_mode",
-            "candidate_fallback",
-            "fallback_reason",
-        ):
-            if field not in required:
-                continue
-            canonical = required.get(field)
-            if parameters.get(field) == canonical:
-                continue
-            parameters[field] = canonical
-            canonicalizations.append(
-                {
-                    "field": field,
-                    "tool": "compile_grasp_seed",
-                    "reason": "bind_grasp_compile_to_current_host_state",
-                }
-            )
-        decision.parameters = parameters
-        return canonicalizations
     if decision.action == "retrieve_asset_reference":
         current_rgb = [
             artifact
@@ -3804,31 +3679,12 @@ def _build_tool_context_payload(
                 else {}
             ),
         ),
-        "grasp_compile_obligation": _grasp_compile_obligation(
-            observation,
-            grasp_policy=memory_context.get("grasp_candidate_policy"),
-            retained=memory_context.get("retained_targeted_grasp"),
-            execution=memory_context.get("grasp_execution"),
-            scene_epoch=memory_context.get("scene_epoch"),
-            asset_reference=memory_context.get("target_asset_reference"),
-            working_artifacts=(
-                memory_context.get("working_memory", {}).get("artifacts", {})
-                if isinstance(memory_context.get("working_memory"), dict)
-                else {}
-            ),
-        ),
         "placement_obligation": _placement_obligation(
             observation=observation,
             object_detection=memory_context.get("placement_object_detection"),
             region_detection=memory_context.get("placement_region_detection"),
             camera_artifacts=camera_artifacts,
             memory_context=memory_context,
-        ),
-        "placement_transform_obligation": _placement_transform_obligation(
-            observation,
-            memory=memory,
-            execution=memory_context.get("grasp_execution"),
-            attachment=memory_context.get("attachment_gate"),
         ),
         "placement_motion_guidance": _placement_motion_guidance(
             observation,
@@ -4724,95 +4580,6 @@ def _grasp_calibration_refresh_obligation(
     }
 
 
-def _grasp_compile_obligation(
-    observation: EnvObservation,
-    *,
-    grasp_policy: object,
-    retained: object,
-    execution: object,
-    scene_epoch: object,
-    asset_reference: object,
-    working_artifacts: object = None,
-) -> JsonDict | None:
-    """Bind an active camera grasp to exact host-owned calibration and epoch."""
-
-    if isinstance(execution, dict) or not isinstance(grasp_policy, dict):
-        return None
-    if str(grasp_policy.get("status") or "") != "active":
-        return None
-    if str(grasp_policy.get("source_tool") or "") not in {
-        "grasp_pose_estimate",
-        "anygrasp",
-    }:
-        return None
-    candidate = grasp_policy.get("active_candidate")
-    if not isinstance(candidate, dict) or str(candidate.get("frame") or "") != "camera":
-        return None
-    safety_request = _enhanced_grasp_sensor_safety_request(
-        grasp_policy=grasp_policy,
-        retained=retained,
-        scene_epoch=scene_epoch,
-    )
-    if safety_request is not None and not _matching_sensor_safety_check(
-        working_artifacts,
-        safety_request=safety_request,
-    ):
-        return None
-    source = retained.get("source") if isinstance(retained, dict) else None
-    frame_id = str(source.get("camera_frame_id") or "") if isinstance(source, dict) else ""
-    if not frame_id:
-        return None
-    camera = next(
-        (camera for camera in observation.cameras if camera.frame_id == frame_id),
-        None,
-    )
-    if camera is None or not camera.extrinsics:
-        return None
-
-    required: JsonDict = {
-        "camera_pose": dict(candidate),
-        "camera_extrinsics": dict(camera.extrinsics),
-        "camera_frame_id": frame_id,
-        "scene_epoch": (
-            int(scene_epoch)
-            if isinstance(scene_epoch, int) and not isinstance(scene_epoch, bool)
-            else 0
-        ),
-    }
-    semantic_hints = grasp_policy.get("compile_hints")
-    if not isinstance(semantic_hints, dict) and isinstance(asset_reference, dict):
-        verification = asset_reference.get("exact_instance_verification")
-        family = (
-            str(verification.get("grasp_geometry_family") or "")
-            if isinstance(verification, dict)
-            and str(verification.get("decision") or "").lower() == "match"
-            else ""
-        )
-        if family and family != "unknown":
-            semantic_hints = {"target_geometry_family": family}
-    reusable = isinstance(semantic_hints, dict)
-    if isinstance(semantic_hints, dict):
-        for field in (
-            "target_geometry_family",
-            "strategy_id",
-            "pregrasp_distance_m",
-            "approach_mode",
-            "candidate_fallback",
-            "fallback_reason",
-        ):
-            value = semantic_hints.get(field)
-            if value not in (None, ""):
-                required[field] = value
-    return {
-        "schema_version": "openeta.grasp_compile_obligation.v1",
-        "required_tool": "compile_grasp_seed",
-        "required_parameters": required,
-        "camera_frame_id": frame_id,
-        "candidate_id": candidate.get("id"),
-        "semantic_hints_reusable": reusable,
-    }
-
-
 def _grasp_sensor_safety_obligation(
     *,
     grasp_policy: object,
@@ -4821,7 +4588,7 @@ def _grasp_sensor_safety_obligation(
     scene_epoch: object,
     working_artifacts: object,
 ) -> JsonDict | None:
-    if isinstance(execution, dict):
+    if isinstance(execution, dict) and execution.get("status") == "completed":
         return None
     request = _enhanced_grasp_sensor_safety_request(
         grasp_policy=grasp_policy,
@@ -5087,56 +4854,6 @@ def _latest_anyplace_failure(memory_context: JsonDict) -> str | None:
                 return None
             return str(result.get("content") or "AnyPlace failed.")
     return None
-
-
-def _placement_transform_obligation(
-    observation: EnvObservation,
-    *,
-    memory: AgentMemory,
-    execution: object,
-    attachment: object,
-) -> JsonDict | None:
-    """Expose id-only placement selection after attachment; never select for the VLM."""
-
-    if (
-        not isinstance(execution, dict)
-        or execution.get("status") != "completed"
-        or execution.get("stage") != "attached"
-        or execution.get("attachment_mode") == "articulated_handle"
-        or not isinstance(attachment, dict)
-        or attachment.get("status") != "resolved"
-        or attachment.get("verdict") != "PASS"
-    ):
-        return None
-    policy = memory.placement_candidate_policy()
-    if not isinstance(policy, dict) or policy.get("status") != "selection_required":
-        return None
-    rejected = {
-        str(item.get("candidate_id") or "")
-        for item in policy.get("rejected_candidates", [])
-        if isinstance(item, dict)
-    }
-    remaining = [
-        str(candidate_id)
-        for candidate_id in policy.get("candidate_queue", [])
-        if str(candidate_id) not in rejected
-    ]
-    if not remaining:
-        return None
-    return {
-        "schema_version": "openeta.placement_selection_obligation.v2",
-        "status": "selection_required",
-        "required_tool": "compile_placement_seed",
-        "allowed_parameters": {
-            "placement_candidate_id": remaining,
-        },
-        "attachment_transform_sha256": policy.get("attachment_transform_sha256"),
-        "selection_source": "main_agent_vlm",
-        "rule": (
-            "The main VLM must choose one retained candidate id. The host binds pose, "
-            "world object goal, measured attachment transform, scene revision, and calibration."
-        ),
-    }
 
 
 def _placement_motion_guidance(

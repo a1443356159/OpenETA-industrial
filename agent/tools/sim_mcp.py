@@ -716,8 +716,8 @@ class SimulatorMcpToolProxy:
         is_grasp_candidate = _is_ranked_grasp_candidate_pose(parameters)
         if is_anyplace_pose:
             raise ValueError(
-                "Raw AnyPlace poses are not executable; select the retained candidate "
-                "with compile_placement_seed and use only its host-compiled EEF poses."
+                "Raw AnyPlace poses are not executable; use only EEF poses from the "
+                "host-owned qualified-candidate compilation event."
             )
         elif is_grasp_candidate and self.config.forward_grasp_candidate_orientation:
             arguments.update(

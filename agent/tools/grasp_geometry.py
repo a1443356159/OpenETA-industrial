@@ -146,11 +146,19 @@ def build_compile_grasp_seed_handler(
                 # the host has advanced this counter after real mutations.
                 # Prefer the runtime value so cache lookup and memory capture
                 # bind the same scene version.
-                requested_epoch = (
-                    memory.get("scene_epoch")
-                    if isinstance(memory, Mapping)
-                    else observation_metadata.get("scene_epoch")
+                host_binding = context.metadata.get(
+                    "_openeta_host_candidate_compilation_binding"
                 )
+                host_binding = (
+                    host_binding if isinstance(host_binding, Mapping) else {}
+                )
+                requested_epoch = host_binding.get("scene_epoch")
+                if requested_epoch is None:
+                    requested_epoch = (
+                        memory.get("scene_epoch")
+                        if isinstance(memory, Mapping)
+                        else observation_metadata.get("scene_epoch")
+                    )
                 if requested_epoch is None:
                     requested_epoch = observation_metadata.get("scene_epoch")
                 scene_epoch = (
@@ -158,7 +166,10 @@ def build_compile_grasp_seed_handler(
                     if requested_epoch is not None
                     else None
                 )
-                revision = observation_metadata.get("planning_scene_revision")
+                revision = host_binding.get(
+                    "planning_scene_revision",
+                    observation_metadata.get("planning_scene_revision"),
+                )
                 if isinstance(revision, bool) or (
                     revision is not None and not isinstance(revision, int)
                 ):
@@ -182,6 +193,8 @@ def build_compile_grasp_seed_handler(
                 parameters["grasp_candidate_id"] = candidate_id
                 parameters["camera_pose"] = dict(entry["candidate"])
                 parameters["scene_epoch"] = scene_epoch
+                if host_binding:
+                    parameters["selection_source"] = "host_qualified_queue"
                 if parameters.get("qualification_profile_sha256") != profile_sha256:
                     raise GraspGeometryError(
                         "MoveIt qualification calibration proof is stale"
@@ -294,16 +307,24 @@ def build_compile_placement_seed_handler(
             # placement policy records that host-owned binding alongside the
             # candidate queue; use it to resolve the exact proof that was
             # exposed to the planner.
-            epoch_value = (
-                placement_policy.get("scene_epoch")
-                if isinstance(placement_policy, Mapping)
-                else observation_metadata.get("scene_epoch")
+            host_binding = context.metadata.get(
+                "_openeta_host_candidate_compilation_binding"
             )
-            revision_value = (
-                placement_policy.get("planning_scene_revision")
-                if isinstance(placement_policy, Mapping)
-                else observation_metadata.get("planning_scene_revision")
-            )
+            host_binding = host_binding if isinstance(host_binding, Mapping) else {}
+            epoch_value = host_binding.get("scene_epoch")
+            if epoch_value is None:
+                epoch_value = (
+                    placement_policy.get("scene_epoch")
+                    if isinstance(placement_policy, Mapping)
+                    else observation_metadata.get("scene_epoch")
+                )
+            revision_value = host_binding.get("planning_scene_revision")
+            if revision_value is None:
+                revision_value = (
+                    placement_policy.get("planning_scene_revision")
+                    if isinstance(placement_policy, Mapping)
+                    else observation_metadata.get("planning_scene_revision")
+                )
             entry = qualification_cache.resolve(
                 purpose="placement",
                 candidate_id=candidate_id,
@@ -318,6 +339,8 @@ def build_compile_placement_seed_handler(
             parameters = dict(proof_parameters)
             parameters["placement_candidate_id"] = candidate_id
             parameters["placement_candidate"] = dict(entry["candidate"])
+            if host_binding:
+                parameters["selection_source"] = "host_qualified_queue"
             if parameters.get("qualification_profile_sha256") != profile_sha256:
                 raise GraspGeometryError("MoveIt qualification calibration proof is stale")
             expected_start_hash = parameters.get("qualified_start_state_sha256")
@@ -647,10 +670,14 @@ def compile_grasp_seed(
         "schema_version": COMPILED_GRASP_SCHEMA,
         "compiled_grasp_id": compiled_id,
         "candidate_id": candidate_id,
+        "selection_source": str(
+            parameters.get("selection_source") or "host_qualified_queue"
+        ),
         "camera_frame_id": str(parameters.get("camera_frame_id") or ""),
         "scene_epoch": scene_epoch,
         "target_class": target_geometry_family,
         "target_geometry_family": target_geometry_family,
+        "source_backend": str(candidate.get("source_backend") or ""),
         **({"approach_mode": approach_mode} if approach_mode else {}),
         "calibration_id": calibration_id,
         "calibration_status": str(profile.get("status") or ""),
@@ -823,7 +850,9 @@ def compile_placement_seed(
         ).hexdigest(),
         "scene_epoch": scene_epoch,
         "scene_revision": scene_revision,
-        "selection_source": "main_agent_vlm",
+        "selection_source": str(
+            parameters.get("selection_source") or "host_qualified_queue"
+        ),
         "profile_sha256": profile_sha256,
         "calibration_id": str(profile.get("calibration_id") or ""),
         "orientation_clamped": False,

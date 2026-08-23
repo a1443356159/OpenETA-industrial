@@ -1389,71 +1389,6 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             batchable=False,
         ),
         ToolSpec(
-            name="compile_grasp_seed",
-            category="geometry",
-            description=(
-                "Compile one active normalized camera-frame grasp seed into staged "
-                "world-frame EEF poses with the host-owned "
-                "read-only embodiment calibration and an optional task-family "
-                "strategy. Unknown geometry families use the generic calibrated "
-                "transform instead of being rejected."
-            ),
-            parameters={
-                "purpose": "grasp (default); placement is not supported",
-                "grasp_candidate_id": (
-                    "for purpose=grasp, the only planner-selected field; the host "
-                    "binds the qualified candidate geometry"
-                ),
-                "camera_pose": "complete active normalized camera-frame grasp candidate",
-                "camera_extrinsics": ("matching camera calibration from the estimator observation"),
-                "camera_frame_id": "matching camera frame id for provenance",
-                "target_geometry_family": (
-                    "optional truthful geometry/affordance hint such as upright_can, "
-                    "upright_bottle, boxed_item, bowl, apple, articulated_handle, "
-                    "or drawer_handle; "
-                    "unknown values are allowed"
-                ),
-                "target_class": "legacy alias for target_geometry_family",
-                "strategy_id": (
-                    "optional explicit session-local strategy id; omit for deterministic "
-                    "automatic matching or generic fallback"
-                ),
-                "approach_mode": (
-                    "host-owned articulated-handle mode: top_down, front, or side; "
-                    "the agent must not invent or override it"
-                ),
-                "candidate_fallback": (
-                    "host-owned true only for the one global score fallback after all "
-                    "articulated-handle modes fail"
-                ),
-                "fallback_reason": "host-owned structured fallback provenance",
-                "scene_epoch": (
-                    "legacy non-qualified path only; qualified selection binds the "
-                    "current host-owned epoch"
-                ),
-                "pregrasp_distance_m": (
-                    "optional requested approach standoff in [0.04, 0.16] m; "
-                    "the host enforces at least 0.15 m along the world-frame grasp normal"
-                ),
-            },
-            effect=ToolEffect.READ_ONLY,
-            batchable=False,
-        ),
-        ToolSpec(
-            name="compile_placement_seed",
-            category="geometry",
-            description=(
-                "Select one MoveIt-PASS AnyPlace object-goal candidate by id. The host "
-                "binds its world object pose to the measured frozen T_eef_object_attached "
-                "and returns newly compiled EEF hover/release poses."
-            ),
-            parameters={
-                "placement_candidate_id": "the only planner-selected field",
-            },
-            effect=ToolEffect.READ_ONLY,
-            batchable=False,
-        ),
-        ToolSpec(
             name="compute_wrist_alignment",
             category="geometry",
             description=(
@@ -1461,7 +1396,7 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                 "mask, aligned depth and camera calibration. It does not move the robot."
             ),
             parameters={
-                "compiled_grasp": "complete compile_grasp_seed output",
+                "compiled_grasp": "complete host-generated compiled grasp seed",
                 "target_mask": "fresh full-frame wrist-camera target mask path",
                 "depth": "fresh aligned wrist depth PNG path",
                 "intrinsics": "matching wrist fx/fy/cx/cy/scale",

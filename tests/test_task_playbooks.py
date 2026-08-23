@@ -122,12 +122,26 @@ def test_success_rollout_extracts_non_executable_candidate(tmp_path: Path) -> No
         },
         {
             "event": {
-                "phase": "start",
-                "name": "compile_grasp_seed",
-                "parameters": {
-                    "target_geometry_family": "upright_can",
-                    "strategy_id": "top-down",
-                    "camera_pose": {"width": 0.06, "source_backend": "anygrasp"},
+                "phase": "end",
+                "name": "grasp_pose_estimate",
+                "details": {
+                    "outputs": {
+                        "host_candidate_compilation": {
+                            "schema_version": "openeta.host_candidate_compilation.v1",
+                            "event_type": "candidate_compiled",
+                            "purpose": "grasp",
+                            "candidate_id": "grasp_000",
+                            "execution_started": False,
+                            "compiled_seed": {
+                                "schema_version": "openeta.compiled_grasp_seed.v1",
+                                "candidate_id": "grasp_000",
+                                "target_geometry_family": "upright_can",
+                                "strategy_id": "top-down",
+                                "gripper_width_m": 0.06,
+                                "source_backend": "anygrasp",
+                            },
+                        }
+                    }
                 },
             }
         },
@@ -174,4 +188,12 @@ def test_success_rollout_extracts_non_executable_candidate(tmp_path: Path) -> No
     assert candidate["scope"]["task_text_sha256"] == task_text_sha256("pick up test can")
     assert candidate["guidance"]["observed_object_queries"] == ["test can"]
     assert candidate["guidance"]["successful_stage_sequence"] == ["full_lift"]
+    assert candidate["guidance"]["successful_grasp_signatures"] == [
+        {
+            "geometry_family": "upright_can",
+            "strategy_id": "top-down",
+            "gripper_width_m": 0.06,
+            "backend": "anygrasp",
+        }
+    ]
     assert "xyz" not in json.dumps(candidate["guidance"])

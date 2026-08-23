@@ -13,7 +13,6 @@ allowed_tools:
   - select_sam3_detection
   - reject_sam3_detections
   - anyplace
-  - compile_placement_seed
   - move_to
   - gripper_control
   - close_simulator_env
@@ -34,12 +33,13 @@ before choosing the next tool call.
    VLM.
 2. Call grasp estimation only after that pool is ready. The host first runs the
    normal complete grasp funnel, then performs a bounded look-ahead over at most
-   four grasp PASS candidates and the current complete 96-goal pool. The cheap
-   and IK stages inspect the complete pool; globally at most four grasp-goal
-   pairs receive plan-only. Select only a grasp that remains in
-   the exposed list; its look-ahead means the grasp is compatible with at least
-   one placement goal, not that later execution is already proven.
-3. Complete the pickup using the selected grasp. After closing the gripper,
+   four grasp PASS candidates and the current complete 96-goal pool. All
+   constructed pairs pass through coordinate, workspace, pure-IK, collision-IK
+   and endpoint screening; globally at most four grasp-goal
+   pairs receive plan-only. Only grasps compatible with at least one placement
+   goal remain in the qualified queue, and the host activates its stable head;
+   this look-ahead does not prove the later real execution.
+3. Complete the pickup using the host-activated grasp. After closing the gripper,
    require the native attach acknowledgement, fixed lift, and attachment PASS.
    Executable placement candidate selection, placement compilation, and motion
    remain blocked until this gate completes.
@@ -57,21 +57,14 @@ before choosing the next tool call.
    qualification funnel. The earlier look-ahead trajectory is never reused as
    executable proof. Only a zero-PASS frozen requalification invokes one real
    new-seed AnyPlace inference on the same observation.
-5. Select one retained AnyPlace candidate id using its stable contact-face
-   metadata, full object-goal rotation, projection, conservative region
-   clearance, score, and candidate image. Prefer an explicitly stable support
-   face; when that metadata is absent, prefer the object-goal rotation with the
-   smallest tilt from a gravity-aligned support orientation and then the larger
-   region clearance. Do not select solely because its projected center is
-   closest to the region center. Call `compile_placement_seed` with only that
-   `placement_candidate_id`. The host binds the full object goal, measured
-   attachment transform, current start state, camera calibration, and
-   planning-scene revision. Never send a raw AnyPlace pose to
-   `camera_pose_to_world` or `move_to`.
-   Every candidate exposed by `anyplace` has already passed the host funnel;
-   failed and unsubmitted candidates are absent. Never skip the first exposed
-   id because task or scenario text mentions that an earlier candidate was
-   rejected—the rejected id is not in this list.
+5. Every retained AnyPlace candidate has passed the full host funnel; failed,
+   UNKNOWN and unsubmitted candidates are absent, and every PASS has equal
+   qualification status. The host deterministically activates the stable queue
+   head and compiles it as an internal transition. Require the immutable
+   `host_candidate_compilation` event to bind the full object goal, measured
+   attachment transform, current start state, calibration, scene epoch and
+   PlanningScene revision with `execution_started=false`. Never send a raw
+   AnyPlace pose to `camera_pose_to_world` or `move_to`.
 6. Move directly to the compiled pre-place hover, then descend to the compiled
    release pose. Preserve its full wrist rotation and use the placement motion
    profile; MoveIt computes the joint path under the complete planning scene.
@@ -117,8 +110,9 @@ before choosing the next tool call.
 - If the target is occluded, observe from another camera or request a broader
   scene query before choosing a release pose.
 - If MoveIt rejects a plan before execution starts, reject only that candidate
-  and select another retained candidate. Never blindly retry the same request
-  fingerprint or describe the coordinate as permanently unreachable.
+  and let the host advance to the next precompiled retained candidate. Never
+  blindly retry the same request fingerprint or describe the coordinate as
+  permanently unreachable.
 - If the object remains in the gripper after opening, retry `gripper_control`
   once, observe, then ask for help or replan.
 - Never release an object from stale perception. Observe again after every

@@ -20,7 +20,6 @@ allowed_tools:
   - close_simulator_env
   - python_exec
   - observe
-  - compile_grasp_seed
   - compute_wrist_alignment
   - camera_pose_to_world
   - move_to
@@ -103,14 +102,13 @@ ManiSkill/SAPIEN camera metadata may use `pos + quat_xyzw` from
 If a non-grasp perception tool returns a camera-frame pose, treat it as OpenCV
 camera frame unless the result says otherwise and use `camera_pose_to_world` with
 the matching current camera calibration. A normalized `grasp_pose_estimate`
-candidate is a stricter case: pass its complete camera-frame candidate to
-`compile_grasp_seed`, which combines the
-camera transform with the staged GraspNet-to-Panda-EEF calibration and, when
-applicable, a session-local task-family strategy. Calibration selection is based
-on environment/robot identity and is not an object-class allowlist. If no strategy
-matches an honestly reported geometry family, compilation preserves the estimator
-orientation and approach under the physical gripper limits. Do not send a normalized
-grasp pose directly to `camera_pose_to_world` or simulator control tools.
+candidate is a stricter case: the host activates the stable head of the
+MoveIt-PASS queue and internally combines it with the camera transform, staged
+GraspNet-to-EEF calibration and any session-local task-family strategy. This
+produces a non-executing `host_candidate_compilation` event before motion.
+Calibration selection is based on environment/robot identity and is not an
+object-class allowlist. Do not send a normalized grasp pose directly to
+`camera_pose_to_world` or simulator control tools.
 
 Simulator control tools should accept world-frame targets. If a `move_to`
 argument carries `target_pose.frame`, it must be `world`.

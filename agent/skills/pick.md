@@ -20,7 +20,6 @@ allowed_tools:
   - grasp_pose_estimate
   - reject_sam3_detections
   - activate_final_grasp_candidate
-  - compile_grasp_seed
   - compute_wrist_alignment
   - camera_pose_to_world
   - obstacle_avoidance
@@ -87,32 +86,26 @@ Use as text guidance only, not an executable macro. Inspect each result.
    If candidate depth was used, follow the host-generated
    `grasp_sensor_safety_obligation`: `obstacle_avoidance` must return
    `clear=true` for the exact candidate, scene epoch, report, and sensor-only
-   safety artifacts before `compile_grasp_seed` becomes available.
+   safety artifacts before any motion from the host-compiled queue head may run.
 8. Read the normalized grasp candidate list. Candidate poses use the
    camera/OpenCV GraspNet convention and are sorted by backend-local score.
    Scores are not comparable across backends. The runtime records
    `grasp_candidate_policy`: rank 0 is the initial `active_candidate`; lower
-   ranked candidates are fallbacks and must not be selected early.
+   ranked candidates are fallbacks and are not activated ahead of the stable
+   queue order. Candidates
+   that passed full plan-only have equal qualification status; the host
+   deterministically activates the stable queue head.
    When selecting the SAM3 mask, include truthful
    `target_geometry_family` (`upright_can`, `upright_bottle`, `boxed_item`,
    `bowl`, `apple`, `drawer_handle`, or `other`) only when visually clear. It is
    task evidence for strategy matching, not a calibration allowlist.
-9. Before grasp motion, call `compile_grasp_seed` with:
-   - `camera_pose`: the complete `grasp_candidate_policy.active_candidate`,
-     preserving its id, camera-frame rotation/translation, width, and dimensions.
-   - `camera_extrinsics`: the matching `camera_packet.extrinsics` from the same
-     observe/render camera used for RGB and depth.
-   - `camera_frame_id`: the matching camera frame id, such as `agentview`.
-   - `scene_epoch`: copy the current host `scene_epoch` exactly.
-   - `target_geometry_family`: optional truthful hint; omit when uncertain and
-     never relabel an object to match a strategy.
-   - `strategy_id`: optional session-local strategy backed by prior evidence.
-   Calibration is not an object allowlist; no strategy match is required. Compiled
-   poses are references. Do not use `camera_pose_to_world` for normalized grasps.
-   Issue exactly one `compile_grasp_seed` call for the selected candidate in a
-   planner turn. It is a single-candidate compiler, so do not emit concurrent or
-   duplicate compile calls. After a successful compile, continue with its staged
-   poses instead of compiling the same candidate again.
+9. Candidate compilation is a host-owned transition, not an AgentTool. After
+   qualification, require `host_candidate_compilation` with
+   `execution_started=false`, the active qualified id, current scene epoch and
+   PlanningScene revision before grasp motion. The host owns the complete
+   candidate, matching camera calibration, TCP profile, strategy binding and
+   proof hashes. Never send a normalized grasp pose to `camera_pose_to_world`
+   or construct world EEF poses in the planner.
 10. Follow `grasp_execution` one observed atomic edge at a time. The host opens only
    when the latched command is not already open. Hover is at least 0.15 m opposite
    world-frame `approach_world_xyz`, not unconditionally world `+Z`. At hover, use

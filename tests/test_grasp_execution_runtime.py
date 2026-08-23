@@ -704,28 +704,114 @@ def test_articulated_fail_open_advances_candidate_without_reviewer_metadata() ->
     assert memory.articulated_attachment_probe() is None
 
 
-def _compiled(memory: AgentMemory) -> dict:
+def _compiled_candidate(candidate: dict, *, scene_epoch: int = 0) -> dict:
     profile = json.loads(DEFAULT_GRASP_PROFILE.read_text(encoding="utf-8"))
     return compile_grasp_seed(
         {
-            "camera_pose": memory.anygrasp_candidate_policy()["active_candidate"],
+            "camera_pose": candidate,
             "camera_extrinsics": {
                 "pos": [0.0, 0.0, 0.0],
                 "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             },
             "camera_frame_id": "agentview",
             "target_class": "upright_can",
-            "scene_epoch": memory.scene_epoch(),
+            "scene_epoch": scene_epoch,
         },
         profile=profile,
         profile_sha256="profile-sha",
     )
 
 
-def test_anygrasp_requires_compiler_but_anyplace_pose_keeps_generic_transform() -> None:
+def _compiled(memory: AgentMemory) -> dict:
+    return _compiled_candidate(
+        memory.anygrasp_candidate_policy()["active_candidate"],
+        scene_epoch=memory.scene_epoch(),
+    )
+
+
+def _host_grasp_compilation_event(
+    compiled: dict, *, queue_position: int, queue_count: int
+) -> dict:
+    return {
+        "schema_version": "openeta.host_candidate_compilation.v1",
+        "event_type": "candidate_compiled",
+        "purpose": "grasp",
+        "candidate_id": compiled["candidate_id"],
+        "queue_position": queue_position,
+        "queue_count": queue_count,
+        "selection_policy": "stable_qualified_queue_head",
+        "scene_epoch": compiled["scene_epoch"],
+        "planning_scene_revision": 0,
+        "execution_started": False,
+        "compiled_seed": compiled,
+    }
+
+
+def test_host_compilation_activates_head_and_precompiled_grasp_fallback() -> None:
+    first = _candidate("grasp_000", 0.9)
+    second = _candidate("grasp_001", 0.8)
+    first_compiled = _compiled_candidate(first)
+    second_compiled = _compiled_candidate(second)
+    events = [
+        _host_grasp_compilation_event(
+            first_compiled, queue_position=0, queue_count=2
+        ),
+        _host_grasp_compilation_event(
+            second_compiled, queue_position=1, queue_count=2
+        ),
+    ]
+    memory = AgentMemory()
+    memory.start_session(task="pick the object")
+
+    memory.add_action(
+        _tool_action(
+            "anygrasp",
+            {},
+            outputs={
+                "result_id": "qualified-grasps",
+                "grasp_candidates": [first, second],
+                "selection_required": False,
+                "host_selected_candidate_id": "grasp_000",
+                "host_candidate_compilation": events[0],
+                "host_candidate_compilation_queue": events,
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["active_candidate"]["id"] == "grasp_000"
+    assert policy["selection_source"] == "host_qualified_queue"
+    assert set(policy["host_candidate_compilations"]) == {
+        "grasp_000",
+        "grasp_001",
+    }
+    assert memory.grasp_execution()["candidate_id"] == "grasp_000"
+
+    memory.add_action(
+        _tool_action(
+            "move_to",
+            {"target_pose": {"source_grasp_id": "grasp_000"}},
+            success=False,
+            outputs={
+                "motion_summary": {
+                    "reached_target": False,
+                    "end": {"xyz": [0.1, 0.2, 0.3]},
+                }
+            },
+        )
+    )
+
+    assert memory.grasp_candidate_policy()["active_candidate"]["id"] == "grasp_001"
+    assert memory.grasp_execution()["candidate_id"] == "grasp_001"
+    assert memory.grasp_execution()["compiled_grasp_id"] == second_compiled[
+        "compiled_grasp_id"
+    ]
+
+
+def test_anygrasp_requires_host_compilation_but_anyplace_pose_keeps_generic_transform() -> None:
     memory = _memory_with_candidates()
 
-    assert "compile_grasp_seed" in memory.grasp_candidate_gate_error(
+    assert "host-owned candidate compiler" in memory.grasp_candidate_gate_error(
         tool_name="camera_pose_to_world",
         parameters={"camera_pose": {"id": "grasp_000"}},
     )

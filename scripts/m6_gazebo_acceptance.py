@@ -28,8 +28,6 @@ REQUIRED_REAL_M6_TOOLS = (
     "observe",
     "sam3",
     "graspgenx",
-    "compile_grasp_seed",
-    "compile_placement_seed",
     "gripper_control",
     "anyplace",
     "close_simulator_env",
@@ -48,7 +46,9 @@ fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增�
 目标 mask；运动前再分割绿色 placement_zone_marker 并按宿主 obligation 调用一次 AnyPlace，形成
 不向 VLM 暴露的 object-goal 池。宿主先完成普通 grasp 漏斗，再对最多 4 个 grasp PASS × 当前轮
 完整 96 个 object goal 做分层有限联查，全局最多 4 对进入 plan-only；仅保留至少有一个 place PASS
-的 grasp。主 VLM 从保留的 GraspGenX 候选中选择并 compile_grasp_seed，执行真实接近、close，
+的 grasp。宿主按稳定资格队列激活首个等价 PASS，并完成不可执行的内部
+host_candidate_compilation grasp event，
+随后主 VLM 执行真实接近、close，
 仅在双垫 native contact 与 attached ACK 后 lift；lift 必须 >=80 mm 且抓持相对漂移 <=10 mm。
 之后重新 observe 获取独立 placement RGB-D，分别用 SAM3 分割被抓物体和绿色
 placement_zone_marker，再把两个独立观察交给 AnyPlace。AnyPlace 只输出物体目标位姿，禁止接收
@@ -56,7 +56,9 @@ selected_grasp/source_grasp_id 或输出 place_grasp_pose。模型 reserve pool 
 宿主先取抓前随实际执行 grasp 通过 plan-only 的冻结绝对 object goals，使用 attach ACK 实测的
 T_eef_object_attached 重新编译 EEF hover/release 并重跑完整资格漏斗；抓前轨迹不得作为执行证明。
 若这些冻结目标零 PASS，才用新 seed 的当前轮 AnyPlace pool，且不与失败目标合并。主 VLM 只能看到 PASS
-集合并通过 compile_placement_seed(placement_candidate_id=...) 选择候选。资格轨迹必须丢弃，真实
+结果，不负责选择候选；宿主存储全部 PASS，按稳定队列激活首个等价 PASS，并生成内部
+host_candidate_compilation placement event。
+资格轨迹必须丢弃，真实
 动作重新规划。规划失败仅当 execution_started=false 时拒绝当前候选，
 不得重复失败 fingerprint；若 execution_started=true 或结果 unknown，立即停止并请求人工。
 成功释放必须有 detach ACK、planning-scene revision；允许自然落稳观测时域完成后，仍只按最终
@@ -69,8 +71,8 @@ SCENARIO_INSTRUCTIONS = {
     "normal": "执行正常放置路径；不得主动制造规划失败。",
     "reject-first": (
         "验收配置会让首个 placement candidate 的资格规划真实返回无轨迹且 "
-        "execution_started=false。保留该回执，宿主不得向主 VLM 暴露该候选；主 VLM 只能从其余 "
-        "PASS 候选中选择并完成放置。"
+        "execution_started=false。保留该回执，宿主不得把该候选存入资格队列；宿主从其余 "
+        "PASS 候选的稳定队首开始并完成放置。"
     ),
 }
 
@@ -286,7 +288,6 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
                 "gripper_control",
                 "move_to",
                 "anyplace",
-                "compile_placement_seed",
             ),
         ):
             errors.append("pregrasp look-ahead, grasp/lift, and executable placement order is invalid")
@@ -305,13 +306,20 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         create = next((call for call in calls if _name(call) == "create_simulator_env"), {})
         if not base._contains(create, "env_id", ENV_ID):
             errors.append("pick-place Gazebo environment identity missing")
-        placement_compiles = [
-            call for call in calls if _name(call) == "compile_placement_seed"
-        ]
-        if not placement_compiles or not any(
-            base._contains(call, "placement_candidate_id") for call in placement_compiles
+        if not any(
+            base._contains(event, "schema_version", "openeta.host_candidate_compilation.v1")
+            and base._contains(event, "purpose", "placement")
+            and base._contains(event, "execution_started", False)
+            for event in events
         ):
-            errors.append("main VLM placement candidate selection/compilation evidence missing")
+            errors.append("host placement candidate compilation evidence missing")
+        if not any(
+            base._contains(event, "schema_version", "openeta.host_candidate_compilation.v1")
+            and base._contains(event, "purpose", "grasp")
+            and base._contains(event, "execution_started", False)
+            for event in events
+        ):
+            errors.append("host grasp candidate compilation evidence missing")
         grasp_calls = [call for call in calls if _name(call) == "graspgenx"]
         final_grasp = grasp_calls[-1] if grasp_calls else {}
         raw_grasp_counts = [

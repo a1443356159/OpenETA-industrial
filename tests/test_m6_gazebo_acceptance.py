@@ -40,17 +40,18 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert "覆盖完整目标轮廓" in prompt
     assert "红色方块 target_object" in prompt
     assert "独立 placement RGB-D" in prompt
-    assert "compile_placement_seed" in prompt
+    assert "host_candidate_compilation" in prompt
+    assert "compile_placement_seed" not in prompt
     assert "source_grasp_id" in prompt
     assert "不得固定 detection id" in prompt
     assert "不得调用 python_exec" in prompt
 
 
 def test_m6_order_helper_rejects_anyplace_before_lift() -> None:
-    valid = ["observe", "graspgenx", "gripper_control", "move_to", "anyplace", "compile_placement_seed"]
-    invalid = ["observe", "graspgenx", "anyplace", "gripper_control", "move_to", "compile_placement_seed"]
+    valid = ["observe", "graspgenx", "gripper_control", "move_to", "anyplace"]
+    invalid = ["observe", "graspgenx", "anyplace", "gripper_control", "move_to"]
 
-    required = ("observe", "graspgenx", "gripper_control", "move_to", "anyplace", "compile_placement_seed")
+    required = ("observe", "graspgenx", "gripper_control", "move_to", "anyplace")
     assert m6._ordered(valid, required)
     assert not m6._ordered(invalid, required)
 

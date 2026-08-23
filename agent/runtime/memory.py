@@ -371,7 +371,16 @@ class AgentMemory:
         self._capture_sam3_selection_state(action)
         target_mask_invalidated = self._invalidate_failed_anygrasp_target_mask(action)
         self._capture_anygrasp_candidate_policy(action)
-        self._capture_compiled_grasp(action)
+        placement_candidates_updated = self._capture_placement_candidates(action)
+        compilation_updated = self._capture_compiled_grasp(action)
+        if not compilation_updated:
+            # A physical-width filter may remove the qualifier's first queue
+            # entry before activation.  Compile events are already retained by
+            # candidate id, so activate the first locally valid queue entry
+            # without asking the planner to repeat a deterministic transition.
+            compilation_updated = (
+                self._activate_host_compiled_grasp_for_active_candidate()
+            )
         self._capture_wrist_alignment(action)
         captured_artifacts = _extract_action_artifacts(action)
         for artifact in captured_artifacts:
@@ -381,7 +390,6 @@ class AgentMemory:
                 "source": "tool_result",
                 "timestamp_s": time.time(),
             }
-        placement_candidates_updated = self._capture_placement_candidates(action)
         world_mutated = self._record_successful_world_mutation(action)
         gripper_state_updated = self._capture_gripper_command_state(action)
         placement_release_denied = self._capture_placement_release_denial(action)
@@ -434,6 +442,7 @@ class AgentMemory:
                         "artifact_keys": invalidated,
                     },
                 )
+            self._activate_host_compiled_grasp_for_active_candidate()
         self._append_transition_ledger(action)
         if (
             captured_artifacts
@@ -441,6 +450,7 @@ class AgentMemory:
             or placement_release_denied
             or placement_release_updated
             or placement_candidates_updated
+            or compilation_updated
             or lift_probe_updated
             or articulated_probe_prepared
             or articulated_probe_updated
@@ -1095,7 +1105,6 @@ class AgentMemory:
         if policy is None:
             return None
         if tool_name not in {
-            "compile_grasp_seed",
             "camera_pose_to_world",
             "move_to",
             "follow_eef_trajectory",
@@ -1125,16 +1134,11 @@ class AgentMemory:
         source_tool = str(policy.get("source_tool") or "grasp_pose_estimate")
         source_backend = str(policy.get("source_backend") or source_tool)
         source_label = _grasp_backend_label(source_backend)
-        if status == "selection_required" and tool_name == "compile_grasp_seed":
-            candidate_id = _parameters_grasp_candidate_id(parameters)
-            allowed_ids = {
-                str(candidate.get("id") or "")
-                for candidate in policy.get("candidates", [])
-                if isinstance(candidate, dict)
-            }
-            if candidate_id not in allowed_ids:
-                return "compile_grasp_seed requires an id from the MoveIt PASS set."
-            return None
+        if status == "selection_required":
+            return (
+                "The qualified grasp queue has no host compilation event. Planner "
+                "tools cannot compile or execute raw candidates."
+            )
         active = policy.get("active_candidate")
         if status == "exhausted" or not isinstance(active, dict):
             return (
@@ -1149,9 +1153,8 @@ class AgentMemory:
                 return None
             if source_tool in {"anygrasp", "grasp_pose_estimate"}:
                 return (
-                    "AnyGrasp candidates require compile_grasp_seed; "
-                    "camera_pose_to_world does not apply the GraspNet-to-EEF "
-                    "calibration."
+                    "Raw grasp candidates cannot use camera_pose_to_world; only the "
+                    "host-owned candidate compiler applies GraspNet-to-EEF calibration."
                 )
             if not supplied_id:
                 return (
@@ -1165,35 +1168,14 @@ class AgentMemory:
                     "after a candidate-linked safety or motion rejection."
                 )
             return None
-        if tool_name == "compile_grasp_seed":
-            if source_tool not in {"anygrasp", "grasp_pose_estimate"}:
-                return (
-                    f"{source_label} candidates use camera_pose_to_world rather than "
-                    "the AnyGrasp-specific compile_grasp_seed calibration."
-                )
-            if supplied_id != active_id:
-                return (
-                    "compile_grasp_seed must receive the complete active AnyGrasp "
-                    f"candidate {active_id!r}."
-                )
-            try:
-                supplied_epoch = int(parameters.get("scene_epoch"))
-            except (TypeError, ValueError):
-                supplied_epoch = -1
-            if supplied_epoch != self.scene_epoch():
-                return (
-                    "compile_grasp_seed must use the current host scene_epoch "
-                    f"{self.scene_epoch()}."
-                )
-            return None
         if (
             source_tool in {"anygrasp", "grasp_pose_estimate"}
             and tool_name in {"move_to", "follow_eef_trajectory"}
             and self.grasp_execution() is None
         ):
             return (
-                "Raw AnyGrasp motion is blocked. Compile the active candidate with "
-                "compile_grasp_seed and follow the host-generated grasp_execution stages."
+                "Raw grasp motion is blocked. A valid host compilation event and "
+                "host-generated grasp_execution stages are required."
             )
         if supplied_id and supplied_id != active_id:
             return (
@@ -2366,6 +2348,18 @@ class AgentMemory:
                 "scene_epoch": self.scene_epoch(),
                 "activated_at_s": time.time(),
             }
+            compilation_queue = outputs.get("host_candidate_compilation_queue")
+            if isinstance(compilation_queue, list):
+                policy["host_candidate_compilations"] = {
+                    str(event.get("candidate_id") or ""): dict(
+                        event["compiled_seed"]
+                    )
+                    for event in compilation_queue
+                    if isinstance(event, dict)
+                    and isinstance(event.get("compiled_seed"), dict)
+                    and str(event.get("candidate_id") or "")
+                    == str(event["compiled_seed"].get("candidate_id") or "")
+                }
             if isinstance(outputs.get("qualification_evidence"), dict):
                 policy["qualification_evidence"] = dict(
                     outputs["qualification_evidence"]
@@ -3583,11 +3577,24 @@ class AgentMemory:
         if placement_call is not None:
             outputs = _tool_call_outputs(placement_call)
             if outputs.get("schema_version") == "openeta.compiled_placement_seed.v2":
-                return self._capture_compiled_placement(outputs)
+                return self._capture_compiled_placement(
+                    outputs, source="legacy_compile_tool"
+                )
+        placement_outputs = _host_candidate_compilation_outputs(
+            action, purpose="placement"
+        )
+        if placement_outputs is not None:
+            return self._capture_compiled_placement(
+                placement_outputs, source="host_qualified_queue"
+            )
         call = _successful_tool_call(action, "compile_grasp_seed")
-        if call is None:
+        outputs = _tool_call_outputs(call) if call is not None else None
+        compilation_source = "legacy_compile_tool"
+        if not isinstance(outputs, dict):
+            outputs = _host_candidate_compilation_outputs(action, purpose="grasp")
+            compilation_source = "host_qualified_queue"
+        if not isinstance(outputs, dict):
             return False
-        outputs = _tool_call_outputs(call)
         if outputs.get("schema_version") != "openeta.compiled_grasp_seed.v1":
             return False
         policy = self.anygrasp_candidate_policy() or {}
@@ -3609,13 +3616,15 @@ class AgentMemory:
                         "status": "active",
                         "active_candidate": active,
                         "active_rank": active.get("rank"),
-                        "selection_source": "main_agent_vlm",
+                        "selection_source": str(
+                            outputs.get("selection_source") or compilation_source
+                        ),
                         "remaining_candidate_ids": [],
                     }
                 )
                 self.facts.pop(LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY, None)
                 self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                    policy, source="compile_grasp_seed"
+                    policy, source=compilation_source
                 )
         if not isinstance(active, dict):
             return False
@@ -3623,6 +3632,14 @@ class AgentMemory:
             return False
         if _optional_int(outputs.get("scene_epoch"), default=-1) != self.scene_epoch():
             return False
+        policy["selection_source"] = str(
+            outputs.get("selection_source") or compilation_source
+        )
+        self.facts.pop(LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY, None)
+        self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy,
+            source=compilation_source,
+        )
         compile_hints: JsonDict = {
             field: outputs.get(field)
             for field in (
@@ -3641,7 +3658,7 @@ class AgentMemory:
             self.facts.pop(LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY, None)
             self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
                 policy,
-                source="compile_grasp_seed",
+                source=compilation_source,
             )
         hover = outputs.get("hover_pose")
         gripper_state = self.gripper_command_state() or {}
@@ -3687,7 +3704,7 @@ class AgentMemory:
         }
         self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
             execution,
-            source="compile_grasp_seed",
+            source=compilation_source,
         )
         self.facts.pop(ATTACHMENT_GATE_KEY, None)
         self.facts.pop(GRASP_LIFT_PROBE_KEY, None)
@@ -3702,6 +3719,28 @@ class AgentMemory:
             },
         )
         return True
+
+    def _activate_host_compiled_grasp_for_active_candidate(self) -> bool:
+        """Project the next retained queue entry into normal grasp execution."""
+
+        policy = self.grasp_candidate_policy()
+        if not isinstance(policy, dict) or policy.get("status") != "active":
+            return False
+        active = policy.get("active_candidate")
+        candidate_id = (
+            str(active.get("id") or "") if isinstance(active, dict) else ""
+        )
+        compiled_by_id = policy.get("host_candidate_compilations")
+        compiled = (
+            compiled_by_id.get(candidate_id)
+            if isinstance(compiled_by_id, dict)
+            else None
+        )
+        if not isinstance(compiled, dict):
+            return False
+        return self._capture_compiled_grasp(
+            _host_compilation_action(purpose="grasp", compiled=compiled)
+        )
 
     def _capture_placement_candidates(self, action: EnvAction) -> bool:
         call = _successful_tool_call(action, "anyplace")
@@ -3898,13 +3937,29 @@ class AgentMemory:
                 ).encode("utf-8")
             ).hexdigest(),
         }
+        compilation_queue = outputs.get("host_candidate_compilation_queue")
+        if isinstance(compilation_queue, list):
+            policy["host_candidate_compilations"] = {
+                str(event.get("candidate_id") or ""): dict(event["compiled_seed"])
+                for event in compilation_queue
+                if isinstance(event, dict)
+                and isinstance(event.get("compiled_seed"), dict)
+                and str(event.get("candidate_id") or "")
+                == str(
+                    event["compiled_seed"].get("placement_candidate_id")
+                    or event["compiled_seed"].get("candidate_id")
+                    or ""
+                )
+            }
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
             policy, source="anyplace"
         )
         self.record("placement_candidates_retained", dict(policy))
         return True
 
-    def _capture_compiled_placement(self, outputs: JsonDict) -> bool:
+    def _capture_compiled_placement(
+        self, outputs: JsonDict, *, source: str = "legacy_compile_tool"
+    ) -> bool:
         policy = self.placement_candidate_policy()
         if not isinstance(policy, dict):
             return False
@@ -3932,12 +3987,12 @@ class AgentMemory:
             {
                 "status": "active",
                 "active_candidate_id": candidate_id,
-                "selection_source": "main_agent_vlm",
+                "selection_source": str(outputs.get("selection_source") or source),
                 "compiled_placement": dict(outputs),
             }
         )
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-            policy, source="compile_placement_seed"
+            policy, source=source
         )
         self.record(
             "placement_candidate_selected",
@@ -3945,7 +4000,7 @@ class AgentMemory:
                 "placement_candidate_id": candidate_id,
                 "attachment_transform_sha256": outputs.get("attachment_transform_sha256"),
                 "scene_revision": policy.get("scene_revision"),
-                "selection_source": "main_agent_vlm",
+                "selection_source": policy.get("selection_source"),
             },
         )
         return True
@@ -4133,6 +4188,17 @@ class AgentMemory:
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
             policy, source="placement_candidate_rejected"
         )
+        if remaining:
+            compiled_by_id = policy.get("host_candidate_compilations")
+            next_compiled = (
+                compiled_by_id.get(str(remaining[0]))
+                if isinstance(compiled_by_id, dict)
+                else None
+            )
+            if isinstance(next_compiled, dict):
+                self._capture_compiled_placement(
+                    dict(next_compiled), source="host_qualified_queue_fallback"
+                )
         self.record("placement_candidate_rejected", dict(rejected[-1]))
         return True
 
@@ -7058,6 +7124,72 @@ def _tool_call_outputs(call: JsonDict) -> JsonDict:
     return dict(outputs) if isinstance(outputs, dict) else dict(details)
 
 
+def _host_candidate_compilation_outputs(
+    action: EnvAction, *, purpose: str
+) -> JsonDict | None:
+    """Read one fail-closed host compilation event from a normal tool result."""
+
+    command = action.command if isinstance(action.command, dict) else {}
+    for call in command.get("tool_calls", []) or []:
+        if not isinstance(call, dict) or not _call_result_success(call):
+            continue
+        result_outputs = _tool_call_outputs(call)
+        event = result_outputs.get("host_candidate_compilation")
+        if not isinstance(event, dict):
+            continue
+        compiled = event.get("compiled_seed")
+        if (
+            event.get("schema_version")
+            != "openeta.host_candidate_compilation.v1"
+            or event.get("event_type") != "candidate_compiled"
+            or event.get("purpose") != purpose
+            or event.get("execution_started") is not False
+            or not isinstance(compiled, dict)
+            or str(event.get("candidate_id") or "")
+            != str(
+                compiled.get("candidate_id")
+                or compiled.get("placement_candidate_id")
+                or ""
+            )
+        ):
+            continue
+        return dict(compiled)
+    return None
+
+
+def _host_compilation_action(*, purpose: str, compiled: JsonDict) -> EnvAction:
+    """Build an internal reducer input; it is never dispatched as an AgentTool."""
+
+    candidate_id = str(
+        compiled.get("placement_candidate_id")
+        or compiled.get("candidate_id")
+        or ""
+    )
+    return EnvAction(
+        action_type="host_transition",
+        command={
+            "tool_calls": [
+                {
+                    "name": "_host_candidate_transition",
+                    "result": {
+                        "success": True,
+                        "details": {
+                            "host_candidate_compilation": {
+                                "schema_version": "openeta.host_candidate_compilation.v1",
+                                "event_type": "candidate_compiled",
+                                "purpose": purpose,
+                                "candidate_id": candidate_id,
+                                "execution_started": False,
+                                "compiled_seed": dict(compiled),
+                            }
+                        },
+                    },
+                }
+            ]
+        },
+    )
+
+
 def _qualification_artifact_evidence(
     outputs: Mapping[str, Any],
     *,
@@ -8357,9 +8489,8 @@ def _extract_grasp_candidate_artifacts(call: JsonDict, details: JsonDict) -> lis
             "gripper_name": grasp_source.get("gripper_name"),
             "raw_output_ref": source.get("raw_output_ref"),
             "next_tool_hint": (
-                "Call compile_grasp_seed with the active normalized candidate, "
-                "matching camera extrinsics/frame id, and current scene_epoch; "
-                "then follow host-generated grasp_execution stages."
+                "Require the host-owned compilation event for the stable qualified "
+                "queue head, then follow host-generated grasp_execution stages."
             ),
         }
     ]
@@ -8406,8 +8537,8 @@ def _extract_placement_candidate_artifacts(
             "candidate_image_ref": source.get("candidate_image_ref"),
             "raw_output_ref": source.get("raw_output_ref"),
             "next_tool_hint": (
-                "Choose a retained placement candidate id with the main VLM, then call "
-                "compile_placement_seed; raw AnyPlace transforms are not executable EEF poses."
+                "Use the host-owned compilation event for the stable qualified queue "
+                "head; raw AnyPlace transforms are not executable EEF poses."
             ),
         }
     ]

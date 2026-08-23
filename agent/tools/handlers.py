@@ -20,8 +20,6 @@ from adapter.protocol import JsonDict
 from agent.runtime.artifact_paths import artifact_session_id, artifact_session_root
 from agent.tools.attachment_probe import build_prepare_attachment_probe_handler
 from agent.tools.grasp_geometry import (
-    build_compile_grasp_seed_handler,
-    build_compile_placement_seed_handler,
     build_wrist_alignment_handler,
 )
 from agent.tools.registry import (
@@ -143,8 +141,6 @@ def bind_dummy_tool_handlers(
         "sam3": _sam3_handler,
         "anygrasp": _anygrasp_handler,
         "camera_pose_to_world": _camera_pose_to_world_handler,
-        "compile_grasp_seed": build_compile_grasp_seed_handler(),
-        "compile_placement_seed": build_compile_placement_seed_handler(),
         "prepare_attachment_probe": build_prepare_attachment_probe_handler(),
         "compute_wrist_alignment": build_wrist_alignment_handler(),
         "hand_pose_database": _hand_pose_handler,

@@ -985,7 +985,6 @@ def _compact_grasp_events(episode: JsonDict) -> list[JsonDict]:
     events: list[JsonDict] = []
     relevant = {
         "grasp_pose_estimate",
-        "compile_grasp_seed",
         "compute_wrist_alignment",
         "move_to",
         "gripper_control",

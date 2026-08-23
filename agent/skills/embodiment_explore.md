@@ -24,7 +24,6 @@ allowed_tools:
   - grasp_pose_estimate
   - anyplace
   - camera_pose_to_world
-  - compile_grasp_seed
   - compute_wrist_alignment
   - move_to
   - follow_eef_trajectory

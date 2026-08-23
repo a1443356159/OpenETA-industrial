@@ -49,13 +49,13 @@ pregrasp observe
 → GraspGenX reserve pool
 → grasp world-EEF compilation and MoveIt funnel
 → bounded pregrasp grasp-place compatibility qualification
-→ VLM selects one PASS grasp
+→ host activates and compiles the stable head of the equal-status PASS grasp queue
 → fresh real grasp planning and execution
 → native attach ACK and measured T_eef_object_attached
 → lift/retention gate
 → independent post-attachment placement observation and SAM3 selection
 → measured-attachment requalification of the selected grasp's frozen PASS goals
-→ VLM selects one PASS placement
+→ host activates and compiles the stable head of the equal-status PASS placement queue
 → fresh hover/release planning and execution
 → native detach, settling verification, and retreat
 ```
@@ -466,8 +466,9 @@ stale hit.
 
 Current issue:
 
-`compile_grasp_seed` and `compile_placement_seed` are currently registered as
-AgentTools even though the main VLM supplies only one PASS candidate ID. The
+Before this migration, `compile_grasp_seed` and `compile_placement_seed` were
+registered as AgentTools even though the main VLM supplied only one PASS
+candidate ID. The
 host, rather than the VLM, owns every actual compilation input: the immutable
 candidate, camera calibration, TCP profile, measured attachment, current robot
 state, scene epoch, PlanningScene revision, and proof hashes. Presenting this
@@ -476,11 +477,13 @@ and planner validators to prevent the VLM from skipping, reordering, modifying,
 or repeating it.
 
 The task-level model should treat OpenETA's reasoning loop as a pace and
-decision synchronizer, not as the executor of every deterministic transition:
+decision synchronizer, not as the executor of every deterministic transition.
+Because the bounded L5 PASS candidates have equal qualification status and no
+new selection tool is allowed, candidate activation is a host reducer:
 
 ```text
-VLM selects one qualified PASS candidate ID
-→ host validates the ID against the immutable qualified queue
+host activates the stable head of the immutable qualified queue
+→ host validates its ID against the queue and proof binding
 → host performs the candidate-to-compiled-seed transition
 → host records the compilation proof and next required motion state
 → VLM receives the next semantic decision boundary
@@ -492,9 +495,9 @@ Approved boundary:
   registry and skill `allowed_tools` surface;
 - retain their geometry compilers as host-internal functions with the same
   fail-closed validation, hashes, calibration ownership, and testability;
-- represent candidate selection as a workflow decision carrying only the
-  candidate ID, not as permission for the VLM to provide poses or compilation
-  parameters;
+- represent candidate activation as a hidden workflow reduction carrying only
+  the queue-head candidate ID, never as permission for the VLM to provide poses
+  or compilation parameters;
 - let the host-owned grasp/placement state transition invoke compilation and
   publish an immutable compilation event before any motion can be dispatched;
 - keep real motion freshly planned from the latest state. Candidate selection
@@ -507,12 +510,11 @@ private RPCs remain implementation capabilities coordinated by the host.
 
 Expected benefit: fewer discretionary VLM steps, a smaller public tool surface,
 and a clearer ownership boundary between semantic choice and deterministic
-robot-state transition. Risk: current memory capture, planner obligations,
-skills, traces, and acceptance verification recognize successful compile tool
-calls. They must migrate atomically to an equivalent host compilation event;
-the tools must not be removed before every consumer uses that event. This work
-therefore depends on the typed workflow/reducer boundary in O7 and should reuse
-the evidence vocabulary selected in O10.
+robot-state transition. Migration requirement: memory capture, planner
+obligations, skills, traces, and acceptance verification must all consume the
+equivalent immutable host compilation event before motion is allowed. The
+implementation therefore uses the private reducer boundary in O7 and the
+minimal evidence vocabulary selected in O10.
 
 ## Approved implementation order
 
@@ -556,12 +558,12 @@ Use this table during later discussion. `Recorded` means documented only.
 | O4 | Typed geometry layer | Recorded | No implementation authorized |
 | O5 | Qualification-stage decomposition | Recorded | No implementation authorized |
 | O6 | Separate diversity and scheduling | Approved | No post-L4 quality ranking; deterministic branch-fair selection of four; all L5 PASS candidates have equal status |
-| O7 | Private runtime projections | Approved with constraint | Coding-agent-style host reduction and obligations only; no VLM-visible FSM, state tool, or explicit workflow-state interface |
+| O7 | Private runtime projections | Implemented locally | Coding-agent-style host reduction and obligations only; no VLM-visible FSM, state tool, or explicit workflow-state interface; remote verification pending |
 | O8 | Candidate-batch lineage and layered qualification schema | Approved | Remove exposure settings; immutable lineage/current-run accounting; `candidate_count` is the complete L5 PASS queue |
 | O9 | Planning backend / optional MTC tail | Recorded | No implementation authorized |
 | O10 | Append-only evidence ledger | Supporting refactor approved | Introduce only the minimal internal selection/compilation events needed for O7/O12; retain legacy evidence during migration |
 | O11 | Immutable geometry and ROS payload caches | Recorded | No implementation authorized |
-| O12 | Host-owned candidate compilation transition | Approved | Remove both compile operations from the AgentTool surface after equivalent fail-closed host transitions, evidence, prompts, planner, memory, and verification consumers migrate atomically |
+| O12 | Host-owned candidate compilation transition | Implemented locally | Both compile operations removed from the AgentTool surface; fail-closed host transitions, evidence, prompts, planner, memory, and verification consumers migrated; remote verification pending |
 
 ## Verification expectations for any approved item
 

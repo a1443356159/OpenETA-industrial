@@ -208,19 +208,35 @@ def extract_task_playbook_candidate(
             _append_unique(queries, str(parameters.get("target_object") or ""))
         if phase == "start" and name == "sam3":
             _append_unique(queries, str(parameters.get("prompt") or ""))
-        if phase == "start" and name == "compile_grasp_seed":
-            camera_pose = parameters.get("camera_pose")
+        if phase == "end":
+            details = event.get("details")
+            details = details if isinstance(details, dict) else {}
+            outputs = details.get("outputs")
+            outputs = outputs if isinstance(outputs, dict) else details
+            compilation = outputs.get("host_candidate_compilation")
+            compiled = (
+                compilation.get("compiled_seed")
+                if isinstance(compilation, dict)
+                and compilation.get("purpose") == "grasp"
+                else None
+            )
+            compiled = compiled if isinstance(compiled, dict) else {}
+            camera_pose = compiled.get("source_candidate")
             camera_pose = camera_pose if isinstance(camera_pose, dict) else {}
             signature: JsonDict = {
-                "geometry_family": parameters.get("target_geometry_family")
-                or parameters.get("target_class"),
-                "strategy_id": parameters.get("strategy_id"),
-                "gripper_width_m": camera_pose.get("width"),
-                "backend": camera_pose.get("source_backend"),
+                "geometry_family": compiled.get("target_geometry_family")
+                or compiled.get("target_class"),
+                "strategy_id": compiled.get("strategy_id"),
+                "gripper_width_m": compiled.get("gripper_width_m")
+                or camera_pose.get("width"),
+                "backend": compiled.get("source_backend")
+                or camera_pose.get("source_backend"),
             }
-            grasp_signatures.append(
-                {key: value for key, value in signature.items() if value not in (None, "")}
-            )
+            compact = {
+                key: value for key, value in signature.items() if value not in (None, "")
+            }
+            if compact:
+                grasp_signatures.append(compact)
         if phase == "start" and name == "move_to":
             pose = parameters.get("target_pose")
             pose = pose if isinstance(pose, dict) else {}

@@ -23,7 +23,16 @@ from agent.tools.grasp_geometry import (
     pregrasp_eef_goal_from_object_motion,
     qualification_grasp_pose_chain,
 )
-from agent.tools.registry import ToolExecutionContext, build_default_tool_registry
+from agent.tools.registry import ToolExecutionContext, ToolSpec
+
+
+def _internal_compiler_spec() -> ToolSpec:
+    return ToolSpec(
+        name="host_candidate_compiler",
+        category="host_workflow",
+        description="test-only host compiler context",
+        effect="read_only",
+    )
 
 
 def _profile() -> dict:
@@ -141,7 +150,7 @@ def test_qualified_grasp_compile_hash_binds_lift_stage() -> None:
     result = build_compile_grasp_seed_handler(qualification_cache=Cache())(
         ToolExecutionContext(
             name="compile_grasp_seed",
-            spec=build_default_tool_registry().get("compile_grasp_seed"),
+            spec=_internal_compiler_spec(),
             parameters={"purpose": "grasp", "grasp_candidate_id": "grasp_000"},
             observation=EnvObservation(
                 task="test",
@@ -217,7 +226,7 @@ def test_compile_placement_uses_object_goal_and_attachment_transform() -> None:
     )
 
     assert result["purpose"] == "placement"
-    assert result["selection_source"] == "main_agent_vlm"
+    assert result["selection_source"] == "host_qualified_queue"
     assert result["orientation_clamped"] is False
     assert result["hover_pose"]["rotation_matrix"] == result["release_pose"]["rotation_matrix"]
     assert result["release_pose"]["xyz"] == pytest.approx([0.344, -0.1, 0.43])
@@ -349,7 +358,7 @@ def _qualified_placement_handler_fixture(*, joint_positions=None, attachment_x=0
 
     context = ToolExecutionContext(
         name="compile_placement_seed",
-        spec=build_default_tool_registry().get("compile_placement_seed"),
+        spec=_internal_compiler_spec(),
         parameters={"placement_candidate_id": "placement_000"},
         observation=EnvObservation(
             task="place",
@@ -658,7 +667,7 @@ def test_bowl_strategy_rejects_candidate_without_downward_native_approach() -> N
 def test_bowl_candidate_filter_returns_structured_candidate_rejection() -> None:
     parameters = _compile_parameters()
     parameters["target_class"] = "bowl"
-    spec = build_default_tool_registry().get("compile_grasp_seed")
+    spec = _internal_compiler_spec()
 
     result = build_compile_grasp_seed_handler()(
         ToolExecutionContext(
@@ -687,7 +696,7 @@ def test_qualified_compile_uses_host_observation_scene_identity() -> None:
             calls.append(kwargs)
             return None
 
-    spec = build_default_tool_registry().get("compile_grasp_seed")
+    spec = _internal_compiler_spec()
     build_compile_grasp_seed_handler(qualification_cache=Cache())(
         ToolExecutionContext(
             name="compile_grasp_seed",
@@ -725,7 +734,7 @@ def test_qualified_compile_recovers_selector_from_complete_candidate() -> None:
             calls.append(kwargs)
             return None
 
-    spec = build_default_tool_registry().get("compile_grasp_seed")
+    spec = _internal_compiler_spec()
     result = build_compile_grasp_seed_handler(qualification_cache=Cache())(
         ToolExecutionContext(
             name="compile_grasp_seed",
@@ -753,7 +762,7 @@ def test_qualified_compile_prefers_runtime_invalidation_epoch() -> None:
             calls.append(kwargs)
             return None
 
-    spec = build_default_tool_registry().get("compile_grasp_seed")
+    spec = _internal_compiler_spec()
     build_compile_grasp_seed_handler(qualification_cache=Cache())(
         ToolExecutionContext(
             name="compile_grasp_seed",

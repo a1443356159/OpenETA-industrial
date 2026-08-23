@@ -44,7 +44,7 @@ qualification plane
   which checks this batch actually entered and what each check concluded
 
 selection plane
-  which complete plan-only PASS candidates are stored and may be selected
+  which complete plan-only PASS candidates are stored and may be activated
 ```
 
 These planes must not overwrite one another. In particular, the model output
@@ -69,8 +69,9 @@ failure.
   including full segmented plan-only.
 - **Qualified candidate queue**: the immutable set of all candidates that
   completed L5 with PASS. There is no second exposure cap or exposure queue.
-- **Selected candidate**: one qualified ID selected at a semantic decision
-  boundary. Selection is not compilation, planning, or execution.
+- **Activated candidate**: the stable head ID chosen by the hidden host reducer
+  from an equal-status qualified queue. Activation is not compilation,
+  planning, or execution.
 
 ## Layered funnel
 
@@ -261,7 +262,7 @@ It owns:
 
 `candidate_count` and `full_plan_pass_count` describe the same candidate set.
 There is no `exposure_limit`, exposure truncation, or second PASS subset. A
-selected ID authorizes the next host-owned workflow transition; it does not
+host-activated ID authorizes the next host-owned workflow transition; it does not
 imply that compilation, planning, motion, attach/detach, or execution has
 occurred.
 

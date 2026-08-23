@@ -12,7 +12,6 @@ allowed_tools:
   - select_sam3_detection
   - reject_sam3_detections
   - grasp_pose_estimate
-  - compile_grasp_seed
   - camera_pose_to_world
   - move_to
   - gripper_control
@@ -34,8 +33,8 @@ checks before release.
    complete target-mask artifact, camera frame id, and scene epoch when the
    object is not already held.
 5. For an unheld object, follow the pick skill's explicit SAM3 selection,
-   normalized grasp candidate, `compile_grasp_seed`, atomic `move_to`, and separate
-   gripper-control sequence.
+   qualified grasp queue, host-owned compilation event, atomic `move_to`, and
+   separate gripper-control sequence.
 6. Use `move_to` and `gripper_control` for placement as individual atomic tool
    calls. The simulator controller owns reachability and path-collision checks;
    inspect each structured result and observe after every world mutation.

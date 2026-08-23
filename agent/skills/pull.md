@@ -16,7 +16,6 @@ allowed_tools:
   - select_sam3_detection
   - reject_sam3_detections
   - grasp_pose_estimate
-  - compile_grasp_seed
   - compute_wrist_alignment
   - prepare_attachment_probe
   - assess_attachment_probe
@@ -36,8 +35,9 @@ as a short closed-gripper pull. Do not treat opening as a pick-and-place task.
    geometry, and nearby obstacles.
 2. Call `sam3` if the pull contact region or object boundary is unclear.
 3. For a drawer, visually select the requested handle, estimate a handle grasp,
-   label clear handle geometry as `drawer_handle`, compile the candidate, and
-   follow the normal wrist-aligned contact and close sequence. The label selects
+   label clear handle geometry as `drawer_handle`, require the host-owned
+   qualified-candidate compilation event, and follow the normal wrist-aligned
+   contact and close sequence. The label selects
    only a candidate task strategy and is not attachment evidence. For other
    targets, choose gripper-width contact, hook-like contact, or grasp-assisted
    pull if appropriate.

@@ -61,7 +61,6 @@ from agent.tools.handlers import (
 )
 from agent.tools.grasp_geometry import (
     DEFAULT_GRASP_PROFILE,
-    build_compile_grasp_seed_handler,
     build_wrist_alignment_handler,
 )
 from agent.tools.attachment_probe import (
@@ -97,7 +96,6 @@ __all__ = [
     "build_anyplace_handler",
     "build_contact_graspnet_handler",
     "build_grasp_pose_estimate_handler",
-    "build_compile_grasp_seed_handler",
     "build_prepare_attachment_probe_handler",
     "build_assess_attachment_probe_handler",
     "build_graspgenx_gripper_list_handler",

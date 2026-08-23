@@ -13,6 +13,7 @@ from agent.runtime.moveit_qualification import (
 )
 from agent.runtime.runtime_assembly import (
     _PregraspGraspPlaceCoordinator,
+    _compile_qualified_queue,
     _prepare_postattachment_frozen_goals,
     _qualifying_handler,
 )
@@ -31,6 +32,83 @@ def _pass_stage() -> dict[str, Any]:
         "end_joint_state": {"joint_names": ["j1"], "positions": [0.0]},
         "trajectory": {"point_count": 2},
     }
+
+
+def test_host_compiles_every_full_plan_pass_into_one_equal_status_queue() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def compiler(context: ToolExecutionContext) -> ToolResult:
+        calls.append(
+            {
+                "parameters": dict(context.parameters),
+                "binding": dict(
+                    context.metadata["_openeta_host_candidate_compilation_binding"]
+                ),
+            }
+        )
+        candidate_id = context.parameters["placement_candidate_id"]
+        return ToolResult(
+            True,
+            "compiled",
+            {
+                "outputs": {
+                    "schema_version": "openeta.compiled_placement_seed.v2",
+                    "placement_candidate_id": candidate_id,
+                    "scene_epoch": 3,
+                    "scene_revision": 7,
+                    "selection_source": "host_qualified_queue",
+                }
+            },
+        )
+
+    context = ToolExecutionContext(
+        name="anyplace",
+        spec=build_default_tool_registry().get("anyplace"),
+        parameters={},
+        observation=EnvObservation(
+            task="pick and place", cameras=[], robot=RobotState()
+        ),
+        metadata={},
+    )
+    result = _compile_qualified_queue(
+        ToolResult(
+            True,
+            "qualified",
+            {
+                "placement_candidates": [{"id": "p0"}, {"id": "p1"}],
+                "candidate_count": 2,
+                "full_plan_pass_count": 2,
+            },
+        ),
+        purpose="placement",
+        context=context,
+        scene_epoch=3,
+        planning_scene_revision=7,
+        compiler=compiler,
+    )
+
+    assert result.success
+    assert result.details["selection_required"] is False
+    assert result.details["host_selected_candidate_id"] == "p0"
+    assert [
+        event["candidate_id"]
+        for event in result.details["host_candidate_compilation_queue"]
+    ] == ["p0", "p1"]
+    assert result.details["host_candidate_compilation"] == result.details[
+        "host_candidate_compilation_queue"
+    ][0]
+    assert all(
+        event["selection_policy"] == "stable_qualified_queue_head"
+        and event["execution_started"] is False
+        for event in result.details["host_candidate_compilation_queue"]
+    )
+    assert [call["parameters"]["placement_candidate_id"] for call in calls] == [
+        "p0",
+        "p1",
+    ]
+    assert all(
+        call["binding"]["planning_scene_revision"] == 7 for call in calls
+    )
 
 
 def test_pregrasp_joint_search_keeps_full_pool_round_robin_and_filters_grasps() -> None:

@@ -150,6 +150,38 @@ def test_failed_first_candidate_allows_only_the_second_candidate() -> None:
     assert "placement_001" not in rejected
 
 
+def test_failed_first_candidate_activates_precompiled_host_queue_fallback() -> None:
+    memory = AgentMemory()
+    policy = _policy(["placement_000", "placement_001"])
+    policy["scene_epoch"] = 0
+    policy["host_candidate_compilations"] = {
+        candidate_id: {
+            "schema_version": "openeta.compiled_placement_seed.v2",
+            "placement_candidate_id": candidate_id,
+            "scene_epoch": 0,
+            "scene_revision": 7,
+            "selection_source": "host_qualified_queue",
+            "hover_pose": {
+                "frame": "world",
+                "purpose": "placement",
+                "placement_candidate_id": candidate_id,
+                "placement_stage": "hover",
+                "xyz": [0.4, 0.0, 0.6],
+            },
+        }
+        for candidate_id in ("placement_000", "placement_001")
+    }
+    memory.save_fact("placement_candidate_policy", policy, source="test")
+
+    memory.add_action(_planning_failure("placement_000", "fingerprint-a"))
+
+    active = memory.placement_candidate_policy()
+    assert active["status"] == "active"
+    assert active["active_candidate_id"] == "placement_001"
+    assert active["selection_source"] == "host_qualified_queue"
+    assert active["compiled_placement"]["placement_candidate_id"] == "placement_001"
+
+
 def test_started_or_unknown_placement_motion_stops_without_switching_candidate() -> None:
     for action in (
         _planning_failure("placement_000", "started", execution_started=True),

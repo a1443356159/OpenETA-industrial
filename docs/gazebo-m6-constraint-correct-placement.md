@@ -38,7 +38,8 @@ region with SAM3, and calls AnyPlace. AnyPlace accepts those observations and
 outputs only object goal poses `T_world_object_goal`; it does not accept
 `selected_grasp`/`source_grasp_id` or output `place_grasp_pose`.
 
-Only then does the main VLM call `compile_placement_seed` with:
+Only then does the host activate the stable head of the equal-status PASS queue
+and internally compile it using the retained candidate id:
 
 ```json
 {"placement_candidate_id":"placement_002"}
@@ -80,8 +81,8 @@ participates in table and distractor collision checking.
 
 ## Recovery and acceptance
 
-Candidate rejection retains the current state and asks the main VLM to select
-another PASS candidate. Zero grasp PASS triggers a fresh grasp observation and
+Candidate rejection retains the current state and lets the host advance to the
+next retained PASS candidate. Zero grasp PASS triggers a fresh grasp observation and
 reruns GraspGenX without switching backends. Zero placement PASS keeps the
 native attachment, acquires a new placement observation, resegments both
 placement inputs, and reruns AnyPlace only. `execution_started=true`, UNKNOWN,

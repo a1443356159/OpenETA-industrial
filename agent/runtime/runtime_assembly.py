@@ -461,23 +461,17 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         compile_candidate=_candidate_qualification_compiler(config.workspace),
         candidate_counts=config.candidate_counts,
     )
-    tools.bind_handler(
-        "compile_grasp_seed",
-        build_compile_grasp_seed_handler(
+    internal_candidate_compilers: dict[str, ToolHandler] = {}
+    if qualifier is not None:
+        internal_candidate_compilers["grasp"] = build_compile_grasp_seed_handler(
             workspace.grasp_profile_path,
             strategy_root=workspace.grasp_strategy_root,
-            qualification_cache=qualification_cache if qualifier is not None else None,
-        ),
-        replace=True,
-    )
-    tools.bind_handler(
-        "compile_placement_seed",
-        build_compile_placement_seed_handler(
+            qualification_cache=qualification_cache,
+        )
+        internal_candidate_compilers["placement"] = build_compile_placement_seed_handler(
             workspace.grasp_profile_path,
-            qualification_cache=qualification_cache if qualifier is not None else None,
-        ),
-        replace=True,
-    )
+            qualification_cache=qualification_cache,
+        )
     wrist_handler = build_wrist_alignment_handler()
     if qualifier is not None:
         wrist_handler = _qualifying_wrist_alignment_handler(wrist_handler, qualifier)
@@ -586,6 +580,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         simulator_proxy_config=simulator_proxy_config,
         candidate_qualifier=qualifier,
         candidate_counts=config.candidate_counts,
+        internal_candidate_compilers=internal_candidate_compilers,
     )
 
     planner = ToolCallingPlanner(
@@ -686,6 +681,7 @@ def bind_runtime_perception_tools(
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None,
     candidate_qualifier: MoveItCandidateQualifier | None = None,
     candidate_counts: RuntimeCandidateCounts | None = None,
+    internal_candidate_compilers: Mapping[str, ToolHandler] | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
     pregrasp_coordinator = (
@@ -836,6 +832,9 @@ def bind_runtime_perception_tools(
                 candidate_qualifier,
                 purpose="placement",
                 pregrasp_coordinator=pregrasp_coordinator,
+                candidate_compiler=(internal_candidate_compilers or {}).get(
+                    "placement"
+                ),
             )
         tools.bind_handler(
             "anyplace",
@@ -880,6 +879,7 @@ def bind_runtime_perception_tools(
                 candidate_qualifier,
                 purpose="grasp",
                 pregrasp_coordinator=pregrasp_coordinator,
+                candidate_compiler=(internal_candidate_compilers or {}).get("grasp"),
             )
         tools.bind_handler(
             "grasp_pose_estimate",
@@ -1661,6 +1661,7 @@ def _qualifying_handler(
     *,
     purpose: str,
     pregrasp_coordinator: _PregraspGraspPlaceCoordinator | None = None,
+    candidate_compiler: ToolHandler | None = None,
 ) -> ToolHandler:
     """Apply private MoveIt qualification before a result reaches memory/VLM."""
 
@@ -1834,15 +1835,143 @@ def _qualifying_handler(
             source=source,
         )
         if purpose == "grasp" and pregrasp_coordinator is not None:
-            return pregrasp_coordinator.filter_grasps(
+            qualified_result = pregrasp_coordinator.filter_grasps(
                 qualified_result,
                 scene_epoch=scene_epoch,
                 planning_scene_revision=revision_value,
                 source=source,
             )
-        return qualified_result
+        return _compile_qualified_queue(
+            qualified_result,
+            purpose=purpose,
+            context=context,
+            scene_epoch=scene_epoch,
+            planning_scene_revision=revision_value,
+            compiler=candidate_compiler,
+        )
 
     return qualified
+
+
+_HOST_CANDIDATE_COMPILER_SPEC = ToolSpec(
+    name="host_candidate_compiler",
+    category="host_workflow",
+    description="Host-private qualified-candidate compilation transition.",
+    parameters={},
+    effect="read_only",
+    batchable=False,
+)
+
+
+def _compile_qualified_queue(
+    result: ToolResult,
+    *,
+    purpose: str,
+    context: ToolExecutionContext,
+    scene_epoch: int,
+    planning_scene_revision: int,
+    compiler: ToolHandler | None,
+) -> ToolResult:
+    """Compile an equal-status PASS queue and activate its stable head."""
+
+    if not result.success or compiler is None:
+        return result
+    key = "placement_candidates" if purpose == "placement" else "grasp_candidates"
+    candidates = result.details.get(key)
+    if not isinstance(candidates, list) or not candidates:
+        return result
+    expected_schema = (
+        "openeta.compiled_placement_seed.v2"
+        if purpose == "placement"
+        else "openeta.compiled_grasp_seed.v1"
+    )
+    events: list[JsonDict] = []
+    for queue_position, selected in enumerate(candidates):
+        candidate_id = (
+            str(selected.get("id") or "")
+            if isinstance(selected, Mapping)
+            else ""
+        )
+        if not candidate_id:
+            return ToolResult(
+                False,
+                "qualified candidate queue contains an invalid entry",
+                {
+                    **result.details,
+                    "reason": "host_candidate_compilation_failed",
+                    "queue_position": queue_position,
+                    "execution_started": False,
+                },
+            )
+        parameters = (
+            {"placement_candidate_id": candidate_id}
+            if purpose == "placement"
+            else {"purpose": "grasp", "grasp_candidate_id": candidate_id}
+        )
+        metadata = dict(context.metadata)
+        metadata["_openeta_host_candidate_compilation_binding"] = {
+            "purpose": purpose,
+            "candidate_id": candidate_id,
+            "scene_epoch": scene_epoch,
+            "planning_scene_revision": planning_scene_revision,
+            "selection_source": "host_qualified_queue",
+        }
+        compiled = compiler(
+            ToolExecutionContext(
+                name="host_candidate_compiler",
+                spec=_HOST_CANDIDATE_COMPILER_SPEC,
+                parameters=parameters,
+                observation=context.observation,
+                metadata=metadata,
+            )
+        )
+        compiled_outputs = (
+            compiled.details.get("outputs")
+            if isinstance(compiled, ToolResult) and compiled.success
+            else None
+        )
+        if (
+            not isinstance(compiled_outputs, Mapping)
+            or compiled_outputs.get("schema_version") != expected_schema
+        ):
+            failure_details = (
+                compiled.details if isinstance(compiled, ToolResult) else {}
+            )
+            return ToolResult(
+                False,
+                "host failed to compile a qualified candidate",
+                {
+                    **result.details,
+                    "reason": "host_candidate_compilation_failed",
+                    "candidate_id": candidate_id,
+                    "queue_position": queue_position,
+                    "compilation_diagnostics": failure_details.get(
+                        "diagnostics", []
+                    ),
+                    "execution_started": False,
+                },
+            )
+        events.append(
+            {
+                "schema_version": "openeta.host_candidate_compilation.v1",
+                "event_type": "candidate_compiled",
+                "purpose": purpose,
+                "candidate_id": candidate_id,
+                "queue_position": queue_position,
+                "queue_count": len(candidates),
+                "selection_policy": "stable_qualified_queue_head",
+                "scene_epoch": scene_epoch,
+                "planning_scene_revision": planning_scene_revision,
+                "execution_started": False,
+                "compiled_seed": dict(compiled_outputs),
+            }
+        )
+    candidate_id = str(events[0]["candidate_id"])
+    result.details["selection_required"] = False
+    result.details["host_selected_candidate_id"] = candidate_id
+    result.details["host_candidate_compilation"] = dict(events[0])
+    result.details["host_candidate_compilation_queue"] = events
+    return result
 
 
 def _active_source_grasp_id(

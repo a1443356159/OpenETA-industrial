@@ -32,7 +32,6 @@ from agent.runtime.planner import (
     _default_tool_planner_system_prompt,
     _host_obligation_decision,
     _matching_depth_enhancement,
-    _grasp_compile_obligation,
     _grasp_sensor_safety_obligation,
     _wrist_alignment_obligation,
     build_tool_context,
@@ -3042,7 +3041,8 @@ def test_planner_context_preserves_anygrasp_candidates_for_followup_motion() -> 
     assert grasp_artifact["best_grasp_candidate"]["id"] == "grasp_000"
     assert grasp_artifact["selected_grasp_source"]["mode"] == "targeted"
     assert grasp_artifact["selected_grasp_source"]["intrinsics"]["scale"] == 1000.0
-    assert "compile_grasp_seed" in grasp_artifact["next_tool_hint"]
+    assert "host-owned compilation event" in grasp_artifact["next_tool_hint"]
+    assert "compile_grasp_seed" not in grasp_artifact["next_tool_hint"]
 
     retained = context["retained_targeted_grasp"]
     assert retained["candidate"]["id"] == "grasp_000"
@@ -3105,7 +3105,8 @@ def test_planner_context_preserves_anyplace_candidates_for_post_pick_motion() ->
     ]
     assert "selected_grasp_id" not in artifact
     assert artifact["placement_candidates"][0]["object_placement_transform"]["frame"] == "placement_camera"
-    assert "compile_placement_seed" in artifact["next_tool_hint"]
+    assert "host-owned compilation event" in artifact["next_tool_hint"]
+    assert "compile_placement_seed" not in artifact["next_tool_hint"]
 
 
 def test_anygrasp_policy_activates_highest_score_candidate() -> None:
@@ -3127,72 +3128,30 @@ def test_anygrasp_policy_activates_highest_score_candidate() -> None:
     assert policy["remaining_candidate_ids"] == ["grasp_001"]
 
 
-def test_combined_pick_place_allows_grasp_compilation_before_anyplace() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick cube and place it in basket")
-    _record_anygrasp_candidate_policy(memory)
-    active = memory.anygrasp_candidate_policy()["active_candidate"]
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {
-                "kind": "tool_call",
-                "name": "compile_grasp_seed",
-                "parameters": {
-                    "camera_pose": active,
-                    "camera_extrinsics": {
-                        "pos": [0.0, 0.0, 0.0],
-                        "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-                    },
-                    "scene_epoch": 0,
-                    "target_class": "boxed_item",
-                },
-            }
-        )
-    )
-    observation = _observation()
-    observation.task = "pick cube and place it in basket"
+def test_candidate_compilers_are_not_agent_tools() -> None:
+    registry = build_default_tool_registry()
 
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("compile_grasp_seed", "sam3", "anyplace"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "compile_grasp_seed"
-    assert decision.metadata["validation_attempts"] == 1
-    assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
+    assert "compile_grasp_seed" not in {spec.name for spec in registry.list()}
+    assert "compile_placement_seed" not in {spec.name for spec in registry.list()}
+    assert registry.can_execute("compile_grasp_seed") is False
+    assert registry.can_execute("compile_placement_seed") is False
 
 
 def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
     _record_anygrasp_candidate_policy(memory)
-    active = memory.anygrasp_candidate_policy()["active_candidate"]
     retained = memory.retained_targeted_grasp()
     extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
     anyplace_parameters = {
         "object_observation": {"rgb": "tmp/o.png", "depth": "tmp/od.png", "object_mask": {"mask_ref": "tmp/om.png", "source_image": "tmp/o.png"}, "intrinsics": retained["source"]["intrinsics"], "camera_extrinsics": extrinsics},
         "placement_observation": {"rgb": "tmp/p.png", "depth": "tmp/pd.png", "placement_region_mask": {"mask_ref": "tmp/pm.png", "source_image": "tmp/p.png"}, "intrinsics": retained["source"]["intrinsics"], "camera_extrinsics": extrinsics},
     }
-    compile_parameters = {
-        "camera_pose": active,
-        "camera_extrinsics": {
-            "pos": [0.0, 0.0, 0.0],
-            "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-        },
-        "scene_epoch": 0,
-        "target_class": "boxed_item",
-    }
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
             [
                 {"kind": "tool_call", "name": "anyplace", "parameters": anyplace_parameters},
-                {
-                    "kind": "tool_call",
-                    "name": "compile_grasp_seed",
-                    "parameters": compile_parameters,
-                },
+                {"kind": "tool_call", "name": "observe", "parameters": {}},
             ]
         ),
         max_validation_retries=1,
@@ -3203,11 +3162,11 @@ def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
     decision = planner.plan(
         observation,
         memory=memory,
-        tools=_tools_with_handlers("anyplace", "compile_grasp_seed"),
+        tools=_tools_with_handlers("anyplace", "observe"),
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "compile_grasp_seed"
+    assert decision.action == "observe"
     first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
     assert any("host-built pregrasp goal-pool obligation" in error for error in first_errors)
 
@@ -4181,13 +4140,8 @@ def test_all_overwidth_backends_activate_highest_scoring_final_candidate(
         tools=tools,
         skills=build_default_skill_registry(),
     )
-    compile_obligation = context["grasp_compile_obligation"]
-    assert compile_obligation["required_tool"] == "compile_grasp_seed"
-    assert compile_obligation["required_parameters"]["camera_pose"]["id"] == candidate["id"]
-    assert (
-        compile_obligation["required_parameters"]["camera_pose"]["final_refinable_fallback"]
-        is True
-    )
+    assert "grasp_compile_obligation" not in context
+    assert memory.grasp_execution() is None
 
     failed_parameters = {
         "target_pose": {
@@ -4263,19 +4217,6 @@ def test_enhanced_grasp_requires_matching_sensor_safety_evidence(
             },
         }
     }
-    observation = EnvObservation(
-        task="pick",
-        cameras=[
-            CameraFrame(
-                frame_id="wrist",
-                rgb=[[[0, 0, 0]]],
-                depth=[[1.0]],
-                extrinsics={"camera_to_world": [1.0] * 16},
-            )
-        ],
-        robot=RobotState(),
-    )
-
     obligation = _grasp_sensor_safety_obligation(
         grasp_policy=policy,
         retained=retained,
@@ -4285,18 +4226,13 @@ def test_enhanced_grasp_requires_matching_sensor_safety_evidence(
     )
     assert obligation is not None
     assert obligation["required_tool"] == "obstacle_avoidance"
-    assert (
-        _grasp_compile_obligation(
-            observation,
-            grasp_policy=policy,
-            retained=retained,
-            execution=None,
-            scene_epoch=3,
-            asset_reference=None,
-            working_artifacts={},
-        )
-        is None
-    )
+    assert _grasp_sensor_safety_obligation(
+        grasp_policy=policy,
+        retained=retained,
+        execution={"status": "required", "stage": "open"},
+        scene_epoch=3,
+        working_artifacts={},
+    ) is not None
 
     request = obligation["required_parameters"]["path"]
     evidence = {
@@ -4315,18 +4251,6 @@ def test_enhanced_grasp_requires_matching_sensor_safety_evidence(
             working_artifacts={"safety": evidence},
         )
         is None
-    )
-    assert (
-        _grasp_compile_obligation(
-            observation,
-            grasp_policy=policy,
-            retained=retained,
-            execution=None,
-            scene_epoch=3,
-            asset_reference=None,
-            working_artifacts={"safety": evidence},
-        )
-        is not None
     )
 
 
@@ -4426,80 +4350,22 @@ def test_camera_frame_grasp_with_extrinsics_does_not_request_refresh() -> None:
     ]
 
 
-def test_grasp_compile_canonicalizes_host_numeric_state_without_changing_semantics() -> None:
+def test_grasp_compilation_state_is_not_exposed_as_a_planner_obligation() -> None:
     memory = AgentMemory()
-    _record_anygrasp_candidate_policy(
-        memory,
-        source_tool="grasp_pose_estimate",
-        camera_frame_id="agentview",
-    )
-    active = memory.grasp_candidate_policy()["active_candidate"]
-    exact_extrinsics = {
-        "pos": [0.8965773716836134, 5.216182733499864e-07, 0.65],
-        "mat": [
-            -1.7233905013069872e-06,
-            -0.5287697435529835,
-            0.8487653140297038,
-            0.9999999999985034,
-            -7.823149652530503e-07,
-            1.5430955956352577e-06,
-            -1.5194045527300304e-07,
-            -0.848765314031093,
-            0.5287697435535403,
-        ],
-    }
-    observation = EnvObservation(
-        task="pick alphabet soup",
-        cameras=[
-            CameraFrame(
-                frame_id="agentview",
-                rgb=[[[0, 0, 0]]],
-                extrinsics=exact_extrinsics,
-            )
-        ],
-        robot=RobotState(),
-    )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {
-                "kind": "tool_call",
-                "name": "compile_grasp_seed",
-                "parameters": {
-                    "camera_pose": {**active, "translation_xyz": [9.0, 9.0, 9.0]},
-                    "camera_extrinsics": {
-                        **exact_extrinsics,
-                        "mat": [*exact_extrinsics["mat"][:6], -1.5194045527300304, *exact_extrinsics["mat"][7:]],
-                    },
-                    "camera_frame_id": "stale-camera",
-                    "scene_epoch": 7,
-                    "target_geometry_family": "upright_can",
-                },
-            }
-        )
-    )
+    _record_anygrasp_candidate_policy(memory)
 
-    decision = planner.plan(
-        observation,
+    context = build_tool_context(
+        observation=_observation(),
         memory=memory,
-        tools=_tools_with_handlers("compile_grasp_seed"),
+        tools=build_default_tool_registry(),
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "compile_grasp_seed"
-    assert decision.parameters["camera_pose"] == active
-    assert decision.parameters["camera_extrinsics"] == exact_extrinsics
-    assert decision.parameters["camera_frame_id"] == "agentview"
-    assert decision.parameters["scene_epoch"] == 0
-    assert decision.parameters["target_geometry_family"] == "upright_can"
-    canonicalized = {
-        entry["field"] for entry in decision.metadata["host_parameter_canonicalizations"]
-    }
-    assert canonicalized == {
-        "camera_pose",
-        "camera_extrinsics",
-        "camera_frame_id",
-        "scene_epoch",
-    }
+    assert "grasp_compile_obligation" not in context
+    assert all(
+        tool["name"] != "compile_grasp_seed"
+        for tool in context["tool_references"]
+    )
 
 
 def test_fallback_grasp_candidate_reuses_semantics_via_host_compile() -> None:
@@ -4515,45 +4381,22 @@ def test_fallback_grasp_candidate_reuses_semantics_via_host_compile() -> None:
         "pregrasp_distance_m": 0.08,
     }
     memory.save_fact("grasp_candidate_policy", policy, source="test")
-    exact_extrinsics = {
-        "pos": [0.0, 0.0, 0.0],
-        "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-    }
-    observation = EnvObservation(
-        task="pick alphabet soup",
-        cameras=[
-            CameraFrame(
-                frame_id="agentview",
-                rgb=[[[0, 0, 0]]],
-                extrinsics=exact_extrinsics,
-            )
-        ],
-        robot=RobotState(),
-    )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "ask_human", "parameters": {"message": "unused"}}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
+    context = build_tool_context(
+        observation=_observation(),
         memory=memory,
-        tools=_tools_with_handlers("compile_grasp_seed"),
+        tools=build_default_tool_registry(),
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "compile_grasp_seed"
-    assert decision.parameters == {
-        "camera_pose": policy["active_candidate"],
-        "camera_extrinsics": exact_extrinsics,
-        "camera_frame_id": "agentview",
-        "scene_epoch": 0,
+    assert memory.grasp_candidate_policy()["compile_hints"] == {
         "target_geometry_family": "upright_can",
         "pregrasp_distance_m": 0.08,
     }
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "grasp_compile"
+    assert "grasp_compile_obligation" not in context
+    assert all(
+        tool["name"] != "compile_grasp_seed"
+        for tool in context["tool_references"]
+    )
 
 
 def test_articulated_handle_compile_mode_is_host_owned() -> None:
@@ -4570,46 +4413,26 @@ def test_articulated_handle_compile_mode_is_host_owned() -> None:
         "strategy_id": "native-front-articulated-handle-panda-p8",
     }
     memory.save_fact("grasp_candidate_policy", policy, source="test")
-    extrinsics = {
-        "pos": [0.0, 0.0, 0.0],
-        "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-    }
-    observation = EnvObservation(
-        task="open the microwave",
-        cameras=[
-            CameraFrame(
-                frame_id="agentview",
-                rgb=[[[0, 0, 0]]],
-                extrinsics=extrinsics,
-            )
-        ],
-        robot=RobotState(),
-    )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "ask_human", "parameters": {"message": "unused"}}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
+    context = build_tool_context(
+        observation=_observation(),
         memory=memory,
-        tools=_tools_with_handlers("compile_grasp_seed"),
+        tools=build_default_tool_registry(),
         skills=build_default_skill_registry(),
     )
 
-    assert decision.parameters["approach_mode"] == "front"
-    assert decision.parameters["strategy_id"] == (
-        "native-front-articulated-handle-panda-p8"
+    assert memory.grasp_candidate_policy()["compile_hints"] == {
+        "target_geometry_family": "articulated_handle",
+        "approach_mode": "front",
+        "strategy_id": "native-front-articulated-handle-panda-p8",
+    }
+    assert "grasp_compile_obligation" not in context
+    assert all(
+        tool["name"] != "compile_grasp_seed"
+        for tool in context["tool_references"]
     )
-    assert "candidate_fallback" not in decision.parameters
-    assert "fallback_reason" not in decision.parameters
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "grasp_compile"
-    assert "host_parameter_canonicalizations" not in decision.metadata
 
 
-def test_verified_reference_geometry_drives_initial_host_grasp_compile() -> None:
+def test_verified_reference_geometry_is_not_exposed_as_compile_obligation() -> None:
     memory = AgentMemory()
     _record_anygrasp_candidate_policy(
         memory,
@@ -4627,38 +4450,21 @@ def test_verified_reference_geometry_drives_initial_host_grasp_compile() -> None
         },
         source="test",
     )
-    exact_extrinsics = {
-        "pos": [0.0, 0.0, 0.0],
-        "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-    }
-    observation = EnvObservation(
-        task="pick alphabet soup",
-        cameras=[
-            CameraFrame(
-                frame_id="agentview",
-                rgb=[[[0, 0, 0]]],
-                extrinsics=exact_extrinsics,
-            )
-        ],
-        robot=RobotState(),
-    )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "ask_human", "parameters": {"message": "unused"}}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
+    context = build_tool_context(
+        observation=_observation(),
         memory=memory,
-        tools=_tools_with_handlers("compile_grasp_seed"),
+        tools=build_default_tool_registry(),
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "compile_grasp_seed"
-    assert decision.parameters["target_geometry_family"] == "upright_can"
-    assert decision.parameters["camera_extrinsics"] == exact_extrinsics
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
+    assert memory.target_asset_reference()["exact_instance_verification"][
+        "grasp_geometry_family"
+    ] == "upright_can"
+    assert "grasp_compile_obligation" not in context
+    assert all(
+        tool["name"] != "compile_grasp_seed"
+        for tool in context["tool_references"]
+    )
 
 
 def test_grasp_open_precedes_stale_reference_recovery_obligation() -> None:
@@ -5994,7 +5800,7 @@ def test_placement_obligation_joins_independent_post_attach_observations() -> No
         skills=build_default_skill_registry(),
     )
     assert articulated_context["placement_obligation"] is None
-    assert articulated_context["placement_transform_obligation"] is None
+    assert "placement_transform_obligation" not in articulated_context
     assert articulated_context["placement_motion_guidance"] is None
     execution.pop("attachment_mode", None)
     memory.save_fact("grasp_execution", execution, source="test")
@@ -6061,7 +5867,7 @@ def test_new_placement_selection_clears_other_detection_from_stale_image() -> No
     assert memory.placement_region_detection() is None
 
 
-def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None:
+def test_placement_selection_is_not_a_public_planner_obligation() -> None:
     memory = AgentMemory()
     memory.save_fact(
         "attachment_gate",
@@ -6115,15 +5921,14 @@ def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None
     context = build_tool_context(
         observation=observation,
         memory=memory,
-        tools=_tools_with_handlers("compile_placement_seed"),
+        tools=build_default_tool_registry(),
         skills=build_default_skill_registry(),
     )
-    obligation = context["placement_transform_obligation"]
-    assert obligation["required_tool"] == "compile_placement_seed"
-    assert obligation["allowed_parameters"] == {
-        "placement_candidate_id": ["placement_000"],
-    }
-    assert obligation["selection_source"] == "main_agent_vlm"
+    assert "placement_transform_obligation" not in context
+    assert all(
+        tool["name"] != "compile_placement_seed"
+        for tool in context["tool_references"]
+    )
 
 
 def test_native_held_proof_overrides_zero_gripper_openness_during_placement() -> None:
@@ -8320,7 +8125,7 @@ def test_pipeline_blocks_skipping_ahead_in_anygrasp_candidate_queue() -> None:
     )
 
     assert plan.status.value == "blocked"
-    assert "require compile_grasp_seed" in plan.tool_calls[0].reason
+    assert "host-owned candidate compiler" in plan.tool_calls[0].reason
     assert memory.anygrasp_candidate_policy()["active_candidate"]["id"] == "grasp_000"
 
 
