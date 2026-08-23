@@ -432,6 +432,34 @@ def _host_obligation_decision(
 ) -> PlannerDecision | None:
     """Dispatch fully determined structured joins without model JSON copying."""
 
+    completion = tool_context.get("task_completion_evidence")
+    if (
+        isinstance(completion, dict)
+        and completion.get("status") == "proven"
+        and completion.get("outcome") == "success"
+        and completion.get("environment_closed") is True
+    ):
+        return PlannerDecision(
+            action_type="response",
+            action="task_complete",
+            parameters={
+                "success": True,
+                "summary": "The embodied task completed and its environment was closed.",
+            },
+            reasoning=(
+                "The host retained a PASS placement verification after retreat and a "
+                "successful environment close; no further tool action or human input "
+                "is required."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": completion.get("schema_version"),
+                    "stage": "task_complete",
+                    "source": completion.get("source"),
+                }
+            },
+        )
+
     grasp_policy = tool_context.get("grasp_candidate_policy")
     if isinstance(grasp_policy, dict) and grasp_policy.get("status") == "blocked":
         return PlannerDecision(
@@ -2456,7 +2484,10 @@ def _default_tool_planner_system_prompt() -> str:
         "JSON object with fields: kind, name, parameters, reasoning. Valid "
         "top-level kinds are tool_call and response. For tool_call, choose only one "
         "currently executable tool by exact name from tool_context.tool_references. "
-        "For response, use ask_human, talk, or task_complete. Execute atomic actions: "
+        "For response, use ask_human, talk, or task_complete. Use ask_human only for "
+        "a concrete unresolved choice or unsafe/unknown outcome that genuinely requires "
+        "operator input; never use it as a generic final status. After host-proven "
+        "success and lifecycle cleanup, finish with task_complete. Execute atomic actions: "
         "choose at most one state-changing tool, then obtain fresh observation evidence "
         "before dependent control. Do not batch calls when later parameters depend on "
         "earlier results. A tool acknowledgement proves only that the call ran; it does "
@@ -3614,6 +3645,7 @@ def _build_tool_context_payload(
         "schema_version": "openeta.planner_context.v1",
         "task": effective_task,
         "active_environment_task": memory_context.get("active_environment_task"),
+        "task_completion_evidence": memory_context.get("task_completion_evidence"),
         "task_playbook": task_playbook,
         "observation": _observation_summary(observation),
         "vision_image_paths": vision_image_paths,

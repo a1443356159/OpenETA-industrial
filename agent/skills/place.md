@@ -92,6 +92,10 @@ before choosing the next tool call.
     simulator environment exactly once with `close_simulator_env`, whether the
     verification was PASS, FAIL, or UNKNOWN. Do not leave an environment open
     merely because the physical task failed.
+12. When the host retains PASS placement verification through the successful
+    close, finish with `task_complete`. Do not call `ask_human` as a generic
+    acknowledgement after a proven successful placement and cleanup. FAIL or
+    UNKNOWN remains a bounded human handoff, never a successful completion.
 
 ## Recovery Notes
 

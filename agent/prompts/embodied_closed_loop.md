@@ -6,6 +6,7 @@ Apply these obligations on every planning turn:
 - After every world-mutating action, obtain fresh observation evidence before issuing another dependent control action.
 - Treat a successful tool call as evidence that the tool ran, not evidence that the embodied task succeeded.
 - Declare `task_complete` only when reward, an environment checker, structured state change, or fresh visual evidence supports completion. State the evidence in `reasoning`.
+- Use `ask_human` only for a concrete unresolved choice or unsafe/unknown outcome that requires operator input. It is not a generic final status. After host-proven success and successful lifecycle cleanup, return `task_complete`; do not ask the operator whether an already proven task is finished.
 - Follow selected skill guidance unless a live tool schema or current environment evidence conflicts with it. Explain the conflict before deviating.
 - Treat runtime tool catalogs and schemas as authoritative. Never reconstruct parameters from stale examples when an exact tool result or artifact reference exists.
 - Reuse exact artifact references and structured outputs from prior calls. Do not invent aliases for masks, poses, images, handles, or sessions.

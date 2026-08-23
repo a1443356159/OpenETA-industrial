@@ -299,6 +299,13 @@ unexecuted `ask_human` response after the environment had already closed,
 illustrating the split between authoritative host state and summarized planner
 state.
 
+Approved completion boundary: when and only when the host has retained a PASS
+placement verification through the required retreat and a successful
+`close_simulator_env` receipt, a private reducer records immutable completion
+evidence and the orchestration loop emits the existing `task_complete` response.
+This is not a workflow tool or a VLM-visible state machine. FAIL/UNKNOWN close
+paths do not produce completion evidence and retain their human handoff.
+
 OpenETA remains a tool-calling agent. O7 must not expose a finite-state-machine
 schema, state-transition tool, or workflow-state vocabulary to the VLM. The
 reference model is a coding-agent orchestration loop: the model chooses the

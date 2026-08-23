@@ -48,6 +48,7 @@ GRASP_ESTIMATION_RECOVERY_KEY = "grasp_estimation_recovery"
 GRIPPER_COMMAND_STATE_KEY = "gripper_command_state"
 ATTACHMENT_GATE_KEY = "attachment_gate"
 PLACEMENT_RELEASE_KEY = "placement_release"
+TASK_COMPLETION_EVIDENCE_KEY = "task_completion_evidence"
 PLACEMENT_CANDIDATE_POLICY_KEY = "placement_candidate_policy"
 PLACEMENT_OBJECT_DETECTION_KEY = "placement_object_detection"
 PLACEMENT_REGION_DETECTION_KEY = "placement_region_detection"
@@ -1029,9 +1030,45 @@ class AgentMemory:
     def active_environment_task(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(ACTIVE_ENVIRONMENT_TASK_KEY))
 
+    def task_completion_evidence(self) -> JsonDict | None:
+        """Return host-proven evidence that a closed task finished successfully."""
+
+        return _memory_fact_value(self.facts.get(TASK_COMPLETION_EVIDENCE_KEY))
+
     def _capture_active_environment_task(self, action: EnvAction) -> bool:
         close_call = _successful_tool_call(action, "close_simulator_env")
         if close_call is not None:
+            release = self.placement_release()
+            verification = (
+                release.get("placement_verification")
+                if isinstance(release, dict)
+                else None
+            )
+            completion_recorded = False
+            if (
+                isinstance(release, dict)
+                and release.get("status") == "retreated"
+                and isinstance(verification, dict)
+                and verification.get("placement_confirmed") is True
+                and verification.get("verdict") == "PASS"
+            ):
+                evidence = {
+                    "schema_version": "openeta.task_completion_evidence.v1",
+                    "status": "proven",
+                    "outcome": "success",
+                    "source": "placement_verification",
+                    "environment_closed": True,
+                    "candidate_id": release.get("candidate_id"),
+                    "placement_pose_id": release.get("placement_pose_id"),
+                    "placement_verification": dict(verification),
+                    "closed_at_s": time.time(),
+                }
+                self.facts[TASK_COMPLETION_EVIDENCE_KEY] = _memory_fact_entry(
+                    evidence,
+                    source="successful_environment_close",
+                )
+                self.record("task_completion_proven", dict(evidence))
+                completion_recorded = True
             removed = self.facts.pop(ACTIVE_ENVIRONMENT_TASK_KEY, None)
             gripper_removed = self.facts.pop(GRIPPER_COMMAND_STATE_KEY, None)
             release_removed = self.facts.pop(PLACEMENT_RELEASE_KEY, None)
@@ -1043,12 +1080,14 @@ class AgentMemory:
                 removed is not None
                 or gripper_removed is not None
                 or release_removed is not None
+                or completion_recorded
             )
 
         gripper_removed = False
         call = _successful_tool_call(action, "create_simulator_env")
         if call is not None:
             gripper_removed = self.facts.pop(GRIPPER_COMMAND_STATE_KEY, None) is not None
+            self.facts.pop(TASK_COMPLETION_EVIDENCE_KEY, None)
         if call is None:
             call = _successful_tool_call(action, "observe")
         if call is None:
@@ -6140,6 +6179,7 @@ class AgentMemory:
             "session_initial_task": self.task,
             "current_user_request": self.current_user_request,
             "active_environment_task": self.active_environment_task(),
+            "task_completion_evidence": self.task_completion_evidence(),
             "conversation": self.conversation.planning_context(max_items=0),
             "metadata": self.metadata,
             "selection_obligation": self.pending_sam3_selection(),
@@ -6190,6 +6230,7 @@ class AgentMemory:
                         GRIPPER_COMMAND_STATE_KEY,
                         ATTACHMENT_GATE_KEY,
                         PLACEMENT_RELEASE_KEY,
+                        TASK_COMPLETION_EVIDENCE_KEY,
                         MOTION_RECONCILIATION_KEY,
                         SCENE_EPOCH_KEY,
                         TRANSITION_LEDGER_KEY,

@@ -609,6 +609,8 @@ def test_default_planner_prompt_preserves_generic_lifecycle_boundaries() -> None
     assert "currently executable tool" in prompt
     assert "create_simulator_env and close_simulator_env" in prompt
     assert "host-owned lifecycle" in prompt
+    assert "never use it as a generic final status" in prompt
+    assert "finish with task_complete" in prompt
     assert "skills are editable text guidance, not executable macros" in prompt.lower()
     assert all(term not in prompt.lower() for term in ("sam3", "anygrasp", "anyplace", "molmopoint"))
 
@@ -6663,6 +6665,82 @@ def test_successful_placement_release_clears_stale_attachment_state() -> None:
         )
     )
     assert memory.placement_release() is None
+    completion = memory.task_completion_evidence()
+    assert completion is not None
+    assert completion["status"] == "proven"
+    assert completion["outcome"] == "success"
+    assert completion["environment_closed"] is True
+    assert completion["placement_verification"]["verdict"] == "PASS"
+
+    context = build_tool_context(
+        observation=EnvObservation(
+            task="pick can and place it in basket",
+            cameras=[],
+            robot=RobotState(),
+        ),
+        memory=memory,
+        tools=_tools_with_handlers(),
+        skills=build_default_skill_registry(),
+    )
+    assert context["task_completion_evidence"] == completion
+    decision = planner.plan(
+        EnvObservation(
+            task="pick can and place it in basket",
+            cameras=[],
+            robot=RobotState(),
+        ),
+        memory=memory,
+        tools=_tools_with_handlers(),
+        skills=build_default_skill_registry(),
+    )
+    assert decision.action_type == "response"
+    assert decision.action == "task_complete"
+    assert decision.parameters["success"] is True
+    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
+    assert decision.metadata["host_obligation"]["stage"] == "task_complete"
+
+
+@pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])
+def test_close_does_not_prove_task_completion_without_placement_pass(verdict: str) -> None:
+    memory = AgentMemory()
+    memory.save_fact(
+        "placement_release",
+        {
+            "schema_version": "openeta.placement_release.v1",
+            "status": "retreated",
+            "candidate_id": "placement_000",
+            "placement_pose_id": "place_grasp_000",
+            "placement_verification": {
+                "placement_confirmed": False,
+                "verdict": verdict,
+            },
+        },
+        source="test",
+    )
+
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {
+                    "kind": "tool_call",
+                    "name": "close_simulator_env",
+                    "parameters": {},
+                },
+                "status": "executed",
+                "tool_calls": [
+                    {
+                        "name": "close_simulator_env",
+                        "status": "executed",
+                        "result": {"success": True, "content": "closed"},
+                    }
+                ],
+            },
+        )
+    )
+
+    assert memory.placement_release() is None
+    assert memory.task_completion_evidence() is None
 
 
 def test_wrist_alignment_obligation_joins_current_geometry(tmp_path: Path) -> None:
