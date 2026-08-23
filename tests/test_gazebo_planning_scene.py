@@ -8,6 +8,7 @@ from extensions.gazebo.planning_scene import (
     PlanningSceneSynchronizer,
     TARGET_TOUCH_LINKS,
 )
+from extensions.gazebo.ros_control import _relative_pose
 
 
 def test_motion_only_scene_requires_empty_readback() -> None:
@@ -36,7 +37,6 @@ def test_motion_only_scene_fails_closed_on_nonempty_readback() -> None:
     with pytest.raises(PlanningSceneError, match="readback mismatch"):
         scene.initialize_empty()
     assert scene.ready is False
-from extensions.gazebo.ros_control import _relative_pose
 
 
 def _boxes():
@@ -108,6 +108,48 @@ def test_planning_scene_preserves_world_and_attached_rotations() -> None:
         2**-0.5, 0.0, 0.0, 2**-0.5
     ]
     assert calls[2]["world_objects"][0]["pose_quat_xyzw"] == list(target.pose_quat_xyzw)
+
+
+def test_planning_scene_updates_detached_target_pose_with_new_revision() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        return {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
+    table, distractor, target = _boxes()
+    scene.reset(table=table, distractor=distractor, target=target)
+    moved_target = CollisionBox(
+        "target",
+        target.size_xyz,
+        (0.31, -0.08, 0.43),
+        (0.0, 0.0, 2**-0.5, 2**-0.5),
+    )
+
+    assert scene.update_world_target(target=moved_target) == 2
+    assert scene.world_ids == {"table", "distractor", "target"}
+    assert scene.attached_ids == set()
+    assert scene.world_specs["target"] == moved_target.to_dict()
+    assert calls[1] == {
+        "operation": "update_world_target",
+        "world_objects": [moved_target.to_dict()],
+    }
+
+
+def test_planning_scene_rejects_world_pose_update_while_target_is_attached() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, distractor, target = _boxes()
+    scene.reset(table=table, distractor=distractor, target=target)
+    scene.attach_target(target=target)
+
+    with pytest.raises(PlanningSceneError, match="attached target"):
+        scene.update_world_target(target=target)
+    assert scene.ready is False
 
 
 def test_relative_pose_uses_parent_rotation_for_translation_and_orientation() -> None:

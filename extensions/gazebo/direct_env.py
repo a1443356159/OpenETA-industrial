@@ -224,15 +224,38 @@ class GazeboDirectEnv(Env):
             attachment = getattr(self.runtime, "attachment", None)
             if recovery_to_hover:
                 if receipt.get("ok") is True:
-                    self._native_grasp_verifier.reset()
-                    self._native_grasp_transport_locked = False
-                    self._native_grasp_lift_proof_pending = False
-                    self._attachment_transform = None
-                    self._native_grasp_recovery_hover = None
-                    receipt["native_grasp_recovery"] = {
-                        "status": "returned_to_compiled_hover",
-                        "reason": "close_rejected_without_attachment",
-                    }
+                    try:
+                        pose_sync = self._sync_failed_close_target_pose()
+                    except Exception as exc:
+                        # The withdrawal already occurred, but another grasp
+                        # must remain blocked until collision geometry is
+                        # proven at the measured post-contact object pose.
+                        receipt.update(
+                            {
+                                "ok": False,
+                                "error_code": "PLANNING_SCENE_SYNC_FAILED",
+                                "detail": str(exc),
+                                "planning_scene_target_pose_sync": {
+                                    "status": "failed",
+                                    "execution_started": False,
+                                },
+                            }
+                        )
+                    else:
+                        self._native_grasp_verifier.reset()
+                        self._native_grasp_transport_locked = False
+                        self._native_grasp_lift_proof_pending = False
+                        self._attachment_transform = None
+                        self._native_grasp_recovery_hover = None
+                        receipt["planning_scene_revision"] = pose_sync["revision"]
+                        raw.setdefault("metadata", {})[
+                            "planning_scene_revision"
+                        ] = pose_sync["revision"]
+                        receipt["planning_scene_target_pose_sync"] = pose_sync
+                        receipt["native_grasp_recovery"] = {
+                            "status": "returned_to_compiled_hover",
+                            "reason": "close_rejected_without_attachment",
+                        }
                 raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
                 receipt["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
             elif action_type == "gripper_close":
@@ -471,7 +494,8 @@ class GazeboDirectEnv(Env):
                     self._attachment_transform = None
             else:
                 raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
-            self._remember_compiled_hover(raw_action, receipt)
+            if not recovery_to_hover:
+                self._remember_compiled_hover(raw_action, receipt)
         self._latest = raw
         # The Direct/Gym boundary owns the public unified observation.  Keep
         # the structured receipt anchored to that exact post-action object so
@@ -485,6 +509,30 @@ class GazeboDirectEnv(Env):
     def _contact_unavailable_result(self):
         from .native_grasp import ContactGateResult
         return ContactGateResult(False, ReasonCode.CONTACT_WINDOW_NOT_ARMED, 0, 0)
+
+    def _sync_failed_close_target_pose(self) -> dict[str, Any]:
+        """Synchronize a detached target pushed by a rejected close."""
+
+        attachment = getattr(self.runtime, "attachment", None)
+        if attachment is None or getattr(attachment, "state", None) == "attached":
+            raise GazeboProcessError("NATIVE_GRASP_TARGET_POSE_UNAVAILABLE")
+        target_pose, _ = attachment.native_target_mount_poses()
+        sync_target_pose = getattr(
+            self.controller, "sync_planning_scene_target_pose", None
+        )
+        if not callable(sync_target_pose):
+            raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+        revision = sync_target_pose(
+            self._native_grasp_config,
+            target_xyz=target_pose.xyz,
+            target_quat_xyzw=target_pose.quat_xyzw,
+        )
+        return {
+            "status": "synchronized_from_native_world_pose",
+            "revision": int(revision),
+            "target_id": self._native_grasp_config.target_id,
+            "execution_started": False,
+        }
 
     def _is_failed_close_recovery_hover(self, action: Mapping[str, Any]) -> bool:
         """Allow only an exact withdrawal to the prior compiled grasp hover.

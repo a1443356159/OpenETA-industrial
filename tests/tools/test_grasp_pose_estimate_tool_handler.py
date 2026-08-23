@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from agent.tools.handlers import build_grasp_pose_estimate_handler
 from agent.tools.registry import (
     ToolEffect,
@@ -155,6 +157,49 @@ def test_falls_back_and_normalizes_backend_provenance(tmp_path: Path) -> None:
     assert candidates[0]["source_backend"] == "contact_graspnet"
     assert result.details["source"]["scene_epoch"] == 4
     assert result.details["source"]["camera_frame_id"] == "agentview"
+
+
+def test_parallel_gripper_candidates_receive_mask_depth_closing_alignment(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+    from PIL import Image
+
+    parameters = _parameters(tmp_path)
+    Image.new("RGB", (16, 16), (0, 0, 0)).save(parameters["rgb"])
+    Image.fromarray(np.full((16, 16), 1000, dtype=np.uint16)).save(
+        parameters["depth"]
+    )
+    mask = np.zeros((16, 16), dtype=np.uint8)
+    mask[4:13, 4:13] = 255
+    Image.fromarray(mask).save(parameters["object_mask"]["mask_ref"])
+    candidate = _candidate("graspgenx-0", score=0.9)
+    candidate.update(
+        {
+            "translation_xyz": [0.0, 0.02, 0.97],
+            "gripper_tip_position_xyz": [0.03, 0.02, 0.97],
+        }
+    )
+
+    result = build_grasp_pose_estimate_handler(
+        {"graspgenx": lambda _context: _success(candidate)},
+        backend_order=("graspgenx",),
+        graspgenx_gripper_name="robotiq_2f_85",
+    )(_context(parameters))
+
+    assert result.success is True
+    normalized = result.details["grasp_candidates"][0]
+    evidence = normalized["target_closing_alignment"]
+    assert normalized["gripper_name"] == "robotiq_2f_85"
+    assert evidence["source"] == "aligned_selected_mask_depth"
+    assert evidence["depth_provenance"] == "sensor_depth"
+    assert evidence["closing_axis"] == "graspnet_local_y"
+    assert evidence["support_point_count"] == 81
+    assert evidence["sampled_point_count"] == 81
+    assert evidence["target_span_m"] == pytest.approx(0.08)
+    assert evidence["correction_m"] == pytest.approx(-0.02)
+    assert evidence["correction_camera_xyz"] == pytest.approx([0.0, -0.02, 0.0])
+    assert result.details["source"]["target_closing_alignment_candidate_count"] == 1
 
 
 def test_host_excluded_backend_is_skipped(tmp_path: Path) -> None:

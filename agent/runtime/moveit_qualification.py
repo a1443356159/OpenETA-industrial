@@ -37,6 +37,9 @@ PLANNING_ATTEMPTS = 3
 KINEMATIC_IK_TIMEOUT_S = 2.0
 STATE_VALIDITY_TIMEOUT_S = 2.0
 QUALIFICATION_RPC_GRACE_S = 30.0
+PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA = (
+    "openeta.parallel_gripper_target_closing_alignment.v1"
+)
 
 
 def _hash(value: object) -> str:
@@ -161,19 +164,31 @@ class MoveItCandidateQualifier:
             for candidate in raw:
                 if not isinstance(candidate, Mapping):
                     continue
-                augmented_candidates.append(dict(candidate))
                 gripper_name = str(candidate.get("gripper_name") or "").lower()
-                if (
-                    ("robotiq" in gripper_name or "parallel" in gripper_name)
-                ):
+                parallel_gripper = (
+                    "robotiq" in gripper_name or "parallel" in gripper_name
+                )
+                base_candidate = dict(candidate)
+                if parallel_gripper:
+                    try:
+                        base_candidate = parallel_gripper_centering_variant(candidate)
+                    except ValueError:
+                        # Sensor evidence is optional.  With no valid aligned
+                        # mask/depth correction, retain the unmodified model
+                        # pose and let the existing funnel fail closed.
+                        pass
+                augmented_candidates.append(base_candidate)
+                if parallel_gripper:
                     try:
                         augmented_candidates.append(
-                            parallel_gripper_symmetry_variant(candidate)
+                            parallel_gripper_symmetry_variant(base_candidate)
                         )
                     except ValueError:
                         pass
                     try:
-                        reversal = parallel_gripper_approach_reversal_variant(candidate)
+                        reversal = parallel_gripper_approach_reversal_variant(
+                            base_candidate
+                        )
                         augmented_candidates.extend(
                             [
                                 reversal,
@@ -694,6 +709,110 @@ def _pose_with_quaternion(pose: Mapping[str, Any]) -> JsonDict:
             quat = [(m[0][2] + m[2][0]) / scale, (m[1][2] + m[2][1]) / scale, 0.25 * scale, (m[1][0] - m[0][1]) / scale]
     result["quat_xyzw"] = quat
     return result
+
+
+def parallel_gripper_centering_variant(candidate: Mapping[str, Any]) -> JsonDict:
+    """Translate a parallel-jaw grasp onto its measured target midplane.
+
+    Only translation along GraspNet local +Y (the jaw closing axis) is
+    permitted.  The estimator's approach, wrist rotation, insertion depth and
+    opening width are preserved.  The correction must come from the selected
+    target's aligned mask/depth evidence and remains auditable on the derived
+    candidate.
+    """
+
+    variant = json.loads(json.dumps(dict(candidate)))
+    evidence = variant.get("target_closing_alignment")
+    rotation = variant.get("rotation_matrix")
+    translation = variant.get("translation_xyz")
+    tip = variant.get("gripper_tip_position_xyz")
+    if not (
+        isinstance(evidence, Mapping)
+        and evidence.get("schema_version")
+        == PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA
+        and evidence.get("source") == "aligned_selected_mask_depth"
+        and evidence.get("depth_provenance")
+        in {"sensor_depth", "sensor_safety_depth"}
+        and evidence.get("closing_axis") == "graspnet_local_y"
+        and isinstance(rotation, list)
+        and len(rotation) == 3
+        and all(isinstance(row, list) and len(row) == 3 for row in rotation)
+        and isinstance(translation, list)
+        and len(translation) == 3
+        and isinstance(tip, list)
+        and len(tip) == 3
+    ):
+        raise ValueError("parallel-gripper centering requires aligned target evidence")
+    try:
+        rotation_values = [[float(value) for value in row] for row in rotation]
+        translation_values = [float(value) for value in translation]
+        tip_values = [float(value) for value in tip]
+        correction = float(evidence["correction_m"])
+        correction_vector = [
+            float(value) for value in evidence["correction_camera_xyz"]
+        ]
+        target_span = float(evidence["target_span_m"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("parallel-gripper centering evidence is malformed") from exc
+    expected_vector = [correction * row[1] for row in rotation_values]
+    if not (
+        all(
+            math.isfinite(value)
+            for value in (
+                correction,
+                target_span,
+                *translation_values,
+                *tip_values,
+                *correction_vector,
+                *(value for row in rotation_values for value in row),
+            )
+        )
+        and target_span > 0.0
+        and len(correction_vector) == 3
+        and all(
+            math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9)
+            for actual, expected in zip(correction_vector, expected_vector)
+        )
+    ):
+        raise ValueError("parallel-gripper centering evidence is inconsistent")
+
+    centered_translation = [
+        value + correction_vector[index]
+        for index, value in enumerate(translation_values)
+    ]
+    centered_tip = [
+        value + correction_vector[index] for index, value in enumerate(tip_values)
+    ]
+    variant["translation_xyz"] = centered_translation
+    variant["gripper_tip_position_xyz"] = centered_tip
+    transform = variant.get("transform_matrix")
+    if transform is not None:
+        if not (
+            isinstance(transform, list)
+            and len(transform) == 4
+            and all(isinstance(row, list) and len(row) == 4 for row in transform)
+        ):
+            raise ValueError("parallel-gripper centering transform is malformed")
+        for row_index in range(3):
+            if not math.isclose(
+                float(transform[row_index][3]),
+                translation_values[row_index],
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                raise ValueError("parallel-gripper centering transform is inconsistent")
+            transform[row_index][3] = centered_translation[row_index]
+    variant.pop("model_native_grasp_pose", None)
+    variant["id"] = f"{candidate.get('id', 'grasp')}_closing_centered"
+    variant["centering_parent_id"] = str(candidate.get("id") or "")
+    variant["centering_parent_provenance"] = str(
+        candidate.get("provenance") or candidate.get("source_model") or ""
+    )
+    variant["centering_transform"] = "target_mask_depth_closing_midplane"
+    variant["centering_offset_m"] = correction
+    variant["target_closing_span_m"] = target_span
+    variant["provenance"] = "host_parallel_gripper_closing_centering"
+    return variant
 
 
 def parallel_gripper_symmetry_variant(candidate: Mapping[str, Any]) -> JsonDict:

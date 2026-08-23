@@ -10,13 +10,14 @@ from agent.runtime.moveit_qualification import (
     MoveItCandidateQualifier,
     MoveItQualificationEngine,
     parallel_gripper_approach_reversal_variant,
+    parallel_gripper_centering_variant,
     parallel_gripper_symmetry_variant,
 )
 from agent.tools.registry import ToolResult
 from tools.candidate_config import CandidateFunnelConfig
 from extensions.gazebo.planning_scene import CollisionBox, PlanningSceneSynchronizer
 from extensions.gazebo.robot_control import GazeboControlConfig
-from extensions.gazebo.ros_control import _RosRuntime
+from extensions.gazebo.ros_control import RosGazeboController, _RosRuntime
 
 
 def _hash(value):
@@ -213,6 +214,73 @@ def test_parallel_gripper_variant_preserves_approach_and_records_provenance():
     assert variant["provenance"] == "host_parallel_gripper_symmetry"
 
 
+def test_parallel_gripper_centering_changes_only_closing_axis_translation():
+    candidate = {
+        "id": "g0",
+        "score": 0.9,
+        "depth": 0.12,
+        "width": 0.06,
+        "translation_xyz": [0.1, 0.2, 0.3],
+        "gripper_tip_position_xyz": [0.22, 0.2, 0.3],
+        "rotation_matrix": [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        "transform_matrix": [
+            [1.0, 0.0, 0.0, 0.1],
+            [0.0, 1.0, 0.0, 0.2],
+            [0.0, 0.0, 1.0, 0.3],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        "target_closing_alignment": {
+            "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
+            "source": "aligned_selected_mask_depth",
+            "depth_provenance": "sensor_depth",
+            "closing_axis": "graspnet_local_y",
+            "target_span_m": 0.04,
+            "correction_m": 0.012,
+            "correction_camera_xyz": [0.0, 0.012, 0.0],
+        },
+    }
+
+    variant = parallel_gripper_centering_variant(candidate)
+
+    assert variant["translation_xyz"] == pytest.approx([0.1, 0.212, 0.3])
+    assert variant["gripper_tip_position_xyz"] == pytest.approx([0.22, 0.212, 0.3])
+    assert variant["rotation_matrix"] == candidate["rotation_matrix"]
+    assert variant["depth"] == candidate["depth"]
+    assert variant["width"] == candidate["width"]
+    assert variant["transform_matrix"][1][3] == pytest.approx(0.212)
+    assert variant["centering_parent_id"] == "g0"
+    assert variant["provenance"] == "host_parallel_gripper_closing_centering"
+
+
+def test_parallel_gripper_centering_rejects_inconsistent_axis_evidence():
+    candidate = {
+        "id": "g0",
+        "translation_xyz": [0.1, 0.2, 0.3],
+        "gripper_tip_position_xyz": [0.22, 0.2, 0.3],
+        "rotation_matrix": [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        "target_closing_alignment": {
+            "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
+            "source": "aligned_selected_mask_depth",
+            "depth_provenance": "sensor_depth",
+            "closing_axis": "graspnet_local_y",
+            "target_span_m": 0.04,
+            "correction_m": 0.012,
+            "correction_camera_xyz": [0.012, 0.0, 0.0],
+        },
+    }
+
+    with pytest.raises(ValueError, match="inconsistent"):
+        parallel_gripper_centering_variant(candidate)
+
+
 def test_parallel_gripper_approach_reversal_preserves_tip_and_closing_axis():
     candidate = {
         "id": "g0",
@@ -295,6 +363,70 @@ def test_robotiq_symmetry_variants_enter_the_real_grasp_funnel():
     ids = [item["candidate_id"] for item in captured["candidates"]]
     assert ids == ["g0", "g0_sym180"]
     assert result.details["raw_candidate_count"] == 2
+
+
+def test_robotiq_measured_centering_replaces_raw_pose_before_full_funnel():
+    captured = {}
+
+    def rpc(name, request, timeout):
+        captured["candidates"] = request["candidates"]
+        return _engine().qualify(request)
+
+    candidate = {
+        "id": "g0",
+        "gripper_name": "robotiq_2f_85",
+        "depth": 0.1,
+        "translation_xyz": [0.1, 0.2, 0.3],
+        "gripper_tip_position_xyz": [0.2, 0.2, 0.3],
+        "rotation_matrix": [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        "target_closing_alignment": {
+            "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
+            "source": "aligned_selected_mask_depth",
+            "depth_provenance": "sensor_depth",
+            "closing_axis": "graspnet_local_y",
+            "target_span_m": 0.04,
+            "correction_m": -0.01,
+            "correction_camera_xyz": [-0.0, -0.01, -0.0],
+        },
+    }
+    result = MoveItCandidateQualifier(
+        rpc,
+        compile_candidate=lambda candidate, *args: {
+            "qualification_stages": [
+                {
+                    "name": "hover",
+                    "xyz": list(candidate["translation_xyz"]),
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            ]
+        },
+    ).qualify_result(
+        ToolResult(
+            True,
+            "ok",
+            {"grasp_candidates": [candidate], "model_raw_candidate_count": 1},
+        ),
+        purpose="grasp",
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    ids = [item["candidate_id"] for item in captured["candidates"]]
+    assert "g0" not in ids
+    assert ids == [
+        "g0_closing_centered",
+        "g0_closing_centered_sym180",
+        "g0_closing_centered_approach180",
+        "g0_closing_centered_approach180_sym180",
+    ]
+    base = captured["candidates"][0]["candidate"]
+    assert base["translation_xyz"] == pytest.approx([0.1, 0.19, 0.3])
+    assert base["provenance"] == "host_parallel_gripper_closing_centering"
+    assert result.details["candidate_count"] == 4
 
 
 def test_second_zero_pass_round_has_no_source_return_recovery():
@@ -445,3 +577,38 @@ def test_ros_virtual_scene_diff_is_clone_only_and_payload_aware():
     assert detached["planning_scene_diff"]["world_objects"][0]["pose_xyz"][0] == pytest.approx(0.4)
     assert scene.revision == revision
     assert scene.attached_ids == set()
+
+
+def test_ros_controller_syncs_measured_detached_target_pose_and_validates_state():
+    scene = PlanningSceneSynchronizer()
+    scene.reset(
+        table=CollisionBox("table", (1.0, 1.0, 0.1), (0.0, 0.0, 0.0)),
+        distractor=CollisionBox("other", (0.1, 0.1, 0.1), (0.5, 0.0, 0.2)),
+        target=CollisionBox("target", (0.05, 0.05, 0.05), (0.2, 0.0, 0.3)),
+    )
+    runtime = type("Runtime", (), {})()
+    runtime.planning_scene = scene
+    runtime.scene_revision = scene.revision
+    runtime.planning_scene_ready = True
+    runtime.current_state_validity = lambda **_kwargs: {
+        "valid": True,
+        "collision_pairs": [],
+    }
+    controller = object.__new__(RosGazeboController)
+    controller.runtime = runtime
+    config = type(
+        "Config",
+        (),
+        {"target_id": "target", "target_size_m": (0.05, 0.05, 0.05)},
+    )()
+
+    revision = controller.sync_planning_scene_target_pose(
+        config,
+        target_xyz=(0.23, -0.01, 0.3),
+        target_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    assert revision == 2
+    assert runtime.scene_revision == 2
+    assert runtime.planning_scene_ready is True
+    assert scene.world_specs["target"]["pose_xyz"] == [0.23, -0.01, 0.3]

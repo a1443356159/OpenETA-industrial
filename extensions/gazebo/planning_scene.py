@@ -145,6 +145,32 @@ class PlanningSceneSynchronizer:
         self.attached_specs = {target.object_id: attached_spec}
         return revision
 
+    def update_world_target(self, *, target: CollisionBox) -> int:
+        """Replace the detached target pose without changing scene identity.
+
+        A rejected physical close can push the object even though no attach is
+        acknowledged.  Before another ordinary grasp cycle, synchronize that
+        measured world pose so collision checking cannot use the pre-contact
+        location.
+        """
+
+        if not self.target_id or target.object_id != self.target_id:
+            return self._fail("world target identity does not match the planning scene")
+        if target.object_id in self.attached_ids:
+            return self._fail("attached target cannot be updated as a world object")
+        if target.object_id not in self.world_ids:
+            return self._fail("target is missing from the world scene before pose update")
+        revision = self._commit(
+            {
+                "operation": "update_world_target",
+                "world_objects": [target.to_dict()],
+            },
+            expected_world=set(self.world_ids),
+            expected_attached=set(self.attached_ids),
+        )
+        self.world_specs[target.object_id] = target.to_dict()
+        return revision
+
     def detach_target(self, *, target: CollisionBox) -> int:
         if target.object_id not in self.attached_ids:
             return self._fail("target is not attached in the planning scene")

@@ -64,6 +64,11 @@ DEFAULT_MOLMOPOINT_OUTPUT_ROOT = Path("tmp") / "tool_result" / "molmopoint"
 DEFAULT_GRASPGENX_OUTPUT_ROOT = Path("tmp") / "tool_result" / "graspgenx"
 DEFAULT_DEPTH_PRIOR_OUTPUT_ROOT = Path("tmp") / "tool_result" / "depth_prior"
 GRASP_POSE_ESTIMATE_SCHEMA = "openeta.grasp_pose_estimate.v1"
+PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA = (
+    "openeta.parallel_gripper_target_closing_alignment.v1"
+)
+PARALLEL_GRIPPER_ALIGNMENT_QUANTILES = (0.02, 0.98)
+PARALLEL_GRIPPER_ALIGNMENT_MAX_POINTS = 4096
 DEFAULT_GRASP_POSE_BACKEND_ORDER = (
     "anygrasp",
     "contact_graspnet",
@@ -1175,6 +1180,7 @@ def build_grasp_pose_estimate_handler(
                     camera_frame_id=camera_frame_id,
                     scene_epoch=int(scene_epoch),
                     hints=hints,
+                    configured_gripper_name=graspgenx_gripper_name,
                 )
                 if normalized.success:
                     return normalized
@@ -3782,6 +3788,120 @@ def _grasp_backend_candidate_count(result: ToolResult) -> int:
         return 0
 
 
+def _annotate_parallel_gripper_closing_alignment(
+    candidates: list[JsonDict],
+    *,
+    depth_path: str,
+    object_mask: JsonDict | None,
+    intrinsics: Mapping[str, Any],
+    depth_provenance: str,
+) -> int:
+    """Attach measured closing-midplane corrections to parallel-jaw grasps.
+
+    The estimator pose fixes the approach and wrist rotation, but a coupled
+    parallel gripper also needs the target to straddle its closing plane.  Use
+    only the selected target's aligned mask/depth point cloud to derive that
+    one-dimensional translation.  Missing or malformed sensor evidence leaves
+    the model candidate unchanged; every derived pose still goes through the
+    complete host qualification funnel.
+    """
+
+    if not isinstance(object_mask, Mapping):
+        return 0
+    mask_path = _string_param(object_mask.get("mask_ref"))
+    if not depth_path or not mask_path:
+        return 0
+    try:
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(Path(depth_path).expanduser()) as loaded_depth:
+            depth = np.asarray(loaded_depth, dtype=np.float64)
+        with Image.open(Path(mask_path).expanduser()) as loaded_mask:
+            mask = np.asarray(loaded_mask.convert("L"), dtype=np.uint8) > 0
+        if depth.ndim == 3:
+            depth = depth[..., 0]
+        if depth.ndim != 2 or depth.shape != mask.shape:
+            return 0
+        fx = float(intrinsics["fx"])
+        fy = float(intrinsics["fy"])
+        cx = float(intrinsics["cx"])
+        cy = float(intrinsics["cy"])
+        scale = float(intrinsics["scale"])
+        if not all(math.isfinite(value) for value in (fx, fy, cx, cy, scale)):
+            return 0
+        if fx <= 0.0 or fy <= 0.0 or scale <= 0.0:
+            return 0
+        valid = mask & np.isfinite(depth) & (depth > 0.0)
+        flat_indices = np.flatnonzero(valid)
+        support_point_count = int(flat_indices.size)
+        if support_point_count < 16:
+            return 0
+        if support_point_count > PARALLEL_GRIPPER_ALIGNMENT_MAX_POINTS:
+            sample_indices = np.linspace(
+                0,
+                support_point_count - 1,
+                PARALLEL_GRIPPER_ALIGNMENT_MAX_POINTS,
+                dtype=np.int64,
+            )
+            flat_indices = flat_indices[sample_indices]
+        rows, columns = np.unravel_index(flat_indices, depth.shape)
+        z = depth[rows, columns] / scale
+        points = np.column_stack(
+            (
+                (columns.astype(np.float64) - cx) * z / fx,
+                (rows.astype(np.float64) - cy) * z / fy,
+                z,
+            )
+        )
+        if not np.isfinite(points).all():
+            return 0
+    except (KeyError, OSError, TypeError, ValueError):
+        return 0
+
+    annotated = 0
+    lower_quantile, upper_quantile = PARALLEL_GRIPPER_ALIGNMENT_QUANTILES
+    for candidate in candidates:
+        gripper_name = _string_param(candidate.get("gripper_name")).lower()
+        if "robotiq" not in gripper_name and "parallel" not in gripper_name:
+            continue
+        rotation = _finite_matrix3(candidate.get("rotation_matrix"))
+        tip = _finite_vector(candidate.get("gripper_tip_position_xyz"), length=3)
+        if rotation is None or tip is None or not _is_rotation_matrix3(rotation):
+            continue
+        rotation_array = np.asarray(rotation, dtype=np.float64)
+        closing_axis = rotation_array[:, 1]
+        projections = points @ closing_axis
+        low, high = np.quantile(
+            projections,
+            [lower_quantile, upper_quantile],
+        )
+        span = float(high - low)
+        correction = float((low + high) / 2.0 - np.dot(tip, closing_axis))
+        correction_camera = closing_axis * correction
+        if (
+            not math.isfinite(span)
+            or span <= 0.0
+            or not math.isfinite(correction)
+            or not np.isfinite(correction_camera).all()
+        ):
+            continue
+        candidate["target_closing_alignment"] = {
+            "schema_version": PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA,
+            "source": "aligned_selected_mask_depth",
+            "depth_provenance": depth_provenance,
+            "closing_axis": "graspnet_local_y",
+            "quantile_bounds": [lower_quantile, upper_quantile],
+            "support_point_count": support_point_count,
+            "sampled_point_count": int(points.shape[0]),
+            "target_span_m": span,
+            "correction_m": correction,
+            "correction_camera_xyz": correction_camera.tolist(),
+        }
+        annotated += 1
+    return annotated
+
+
 def _normalise_grasp_pose_estimate_result(
     result: ToolResult,
     *,
@@ -3795,6 +3915,7 @@ def _normalise_grasp_pose_estimate_result(
     camera_frame_id: str,
     scene_epoch: int,
     hints: JsonDict,
+    configured_gripper_name: str,
 ) -> ToolResult:
     details = result.details if isinstance(result.details, dict) else {}
     outputs = details.get("outputs")
@@ -3839,11 +3960,33 @@ def _normalise_grasp_pose_estimate_result(
         )
         if "depth" not in candidate and "gripper_depth" in candidate:
             candidate["depth"] = candidate["gripper_depth"]
+        if not _string_param(candidate.get("gripper_name")):
+            candidate["gripper_name"] = configured_gripper_name
         candidates.append(candidate)
     candidates.sort(key=lambda candidate: -float(candidate.get("score") or 0.0))
     for rank, candidate in enumerate(candidates):
         candidate["rank"] = rank
         candidate["id"] = f"{result_id}-{rank:03d}"
+
+    alignment_depth = depth
+    alignment_depth_provenance = "sensor_depth"
+    enhancement = hints.get("depth_enhancement")
+    if (
+        isinstance(enhancement, Mapping)
+        and enhancement.get("candidate_generation_only") is True
+    ):
+        # Candidate-only enhanced depth may fill unseen geometry.  It remains
+        # valid for the estimator, but never for this physical centering
+        # correction; use the sensor-only safety depth or omit the correction.
+        alignment_depth = _string_param(enhancement.get("safety_depth_png"))
+        alignment_depth_provenance = "sensor_safety_depth"
+    closing_alignment_count = _annotate_parallel_gripper_closing_alignment(
+        candidates,
+        depth_path=alignment_depth,
+        object_mask=object_mask,
+        intrinsics=intrinsics,
+        depth_provenance=alignment_depth_provenance,
+    )
 
     source: JsonDict = {
         "source_tool": "grasp_pose_estimate",
@@ -3855,8 +3998,8 @@ def _normalise_grasp_pose_estimate_result(
         "intrinsics": dict(intrinsics),
         "camera_frame_id": camera_frame_id,
         "scene_epoch": scene_epoch,
+        "target_closing_alignment_candidate_count": closing_alignment_count,
     }
-    enhancement = hints.get("depth_enhancement")
     if isinstance(enhancement, Mapping):
         source["depth_enhancement"] = dict(enhancement)
         source["requires_sensor_safety_check"] = bool(

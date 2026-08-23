@@ -405,6 +405,26 @@ class RosGazeboController(GazeboController):
         self.runtime.planning_scene_ready = self.planning_scene.ready
         return revision
 
+    def sync_planning_scene_target_pose(
+        self,
+        config: Any,
+        *,
+        target_xyz: tuple[float, float, float],
+        target_quat_xyzw: tuple[float, float, float, float],
+    ) -> int:
+        revision = self.planning_scene.update_world_target(
+            target=CollisionBox(
+                config.target_id,
+                tuple(config.target_size_m),
+                target_xyz,
+                target_quat_xyzw,
+            )
+        )
+        self._require_current_planning_state_valid()
+        self.runtime.scene_revision = revision
+        self.runtime.planning_scene_ready = self.planning_scene.ready
+        return revision
+
     def _require_current_planning_state_valid(self) -> None:
         validity = self.runtime.current_state_validity(timeout_s=3.0)
         self.runtime.planning_scene_validation = validity

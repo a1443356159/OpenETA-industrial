@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from adapter.protocol import EnvObservation, RobotState
 from extensions.gazebo.native_grasp import (
     ChildLinkProof,
+    NativePickPlaceConfig,
     NativeGraspVerifier,
     NativeContactSample,
     ReasonCode,
@@ -9,6 +13,7 @@ from extensions.gazebo.native_grasp import (
     confirm_native_bilateral_contact,
 )
 from extensions.gazebo.direct_env import GazeboDirectEnv
+from extensions.gazebo.profiles import STRUCTURED_RECEIPT
 
 
 def _sample(side: str, stamp: float) -> NativeContactSample:
@@ -138,3 +143,125 @@ def test_failed_close_allows_only_the_exact_compiled_hover_recovery() -> None:
     assert env._is_failed_close_recovery_hover({
         "action_type": "move_to", "parameters": {"target_pose": dict(matrix_hover)},
     })
+
+
+def _failed_close_recovery_env(*, sync_fails: bool = False):
+    config = NativePickPlaceConfig()
+    synchronized = []
+
+    class Attachment:
+        state = "detached"
+
+        @staticmethod
+        def native_target_mount_poses():
+            return (
+                SimpleNamespace(
+                    xyz=(0.31, -0.08, 0.43),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                SimpleNamespace(
+                    xyz=(0.3, -0.08, 0.55),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+            )
+
+    class Controller:
+        planning_scene = SimpleNamespace(revision=7)
+
+        def sync_planning_scene_target_pose(
+            self, supplied_config, *, target_xyz, target_quat_xyzw
+        ):
+            if sync_fails:
+                raise RuntimeError("readback mismatch")
+            synchronized.append(
+                (supplied_config, target_xyz, target_quat_xyzw)
+            )
+            self.planning_scene.revision = 8
+            return 8
+
+    controller = Controller()
+    observation = EnvObservation(
+        task="pick and place",
+        cameras=[],
+        robot=RobotState(),
+    )
+    runtime = SimpleNamespace(
+        attachment=Attachment(),
+        controller=controller,
+        scene_revision=7,
+        execute=lambda _action: (observation, {"ok": True}),
+    )
+    env = object.__new__(GazeboDirectEnv)
+    env.runtime = runtime
+    env.profile = SimpleNamespace(
+        model_config=config,
+        cameras=(),
+        capabilities={STRUCTURED_RECEIPT},
+    )
+    env._native_grasp_config = config
+    env._native_grasp_verifier = NativeGraspVerifier(config)
+    env._native_grasp_verifier.close_result(
+        confirm_native_bilateral_contact(
+            [], close_completed_sim_time_s=10.0, now_monotonic_s=20.0
+        ),
+        attach_acked=False,
+    )
+    env._native_grasp_transport_locked = True
+    env._native_grasp_lift_proof_pending = False
+    env._attachment_transform = None
+    env._native_grasp_recovery_hover = {
+        "grasp_stage": "hover",
+        "compiled_grasp_id": "grasp-7",
+        "xyz": [0.1, 0.2, 0.3],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+    return env, synchronized
+
+
+def test_failed_close_recovery_syncs_measured_target_before_unlocking() -> None:
+    env, synchronized = _failed_close_recovery_env()
+    action = {
+        "action_type": "move_to",
+        "target_pose": dict(env._native_grasp_recovery_hover),
+    }
+
+    raw, _, _, _, info = env.step(action)
+    receipt = info["_openeta_receipt"]
+
+    assert receipt["ok"] is True
+    assert receipt["planning_scene_revision"] == 8
+    assert receipt["planning_scene_target_pose_sync"] == {
+        "status": "synchronized_from_native_world_pose",
+        "revision": 8,
+        "target_id": env._native_grasp_config.target_id,
+        "execution_started": False,
+    }
+    assert synchronized[0][1:] == (
+        (0.31, -0.08, 0.43),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    assert raw["metadata"]["planning_scene_revision"] == 8
+    assert env._native_grasp_transport_locked is False
+    assert env._native_grasp_verifier.phase == "ready"
+    assert env._native_grasp_recovery_hover is None
+
+
+def test_failed_close_recovery_stays_locked_when_scene_sync_fails() -> None:
+    env, _ = _failed_close_recovery_env(sync_fails=True)
+    action = {
+        "action_type": "move_to",
+        "target_pose": dict(env._native_grasp_recovery_hover),
+    }
+
+    _, _, _, _, info = env.step(action)
+    receipt = info["_openeta_receipt"]
+
+    assert receipt["ok"] is False
+    assert receipt["error_code"] == "PLANNING_SCENE_SYNC_FAILED"
+    assert receipt["planning_scene_target_pose_sync"] == {
+        "status": "failed",
+        "execution_started": False,
+    }
+    assert env._native_grasp_transport_locked is True
+    assert env._native_grasp_verifier.phase == "contact_rejected"
+    assert env._native_grasp_recovery_hover is not None
