@@ -11,7 +11,12 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count
+from tools.candidate_config import (
+    DEFAULT_CANDIDATE_COUNT,
+    DEFAULT_GRASP_RAW_POOL_SIZE,
+    candidate_count,
+    raw_pool_size as validate_raw_pool_size,
+)
 
 
 class AnyGraspInputError(Exception):
@@ -45,6 +50,7 @@ class AnyGraspBackend:
         gripper_height: float = 0.03,
         depth_truncation: float = 1.0,
         max_candidates: int = DEFAULT_CANDIDATE_COUNT,
+        raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
     ) -> None:
         self.sdk_root = Path(sdk_root)
         self.checkpoint_path = Path(checkpoint_path)
@@ -52,7 +58,11 @@ class AnyGraspBackend:
         self.gripper_height = gripper_height
         self.depth_truncation = depth_truncation
         self.max_candidates = candidate_count(max_candidates)
+        self.raw_pool_size = validate_raw_pool_size(raw_pool_size)
+        if self.raw_pool_size < self.max_candidates:
+            raise ValueError("raw pool size must be >= max candidates")
         self._detector: Any | None = None
+        self.last_returned_candidate_count = 0
 
     def detect_grasps(
         self,
@@ -140,7 +150,9 @@ class AnyGraspBackend:
                 )
             if not dense_grasp:
                 grasps = grasps.nms()
-            candidates = normalise_grasp_candidates(grasps)[: self.max_candidates]
+            model_candidates = normalise_grasp_candidates(grasps)
+            candidates = model_candidates[: self.raw_pool_size]
+            self.last_returned_candidate_count = len(candidates)
             if not candidates:
                 return _failure_result(
                     reason="no_grasp_candidates",
@@ -176,6 +188,9 @@ class AnyGraspBackend:
                 "model": "anygrasp_sdk",
                 "mode": mode,
                 "candidate_count": len(candidates),
+                "model_raw_candidate_count": len(model_candidates),
+                "raw_candidate_count": len(candidates),
+                "generated_candidate_count": len(candidates),
                 "grasp_candidates": candidates,
                 "ranking": "score_descending",
                 "artifacts": [],
@@ -224,6 +239,8 @@ class AnyGraspBackend:
             "workspace_limits": None,
             "depth_truncation": self.depth_truncation,
             "max_candidates": self.max_candidates,
+            "exposure_limit": self.max_candidates,
+            "raw_pool_size": self.raw_pool_size,
         }
 
 

@@ -506,6 +506,67 @@ def _host_obligation_decision(
     placement_policy = tool_context.get("placement_candidate_policy")
     if (
         isinstance(placement_policy, dict)
+        and placement_policy.get("status") == "stopped_requires_human"
+    ):
+        # This is a host-owned terminal safety state: continuing to ask the
+        # model for a new grasp/placement only turns one bounded failure into
+        # an unbounded tool-call loop.  Surface it as an explicit handoff.
+        return PlannerDecision(
+            action_type="response",
+            action="ask_human",
+            parameters={
+                "question": (
+                    "The current grasp/placement recovery budget is exhausted or "
+                    "its execution evidence is not safe to continue from. Please "
+                    "inspect the cell before authorizing another recovery attempt."
+                ),
+                "failure_code": str(
+                    placement_policy.get("stop_reason")
+                    or "CURRENT_GRASP_PLACE_INFEASIBLE"
+                ),
+            },
+            reasoning=(
+                "A bounded host recovery reached its terminal fail-closed state; "
+                "handoff instead of repeating blocked inference or motion."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.placement_recovery.v3",
+                    "status": "stopped_requires_human",
+                }
+            },
+        )
+    if (
+        isinstance(placement_policy, dict)
+        and placement_policy.get("status") == "qualification_retry_required"
+    ):
+        recovery = placement_policy.get("recovery")
+        required = recovery.get("required_action") if isinstance(recovery, dict) else None
+        if (
+            isinstance(required, dict)
+            and required.get("name") == "anyplace"
+            and isinstance(required.get("parameters"), dict)
+            and tools.can_execute("anyplace")
+        ):
+            return PlannerDecision(
+                action_type="tool_call",
+                action="anyplace",
+                parameters=dict(required["parameters"]),
+                reasoning=(
+                    "The first frozen placement pool produced zero plan-only PASS candidates; "
+                    "run the one bounded new-seed inference on the same observation and "
+                    "qualify only that new pool without merging failed frozen goals."
+                ),
+                metadata={
+                    "host_obligation": {
+                        "schema_version": "openeta.placement_recovery.v3",
+                        "stage": "second_qualification_round",
+                        "requires_fresh_observation": False,
+                    }
+                },
+            )
+    if (
+        isinstance(placement_policy, dict)
         and placement_policy.get("status") == "reobserve_required"
         and tools.can_execute("observe")
     ):
@@ -531,12 +592,13 @@ def _host_obligation_decision(
         required = recovery.get("required_action")
         if (
             isinstance(required, dict)
-            and required.get("name") in {"move_to", "observe"}
+            and required.get("name") in {"move_to", "gripper_control", "observe"}
             and isinstance(required.get("parameters"), dict)
             and tools.can_execute(str(required.get("name")))
         ):
             action = str(required["name"])
             is_source_return = action == "move_to"
+            is_reopen = action == "gripper_control"
             return PlannerDecision(
                 action_type="tool_call",
                 action=action,
@@ -545,6 +607,9 @@ def _host_obligation_decision(
                     "A failed approach left the arm at safe hover; use a fresh MoveIt "
                     "plan to return to the recorded source pose before re-observing."
                     if is_source_return
+                    else "The failed close left the detached gripper closed; reopen it "
+                    "before acquiring the next grasp observation."
+                    if is_reopen
                     else "The retained grasp candidates are exhausted; obtain a fresh "
                     "observation before re-estimating from an alternate camera view."
                 ),
@@ -555,6 +620,8 @@ def _host_obligation_decision(
                         "stage": (
                             "candidate_source_return"
                             if is_source_return
+                            else "candidate_gripper_reopen"
+                            if is_reopen
                             else "candidate_reestimate_observation"
                         ),
                         "candidate_id": recovery.get("candidate_id"),
@@ -1438,7 +1505,11 @@ def _host_obligation_decision(
         required_name = str(required.get("name") or "") if isinstance(required, dict) else ""
         if (
             isinstance(required, dict)
-            and required_name in {"gripper_control", "move_to"}
+            and required_name in {
+                "gripper_control",
+                "move_to",
+                "close_simulator_env",
+            }
             and isinstance(required.get("parameters"), dict)
             and tools.can_execute(required_name)
         ):
@@ -1456,6 +1527,11 @@ def _host_obligation_decision(
                         "The object was released over the receptacle; dispatch the "
                         "fixed vertical retreat so physics can settle and the official "
                         "reward can be read from the same episode."
+                        if stage == "retreat"
+                        else (
+                            "The stable placement and retreat are proven; close the "
+                            "simulator environment exactly once before completion."
+                        )
                     )
                 ),
                 metadata={
@@ -1487,7 +1563,7 @@ def _host_obligation_decision(
                     "Post-lift telemetry shows an empty closed gripper; reopen through "
                     "independent review so the ranked candidate can be rejected."
                     if placement_motion.get("stage") == "attachment_lost"
-                    else "Attachment evidence is invalid; reopen before regrasping."
+                    else "Attachment evidence is invalid; reopen before the next observation."
                 )
             ),
             metadata={
@@ -1567,8 +1643,8 @@ def _host_obligation_decision(
         action=tool_name,
         parameters=parameters,
         reasoning=(
-            "Host joined the independently calibrated post-attachment object and "
-            "placement-region observations; dispatch the unique AnyPlace input."
+            "Host joined the calibrated object and placement-region observations; "
+            "dispatch the bounded AnyPlace goal-pool input for the current phase."
         ),
         metadata={
             "host_obligation": {
@@ -3146,10 +3222,25 @@ def _validate_pick_place_anyplace_obligation(
         and attachment.get("status") == "resolved"
         and attachment.get("verdict") == "PASS"
     )
-    if decision.action == "anyplace" and not attachment_passed:
+    if (
+        decision.action == "grasp_pose_estimate"
+        and not isinstance(tool_context.get("pregrasp_placement_goal_pool"), dict)
+        and not attachment_passed
+    ):
         return [
-            "AnyPlace placement inference starts only after attach and lift verification. "
-            "Acquire independent placement object/region observations after attachment."
+            "Combined pick-place grasp estimation requires the host-private pregrasp "
+            "placement goal pool first. Segment/select the destination region and "
+            "follow placement_obligation."
+        ]
+    placement = tool_context.get("placement_obligation")
+    pregrasp_goal_pool = (
+        isinstance(placement, dict)
+        and placement.get("phase") == "pregrasp_goal_pool"
+    )
+    if decision.action == "anyplace" and not attachment_passed and not pregrasp_goal_pool:
+        return [
+            "AnyPlace requires either the host-built pregrasp goal-pool obligation or "
+            "a verified attachment for executable placement qualification."
         ]
     if decision.action == "camera_pose_to_world" and _planner_is_anyplace_pose(
         decision.parameters
@@ -3177,7 +3268,6 @@ def _validate_pick_place_anyplace_obligation(
             return ["Select one non-rejected id from the retained AnyPlace candidate queue."]
         return []
     policy = tool_context.get("grasp_candidate_policy")
-    placement = tool_context.get("placement_obligation")
     required_placement = (
         placement.get("required_parameters") if isinstance(placement, dict) else None
     )
@@ -3199,13 +3289,11 @@ def _validate_pick_place_anyplace_obligation(
         decision.action == "sam3"
         and not isinstance(policy, dict)
         and _looks_like_placement_region_prompt(decision.parameters.get("prompt"))
+        and not isinstance(tool_context.get("placement_object_detection"), dict)
     ):
         return [
-            "Target-object grasp estimation must succeed before segmenting the placement region. "
-            "The runtime has one active SAM3 selection slot, so selecting a basket, bin, "
-            "or receptacle now would overwrite the object mask. Call targeted "
-            "grasp_pose_estimate "
-            "with the selected object mask and its aligned RGBD observation first."
+            "Segment and select the target object before the placement region so the host "
+            "can retain both masks for bounded pregrasp goal qualification."
         ]
     return []
 
@@ -3601,7 +3689,7 @@ def _build_tool_context_payload(
         memory=memory,
         config=config,
     )
-    skill_usage = _skill_usage_guidance(selected_skill_guidance, memory)
+    skill_usage = _skill_usage_guidance(selected_skill_guidance, memory, config=config)
     memory_context = memory.planning_context(max_events=config.max_memory_events)
     effective_task = _effective_task_text(observation, memory)
     task_playbook = _matched_task_playbook(
@@ -3615,6 +3703,25 @@ def _build_tool_context_payload(
         working_memory.get("artifacts", {}) if isinstance(working_memory, dict) else {}
     )
     execution = memory_context.get("grasp_execution")
+    selected_skill_names = {
+        str(skill.get("name") or "")
+        for skill in selected_skill_guidance
+        if isinstance(skill, dict)
+    }
+    pregrasp_pool_required = (
+        {"pick", "place"}.issubset(selected_skill_names)
+        and not isinstance(memory_context.get("pregrasp_placement_goal_pool"), dict)
+        and not isinstance(execution, dict)
+    )
+    grasp_target_selection = (
+        None
+        if pregrasp_pool_required
+        else (
+            memory_context.get("placement_object_detection")
+            if isinstance(memory_context.get("pregrasp_placement_goal_pool"), dict)
+            else memory_context.get("selected_sam3_detection")
+        )
+    )
     grasp_visual_stage = _grasp_visual_stage_for_context(execution)
     if grasp_visual_stage:
         vision_image_paths = [
@@ -3640,11 +3747,16 @@ def _build_tool_context_payload(
         "memory": memory_context,
         "selection_obligation": memory_context.get("selection_obligation"),
         "selected_sam3_detection": memory_context.get("selected_sam3_detection"),
+        "placement_object_detection": memory_context.get("placement_object_detection"),
+        "placement_region_detection": memory_context.get("placement_region_detection"),
+        "pregrasp_placement_goal_pool": memory_context.get(
+            "pregrasp_placement_goal_pool"
+        ),
         "sam3_no_detection": memory_context.get("sam3_no_detection"),
         "grasp_estimation_fallback_obligation": _grasp_estimation_fallback_obligation(
             observation,
             camera_artifacts=camera_artifacts,
-            selected=memory_context.get("selected_sam3_detection"),
+            selected=grasp_target_selection,
             pending_selection=memory_context.get("selection_obligation"),
             grasp_policy=memory_context.get("grasp_candidate_policy"),
             recovery=memory_context.get("grasp_estimation_recovery"),
@@ -3670,7 +3782,7 @@ def _build_tool_context_payload(
         "targeted_grasp_obligation": _targeted_grasp_obligation(
             observation,
             camera_artifacts=camera_artifacts,
-            selected=memory_context.get("selected_sam3_detection"),
+            selected=grasp_target_selection,
             grasp_policy=memory_context.get("grasp_candidate_policy"),
             scene_epoch=memory_context.get("scene_epoch"),
             working_artifacts=working_artifacts,
@@ -4044,19 +4156,26 @@ def _targeted_grasp_obligation(
     )
     if not isinstance(depth, dict) or camera is None or not camera.intrinsics:
         return None
+    depth_path = _resolve_paired_camera_artifact_path(
+        kind="depth",
+        declared_path=depth.get("path"),
+        paired_path=rgb.get("path"),
+    )
+    if depth_path is None:
+        return None
     hints: JsonDict = {
         "depth_cutoff_factor": _target_depth_cutoff_factor(
-            depth_path=str(depth["path"]),
+            depth_path=depth_path,
             mask_path=mask_ref,
             intrinsics=camera.intrinsics,
         ),
     }
-    selected_depth_path = str(depth["path"])
+    selected_depth_path = depth_path
     enhanced_depth = _matching_depth_enhancement(
         working_artifacts,
         frame_id=frame_id,
         source_rgb=str(rgb["path"]),
-        source_depth=str(depth["path"]),
+        source_depth=depth_path,
         scene_epoch=scene_epoch,
     )
     if enhanced_depth is not None:
@@ -4119,6 +4238,38 @@ def _targeted_grasp_obligation(
         "detection_id": selected.get("id"),
         "source_rematerialized": required["rgb"] != source_image,
     }
+
+
+def _resolve_paired_camera_artifact_path(
+    *,
+    kind: str,
+    declared_path: object,
+    paired_path: object,
+) -> str | None:
+    """Resolve one materialized RGB-D sibling without accepting a missing path.
+
+    A camera snapshot normally carries absolute paths shaped as
+    ``<root>/<session>/<kind>/<bundle>/<file>``.  If a transported snapshot has
+    dropped the session and kind components from one sibling, recover only the
+    unique sibling in the same session and bundle as the existing paired image.
+    This keeps recovery scoped to host-materialized camera artifacts and never
+    guesses image content or searches outside that packet.
+    """
+
+    if not isinstance(declared_path, str) or not declared_path:
+        return None
+    declared = Path(declared_path).expanduser()
+    if declared.is_file():
+        return str(declared)
+    if not isinstance(paired_path, str) or not paired_path:
+        return None
+    paired = Path(paired_path).expanduser()
+    if not paired.is_file() or len(paired.parents) < 3:
+        return None
+    bundle = paired.parent.name
+    session_root = paired.parents[2]
+    candidate = session_root / kind / bundle / declared.name
+    return str(candidate) if candidate.is_file() else None
 
 
 def _grasp_estimation_fallback_obligation(
@@ -4804,21 +4955,25 @@ def _placement_obligation(
     camera_artifacts: list[JsonDict],
     memory_context: JsonDict,
 ) -> JsonDict | None:
-    """Build AnyPlace input from independent post-attachment observations."""
+    """Build AnyPlace input for private pregrasp goals or attached placement."""
 
     if not isinstance(object_detection, dict) or not isinstance(region_detection, dict):
         return None
     execution = memory_context.get("grasp_execution")
     attachment = memory_context.get("attachment_gate")
-    if (
-        not isinstance(execution, dict)
-        or execution.get("status") != "completed"
-        or execution.get("stage") != "attached"
-        or execution.get("attachment_mode") == "articulated_handle"
-        or not isinstance(attachment, dict)
-        or attachment.get("status") != "resolved"
-        or attachment.get("verdict") != "PASS"
-    ):
+    attached = (
+        isinstance(execution, dict)
+        and execution.get("status") == "completed"
+        and execution.get("stage") == "attached"
+        and execution.get("attachment_mode") != "articulated_handle"
+        and isinstance(attachment, dict)
+        and attachment.get("status") == "resolved"
+        and attachment.get("verdict") == "PASS"
+    )
+    if isinstance(execution, dict) and not attached:
+        return None
+    pregrasp_pool = memory_context.get("pregrasp_placement_goal_pool")
+    if not attached and isinstance(pregrasp_pool, dict):
         return None
     def packet(detection: JsonDict, mask_name: str) -> JsonDict | None:
         source_image = detection.get("source_image")
@@ -4879,8 +5034,14 @@ def _placement_obligation(
         "placement_observation": placement_packet,
         "scene_revision": (
             attachment.get("planning_scene_revision")
-            if isinstance(attachment.get("planning_scene_revision"), int)
-            else int(memory_context.get("scene_epoch") or 0)
+            if attached and isinstance(attachment.get("planning_scene_revision"), int)
+            else (
+                observation.metadata.get("planning_scene_revision")
+                if isinstance(
+                    observation.metadata.get("planning_scene_revision"), int
+                )
+                else int(memory_context.get("scene_epoch") or 0)
+            )
         ),
     }
     return {
@@ -4891,10 +5052,11 @@ def _placement_obligation(
         "placement_region_detection_id": region_detection.get("id"),
         "planning_scene_revision": (
             attachment.get("planning_scene_revision")
-            if isinstance(attachment.get("planning_scene_revision"), int)
-            else int(memory_context.get("scene_epoch") or 0)
+            if attached and isinstance(attachment.get("planning_scene_revision"), int)
+            else required["scene_revision"]
         ),
-        "independent_from_grasp": True,
+        "phase": "post_attachment" if attached else "pregrasp_goal_pool",
+        "independent_from_grasp": attached,
     }
 
 
@@ -5002,6 +5164,16 @@ def _placement_motion_guidance(
         parsed_openness = float(openness)
     except (TypeError, ValueError):
         parsed_openness = None
+    physical_verification = observation.metadata.get("physical_verification")
+    # The resolved attachment gate remains authoritative across read-only tools,
+    # whose feedback may omit physical_verification.  Only explicit current
+    # evidence can invalidate it; absence is not detach proof.
+    native_held = True
+    if isinstance(physical_verification, dict) and (
+        physical_verification.get("grasp_confirmed") is False
+        or str(physical_verification.get("verdict") or "").upper() == "FAIL"
+    ):
+        native_held = False
     policy = memory.placement_candidate_policy()
     compiled = policy.get("compiled_placement") if isinstance(policy, dict) else None
     if not isinstance(compiled, dict) or policy.get("status") != "active":
@@ -5014,7 +5186,11 @@ def _placement_motion_guidance(
     current_xyz = _pose_xyz(current_pose)
     hover_xyz = _pose_xyz(hover_pose)
     release_xyz = _pose_xyz(release_pose)
-    if parsed_openness is not None and parsed_openness <= _PLACEMENT_EMPTY_GRIPPER_OPENNESS_MAX:
+    if (
+        not native_held
+        and parsed_openness is not None
+        and parsed_openness <= _PLACEMENT_EMPTY_GRIPPER_OPENNESS_MAX
+    ):
         near_receptacle = (
             release_xyz is not None
             and current_xyz is not None
@@ -5099,6 +5275,28 @@ def _placement_release_obligation(
     if not isinstance(release, dict):
         return None
     status = str(release.get("status") or "")
+    if status == "retreated":
+        verification = release.get("placement_verification")
+        if (
+            isinstance(verification, dict)
+            and verification.get("placement_confirmed") is True
+            and verification.get("verdict") == "PASS"
+        ):
+            return {
+                "schema_version": "openeta.placement_release_obligation.v1",
+                "status": "required",
+                "stage": "close",
+                "required_action": {
+                    "name": "close_simulator_env",
+                    "parameters": {},
+                },
+                "rule": (
+                    "The detached object passed native stability and in-zone checks "
+                    "and the open gripper retreated. Close this simulator environment "
+                    "exactly once before reporting completion."
+                ),
+            }
+        return None
     if status == "ready":
         return {
             "schema_version": "openeta.placement_release_obligation.v1",
@@ -5121,17 +5319,26 @@ def _placement_release_obligation(
     current_xyz = _pose_xyz(observation.robot.end_effector_pose)
     if release_xyz is None or current_xyz is None:
         return None
-    retreat_pose = {
-        "frame": "world",
-        "xyz": [
-            current_xyz[0],
-            current_xyz[1],
-            max(current_xyz[2], release_xyz[2]) + _PLACEMENT_POST_RELEASE_RETREAT_M,
-        ],
-        "placement_candidate_id": release.get("candidate_id"),
-        "placement_pose_id": release.get("placement_pose_id"),
-        "placement_stage": "retreat",
-    }
+    retreat_pose = dict(release_pose)
+    retreat_pose.update(
+        {
+            "frame": "world",
+            "xyz": [
+                current_xyz[0],
+                current_xyz[1],
+                max(current_xyz[2], release_xyz[2])
+                + _PLACEMENT_POST_RELEASE_RETREAT_M,
+            ],
+            "compiled_eef_pose": True,
+            "placement_candidate_id": release.get("candidate_id"),
+            "placement_pose_id": release.get("placement_pose_id"),
+            "placement_stage": "retreat",
+            "purpose": "placement",
+        }
+    )
+    detach_revision = release.get("planning_scene_revision")
+    if isinstance(detach_revision, int) and not isinstance(detach_revision, bool):
+        retreat_pose["scene_revision"] = detach_revision
     return {
         "schema_version": "openeta.placement_release_obligation.v1",
         "status": "required",
@@ -5992,7 +6199,12 @@ def _skill_guidance_reference(
     return payload
 
 
-def _skill_usage_guidance(selected_skill_guidance: list[JsonDict], memory: AgentMemory) -> JsonDict:
+def _skill_usage_guidance(
+    selected_skill_guidance: list[JsonDict],
+    memory: AgentMemory,
+    *,
+    config: PlannerContextConfig,
+) -> JsonDict:
     selected = [
         str(skill.get("name")).strip()
         for skill in selected_skill_guidance
@@ -6006,6 +6218,11 @@ def _skill_usage_guidance(selected_skill_guidance: list[JsonDict], memory: Agent
         [primary_name]
         if primary_name
         and primary.get("content_truncated") is True
+        # Normal prompt budgeting may truncate an otherwise well-known skill;
+        # it should inform the model, not turn ordinary control into a loop.
+        # A deliberately tiny excerpt cannot safely carry operational guidance,
+        # so retain the mandatory inspection gate for that configuration.
+        and config.max_skill_content_chars < 1024
         and int(primary.get("current_task_score") or 0) > 0
         and primary_name not in inspected
         else []

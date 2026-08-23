@@ -829,6 +829,44 @@ def test_move_to_proxy_converts_world_rotation_matrix_to_mcp_euler_angles() -> N
     assert arguments["roll"] == 0.0
     assert arguments["pitch"] == 0.0
     assert arguments["yaw"] == 0.0
+    # Semantic identity survives the generic x/y/z + Euler transport.  It is
+    # not part of the motion command, but enables a backend to recognize a
+    # narrowly authorized recovery withdrawal after a rejected close.
+    assert arguments["motion_provenance"] == {
+        "frame": "world",
+        "rotation_matrix": [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    }
+
+
+def test_move_to_proxy_preserves_compiled_grasp_hover_identity() -> None:
+    transport = FakeSimulatorMcpTransport({"success": True})
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-1", handle="env-1"),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call(
+        "move_to",
+        {
+            "target_pose": {
+                "frame": "world",
+                "xyz": [0.1, 0.2, 0.3],
+                "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                "compiled_grasp_id": "grasp-7",
+                "grasp_stage": "hover",
+            }
+        },
+    )
+
+    assert result.success is True
+    assert transport.calls[0]["arguments"]["motion_provenance"]["compiled_grasp_id"] == "grasp-7"
+    assert transport.calls[0]["arguments"]["motion_provenance"]["grasp_stage"] == "hover"
 
 
 def test_move_to_proxy_rejects_unsupported_speed_parameter() -> None:

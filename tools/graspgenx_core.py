@@ -17,7 +17,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count
+from tools.candidate_config import (
+    DEFAULT_CANDIDATE_COUNT,
+    DEFAULT_GRASP_RAW_POOL_SIZE,
+    candidate_count,
+    raw_pool_size as validate_raw_pool_size,
+)
 
 
 SERVER_NAME = "openeta-graspgenx"
@@ -36,6 +41,12 @@ DEFAULT_DEPTH_TRUNCATION = 1.0
 MIN_OBJECT_POINTS = 100
 MAX_RETURNED_CANDIDATES = 20
 NUM_GRASPS = 200
+# GraspGenX diffusion is intentionally stochastic.  One model draw often
+# returns many near-duplicate top grasps while omitting the side/oblique mode
+# that the RM75 can reach.  Union several independent draws before scene
+# collision filtering and SE(3) diversity selection.  This grows only the
+# model-internal pool; the public reserve and VLM exposure limits are unchanged.
+MODEL_INFERENCE_DRAWS = 4
 MOE_NUM_YAWS = 36
 MOE_Z_OFFSETS_CM = (-2.0, 0.0)
 MOE_OUTLIER_THRESHOLD = 0.014
@@ -51,6 +62,7 @@ COLLISION_BATCH_SIZE = 16
 MMR_TRANSLATION_SCALE_M = 0.03
 MMR_ROTATION_SCALE_RAD = math.radians(30.0)
 MMR_ROTATION_WEIGHT = 1.0
+MMR_WRIST_ROTATION_WEIGHT = 0.35
 MMR_SIMILARITY_PENALTY = 0.55
 MMR_DIVERSITY_RESERVE_MULTIPLIER = 16
 MMR_MIN_SOURCE_COVERAGE = 3
@@ -60,6 +72,7 @@ MMR_MIN_SOURCE_COVERAGE = 3
 # OBB grasp mode.
 FORMAL_MIN_TRANSLATION_M = 0.015
 FORMAL_MIN_APPROACH_SEPARATION_RAD = math.radians(20.0)
+FORMAL_MIN_WRIST_ROTATION_RAD = math.radians(30.0)
 
 _DEPTH_SCALE_GUIDANCE = (
     "Depth in meters is raw_depth / intrinsics.scale; for uint16 millimeter "
@@ -570,7 +583,19 @@ def _se3_mmr_order(
             )
         )
         approach = math.acos(cosine) / MMR_ROTATION_SCALE_RAD
-        return math.exp(-(translation + MMR_ROTATION_WEIGHT * approach))
+        relative_trace = float(
+            np.trace(pose_array[left, :3, :3].T @ pose_array[right, :3, :3])
+        )
+        wrist_rotation = math.acos(
+            float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
+        ) / MMR_ROTATION_SCALE_RAD
+        return math.exp(
+            -(
+                translation
+                + MMR_ROTATION_WEIGHT * approach
+                + MMR_WRIST_ROTATION_WEIGHT * wrist_rotation
+            )
+        )
 
     # Seed each model source with its own quality/diversity modes before the
     # global MMR pass.  This is a floor, not a fixed OBB/diffusion quota: a
@@ -647,9 +672,16 @@ def _is_formally_novel_grasp(
             np.clip(np.dot(candidate[:3, 2], selected[:3, 2]), -1.0, 1.0)
         )
         approach_separation = math.acos(cosine)
+        relative_trace = float(
+            np.trace(candidate[:3, :3].T @ selected[:3, :3])
+        )
+        wrist_rotation_separation = math.acos(
+            float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
+        )
         if (
             translation < FORMAL_MIN_TRANSLATION_M
             and approach_separation < FORMAL_MIN_APPROACH_SEPARATION_RAD
+            and wrist_rotation_separation < FORMAL_MIN_WRIST_ROTATION_RAD
         ):
             return False
     return True
@@ -667,6 +699,7 @@ class GraspGenXBackend:
         device: str = "cuda:0",
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
         max_candidates: int = DEFAULT_CANDIDATE_COUNT,
+        raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
     ) -> None:
         self.graspgenx_root = Path(graspgenx_root).expanduser().resolve()
         self.checkpoint_root = Path(checkpoint_root).expanduser().resolve()
@@ -676,6 +709,10 @@ class GraspGenXBackend:
         self.device = validate_cuda_device_name(device)
         self.depth_truncation = float(depth_truncation)
         self.max_candidates = candidate_count(max_candidates)
+        self.raw_pool_size = validate_raw_pool_size(raw_pool_size)
+        if self.raw_pool_size < self.max_candidates:
+            raise ValueError("raw pool size must be >= max candidates")
+        self.last_returned_candidate_count = 0
         self.generator_checkpoint, self.discriminator_checkpoint = (
             validate_checkpoint_layout(self.checkpoint_root)
         )
@@ -779,11 +816,32 @@ class GraspGenXBackend:
             )
 
         try:
-            raw_grasps, raw_scores, raw_tags = self._run_planner(
-                loaded=loaded,
-                sampler_entry=sampler_entry,
-                object_points_aligned=object_points_aligned,
+            planner_outputs = []
+            # Test/lightweight backends do not expose the real torch runtime
+            # and retain their single-call contract.  A loaded production
+            # backend unions independent diffusion draws.
+            inference_draw_count = (
+                MODEL_INFERENCE_DRAWS if loaded.get("torch") is not None else 1
             )
+            for _draw_index in range(inference_draw_count):
+                planner_outputs.append(
+                    self._run_planner(
+                        loaded=loaded,
+                        sampler_entry=sampler_entry,
+                        object_points_aligned=object_points_aligned,
+                    )
+                )
+            np, _Image = _load_image_dependencies()
+            raw_grasps = np.concatenate(
+                [np.asarray(output[0]) for output in planner_outputs], axis=0
+            )
+            raw_scores = np.concatenate(
+                [np.asarray(output[1]) for output in planner_outputs], axis=0
+            )
+            raw_tags = [
+                str(tag) for output in planner_outputs for tag in output[2]
+            ]
+            metadata["model_inference_draw_count"] = inference_draw_count
         except Exception as exc:  # noqa: BLE001 - third-party inference boundary.
             return failure_result(
                 reason="model_inference_failed",
@@ -813,6 +871,7 @@ class GraspGenXBackend:
                 camera_native_grasps=camera_native_grasps,
                 scores=scores,
                 branch_tags=tags,
+                selection_limit=self.raw_pool_size,
             )
             metadata.update(collision_metadata)
             candidates = normalise_grasp_candidates(
@@ -853,7 +912,8 @@ class GraspGenXBackend:
                 "camera_frame": CAMERA_FRAME,
                 "grasp_frame": GRASP_FRAME,
                 "gripper_name": gripper.name,
-                "raw_candidate_count": int(len(scores)),
+                "model_raw_candidate_count": int(len(scores)),
+                "raw_candidate_count": len(candidates),
                 "generated_candidate_count": len(candidates),
                 "candidate_count": len(candidates),
                 "grasp_candidates": candidates,
@@ -997,16 +1057,18 @@ class GraspGenXBackend:
         camera_native_grasps: Any,
         scores: Any,
         branch_tags: list[str],
+        selection_limit: int | None = None,
     ) -> tuple[list[int], dict[str, Any]]:
         np, _Image = _load_image_dependencies()
         score_array = np.asarray(scores, dtype=np.float64)
         ranked = sorted(range(len(score_array)), key=lambda idx: (-score_array[idx], idx))
         poses = np.asarray(camera_native_grasps, dtype=np.float64)
+        limit = self.max_candidates if selection_limit is None else int(selection_limit)
         diversity_order_count = min(
             len(ranked),
             max(
                 COLLISION_BATCH_SIZE * 2,
-                self.max_candidates * MMR_DIVERSITY_RESERVE_MULTIPLIER,
+                limit * MMR_DIVERSITY_RESERVE_MULTIPLIER,
             ),
         )
         inspection_order = _se3_mmr_order(
@@ -1025,7 +1087,7 @@ class GraspGenXBackend:
                     selected_indices=selected,
                 ):
                     selected.append(index)
-                    if len(selected) >= self.max_candidates:
+                    if len(selected) >= limit:
                         break
                 else:
                     diversity_rejected += 1
@@ -1039,6 +1101,7 @@ class GraspGenXBackend:
                 "mmr_diversity_order_count": diversity_order_count,
                 "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
                 "formal_min_approach_separation_rad": FORMAL_MIN_APPROACH_SEPARATION_RAD,
+                "formal_min_wrist_rotation_rad": FORMAL_MIN_WRIST_ROTATION_RAD,
                 "formal_diversity_rejected_count": diversity_rejected,
             }
 
@@ -1090,13 +1153,13 @@ class GraspGenXBackend:
             }
             required_source_coverage = min(
                 MMR_MIN_SOURCE_COVERAGE,
-                max(1, self.max_candidates // len(selected_by_source)),
+                max(1, limit // len(selected_by_source)),
             )
             if (
-                len(selected) >= self.max_candidates
+                len(selected) >= limit
                 and all(count >= required_source_coverage for count in selected_by_source.values())
             ):
-                selected = selected[: self.max_candidates]
+                selected = selected[:limit]
                 break
         if not selected:
             raise GraspGenXInputError(
@@ -1109,7 +1172,8 @@ class GraspGenXBackend:
                     "returned_candidate_count": 0,
                 },
             )
-        selected = selected[: self.max_candidates]
+        selected = selected[:limit]
+        self.last_returned_candidate_count = len(selected)
         return selected, {
             "collision_filter_applied": True,
             "collision_scene_point_count": int(len(collision_scene)),
@@ -1118,7 +1182,8 @@ class GraspGenXBackend:
             "candidate_selection": "source_aware_se3_mmr_with_minimum_se3_separation",
             "mmr_diversity_order_count": diversity_order_count,
             "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
-            "formal_min_approach_separation_rad": FORMAL_MIN_APPROACH_SEPARATION_RAD,
+                "formal_min_approach_separation_rad": FORMAL_MIN_APPROACH_SEPARATION_RAD,
+                "formal_min_wrist_rotation_rad": FORMAL_MIN_WRIST_ROTATION_RAD,
             "formal_diversity_rejected_count": diversity_rejected,
         }
 
@@ -1133,7 +1198,9 @@ class GraspGenXBackend:
             "gripper_name": gripper_name,
             "depth_truncation": self.depth_truncation,
             "min_object_points": MIN_OBJECT_POINTS,
-            "max_returned_candidates": self.max_candidates,
+            "max_returned_candidates": self.raw_pool_size,
+            "raw_pool_size": self.raw_pool_size,
+            "exposure_limit": self.max_candidates,
             "model_loaded": self.model_loaded,
             "intrinsics": {},
             "inference_options": {

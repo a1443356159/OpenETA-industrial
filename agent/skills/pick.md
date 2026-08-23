@@ -69,7 +69,13 @@ Use as text guidance only, not an executable macro. Inspect each result.
    `candidate_depth_png` for grasp generation only when its quality flag allows
    it. Collision evidence must use `safety_depth_png` or the safety point cloud,
    never mono-filled geometry.
-6. Call `grasp_pose_estimate` with the exact
+6. In a combined pick-place task, do not call `grasp_pose_estimate` until the
+   selected target mask and selected destination-region mask have produced the
+   host's private pregrasp AnyPlace goal pool. Keep the target-object selection
+   authoritative after selecting the region; the host restores its exact mask
+   for grasp estimation. This bounded look-ahead changes grasp ranking only and
+   never authorizes placement execution.
+7. Call `grasp_pose_estimate` with the exact
    `targeted_grasp_obligation.required_parameters`. The host joins:
    - `rgb`/`depth`: exact current artifact paths for the same camera.
    - `intrinsics`: same camera intrinsics with `fx`, `fy`, `cx`, `cy`, and `scale`.
@@ -82,7 +88,7 @@ Use as text guidance only, not an executable macro. Inspect each result.
    `grasp_sensor_safety_obligation`: `obstacle_avoidance` must return
    `clear=true` for the exact candidate, scene epoch, report, and sensor-only
    safety artifacts before `compile_grasp_seed` becomes available.
-7. Read the normalized grasp candidate list. Candidate poses use the
+8. Read the normalized grasp candidate list. Candidate poses use the
    camera/OpenCV GraspNet convention and are sorted by backend-local score.
    Scores are not comparable across backends. The runtime records
    `grasp_candidate_policy`: rank 0 is the initial `active_candidate`; lower
@@ -91,7 +97,7 @@ Use as text guidance only, not an executable macro. Inspect each result.
    `target_geometry_family` (`upright_can`, `upright_bottle`, `boxed_item`,
    `bowl`, `apple`, `drawer_handle`, or `other`) only when visually clear. It is
    task evidence for strategy matching, not a calibration allowlist.
-8. Before grasp motion, call `compile_grasp_seed` with:
+9. Before grasp motion, call `compile_grasp_seed` with:
    - `camera_pose`: the complete `grasp_candidate_policy.active_candidate`,
      preserving its id, camera-frame rotation/translation, width, and dimensions.
    - `camera_extrinsics`: the matching `camera_packet.extrinsics` from the same
@@ -103,18 +109,22 @@ Use as text guidance only, not an executable macro. Inspect each result.
    - `strategy_id`: optional session-local strategy backed by prior evidence.
    Calibration is not an object allowlist; no strategy match is required. Compiled
    poses are references. Do not use `camera_pose_to_world` for normalized grasps.
-9. Follow `grasp_execution` one observed atomic edge at a time. The host opens only
+   Issue exactly one `compile_grasp_seed` call for the selected candidate in a
+   planner turn. It is a single-candidate compiler, so do not emit concurrent or
+   duplicate compile calls. After a successful compile, continue with its staged
+   poses instead of compiling the same candidate again.
+10. Follow `grasp_execution` one observed atomic edge at a time. The host opens only
    when the latched command is not already open. Hover is at least 0.15 m opposite
    world-frame `approach_world_xyz`, not unconditionally world `+Z`. At hover, use
    fresh matching wrist RGB-D to call `compute_wrist_alignment`; bounded feedback
    corrections must preserve world frame and candidate provenance. Accept only at contact.
-10. After contact, execute binary `gripper_control position=0`; `0=closed`, `1=open`,
+11. After contact, execute binary `gripper_control position=0`; `0=closed`, `1=open`,
    and the command stays latched across motion. Its acknowledgement and observed
    openness do not prove attachment; a static post-close image is not evidence.
    Portable objects use the exact lift probe; PASS permits full lift. An articulated
    handle instead uses `prepare_attachment_probe` for a 5 cm linear/arc path, then
    `assess_attachment_probe`; PASS keeps its endpoint and UNKNOWN gets one refresh.
-11. A simulator transport timeout means the action outcome is unknown, not failed.
+12. A simulator transport timeout means the action outcome is unknown, not failed.
     Observe the same handle and reconcile state before retry or a new action. A structured,
     candidate-linked rejection advances to the next candidate; calibration errors,
     unrelated failures, timeout, and interruption keep the current candidate active.

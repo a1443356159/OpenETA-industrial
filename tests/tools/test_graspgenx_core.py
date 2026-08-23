@@ -18,6 +18,7 @@ from tools.graspgenx_core import (
     GraspGenXBackend,
     GraspGenXInputError,
     GripperDescription,
+    MODEL_INFERENCE_DRAWS,
     build_targeted_point_clouds,
     decode_image_payload,
     normalise_grasp_candidates,
@@ -512,6 +513,47 @@ def test_backend_returns_ranked_contract_without_transport_payloads(
     assert "point_cloud" not in serialized
 
 
+def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
+    tmp_path: Path,
+) -> None:
+    class MultiDrawBackend(_FakeBackend):
+        calls = 0
+
+        def _get_loaded_backend(self) -> dict[str, Any]:
+            loaded = super()._get_loaded_backend()
+            loaded["torch"] = object()
+            return loaded
+
+        def _run_planner(self, **kwargs: Any) -> tuple[Any, Any, Any]:
+            self.calls += 1
+            return super()._run_planner(**kwargs)
+
+    source, checkpoints, grippers = _backend_layout(tmp_path)
+    backend = MultiDrawBackend(
+        graspgenx_root=source,
+        checkpoint_root=checkpoints,
+        gripper_descriptions_root=grippers,
+    )
+    result = backend.predict_grasps(
+        depth=_image_payload(np.full((11, 11), 500, dtype=np.uint16)),
+        object_mask=_image_payload(np.full((11, 11), 255, dtype=np.uint8)),
+        intrinsics=_intrinsics(),
+        gripper_name="franka_panda",
+        up_direction_camera=[0, 0, 1],
+    )
+
+    assert result["success"] is True
+    assert backend.calls == MODEL_INFERENCE_DRAWS
+    assert result["details"]["model_raw_candidate_count"] == (
+        3 * MODEL_INFERENCE_DRAWS
+    )
+    assert result["details"]["metadata"]["model_inference_draw_count"] == (
+        MODEL_INFERENCE_DRAWS
+    )
+    # Repeated identical candidates remain one formal SE(3) mode per pose.
+    assert result["details"]["candidate_count"] == 3
+
+
 def test_collision_selection_checks_source_balanced_ranked_batches(
     tmp_path: Path,
 ) -> None:
@@ -639,7 +681,7 @@ def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
     assert metadata["formal_diversity_rejected_count"] == 2
 
 
-def test_formal_selection_treats_same_point_yaw_as_one_grasp_mode(
+def test_formal_selection_retains_same_approach_with_distinct_wrist_rotation(
     tmp_path: Path,
 ) -> None:
     source, checkpoints, grippers = _backend_layout(tmp_path)
@@ -647,7 +689,7 @@ def test_formal_selection_treats_same_point_yaw_as_one_grasp_mode(
         graspgenx_root=source,
         checkpoint_root=checkpoints,
         gripper_descriptions_root=grippers,
-        max_candidates=2,
+        max_candidates=3,
     )
     poses = np.tile(np.eye(4), (3, 1, 1))
     poses[1, :3, :3] = np.array(
@@ -672,8 +714,9 @@ def test_formal_selection_treats_same_point_yaw_as_one_grasp_mode(
         branch_tags=["obb", "obb", "diff"],
     )
 
-    assert selected == [0, 2]
-    assert metadata["formal_diversity_rejected_count"] == 1
+    assert set(selected) == {0, 1, 2}
+    assert metadata["formal_diversity_rejected_count"] == 0
+    assert metadata["formal_min_wrist_rotation_rad"] > 0.0
 
 
 def test_no_scene_selection_retains_lower_scored_side_approaches(tmp_path: Path) -> None:

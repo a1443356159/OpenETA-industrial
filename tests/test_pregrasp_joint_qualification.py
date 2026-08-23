@@ -1,0 +1,683 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from PIL import Image
+
+from adapter.protocol import EnvObservation, RobotState
+from agent.runtime.moveit_qualification import (
+    QUALIFICATION_SCHEMA,
+    MoveItCandidateQualifier,
+    QualificationCache,
+)
+from agent.runtime.runtime_assembly import (
+    _PregraspGraspPlaceCoordinator,
+    _prepare_postattachment_frozen_goals,
+    _qualifying_handler,
+)
+from agent.tools.handlers import build_anyplace_handler
+from agent.tools.registry import ToolExecutionContext, ToolResult, build_default_tool_registry
+
+
+def _pass_stage() -> dict[str, Any]:
+    return {
+        "kinematic_ik": True,
+        "state_valid": True,
+        "collision_ik": True,
+        "plan_only": True,
+        "execution_started": False,
+        "start_joint_state_sha256": "start",
+        "end_joint_state": {"joint_names": ["j1"], "positions": [0.0]},
+        "trajectory": {"point_count": 2},
+    }
+
+
+def test_pregrasp_joint_search_keeps_full_pool_round_robin_and_filters_grasps() -> None:
+    captured: dict[str, Any] = {}
+
+    def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        captured.update(request)
+        # The first four descriptors must represent four different grasps.
+        first_ids = [
+            item["candidate"]["source_grasp_id"]
+            for item in request["candidates"][:4]
+        ]
+        assert first_ids == ["g0", "g1", "g2", "g3"]
+        passed_grasps = {"g0", "g2"}
+        return {
+            "schema_version": QUALIFICATION_SCHEMA,
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "results": [
+                {
+                    "candidate_id": item["candidate_id"],
+                    "candidate_pose_sha256": item["candidate_pose_sha256"],
+                    "qualification_binding_sha256": request[
+                        "qualification_binding_sha256"
+                    ],
+                    "execution_started": False,
+                    "verdict": (
+                        "PASS"
+                        if item["candidate"]["source_grasp_id"] in passed_grasps
+                        and index < 4
+                        else "FAIL"
+                    ),
+                    "reason": "qualified" if index < 4 else "not_submitted",
+                    "stages": [_pass_stage()] if index < 4 else [],
+                    "full_plan_submitted": index < 4,
+                }
+                for index, item in enumerate(request["candidates"])
+            ],
+        }
+
+    cache = QualificationCache()
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        cache=cache,
+        placement_full_plan_limit=4,
+        placement_diversity_limit=96,
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "hover",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                }
+            ]
+        },
+    )
+    grasps = [{"id": f"g{index}"} for index in range(4)]
+    proofs: dict[str, dict[str, Any]] = {}
+    for grasp in grasps:
+        grasp_id = grasp["id"]
+        proofs[grasp_id] = {
+            "verdict": "PASS",
+            "stages": [
+                {
+                    "name": "contact",
+                    "target_pose": {
+                        "xyz": [0.3, 0.0, 0.45],
+                        "rotation_matrix": [
+                            [1.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0],
+                            [0.0, 0.0, 1.0],
+                        ],
+                    },
+                    "end_joint_state": {"joint_names": ["j1"], "positions": [0.0]},
+                },
+                {
+                    "name": "lift",
+                    "end_joint_state": {"joint_names": ["j1"], "positions": [0.1]},
+                },
+            ],
+        }
+    cache.replace(
+        purpose="grasp",
+        candidates=grasps,
+        proofs=proofs,
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+    coordinator = _PregraspGraspPlaceCoordinator(qualifier)
+    coordinator.object_current_pose = {
+        "frame": "world",
+        "translation_xyz": [0.3, 0.0, 0.43],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    coordinator.object_goals = [
+        {
+            "id": f"p{index}",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.45 + index * 0.001, 0.0, 0.43],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            },
+        }
+        for index in range(16)
+    ]
+    coordinator.scene_epoch = 3
+    coordinator.planning_scene_revision = 7
+
+    result = coordinator.filter_grasps(
+        ToolResult(True, "ok", {"grasp_candidates": grasps}),
+        scene_epoch=3,
+        planning_scene_revision=7,
+        source={},
+    )
+
+    assert len(captured["candidates"]) == 64
+    assert captured["funnel"]["full_plan_limit"] == 4
+    assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0", "g2"]
+    assert cache.resolve(purpose="grasp", candidate_id="g1") is None
+    retained_cache = cache.resolve(purpose="grasp", candidate_id="g0")
+    assert retained_cache is not None
+    assert "grasp_place_joint_qualified" not in retained_cache["candidate"]
+    coordinator.source_model_raw_candidate_count = 96
+    coordinator.source_candidate_image_ref = "/pregrasp/candidates.png"
+    coordinator.source_candidate_artifacts = [
+        {
+            "type": "placement_candidate_image",
+            "kind": "image",
+            "tool": "anyplace",
+            "path": "/pregrasp/candidates.png",
+        }
+    ]
+    attachment = {
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": [0.0, 0.0, 0.15],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    postattach = coordinator.prepare_frozen_goal_requalification(
+        source_grasp_id="g0",
+        attachment_transform=attachment,
+        source={"placement_observation": {"rgb": "/postattach/rgb.png"}},
+        scene_revision=8,
+    )
+    assert postattach is not None
+    assert [item["id"] for item in postattach.details["placement_candidates"]] == [
+        "p0"
+    ]
+    assert postattach.details["frozen_pregrasp_goal_requalification"] is True
+    assert postattach.details["discarded_postattach_model_candidate_count"] == 0
+    assert postattach.details["model_raw_candidate_count"] == 96
+    assert postattach.details["raw_candidate_count"] == 1
+    assert postattach.details["anyplace_model_inference_invoked"] is False
+    assert postattach.details["candidate_image_ref"] == "/pregrasp/candidates.png"
+    assert postattach.details["artifacts"][0]["provenance"] == (
+        "frozen_pregrasp_anyplace_pool"
+    )
+    assert "source_grasp_id" not in postattach.details
+
+    assert coordinator.prepare_frozen_goal_requalification(
+        source_grasp_id="g0",
+        attachment_transform=attachment,
+        source={},
+        scene_revision=8,
+    ) is None
+
+
+def test_pregrasp_joint_search_does_not_reuse_stale_goal_pool() -> None:
+    qualifier = MoveItCandidateQualifier(lambda *_args: {})
+    coordinator = _PregraspGraspPlaceCoordinator(
+        qualifier,
+        object_goals=[{"id": "p0"}],
+        object_current_pose={"frame": "world"},
+        scene_epoch=1,
+        planning_scene_revision=2,
+    )
+    result = ToolResult(True, "ok", {"grasp_candidates": [{"id": "g0"}]})
+
+    returned = coordinator.filter_grasps(
+        result,
+        scene_epoch=2,
+        planning_scene_revision=2,
+        source={},
+    )
+
+    assert returned.details["grasp_candidates"] == [{"id": "g0"}]
+
+
+def _identity_extrinsics() -> dict[str, Any]:
+    return {
+        "camera_frame": "opencv",
+        "camera_to_world": [
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ],
+    }
+
+
+def _observation_packet(
+    tmp_path: Path,
+    *,
+    name: str,
+    mask_key: str,
+) -> dict[str, Any]:
+    rgb = tmp_path / f"{name}.rgb.png"
+    depth = tmp_path / f"{name}.depth.png"
+    mask = tmp_path / f"{name}.mask.png"
+    Image.new("RGB", (8, 8), (20, 30, 40)).save(rgb)
+    Image.new("I;16", (8, 8), 500).save(depth)
+    Image.new("L", (8, 8), 255).save(mask)
+    return {
+        "rgb": str(rgb),
+        "depth": str(depth),
+        mask_key: {"mask_ref": str(mask), "source_image": str(rgb)},
+        "intrinsics": {
+            "fx": 100.0,
+            "fy": 100.0,
+            "cx": 4.0,
+            "cy": 4.0,
+            "scale": 1000.0,
+        },
+        "camera_extrinsics": _identity_extrinsics(),
+        "camera_frame_id": name,
+    }
+
+
+def _anyplace_parameters(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "object_observation": _observation_packet(
+            tmp_path, name="held-object", mask_key="object_mask"
+        ),
+        "placement_observation": _observation_packet(
+            tmp_path, name="destination", mask_key="placement_region_mask"
+        ),
+        "scene_revision": 7,
+    }
+
+
+def _model_response() -> dict[str, Any]:
+    return {
+        "success": True,
+        "content": "new-seed AnyPlace inference",
+        "details": {
+            "backend": "anyplace_mcp",
+            "model": "anyplace_multitask",
+            "frame": "placement_camera",
+            "camera_frame": "opencv",
+            "candidate_count": 1,
+            "object_current_pose": {
+                "frame": "world",
+                "translation_xyz": [0.3, 0.0, 0.45],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            },
+            "placement_candidates": [
+                {
+                    "id": "placement_new_seed",
+                    "object_placement_transform": {
+                        "frame": "placement_camera",
+                        "camera_frame": "opencv",
+                        "convention": "p_placed = R @ p_current + t",
+                        "transform_matrix": [
+                            [1, 0, 0, 0.1],
+                            [0, 1, 0, 0.0],
+                            [0, 0, 1, 0.0],
+                            [0, 0, 0, 1.0],
+                        ],
+                    },
+                }
+            ],
+            "metadata": {"configured_candidate_count": 1},
+        },
+    }
+
+
+def _postattachment_memory(measured_attachment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "scene_epoch": 3,
+        "attachment_gate": {
+            "status": "resolved",
+            "verdict": "PASS",
+            "planning_scene_revision": 7,
+            "full_lift_proof": {"attachment_transform": measured_attachment},
+        },
+        "grasp_execution": {
+            "status": "completed",
+            "stage": "attached",
+            "compiled_grasp": {"source_grasp_id": "g-selected"},
+        },
+    }
+
+
+def _context(
+    tmp_path: Path,
+    *,
+    measured_attachment: dict[str, Any],
+    attached: bool = True,
+) -> ToolExecutionContext:
+    memory = _postattachment_memory(measured_attachment) if attached else {"scene_epoch": 3}
+    return ToolExecutionContext(
+        name="anyplace",
+        spec=build_default_tool_registry().get("anyplace"),
+        parameters=_anyplace_parameters(tmp_path),
+        observation=EnvObservation(
+            task="pick and place",
+            cameras=[],
+            robot=RobotState(
+                end_effector_pose={
+                    "frame": "world",
+                    "xyz": [0.3, 0.0, 0.6],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                }
+            ),
+            metadata={"planning_scene_revision": 7},
+        ),
+        metadata={
+            "session_id": "test",
+            "supervision_context": {"memory": memory},
+        },
+    )
+
+
+def _postattachment_handler(
+    tmp_path: Path,
+    *,
+    qualifier: MoveItCandidateQualifier,
+    coordinator: _PregraspGraspPlaceCoordinator,
+    predictor,
+):
+    raw = build_anyplace_handler(
+        predictor,
+        output_root=tmp_path / "anyplace-runs",
+        expected_candidate_count=1,
+        pre_inference=lambda context, request: _prepare_postattachment_frozen_goals(
+            context,
+            request,
+            coordinator=coordinator,
+        ),
+    )
+    return _qualifying_handler(
+        raw,
+        qualifier,
+        purpose="placement",
+        pregrasp_coordinator=coordinator,
+    )
+
+
+def test_postattach_frozen_goal_pass_skips_anyplace_model(
+    tmp_path: Path,
+) -> None:
+    captured_request: dict[str, Any] = {}
+    captured_source: dict[str, Any] = {}
+    predictor_calls: list[dict[str, Any]] = []
+
+    def compile_candidate(candidate, _purpose, source, _epoch, _revision):
+        captured_source.update(source)
+        assert candidate["id"] == "p-pass"
+        return {
+            "qualification_stages": [
+                {
+                    "name": "hover",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                }
+            ]
+        }
+
+    def rpc(_name, request, _timeout):
+        captured_request.update(request)
+        item = request["candidates"][0]
+        return {
+            "schema_version": QUALIFICATION_SCHEMA,
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "results": [
+                {
+                    "candidate_id": item["candidate_id"],
+                    "candidate_pose_sha256": item["candidate_pose_sha256"],
+                    "qualification_binding_sha256": request[
+                        "qualification_binding_sha256"
+                    ],
+                    "execution_started": False,
+                    "verdict": "PASS",
+                    "reason": "qualified",
+                    "stages": [_pass_stage()],
+                    "full_plan_submitted": True,
+                }
+            ],
+        }
+
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        compile_candidate=compile_candidate,
+        placement_full_plan_limit=4,
+        placement_diversity_limit=96,
+    )
+    coordinator = _PregraspGraspPlaceCoordinator(
+        qualifier,
+        qualified_goals_by_grasp={
+            "g-selected": [
+                {
+                    "id": "p-pass",
+                    "object_goal_pose": {
+                        "frame": "world",
+                        "translation_xyz": [0.48, -0.1, 0.43],
+                        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                    },
+                }
+            ]
+        },
+        source_model_raw_candidate_count=96,
+        source_candidate_image_ref=str(tmp_path / "pregrasp-candidates.png"),
+        source_candidate_artifacts=[
+            {
+                "type": "placement_candidate_image",
+                "kind": "image",
+                "tool": "anyplace",
+                "path": str(tmp_path / "pregrasp-candidates.png"),
+            }
+        ],
+    )
+    measured_attachment = {
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": [0.001, -0.015, 0.153],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    handler = _postattachment_handler(
+        tmp_path,
+        qualifier=qualifier,
+        coordinator=coordinator,
+        predictor=lambda request: predictor_calls.append(request) or _model_response(),
+    )
+
+    context = _context(tmp_path, measured_attachment=measured_attachment)
+    result = handler(context)
+    repeated = handler(context)
+
+    assert result.success
+    assert predictor_calls == []
+    assert [item["id"] for item in result.details["placement_candidates"]] == [
+        "p-pass"
+    ]
+    assert result.details["qualification_round"] == 1
+    assert result.details["model_raw_candidate_count"] == 96
+    assert result.details["raw_candidate_count"] == 1
+    assert result.details["anyplace_model_inference_invoked"] is False
+    assert result.details["artifacts"][0]["provenance"] == (
+        "frozen_pregrasp_anyplace_pool"
+    )
+    assert "source_grasp_id" not in str(result.details["source"])
+    assert captured_request["funnel"]["full_plan_limit"] == 4
+    assert captured_source["attachment_transform"] == measured_attachment
+    assert captured_source["frozen_pregrasp_goal_requalification"] is True
+    assert repeated.success is False
+    assert repeated.details["reason"] == "placement_model_retry_not_authorized"
+    assert predictor_calls == []
+
+
+def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
+    tmp_path: Path,
+) -> None:
+    predictor_calls: list[dict[str, Any]] = []
+    qualification_requests: list[dict[str, Any]] = []
+
+    def rpc(_name, request, _timeout):
+        qualification_requests.append(request)
+        second_round = len(qualification_requests) == 2
+        return {
+            "schema_version": QUALIFICATION_SCHEMA,
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "results": [
+                {
+                    "candidate_id": item["candidate_id"],
+                    "candidate_pose_sha256": item["candidate_pose_sha256"],
+                    "qualification_binding_sha256": request[
+                        "qualification_binding_sha256"
+                    ],
+                    "execution_started": False,
+                    "verdict": "PASS" if second_round and index == 0 else "FAIL",
+                    "reason": "qualified" if second_round and index == 0 else "ik_failed",
+                    "stages": [_pass_stage()] if second_round and index == 0 else [],
+                    "full_plan_submitted": second_round and index == 0,
+                }
+                for index, item in enumerate(request["candidates"])
+            ],
+        }
+
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "hover",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                }
+            ]
+        },
+        placement_full_plan_limit=4,
+        placement_diversity_limit=96,
+    )
+    coordinator = _PregraspGraspPlaceCoordinator(
+        qualifier,
+        qualified_goals_by_grasp={
+            "g-selected": [
+                {
+                    "id": "p-frozen-fail",
+                    "object_goal_pose": {
+                        "frame": "world",
+                        "translation_xyz": [0.48, -0.1, 0.43],
+                        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                    },
+                }
+            ]
+        },
+        source_model_raw_candidate_count=96,
+    )
+    measured_attachment = {
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": [0.001, -0.015, 0.153],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    handler = _postattachment_handler(
+        tmp_path,
+        qualifier=qualifier,
+        coordinator=coordinator,
+        predictor=lambda request: predictor_calls.append(request) or _model_response(),
+    )
+    frozen = handler(_context(tmp_path, measured_attachment=measured_attachment))
+    retry_parameters = {
+        key: frozen.details["source"][key]
+        for key in (
+            "object_observation",
+            "placement_observation",
+            "object_camera_to_placement_camera",
+            "placement_camera_to_world",
+        )
+    }
+    retry_parameters["scene_revision"] = frozen.details["scene_revision"]
+    mismatched_retry_context = _context(
+        tmp_path, measured_attachment=measured_attachment
+    )
+    mismatched_retry_context.parameters = retry_parameters
+    mismatched_retry_context.metadata["supervision_context"]["memory"][
+        "placement_candidate_policy"
+    ] = {
+        "status": "qualification_retry_required",
+        "scene_revision": 6,
+        "planning_scene_revision": 6,
+        "recovery": {
+            "required_action": {
+                "name": "anyplace",
+                "parameters": retry_parameters,
+            }
+        },
+    }
+    mismatched_retry = handler(mismatched_retry_context)
+    assert mismatched_retry.success is False
+    assert mismatched_retry.details["reason"] == "placement_model_retry_not_authorized"
+    assert predictor_calls == []
+
+    retry_context = _context(tmp_path, measured_attachment=measured_attachment)
+    retry_context.parameters = retry_parameters
+    retry_context.metadata["supervision_context"]["memory"][
+        "placement_candidate_policy"
+    ] = {
+        "status": "qualification_retry_required",
+        "scene_revision": 7,
+        "planning_scene_revision": 7,
+        "recovery": {
+            "required_action": {
+                "name": "anyplace",
+                "parameters": retry_parameters,
+            }
+        },
+    }
+    regenerated = handler(retry_context)
+    repeated_retry = handler(retry_context)
+
+    assert frozen.success and frozen.details["qualified_candidate_count"] == 0
+    assert frozen.details["qualification_round"] == 1
+    assert len(predictor_calls) == 1
+    assert regenerated.success and regenerated.details["qualified_candidate_count"] == 1
+    assert regenerated.details["qualification_round"] == 2
+    assert repeated_retry.success is False
+    assert repeated_retry.details["reason"] == "placement_model_retry_already_consumed"
+    assert len(predictor_calls) == 1
+    assert regenerated.details["source"]["object_observation"] == frozen.details[
+        "source"
+    ]["object_observation"]
+    assert regenerated.details["source"]["placement_observation"] == frozen.details[
+        "source"
+    ]["placement_observation"]
+    second_ids = {
+        item["candidate_id"] for item in qualification_requests[1]["candidates"]
+    }
+    assert "p-frozen-fail" not in second_ids
+    assert "placement_new_seed" in second_ids
+
+
+def test_no_attachment_or_matching_frozen_pool_calls_model_normally(
+    tmp_path: Path,
+) -> None:
+    predictor_calls: list[dict[str, Any]] = []
+    qualifier = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: {
+            "schema_version": QUALIFICATION_SCHEMA,
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "results": [],
+        },
+        compile_candidate=lambda *_args: {"qualification_stages": [{"name": "hover"}]},
+    )
+    coordinator = _PregraspGraspPlaceCoordinator(qualifier)
+    raw = build_anyplace_handler(
+        lambda request: predictor_calls.append(request) or _model_response(),
+        output_root=tmp_path / "anyplace-runs",
+        expected_candidate_count=1,
+        pre_inference=lambda context, request: _prepare_postattachment_frozen_goals(
+            context,
+            request,
+            coordinator=coordinator,
+        ),
+    )
+    measured_attachment = {
+        "translation_xyz": [0.0, 0.0, 0.15],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+
+    unattached = raw(
+        _context(tmp_path, measured_attachment=measured_attachment, attached=False)
+    )
+    attached_without_matching_pool = raw(
+        _context(tmp_path, measured_attachment=measured_attachment, attached=True)
+    )
+
+    assert unattached.success
+    assert attached_without_matching_pool.success
+    assert len(predictor_calls) == 2
+    assert unattached.details.get("frozen_pregrasp_goal_requalification") is not True
+    assert (
+        attached_without_matching_pool.details.get(
+            "frozen_pregrasp_goal_requalification"
+        )
+        is not True
+    )

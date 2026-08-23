@@ -7,6 +7,7 @@ import hashlib
 import math
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -50,6 +51,7 @@ PLACEMENT_RELEASE_KEY = "placement_release"
 PLACEMENT_CANDIDATE_POLICY_KEY = "placement_candidate_policy"
 PLACEMENT_OBJECT_DETECTION_KEY = "placement_object_detection"
 PLACEMENT_REGION_DETECTION_KEY = "placement_region_detection"
+PREGRASP_PLACEMENT_POOL_KEY = "pregrasp_placement_goal_pool"
 COMPLETED_PLACEMENT_SUBGOALS_KEY = "completed_placement_subgoals"
 MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
@@ -65,6 +67,7 @@ NATIVE_GRASP_MAXIMUM_DRIFT_M = 0.01
 GRASP_RECOVERY_RETREAT_DISTANCE_M = 0.12
 GRASP_CANDIDATE_MAX_ATTEMPTS = 3
 GRASP_ZERO_PASS_REESTIMATION_LIMIT = 3
+ANYPLACE_MAX_QUALIFICATION_ROUNDS = 2
 ARTICULATED_HANDLE_APPROACH_MODES = ("top_down", "front", "side")
 GRASP_REFERENCE_POSITION_TOLERANCE_M = 0.05
 GRASP_REFERENCE_ORIENTATION_TOLERANCE_DEG = 20.0
@@ -957,6 +960,42 @@ class AgentMemory:
     def placement_region_detection(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(PLACEMENT_REGION_DETECTION_KEY))
 
+    def pregrasp_placement_goal_pool(self) -> JsonDict | None:
+        return _memory_fact_value(self.facts.get(PREGRASP_PLACEMENT_POOL_KEY))
+
+    def _save_placement_detection(
+        self,
+        key: str,
+        detection: JsonDict,
+        *,
+        source: str,
+    ) -> None:
+        """Retain only object/region masks from the same placement image."""
+
+        other_key = (
+            PLACEMENT_REGION_DETECTION_KEY
+            if key == PLACEMENT_OBJECT_DETECTION_KEY
+            else PLACEMENT_OBJECT_DETECTION_KEY
+        )
+        other = _memory_fact_value(self.facts.get(other_key))
+        source_image = detection.get("source_image")
+        if (
+            isinstance(other, dict)
+            and isinstance(source_image, str)
+            and source_image
+            and other.get("source_image") != source_image
+        ):
+            self.facts.pop(other_key, None)
+            self.record(
+                "stale_placement_detection_cleared",
+                {
+                    "cleared_key": other_key,
+                    "replacement_key": key,
+                    "replacement_source_image": source_image,
+                },
+            )
+        self.facts[key] = _memory_fact_entry(detection, source=source)
+
     def motion_reconciliation(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(MOTION_RECONCILIATION_KEY))
 
@@ -985,11 +1024,16 @@ class AgentMemory:
         if close_call is not None:
             removed = self.facts.pop(ACTIVE_ENVIRONMENT_TASK_KEY, None)
             gripper_removed = self.facts.pop(GRIPPER_COMMAND_STATE_KEY, None)
+            release_removed = self.facts.pop(PLACEMENT_RELEASE_KEY, None)
             self.record(
                 "active_environment_task_cleared",
                 {"reason": "simulator_environment_closed"},
             )
-            return removed is not None or gripper_removed is not None
+            return (
+                removed is not None
+                or gripper_removed is not None
+                or release_removed is not None
+            )
 
         gripper_removed = False
         call = _successful_tool_call(action, "create_simulator_env")
@@ -1355,20 +1399,16 @@ class AgentMemory:
             selected,
             source="select_sam3_detection",
         )
-        attachment = self.attachment_gate()
-        if (
-            isinstance(attachment, dict)
-            and attachment.get("status") == "resolved"
-            and str(attachment.get("verdict") or "").upper() == "PASS"
-        ):
-            placement_key = (
-                PLACEMENT_REGION_DETECTION_KEY
-                if _placement_region_prompt(selected.get("target_prompt"))
-                else PLACEMENT_OBJECT_DETECTION_KEY
-            )
-            self.facts[placement_key] = _memory_fact_entry(
-                selected, source="select_sam3_detection"
-            )
+        placement_key = (
+            PLACEMENT_REGION_DETECTION_KEY
+            if _placement_region_prompt(selected.get("target_prompt"))
+            else PLACEMENT_OBJECT_DETECTION_KEY
+        )
+        self._save_placement_detection(
+            placement_key,
+            selected,
+            source="select_sam3_detection",
+        )
         self.facts.pop(TARGET_LOCALIZATION_BUDGET_KEY, None)
         self.record(
             "sam3_detection_selected",
@@ -1641,7 +1681,8 @@ class AgentMemory:
                     )
                     if source_camera_role:
                         region["source_camera_role"] = source_camera_role
-                    self.facts[PLACEMENT_REGION_DETECTION_KEY] = _memory_fact_entry(
+                    self._save_placement_detection(
+                        PLACEMENT_REGION_DETECTION_KEY,
                         region,
                         source="sam3_single_placement_region",
                     )
@@ -2110,7 +2151,11 @@ class AgentMemory:
                         policy, source="moveit_qualification"
                     )
                     self.record("grasp_candidates_moveit_rejected", dict(policy))
-                    selected_target = self.selected_sam3_detection()
+                    selected_target = (
+                        self.placement_object_detection()
+                        if self.pregrasp_placement_goal_pool() is not None
+                        else self.selected_sam3_detection()
+                    )
                     source = outputs.get("source")
                     source = source if isinstance(source, dict) else {}
                     target_prompt = (
@@ -2120,7 +2165,7 @@ class AgentMemory:
                     )
                     source_rgb = str(outputs.get("source_rgb") or source.get("rgb") or "")
                     if target_prompt and source_rgb:
-                        existing = self.grasp_estimation_recovery()
+                        existing = self.grasp_reestimation()
                         previous_attempts = (
                             _optional_int(existing.get("attempt_count"), default=0)
                             if isinstance(existing, dict)
@@ -2201,7 +2246,11 @@ class AgentMemory:
             result_id = str(outputs.get("result_id") or "")
             if not result_id:
                 result_id = f"{source_tool}-{int(time.time() * 1000)}"
-            selected_target = self.selected_sam3_detection()
+            selected_target = (
+                self.placement_object_detection()
+                if self.pregrasp_placement_goal_pool() is not None
+                else self.selected_sam3_detection()
+            )
             source = outputs.get("source")
             if not isinstance(source, dict):
                 source = {}
@@ -2216,6 +2265,7 @@ class AgentMemory:
                     scene_epoch=self.scene_epoch(),
                 )
             previous_policy = self.grasp_candidate_policy()
+            existing_reestimate = self.grasp_reestimation()
             existing_recovery = self.grasp_estimation_recovery()
             target_prompt = (
                 str(selected_target.get("target_prompt") or "").strip()
@@ -2401,8 +2451,8 @@ class AgentMemory:
             )
             if zero_pass_reestimate:
                 previous_attempts = (
-                    _optional_int(existing_recovery.get("attempt_count"), default=0)
-                    if isinstance(existing_recovery, dict)
+                    _optional_int(existing_reestimate.get("attempt_count"), default=0)
+                    if isinstance(existing_reestimate, dict)
                     else 0
                 )
                 attempt_count = previous_attempts + 1
@@ -2675,9 +2725,10 @@ class AgentMemory:
         # This deliberately does not apply to zero-qualified candidates: that
         # path never moved the robot and must remain observation-only.
         needs_source_return = (
-            failed_stage in {"align_move", "precontact", "descend"}
+            failed_stage in {"align_move", "precontact", "descend", "close"}
             and isinstance(source_return_pose, dict)
         )
+        reopen_required = failed_stage == "close"
         recovery_id = f"grasp-recovery-{uuid4()}"
         recovery = {
             "schema_version": "openeta.grasp_recovery.v1",
@@ -2698,7 +2749,14 @@ class AgentMemory:
             "previous_view": previous_view,
             "observation_views": ["agentview", "wrist", "render"],
             "scene_epoch": self.scene_epoch(),
-            "stage": "source_return" if needs_source_return else "observe",
+            "stage": (
+                "source_return"
+                if needs_source_return
+                else "reopen"
+                if reopen_required
+                else "observe"
+            ),
+            "reopen_required": reopen_required,
             "required_action": (
                 {
                     "name": "move_to",
@@ -2712,6 +2770,8 @@ class AgentMemory:
                     },
                 }
                 if needs_source_return
+                else {"name": "gripper_control", "parameters": {"position": 1}}
+                if reopen_required
                 else {"name": "observe", "parameters": {}}
             ),
             "created_at_s": time.time(),
@@ -2752,10 +2812,15 @@ class AgentMemory:
                 )
                 self.record("grasp_source_return_stopped", dict(recovery))
                 return True
+            reopen_required = recovery.get("reopen_required") is True
             recovery.update(
                 {
-                    "stage": "observe",
-                    "required_action": {"name": "observe", "parameters": {}},
+                    "stage": "reopen" if reopen_required else "observe",
+                    "required_action": (
+                        {"name": "gripper_control", "parameters": {"position": 1}}
+                        if reopen_required
+                        else {"name": "observe", "parameters": {}}
+                    ),
                     "source_return_completed_at_s": time.time(),
                 }
             )
@@ -2763,6 +2828,33 @@ class AgentMemory:
                 recovery, source="candidate_source_return_completed"
             )
             self.record("grasp_source_return_completed", dict(recovery))
+            return True
+        if recovery.get("stage") == "reopen":
+            if not completed:
+                recovery.update(
+                    {
+                        "status": "stopped_requires_human",
+                        "required_action": None,
+                        "stop_reason": "gripper_reopen_not_completed",
+                        "completed_at_s": time.time(),
+                    }
+                )
+                self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+                    recovery, source="candidate_gripper_reopen_stopped"
+                )
+                self.record("grasp_recovery_gripper_reopen_stopped", dict(recovery))
+                return True
+            recovery.update(
+                {
+                    "stage": "observe",
+                    "required_action": {"name": "observe", "parameters": {}},
+                    "gripper_reopened_at_s": time.time(),
+                }
+            )
+            self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+                recovery, source="candidate_gripper_reopened"
+            )
+            self.record("grasp_recovery_gripper_reopened", dict(recovery))
             return True
         recovery.update(
             {
@@ -3616,28 +3708,97 @@ class AgentMemory:
         if call is None:
             return False
         outputs = _tool_call_outputs(call)
+        if outputs.get("pregrasp_goal_pool_ready") is True:
+            pool = {
+                "schema_version": "openeta.pregrasp_placement_goal_pool.v1",
+                "status": "ready",
+                "goal_count": _optional_int(
+                    outputs.get("pregrasp_goal_pool_count"), default=0
+                ),
+                "scene_epoch": self.scene_epoch(),
+                "execution_started": False,
+                "visibility": "host_private",
+            }
+            self.facts[PREGRASP_PLACEMENT_POOL_KEY] = _memory_fact_entry(
+                pool, source="anyplace"
+            )
+            self.record("pregrasp_placement_goal_pool_ready", dict(pool))
+            return True
+        private_qualification = _qualification_artifact_evidence(
+            outputs, artifact_key="qualification_artifact"
+        )
         candidates = outputs.get("placement_candidates")
         if not isinstance(candidates, list) or not candidates:
             if isinstance(outputs.get("qualification_evidence"), dict):
+                qualification_round = _optional_int(
+                    outputs.get("qualification_round"), default=1
+                )
+                source = outputs.get("source")
+                source = source if isinstance(source, dict) else {}
+                retry_parameters = {
+                    key: source[key]
+                    for key in (
+                        "object_observation",
+                        "placement_observation",
+                        "object_camera_to_placement_camera",
+                        "placement_camera_to_world",
+                    )
+                    if key in source
+                }
+                # The qualifier keys its frozen reserve by planning-scene
+                # revision as well as observation/attachment identity. Keep
+                # the original detach/attach revision on the bounded retry;
+                # falling back to the AnyPlace handler's default revision 0
+                # would incorrectly start a new round counter.
+                scene_revision = outputs.get("scene_revision")
+                if (
+                    isinstance(scene_revision, int)
+                    and not isinstance(scene_revision, bool)
+                    and scene_revision >= 0
+                ):
+                    retry_parameters["scene_revision"] = scene_revision
+                rounds_exhausted = qualification_round >= ANYPLACE_MAX_QUALIFICATION_ROUNDS
                 policy = {
                     "schema_version": "openeta.placement_candidate_policy.v2",
-                    "status": "reobserve_required",
+                    "status": "stopped_requires_human" if rounds_exhausted else "qualification_retry_required",
                     "candidate_queue": [],
                     "active_candidate_id": None,
-                    "rejected_candidates": list(
-                        outputs.get("qualification_evidence", {}).get("results", [])
+                    # Exact failed IDs, seeds, poses, and collision evidence
+                    # remain in the host-only qualification artifact. There is
+                    # no selectable queue in a zero-PASS round, so exposing
+                    # those entries to planner memory has no control purpose.
+                    "rejected_candidates": [],
+                    "rejected_candidate_count": len(
+                        private_qualification.get("results", [])
                     ),
                     "failed_request_fingerprints": [],
                     "scene_revision": outputs.get("scene_revision"),
                     "planning_scene_revision": outputs.get("scene_revision"),
                     "scene_epoch": self.scene_epoch(),
                     "selection_source": None,
-                    "stop_reason": "no_moveit_qualified_placement_candidates",
-                    "recovery": {
-                        "stage": "observe_placement",
-                        "then": "resegment_placement_region_and_rerun_anyplace",
-                        "preserve_attachment": True,
-                    },
+                    "stop_reason": (
+                        "CURRENT_GRASP_PLACE_INFEASIBLE"
+                        if rounds_exhausted
+                        else "placement_qualification_round_zero_pass"
+                    ),
+                    "qualification_round": qualification_round,
+                    "max_qualification_rounds": ANYPLACE_MAX_QUALIFICATION_ROUNDS,
+                    "frozen_anyplace_parameters": dict(retry_parameters),
+                    "recovery": (
+                        {
+                            "stage": "rerun_anyplace",
+                            "then": "qualify_new_round_only",
+                            "preserve_attachment": True,
+                            "preserve_placement_observation": True,
+                            "requires_fresh_observation": False,
+                            "required_action": {
+                                "name": "anyplace",
+                                "parameters": retry_parameters,
+                            },
+                        }
+                        if not rounds_exhausted
+                        else {"stage": "manual_intervention", "required_action": None}
+                    ),
                 }
                 self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
                     policy, source="moveit_qualification"
@@ -3718,6 +3879,19 @@ class AgentMemory:
             ),
             "scene_epoch": qualification_scene_epoch,
             "selection_source": None,
+            "qualification_round": _optional_int(outputs.get("qualification_round"), default=1),
+            "max_qualification_rounds": ANYPLACE_MAX_QUALIFICATION_ROUNDS,
+            "frozen_anyplace_parameters": {
+                key: outputs.get("source", {}).get(key)
+                for key in (
+                    "object_observation",
+                    "placement_observation",
+                    "object_camera_to_placement_camera",
+                    "placement_camera_to_world",
+                )
+                if isinstance(outputs.get("source"), dict)
+                and key in outputs["source"]
+            },
             "attachment_transform_sha256": hashlib.sha256(
                 json.dumps(
                     attachment_transform, sort_keys=True, separators=(",", ":")
@@ -3812,6 +3986,19 @@ class AgentMemory:
             )
             return True
         expected_revision = _optional_int(policy.get("scene_revision"), default=-1)
+        # A successful gripper-open is a real virtual detach and advances the
+        # planning-scene revision.  The subsequent retreat is therefore bound
+        # to the release receipt's revision, not the attach-time revision that
+        # qualified hover/release.
+        if target.get("placement_stage") == "retreat":
+            release = self.placement_release()
+            if isinstance(release, dict) and release.get("status") in {
+                "released",
+                "retreated",
+            }:
+                expected_revision = _optional_int(
+                    release.get("planning_scene_revision"), default=expected_revision
+                )
         requested_revision = _optional_int(target.get("scene_revision"), default=-2)
         receipt_revision = _optional_int(
             receipt.get("planning_scene_revision"), default=-3
@@ -3897,21 +4084,52 @@ class AgentMemory:
             for candidate in policy.get("candidate_queue", [])
             if candidate not in {str(item.get("candidate_id") or "") for item in rejected}
         ]
+        legacy_reobserve = "qualification_round" not in policy
         policy.update(
             {
                 "active_candidate_id": None,
                 "compiled_placement": None,
                 "rejected_candidates": rejected,
                 "failed_request_fingerprints": failed,
-                "status": "selection_required" if remaining else "reobserve_required",
+                "status": (
+                    "selection_required"
+                    if remaining
+                    else (
+                        "reobserve_required"
+                        if legacy_reobserve
+                        else "qualification_retry_required"
+                        if _optional_int(policy.get("qualification_round"), default=1)
+                        < ANYPLACE_MAX_QUALIFICATION_ROUNDS
+                        else "current_grasp_place_infeasible"
+                    )
+                ),
             }
         )
         if not remaining:
-            policy["recovery"] = {
-                "stage": "observe_placement",
-                "then": "resegment_placement_region_and_rerun_anyplace",
-                "preserve_attachment": True,
-            }
+            if policy["status"] == "reobserve_required":
+                policy["recovery"] = {
+                    "stage": "observe_placement",
+                    "then": "resegment_placement_region_and_rerun_anyplace",
+                    "preserve_attachment": True,
+                }
+            elif policy["status"] == "qualification_retry_required":
+                policy["recovery"] = {
+                    "stage": "rerun_anyplace",
+                    "then": "qualify_new_round_only",
+                    "preserve_attachment": True,
+                    "preserve_placement_observation": True,
+                    "requires_fresh_observation": False,
+                    "required_action": {
+                        "name": "anyplace",
+                        "parameters": dict(policy.get("frozen_anyplace_parameters") or {}),
+                    },
+                }
+            else:
+                policy["stop_reason"] = "CURRENT_GRASP_PLACE_INFEASIBLE"
+                policy["recovery"] = {
+                    "stage": "manual_intervention",
+                    "required_action": None,
+                }
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
             policy, source="placement_candidate_rejected"
         )
@@ -4193,6 +4411,13 @@ class AgentMemory:
             expected_revision = _optional_int(
                 policy.get("scene_revision"), default=-1
             )
+            if placement_stage == "retreat":
+                release_state = self.placement_release()
+                if isinstance(release_state, dict):
+                    expected_revision = _optional_int(
+                        release_state.get("planning_scene_revision"),
+                        default=expected_revision,
+                    )
             if policy.get("revision_provenance") == "native_attachment_gate" and (
                 _optional_int(target_pose.get("scene_revision"), default=-2)
                 != expected_revision
@@ -4305,6 +4530,11 @@ class AgentMemory:
                 "status": "released",
                 "scene_epoch": self.scene_epoch(),
                 "released_at_s": time.time(),
+                **(
+                    {"placement_verification": dict(receipt["placement_verification"])}
+                    if isinstance(receipt.get("placement_verification"), dict)
+                    else {}
+                ),
                 **(
                     {"planning_scene_revision": detach_revision}
                     if policy.get("revision_provenance")
@@ -5857,6 +6087,7 @@ class AgentMemory:
             "placement_candidate_policy": self.placement_candidate_policy(),
             "placement_object_detection": self.placement_object_detection(),
             "placement_region_detection": self.placement_region_detection(),
+            "pregrasp_placement_goal_pool": self.pregrasp_placement_goal_pool(),
             "motion_reconciliation": self.motion_reconciliation(),
             "scene_epoch": self.scene_epoch(),
             "transition_ledger": self.transition_ledger()[-12:],
@@ -6323,14 +6554,33 @@ def _grasp_recovery_source_return_pose(execution: JsonDict | None) -> JsonDict |
 
     if not isinstance(execution, dict):
         return None
-    pose = execution.get("source_eef_pose")
+    # Once hover has completed, a failed alignment/descent/close must recover
+    # to this candidate's exact compiled world-frame hover. Observing at or
+    # near contact occludes the object and poisons the following inference.
+    # Failures before hover completes retain the pre-grasp source EEF pose.
+    pose = None
+    if str(execution.get("stage") or "") in {
+        "align",
+        "align_move",
+        "precontact",
+        "descend",
+        "close",
+    }:
+        compiled = execution.get("compiled_grasp")
+        if isinstance(compiled, dict):
+            pose = compiled.get("hover_pose")
+    if not isinstance(pose, dict):
+        pose = execution.get("source_eef_pose")
     if not isinstance(pose, dict):
         return None
     xyz = pose.get("xyz")
     if not _finite_xyz(xyz):
         return None
     result = dict(pose)
-    result["frame"] = str(result.get("frame") or "world")
+    # RobotState.end_effector_pose.frame names the represented EEF link, while
+    # its xyz/quaternion are expressed in the environment world frame. move_to
+    # consumes the expression frame, so recovery targets are always world.
+    result["frame"] = "world"
     result["xyz"] = [float(value) for value in xyz[:3]]
     return result
 
@@ -6806,6 +7056,42 @@ def _tool_call_outputs(call: JsonDict) -> JsonDict:
         return {}
     outputs = details.get("outputs")
     return dict(outputs) if isinstance(outputs, dict) else dict(details)
+
+
+def _qualification_artifact_evidence(
+    outputs: Mapping[str, Any],
+    *,
+    artifact_key: str,
+    public_key: str = "qualification_evidence",
+) -> JsonDict:
+    """Load host-private exact proof while planner-visible memory keeps only a summary."""
+
+    public = outputs.get(public_key)
+    public = dict(public) if isinstance(public, Mapping) else {}
+    artifact = outputs.get(artifact_key)
+    if not isinstance(artifact, Mapping):
+        return public
+    path_value = artifact.get("path")
+    if not isinstance(path_value, str) or not path_value.endswith(".json"):
+        return public
+    try:
+        path = Path(path_value)
+        if not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+            return public
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return public
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version")
+        not in {
+            "openeta.moveit_candidate_funnel.v2",
+            "openeta.moveit_candidate_qualification.v1",
+        }
+        or not isinstance(payload.get("results"), list)
+    ):
+        return public
+    return payload
 
 
 def _environment_receipt(call: JsonDict) -> JsonDict:

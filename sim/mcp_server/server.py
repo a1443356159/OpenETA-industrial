@@ -583,6 +583,7 @@ def qualify_motion_candidates(
     candidates: list[dict],
     qualification_binding_sha256: str,
     *,
+    funnel: dict | None = None,
     session_id: str = "",
 ) -> dict:
     """Private host RPC for batch MoveIt qualification; never an AgentTool."""
@@ -604,6 +605,7 @@ def qualify_motion_candidates(
             "scene_epoch": scene_epoch,
             "planning_scene_revision": planning_scene_revision,
             "planning": planning,
+            "funnel": dict(funnel or {}),
             "source": source,
             "candidates": candidates,
             "qualification_binding_sha256": qualification_binding_sha256,
@@ -625,7 +627,8 @@ def move_to(handle: str, x: float, y: float, z: float, *,
             num_steps: int = 100, tolerance: float = 0.002, ori_tolerance: float = 0.05,
             session_id: str = "",
             enable_collision_check: bool = True,
-            velocity_scaling: float = 0.3, acceleration_scaling: float = 0.3) -> dict:
+            velocity_scaling: float = 0.3, acceleration_scaling: float = 0.3,
+            motion_provenance: dict | None = None) -> dict:
     """Move the end-effector to an absolute pose using closed-loop interpolation.
 
     Re-observes the EE pose from the step result every 10 steps for
@@ -681,8 +684,23 @@ def move_to(handle: str, x: float, y: float, z: float, *,
             if len(quat) < 4:
                 return {"ok": False, "error_code": "ROBOT_STATE_UNAVAILABLE",
                         "error": "fresh end-effector orientation is unavailable"}
+        # Preserve semantic identity separately from the executable pose.
+        # In particular, Gazebo's native-grasp verifier needs to recognize an
+        # exact, already-host-compiled hover withdrawal after a rejected
+        # close.  Provenance is deliberately unable to override xyz or the
+        # quaternion calculated by this transport boundary.
+        provenance = (
+            {
+                key: value
+                for key, value in motion_provenance.items()
+                if key not in {"x", "y", "z", "xyz", "position", "translation_xyz", "quat_xyzw"}
+            }
+            if isinstance(motion_provenance, dict)
+            else {}
+        )
+        target_pose = {"xyz": [x, y, z], "quat_xyzw": quat[:4], **provenance}
         return _proxy_step(meta, {"action_type": "move_to",
-            "target_pose": {"xyz": [x, y, z], "quat_xyzw": quat[:4]},
+            "target_pose": target_pose,
             "position_tolerance_m": tolerance,
             # The conservative RM75 trajectory scaling can require slightly
             # over 30 seconds for a 30 mm Cartesian offset after gripper

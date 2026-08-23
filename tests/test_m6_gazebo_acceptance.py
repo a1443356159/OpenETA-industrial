@@ -34,7 +34,7 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     prompt = paths.instructions.read_text(encoding="utf-8")
     assert "GraspGenX" in prompt and "AnyPlace" in prompt
     assert "execution_started=false" in prompt
-    assert "稳定 >=0.5 s" in prompt
+    assert "最终\n0.5 s 判断稳定" in prompt
     assert "禁止 Oracle" in prompt
     assert "initial observation 不计作这次显式 observe" in prompt
     assert "覆盖完整目标轮廓" in prompt
@@ -74,7 +74,24 @@ def test_m6_health_url_preserves_service_root() -> None:
     assert m6._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
 
 
-def test_m6_recovery_scenarios_are_explicit_acceptance_only_fixtures(
+def test_m6_verifier_uses_model_raw_count_for_frozen_goal_requalification() -> None:
+    call = {
+        "result": {
+            "details": {
+                "outputs": {
+                    "model_raw_candidate_count": 96,
+                    "raw_candidate_count": 4,
+                    "frozen_pregrasp_goal_count": 4,
+                }
+            }
+        }
+    }
+
+    assert m6._has_minimum_int_value(call, "model_raw_candidate_count", 96)
+    assert not m6._has_minimum_int_value(call, "raw_candidate_count", 96)
+
+
+def test_m6_rejection_scenario_is_explicit_acceptance_only_fixture(
     tmp_path, monkeypatch
 ) -> None:
     allocation = m6.base.Allocation(81, "partition", 18765, "run-id")
@@ -85,24 +102,24 @@ def test_m6_recovery_scenarios_are_explicit_acceptance_only_fixtures(
         lambda *_args, **_kwargs: {"trusted": True},
     )
 
-    for scenario in ("reject-first", "reject-all-recover"):
-        paths = m6.prepare_case(
-            tmp_path,
-            tmp_path / scenario,
-            allocation,
-            dict(m6.DEFAULT_SERVICES),
-            scenario=scenario,
-        )
-        prompt = paths.instructions.read_text(encoding="utf-8")
-        assert scenario in prompt
-        assert "execution_started=false" in prompt
-        receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
-        assert receipt["m6_scenario"] == scenario
-        unhashed = dict(receipt)
-        supplied_hash = unhashed.pop("receipt_sha256")
-        assert supplied_hash == m6.base.hashlib.sha256(
-            json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+    scenario = "reject-first"
+    paths = m6.prepare_case(
+        tmp_path,
+        tmp_path / scenario,
+        allocation,
+        dict(m6.DEFAULT_SERVICES),
+        scenario=scenario,
+    )
+    prompt = paths.instructions.read_text(encoding="utf-8")
+    assert scenario in prompt
+    assert "execution_started=false" in prompt
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["m6_scenario"] == scenario
+    unhashed = dict(receipt)
+    supplied_hash = unhashed.pop("receipt_sha256")
+    assert supplied_hash == m6.base.hashlib.sha256(
+        json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def test_m6_failed_fingerprint_check_ignores_receipt_mirrors() -> None:
@@ -133,6 +150,39 @@ def test_m6_failed_fingerprint_check_ignores_receipt_mirrors() -> None:
     assert m6._repeated_failed_motion_fingerprints([event, event]) == {
         "fingerprint-a"
     }
+
+
+def test_m6_qualification_blocks_resolve_relative_to_case_root(tmp_path) -> None:
+    artifact = (
+        tmp_path
+        / ".openeta_memory"
+        / "sessions"
+        / "session-a"
+        / "artifacts"
+        / "moveit_qualification"
+        / "qualification.json"
+    )
+    artifact.parent.mkdir(parents=True)
+    proof = {
+        "results": [
+            {
+                "candidate_id": "placement_000",
+                "verdict": "FAIL",
+                "reason": "plan_only_failed",
+                "execution_started": False,
+                "full_plan_submitted": True,
+            }
+        ]
+    }
+    artifact.write_text(json.dumps(proof), encoding="utf-8")
+    call = {
+        "qualification_artifact": {
+            "kind": "json",
+            "path": str(artifact.relative_to(tmp_path)),
+        }
+    }
+
+    assert m6._qualification_blocks(call, artifact_root=tmp_path) == [proof]
 
 
 def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:

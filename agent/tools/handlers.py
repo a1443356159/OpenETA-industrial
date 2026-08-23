@@ -41,6 +41,9 @@ Sam3PointSegmentCallable = Callable[[JsonDict], JsonDict]
 AnyGraspDetectCallable = Callable[[JsonDict], JsonDict]
 ContactGraspNetPredictCallable = Callable[[JsonDict], JsonDict]
 AnyPlacePredictCallable = Callable[[JsonDict], JsonDict]
+AnyPlacePreInferenceCallable = Callable[
+    [ToolExecutionContext, JsonDict], ToolResult | None
+]
 MolmoPointCallable = Callable[[JsonDict], JsonDict]
 GraspGenXPredictCallable = Callable[[JsonDict], JsonDict]
 GraspGenXListCallable = Callable[[], JsonDict]
@@ -1735,6 +1738,7 @@ def build_anyplace_handler(
     *,
     output_root: str | Path = DEFAULT_ANYPLACE_OUTPUT_ROOT,
     expected_candidate_count: int = DEFAULT_CANDIDATE_COUNT,
+    pre_inference: AnyPlacePreInferenceCallable | None = None,
 ) -> ToolHandler:
     """Build an AnyPlace ToolRegistry handler backed by an injected MCP callable."""
 
@@ -1786,8 +1790,14 @@ def build_anyplace_handler(
         request: JsonDict = {
             "object_observation": object_packet,
             "placement_observation": placement_packet,
+            "object_camera_to_placement_camera": transform,
+            "placement_camera_to_world": placement_camera_to_world,
             "scene_revision": scene_revision,
         }
+        if pre_inference is not None:
+            prepared = pre_inference(context, request)
+            if prepared is not None:
+                return prepared
         try:
             response = predict_placement(mcp_request)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured.
@@ -3534,6 +3544,7 @@ def _normalise_anygrasp_response(
         parsed_count = -1
     metadata = _dict_or_empty(details.get("metadata"))
     registered_count = metadata.get("max_candidates")
+    registered_raw_pool = metadata.get("raw_pool_size")
     if (
         parsed_count != len(candidates_value)
         or parsed_count <= 0
@@ -3541,7 +3552,17 @@ def _normalise_anygrasp_response(
             registered_count is not None
             and (
                 registered_count != expected_candidate_count
-                or parsed_count != expected_candidate_count
+                or (
+                    registered_raw_pool is None
+                    and parsed_count != expected_candidate_count
+                )
+                or (
+                    registered_raw_pool is not None
+                    and (
+                        not isinstance(registered_raw_pool, int)
+                        or parsed_count > registered_raw_pool
+                    )
+                )
             )
         )
     ):
@@ -3621,6 +3642,9 @@ def _normalise_anygrasp_response(
         "raw_output_ref": str(raw_output_ref),
         "result_id": run_dir.name,
         "candidate_count": len(candidates),
+        "model_raw_candidate_count": int(details.get("model_raw_candidate_count", len(candidates))),
+        "raw_candidate_count": len(candidates),
+        "generated_candidate_count": len(candidates),
         "grasp_candidates": candidates,
         "best_grasp_candidate": candidates[0],
         "active_grasp_candidate": candidates[0],
@@ -3880,6 +3904,12 @@ def _normalise_grasp_pose_estimate_result(
             "object_mask": source.get("object_mask"),
             "camera_frame_id": camera_frame_id,
             "scene_epoch": scene_epoch,
+            "model_raw_candidate_count": _nonnegative_int(
+                source_details.get("model_raw_candidate_count"),
+                default=len(candidates),
+            ),
+            "raw_candidate_count": len(candidates),
+            "generated_candidate_count": len(candidates),
             "candidate_count": len(candidates),
             "grasp_candidates": candidates,
             "best_grasp_candidate": candidates[0],
@@ -4231,6 +4261,9 @@ def _normalise_graspgenx_response(
     candidate_count = details.get("candidate_count")
     raw_candidate_count = details.get("raw_candidate_count")
     generated_candidate_count = details.get("generated_candidate_count")
+    model_raw_candidate_count = details.get(
+        "model_raw_candidate_count", raw_candidate_count
+    )
     if (
         isinstance(candidate_count, bool)
         or not isinstance(candidate_count, int)
@@ -4238,11 +4271,14 @@ def _normalise_graspgenx_response(
         or not isinstance(raw_candidate_count, int)
         or isinstance(generated_candidate_count, bool)
         or not isinstance(generated_candidate_count, int)
+        or isinstance(model_raw_candidate_count, bool)
+        or not isinstance(model_raw_candidate_count, int)
         or not isinstance(candidates_value, list)
         or candidate_count != len(candidates_value)
         or generated_candidate_count != candidate_count
         or raw_candidate_count < generated_candidate_count
-        or not 1 <= candidate_count <= GRASPGENX_MAX_CANDIDATES
+        or model_raw_candidate_count < raw_candidate_count
+        or not 1 <= candidate_count <= 512
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
 
@@ -4274,11 +4310,21 @@ def _normalise_graspgenx_response(
         return _graspgenx_failure("inconsistent_grasp_outputs")
     metadata = _scrub_graspgenx_payload(metadata_value)
     registered_count = metadata.get("max_returned_candidates")
-    if registered_count is not None and (
-        registered_count != expected_candidate_count
-        or candidate_count != expected_candidate_count
+    exposure_limit = metadata.get("exposure_limit")
+    if (
+        exposure_limit is not None and exposure_limit != expected_candidate_count
+    ) or (
+        registered_count is not None
+        and (
+            not isinstance(registered_count, int)
+            or candidate_count > registered_count
+            or (exposure_limit is None and registered_count != expected_candidate_count)
+        )
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
+    v2_reserve_contract = (
+        "raw_pool_size" in metadata or "exposure_limit" in metadata
+    )
     return ToolResult(
         True,
         content=_string_param(response.get("content"))
@@ -4307,8 +4353,11 @@ def _normalise_graspgenx_response(
                 "gripper_name": gripper_name,
                 "up_direction_camera": list(up_direction_camera),
             },
-            "raw_candidate_count": raw_candidate_count,
-            "generated_candidate_count": generated_candidate_count,
+            "model_raw_candidate_count": model_raw_candidate_count,
+            "raw_candidate_count": (
+                len(candidates) if v2_reserve_contract else raw_candidate_count
+            ),
+            "generated_candidate_count": len(candidates),
             "candidate_count": len(candidates),
             "grasp_candidates": candidates,
             "best_grasp_candidate": candidates[0],
@@ -5134,16 +5183,29 @@ def _normalise_anyplace_response(
     except (TypeError, ValueError):
         candidate_count = -1
     metadata = _dict_or_empty(details.get("metadata"))
+    object_current_pose = details.get("object_current_pose")
     registered_count = metadata.get("configured_candidate_count")
+    registered_raw_pool = metadata.get("raw_pool_size")
     if (
         not isinstance(candidates_value, list)
+        or not isinstance(object_current_pose, Mapping)
         or candidate_count != len(candidates_value)
         or candidate_count <= 0
         or (
             registered_count is not None
             and (
                 registered_count != expected_candidate_count
-                or candidate_count != expected_candidate_count
+                or (
+                    registered_raw_pool is None
+                    and candidate_count != expected_candidate_count
+                )
+                or (
+                    registered_raw_pool is not None
+                    and (
+                        not isinstance(registered_raw_pool, int)
+                        or candidate_count > registered_raw_pool
+                    )
+                )
             )
         )
     ):
@@ -5189,6 +5251,12 @@ def _normalise_anyplace_response(
             "source": {
                 "object_observation": dict(request["object_observation"]),
                 "placement_observation": dict(request["placement_observation"]),
+                "object_camera_to_placement_camera": [
+                    list(row) for row in request["object_camera_to_placement_camera"]
+                ],
+                "placement_camera_to_world": [
+                    list(row) for row in request["placement_camera_to_world"]
+                ],
                 "placement_camera_extrinsics": dict(
                     request["placement_observation"]["camera_extrinsics"]
                 ),
@@ -5196,7 +5264,11 @@ def _normalise_anyplace_response(
             "scene_revision": request["scene_revision"],
             "raw_output_ref": str(raw_output_ref),
             "candidate_count": len(candidates),
+            "model_raw_candidate_count": int(details.get("model_raw_candidate_count", len(candidates))),
+            "raw_candidate_count": len(candidates),
+            "generated_candidate_count": len(candidates),
             "placement_candidates": candidates,
+            "object_current_pose": dict(object_current_pose),
             "candidate_image_ref": candidate_image_ref,
             "artifacts": [
                 {
@@ -5806,6 +5878,13 @@ def _normalise_anyplace_observation(value: Any, *, mask_key: str) -> JsonDict:
     rgb = _string_param(value.get("rgb"))
     depth = _string_param(value.get("depth"))
     mask_value = value.get(mask_key)
+    if mask_value is None:
+        # Bounded placement recovery replays the handler-owned normalized
+        # packet saved in ``details.source``.  Accept that exact internal
+        # representation so the bounded second round does not require the VLM
+        # to reconstruct external mask parameters.
+        mask_artifact = value.get("mask_artifact")
+        mask_value = mask_artifact if isinstance(mask_artifact, Mapping) else value.get("mask")
     if isinstance(mask_value, Mapping):
         mask_ref = _string_param(mask_value.get("mask_ref"))
         source_image = _string_param(mask_value.get("source_image"))

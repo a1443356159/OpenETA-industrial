@@ -48,6 +48,12 @@ def test_anyplace_mcp_stdio_predicts_aligned_rgbd_sample() -> None:
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ],
+        "placement_camera_to_world": [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
     }
 
     async def run_call() -> dict:
@@ -89,8 +95,11 @@ def test_anyplace_mcp_stdio_predicts_aligned_rgbd_sample() -> None:
     details = payload["details"]
     assert details["frame"] == "placement_camera"
     assert details["camera_frame"] == "opencv"
-    assert details["candidate_count"] == 10
-    assert len(details["placement_candidates"]) == 10
+    assert details["candidate_count"] == 96
+    assert details["model_raw_candidate_count"] == 96
+    assert details["raw_candidate_count"] == 96
+    assert details["generated_candidate_count"] == 96
+    assert len(details["placement_candidates"]) == 96
     for index, candidate in enumerate(details["placement_candidates"]):
         assert candidate["id"] == f"placement_{index:03d}"
         assert set(candidate) == {"id", "object_placement_transform"}

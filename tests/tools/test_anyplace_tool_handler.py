@@ -58,6 +58,11 @@ def _response(count: int = 10) -> dict[str, Any]:
             "frame": "placement_camera",
             "camera_frame": "opencv",
             "candidate_count": count,
+            "object_current_pose": {
+                "frame": "world",
+                "translation_xyz": [0.2, 0.0, 0.43],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            },
             "placement_candidates": [
                 {
                     "id": f"placement_{index:03d}",
@@ -112,6 +117,32 @@ def test_handler_allows_distinct_rgbd_packets(tmp_path: Path) -> None:
         _context(parameters)
     )
     assert result.success is True
+
+
+def test_handler_replays_its_frozen_normalized_observations(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    handler = build_anyplace_handler(
+        lambda request: calls.append(request) or _response(),
+        output_root=tmp_path / "runs",
+    )
+    first = handler(_context(_parameters(tmp_path)))
+
+    frozen = first.details["source"]
+    second = handler(
+        _context(
+            {
+                "object_observation": frozen["object_observation"],
+                "placement_observation": frozen["placement_observation"],
+                "scene_revision": 2,
+            }
+        )
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert len(calls) == 2
+    assert "object_mask" in calls[1]["object_observation"]
+    assert "placement_region_mask" in calls[1]["placement_observation"]
 
 
 def test_handler_rejects_mask_not_aligned_with_its_own_rgb(tmp_path: Path) -> None:

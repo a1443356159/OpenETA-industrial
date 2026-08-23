@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count as validate_candidate_count
+from tools.candidate_config import (
+    DEFAULT_ANYPLACE_RAW_POOL_SIZE,
+    DEFAULT_CANDIDATE_COUNT,
+    candidate_count as validate_candidate_count,
+    raw_pool_size as validate_raw_pool_size,
+)
 
 
 MODEL_NAME = "anyplace_multitask"
@@ -84,12 +89,17 @@ class AnyPlaceBackend:
         seed: int = 0,
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
         candidate_count: int = DEFAULT_CANDIDATE_LIMIT,
+        raw_pool_size: int = DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     ) -> None:
         self.anyplace_root = Path(anyplace_root)
         self.config_path = Path(config_path)
         self.seed = seed
         self.depth_truncation = depth_truncation
         self.candidate_count = validate_candidate_count(candidate_count)
+        self.raw_pool_size = validate_raw_pool_size(raw_pool_size, placement=True)
+        if self.raw_pool_size < self.candidate_count:
+            raise ValueError("raw pool size must be >= candidate count")
+        self.last_returned_candidate_count = 0
         self._loaded: dict[str, Any] | None = None
         self._prediction_count = 0
 
@@ -195,8 +205,17 @@ class AnyPlaceBackend:
             )
             object_pcd = (placement_to_world @ object_h.T).T[:, :3].astype(np.float32)
             placement_pcd = (placement_to_world @ placement_h.T).T[:, :3].astype(np.float32)
-            measured_object_pcd = object_pcd.copy()
-            measured_placement_pcd = placement_pcd.copy()
+            object_current_pose = {
+                "frame": "world",
+                "translation_xyz": _float_list(np.mean(object_pcd, axis=0)),
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                "convention": "T_world_object_current_pointcloud_frame",
+                "provenance": "measured_masked_rgbd_centroid",
+            }
             metadata.update(
                 {
                     "object_point_count": int(object_pcd.shape[0]),
@@ -248,19 +267,17 @@ class AnyPlaceBackend:
                 placement_region_pcd=placement_pcd,
                 inference_seed=inference_seed,
             )
-            raw_candidates = _project_object_bottoms_to_support(
-                raw_candidates,
-                object_points=measured_object_pcd,
-                support_points=measured_placement_pcd,
-                np=np,
-            )
+            model_raw_candidate_count = int(len(raw_candidates))
             raw_candidates = _model_world_to_placement_camera_transforms(
                 raw_candidates, placement_camera_to_world=placement_to_world, np=np
             )
             candidates = normalise_placement_candidates(
                 raw_candidates,
-                expected_count=self.candidate_count,
+                expected_count=None,
             )
+            if not self.candidate_count <= len(candidates) <= self.raw_pool_size:
+                raise AnyPlaceInputError("inconsistent_placement_outputs")
+            self.last_returned_candidate_count = len(candidates)
         except AnyPlaceInputError as exc:
             return _failure_result(
                 reason=exc.reason,
@@ -287,9 +304,19 @@ class AnyPlaceBackend:
                 "frame": FRAME,
                 "camera_frame": CAMERA_FRAME,
                 "candidate_count": len(candidates),
+                "model_raw_candidate_count": model_raw_candidate_count,
+                "raw_candidate_count": len(candidates),
+                "generated_candidate_count": len(candidates),
                 "placement_candidates": candidates,
+                "object_current_pose": object_current_pose,
                 "metadata": _with_duration(
-                    {**metadata, "configured_candidate_count": self.candidate_count},
+                    {
+                        **metadata,
+                        "configured_candidate_count": self.candidate_count,
+                        "exposure_limit": self.candidate_count,
+                        "raw_pool_size": self.raw_pool_size,
+                        "returned_candidate_count": len(candidates),
+                    },
                     start,
                 ),
             },
@@ -326,7 +353,7 @@ class AnyPlaceBackend:
 
         args = config_util.load_config(str(self.config_path), demo_train_eval="eval")
         args = config_util.recursive_attr_dict(args)
-        args.experiment.eval.init_k_val = self.candidate_count
+        args.experiment.eval.init_k_val = self.raw_pool_size
         ckpt_path = Path(args.experiment.eval.ckpt_path)
         if not ckpt_path.is_absolute():
             ckpt_path = self.config_path.parent / ckpt_path
@@ -454,7 +481,7 @@ class AnyPlaceBackend:
                 return_top=(not exp_args.eval.return_rand),
                 with_coll=exp_args.eval.with_coll,
                 run_affordance=exp_args.eval.run_affordance,
-                init_k_val=self.candidate_count,
+                init_k_val=self.raw_pool_size,
                 no_sc_score=exp_args.eval.no_success_classifier,
                 init_parent_mean=exp_args.eval.init_parent_mean_pos,
                 init_orig_ori=exp_args.eval.init_orig_ori,
@@ -680,42 +707,6 @@ def _model_world_to_placement_camera_transforms(
         np.matmul(inverse[None, :, :], transforms),
         placement_camera_to_world[None, :, :],
     )
-
-
-def _project_object_bottoms_to_support(
-    raw_candidates: Any,
-    *,
-    object_points: Any,
-    support_points: Any,
-    np: Any,
-) -> Any:
-    """Place each predicted object bottom on the measured gravity-aligned support."""
-
-    transforms = np.asarray(raw_candidates, dtype=np.float64)
-    if transforms.ndim != 3 or transforms.shape[1:] != (4, 4):
-        return raw_candidates
-    object_array = np.asarray(object_points, dtype=np.float64)
-    support_array = np.asarray(support_points, dtype=np.float64)
-    if (
-        object_array.ndim != 2
-        or object_array.shape[1] != 3
-        or len(object_array) == 0
-        or support_array.ndim != 2
-        or support_array.shape[1] != 3
-        or len(support_array) == 0
-    ):
-        return raw_candidates
-    # Median is robust to the marker border/depth holes; use a low percentile
-    # for the object bottom so a few noisy depth pixels cannot suspend it.
-    support_height = float(np.median(support_array[:, 2]))
-    homogeneous = np.concatenate(
-        [object_array, np.ones((len(object_array), 1), dtype=np.float64)], axis=1
-    )
-    projected = np.matmul(transforms, homogeneous.T).transpose(0, 2, 1)[:, :, :3]
-    bottoms = np.quantile(projected[:, :, 2], 0.02, axis=1)
-    adjusted = transforms.copy()
-    adjusted[:, 2, 3] += support_height - bottoms
-    return adjusted
 
 
 def _is_rigid_transform(matrix: Any) -> bool:

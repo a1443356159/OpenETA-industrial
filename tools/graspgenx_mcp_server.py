@@ -27,7 +27,12 @@ from tools.graspgenx_core import (
     GraspGenXBackend,
     failure_result,
 )
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, argparse_candidate_count
+from tools.candidate_config import (
+    DEFAULT_CANDIDATE_COUNT,
+    DEFAULT_GRASP_RAW_POOL_SIZE,
+    argparse_candidate_count,
+    argparse_raw_pool_size,
+)
 
 
 _BACKEND: GraspGenXBackend | None = None
@@ -194,16 +199,28 @@ def build_mcp(gripper_names: list[str] | tuple[str, ...]) -> FastMCP:
 
 def health_payload() -> dict[str, Any]:
     backend = _BACKEND
+    exposure_limit = (
+        0
+        if backend is None
+        else int(getattr(backend, "max_candidates", DEFAULT_CANDIDATE_COUNT))
+    )
     return {
         "ok": backend is not None,
         "server": SERVER_NAME,
         "tools": [LIST_TOOL_NAME, TOOL_NAME],
         "model_loaded": bool(backend is not None and backend.model_loaded),
         "gripper_count": 0 if backend is None else len(backend.grippers),
-        "max_candidates": (
+        "max_candidates": exposure_limit,
+        "exposure_limit": exposure_limit,
+        "raw_pool_size": (
             0
             if backend is None
-            else int(getattr(backend, "max_candidates", DEFAULT_CANDIDATE_COUNT))
+            else int(getattr(backend, "raw_pool_size", exposure_limit))
+        ),
+        "returned_candidate_count": (
+            0
+            if backend is None
+            else int(getattr(backend, "last_returned_candidate_count", 0))
         ),
     }
 
@@ -232,6 +249,11 @@ def main() -> int:
         type=argparse_candidate_count,
         default=DEFAULT_CANDIDATE_COUNT,
     )
+    parser.add_argument(
+        "--raw-pool-size",
+        type=argparse_raw_pool_size(),
+        default=DEFAULT_GRASP_RAW_POOL_SIZE,
+    )
     args = parser.parse_args()
 
     source_root = Path(args.graspgenx_root).expanduser().resolve()
@@ -246,6 +268,7 @@ def main() -> int:
             gripper_descriptions_root=args.gripper_descriptions_root,
             device=args.device,
             max_candidates=args.max_candidates,
+            raw_pool_size=args.raw_pool_size,
         )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

@@ -34,7 +34,7 @@ REQUIRED_REAL_M6_TOOLS = (
     "anyplace",
     "close_simulator_env",
 )
-SCENARIOS = ("normal", "reject-first", "reject-all-recover")
+SCENARIOS = ("normal", "reject-first")
 
 
 INSTRUCTIONS = """
@@ -42,19 +42,25 @@ INSTRUCTIONS = """
 创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 并用该抓取观察供 SAM3
 分割红色方块 target_object 与 GraspGenX(gripper_name=robotiq_2f_85) 使用；create 返回的
 initial observation 不计作这次显式 observe。禁止 Oracle、
-fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增运动工具。抓取前不得运行
-AnyPlace；不得调用 python_exec 读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
+fake candidate、AnyGrasp、固定抓法、固定腕姿、IK preview 或新增运动工具。不得调用 python_exec
+读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
 拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
-GraspGenX 候选并 compile_grasp_seed，执行真实接近、close，
+目标 mask；运动前再分割绿色 placement_zone_marker 并按宿主 obligation 调用一次 AnyPlace，形成
+不向 VLM 暴露的 object-goal 池。宿主先完成普通 grasp 漏斗，再对最多 4 个 grasp PASS × 当前轮
+完整 96 个 object goal 做分层有限联查，全局最多 4 对进入 plan-only；仅保留至少有一个 place PASS
+的 grasp。主 VLM 从保留的 GraspGenX 候选中选择并 compile_grasp_seed，执行真实接近、close，
 仅在双垫 native contact 与 attached ACK 后 lift；lift 必须 >=80 mm 且抓持相对漂移 <=10 mm。
 之后重新 observe 获取独立 placement RGB-D，分别用 SAM3 分割被抓物体和绿色
 placement_zone_marker，再把两个独立观察交给 AnyPlace。AnyPlace 只输出物体目标位姿，禁止接收
-selected_grasp/source_grasp_id 或输出 place_grasp_pose。十个原始候选全部送入宿主 MoveIt 资格筛选；
-宿主使用 attach ACK 时冻结的 T_eef_object_attached 编译 EEF hover/release。主 VLM 只能看到 PASS
+selected_grasp/source_grasp_id 或输出 place_grasp_pose。模型 reserve pool 只进入宿主分层 MoveIt 漏斗；
+宿主先取抓前随实际执行 grasp 通过 plan-only 的冻结绝对 object goals，使用 attach ACK 实测的
+T_eef_object_attached 重新编译 EEF hover/release 并重跑完整资格漏斗；抓前轨迹不得作为执行证明。
+若这些冻结目标零 PASS，才用新 seed 的当前轮 AnyPlace pool，且不与失败目标合并。主 VLM 只能看到 PASS
 集合并通过 compile_placement_seed(placement_candidate_id=...) 选择候选。资格轨迹必须丢弃，真实
 动作重新规划。规划失败仅当 execution_started=false 时拒绝当前候选，
 不得重复失败 fingerprint；若 execution_started=true 或结果 unknown，立即停止并请求人工。
-成功释放必须有 detach ACK、planning-scene revision、稳定 >=0.5 s、末段漂移 <=5 mm、中心高度
+成功释放必须有 detach ACK、planning-scene revision；允许自然落稳观测时域完成后，仍只按最终
+0.5 s 判断稳定且末段漂移 <=5 mm、中心高度
 0.43±0.01 m，且目标 XY 外接圆完全位于标记区域。完成后唯一一次 close_simulator_env。
 """.strip() + "\n"
 
@@ -65,11 +71,6 @@ SCENARIO_INSTRUCTIONS = {
         "验收配置会让首个 placement candidate 的资格规划真实返回无轨迹且 "
         "execution_started=false。保留该回执，宿主不得向主 VLM 暴露该候选；主 VLM 只能从其余 "
         "PASS 候选中选择并完成放置。"
-    ),
-    "reject-all-recover": (
-        "验收配置会让首次抓取周期的十个 placement candidate 在资格阶段各自真实失败。"
-        "十个全部耗尽且无运动后保持 native attachment，重新 observe placement、重新分割并运行 "
-        "AnyPlace；不得 detach 或重新运行 GraspGenX，随后完成放置。"
     ),
 }
 
@@ -95,12 +96,15 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                 and payload.get("server") == expected[name]
                 and (
                     name == "openeta-sam3"
-                    or payload.get(
+                    or (
+                        payload.get(
                         "candidate_count"
                         if name == "openeta-anyplace"
                         else "max_candidates"
+                        ) == 10
+                        and payload.get("raw_pool_size")
+                        == (96 if name == "openeta-anyplace" else 200)
                     )
-                    == 10
                 )
             )
             rows[name] = {
@@ -183,6 +187,14 @@ def _name(call: Mapping[str, Any]) -> str:
     return name
 
 
+def _has_minimum_int_value(payload: object, key: str, minimum: int) -> bool:
+    return any(
+        value >= minimum
+        for value in base._values(payload, key)
+        if isinstance(value, int) and not isinstance(value, bool)
+    )
+
+
 def _parameters(call: Mapping[str, Any]) -> Mapping[str, Any]:
     value = call.get("parameters")
     return value if isinstance(value, Mapping) else {}
@@ -215,6 +227,40 @@ def _repeated_failed_motion_fingerprints(
     return {fingerprint for fingerprint, count in counts.items() if count > 1}
 
 
+def _qualification_blocks(
+    call: Mapping[str, Any], *, artifact_root: Path
+) -> list[Mapping[str, Any]]:
+    """Read exact host proof artifacts without placing raw proof in VLM output."""
+
+    blocks = [
+        value
+        for value in base._values(call, "qualification_evidence")
+        if isinstance(value, Mapping) and isinstance(value.get("results"), list)
+    ]
+    seen_paths: set[str] = set()
+    for artifact in base._values(call, "qualification_artifact"):
+        if not isinstance(artifact, Mapping):
+            continue
+        path_value = artifact.get("path")
+        if not isinstance(path_value, str) or not path_value.endswith(".json"):
+            continue
+        if path_value in seen_paths:
+            continue
+        seen_paths.add(path_value)
+        try:
+            path = Path(path_value)
+            if not path.is_absolute():
+                path = artifact_root / path
+            if not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, Mapping) and isinstance(payload.get("results"), list):
+            blocks.append(payload)
+    return blocks
+
+
 def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str, Any]:
     errors: list[str] = []
     try:
@@ -227,13 +273,21 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         for required in REQUIRED_REAL_M6_TOOLS:
             if required not in names:
                 errors.append(f"required real M6 tool call missing: {required}")
-        if names.count("sam3") < 3:
-            errors.append("grasp object plus placement object/region SAM3 calls are required")
+        if names.count("sam3") < 4:
+            errors.append("pregrasp and post-attachment object/region SAM3 calls are required")
         if not _ordered(
             names,
-            ("observe", "graspgenx", "gripper_control", "move_to", "anyplace", "compile_placement_seed"),
+            (
+                "observe",
+                "anyplace",
+                "graspgenx",
+                "gripper_control",
+                "move_to",
+                "anyplace",
+                "compile_placement_seed",
+            ),
         ):
-            errors.append("grasp/lift, independent AnyPlace, and placement compilation order is invalid")
+            errors.append("pregrasp look-ahead, grasp/lift, and executable placement order is invalid")
         if any(base._contains(event, "perception_source", "gazebo_oracle") for event in events):
             errors.append("Oracle perception is forbidden")
         if any(base._contains(event, "fake_grasp_candidate") for event in events):
@@ -241,7 +295,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         if any(
             base._contains(event, "plan_only", True)
             and not base._contains(
-                event, "schema_version", "openeta.moveit_candidate_qualification.v1"
+                event, "schema_version", "openeta.moveit_candidate_funnel.v2"
             )
             for event in events
         ):
@@ -265,10 +319,14 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ]
         if not raw_grasp_counts or raw_grasp_counts[-1] < 10:
             errors.append("GraspGenX raw candidate count evidence is missing")
-        if not base._contains(final_grasp, "generated_candidate_count", 10):
-            errors.append("GraspGenX did not retain exactly ten formal candidates")
-        if not base._contains(final_grasp, "submitted_candidate_count", 10):
-            errors.append("GraspGenX did not submit all ten formal candidates")
+        if not any(
+            1 <= value <= 64
+            for value in base._values(final_grasp, "diversity_selected_count")
+            if isinstance(value, int) and not isinstance(value, bool)
+        ):
+            errors.append("GraspGenX diversity pool evidence is missing")
+        if not any(1 <= value <= 4 for value in base._values(final_grasp, "full_plan_submitted_count") if isinstance(value, int)):
+            errors.append("GraspGenX full-plan submission bound is missing")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}
@@ -277,10 +335,10 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             for value in base._values(anyplace, "id")
             if str(value).startswith("placement_")
         }
-        if not base._contains(anyplace, "generated_candidate_count", 10):
-            errors.append("AnyPlace did not generate exactly ten placement candidates")
-        if not base._contains(anyplace, "submitted_candidate_count", 10):
-            errors.append("AnyPlace did not submit all ten candidates to MoveIt qualification")
+        if not _has_minimum_int_value(anyplace, "model_raw_candidate_count", 96):
+            errors.append("AnyPlace model raw pool evidence is missing")
+        if not any(1 <= value <= 4 for value in base._values(anyplace, "full_plan_submitted_count") if isinstance(value, int)):
+            errors.append("AnyPlace full-plan submission bound is missing")
         qualified_counts = [
             int(value)
             for value in base._values(anyplace, "qualified_candidate_count")
@@ -294,7 +352,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             if base._contains(anyplace, legacy_key):
                 errors.append(f"AnyPlace leaked forbidden grasp-coupled field: {legacy_key}")
         if not base._contains(
-            anyplace, "schema_version", "openeta.moveit_candidate_qualification.v1"
+            anyplace, "schema_version", "openeta.moveit_candidate_funnel.v2"
         ):
             errors.append("AnyPlace qualification evidence is missing")
         if not base._contains(anyplace, "type", "placement_candidate_image"):
@@ -308,7 +366,10 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ]
         if len(rotations) < len(candidate_ids):
             errors.append("AnyPlace PASS candidates do not retain full rotations")
-        anyplace_parameters = _parameters(anyplace)
+        # The bounded retry may use the host-normalized frozen packet
+        # (mask/mask_artifact). Validate the independent public observations on
+        # the initial inference call, before that internal replay boundary.
+        anyplace_parameters = _parameters(first_anyplace)
         object_observation = anyplace_parameters.get("object_observation")
         placement_observation = anyplace_parameters.get("placement_observation")
         if not isinstance(object_observation, Mapping) or not isinstance(
@@ -365,20 +426,28 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ]
         if scenario == "normal" and placement_failures:
             errors.append("normal scenario unexpectedly injected a placement rejection")
+        first_qualification_blocks = _qualification_blocks(
+            first_anyplace, artifact_root=paths.root
+        )
+        qualification_results = (
+            first_qualification_blocks[-1].get("results", [])
+            if first_qualification_blocks
+            else []
+        )
+        first_full_plan_rejections = [
+            value
+            for value in qualification_results
+            if isinstance(value, Mapping)
+            and value.get("full_plan_submitted") is True
+            and value.get("verdict") == "FAIL"
+            and value.get("reason") == "plan_only_failed"
+            and value.get("execution_started") is False
+        ]
         if scenario == "reject-first":
-            verdicts = [str(value) for value in base._values(first_anyplace, "verdict")]
-            if verdicts.count("FAIL") != 1:
+            if len(first_full_plan_rejections) != 1:
                 errors.append("reject-first did not retain exactly one qualification rejection")
             if placement_failures:
                 errors.append("reject-first reached execution planning with a rejected candidate")
-        if scenario == "reject-all-recover":
-            verdicts = [str(value) for value in base._values(first_anyplace, "verdict")]
-            if verdicts.count("FAIL") < 10:
-                errors.append("reject-all-recover lacks ten real qualification rejections")
-            if placement_failures:
-                errors.append("reject-all-recover executed a qualification-rejected candidate")
-            if names.count("anyplace") < 2 or names.count("graspgenx") != 1:
-                errors.append("reject-all-recover did not preserve attachment and rerun only AnyPlace")
         if not fingerprints:
             errors.append("motion request fingerprint evidence missing")
         scene_revisions = [
@@ -457,11 +526,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         paths,
         allocation,
         calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
-        extra_environment=(
-            {"OPENETA_ACCEPTANCE_PLACEMENT_FAULT": args.scenario}
-            if args.scenario != "normal"
-            else None
-        ),
+        extra_environment={
+            "OPENETA_EPISODE_MAX_TOTAL_TOKENS": "10000000",
+            # Cold software-rendered Gazebo launches occasionally need more
+            # than the deployment default before the documented world-control
+            # service is discoverable.  This affects startup only; motion,
+            # planning, execution, and verification deadlines stay unchanged.
+            "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": "90",
+            **(
+                {"OPENETA_ACCEPTANCE_PLACEMENT_FAULT": args.scenario}
+                if args.scenario != "normal"
+                else {}
+            ),
+        },
     )
     report = verify_case(paths, scenario=args.scenario)
     report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})

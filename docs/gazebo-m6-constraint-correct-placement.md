@@ -24,12 +24,12 @@ or human handling.
 ## Perception and compilation boundary
 
 Grasp and placement use independent observations. A fresh grasp RGB-D packet
-feeds target SAM3 and GraspGenX for the `robotiq_2f_85` embodiment. GraspGenX's
-raw pool is reduced to ten formal candidates with deterministic source-aware
-SE(3) MMR over translation, SO(3) geodesic angle, backend score, and branch
-provenance. This does not rewrite poses or use robot IK. All ten formal
-candidates then receive private MoveIt qualification, and only PASS candidates
-are exposed to the main VLM.
+feeds target SAM3 and GraspGenX for the `robotiq_2f_85` embodiment. The service
+returns a host-only reserve pool of up to 200. After world-EEF compilation,
+deterministic source-aware SE(3) diversity retains at most 64 candidates across
+translation, approach, complete wrist rotation, score, and branch provenance.
+The private `openeta.moveit_candidate_funnel.v2` submits at most 12 complete
+plans and exposes at most ten PASS candidates to the main VLM.
 
 After close, Gazebo attach acknowledgement, and the unchanged M3 lift gate,
 the host measures and freezes `T_eef_object_attached`. It then acquires a new
@@ -51,9 +51,11 @@ rotation. Any attachment-transform, pose, calibration, joint-state, scene-epoch,
 or planning-scene-revision change invalidates the proof. Raw AnyPlace and grasp
 estimator poses fail closed at the motion proxy.
 
-Candidate accounting is explicit: `raw_candidate_count` is GraspGenX output
-before diversity, `generated_candidate_count` is the ten-candidate formal pool,
-`submitted_candidate_count` is the pool sent to MoveIt, and
+Candidate accounting is explicit from `model_raw_candidate_count` and
+`raw_candidate_count` through diversity, coordinate/TCP, workspace, pure IK,
+collision IK, endpoint, full-plan, and qualification counts.
+`generated_candidate_count` aliases the returned raw pool,
+`submitted_candidate_count` aliases full-plan submissions, and
 `qualified_candidate_count`/`candidate_count` count PASS candidates exposed to
 the VLM.
 

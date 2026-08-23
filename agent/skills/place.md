@@ -16,6 +16,7 @@ allowed_tools:
   - compile_placement_seed
   - move_to
   - gripper_control
+  - close_simulator_env
 ---
 # Place
 
@@ -25,12 +26,22 @@ before choosing the next tool call.
 
 ## Recommended Tool Sequence
 
-1. Complete object segmentation, grasp estimation, and pickup from a grasp
-   observation. Placement perception is an independent stage and must not be
-   bound to this frozen RGB-D packet.
+1. Before grasp estimation in a combined pick-place task, segment and select
+   the target object, then segment and select the destination region from the
+   same calibrated, unchanged RGB-D scene. Follow the host
+   `placement_obligation` once to let AnyPlace retain a host-private object-goal
+   pool. These are not executable placement candidates and are not shown to the
+   VLM.
+2. Call grasp estimation only after that pool is ready. The host first runs the
+   normal complete grasp funnel, then performs a bounded look-ahead over at most
+   four grasp PASS candidates and the current complete 96-goal pool. The cheap
+   and IK stages inspect the complete pool; globally at most four grasp-goal
+   pairs receive plan-only. Select only a grasp that remains in
+   the exposed list; its look-ahead means the grasp is compatible with at least
+   one placement goal, not that later execution is already proven.
 3. Complete the pickup using the selected grasp. After closing the gripper,
    require the native attach acknowledgement, fixed lift, and attachment PASS.
-   AnyPlace, candidate selection, placement compilation, and transport planning
+   Executable placement candidate selection, placement compilation, and motion
    remain blocked until this gate completes.
 4. After attachment PASS, observe the placement scene independently. Segment
    the held object and the target region from placement observations and call
@@ -38,12 +49,29 @@ before choosing the next tool call.
    AnyPlace predicts only object goal poses; it never accepts a selected grasp
    or produces an EEF pose. Never run grasp estimation on the receptacle as a
    substitute for AnyPlace.
-5. Select one retained AnyPlace candidate id using its projection, region
-   clearance, score, and candidate image. Call `compile_placement_seed` with
-   only that `placement_candidate_id`. The host binds the full object goal,
-   measured attachment transform, current start state, camera calibration, and
+   The host freezes only the absolute object goals that passed the pregrasp
+   look-ahead for the grasp that was actually executed. On the first
+   post-attachment `anyplace` obligation, the host validates the independent
+   observation packets, skips model inference, recompiles those goals using
+   the measured attachment and current robot state, then reruns the complete
+   qualification funnel. The earlier look-ahead trajectory is never reused as
+   executable proof. Only a zero-PASS frozen requalification invokes one real
+   new-seed AnyPlace inference on the same observation.
+5. Select one retained AnyPlace candidate id using its stable contact-face
+   metadata, full object-goal rotation, projection, conservative region
+   clearance, score, and candidate image. Prefer an explicitly stable support
+   face; when that metadata is absent, prefer the object-goal rotation with the
+   smallest tilt from a gravity-aligned support orientation and then the larger
+   region clearance. Do not select solely because its projected center is
+   closest to the region center. Call `compile_placement_seed` with only that
+   `placement_candidate_id`. The host binds the full object goal, measured
+   attachment transform, current start state, camera calibration, and
    planning-scene revision. Never send a raw AnyPlace pose to
    `camera_pose_to_world` or `move_to`.
+   Every candidate exposed by `anyplace` has already passed the host funnel;
+   failed and unsubmitted candidates are absent. Never skip the first exposed
+   id because task or scenario text mentions that an earlier candidate was
+   rejected—the rejected id is not in this list.
 6. Move directly to the compiled pre-place hover, then descend to the compiled
    release pose. Preserve its full wrist rotation and use the placement motion
    profile; MoveIt computes the joint path under the complete planning scene.
@@ -52,22 +80,40 @@ before choosing the next tool call.
    with the gripper and its source location remains vacant. If the target is
    visible elsewhere and the closed-gripper openness has collapsed to the empty
    threshold, follow the `attachment_lost` recovery action so the current grasp
-   candidate is rejected before regrasping.
+   candidate is rejected before attempting another grasp.
 8. Descend only to the compiled `placement_motion_guidance.release_pose`, whose
    profile-owned clearance is 5 mm above the AnyPlace low reference.
 9. Call `gripper_control` with `position=1` only after the vertical placement
    motion succeeds and fresh evidence still supports attachment over the
    receptacle.
-10. Retreat with `move_to`, then call `observe` to verify the object was released
-    in the intended place and check the official task reward.
+10. After opening, allow the configured natural settling observation horizon to
+    complete. The verifier still judges only the final 0.5 seconds, requires
+    drift <=5 mm, and preserves the height and full-footprint gates. Retreat
+    with `move_to`, then call `observe` to verify the object was released
+    in the intended place and check the official task reward. A successful
+    gripper or retreat tool call is not placement success: require the returned
+    placement verification itself to be PASS. If post-release verification is
+    FAIL or UNKNOWN, do not claim completion or try another candidate after
+    execution has started.
+11. Once the final placement verification has been reported, close the active
+    simulator environment exactly once with `close_simulator_env`, whether the
+    verification was PASS, FAIL, or UNKNOWN. Do not leave an environment open
+    merely because the physical task failed.
 
 ## Recovery Notes
 
 - If the target receptacle or surface is ambiguous, call `ask_human` before
   moving.
-- If placement perception is stale or all placement candidates fail before
-  execution, keep the verified attachment and reobserve/resegment/rerun
-  AnyPlace. Regrasp only if attachment evidence is lost.
+- If measured-attachment requalification of the frozen pregrasp PASS goals has
+  zero PASS candidates, keep the independent placement observation and run
+  exactly one new-seed AnyPlace round. Qualify only that round's new pool,
+  without merging it with or requalifying goals from the failed frozen set.
+- If both rounds fail, treat the current attachment as
+  `CURRENT_GRASP_PLACE_INFEASIBLE` and request human intervention. Do not alter
+  the attachment or start another grasp cycle automatically.
+- After a known grasp-close failure, execute the host-provided return to that
+  grasp's compiled hover before observing or estimating another grasp. Never
+  collect a recovery observation while the gripper remains at contact.
 - If the target is occluded, observe from another camera or request a broader
   scene query before choosing a release pose.
 - If MoveIt rejects a plan before execution starts, reject only that candidate

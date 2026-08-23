@@ -60,16 +60,23 @@ class PlanningSceneSynchronizer:
         self.ready = apply_readback is None
         self.world_ids: set[str] = set()
         self.attached_ids: set[str] = set()
+        self.world_specs: dict[str, dict[str, Any]] = {}
+        self.attached_specs: dict[str, dict[str, Any]] = {}
+        self.target_id = ""
         self.last_error = ""
 
     def initialize_empty(self) -> int:
         """Prove that a motion-only environment has no scene objects."""
 
-        return self._commit(
+        revision = self._commit(
             {"operation": "initialize_empty"},
             expected_world=set(),
             expected_attached=set(),
         )
+        self.world_specs = {}
+        self.attached_specs = {}
+        self.target_id = ""
+        return revision
 
     def reset(
         self,
@@ -78,7 +85,7 @@ class PlanningSceneSynchronizer:
         distractor: CollisionBox,
         target: CollisionBox,
     ) -> int:
-        return self._commit(
+        revision = self._commit(
             {
                 "operation": "reset",
                 "world_objects": [table.to_dict(), distractor.to_dict(), target.to_dict()],
@@ -95,6 +102,12 @@ class PlanningSceneSynchronizer:
             expected_world={table.object_id, distractor.object_id, target.object_id},
             expected_attached=set(),
         )
+        self.world_specs = {
+            item.object_id: item.to_dict() for item in (table, distractor, target)
+        }
+        self.attached_specs = {}
+        self.target_id = target.object_id
+        return revision
 
     def attach_target(
         self,
@@ -106,7 +119,15 @@ class PlanningSceneSynchronizer:
     ) -> int:
         if target.object_id not in self.world_ids:
             return self._fail("target is missing from the world scene before attach")
-        return self._commit(
+        attached_spec = {
+            **target.to_dict(),
+            "frame": link_name,
+            "pose_xyz": list(relative_pose_xyz),
+            "pose_quat_xyzw": list(relative_pose_quat_xyzw),
+            "link_name": link_name,
+            "touch_links": list(TARGET_TOUCH_LINKS),
+        }
+        revision = self._commit(
             {
                 "operation": "attach",
                 # MoveIt automatically removes a same-id world object when an
@@ -114,24 +135,20 @@ class PlanningSceneSynchronizer:
                 # REMOVE in the same diff removes it twice and makes the apply
                 # service return success=false.
                 "attached_objects": [
-                    {
-                        **target.to_dict(),
-                        "frame": link_name,
-                        "pose_xyz": list(relative_pose_xyz),
-                        "pose_quat_xyzw": list(relative_pose_quat_xyzw),
-                        "link_name": link_name,
-                        "touch_links": list(TARGET_TOUCH_LINKS),
-                    }
+                    attached_spec
                 ],
             },
             expected_world=self.world_ids - {target.object_id},
             expected_attached={target.object_id},
         )
+        self.world_specs.pop(target.object_id, None)
+        self.attached_specs = {target.object_id: attached_spec}
+        return revision
 
     def detach_target(self, *, target: CollisionBox) -> int:
         if target.object_id not in self.attached_ids:
             return self._fail("target is not attached in the planning scene")
-        return self._commit(
+        revision = self._commit(
             {
                 "operation": "detach",
                 "remove_attached_ids": [target.object_id],
@@ -140,6 +157,9 @@ class PlanningSceneSynchronizer:
             expected_world=self.world_ids | {target.object_id},
             expected_attached=set(),
         )
+        self.attached_specs.pop(target.object_id, None)
+        self.world_specs[target.object_id] = target.to_dict()
+        return revision
 
     def _commit(
         self,

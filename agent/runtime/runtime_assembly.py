@@ -100,6 +100,8 @@ from agent.tools.grasp_geometry import (
     compile_placement_seed,
     compile_grasp_seed,
     materialize_world_object_goal,
+    materialize_world_object_goal_from_current_pose,
+    pregrasp_eef_goal_from_object_motion,
     qualification_grasp_pose_chain,
 )
 from agent.tools.grasp_strategies import load_grasp_strategies
@@ -127,7 +129,10 @@ from agent.tools.sim_mcp import (
     bind_simulator_mcp_tool_handlers,
 )
 from agent.tools.web_access import WebAccessConfig, bind_configured_web_tool_handlers
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, candidate_count
+from tools.candidate_config import (
+    DEFAULT_CANDIDATE_COUNT,
+    CandidateFunnelConfig,
+)
 
 
 BackendFactory = Callable[..., PlannerBackend]
@@ -308,24 +313,57 @@ class RuntimeCandidateCounts:
     graspgenx: int = DEFAULT_CANDIDATE_COUNT
     anygrasp: int = DEFAULT_CANDIDATE_COUNT
     anyplace: int = DEFAULT_CANDIDATE_COUNT
+    graspgenx_raw_pool_size: int = 200
+    anygrasp_raw_pool_size: int = 200
+    anyplace_raw_pool_size: int = 96
+    grasp_diversity_pool_size: int = 64
+    anyplace_diversity_pool_size: int = 96
+    grasp_full_plan_limit: int = 4
+    anyplace_full_plan_limit: int = 4
+    moveit_ik_seed_count: int = 8
+    anyplace_max_qualification_rounds: int = 2
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "graspgenx", candidate_count(self.graspgenx))
-        object.__setattr__(self, "anygrasp", candidate_count(self.anygrasp))
-        object.__setattr__(self, "anyplace", candidate_count(self.anyplace))
+        validated = CandidateFunnelConfig(
+            graspgenx_exposure_limit=self.graspgenx,
+            anygrasp_exposure_limit=self.anygrasp,
+            anyplace_exposure_limit=self.anyplace,
+            graspgenx_raw_pool_size=self.graspgenx_raw_pool_size,
+            anygrasp_raw_pool_size=self.anygrasp_raw_pool_size,
+            anyplace_raw_pool_size=self.anyplace_raw_pool_size,
+            grasp_diversity_pool_size=self.grasp_diversity_pool_size,
+            anyplace_diversity_pool_size=self.anyplace_diversity_pool_size,
+            grasp_full_plan_limit=self.grasp_full_plan_limit,
+            anyplace_full_plan_limit=self.anyplace_full_plan_limit,
+            moveit_ik_seed_count=self.moveit_ik_seed_count,
+            anyplace_max_qualification_rounds=self.anyplace_max_qualification_rounds,
+        )
+        object.__setattr__(self, "graspgenx", validated.graspgenx_exposure_limit)
+        object.__setattr__(self, "anygrasp", validated.anygrasp_exposure_limit)
+        object.__setattr__(self, "anyplace", validated.anyplace_exposure_limit)
+        for name in (
+            "graspgenx_raw_pool_size", "anygrasp_raw_pool_size", "anyplace_raw_pool_size",
+            "grasp_diversity_pool_size", "anyplace_diversity_pool_size",
+            "grasp_full_plan_limit", "anyplace_full_plan_limit", "moveit_ik_seed_count",
+            "anyplace_max_qualification_rounds",
+        ):
+            object.__setattr__(self, name, getattr(validated, name))
 
 
 def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
     return RuntimeCandidateCounts(
-        graspgenx=candidate_count(
-            os.environ.get("OPENETA_GRASPGENX_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT)
-        ),
-        anygrasp=candidate_count(
-            os.environ.get("OPENETA_ANYGRASP_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT)
-        ),
-        anyplace=candidate_count(
-            os.environ.get("OPENETA_ANYPLACE_CANDIDATE_COUNT", DEFAULT_CANDIDATE_COUNT)
-        ),
+        graspgenx=os.environ.get("OPENETA_GRASPGENX_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT),
+        anygrasp=os.environ.get("OPENETA_ANYGRASP_MAX_CANDIDATES", DEFAULT_CANDIDATE_COUNT),
+        anyplace=os.environ.get("OPENETA_ANYPLACE_CANDIDATE_COUNT", DEFAULT_CANDIDATE_COUNT),
+        graspgenx_raw_pool_size=os.environ.get("OPENETA_GRASPGENX_RAW_POOL_SIZE", 200),
+        anygrasp_raw_pool_size=os.environ.get("OPENETA_ANYGRASP_RAW_POOL_SIZE", 200),
+        anyplace_raw_pool_size=os.environ.get("OPENETA_ANYPLACE_RAW_POOL_SIZE", 96),
+        grasp_diversity_pool_size=os.environ.get("OPENETA_GRASP_DIVERSITY_POOL_SIZE", 64),
+        anyplace_diversity_pool_size=os.environ.get("OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96),
+        grasp_full_plan_limit=os.environ.get("OPENETA_GRASP_FULL_PLAN_LIMIT", 4),
+        anyplace_full_plan_limit=os.environ.get("OPENETA_ANYPLACE_FULL_PLAN_LIMIT", 4),
+        moveit_ik_seed_count=os.environ.get("OPENETA_MOVEIT_IK_SEED_COUNT", 8),
+        anyplace_max_qualification_rounds=os.environ.get("OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
     )
 
 
@@ -425,6 +463,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         cache=qualification_cache,
         artifact_root=config.workspace.artifacts_dir / "moveit_qualification",
         compile_candidate=_candidate_qualification_compiler(config.workspace),
+        candidate_counts=config.candidate_counts,
     )
     tools.bind_handler(
         "compile_grasp_seed",
@@ -653,6 +692,11 @@ def bind_runtime_perception_tools(
     candidate_counts: RuntimeCandidateCounts | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
+    pregrasp_coordinator = (
+        _PregraspGraspPlaceCoordinator(candidate_qualifier)
+        if candidate_qualifier is not None
+        else None
+    )
     segmenter_tool = perception_segmenter_tool_name(
         resolve_perception_profile()
         if perception_profile is None
@@ -777,10 +821,22 @@ def bind_runtime_perception_tools(
             build_sse_anyplace_mcp_placer(url=endpoints.anyplace_url),
             output_root=artifact_root / "anyplace_results",
             expected_candidate_count=counts.anyplace,
+            pre_inference=(
+                lambda context, request: _prepare_postattachment_frozen_goals(
+                    context,
+                    request,
+                    coordinator=pregrasp_coordinator,
+                )
+                if pregrasp_coordinator is not None
+                else None
+            ),
         )
         if candidate_qualifier is not None:
             anyplace_handler = _qualifying_handler(
-                anyplace_handler, candidate_qualifier, purpose="placement"
+                anyplace_handler,
+                candidate_qualifier,
+                purpose="placement",
+                pregrasp_coordinator=pregrasp_coordinator,
             )
         tools.bind_handler(
             "anyplace",
@@ -821,7 +877,10 @@ def bind_runtime_perception_tools(
         )
         if candidate_qualifier is not None:
             grasp_handler = _qualifying_handler(
-                grasp_handler, candidate_qualifier, purpose="grasp"
+                grasp_handler,
+                candidate_qualifier,
+                purpose="grasp",
+                pregrasp_coordinator=pregrasp_coordinator,
             )
         tools.bind_handler(
             "grasp_pose_estimate",
@@ -838,6 +897,7 @@ def _runtime_candidate_qualifier(
     cache: QualificationCache,
     artifact_root: Path,
     compile_candidate: Callable,
+    candidate_counts: RuntimeCandidateCounts | None = None,
 ) -> MoveItCandidateQualifier | None:
     """Discover the private RPC without adding it to the planner tool registry."""
 
@@ -855,6 +915,7 @@ def _runtime_candidate_qualifier(
     }
     if PRIVATE_RPC_NAME not in names:
         return None
+    counts = candidate_counts or runtime_candidate_counts_from_env()
     return MoveItCandidateQualifier(
         private_qualification_rpc(
             transport,
@@ -864,6 +925,14 @@ def _runtime_candidate_qualifier(
         cache=cache,
         artifact_root=artifact_root,
         compile_candidate=compile_candidate,
+        grasp_exposure_limit=min(counts.graspgenx, counts.anygrasp),
+        placement_exposure_limit=counts.anyplace,
+        grasp_diversity_limit=counts.grasp_diversity_pool_size,
+        placement_diversity_limit=counts.anyplace_diversity_pool_size,
+        grasp_full_plan_limit=counts.grasp_full_plan_limit,
+        placement_full_plan_limit=counts.anyplace_full_plan_limit,
+        ik_seed_count=counts.moveit_ik_seed_count,
+        placement_max_rounds=counts.anyplace_max_qualification_rounds,
     )
 
 
@@ -885,15 +954,39 @@ def _candidate_qualification_compiler(
         profile = json.loads(profile_bytes.decode("utf-8"))
         profile_sha256 = hashlib.sha256(profile_bytes).hexdigest()
         if purpose == "placement":
-            attachment_transform = source.get("attachment_transform")
+            pregrasp_contact = candidate.get("pregrasp_contact_pose")
+            if isinstance(pregrasp_contact, Mapping):
+                eef_goal = pregrasp_eef_goal_from_object_motion(
+                    contact_pose=pregrasp_contact,
+                    placement_candidate=candidate,
+                )
+                compiled_candidate = dict(candidate)
+                compiled_candidate["object_goal_pose"] = eef_goal
+                attachment_transform: object = {
+                    "schema_version": "openeta.pregrasp_eef_identity.v1",
+                    "parent_frame": "eef",
+                    "child_frame": "object",
+                    "translation_xyz": [0.0, 0.0, 0.0],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            else:
+                compiled_candidate = dict(candidate)
+                attachment_transform = source.get("attachment_transform")
             if not isinstance(attachment_transform, dict):
                 raise ValueError("measured attachment transform unavailable")
-            start_joint_state = source.get("start_joint_state")
+            start_joint_state = candidate.get(
+                "qualification_start_joint_state",
+                source.get("start_joint_state"),
+            )
             if not isinstance(start_joint_state, dict):
                 raise ValueError("placement qualification start state unavailable")
             parameters: JsonDict = {
                 "placement_candidate_id": str(candidate.get("id") or ""),
-                "placement_candidate": dict(candidate),
+                "placement_candidate": compiled_candidate,
                 "attachment_transform": dict(attachment_transform),
                 "scene_epoch": scene_epoch,
                 "scene_revision": planning_scene_revision,
@@ -922,9 +1015,23 @@ def _candidate_qualification_compiler(
                 dict(compiled["hover_pose"]),
                 dict(compiled["release_pose"]),
             ]
+            retreat_pose = dict(compiled["release_pose"])
+            retreat_xyz = retreat_pose.get("xyz")
+            if not isinstance(retreat_xyz, list) or len(retreat_xyz) != 3:
+                raise ValueError("compiled placement release pose is invalid")
+            retreat_pose["xyz"] = [
+                float(retreat_xyz[0]),
+                float(retreat_xyz[1]),
+                float(retreat_xyz[2]) + 0.1,
+            ]
+            compiled_pose_chain.append(retreat_pose)
             stages = [
                 _qualification_pose("hover", compiled["hover_pose"]),
-                _qualification_pose("release", compiled["release_pose"]),
+                {
+                    **_qualification_pose("release", compiled["release_pose"]),
+                    "scene_transition": "virtual_detach",
+                },
+                _qualification_pose("retreat", retreat_pose),
             ]
         else:
             extrinsics = source.get("camera_extrinsics")
@@ -953,12 +1060,26 @@ def _candidate_qualification_compiler(
                 _qualification_pose(name, pose)
                 for name, pose in zip(stage_names, compiled_pose_chain, strict=True)
             ]
+            for stage in stages:
+                if stage["name"] == "contact":
+                    stage["scene_transition"] = "virtual_attach"
         return {
             "qualification_stages": stages,
             "compile_parameters": {
                 **parameters,
                 "qualification_profile_sha256": profile_sha256,
                 "qualified_compiled_pose_sha256": hashlib.sha256(
+                    json.dumps(
+                        (
+                            compiled_pose_chain[:2]
+                            if purpose == "placement"
+                            else compiled_pose_chain
+                        ),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+                "qualified_stage_pose_sha256": hashlib.sha256(
                     json.dumps(
                         compiled_pose_chain,
                         sort_keys=True,
@@ -1003,24 +1124,592 @@ def _qualification_pose(name: str, pose: object) -> JsonDict:
     return result
 
 
+@dataclass(slots=True)
+class _PregraspGraspPlaceCoordinator:
+    """Host-private bounded look-ahead used only to rank executable grasps."""
+
+    qualifier: MoveItCandidateQualifier
+    object_goals: list[JsonDict] = field(default_factory=list)
+    object_current_pose: JsonDict | None = None
+    scene_epoch: int = -1
+    planning_scene_revision: int = -1
+    qualified_goals_by_grasp: dict[str, list[JsonDict]] = field(default_factory=dict)
+    consumed_attachment_bindings: set[str] = field(default_factory=set)
+    consumed_model_retry_bindings: set[str] = field(default_factory=set)
+    source_model_raw_candidate_count: int = 0
+    source_candidate_image_ref: str = ""
+    source_candidate_artifacts: list[JsonDict] = field(default_factory=list)
+
+    def retain_goal_pool(
+        self,
+        result: ToolResult,
+        *,
+        source: Mapping[str, object],
+        scene_epoch: int,
+        planning_scene_revision: int,
+    ) -> ToolResult:
+        candidates = result.details.get("placement_candidates")
+        current_pose = result.details.get("object_current_pose")
+        extrinsics = source.get("placement_camera_extrinsics")
+        if not (
+            isinstance(candidates, list)
+            and candidates
+            and isinstance(current_pose, Mapping)
+            and isinstance(extrinsics, Mapping)
+        ):
+            return ToolResult(
+                False,
+                "pregrasp placement goal binding evidence is incomplete",
+                {"reason": "pregrasp_goal_binding_missing", "execution_started": False},
+            )
+        try:
+            goals = [
+                materialize_world_object_goal_from_current_pose(
+                    candidate,
+                    placement_camera_extrinsics=extrinsics,
+                    object_current_pose=current_pose,
+                )
+                for candidate in candidates
+                if isinstance(candidate, Mapping)
+            ]
+        except Exception as exc:  # noqa: BLE001 - fail closed at frame boundary.
+            return ToolResult(
+                False,
+                f"pregrasp placement goal binding failed: {exc}",
+                {"reason": "pregrasp_goal_binding_invalid", "execution_started": False},
+            )
+        self.object_goals = goals
+        self.object_current_pose = dict(current_pose)
+        self.scene_epoch = scene_epoch
+        self.planning_scene_revision = planning_scene_revision
+        self.qualified_goals_by_grasp.clear()
+        self.consumed_attachment_bindings.clear()
+        self.consumed_model_retry_bindings.clear()
+        model_raw_count = result.details.get("model_raw_candidate_count")
+        self.source_model_raw_candidate_count = (
+            model_raw_count
+            if isinstance(model_raw_count, int) and not isinstance(model_raw_count, bool)
+            else len(candidates)
+        )
+        candidate_image_ref = result.details.get("candidate_image_ref")
+        self.source_candidate_image_ref = (
+            candidate_image_ref if isinstance(candidate_image_ref, str) else ""
+        )
+        artifacts = result.details.get("artifacts")
+        self.source_candidate_artifacts = [
+            json.loads(json.dumps(artifact))
+            for artifact in artifacts
+            if isinstance(artifact, Mapping)
+        ] if isinstance(artifacts, list) else []
+        # Raw goals remain host-private.  They are not executable placement
+        # candidates and are never inserted into the placement qualification cache.
+        result.details["placement_candidates"] = []
+        result.details["candidate_count"] = 0
+        result.details["selection_required"] = False
+        result.details["pregrasp_goal_pool_ready"] = True
+        result.details["pregrasp_goal_pool_count"] = len(goals)
+        result.details["execution_started"] = False
+        result.content = (
+            f"Retained {len(goals)} host-private object goals for bounded "
+            "pregrasp grasp-place qualification."
+        )
+        return result
+
+    def filter_grasps(
+        self,
+        result: ToolResult,
+        *,
+        scene_epoch: int,
+        planning_scene_revision: int,
+        source: Mapping[str, object],
+    ) -> ToolResult:
+        grasps = result.details.get("grasp_candidates")
+        if not isinstance(grasps, list) or not grasps:
+            return result
+        if not (
+            self.object_goals
+            and isinstance(self.object_current_pose, Mapping)
+            and self.scene_epoch == scene_epoch
+            and self.planning_scene_revision == planning_scene_revision
+        ):
+            # A stale or absent pool cannot influence grasp qualification.
+            return result
+
+        retained_entries: dict[str, JsonDict] = {}
+        per_grasp_pairs: list[list[JsonDict]] = []
+        # Preserve the complete current AnyPlace pool through the cheap and IK
+        # funnel stages.  Preselecting a handful by farthest-first SE(3)
+        # overrepresents extreme object rotations and can discard every
+        # attachment-aware reachable goal before MoveIt sees it.  The qualifier
+        # still enforces the global full-plan limit after endpoint screening.
+        current_goals = [dict(goal) for goal in self.object_goals]
+        for grasp in grasps[:4]:
+            if not isinstance(grasp, Mapping):
+                continue
+            grasp_id = str(grasp.get("id") or "")
+            entry = self.qualifier.cache.resolve(
+                purpose="grasp",
+                candidate_id=grasp_id,
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+            )
+            if not isinstance(entry, Mapping):
+                continue
+            proof = entry.get("proof")
+            stages = proof.get("stages") if isinstance(proof, Mapping) else None
+            if not isinstance(stages, list) or not stages:
+                continue
+            contact = next(
+                (
+                    stage.get("target_pose")
+                    for stage in stages
+                    if isinstance(stage, Mapping)
+                    and str(stage.get("name") or "") == "contact"
+                    and isinstance(stage.get("target_pose"), Mapping)
+                ),
+                None,
+            )
+            lift_state = stages[-1].get("end_joint_state") if isinstance(stages[-1], Mapping) else None
+            if not isinstance(contact, Mapping) or not isinstance(lift_state, Mapping):
+                continue
+            retained_entries[grasp_id] = dict(entry)
+            pairs: list[JsonDict] = []
+            for goal in current_goals:
+                pair = dict(goal)
+                goal_id = str(goal.get("id") or "goal")
+                pair["id"] = f"pregrasp_pair_{grasp_id}_{goal_id}"
+                pair["source_grasp_id"] = grasp_id
+                pair["source_object_goal_id"] = goal_id
+                pair["pregrasp_contact_pose"] = dict(contact)
+                pair["qualification_start_joint_state"] = dict(lift_state)
+                pair["initial_scene_transition"] = "virtual_attach"
+                pair["initial_scene_transition_pose"] = dict(contact)
+                pairs.append(pair)
+            per_grasp_pairs.append(pairs)
+
+        # Round-robin ordering ensures the global top-four plan-only tail does
+        # not get consumed by several goals from the first grasp alone.
+        pair_depth = max((len(group) for group in per_grasp_pairs), default=0)
+        pairs = [
+            group[index]
+            for index in range(pair_depth)
+            for group in per_grasp_pairs
+            if index < len(group)
+        ]
+        if not pairs:
+            return self._replace_grasps(result, [], {}, scene_epoch, planning_scene_revision)
+        joint = self.qualifier.qualify_result(
+            ToolResult(
+                True,
+                "bounded pregrasp grasp-place qualification",
+                {
+                    "placement_candidates": pairs,
+                    "model_raw_candidate_count": len(pairs),
+                    "raw_candidate_count": len(pairs),
+                },
+            ),
+            purpose="placement",
+            scene_epoch=scene_epoch,
+            planning_scene_revision=planning_scene_revision,
+            source=source,
+            cache_result=False,
+            qualification_mode="pregrasp_joint",
+        )
+        passed_pairs = joint.details.get("placement_candidates")
+        passed_pairs = passed_pairs if isinstance(passed_pairs, list) else []
+        pass_count: dict[str, int] = {}
+        goal_ids: dict[str, list[str]] = {}
+        for pair in passed_pairs:
+            if not isinstance(pair, Mapping):
+                continue
+            grasp_id = str(pair.get("source_grasp_id") or "")
+            if not grasp_id:
+                continue
+            pass_count[grasp_id] = pass_count.get(grasp_id, 0) + 1
+            goal_ids.setdefault(grasp_id, []).append(
+                str(pair.get("source_object_goal_id") or "")
+            )
+        goal_lookup = {
+            str(goal.get("id") or ""): goal
+            for goal in self.object_goals
+            if isinstance(goal, Mapping) and str(goal.get("id") or "")
+        }
+        self.qualified_goals_by_grasp = {
+            grasp_id: [
+                json.loads(json.dumps(goal_lookup[goal_id]))
+                for goal_id in ids
+                if goal_id in goal_lookup
+            ]
+            for grasp_id, ids in goal_ids.items()
+        }
+        retained: list[JsonDict] = []
+        cache_grasps: list[JsonDict] = []
+        proofs: dict[str, Mapping[str, object]] = {}
+        for grasp in grasps:
+            grasp_id = str(grasp.get("id") or "") if isinstance(grasp, Mapping) else ""
+            entry = retained_entries.get(grasp_id)
+            if not grasp_id or not entry or pass_count.get(grasp_id, 0) <= 0:
+                continue
+            annotated = dict(grasp)
+            annotated["grasp_place_joint_qualified"] = True
+            annotated["grasp_place_pass_count"] = pass_count[grasp_id]
+            annotated["grasp_place_goal_ids"] = goal_ids.get(grasp_id, [])
+            retained.append(annotated)
+            cached_candidate = entry.get("candidate")
+            if isinstance(cached_candidate, Mapping):
+                cache_grasps.append(dict(cached_candidate))
+            if isinstance(entry.get("proof"), Mapping):
+                proofs[grasp_id] = entry["proof"]
+        result.details["pregrasp_joint_pair_count"] = len(pairs)
+        result.details["pregrasp_joint_full_plan_submitted_count"] = joint.details.get(
+            "full_plan_submitted_count", 0
+        )
+        result.details["pregrasp_joint_full_plan_pass_count"] = joint.details.get(
+            "full_plan_pass_count", 0
+        )
+        if joint.details.get("qualification_artifact"):
+            result.details["pregrasp_joint_qualification_artifact"] = joint.details[
+                "qualification_artifact"
+            ]
+        return self._replace_grasps(
+            result,
+            retained,
+            proofs,
+            scene_epoch,
+            planning_scene_revision,
+            cache_grasps=cache_grasps,
+        )
+
+    def prepare_frozen_goal_requalification(
+        self,
+        *,
+        source_grasp_id: str,
+        attachment_transform: Mapping[str, object],
+        source: Mapping[str, object],
+        scene_revision: int,
+    ) -> ToolResult | None:
+        """Prepare one measured-attachment qualification without model inference."""
+
+        goals = self.qualified_goals_by_grasp.get(source_grasp_id)
+        if not goals:
+            return None
+        binding = self.attachment_binding(
+            source_grasp_id=source_grasp_id,
+            attachment_transform=attachment_transform,
+        )
+        if binding in self.consumed_attachment_bindings:
+            return None
+        self.consumed_attachment_bindings.add(binding)
+        frozen = [json.loads(json.dumps(goal)) for goal in goals]
+        artifacts: list[JsonDict] = []
+        for source_artifact in self.source_candidate_artifacts:
+            artifact = json.loads(json.dumps(source_artifact))
+            artifact["provenance"] = "frozen_pregrasp_anyplace_pool"
+            artifact["reused_for_measured_attachment_requalification"] = True
+            artifact["anyplace_model_inference_invoked"] = False
+            artifacts.append(artifact)
+        metadata = {
+            "candidate_source": "frozen_pregrasp_pass_goals",
+            "source_model_raw_candidate_count": self.source_model_raw_candidate_count,
+            "anyplace_model_inference_invoked": False,
+        }
+        return ToolResult(
+            True,
+            (
+                f"Prepared {len(frozen)} frozen pregrasp PASS object goals for "
+                "measured-attachment qualification without AnyPlace inference."
+            ),
+            {
+                "tool": "anyplace",
+                "backend": "openeta_frozen_goal_requalifier",
+                "frame": "world",
+                "source": json.loads(json.dumps(source)),
+                "scene_revision": scene_revision,
+                "candidate_count": len(frozen),
+                "model_raw_candidate_count": self.source_model_raw_candidate_count,
+                "raw_candidate_count": len(frozen),
+                "generated_candidate_count": len(frozen),
+                "placement_candidates": frozen,
+                "candidate_image_ref": self.source_candidate_image_ref,
+                "artifacts": artifacts,
+                "metadata": metadata,
+                "frozen_pregrasp_goal_requalification": True,
+                "frozen_pregrasp_goal_count": len(frozen),
+                "discarded_postattach_model_candidate_count": 0,
+                "anyplace_model_inference_invoked": False,
+                "execution_started": False,
+            },
+        )
+
+    def attachment_binding(
+        self,
+        *,
+        source_grasp_id: str,
+        attachment_transform: Mapping[str, object],
+    ) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "source_grasp_id": source_grasp_id,
+                    "attachment_transform": attachment_transform,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def has_frozen_goals(self, source_grasp_id: str) -> bool:
+        return bool(self.qualified_goals_by_grasp.get(source_grasp_id))
+
+    def attachment_binding_consumed(
+        self,
+        *,
+        source_grasp_id: str,
+        attachment_transform: Mapping[str, object],
+    ) -> bool:
+        return self.attachment_binding(
+            source_grasp_id=source_grasp_id,
+            attachment_transform=attachment_transform,
+        ) in self.consumed_attachment_bindings
+
+    def consume_model_retry_binding(
+        self,
+        *,
+        source_grasp_id: str,
+        attachment_transform: Mapping[str, object],
+    ) -> bool:
+        binding = self.attachment_binding(
+            source_grasp_id=source_grasp_id,
+            attachment_transform=attachment_transform,
+        )
+        if binding in self.consumed_model_retry_bindings:
+            return False
+        self.consumed_model_retry_bindings.add(binding)
+        return True
+
+    def _replace_grasps(
+        self,
+        result: ToolResult,
+        grasps: list[JsonDict],
+        proofs: Mapping[str, Mapping[str, object]],
+        scene_epoch: int,
+        planning_scene_revision: int,
+        *,
+        cache_grasps: list[JsonDict] | None = None,
+    ) -> ToolResult:
+        self.qualifier.cache.replace(
+            purpose="grasp",
+            candidates=grasps if cache_grasps is None else cache_grasps,
+            proofs=proofs,
+            scene_epoch=scene_epoch,
+            planning_scene_revision=planning_scene_revision,
+        )
+        result.details["grasp_candidates"] = grasps
+        result.details["candidate_count"] = len(grasps)
+        result.details["qualified_candidate_count"] = len(grasps)
+        result.details["selection_required"] = bool(grasps)
+        result.details["pregrasp_joint_qualified_grasp_count"] = len(grasps)
+        return result
+
+
+def _prepare_postattachment_frozen_goals(
+    context: ToolExecutionContext,
+    request: JsonDict,
+    *,
+    coordinator: _PregraspGraspPlaceCoordinator,
+) -> ToolResult | None:
+    """Short-circuit model inference for the selected grasp's frozen PASS goals."""
+
+    supervision = context.metadata.get("supervision_context")
+    memory = supervision.get("memory") if isinstance(supervision, Mapping) else None
+    if not isinstance(memory, Mapping):
+        return None
+    execution = memory.get("grasp_execution")
+    attachment_gate = memory.get("attachment_gate")
+    if not (
+        isinstance(execution, Mapping)
+        and execution.get("status") == "completed"
+        and execution.get("stage") == "attached"
+        and execution.get("attachment_mode") != "articulated_handle"
+        and isinstance(attachment_gate, Mapping)
+        and attachment_gate.get("status") == "resolved"
+        and str(attachment_gate.get("verdict") or "").upper() == "PASS"
+    ):
+        return None
+    full_proof = attachment_gate.get("full_lift_proof")
+    attachment_transform = (
+        full_proof.get("attachment_transform")
+        if isinstance(full_proof, Mapping)
+        else None
+    )
+    if not isinstance(attachment_transform, Mapping):
+        return None
+    compiled_source_grasp = execution.get("compiled_grasp")
+    source_grasp_id = _active_source_grasp_id(
+        memory,
+        compiled_source_grasp=compiled_source_grasp,
+    )
+    if not source_grasp_id:
+        return None
+    scene_revision = request.get("scene_revision")
+    if not isinstance(scene_revision, int) or isinstance(scene_revision, bool):
+        return None
+    attachment_revision = attachment_gate.get("planning_scene_revision")
+    if (
+        isinstance(attachment_revision, int)
+        and not isinstance(attachment_revision, bool)
+        and scene_revision != attachment_revision
+    ):
+        return ToolResult(
+            False,
+            "frozen placement qualification scene revision does not match attachment proof",
+            {
+                "reason": "frozen_placement_scene_revision_mismatch",
+                "execution_started": False,
+            },
+        )
+    if coordinator.attachment_binding_consumed(
+        source_grasp_id=source_grasp_id,
+        attachment_transform=attachment_transform,
+    ):
+        if _placement_model_retry_authorized(memory, request):
+            if coordinator.consume_model_retry_binding(
+                source_grasp_id=source_grasp_id,
+                attachment_transform=attachment_transform,
+            ):
+                return None
+            return ToolResult(
+                False,
+                "The bounded new-seed AnyPlace inference was already consumed.",
+                {
+                    "reason": "placement_model_retry_already_consumed",
+                    "execution_started": False,
+                },
+            )
+        return ToolResult(
+            False,
+            (
+                "AnyPlace inference is blocked until a zero-PASS frozen-goal "
+                "qualification authorizes the bounded new-seed retry."
+            ),
+            {
+                "reason": "placement_model_retry_not_authorized",
+                "execution_started": False,
+            },
+        )
+    placement_observation = request.get("placement_observation")
+    if not isinstance(placement_observation, Mapping):
+        return None
+    source = {
+        "object_observation": json.loads(
+            json.dumps(request.get("object_observation"))
+        ),
+        "placement_observation": json.loads(json.dumps(placement_observation)),
+        "object_camera_to_placement_camera": json.loads(
+            json.dumps(request.get("object_camera_to_placement_camera"))
+        ),
+        "placement_camera_to_world": json.loads(
+            json.dumps(request.get("placement_camera_to_world"))
+        ),
+        "placement_camera_extrinsics": json.loads(
+            json.dumps(placement_observation.get("camera_extrinsics"))
+        ),
+    }
+    return coordinator.prepare_frozen_goal_requalification(
+        source_grasp_id=source_grasp_id,
+        attachment_transform=attachment_transform,
+        source=source,
+        scene_revision=scene_revision,
+    )
+
+
+def _placement_model_retry_authorized(
+    memory: Mapping[str, object],
+    request: Mapping[str, object],
+) -> bool:
+    policy = memory.get("placement_candidate_policy")
+    if not (
+        isinstance(policy, Mapping)
+        and policy.get("status") == "qualification_retry_required"
+    ):
+        return False
+    policy_revision = policy.get("planning_scene_revision", policy.get("scene_revision"))
+    request_revision = request.get("scene_revision")
+    if (
+        not isinstance(policy_revision, int)
+        or isinstance(policy_revision, bool)
+        or policy_revision != request_revision
+    ):
+        return False
+    recovery = policy.get("recovery")
+    required_action = (
+        recovery.get("required_action") if isinstance(recovery, Mapping) else None
+    )
+    required_parameters = (
+        required_action.get("parameters")
+        if isinstance(required_action, Mapping)
+        and required_action.get("name") == "anyplace"
+        else None
+    )
+    return isinstance(required_parameters, Mapping) and dict(required_parameters) == dict(
+        request
+    )
+
+
 def _qualifying_handler(
     handler: ToolHandler,
     qualifier: MoveItCandidateQualifier,
     *,
     purpose: str,
+    pregrasp_coordinator: _PregraspGraspPlaceCoordinator | None = None,
 ) -> ToolHandler:
     """Apply private MoveIt qualification before a result reaches memory/VLM."""
 
     def qualified(context: ToolExecutionContext) -> ToolResult:
+        supervision = context.metadata.get("supervision_context")
+        memory = supervision.get("memory") if isinstance(supervision, dict) else None
+        placement_policy = (
+            memory.get("placement_candidate_policy")
+            if isinstance(memory, dict)
+            else None
+        )
+        if (
+            purpose == "placement"
+            and isinstance(placement_policy, dict)
+            and placement_policy.get("status") == "stopped_requires_human"
+        ):
+            # Qualification is bounded.  Once the frozen pool is exhausted
+            # and the return-to-source proof is unavailable, fresh model
+            # samples cannot safely alter the current attached state.
+            return ToolResult(
+                False,
+                "CURRENT_GRASP_PLACE_INFEASIBLE: placement recovery is blocked pending human intervention.",
+                {
+                    "reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
+                    "execution_started": False,
+                    "qualification_round": placement_policy.get("qualification_round"),
+                    "max_qualification_rounds": placement_policy.get("max_qualification_rounds"),
+                },
+            )
         result = handler(context)
         if not result.success:
             return result
         observation_metadata = (
             context.observation.metadata if context.observation is not None else {}
         )
-        scene_epoch_value = observation_metadata.get(
-            "scene_epoch",
-            result.details.get("scene_epoch", context.parameters.get("scene_epoch", 0)),
+        # Use the runtime invalidation epoch consistently for qualification,
+        # cache storage, and later compilation.  A simulator observation can
+        # report its reset epoch after the runtime has advanced its mutation
+        # counter, and mixing the two makes a valid PASS proof unexecutable.
+        scene_epoch_value = (
+            memory.get("scene_epoch")
+            if isinstance(memory, Mapping)
+            and isinstance(memory.get("scene_epoch"), int)
+            and not isinstance(memory.get("scene_epoch"), bool)
+            else observation_metadata.get(
+                "scene_epoch",
+                result.details.get("scene_epoch", context.parameters.get("scene_epoch", 0)),
+            )
         )
         scene_epoch = (
             scene_epoch_value
@@ -1051,8 +1740,6 @@ def _qualifying_handler(
                 source["camera_frame_id"] = camera.frame_id
                 source["camera_extrinsics"] = dict(camera.extrinsics)
         if purpose == "placement":
-            supervision = context.metadata.get("supervision_context")
-            memory = supervision.get("memory") if isinstance(supervision, dict) else None
             attachment_gate = memory.get("attachment_gate") if isinstance(memory, dict) else None
             full_proof = (
                 attachment_gate.get("full_lift_proof")
@@ -1064,6 +1751,27 @@ def _qualifying_handler(
                 if isinstance(full_proof, dict)
                 else None
             )
+            if (
+                not isinstance(attachment_transform, dict)
+                and pregrasp_coordinator is not None
+            ):
+                return pregrasp_coordinator.retain_goal_pool(
+                    result,
+                    source=source,
+                    scene_epoch=scene_epoch,
+                    planning_scene_revision=revision_value,
+                )
+            grasp_execution = (
+                memory.get("grasp_execution") if isinstance(memory, dict) else None
+            )
+            compiled_source_grasp = (
+                grasp_execution.get("compiled_grasp")
+                if isinstance(grasp_execution, dict)
+                else None
+            )
+            frozen_goal_requalification = (
+                result.details.get("frozen_pregrasp_goal_requalification") is True
+            )
             current_eef_pose = (
                 context.observation.robot.end_effector_pose
                 if context.observation is not None
@@ -1071,11 +1779,19 @@ def _qualifying_handler(
             )
             placement_extrinsics = source.get("placement_camera_extrinsics")
             candidates = result.details.get("placement_candidates")
+            already_world_goals = isinstance(candidates, list) and all(
+                isinstance(candidate, Mapping)
+                and isinstance(candidate.get("object_goal_pose"), Mapping)
+                for candidate in candidates
+            )
             if not (
                 isinstance(attachment_transform, dict)
                 and isinstance(current_eef_pose, dict)
-                and isinstance(placement_extrinsics, dict)
                 and isinstance(candidates, list)
+                and (
+                    already_world_goals
+                    or isinstance(placement_extrinsics, dict)
+                )
             ):
                 return ToolResult(
                     False,
@@ -1083,16 +1799,20 @@ def _qualifying_handler(
                     {"reason": "placement_binding_evidence_missing"},
                 )
             try:
-                materialized = [
-                    materialize_world_object_goal(
-                        candidate,
-                        placement_camera_extrinsics=placement_extrinsics,
-                        current_eef_pose=current_eef_pose,
-                        attachment_transform=attachment_transform,
-                    )
-                    for candidate in candidates
-                    if isinstance(candidate, Mapping)
-                ]
+                materialized = (
+                    [dict(candidate) for candidate in candidates]
+                    if already_world_goals
+                    else [
+                        materialize_world_object_goal(
+                            candidate,
+                            placement_camera_extrinsics=placement_extrinsics,
+                            current_eef_pose=current_eef_pose,
+                            attachment_transform=attachment_transform,
+                        )
+                        for candidate in candidates
+                        if isinstance(candidate, Mapping)
+                    ]
+                )
             except Exception as exc:  # noqa: BLE001 - fail closed at evidence boundary.
                 return ToolResult(
                     False,
@@ -1103,15 +1823,62 @@ def _qualifying_handler(
             result.details["candidate_count"] = len(materialized)
             source["attachment_transform"] = dict(attachment_transform)
             source["current_eef_pose"] = dict(current_eef_pose)
-        return qualifier.qualify_result(
+            if frozen_goal_requalification:
+                source["frozen_pregrasp_goal_requalification"] = True
+            if isinstance(compiled_source_grasp, dict):
+                source["source_grasp_compiled"] = dict(compiled_source_grasp)
+        qualified_result = qualifier.qualify_result(
             result,
             purpose=purpose,
             scene_epoch=scene_epoch,
             planning_scene_revision=revision_value,
             source=source,
         )
+        if purpose == "grasp" and pregrasp_coordinator is not None:
+            return pregrasp_coordinator.filter_grasps(
+                qualified_result,
+                scene_epoch=scene_epoch,
+                planning_scene_revision=revision_value,
+                source=source,
+            )
+        return qualified_result
 
     return qualified
+
+
+def _active_source_grasp_id(
+    memory: Mapping[str, object] | None,
+    *,
+    compiled_source_grasp: object,
+) -> str:
+    """Resolve the executed grasp identity from host-owned runtime state."""
+
+    if isinstance(compiled_source_grasp, Mapping):
+        for value in (
+            compiled_source_grasp.get("source_grasp_id"),
+            compiled_source_grasp.get("grasp_candidate_id"),
+        ):
+            if isinstance(value, str) and value:
+                return value
+        for pose_key in ("contact_pose", "hover_pose", "lift_pose"):
+            pose = compiled_source_grasp.get(pose_key)
+            if not isinstance(pose, Mapping):
+                continue
+            value = pose.get("source_grasp_id") or pose.get("grasp_candidate_id")
+            if isinstance(value, str) and value:
+                return value
+    policy = memory.get("grasp_candidate_policy") if isinstance(memory, Mapping) else None
+    if isinstance(policy, Mapping):
+        active = policy.get("active_candidate")
+        if isinstance(active, Mapping):
+            value = active.get("id") or active.get("source_grasp_id")
+            if isinstance(value, str) and value:
+                return value
+        for key in ("selected_grasp_id", "candidate_id"):
+            value = policy.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
 
 
 def _qualifying_wrist_alignment_handler(

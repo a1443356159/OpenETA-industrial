@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -116,6 +117,70 @@ def test_qualification_request_binds_short_service_timeouts():
     }
 
 
+def test_qualification_rpc_deadline_covers_screening_pool_and_plan_tail():
+    captured = {}
+
+    def rpc(name, request, timeout):
+        del name
+        captured["timeout"] = timeout
+        return _engine().qualify(request)
+
+    candidates = [
+        {
+            "id": f"p{i}",
+            "object_goal_pose": {"translation_xyz": [i / 1000.0, 0.0, 0.0]},
+        }
+        for i in range(96)
+    ]
+    MoveItCandidateQualifier(
+        rpc,
+        placement_diversity_limit=96,
+        placement_full_plan_limit=4,
+        compile_candidate=lambda *args: {
+            "qualification_stages": [
+                {"name": "hover"},
+                {"name": "release"},
+                {"name": "retreat"},
+            ]
+        },
+    ).qualify_result(
+        ToolResult(True, "ok", {"placement_candidates": candidates}),
+        purpose="placement",
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    assert captured["timeout"] > PLANNING_TIME_S * 4 + 10.0
+    assert captured["timeout"] == pytest.approx(1158.0)
+
+
+def test_qualification_rpc_error_reason_is_preserved():
+    def rpc(name, request, timeout):
+        del name, request, timeout
+        raise TimeoutError("outer qualification deadline")
+
+    result = MoveItCandidateQualifier(
+        rpc,
+        compile_candidate=lambda *args: {
+            "qualification_stages": [{"name": "hover"}]
+        },
+    ).qualify_result(
+        ToolResult(True, "ok", {"grasp_candidates": [{"id": "g0"}]}),
+        purpose="grasp",
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    evidence = result.details["qualification_evidence"]
+    assert [item["verdict"] for item in evidence["results"]] == ["UNKNOWN"]
+    assert [item["reason"] for item in evidence["results"]] == [
+        "qualification_rpc_error"
+    ]
+    assert result.details["rejection_reason_counts"] == {
+        "qualification_rpc_error": 1
+    }
+
+
 @pytest.mark.parametrize(
     ("override", "verdict", "reason"),
     [
@@ -179,6 +244,13 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
     assert cache.resolve(purpose="grasp", candidate_id="g0", scene_epoch=3, planning_scene_revision=4)
     assert cache.resolve(purpose="grasp", candidate_id="g1", scene_epoch=3) is None
     assert result.details["qualification_artifact"]["path"].endswith(".json")
+    assert "results" not in result.details["qualification_evidence"]
+    stored = json.loads(
+        Path(result.details["qualification_artifact"]["path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(stored["results"]) == 2
 
 
 def test_scene_revision_drift_is_unknown():

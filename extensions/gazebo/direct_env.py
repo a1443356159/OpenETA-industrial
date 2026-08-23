@@ -81,6 +81,11 @@ class GazeboDirectEnv(Env):
         self._native_grasp_transport_locked = False
         self._native_grasp_lift_proof_pending = False
         self._attachment_transform: dict[str, Any] | None = None
+        # A failed close leaves the robot at contact with no object attached.
+        # Retain only the exact host-issued hover pose that preceded it, so the
+        # recovery path can withdraw safely without turning the transport lock
+        # into a general motion bypass.
+        self._native_grasp_recovery_hover: dict[str, Any] | None = None
 
     @property
     def controller(self) -> Any | None:
@@ -149,6 +154,7 @@ class GazeboDirectEnv(Env):
             self._native_grasp_transport_locked = False
             self._native_grasp_lift_proof_pending = False
             self._attachment_transform = None
+            self._native_grasp_recovery_hover = None
         observation = self.runtime.reset(seed=self._seed)
         raw = self._decorate_robot(self._as_unified(observation))
         scene_revision = self._planning_scene_revision()
@@ -171,6 +177,7 @@ class GazeboDirectEnv(Env):
     def step(self, action: Any):
         raw_action = action if isinstance(action, Mapping) else {}
         action_type = str(raw_action.get("action_type") or "")
+        recovery_to_hover = self._is_failed_close_recovery_hover(raw_action)
         contact_window: GazeboNativeContactWindow | None = None
         if self._native_grasp_config is not None and action_type == "gripper_close":
             contact_window = GazeboNativeContactWindow(
@@ -188,9 +195,16 @@ class GazeboDirectEnv(Env):
                 return raw, 0.0, False, False, {"_openeta_receipt": receipt}
         if self._native_grasp_config is not None and self._native_grasp_transport_locked and action_type in {"move_to", "follow_eef_trajectory"}:
             attachment = getattr(self.runtime, "attachment", None)
-            if attachment is None or getattr(attachment, "state", None) != "attached":
+            if (
+                (attachment is None or getattr(attachment, "state", None) != "attached")
+                and not recovery_to_hover
+            ):
                 observation = self.runtime.observe()
-                receipt = {"ok": False, "error_code": ReasonCode.ATTACH_ACK_MISSING.value}
+                receipt = {
+                    "ok": False,
+                    "error_code": ReasonCode.ATTACH_ACK_MISSING.value,
+                    "native_grasp_recovery_diagnostic": self._failed_close_recovery_diagnostic(raw_action),
+                }
                 raw = self._decorate_robot(self._as_unified(observation))
                 raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict() if self._native_grasp_verifier else {}
                 receipt["observation"] = raw
@@ -208,7 +222,20 @@ class GazeboDirectEnv(Env):
             raw.setdefault("metadata", {})["planning_scene_revision"] = scene_revision
         if self._native_grasp_config is not None and self._native_grasp_verifier is not None:
             attachment = getattr(self.runtime, "attachment", None)
-            if action_type == "gripper_close":
+            if recovery_to_hover:
+                if receipt.get("ok") is True:
+                    self._native_grasp_verifier.reset()
+                    self._native_grasp_transport_locked = False
+                    self._native_grasp_lift_proof_pending = False
+                    self._attachment_transform = None
+                    self._native_grasp_recovery_hover = None
+                    receipt["native_grasp_recovery"] = {
+                        "status": "returned_to_compiled_hover",
+                        "reason": "close_rejected_without_attachment",
+                    }
+                raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
+                receipt["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
+            elif action_type == "gripper_close":
                 gate = None
                 self._native_grasp_transport_locked = True
                 try:
@@ -356,7 +383,11 @@ class GazeboDirectEnv(Env):
                             "state_topic": self._native_grasp_config.state_topic,
                         }
                         samples = attachment.sample_detached_target_poses(
-                            duration_s=self._native_grasp_config.placement_stability_duration_s,
+                            duration_s=(
+                                self._native_grasp_config.placement_settling_observation_s
+                                + self._native_grasp_config.placement_stability_duration_s
+                                + self._native_grasp_config.placement_terminal_window_s
+                            ),
                             interval_s=self._native_grasp_config.placement_sample_interval_s,
                         )
                         placement = verify_stable_placement(samples, self._native_grasp_config)
@@ -440,6 +471,7 @@ class GazeboDirectEnv(Env):
                     self._attachment_transform = None
             else:
                 raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict()
+            self._remember_compiled_hover(raw_action, receipt)
         self._latest = raw
         # The Direct/Gym boundary owns the public unified observation.  Keep
         # the structured receipt anchored to that exact post-action object so
@@ -454,6 +486,95 @@ class GazeboDirectEnv(Env):
         from .native_grasp import ContactGateResult
         return ContactGateResult(False, ReasonCode.CONTACT_WINDOW_NOT_ARMED, 0, 0)
 
+    def _is_failed_close_recovery_hover(self, action: Mapping[str, Any]) -> bool:
+        """Allow only an exact withdrawal to the prior compiled grasp hover.
+
+        A rejected contact has no attachment to prove, but keeping every motion
+        blocked strands the robot at the rejected contact pose.  Candidate ID,
+        stage and full EEF pose are all checked, so neither arbitrary motions
+        nor a stale candidate can use this narrow recovery exception.
+        """
+
+        if (
+            self._native_grasp_verifier is None
+            or self._native_grasp_verifier.phase != "contact_rejected"
+            or str(action.get("action_type") or "") != "move_to"
+            or not isinstance(self._native_grasp_recovery_hover, dict)
+        ):
+            return False
+        requested = _action_target_pose(action)
+        saved = self._native_grasp_recovery_hover
+        if not isinstance(requested, Mapping):
+            return False
+        if requested.get("grasp_stage") != "hover" or saved.get("grasp_stage") != "hover":
+            return False
+        candidate_id = str(requested.get("compiled_grasp_id") or "")
+        if not candidate_id or candidate_id != str(saved.get("compiled_grasp_id") or ""):
+            return False
+        try:
+            requested_xyz = np.asarray(requested["xyz"], dtype=float)
+            saved_xyz = np.asarray(saved["xyz"], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if requested_xyz.shape != (3,) or saved_xyz.shape != (3,):
+            return False
+        if not (np.isfinite(requested_xyz).all() and np.isfinite(saved_xyz).all()):
+            return False
+        if not np.allclose(requested_xyz, saved_xyz, atol=1e-6, rtol=0.0):
+            return False
+        requested_quat = requested.get("quat_xyzw")
+        saved_quat = saved.get("quat_xyzw")
+        if requested_quat is not None or saved_quat is not None:
+            try:
+                requested_quat = np.asarray(requested_quat, dtype=float)
+                saved_quat = np.asarray(saved_quat, dtype=float)
+            except (TypeError, ValueError):
+                return False
+            # q and -q encode the same orientation.
+            return bool(
+                requested_quat.shape == (4,)
+                and saved_quat.shape == (4,)
+                and np.isfinite(requested_quat).all()
+                and np.isfinite(saved_quat).all()
+                and abs(float(np.dot(requested_quat, saved_quat))) >= 1.0 - 1e-6
+            )
+        try:
+            requested_rotation = np.asarray(requested["rotation_matrix"], dtype=float)
+            saved_rotation = np.asarray(saved["rotation_matrix"], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            return False
+        return bool(
+            requested_rotation.shape == (3, 3)
+            and saved_rotation.shape == (3, 3)
+            and np.isfinite(requested_rotation).all()
+            and np.isfinite(saved_rotation).all()
+            and np.allclose(requested_rotation, saved_rotation, atol=1e-6, rtol=0.0)
+        )
+
+    def _failed_close_recovery_diagnostic(self, action: Mapping[str, Any]) -> dict[str, Any]:
+        """Return non-authoritative details for a rejected locked recovery."""
+        requested = _action_target_pose(action)
+        saved = self._native_grasp_recovery_hover
+        return {
+            "verifier_phase": getattr(self._native_grasp_verifier, "phase", None),
+            "action_type": str(action.get("action_type") or ""),
+            "requested_stage": requested.get("grasp_stage") if isinstance(requested, Mapping) else None,
+            "saved_stage": saved.get("grasp_stage") if isinstance(saved, Mapping) else None,
+            "requested_compiled_grasp_id": requested.get("compiled_grasp_id") if isinstance(requested, Mapping) else None,
+            "saved_compiled_grasp_id": saved.get("compiled_grasp_id") if isinstance(saved, Mapping) else None,
+            "cached_hover_present": isinstance(saved, Mapping),
+        }
+
+    def _remember_compiled_hover(self, action: Mapping[str, Any], receipt: Mapping[str, Any]) -> None:
+        if receipt.get("ok") is not True or str(action.get("action_type") or "") != "move_to":
+            return
+        target = _action_target_pose(action)
+        if not isinstance(target, Mapping) or target.get("grasp_stage") != "hover":
+            return
+        if not str(target.get("compiled_grasp_id") or ""):
+            return
+        self._native_grasp_recovery_hover = dict(target)
+
     def render(self):
         if self._latest is None:
             return None
@@ -463,3 +584,12 @@ class GazeboDirectEnv(Env):
     def close(self) -> None:
         self.runtime.close()
         self._latest = None
+
+
+def _action_target_pose(action: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Read the canonical pose from direct and transport-wrapped actions."""
+    target = action.get("target_pose")
+    if not isinstance(target, Mapping):
+        parameters = action.get("parameters")
+        target = parameters.get("target_pose") if isinstance(parameters, Mapping) else None
+    return target if isinstance(target, Mapping) else None

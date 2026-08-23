@@ -142,6 +142,23 @@ def test_exhausted_placement_recovery_dispatches_fresh_observation() -> None:
     assert decision.metadata["host_obligation"]["stage"] == "reobserve_placement"
 
 
+def test_terminal_placement_recovery_hands_off_without_repeating_inference() -> None:
+    decision = _host_obligation_decision(
+        {
+            "placement_candidate_policy": {
+                "status": "stopped_requires_human",
+                "stop_reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
+            }
+        },
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+    )
+
+    assert decision is not None
+    assert decision.action_type == "response"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "CURRENT_GRASP_PLACE_INFEASIBLE"
+
+
 def _record_pending_sam3_selection(
     memory: AgentMemory,
     *,
@@ -3192,7 +3209,7 @@ def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
 
     assert decision.action == "compile_grasp_seed"
     first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
-    assert any("only after attach and lift verification" in error for error in first_errors)
+    assert any("host-built pregrasp goal-pool obligation" in error for error in first_errors)
 
 
 def test_combined_pick_place_keeps_independent_placement_rgb() -> None:
@@ -3459,6 +3476,84 @@ def test_targeted_grasp_obligation_joins_selected_mask_to_current_rgbd(
     assert decision.action == "grasp_pose_estimate"
     assert decision.parameters == obligation["required_parameters"]
     assert decision.metadata["execution_model"] == "host_obligation_dispatch"
+
+    observation.task = "pick alphabet soup and place it in basket"
+    before_pool = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate", "anyplace"),
+        skills=build_default_skill_registry(),
+    )
+    assert before_pool["targeted_grasp_obligation"] is None
+    memory.save_fact(
+        "pregrasp_placement_goal_pool",
+        {"status": "ready", "goal_count": 96, "scene_epoch": 0},
+        source="test",
+    )
+    after_pool = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate", "anyplace"),
+        skills=build_default_skill_registry(),
+    )
+    assert after_pool["targeted_grasp_obligation"] is not None
+
+
+def test_targeted_grasp_obligation_recovers_paired_session_depth_path(
+    tmp_path: Path,
+) -> None:
+    session_root = tmp_path / "images" / "session-a"
+    bundle = "observation-0008"
+    current_rgb = session_root / "rgb" / bundle / "agentview.rgb.png"
+    current_depth = session_root / "depth" / bundle / "agentview.depth.png"
+    malformed_depth = tmp_path / "images" / bundle / current_depth.name
+    selected_rgb = tmp_path / "selected" / current_rgb.name
+    current_rgb.parent.mkdir(parents=True)
+    current_depth.parent.mkdir(parents=True)
+    selected_rgb.parent.mkdir(parents=True)
+    selected_rgb.write_bytes(b"same-agentview-scene")
+    current_rgb.write_bytes(b"same-agentview-scene")
+    current_depth.write_bytes(b"depth")
+    memory = AgentMemory()
+    _record_pending_sam3_selection(memory, original_image_ref=str(selected_rgb))
+    memory.resolve_sam3_selection(
+        result_id="sam3-run-selection",
+        detection_id="detection_000",
+        selection_source="main_agent_vlm",
+    )
+    observation = EnvObservation(
+        task="pick alphabet soup",
+        cameras=[
+            CameraFrame(
+                frame_id="agentview",
+                rgb=[[[0, 0, 0]]],
+                depth=[[1.0]],
+                intrinsics={"fx": 100.0, "fy": 100.0, "cx": 0.5, "cy": 0.5},
+            )
+        ],
+        robot=RobotState(),
+        metadata={
+            "image_artifacts": [
+                {"kind": "rgb", "frame_id": "agentview", "path": str(current_rgb)},
+                {
+                    "kind": "depth",
+                    "frame_id": "agentview",
+                    "path": str(malformed_depth),
+                },
+            ]
+        },
+    )
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["targeted_grasp_obligation"]["required_parameters"]["depth"] == str(
+        current_depth
+    )
 
 
 def test_targeted_grasp_obligation_prefers_usable_enhanced_depth(
@@ -5853,7 +5948,7 @@ def test_placement_obligation_joins_independent_post_attach_observations() -> No
         tools=_tools_with_handlers("anyplace"),
         skills=build_default_skill_registry(),
     )
-    assert pre_attachment_context["placement_obligation"] is None
+    assert pre_attachment_context["placement_obligation"]["phase"] == "pregrasp_goal_pool"
     memory.save_fact(
         "grasp_execution",
         {
@@ -5924,6 +6019,48 @@ def test_placement_obligation_joins_independent_post_attach_observations() -> No
     assert decision.metadata["host_obligation"]["tool"] == "anyplace"
 
 
+def test_new_placement_selection_clears_other_detection_from_stale_image() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="place the held cube")
+    memory.save_fact(
+        "attachment_gate",
+        {"status": "resolved", "verdict": "PASS"},
+        source="test",
+    )
+    memory.save_fact(
+        "placement_region_detection",
+        {
+            "id": "old-region",
+            "mask_ref": "tmp/old-region.png",
+            "source_image": "tmp/pre-attach.png",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "pending_sam3_selection",
+        {
+            "result_id": "post-attach-object",
+            "source_image": "tmp/post-attach.png",
+            "frame_id": "placement",
+            "target_prompt": "red cube",
+            "segmentation_mode": "point_prompt",
+            "candidates": [
+                {"id": "detection_000", "mask_ref": "tmp/post-attach-object.png"}
+            ],
+        },
+        source="test",
+    )
+
+    memory.resolve_sam3_selection(
+        result_id="post-attach-object",
+        detection_id="detection_000",
+        selection_source="main_agent_vlm",
+    )
+
+    assert memory.placement_object_detection()["source_image"] == "tmp/post-attach.png"
+    assert memory.placement_region_detection() is None
+
+
 def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None:
     memory = AgentMemory()
     memory.save_fact(
@@ -5987,6 +6124,60 @@ def test_placement_selection_obligation_requires_main_vlm_candidate_id() -> None
         "placement_candidate_id": ["placement_000"],
     }
     assert obligation["selection_source"] == "main_agent_vlm"
+
+
+def test_native_held_proof_overrides_zero_gripper_openness_during_placement() -> None:
+    memory = AgentMemory()
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "status": "completed",
+            "stage": "attached",
+            "candidate_id": "grasp_005",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "attachment_gate",
+        {
+            "status": "resolved",
+            "verdict": "PASS",
+            "candidate_id": "grasp_005",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "placement_candidate_policy",
+        {
+            "status": "active",
+            "active_candidate_id": "placement_036",
+            "compiled_placement": {
+                "hover_pose": {"frame": "world", "xyz": [0.30, -0.10, 0.64]},
+                "release_pose": {"frame": "world", "xyz": [0.30, -0.10, 0.54]},
+            },
+        },
+        source="test",
+    )
+    observation = _observation()
+    observation.robot.end_effector_pose = {"frame": "world", "xyz": [0.11, -0.04, 0.56]}
+    observation.robot.gripper_state = {"open": False, "openness": 0.0}
+    observation.metadata["physical_verification"] = {
+        "grasp_confirmed": True,
+        "verdict": "PASS",
+        "phase": "held_proven",
+    }
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("move_to", "gripper_control"),
+        skills=build_default_skill_registry(),
+    )
+
+    guidance = context["placement_motion_guidance"]
+    assert guidance["stage"] == "hover"
+    assert guidance["required_parameters"]["target_pose"]["placement_stage"] == "hover"
+    assert guidance["required_parameters"]["target_pose"]["xyz"] == [0.30, -0.10, 0.64]
 
 
 @pytest.mark.skip(reason="superseded by direct compiled-hover M6 contract")
@@ -6489,7 +6680,22 @@ def test_successful_placement_release_clears_stale_attachment_state() -> None:
                     {
                         "name": "gripper_control",
                         "status": "executed",
-                        "result": {"success": True, "content": "gripper opened"},
+                        "result": {
+                            "success": True,
+                            "content": "gripper opened",
+                            "details": {
+                                "environment_receipt": {
+                                    "placement_verification": {
+                                        "placement_confirmed": True,
+                                        "verdict": "PASS",
+                                        "evidence": {
+                                            "stable_duration_s": 0.5,
+                                            "terminal_drift_m": 0.0,
+                                        },
+                                    }
+                                }
+                            },
+                        },
                     }
                 ],
             },
@@ -6519,11 +6725,11 @@ def test_successful_placement_release_clears_stale_attachment_state() -> None:
     assert context["placement_release"]["status"] == "released"
     assert context["placement_motion_guidance"] is None
     retreat_pose = {
-        "frame": "world",
+        **release_pose,
         "xyz": [0.07, 0.30, 0.31],
-        "placement_candidate_id": "placement_000",
-        "placement_pose_id": "place_grasp_000",
+        "compiled_eef_pose": True,
         "placement_stage": "retreat",
+        "purpose": "placement",
     }
     assert context["placement_release_obligation"] == {
         "schema_version": "openeta.placement_release_obligation.v1",
@@ -6549,7 +6755,7 @@ def test_successful_placement_release_clears_stale_attachment_state() -> None:
             ),
         ),
         memory=memory,
-        tools=_tools_with_handlers("move_to"),
+        tools=_tools_with_handlers("move_to", "close_simulator_env"),
         skills=build_default_skill_registry(),
     )
     assert decision.action == "move_to"
@@ -6598,7 +6804,60 @@ def test_successful_placement_release_clears_stale_attachment_state() -> None:
         tools=_tools_with_handlers("move_to"),
         skills=build_default_skill_registry(),
     )
-    assert context["placement_release_obligation"] is None
+    assert context["placement_release_obligation"] == {
+        "schema_version": "openeta.placement_release_obligation.v1",
+        "status": "required",
+        "stage": "close",
+        "required_action": {
+            "name": "close_simulator_env",
+            "parameters": {},
+        },
+        "rule": (
+            "The detached object passed native stability and in-zone checks and the "
+            "open gripper retreated. Close this simulator environment exactly once "
+            "before reporting completion."
+        ),
+    }
+    decision = planner.plan(
+        EnvObservation(
+            task="pick can and place it in basket",
+            cameras=[],
+            robot=RobotState(
+                end_effector_pose={"xyz": retreat_pose["xyz"]},
+                gripper_state={"open": True, "openness": 1.0},
+            ),
+        ),
+        memory=memory,
+        tools=_tools_with_handlers("close_simulator_env"),
+        skills=build_default_skill_registry(),
+    )
+    assert decision.action == "close_simulator_env"
+    assert decision.parameters == {}
+    assert decision.metadata["host_obligation"]["stage"] == "close"
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {
+                    "kind": "tool_call",
+                    "name": "close_simulator_env",
+                    "parameters": {},
+                },
+                "status": "executed",
+                "tool_calls": [
+                    {
+                        "name": "close_simulator_env",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "content": "Simulator environment closed.",
+                        },
+                    }
+                ],
+            },
+        )
+    )
+    assert memory.placement_release() is None
 
 
 def test_wrist_alignment_obligation_joins_current_geometry(tmp_path: Path) -> None:
@@ -7846,7 +8105,7 @@ def test_anyplace_host_does_not_repeat_a_deterministic_failure() -> None:
     assert context["placement_obligation"] is None
 
 
-def test_combined_pick_place_blocks_receptacle_segmentation_before_anygrasp() -> None:
+def test_combined_pick_place_allows_destination_segmentation_before_grasp() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
     _record_pending_sam3_selection(memory)
@@ -7896,9 +8155,7 @@ def test_combined_pick_place_blocks_receptacle_segmentation_before_anygrasp() ->
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "anygrasp"
-    first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
-    assert any("one active SAM3 selection slot" in error for error in first_errors)
+    assert decision.action == "sam3"
 
 
 def test_replacement_anygrasp_requires_reopening_after_accepted_motion() -> None:

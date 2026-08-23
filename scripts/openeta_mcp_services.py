@@ -19,7 +19,9 @@ from typing import Any, Iterable
 
 from tools.candidate_config import (
     DEFAULT_CANDIDATE_COUNT,
+    CandidateFunnelConfig,
     argparse_candidate_count,
+    argparse_raw_pool_size,
     candidate_count,
 )
 
@@ -129,6 +131,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graspgenx-max-candidates", type=argparse_candidate_count)
     parser.add_argument("--anygrasp-max-candidates", type=argparse_candidate_count)
     parser.add_argument("--anyplace-candidate-count", type=argparse_candidate_count)
+    parser.add_argument("--graspgenx-raw-pool-size", type=argparse_raw_pool_size())
+    parser.add_argument("--anygrasp-raw-pool-size", type=argparse_raw_pool_size())
+    parser.add_argument("--anyplace-raw-pool-size", type=argparse_raw_pool_size(placement=True))
+    parser.add_argument("--grasp-diversity-pool-size", type=int)
+    parser.add_argument("--anyplace-diversity-pool-size", type=int)
+    parser.add_argument("--grasp-full-plan-limit", type=int)
+    parser.add_argument("--anyplace-full-plan-limit", type=int)
+    parser.add_argument("--moveit-ik-seed-count", type=int)
+    parser.add_argument("--anyplace-max-qualification-rounds", type=int)
     parser.add_argument("--unidepth-v2-model-id")
     parser.add_argument("--unidepth-v2-device")
     parser.add_argument("--unidepth-v2-resolution-level", type=int)
@@ -194,10 +205,16 @@ def _build_configs(args: argparse.Namespace) -> list[ServiceConfig]:
         if args.target == "all"
         else (args.target,)
     )
-    return [_build_config(target, args) for target in targets]
+    funnel = _startup_funnel_config(args)
+    return [_build_config(target, args, funnel=funnel) for target in targets]
 
 
-def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
+def _build_config(
+    name: str,
+    args: argparse.Namespace,
+    *,
+    funnel: CandidateFunnelConfig,
+) -> ServiceConfig:
     state_dir = _resolve_state_dir(args.state_dir)
     env = os.environ.copy()
     if name == "sam3":
@@ -244,12 +261,9 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             "--port",
             str(args.anygrasp_port),
             "--max-candidates",
-            str(
-                _startup_candidate_count(
-                    args.anygrasp_max_candidates,
-                    "OPENETA_ANYGRASP_MAX_CANDIDATES",
-                )
-            ),
+            str(funnel.anygrasp_exposure_limit),
+            "--raw-pool-size",
+            str(funnel.anygrasp_raw_pool_size),
         ]
         if sdk_root:
             command.extend(["--sdk-root", sdk_root])
@@ -285,12 +299,9 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             "--port",
             str(args.anyplace_port),
             "--candidate-count",
-            str(
-                _startup_candidate_count(
-                    args.anyplace_candidate_count,
-                    "OPENETA_ANYPLACE_CANDIDATE_COUNT",
-                )
-            ),
+            str(funnel.anyplace_exposure_limit),
+            "--raw-pool-size",
+            str(funnel.anyplace_raw_pool_size),
         ]
         if anyplace_root:
             command.extend(["--anyplace-root", anyplace_root])
@@ -376,12 +387,9 @@ def _build_config(name: str, args: argparse.Namespace) -> ServiceConfig:
             "--port",
             str(args.graspgenx_port),
             "--max-candidates",
-            str(
-                _startup_candidate_count(
-                    args.graspgenx_max_candidates,
-                    "OPENETA_GRASPGENX_MAX_CANDIDATES",
-                )
-            ),
+            str(funnel.graspgenx_exposure_limit),
+            "--raw-pool-size",
+            str(funnel.graspgenx_raw_pool_size),
         ]
         if backend_root:
             command.extend(["--graspgenx-root", backend_root])
@@ -505,6 +513,38 @@ def _startup_candidate_count(explicit: int | None, env_name: str) -> int:
         return candidate_count(raw)
     except ValueError as exc:
         raise ConfigError(f"{env_name}: {exc}") from exc
+
+
+def _startup_value(args: argparse.Namespace, attribute: str, env_name: str, default: int) -> object:
+    explicit = getattr(args, attribute, None)
+    return explicit if explicit is not None else os.environ.get(env_name, default)
+
+
+def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
+    """Resolve every related field together so invalid chains fail at startup."""
+
+    try:
+        graspgenx_exposure = _startup_value(args, "graspgenx_max_candidates", "OPENETA_GRASPGENX_MAX_CANDIDATES", 10)
+        anygrasp_exposure = _startup_value(args, "anygrasp_max_candidates", "OPENETA_ANYGRASP_MAX_CANDIDATES", 10)
+        anyplace_exposure = _startup_value(args, "anyplace_candidate_count", "OPENETA_ANYPLACE_CANDIDATE_COUNT", 10)
+        grasp_full_default = 4
+        anyplace_full_default = 4
+        return CandidateFunnelConfig(
+            graspgenx_exposure_limit=graspgenx_exposure,
+            anygrasp_exposure_limit=anygrasp_exposure,
+            anyplace_exposure_limit=anyplace_exposure,
+            graspgenx_raw_pool_size=_startup_value(args, "graspgenx_raw_pool_size", "OPENETA_GRASPGENX_RAW_POOL_SIZE", 200),
+            anygrasp_raw_pool_size=_startup_value(args, "anygrasp_raw_pool_size", "OPENETA_ANYGRASP_RAW_POOL_SIZE", 200),
+            anyplace_raw_pool_size=_startup_value(args, "anyplace_raw_pool_size", "OPENETA_ANYPLACE_RAW_POOL_SIZE", 96),
+            grasp_diversity_pool_size=_startup_value(args, "grasp_diversity_pool_size", "OPENETA_GRASP_DIVERSITY_POOL_SIZE", 64),
+            anyplace_diversity_pool_size=_startup_value(args, "anyplace_diversity_pool_size", "OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96),
+            grasp_full_plan_limit=_startup_value(args, "grasp_full_plan_limit", "OPENETA_GRASP_FULL_PLAN_LIMIT", grasp_full_default),
+            anyplace_full_plan_limit=_startup_value(args, "anyplace_full_plan_limit", "OPENETA_ANYPLACE_FULL_PLAN_LIMIT", anyplace_full_default),
+            moveit_ik_seed_count=_startup_value(args, "moveit_ik_seed_count", "OPENETA_MOVEIT_IK_SEED_COUNT", 8),
+            anyplace_max_qualification_rounds=_startup_value(args, "anyplace_max_qualification_rounds", "OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _service_process_env(config: ServiceConfig) -> dict[str, str]:

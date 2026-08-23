@@ -40,6 +40,7 @@ from agent.backends.provider_config import (
 )
 from agent.runtime.checkers import CheckerSubagentConfig
 from agent.runtime.episode import (
+    DEFAULT_MAX_TOTAL_TOKENS,
     DEFAULT_MAX_TURNS,
     EpisodeResult,
     EpisodeStep,
@@ -505,6 +506,12 @@ class OpenEtaCli:
                     else None
                 ),
                 max_turns=max_turns,
+                max_total_tokens=(
+                    _parse_optional_positive_int(
+                        os.environ.get("OPENETA_EPISODE_MAX_TOTAL_TOKENS")
+                    )
+                    or DEFAULT_MAX_TOTAL_TOKENS
+                ),
                 metadata={
                     "source": "OpenEtaCli",
                     "environment_mode": "tool_feedback",

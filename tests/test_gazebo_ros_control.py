@@ -57,21 +57,44 @@ class _Node:
 
 
 class _Tf:
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, stamp_s: float | None = None):
         self.fail = fail
+        self.stamp_s = stamp_s
 
     def lookup_transform(self, base, child, stamp):
         assert (base, child) == ("base_link", "gripper_mount_link")
         if self.fail:
             raise LookupError
-        return SimpleNamespace(transform=SimpleNamespace(
-            translation=SimpleNamespace(x=0.1, y=0.2, z=0.3),
-            rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
-        ))
+        stamp = None
+        if self.stamp_s is not None:
+            sec = int(self.stamp_s)
+            stamp = SimpleNamespace(
+                sec=sec, nanosec=int(round((self.stamp_s - sec) * 1e9))
+            )
+        return SimpleNamespace(
+            header=SimpleNamespace(stamp=stamp),
+            transform=SimpleNamespace(
+                translation=SimpleNamespace(x=0.1, y=0.2, z=0.3),
+                rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            ),
+        )
 
 
-def _joint_message():
-    return SimpleNamespace(name=JOINT_NAMES, position=[0.0] * len(JOINT_NAMES), velocity=[])
+def _joint_message(stamp_s: float | None = None):
+    header = None
+    if stamp_s is not None:
+        sec = int(stamp_s)
+        header = SimpleNamespace(
+            stamp=SimpleNamespace(
+                sec=sec, nanosec=int(round((stamp_s - sec) * 1e9))
+            )
+        )
+    return SimpleNamespace(
+        name=JOINT_NAMES,
+        position=[0.0] * len(JOINT_NAMES),
+        velocity=[],
+        header=header,
+    )
 
 
 def test_ros_state_source_requires_fresh_complete_joint_state_and_tf() -> None:
@@ -92,6 +115,21 @@ def test_ros_state_source_fails_closed_without_tf() -> None:
     source.joint_state_callback(_joint_message())
     with pytest.raises(RuntimeError, match="TF_TIMEOUT"):
         source.state()
+
+
+def test_ros_state_source_rejects_cached_tf_from_before_action_boundary() -> None:
+    tf = _Tf(stamp_s=9.5)
+    source = RosGazeboStateSource(_Node(), tf, config=GazeboControlConfig())
+    source.clear(min_ros_timestamp_s=10.0)
+    source.joint_state_callback(_joint_message(10.1))
+
+    with pytest.raises(RuntimeError, match="POST_ACTION_STATE_NOT_FRESH"):
+        source.state()
+
+    tf.stamp_s = 10.1
+    state = source.state()
+    assert state.metadata["joint_state_timestamp_s"] == pytest.approx(10.1)
+    assert state.metadata["tf_timestamp_s"] == pytest.approx(10.1)
 
 
 def test_recovery_ros_messages_preserve_all_seven_measured_joint_positions() -> None:
@@ -247,7 +285,7 @@ class _StateSource:
         self.post_state = post_state
         self.clear_calls = 0
 
-    def clear(self):
+    def clear(self, **_kwargs):
         self.clear_calls += 1
 
     def wait_fresh(self, timeout_s):

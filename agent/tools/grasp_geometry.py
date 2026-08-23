@@ -122,12 +122,37 @@ def build_compile_grasp_seed_handler(
                 raise GraspGeometryError("compile_grasp_seed only accepts grasp candidates")
             if qualification_cache is not None:
                 candidate_id = str(parameters.get("grasp_candidate_id") or "").strip()
+                # A read-only compile may be repeated by a planner without the
+                # convenience selector. Recover only the candidate identifier;
+                # all geometry and proof still come exclusively from the host
+                # PASS cache below.
+                if not candidate_id:
+                    camera_pose = parameters.get("camera_pose")
+                    if isinstance(camera_pose, Mapping):
+                        candidate_id = str(camera_pose.get("id") or "").strip()
                 observation_metadata = (
                     context.observation.metadata
                     if context.observation is not None
                     else {}
                 )
-                requested_epoch = observation_metadata.get("scene_epoch")
+                supervision = context.metadata.get("supervision_context")
+                memory = (
+                    supervision.get("memory")
+                    if isinstance(supervision, Mapping)
+                    else None
+                )
+                # The runtime's epoch is the invalidation counter for candidate
+                # proofs.  Gazebo observations may retain the reset epoch while
+                # the host has advanced this counter after real mutations.
+                # Prefer the runtime value so cache lookup and memory capture
+                # bind the same scene version.
+                requested_epoch = (
+                    memory.get("scene_epoch")
+                    if isinstance(memory, Mapping)
+                    else observation_metadata.get("scene_epoch")
+                )
+                if requested_epoch is None:
+                    requested_epoch = observation_metadata.get("scene_epoch")
                 scene_epoch = (
                     _nonnegative_int(requested_epoch, "scene_epoch")
                     if requested_epoch is not None
@@ -257,8 +282,28 @@ def build_compile_placement_seed_handler(
             if qualification_cache is None:
                 raise GraspGeometryError("placement compilation requires a MoveIt PASS proof")
             observation_metadata = context.observation.metadata if context.observation else {}
-            epoch_value = observation_metadata.get("scene_epoch")
-            revision_value = observation_metadata.get("planning_scene_revision")
+            supervision = context.metadata.get("supervision_context")
+            memory = supervision.get("memory") if isinstance(supervision, Mapping) else None
+            placement_policy = (
+                memory.get("placement_candidate_policy")
+                if isinstance(memory, Mapping)
+                else None
+            )
+            # Qualification is keyed by the runtime invalidation epoch, not the
+            # simulator reset epoch carried by an observation.  The retained
+            # placement policy records that host-owned binding alongside the
+            # candidate queue; use it to resolve the exact proof that was
+            # exposed to the planner.
+            epoch_value = (
+                placement_policy.get("scene_epoch")
+                if isinstance(placement_policy, Mapping)
+                else observation_metadata.get("scene_epoch")
+            )
+            revision_value = (
+                placement_policy.get("planning_scene_revision")
+                if isinstance(placement_policy, Mapping)
+                else observation_metadata.get("planning_scene_revision")
+            )
             entry = qualification_cache.resolve(
                 purpose="placement",
                 candidate_id=candidate_id,
@@ -834,6 +879,125 @@ def materialize_world_object_goal(
         "convention": "T_world_object_goal",
     }
     return result
+
+
+def materialize_world_object_goal_from_current_pose(
+    candidate: Mapping[str, Any],
+    *,
+    placement_camera_extrinsics: Mapping[str, Any],
+    object_current_pose: Mapping[str, Any],
+) -> JsonDict:
+    """Bind an AnyPlace point transform before a physical attachment exists."""
+
+    placement = _mapping(
+        candidate.get("object_placement_transform"),
+        "object_placement_transform",
+    )
+    raw = placement.get("transform_matrix")
+    if str(placement.get("frame") or "") != "placement_camera" or not (
+        isinstance(raw, list) and len(raw) == 4
+    ):
+        raise GraspGeometryError("object placement transform is invalid")
+    t_place_goal = [_vector(row, 4, "object_placement_transform") for row in raw]
+    _rotation([row[:3] for row in t_place_goal[:3]], "object_placement_transform")
+    r_world_camera, p_world_camera = _opencv_camera_to_world(
+        placement_camera_extrinsics
+    )
+    t_world_camera = _transform_matrix(r_world_camera, p_world_camera)
+    t_world_object_current = _pose_transform(
+        object_current_pose, "object_current_pose"
+    )
+    object_motion_world = _matmul4(
+        _matmul4(t_world_camera, t_place_goal),
+        _inverse_rigid_transform(t_world_camera),
+    )
+    t_world_object_goal = _matmul4(object_motion_world, t_world_object_current)
+    result = dict(candidate)
+    result["object_goal_pose"] = {
+        "frame": "world",
+        "translation_xyz": _round_vector([row[3] for row in t_world_object_goal[:3]]),
+        "rotation_matrix": _round_matrix([row[:3] for row in t_world_object_goal[:3]]),
+        "convention": "T_world_object_goal",
+    }
+    result["object_motion_world_transform"] = {
+        "frame": "world",
+        "transform_matrix": _round_matrix(object_motion_world),
+        "convention": "T_world_motion_applied_left",
+    }
+    return result
+
+
+def pregrasp_eef_goal_from_object_motion(
+    *,
+    contact_pose: Mapping[str, Any],
+    placement_candidate: Mapping[str, Any],
+) -> JsonDict:
+    """Apply AnyPlace's world rigid motion directly to a candidate contact EEF."""
+
+    motion = _mapping(
+        placement_candidate.get("object_motion_world_transform"),
+        "object_motion_world_transform",
+    )
+    raw = motion.get("transform_matrix")
+    if str(motion.get("frame") or "") != "world" or not (
+        isinstance(raw, list) and len(raw) == 4
+    ):
+        raise GraspGeometryError("pregrasp object motion must be a world 4x4 transform")
+    delta = [_vector(row, 4, "object_motion_world_transform") for row in raw]
+    _rotation([row[:3] for row in delta[:3]], "object_motion_world_transform")
+    if any(abs(a - b) > 1e-6 for a, b in zip(delta[3], [0, 0, 0, 1])):
+        raise GraspGeometryError("pregrasp object motion is not rigid")
+    goal = _matmul4(delta, _pose_transform(contact_pose, "contact_pose"))
+    return {
+        "frame": "world",
+        "translation_xyz": _round_vector([row[3] for row in goal[:3]]),
+        "rotation_matrix": _round_matrix([row[:3] for row in goal[:3]]),
+        "convention": "T_world_eef_goal=Delta_world_object*T_world_eef_contact",
+    }
+
+
+def predicted_attachment_from_grasp(
+    *,
+    contact_pose: Mapping[str, Any],
+    object_current_pose: Mapping[str, Any],
+) -> JsonDict:
+    """Predict T_eef_object for a candidate contact without mutating the scene."""
+
+    t_world_eef = _pose_transform(contact_pose, "contact_pose")
+    t_world_object = _pose_transform(object_current_pose, "object_current_pose")
+    t_eef_object = _matmul4(_inverse_rigid_transform(t_world_eef), t_world_object)
+    rotation = [row[:3] for row in t_eef_object[:3]]
+    return {
+        "schema_version": "openeta.predicted_attachment_transform.v1",
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": _round_vector([row[3] for row in t_eef_object[:3]]),
+        "rotation_matrix": _round_matrix(rotation),
+        "quat_xyzw": _round_vector(_rotation_matrix_quat_xyzw(rotation)),
+        "provenance": "pregrasp_contact_and_measured_object_frame",
+    }
+
+
+def _rotation_matrix_quat_xyzw(rotation: Sequence[Sequence[float]]) -> list[float]:
+    m = [[float(value) for value in row] for row in rotation]
+    trace = m[0][0] + m[1][1] + m[2][2]
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        return [
+            (m[2][1] - m[1][2]) / scale,
+            (m[0][2] - m[2][0]) / scale,
+            (m[1][0] - m[0][1]) / scale,
+            0.25 * scale,
+        ]
+    index = max(range(3), key=lambda item: m[item][item])
+    if index == 0:
+        scale = math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0
+        return [0.25 * scale, (m[0][1] + m[1][0]) / scale, (m[0][2] + m[2][0]) / scale, (m[2][1] - m[1][2]) / scale]
+    if index == 1:
+        scale = math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0
+        return [(m[0][1] + m[1][0]) / scale, 0.25 * scale, (m[1][2] + m[2][1]) / scale, (m[0][2] - m[2][0]) / scale]
+    scale = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0
+    return [(m[0][2] + m[2][0]) / scale, (m[1][2] + m[2][1]) / scale, 0.25 * scale, (m[1][0] - m[0][1]) / scale]
 
 
 def grasp_candidate_approach_world(

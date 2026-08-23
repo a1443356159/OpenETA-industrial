@@ -210,6 +210,9 @@ def test_health_reports_transport_readiness_without_loading_model(
         "model_loaded": False,
         "gripper_count": 2,
         "max_candidates": 10,
+        "exposure_limit": 10,
+        "raw_pool_size": 10,
+        "returned_candidate_count": 0,
     }
 
 

@@ -8,6 +8,7 @@ from extensions.gazebo.native_grasp import (
     Verdict,
     confirm_native_bilateral_contact,
 )
+from extensions.gazebo.direct_env import GazeboDirectEnv
 
 
 def _sample(side: str, stamp: float) -> NativeContactSample:
@@ -91,3 +92,49 @@ def test_transport_retention_does_not_reapply_lift_height_threshold() -> None:
 
     assert lowered.verdict is Verdict.PASS
     assert lowered.evidence["minimum_lift_required"] is False
+
+
+def test_failed_close_allows_only_the_exact_compiled_hover_recovery() -> None:
+    env = object.__new__(GazeboDirectEnv)
+    env._native_grasp_verifier = NativeGraspVerifier()
+    rejected = confirm_native_bilateral_contact(
+        [], close_completed_sim_time_s=10.0, now_monotonic_s=20.0
+    )
+    env._native_grasp_verifier.close_result(rejected, attach_acked=False)
+    env._native_grasp_recovery_hover = {
+        "grasp_stage": "hover",
+        "compiled_grasp_id": "grasp-7",
+        "xyz": [0.1, 0.2, 0.3],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+
+    assert env._is_failed_close_recovery_hover({
+        "action_type": "move_to",
+        "target_pose": dict(env._native_grasp_recovery_hover),
+    })
+    assert not env._is_failed_close_recovery_hover({
+        "action_type": "move_to",
+        "target_pose": {**env._native_grasp_recovery_hover, "xyz": [0.1, 0.2, 0.31]},
+    })
+    assert not env._is_failed_close_recovery_hover({
+        "action_type": "move_to",
+        "target_pose": {**env._native_grasp_recovery_hover, "compiled_grasp_id": "other"},
+    })
+
+    matrix_hover = {
+        "grasp_stage": "hover",
+        "compiled_grasp_id": "grasp-matrix",
+        "xyz": [0.1, 0.2, 0.3],
+        "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+    }
+    env._native_grasp_recovery_hover = matrix_hover
+    assert env._is_failed_close_recovery_hover({
+        "action_type": "move_to", "target_pose": dict(matrix_hover),
+    })
+    assert env._is_failed_close_recovery_hover({
+        "action_type": "move_to",
+        "target_pose": {**matrix_hover, "scene_epoch": 999},
+    })
+    assert env._is_failed_close_recovery_hover({
+        "action_type": "move_to", "parameters": {"target_pose": dict(matrix_hover)},
+    })

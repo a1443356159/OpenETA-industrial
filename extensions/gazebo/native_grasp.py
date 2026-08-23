@@ -22,6 +22,10 @@ PICKPLACE_MODEL_ID = "rm75_robotiq_2f85_pickplace_sim_v1"
 PICKPLACE_DISPLAY_NAME = "Gazebo 仿真环境（原生接触 DetachableJoint 拾放）"
 NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
 PLACEMENT_VERIFICATION_SCHEMA_VERSION = "openeta.gazebo.placement_verification.v1"
+# Native Gazebo poses can straddle an otherwise exact closed boundary by less
+# than one micrometre.  This epsilon is only for floating-point comparison at
+# the configured boundary; it is not added to the configured safety gate.
+_POSE_BOUNDARY_ABS_TOL_M = 1e-6
 
 
 class Verdict(StrEnum):
@@ -127,7 +131,14 @@ class NativePickPlaceConfig(GazeboControlConfig):
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
     placement_stability_duration_s: float = 0.50
     placement_sample_interval_s: float = 0.10
-    placement_terminal_window_s: float = 0.20
+    # Allow detached rigid-body dynamics to settle before the unchanged final
+    # terminal window is judged. This extends observation only; it does not
+    # relax drift, height, footprint, or duration gates.
+    placement_settling_observation_s: float = 1.00
+    # Native pose queries can each take longer than the nominal 100 ms sample
+    # interval. Use the full required stability interval so the terminal drift
+    # proof retains at least two real samples under normal ROS/Gazebo latency.
+    placement_terminal_window_s: float = 0.50
     maximum_placement_terminal_drift_m: float = 0.005
     placement_center_height_m: float = 0.43
     placement_center_height_tolerance_m: float = 0.01
@@ -185,7 +196,6 @@ def verify_stable_placement(
         return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE)
 
     ordered = sorted(samples, key=lambda sample: sample.monotonic_s)
-    duration_s = ordered[-1].monotonic_s - ordered[0].monotonic_s
     final = ordered[-1]
     radius_m = math.hypot(cfg.target_size_m[0], cfg.target_size_m[1]) / 2.0
     half_x = cfg.destination_size_xy_m[0] / 2.0
@@ -198,10 +208,24 @@ def verify_stable_placement(
         for sample in ordered
         if final.monotonic_s - sample.monotonic_s <= cfg.placement_terminal_window_s + 1e-9
     ]
+    # Pose queries are discrete and can take longer than the requested sample
+    # interval. Include the immediately preceding real sample when needed to
+    # prove at least the full stability duration. This makes the drift window
+    # longer (and therefore stricter), never shorter than the configured gate.
+    if (
+        len(ordered) >= 3
+        and terminal
+        and terminal[-1].monotonic_s - terminal[0].monotonic_s
+        < cfg.placement_stability_duration_s
+    ):
+        terminal_start = ordered.index(terminal[0])
+        if terminal_start > 0:
+            terminal = [ordered[terminal_start - 1], *terminal]
+    stable_duration_s = terminal[-1].monotonic_s - terminal[0].monotonic_s
     terminal_drift_m = max(math.dist(sample.xyz, final.xyz) for sample in terminal)
     evidence = {
         "sample_count": len(ordered),
-        "stable_duration_s": duration_s,
+        "stable_duration_s": stable_duration_s,
         "terminal_window_s": cfg.placement_terminal_window_s,
         "terminal_drift_m": terminal_drift_m,
         "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
@@ -218,15 +242,20 @@ def verify_stable_placement(
         "conservative_footprint_radius_m": radius_m,
         "footprint_margin_xy_m": [x_margin_m, y_margin_m],
     }
-    if duration_s + 1e-9 < cfg.placement_stability_duration_s:
+    if len(terminal) < 2:
+        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE, evidence)
+    if stable_duration_s + 1e-9 < cfg.placement_stability_duration_s:
         return PlacementVerification(
             Verdict.UNKNOWN, PlacementReasonCode.OBSERVATION_TOO_SHORT, evidence
         )
-    if len(terminal) < 2:
-        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE, evidence)
     if terminal_drift_m > cfg.maximum_placement_terminal_drift_m:
         return PlacementVerification(Verdict.FAIL, PlacementReasonCode.TERMINAL_DRIFT, evidence)
-    if height_error_m > cfg.placement_center_height_tolerance_m:
+    if height_error_m > cfg.placement_center_height_tolerance_m and not math.isclose(
+        height_error_m,
+        cfg.placement_center_height_tolerance_m,
+        rel_tol=0.0,
+        abs_tol=_POSE_BOUNDARY_ABS_TOL_M,
+    ):
         return PlacementVerification(
             Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
         )

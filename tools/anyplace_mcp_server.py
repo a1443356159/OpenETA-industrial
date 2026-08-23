@@ -17,8 +17,10 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from tools.anyplace_core import AnyPlaceBackend  # noqa: E402
 from tools.candidate_config import (  # noqa: E402
+    DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     DEFAULT_CANDIDATE_COUNT,
     argparse_candidate_count,
+    argparse_raw_pool_size,
 )
 
 
@@ -112,6 +114,11 @@ def main() -> int:
         type=argparse_candidate_count,
         default=DEFAULT_CANDIDATE_COUNT,
     )
+    parser.add_argument(
+        "--raw-pool-size",
+        type=argparse_raw_pool_size(placement=True),
+        default=DEFAULT_ANYPLACE_RAW_POOL_SIZE,
+    )
     args = parser.parse_args()
 
     anyplace_root = Path(args.anyplace_root)
@@ -125,6 +132,7 @@ def main() -> int:
         anyplace_root=anyplace_root,
         config_path=config_path,
         candidate_count=args.candidate_count,
+        raw_pool_size=args.raw_pool_size,
     )
 
     if args.transport == "stdio":
@@ -143,6 +151,9 @@ def main() -> int:
                 "ok": True,
                 "server": "anyplace",
                 "candidate_count": _BACKEND.candidate_count,
+                "exposure_limit": _BACKEND.candidate_count,
+                "raw_pool_size": _BACKEND.raw_pool_size,
+                "returned_candidate_count": _BACKEND.last_returned_candidate_count,
             }
         )
 

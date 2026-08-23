@@ -18,7 +18,6 @@ from tools.anyplace_core import (
     build_masked_pointcloud_from_rgbd,
     normalise_placement_candidates,
     pad_pointcloud_for_model,
-    _project_object_bottoms_to_support,
     _configure_cuda_extension_environment,
     validate_intrinsics,
     validate_pointcloud_array,
@@ -136,19 +135,6 @@ def test_normalise_candidates_returns_only_object_transforms() -> None:
     assert "place_grasp_pose" not in candidates[0]
 
 
-def test_project_object_bottoms_to_measured_support() -> None:
-    transforms = np.tile(np.eye(4), (2, 1, 1))
-    transforms[:, 2, 3] = [0.8, 1.2]
-    adjusted = _project_object_bottoms_to_support(
-        transforms,
-        object_points=np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.1]]),
-        support_points=np.array([[0.0, 0.0, 0.4], [0.1, 0.0, 0.4]]),
-        np=np,
-    )
-
-    assert adjusted[:, 2, 3] == pytest.approx([0.398, 0.398])
-
-
 @pytest.mark.parametrize("raw", [[], np.eye(4), np.tile(np.eye(4), (9, 1, 1))])
 def test_normalise_candidates_checks_dynamic_count(raw) -> None:
     _reason(
@@ -203,8 +189,8 @@ def test_backend_uses_gravity_aligned_model_frame_and_restores_camera_output(
 
     assert result["success"] is True
     assert captured["placement_region_pcd"][0, 2] == pytest.approx(0.5)
-    # Bottom-on-support projection removes the model's unsupported vertical offset.
-    assert result["details"]["placement_candidates"][0]["object_placement_transform"]["transform_matrix"][2][3] == pytest.approx(0.0)
+    # Preserve the model's complete SE(3); downstream qualification decides feasibility.
+    assert result["details"]["placement_candidates"][0]["object_placement_transform"]["transform_matrix"][2][3] == pytest.approx(-0.1)
     assert result["details"]["metadata"]["model_frame"] == "world_gravity_aligned"
 
 

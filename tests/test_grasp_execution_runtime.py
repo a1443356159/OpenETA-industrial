@@ -198,6 +198,64 @@ def test_zero_moveit_pass_reestimates_same_grasp_backend_with_fresh_observation(
     assert reestimate["attempt_count"] == 1
 
 
+def test_pregrasp_zero_pass_reestimates_object_not_placement_region() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block and place it in the green zone")
+    memory.add_observation(
+        EnvObservation(task="pick and place", cameras=[], robot=RobotState())
+    )
+    memory.save_fact(
+        "placement_object_detection",
+        {"target_prompt": "red block"},
+        source="test",
+    )
+    memory.save_fact(
+        "placement_region_detection",
+        {"target_prompt": "green placement_zone_marker"},
+        source="test",
+    )
+    memory.save_fact(
+        "selected_sam3_detection",
+        {"target_prompt": "green placement_zone_marker"},
+        source="test",
+    )
+    memory.save_fact(
+        "pregrasp_placement_goal_pool",
+        {"status": "ready", "goal_count": 96},
+        source="test",
+    )
+
+    outputs = {
+        "result_id": "g0",
+        "selected_backend": "graspgenx",
+        "source_rgb": "fresh-grasp.png",
+        "camera_frame_id": "top",
+        "source": {"rgb": "fresh-grasp.png", "camera_frame_id": "top"},
+        "grasp_candidates": [],
+        "generated_candidate_count": 10,
+        "qualification_evidence": {"results": []},
+    }
+    memory.add_action(_tool_action("grasp_pose_estimate", {}, outputs=outputs))
+
+    assert memory.grasp_reestimation()["target_prompt"] == "red block"
+    assert memory.grasp_reestimation()["attempt_count"] == 1
+
+    memory.add_observation(
+        EnvObservation(task="pick and place", cameras=[], robot=RobotState())
+    )
+    memory.add_action(_tool_action("grasp_pose_estimate", {}, outputs=outputs))
+    assert memory.grasp_reestimation()["attempt_count"] == 2
+
+    memory.add_observation(
+        EnvObservation(task="pick and place", cameras=[], robot=RobotState())
+    )
+    memory.add_action(_tool_action("grasp_pose_estimate", {}, outputs=outputs))
+    assert memory.grasp_reestimation() is None
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "stopped_requires_human"
+    assert policy["zero_pass_reestimate_attempt_count"] == 3
+
+
 def _tool_action(
     name: str,
     parameters: dict,
@@ -262,6 +320,44 @@ def test_single_post_attach_placement_region_is_retained_without_vlm_mask_copy()
     assert region["selection_source"] == "host_single_detection"
     # The raw result is still retained for auditable visual selection semantics.
     assert memory.pending_sam3_selection() is not None
+
+
+def test_single_placement_region_clears_object_detection_from_stale_image() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cube and place it in green marker")
+    memory.save_fact(
+        "attachment_gate",
+        {"status": "resolved", "verdict": "PASS", "planning_scene_revision": 2},
+        source="test",
+    )
+    memory.save_fact(
+        "placement_object_detection",
+        {
+            "id": "old-object",
+            "mask_ref": "tmp/old-object-mask.png",
+            "source_image": "tmp/pre-attach-rgb.png",
+        },
+        source="test",
+    )
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": "tmp/post-attach-rgb.png", "prompt": "green placement_zone_marker"},
+            outputs={
+                "result_id": "post-attach-region",
+                "prompt": "green placement_zone_marker",
+                "source_image": "tmp/post-attach-rgb.png",
+                "frame_id": "top_camera",
+                "selection_required": False,
+                "detections": [
+                    {"id": "detection_000", "mask_ref": "tmp/post-attach-region.png"}
+                ],
+            },
+        )
+    )
+
+    assert memory.placement_region_detection()["source_image"] == "tmp/post-attach-rgb.png"
+    assert memory.placement_object_detection() is None
 
 
 def test_empty_wrist_fallback_accepts_sam3_source_camera_role() -> None:
@@ -676,7 +772,7 @@ def test_exhausted_motion_candidate_queue_requires_fresh_reestimation() -> None:
     assert memory.grasp_recovery()["status"] == "required"
 
 
-def test_failed_descend_returns_to_recorded_source_before_reobservation() -> None:
+def test_failed_descend_returns_to_compiled_hover_before_reobservation() -> None:
     memory = _memory_with_candidates()
     policy = memory.grasp_candidate_policy()
     policy["candidates"] = [policy["active_candidate"]]
@@ -729,7 +825,8 @@ def test_failed_descend_returns_to_recorded_source_before_reobservation() -> Non
     assert recovery["stage"] == "source_return"
     source_return = recovery["required_action"]
     assert source_return["name"] == "move_to"
-    assert source_return["parameters"]["target_pose"]["xyz"] == source_pose["xyz"]
+    assert source_return["parameters"]["target_pose"]["xyz"] == compiled["hover_pose"]["xyz"]
+    assert source_return["parameters"]["target_pose"]["frame"] == "world"
     assert memory.grasp_candidate_gate_error(
         tool_name="move_to", parameters=source_return["parameters"]
     ) is None
@@ -1449,6 +1546,7 @@ def test_known_failed_host_close_rejects_candidate_without_repeating() -> None:
 
 def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None:
     memory = _memory_with_candidates()
+    compiled = _compiled(memory)
     policy = memory.grasp_candidate_policy()
     policy.update(
         {
@@ -1468,6 +1566,7 @@ def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None
             "status": "required",
             "stage": "close",
             "candidate_id": "grasp_000",
+            "compiled_grasp": compiled,
             "required_action": {
                 "name": "gripper_control",
                 "parameters": {"position": 0},
@@ -1491,10 +1590,26 @@ def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None
     assert updated["reestimate_required"]["reason"] == (
         "moveit_qualification_scene_changed"
     )
-    assert memory.grasp_recovery()["required_action"] == {
-        "name": "observe",
-        "parameters": {},
+    recovery = memory.grasp_recovery()
+    assert recovery["stage"] == "source_return"
+    assert recovery["required_action"]["name"] == "move_to"
+    target_pose = recovery["required_action"]["parameters"]["target_pose"]
+    assert target_pose["xyz"] == compiled["hover_pose"]["xyz"]
+    assert target_pose["rotation_matrix"] == compiled["hover_pose"]["rotation_matrix"]
+    assert target_pose["grasp_stage"] == "hover"
+    assert target_pose["grasp_recovery_stage"] == "source_return"
+
+    memory.add_action(_tool_action("move_to", recovery["required_action"]["parameters"]))
+    recovery = memory.grasp_recovery()
+    assert recovery["stage"] == "reopen"
+    assert recovery["required_action"] == {
+        "name": "gripper_control",
+        "parameters": {"position": 1},
     }
+    memory.add_action(_tool_action("gripper_control", {"position": 1}))
+    recovery = memory.grasp_recovery()
+    assert recovery["stage"] == "observe"
+    assert recovery["required_action"] == {"name": "observe", "parameters": {}}
 
 
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:

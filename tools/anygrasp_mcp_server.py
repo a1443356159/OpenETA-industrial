@@ -15,7 +15,12 @@ if str(REPO_ROOT) not in sys.path:
 from mcp.server.fastmcp import FastMCP
 
 from tools.anygrasp_core import AnyGraspBackend
-from tools.candidate_config import DEFAULT_CANDIDATE_COUNT, argparse_candidate_count
+from tools.candidate_config import (
+    DEFAULT_CANDIDATE_COUNT,
+    DEFAULT_GRASP_RAW_POOL_SIZE,
+    argparse_candidate_count,
+    argparse_raw_pool_size,
+)
 
 
 mcp = FastMCP("anygrasp", log_level="WARNING")
@@ -146,6 +151,11 @@ def main() -> int:
         type=argparse_candidate_count,
         default=DEFAULT_CANDIDATE_COUNT,
     )
+    parser.add_argument(
+        "--raw-pool-size",
+        type=argparse_raw_pool_size(),
+        default=DEFAULT_GRASP_RAW_POOL_SIZE,
+    )
     args = parser.parse_args()
 
     _BACKEND = AnyGraspBackend(
@@ -155,6 +165,7 @@ def main() -> int:
         gripper_height=args.gripper_height,
         depth_truncation=args.depth_truncation,
         max_candidates=args.max_candidates,
+        raw_pool_size=args.raw_pool_size,
     )
 
     if args.transport == "stdio":
@@ -173,6 +184,9 @@ def main() -> int:
                 "ok": True,
                 "server": "anygrasp",
                 "max_candidates": _BACKEND.max_candidates,
+                "exposure_limit": _BACKEND.max_candidates,
+                "raw_pool_size": _BACKEND.raw_pool_size,
+                "returned_candidate_count": _BACKEND.last_returned_candidate_count,
             }
         )
 

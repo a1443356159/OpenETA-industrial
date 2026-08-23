@@ -678,6 +678,35 @@ class SimulatorMcpToolProxy:
     def _move_to_arguments(self, parameters: JsonDict) -> JsonDict:
         x, y, z = _extract_xyz(parameters, tool_name="move_to")
         arguments: JsonDict = {"x": x, "y": y, "z": z}
+        # ``move_to`` is encoded for the generic simulator transport as
+        # x/y/z plus an orientation.  Keep the remaining, non-kinematic pose
+        # identity in a separate envelope so a backend can prove that a
+        # requested withdrawal is the exact host-compiled pose that preceded
+        # a failed grasp close.  The transport owns x/y/z/quaternion and will
+        # never let this envelope alter the commanded motion.
+        pose = (
+            parameters.get("target_pose")
+            or parameters.get("pose")
+            or parameters.get("eef_pose")
+        )
+        if isinstance(pose, dict):
+            provenance = {
+                key: value
+                for key, value in pose.items()
+                if key
+                not in {
+                    "x",
+                    "y",
+                    "z",
+                    "xyz",
+                    "position",
+                    "translation_xyz",
+                    "quat_xyzw",
+                    "euler_xyz_deg",
+                }
+            }
+            if provenance:
+                arguments["motion_provenance"] = provenance
         if "speed" in parameters:
             raise ValueError(
                 "move_to `speed` is unsupported by the simulator MCP; "

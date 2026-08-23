@@ -20,6 +20,7 @@ from agent.tools.grasp_geometry import (
     compute_wrist_alignment,
     grasp_refinement_hover_pose,
     materialize_world_object_goal,
+    pregrasp_eef_goal_from_object_motion,
     qualification_grasp_pose_chain,
 )
 from agent.tools.registry import ToolExecutionContext, build_default_tool_registry
@@ -55,6 +56,30 @@ def _compile_parameters() -> dict:
         "target_class": "upright_can",
         "scene_epoch": 0,
     }
+
+
+def test_pregrasp_eef_goal_applies_world_object_motion_to_contact_pose() -> None:
+    goal = pregrasp_eef_goal_from_object_motion(
+        contact_pose={
+            "frame": "world",
+            "xyz": [0.30, -0.10, 0.45],
+            "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+        },
+        placement_candidate={
+            "object_motion_world_transform": {
+                "frame": "world",
+                "transform_matrix": [
+                    [1, 0, 0, 0.20],
+                    [0, 1, 0, 0.05],
+                    [0, 0, 1, 0.00],
+                    [0, 0, 0, 1.00],
+                ],
+            }
+        },
+    )
+
+    assert goal["translation_xyz"] == pytest.approx([0.50, -0.05, 0.45])
+    assert goal["rotation_matrix"] == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 
 
 def test_compile_grasp_seed_applies_camera_and_eef_transforms() -> None:
@@ -310,7 +335,11 @@ def _qualified_placement_handler_fixture(*, joint_positions=None, attachment_x=0
     ).hexdigest()
 
     class Cache:
-        def resolve(self, **_kwargs):
+        def __init__(self):
+            self.calls = []
+
+        def resolve(self, **kwargs):
+            self.calls.append(kwargs)
             return {
                 "candidate": candidate,
                 "proof": {"compile_parameters": parameters},
@@ -333,16 +362,21 @@ def _qualified_placement_handler_fixture(*, joint_positions=None, attachment_x=0
                 "memory": {
                     "attachment_gate": {
                         "full_lift_proof": {"attachment_transform": attachment}
-                    }
+                    },
+                    "placement_candidate_policy": {
+                        "scene_epoch": 4,
+                        "planning_scene_revision": 2,
+                    },
                 }
             }
         },
     )
-    return build_compile_placement_seed_handler(qualification_cache=Cache()), context
+    cache = Cache()
+    return build_compile_placement_seed_handler(qualification_cache=cache), context, cache
 
 
 def test_compile_placement_handler_rejects_changed_start_state() -> None:
-    handler, context = _qualified_placement_handler_fixture()
+    handler, context, _cache = _qualified_placement_handler_fixture()
     context.observation.robot.joint_positions[0] += 0.01
 
     result = handler(context)
@@ -352,7 +386,7 @@ def test_compile_placement_handler_rejects_changed_start_state() -> None:
 
 
 def test_compile_placement_handler_rejects_changed_attachment_transform() -> None:
-    handler, context = _qualified_placement_handler_fixture()
+    handler, context, _cache = _qualified_placement_handler_fixture()
     context.metadata["supervision_context"]["memory"]["attachment_gate"][
         "full_lift_proof"
     ]["attachment_transform"]["translation_xyz"][0] += 0.01
@@ -361,6 +395,24 @@ def test_compile_placement_handler_rejects_changed_attachment_transform() -> Non
 
     assert result.success is False
     assert "attachment transform is stale" in result.content
+
+
+def test_compile_placement_handler_uses_retained_runtime_epoch_not_reset_epoch() -> None:
+    handler, context, cache = _qualified_placement_handler_fixture()
+    context.observation.metadata["scene_epoch"] = 1
+    context.observation.metadata["planning_scene_revision"] = 99
+
+    result = handler(context)
+
+    assert result.success is True
+    assert cache.calls == [
+        {
+            "purpose": "placement",
+            "candidate_id": "placement_000",
+            "scene_epoch": 4,
+            "planning_scene_revision": 2,
+        }
+    ]
 
 
 def test_normalized_opencv_and_legacy_opengl_extrinsics_are_equivalent() -> None:
@@ -663,6 +715,61 @@ def test_qualified_compile_uses_host_observation_scene_identity() -> None:
             "planning_scene_revision": 7,
         }
     ]
+
+
+def test_qualified_compile_recovers_selector_from_complete_candidate() -> None:
+    calls = []
+
+    class Cache:
+        def resolve(self, **kwargs):
+            calls.append(kwargs)
+            return None
+
+    spec = build_default_tool_registry().get("compile_grasp_seed")
+    result = build_compile_grasp_seed_handler(qualification_cache=Cache())(
+        ToolExecutionContext(
+            name="compile_grasp_seed",
+            spec=spec,
+            parameters={"camera_pose": {"id": "g-pass-0"}},
+        )
+    )
+
+    assert result.success is False
+    assert calls == [
+        {
+            "purpose": "grasp",
+            "candidate_id": "g-pass-0",
+            "scene_epoch": None,
+            "planning_scene_revision": None,
+        }
+    ]
+
+
+def test_qualified_compile_prefers_runtime_invalidation_epoch() -> None:
+    calls = []
+
+    class Cache:
+        def resolve(self, **kwargs):
+            calls.append(kwargs)
+            return None
+
+    spec = build_default_tool_registry().get("compile_grasp_seed")
+    build_compile_grasp_seed_handler(qualification_cache=Cache())(
+        ToolExecutionContext(
+            name="compile_grasp_seed",
+            spec=spec,
+            parameters={"grasp_candidate_id": "g-pass-0"},
+            observation=EnvObservation(
+                task="test",
+                cameras=[],
+                robot=RobotState(),
+                metadata={"scene_epoch": 1},
+            ),
+            metadata={"supervision_context": {"memory": {"scene_epoch": 7}}},
+        )
+    )
+
+    assert calls[0]["scene_epoch"] == 7
 
 
 def test_final_refinable_candidate_bypasses_only_strategy_filter() -> None:
