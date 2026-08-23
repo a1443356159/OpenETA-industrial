@@ -82,7 +82,7 @@ def test_anyplace_mcp_docstring_describes_input_semantics() -> None:
     assert "no grasp candidate" in flat_docstring
     assert "calibrated rigid transform" in flat_docstring
     assert "OpenCV camera frames" in flat_docstring
-    assert "configured number" in flat_docstring
+    assert "configured reserve" in flat_docstring
     assert "object_placement_transform" in docstring
 
 

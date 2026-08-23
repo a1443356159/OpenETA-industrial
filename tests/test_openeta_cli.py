@@ -739,10 +739,19 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
                     "tool": "anyplace",
                     "backend": "anyplace_mcp",
                     "model": "anyplace_multitask",
-                    "frame": "placement_camera",
-                    "camera_frame": "opencv",
-                    "candidate_count": 10,
-                    "placement_candidates": candidates,
+                        "frame": "placement_camera",
+                        "camera_frame": "opencv",
+                        "candidate_count": 10,
+                        "object_current_pose": {
+                            "frame": "placement_camera",
+                            "translation_xyz": [0.0, 0.0, 0.5],
+                            "rotation_matrix": [
+                                [1.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                                [0.0, 0.0, 1.0],
+                            ],
+                        },
+                        "placement_candidates": candidates,
                     "metadata": {},
                 },
             }

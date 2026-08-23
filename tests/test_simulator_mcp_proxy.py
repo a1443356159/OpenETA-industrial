@@ -936,8 +936,10 @@ def test_move_to_preserves_orientation_for_uncalibrated_grasp_deployment() -> No
             "tolerance",
             "ori_tolerance",
             "enable_collision_check",
+            "motion_provenance",
         }
     )
+    assert arguments["motion_provenance"]["id"] == "grasp_003"
     assert {
         "candidate_id",
         "approach_x",
