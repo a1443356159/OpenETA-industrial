@@ -518,6 +518,7 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
 ) -> None:
     class MultiDrawBackend(_FakeBackend):
         calls = 0
+        planners: list[str] = []
 
         def _get_loaded_backend(self) -> dict[str, Any]:
             loaded = super()._get_loaded_backend()
@@ -526,7 +527,13 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
 
         def _run_planner(self, **kwargs: Any) -> tuple[Any, Any, Any]:
             self.calls += 1
-            return super()._run_planner(**kwargs)
+            planner = str(kwargs["planner"])
+            self.planners.append(planner)
+            grasps, scores, tags = super()._run_planner(**kwargs)
+            if planner == "diffusion":
+                selected = [index for index, tag in enumerate(tags) if tag == "diff"]
+                return grasps[selected], scores[selected], [tags[index] for index in selected]
+            return grasps, scores, tags
 
     source, checkpoints, grippers = _backend_layout(tmp_path)
     backend = MultiDrawBackend(
@@ -544,12 +551,18 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
 
     assert result["success"] is True
     assert backend.calls == MODEL_INFERENCE_DRAWS
-    assert result["details"]["model_raw_candidate_count"] == (
-        3 * MODEL_INFERENCE_DRAWS
-    )
+    assert backend.planners == ["graspmoe", "diffusion", "diffusion", "diffusion"]
+    assert result["details"]["model_raw_candidate_count"] == 9
     assert result["details"]["metadata"]["model_inference_draw_count"] == (
         MODEL_INFERENCE_DRAWS
     )
+    assert result["details"]["metadata"]["graspmoe_draw_count"] == 1
+    assert result["details"]["metadata"]["diffusion_only_draw_count"] == 3
+    assert (
+        result["details"]["metadata"]["deterministic_obb_reuse_policy"]
+        == "single_full_draw"
+    )
+    assert result["details"]["metadata"]["obb_candidate_count"] == 1
     # Repeated identical candidates remain one formal SE(3) mode per pose.
     assert result["details"]["candidate_count"] == 3
 

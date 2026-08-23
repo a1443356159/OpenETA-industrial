@@ -41,9 +41,10 @@ MAX_RETURNED_CANDIDATES = 20
 NUM_GRASPS = 200
 # GraspGenX diffusion is intentionally stochastic.  One model draw often
 # returns many near-duplicate top grasps while omitting the side/oblique mode
-# that the RM75 can reach.  Union several independent draws before scene
-# collision filtering and SE(3) diversity selection.  This grows only the
-# model-internal pool; the public reserve and VLM exposure limits are unchanged.
+# that the RM75 can reach.  Union several independent diffusion draws before
+# scene collision filtering and SE(3) diversity selection.  The deterministic
+# OBB branch is generated only with the first full GraspMoE draw; repeating it
+# for every stochastic draw adds duplicate work without adding grasp modes.
 MODEL_INFERENCE_DRAWS = 4
 MOE_NUM_YAWS = 36
 MOE_Z_OFFSETS_CM = (-2.0, 0.0)
@@ -817,12 +818,17 @@ class GraspGenXBackend:
             inference_draw_count = (
                 MODEL_INFERENCE_DRAWS if loaded.get("torch") is not None else 1
             )
-            for _draw_index in range(inference_draw_count):
+            planners = [
+                PLANNER if draw_index == 0 else "diffusion"
+                for draw_index in range(inference_draw_count)
+            ]
+            for planner in planners:
                 planner_outputs.append(
                     self._run_planner(
                         loaded=loaded,
                         sampler_entry=sampler_entry,
                         object_points_aligned=object_points_aligned,
+                        planner=planner,
                     )
                 )
             np, _Image = _load_image_dependencies()
@@ -836,6 +842,9 @@ class GraspGenXBackend:
                 str(tag) for output in planner_outputs for tag in output[2]
             ]
             metadata["model_inference_draw_count"] = inference_draw_count
+            metadata["graspmoe_draw_count"] = planners.count(PLANNER)
+            metadata["diffusion_only_draw_count"] = planners.count("diffusion")
+            metadata["deterministic_obb_reuse_policy"] = "single_full_draw"
         except Exception as exc:  # noqa: BLE001 - third-party inference boundary.
             return failure_result(
                 reason="model_inference_failed",
@@ -1017,6 +1026,7 @@ class GraspGenXBackend:
         loaded: dict[str, Any],
         sampler_entry: dict[str, Any],
         object_points_aligned: Any,
+        planner: str = PLANNER,
     ) -> tuple[Any, Any, Any]:
         torch = loaded["torch"]
         with (
@@ -1027,7 +1037,7 @@ class GraspGenXBackend:
             grasps, scores, tags, _obb = loaded["run_planner"](
                 object_points_aligned,
                 sampler_entry["sampler"],
-                planner=PLANNER,
+                planner=planner,
                 grasp_threshold=-1.0,
                 num_grasps=NUM_GRASPS,
                 topk_num_grasps=-1,
