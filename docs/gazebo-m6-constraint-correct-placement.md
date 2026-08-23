@@ -57,8 +57,8 @@ Candidate accounting is explicit from `model_raw_candidate_count` and
 collision IK, endpoint, full-plan, and qualification counts.
 `generated_candidate_count` aliases the returned raw pool,
 `submitted_candidate_count` aliases full-plan submissions, and
-`qualified_candidate_count`/`candidate_count` count PASS candidates exposed to
-the VLM.
+`candidate_count == full_plan_pass_count` counts the complete stored PASS queue;
+there is no separate exposure subset.
 
 ## Motion and scene constraints
 

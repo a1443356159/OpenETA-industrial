@@ -1117,7 +1117,7 @@ def test_graspgenx_memory_preserves_formal_counts_without_post_moveit_reordering
                 "raw_candidate_count": 100,
                 "generated_candidate_count": 10,
                 "submitted_candidate_count": 10,
-                "qualified_candidate_count": 5,
+                "full_plan_pass_count": 5,
                 "grasp_candidates": candidates,
             },
         )
@@ -1138,7 +1138,8 @@ def test_graspgenx_memory_preserves_formal_counts_without_post_moveit_reordering
     assert policy["raw_candidate_count"] == 100
     assert policy["generated_candidate_count"] == 10
     assert policy["submitted_candidate_count"] == 10
-    assert policy["qualified_candidate_count"] == 5
+    assert policy["full_plan_pass_count"] == 5
+    assert "qualified_candidate_count" not in policy
 
 
 def test_selected_mask_geometry_becomes_task_strategy_compile_hint() -> None:

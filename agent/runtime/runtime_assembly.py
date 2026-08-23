@@ -1505,7 +1505,7 @@ class _PregraspGraspPlaceCoordinator:
         )
         result.details["grasp_candidates"] = grasps
         result.details["candidate_count"] = len(grasps)
-        result.details["qualified_candidate_count"] = len(grasps)
+        result.details["full_plan_pass_count"] = len(grasps)
         result.details["selection_required"] = bool(grasps)
         result.details["pregrasp_joint_qualified_grasp_count"] = len(grasps)
         return result

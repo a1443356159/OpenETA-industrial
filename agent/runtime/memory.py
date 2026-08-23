@@ -2092,12 +2092,20 @@ class AgentMemory:
                 and submitted_count_value >= 0
                 else generated_candidate_count
             )
-            qualified_count_value = outputs.get("qualified_candidate_count")
-            qualified_candidate_count = (
-                qualified_count_value
-                if isinstance(qualified_count_value, int)
-                and not isinstance(qualified_count_value, bool)
-                and qualified_count_value >= 0
+            full_plan_pass_value = outputs.get("full_plan_pass_count")
+            if not (
+                isinstance(full_plan_pass_value, int)
+                and not isinstance(full_plan_pass_value, bool)
+                and full_plan_pass_value >= 0
+            ):
+                # Read old traces without emitting the retired alias in new
+                # policy state.
+                full_plan_pass_value = outputs.get("qualified_candidate_count")
+            full_plan_pass_count = (
+                full_plan_pass_value
+                if isinstance(full_plan_pass_value, int)
+                and not isinstance(full_plan_pass_value, bool)
+                and full_plan_pass_value >= 0
                 else len(raw_candidates)
             )
             if not raw_candidates:
@@ -2113,7 +2121,7 @@ class AgentMemory:
                         "raw_candidate_count": raw_candidate_count,
                         "generated_candidate_count": generated_candidate_count,
                         "submitted_candidate_count": submitted_candidate_count,
-                        "qualified_candidate_count": qualified_candidate_count,
+                        "full_plan_pass_count": full_plan_pass_count,
                         "active_rank": None,
                         "active_candidate": None,
                         "remaining_candidate_ids": [],
@@ -2309,7 +2317,7 @@ class AgentMemory:
                 "raw_candidate_count": raw_candidate_count,
                 "generated_candidate_count": generated_candidate_count,
                 "submitted_candidate_count": submitted_candidate_count,
-                "qualified_candidate_count": qualified_candidate_count,
+                "full_plan_pass_count": full_plan_pass_count,
                 "active_rank": 0 if candidates and not selection_required else None,
                 "active_candidate": (
                     candidates[0] if candidates and not selection_required else None

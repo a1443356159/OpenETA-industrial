@@ -349,15 +349,26 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             errors.append("AnyPlace model raw pool evidence is missing")
         if not any(1 <= value <= 4 for value in base._values(anyplace, "full_plan_submitted_count") if isinstance(value, int)):
             errors.append("AnyPlace full-plan submission bound is missing")
-        qualified_counts = [
+        candidate_counts = [
             int(value)
-            for value in base._values(anyplace, "qualified_candidate_count")
+            for value in base._values(anyplace, "candidate_count")
             if isinstance(value, int) and not isinstance(value, bool)
         ]
-        if not qualified_counts or qualified_counts[-1] < 1:
-            errors.append("final AnyPlace result exposed no MoveIt PASS candidate")
+        full_plan_pass_counts = [
+            int(value)
+            for value in base._values(anyplace, "full_plan_pass_count")
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        if not candidate_counts or candidate_counts[-1] < 1:
+            errors.append("final AnyPlace result stored no MoveIt PASS candidate")
+        if (
+            not full_plan_pass_counts
+            or not candidate_counts
+            or full_plan_pass_counts[-1] != candidate_counts[-1]
+        ):
+            errors.append("AnyPlace candidate_count/full_plan_pass_count mismatch")
         if not candidate_ids:
-            errors.append("AnyPlace exposed no MoveIt PASS placement candidate")
+            errors.append("AnyPlace stored no MoveIt PASS placement candidate")
         for legacy_key in ("selected_grasp", "source_grasp_id", "place_grasp_pose"):
             if base._contains(anyplace, legacy_key):
                 errors.append(f"AnyPlace leaked forbidden grasp-coupled field: {legacy_key}")
