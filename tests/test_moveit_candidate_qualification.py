@@ -198,6 +198,47 @@ def test_engine_fail_closed_outcomes(override, verdict, reason):
         assert result["stages"][0]["collision_pairs"] == [["table", "wrist"]]
 
 
+def test_collision_ik_tries_later_seed_after_first_solution_is_in_collision():
+    collision_starts = []
+
+    def compute_ik(target, start, collision):
+        del target
+        if not collision:
+            return {
+                "ok": True,
+                "joint_state": {"names": ["j1"], "positions": [1.0]},
+            }
+        collision_starts.append(list(start["positions"]))
+        solution = [1.0] if start["positions"] == [1.0] else [2.0]
+        return {
+            "ok": True,
+            "joint_state": {"names": ["j1"], "positions": solution},
+        }
+
+    def state_validity(state):
+        valid = state["positions"] == [2.0]
+        return {
+            "valid": valid,
+            "collision_pairs": [] if valid else [["table", "wrist"]],
+        }
+
+    candidate = {"id": "g0", "qualification_stages": [{"name": "hover"}]}
+    result = _engine(
+        compute_ik=compute_ik,
+        check_state_validity=state_validity,
+    ).qualify(_request(candidate))["results"][0]
+
+    assert result["verdict"] == "PASS"
+    stage = result["stages"][0]
+    assert stage["pure_state_valid"] is False
+    assert stage["state_valid"] is True
+    assert collision_starts[:2] == [[1.0], [0.0]]
+    assert [attempt["state_valid"] for attempt in stage["collision_ik_attempts"]] == [
+        False,
+        True,
+    ]
+
+
 def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
     cache = QualificationCache()
 

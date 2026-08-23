@@ -50,6 +50,27 @@ def _hash(value: object) -> str:
     ).hexdigest()
 
 
+def _unique_joint_state_seeds(
+    values: Sequence[Mapping[str, Any]], *, limit: int
+) -> list[JsonDict]:
+    seeds: list[JsonDict] = []
+    identities: set[str] = set()
+    for value in values:
+        identity = _hash(
+            {
+                "names": list(value.get("names") or []),
+                "positions": list(value.get("positions") or []),
+            }
+        )
+        if identity in identities:
+            continue
+        identities.add(identity)
+        seeds.append(dict(value))
+        if len(seeds) >= max(1, limit):
+            break
+    return seeds
+
+
 @dataclass(slots=True)
 class QualificationCache:
     """Runtime-owned binding from a qualified id to its unmodified geometry."""
@@ -1393,42 +1414,58 @@ class MoveItQualificationEngine:
                     )
                 validity = dict(self.check_state_validity(validity_state))
             except TimeoutError:
-                return self._unknown(base, evidence, "state_validity_timeout")
+                evidence["pure_state_valid"] = None
+                evidence["pure_state_validity_error"] = "state_validity_timeout"
             except Exception as exc:  # noqa: BLE001
-                return self._unknown(base, evidence, "state_validity_service_error", exc)
-            evidence["state_valid"] = validity.get("valid") is True
-            evidence["collision_pairs"] = list(validity.get("collision_pairs") or [])
-            if not evidence["state_valid"]:
-                return self._fail(base, evidence, "collision_state_invalid")
-            collision_ik, collision_attempts, collision_error = self._try_ik(target, seeds, True)
+                evidence["pure_state_valid"] = None
+                evidence["pure_state_validity_error"] = "state_validity_service_error"
+                evidence["pure_state_validity_error_type"] = type(exc).__name__
+            else:
+                evidence["pure_state_valid"] = validity.get("valid") is True
+                evidence["pure_collision_pairs"] = list(
+                    validity.get("collision_pairs") or []
+                )
+            collision_seeds = _unique_joint_state_seeds(
+                [dict(pure_state), *seeds],
+                limit=seed_count,
+            )
+            evidence["collision_ik_seeds"] = [dict(seed) for seed in collision_seeds]
+            collision_ik, collision_attempts, collision_error = self._try_collision_ik(
+                target,
+                collision_seeds,
+                active_scene_diff=active_scene_diff,
+            )
             evidence["collision_ik_attempts"] = collision_attempts
             if collision_error:
                 return self._unknown(base, evidence, collision_error)
             evidence["collision_ik"] = collision_ik.get("ok") is True
             if not evidence["collision_ik"]:
                 evidence["collision_pairs"] = list(
-                    collision_ik.get("collision_pairs") or evidence["collision_pairs"]
+                    collision_ik.get("collision_pairs")
+                    or evidence.get("pure_collision_pairs")
+                    or []
                 )
-                return self._fail(base, evidence, "collision_ik_failed")
+                return self._fail(
+                    base,
+                    evidence,
+                    (
+                        "collision_state_invalid"
+                        if collision_ik.get("all_solutions_state_invalid") is True
+                        else "collision_ik_failed"
+                    ),
+                )
             collision_state = collision_ik.get("joint_state")
             if not isinstance(collision_state, Mapping):
                 return self._unknown(base, evidence, "collision_ik_evidence_missing")
-            try:
-                collision_validity_state = dict(collision_state)
-                if active_scene_diff is not None:
-                    collision_validity_state["qualification_scene_diff"] = dict(
-                        active_scene_diff
-                    )
-                collision_validity = dict(
-                    self.check_state_validity(collision_validity_state)
-                )
-            except TimeoutError:
-                return self._unknown(base, evidence, "collision_state_validity_timeout")
-            except Exception as exc:  # noqa: BLE001
-                return self._unknown(base, evidence, "collision_state_validity_service_error", exc)
+            collision_validity = collision_ik.get("state_validity")
+            if not isinstance(collision_validity, Mapping):
+                return self._unknown(base, evidence, "collision_ik_evidence_missing")
             evidence["collision_state_valid"] = collision_validity.get("valid") is True
-            if not evidence["collision_state_valid"]:
-                evidence["collision_pairs"] = list(collision_validity.get("collision_pairs") or [])
+            evidence["state_valid"] = evidence["collision_state_valid"]
+            evidence["collision_pairs"] = list(
+                collision_validity.get("collision_pairs") or []
+            )
+            if not evidence["state_valid"]:
                 return self._fail(base, evidence, "collision_ik_state_invalid")
             end_state = collision_state
             if not isinstance(end_state, Mapping):
@@ -1645,6 +1682,104 @@ class MoveItQualificationEngine:
                 return result, attempts, ""
         return {"ok": False}, attempts, ""
 
+    def _try_collision_ik(
+        self,
+        target: Mapping[str, Any],
+        seeds: Sequence[Mapping[str, Any]],
+        *,
+        active_scene_diff: Mapping[str, Any] | None,
+    ) -> tuple[JsonDict, list[JsonDict], str]:
+        deadline = time.monotonic() + KINEMATIC_IK_TIMEOUT_S
+        attempts: list[JsonDict] = []
+        collision_pairs: list[Any] = []
+        saw_state_invalid = False
+        saw_state_missing = False
+        saw_validity_timeout = False
+        saw_validity_error = False
+        for index, seed in enumerate(seeds):
+            remaining_budget = deadline - time.monotonic()
+            if remaining_budget <= 0:
+                return {}, attempts, "collision_ik_timeout"
+            remaining_seeds = max(1, len(seeds) - index)
+            seeded_target = dict(target)
+            seeded_target["ik_seed_timeout_s"] = max(
+                0.001, remaining_budget / remaining_seeds
+            )
+            attempt: JsonDict = {"seed_sha256": _hash(seed), "ok": False}
+            try:
+                result = dict(self.compute_ik(seeded_target, seed, True))
+            except TimeoutError:
+                attempt["error_type"] = "TimeoutError"
+                attempts.append(attempt)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                attempt["error_type"] = type(exc).__name__
+                attempts.append(attempt)
+                continue
+            attempt.update(
+                {
+                    "ik_solution": result.get("ok") is True,
+                    "moveit_error_code": result.get("moveit_error_code"),
+                    "solver": result.get("solver"),
+                    "elapsed_s": result.get("elapsed_s"),
+                }
+            )
+            result_pairs = list(result.get("collision_pairs") or [])
+            if result_pairs:
+                collision_pairs = result_pairs
+                attempt["collision_pairs"] = result_pairs
+            if result.get("ok") is not True:
+                attempts.append(attempt)
+                continue
+            state = result.get("joint_state")
+            if not isinstance(state, Mapping):
+                saw_state_missing = True
+                attempt["state_evidence"] = "missing"
+                attempts.append(attempt)
+                continue
+            validity_state = dict(state)
+            if active_scene_diff is not None:
+                validity_state["qualification_scene_diff"] = dict(active_scene_diff)
+            try:
+                validity = dict(self.check_state_validity(validity_state))
+            except TimeoutError:
+                saw_validity_timeout = True
+                attempt["state_validity_error"] = "timeout"
+                attempts.append(attempt)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                saw_validity_error = True
+                attempt["state_validity_error"] = "service_error"
+                attempt["state_validity_error_type"] = type(exc).__name__
+                attempts.append(attempt)
+                continue
+            valid = validity.get("valid") is True
+            attempt["state_valid"] = valid
+            attempt["collision_pairs"] = list(validity.get("collision_pairs") or [])
+            if not valid:
+                saw_state_invalid = True
+                if attempt["collision_pairs"]:
+                    collision_pairs = list(attempt["collision_pairs"])
+                attempts.append(attempt)
+                continue
+            attempt["ok"] = True
+            attempts.append(attempt)
+            return {
+                **result,
+                "state_validity": validity,
+            }, attempts, ""
+        if saw_validity_timeout:
+            return {}, attempts, "collision_state_validity_timeout"
+        if saw_validity_error:
+            return {}, attempts, "collision_state_validity_service_error"
+        if saw_state_missing:
+            return {}, attempts, "collision_ik_evidence_missing"
+        return {
+            "ok": False,
+            "all_solutions_state_invalid": saw_state_invalid,
+            "collision_pairs": collision_pairs,
+        }, attempts, ""
+
     @staticmethod
     def _ik_seeds(
         current: Mapping[str, Any],
@@ -1657,16 +1792,17 @@ class MoveItQualificationEngine:
     ) -> list[JsonDict]:
         names = list(current.get("names") or [])
         positions = [float(value) for value in current.get("positions") or []]
-        seeds: list[JsonDict] = [dict(current)]
+        seed_values: list[Mapping[str, Any]] = [current]
         for value in (
             source.get("home_joint_state") or current.get("home_joint_state"),
             previous_solution,
         ):
             if isinstance(value, Mapping):
-                seeds.append(dict(value))
+                seed_values.append(value)
         reservoir = source.get("successful_ik_reservoir")
         if isinstance(reservoir, list):
-            seeds.extend(dict(value) for value in reservoir if isinstance(value, Mapping))
+            seed_values.extend(value for value in reservoir if isinstance(value, Mapping))
+        seeds = _unique_joint_state_seeds(seed_values, limit=count)
         limits = source.get("joint_limits") or current.get("joint_limits")
         lower = [-math.pi] * len(positions)
         upper = [math.pi] * len(positions)
@@ -1676,8 +1812,20 @@ class MoveItQualificationEngine:
                 lower = [float(value) for value in lower_value]
                 upper = [float(value) for value in upper_value]
         rng = random.Random(int(_hash({"candidate": candidate_id, "stage": stage_index})[:16], 16))
-        while len(seeds) < max(1, count):
-            seeds.append({"names": names, "positions": [rng.uniform(lo, hi) for lo, hi in zip(lower, upper)]})
+        duplicate_attempts = 0
+        while positions and len(seeds) < max(1, count):
+            generated = {
+                "names": names,
+                "positions": [rng.uniform(lo, hi) for lo, hi in zip(lower, upper)],
+            }
+            updated = _unique_joint_state_seeds([*seeds, generated], limit=count)
+            if len(updated) == len(seeds):
+                duplicate_attempts += 1
+                if duplicate_attempts >= max(1, count):
+                    break
+            else:
+                duplicate_attempts = 0
+                seeds = updated
         return seeds[: max(1, count)]
 
     @staticmethod
