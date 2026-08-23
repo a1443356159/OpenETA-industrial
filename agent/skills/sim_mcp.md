@@ -126,10 +126,6 @@ the runtime envelope. Frozen attachment probes and gripper commands remain exact
 A close acknowledgement or numeric openness cannot replace post-probe co-motion
 evidence. Close stays latched until binary `position=1`.
 A transport timeout requires observation on the same handle before retry.
-When a known close rejection is withdrawn to its exact compiled hover, wait for
-the host receipt that synchronizes the detached target's measured native pose
-into a new PlanningScene revision. Only that successful reconciliation returns
-to the ordinary grasp flow; missing or failed synchronization is a hard stop.
 
 Classify failures before retrying:
 
