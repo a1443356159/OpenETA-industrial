@@ -1236,11 +1236,12 @@ class _PregraspGraspPlaceCoordinator:
 
         retained_entries: dict[str, JsonDict] = {}
         per_grasp_pairs: list[list[JsonDict]] = []
-        # Preserve the complete current AnyPlace pool through the cheap and IK
-        # funnel stages.  Preselecting a handful by farthest-first SE(3)
-        # overrepresents extreme object rotations and can discard every
-        # attachment-aware reachable goal before MoveIt sees it.  The qualifier
-        # still enforces the global full-plan limit after endpoint screening.
+        # Preserve the complete current AnyPlace pool through compilation and
+        # conservative structural screening.  Preselecting a handful by
+        # farthest-first SE(3) overrepresents extreme object rotations and can
+        # discard every attachment-aware reachable goal before MoveIt sees it.
+        # L3/L4 then traverse the round-robin pair order progressively until
+        # the four-slot plan-only capacity is filled or the batch is exhausted.
         current_goals = [dict(goal) for goal in self.object_goals]
         for grasp in grasps[: self.grasp_branch_limit]:
             if not isinstance(grasp, Mapping):
@@ -1360,6 +1361,18 @@ class _PregraspGraspPlaceCoordinator:
             if isinstance(entry.get("proof"), Mapping):
                 proofs[grasp_id] = entry["proof"]
         result.details["pregrasp_joint_pair_count"] = len(pairs)
+        result.details["pregrasp_joint_workspace_pass_count"] = joint.details.get(
+            "workspace_pass_count", 0
+        )
+        result.details["pregrasp_joint_endpoint_evaluated_count"] = joint.details.get(
+            "endpoint_evaluated_count", 0
+        )
+        result.details["pregrasp_joint_endpoint_not_evaluated_count"] = joint.details.get(
+            "endpoint_not_evaluated_count", 0
+        )
+        result.details["pregrasp_joint_endpoint_pass_count"] = joint.details.get(
+            "endpoint_pass_count", 0
+        )
         result.details["pregrasp_joint_full_plan_submitted_count"] = joint.details.get(
             "full_plan_submitted_count", 0
         )

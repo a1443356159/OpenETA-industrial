@@ -40,6 +40,8 @@ QUALIFICATION_RPC_GRACE_S = 30.0
 PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA = (
     "openeta.parallel_gripper_target_closing_alignment.v1"
 )
+PROGRESSIVE_SCREENING_MODE = "progressive_until_full_plan_capacity"
+PROGRESSIVE_NOT_EVALUATED_REASON = "progressive_endpoint_capacity_reached"
 
 
 def _hash(value: object) -> str:
@@ -275,9 +277,11 @@ class MoveItCandidateQualifier:
                 }
             )
         if qualification_mode == "pregrasp_joint":
-            # Every constructed grasp/object-goal pair must reach the cheap and
-            # IK layers.  Pair diversity before IK can discard the only goal
-            # compatible with a particular measured grasp relationship.
+            # Every constructed grasp/object-goal pair reaches compilation and
+            # the conservative structural precheck.  The private helper then
+            # traverses L3/L4 in stable round-robin order only until it fills
+            # the complete L5 submission capacity.  Unvisited pairs remain
+            # explicitly NOT_EVALUATED; they are never relabelled as failures.
             request_candidates = compiled_descriptors
             full_plan_limit = self.pregrasp_joint_full_plan_limit
         else:
@@ -306,6 +310,15 @@ class MoveItCandidateQualifier:
             "source": dict(source or {}),
             "candidates": request_candidates,
         }
+        if qualification_mode == "pregrasp_joint":
+            request["funnel"].update(
+                {
+                    "screening_mode": PROGRESSIVE_SCREENING_MODE,
+                    # This is a value derived from L5 capacity, not a new
+                    # independently tunable candidate-screen limit.
+                    "endpoint_pass_target": full_plan_limit,
+                }
+            )
         request["qualification_binding_sha256"] = _hash(
             {
                 "purpose": purpose,
@@ -409,6 +422,15 @@ class MoveItCandidateQualifier:
                 "pure_ik_pass_count": stage_counts["pure_ik"],
                 "collision_ik_pass_count": stage_counts["collision_ik"],
                 "endpoint_pass_count": stage_counts["endpoint"],
+                "endpoint_evaluated_count": sum(
+                    item.get("endpoint_evaluated") is True
+                    for item in evidence["results"]
+                ),
+                "endpoint_not_evaluated_count": sum(
+                    item.get("verdict") == "NOT_EVALUATED"
+                    and item.get("endpoint_evaluated") is False
+                    for item in evidence["results"]
+                ),
                 "full_plan_submitted_count": stage_counts["submitted"],
                 "full_plan_pass_count": stage_counts["full_plan"],
                 "generated_candidate_count": raw_count if has_v2_raw else generated,
@@ -1125,10 +1147,58 @@ class MoveItQualificationEngine:
         funnel = funnel if isinstance(funnel, Mapping) else planning
         seed_count = int(funnel.get("ik_seed_count", DEFAULT_MOVEIT_IK_SEED_COUNT))
         full_plan_limit = int(funnel.get("full_plan_limit", DEFAULT_GRASP_FULL_PLAN_LIMIT))
+        screening_mode = str(funnel.get("screening_mode") or "exhaustive")
+        if screening_mode not in {"exhaustive", PROGRESSIVE_SCREENING_MODE}:
+            raise ValueError("invalid qualification screening mode")
+        progressive_endpoint_target: int | None = None
+        if screening_mode == PROGRESSIVE_SCREENING_MODE:
+            raw_target = funnel.get("endpoint_pass_target")
+            if (
+                isinstance(raw_target, bool)
+                or not isinstance(raw_target, int)
+                or raw_target <= 0
+                or raw_target != full_plan_limit
+            ):
+                raise ValueError("progressive endpoint target must equal full-plan capacity")
+            progressive_endpoint_target = raw_target
         source = request.get("source") if isinstance(request.get("source"), Mapping) else {}
         screened: list[JsonDict] = []
         ik_reservoir: list[Mapping[str, Any]] = []
-        for item in candidates:
+        workspace_prechecks: list[JsonDict] | None = None
+        if progressive_endpoint_target is not None:
+            # L1 compilation happened at the host boundary.  Run the entire
+            # batch through the deterministic L2 workspace/structure gate
+            # before progressively spending multi-seed L3/L4 work.
+            workspace_prechecks = [
+                self._workspace_precheck(item) for item in candidates
+            ]
+        endpoint_passes = 0
+        for index, item in enumerate(candidates):
+            workspace_precheck = (
+                workspace_prechecks[index]
+                if workspace_prechecks is not None
+                else None
+            )
+            if (
+                workspace_precheck is not None
+                and workspace_precheck.get("verdict") != "PASS"
+            ):
+                screened.append(workspace_precheck)
+                continue
+            if (
+                progressive_endpoint_target is not None
+                and endpoint_passes >= progressive_endpoint_target
+            ):
+                screened.append(
+                    {
+                        **dict(workspace_precheck or {}),
+                        "verdict": "NOT_EVALUATED",
+                        "reason": PROGRESSIVE_NOT_EVALUATED_REASON,
+                        "endpoint_evaluated": False,
+                        "full_plan_submitted": False,
+                    }
+                )
+                continue
             candidate_source = dict(source)
             candidate_source["successful_ik_reservoir"] = [
                 dict(value) for value in ik_reservoir[-seed_count:]
@@ -1138,9 +1208,11 @@ class MoveItQualificationEngine:
                 revision,
                 seed_count=seed_count,
                 source=candidate_source,
+                workspace_precheck=workspace_precheck,
             )
             screened.append(screen)
             if screen.get("endpoint_pass") is True:
+                endpoint_passes += 1
                 stages = screen.get("stages")
                 if isinstance(stages, list) and stages:
                     state = stages[-1].get("end_joint_state")
@@ -1183,6 +1255,7 @@ class MoveItQualificationEngine:
         *,
         seed_count: int,
         source: Mapping[str, Any],
+        workspace_precheck: Mapping[str, Any] | None = None,
     ) -> JsonDict:
         item = descriptor if isinstance(descriptor, Mapping) else {}
         candidate_id = str(item.get("candidate_id") or "")
@@ -1199,6 +1272,7 @@ class MoveItQualificationEngine:
             "pure_ik_pass": False,
             "collision_ik_pass": False,
             "endpoint_pass": False,
+            "endpoint_evaluated": False,
             "full_plan_submitted": False,
         }
         if isinstance(candidate.get("compile_parameters"), Mapping):
@@ -1219,13 +1293,22 @@ class MoveItQualificationEngine:
                 "reason": "start_joint_state_unavailable",
                 "error_type": type(exc).__name__,
             }
-        if self.workspace_filter is not None:
+        if workspace_precheck is not None:
+            if (
+                workspace_precheck.get("verdict") != "PASS"
+                or workspace_precheck.get("candidate_id") != candidate_id
+                or workspace_precheck.get("candidate_pose_sha256") != pose_hash
+                or workspace_precheck.get("workspace_pass") is not True
+            ):
+                return dict(workspace_precheck)
+        elif self.workspace_filter is not None:
             try:
                 if not all(self.workspace_filter(target) for target in stages if isinstance(target, Mapping)):
                     return {**base, "verdict": "FAIL", "reason": "workspace_envelope_rejected"}
             except Exception as exc:  # noqa: BLE001
                 return {**base, "verdict": "UNKNOWN", "reason": "workspace_filter_error", "error_type": type(exc).__name__}
         base["workspace_pass"] = True
+        base["endpoint_evaluated"] = True
         previous_solution: Mapping[str, Any] | None = None
         active_scene_diff: Mapping[str, Any] | None = None
         initial_transition = candidate.get("initial_scene_transition")
@@ -1358,6 +1441,61 @@ class MoveItQualificationEngine:
             return {**base, "verdict": "UNKNOWN", "reason": "planning_scene_revision_drift"}
         base.update({"pure_ik_pass": True, "collision_ik_pass": True, "endpoint_pass": True})
         return {**base, "verdict": "PASS", "reason": "endpoint_qualified"}
+
+    def _workspace_precheck(self, descriptor: object) -> JsonDict:
+        """Evaluate the complete batch through the cheap structural gate.
+
+        This produces only L2 evidence.  A PASS here does not claim that IK,
+        collision checking, endpoint ordering, or planning ran.
+        """
+
+        item = descriptor if isinstance(descriptor, Mapping) else {}
+        candidate_id = str(item.get("candidate_id") or "")
+        pose_hash = str(item.get("candidate_pose_sha256") or "")
+        candidate = item.get("candidate")
+        candidate = candidate if isinstance(candidate, Mapping) else {}
+        stages = candidate.get("qualification_stages")
+        base: JsonDict = {
+            "candidate_id": candidate_id,
+            "candidate_pose_sha256": pose_hash,
+            "execution_started": False,
+            "stages": [],
+            "workspace_pass": False,
+            "pure_ik_pass": False,
+            "collision_ik_pass": False,
+            "endpoint_pass": False,
+            "endpoint_evaluated": False,
+            "full_plan_submitted": False,
+        }
+        if isinstance(candidate.get("compile_parameters"), Mapping):
+            base["compile_parameters"] = dict(candidate["compile_parameters"])
+        if not candidate_id or not pose_hash or not isinstance(stages, list) or not stages:
+            return {
+                **base,
+                "verdict": "UNKNOWN",
+                "reason": "compiled_stages_missing",
+            }
+        if self.workspace_filter is not None:
+            try:
+                if not all(
+                    self.workspace_filter(target)
+                    for target in stages
+                    if isinstance(target, Mapping)
+                ):
+                    return {
+                        **base,
+                        "verdict": "FAIL",
+                        "reason": "workspace_envelope_rejected",
+                    }
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    **base,
+                    "verdict": "UNKNOWN",
+                    "reason": "workspace_filter_error",
+                    "error_type": type(exc).__name__,
+                }
+        base["workspace_pass"] = True
+        return {**base, "verdict": "PASS", "reason": "workspace_qualified"}
 
     def _plan_candidate(
         self,

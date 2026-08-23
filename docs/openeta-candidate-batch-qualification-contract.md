@@ -221,6 +221,15 @@ collision pairs, and scene-revision checks. It must not call the Gazebo
 DetachableJoint, apply the cloned scene to the live PlanningScene, send a
 controller goal, or change the real scene revision.
 
+For pregrasp grasp-goal pair batches, L1 and L2 evaluate the complete
+constructed batch first. L3/L4 then traverse the stable grasp-branch
+round-robin order progressively. Traversal stops when it has produced as many
+endpoint-PASS pairs as the downstream L5 submission capacity, or after the
+batch is exhausted. Structurally valid pairs not visited after capacity is
+filled are `NOT_EVALUATED`, never FAIL. This scheduling bound does not change
+the IK seed set, endpoint budgets, collision checks, or PASS requirements for
+any visited pair.
+
 The current implementation must not be assumed to satisfy this target
 boundary merely because individual endpoint IK passed. Sequential transition
 application during screening requires its own implementation verification.
@@ -275,7 +284,7 @@ The canonical contract distinguishes four outcomes:
 | `PASS` | The layer produced complete positive evidence | Only after all required layers |
 | `FAIL` | Complete evidence proves the candidate ineligible | No |
 | `UNKNOWN` | Evidence is missing, ambiguous, stale, or timed out | No |
-| `NOT_EVALUATED` | The candidate was eligible but not processed because of a bound or early stop | No |
+| `NOT_EVALUATED` | The candidate passed every applicable upstream layer but was not processed at a downstream layer because of a bound or early stop | No |
 
 For a filtering layer that ran:
 
@@ -524,10 +533,13 @@ The two `pregrasp_joint` values are approved for runtime migration. The
 remaining timing values are recorded only so later refactoring cannot silently
 change behavior; they are not approved as new configuration in this phase.
 
-O2 is decided: every constructed pregrasp pair enters L1-L4. With four grasp
-branches and a 96-goal batch this is at most `4 × 96 = 384` pair traversals.
-There is no separate pair-screen limit. Only L5 remains bounded to four
-deterministically and fairly selected pairs.
+O2 is decided: every constructed pregrasp pair enters L1-L2. With four grasp
+branches and a 96-goal batch this is at most `4 × 96 = 384` materialized and
+structurally checked pairs. L3/L4 traverse them in deterministic branch-fair
+order until four endpoint-PASS pairs have filled the downstream L5 capacity;
+if capacity is not filled, traversal exhausts the batch. There is no separate
+pair-screen hyperparameter: the progressive endpoint target is derived from
+the existing L5 capacity. L5 remains bounded to the same four pairs.
 
 ### Derived values that must not become independent knobs
 
@@ -540,6 +552,8 @@ The following values are computed from the batch graph and resolved config:
 | `host_prepared_candidate_count` | Result after approved deterministic derivations and exact deduplication |
 | `pregrasp_goal_count_per_grasp` | Number of goals selected from the active immutable goal batch for that grasp branch |
 | `constructed_pair_count` | Sum of materialized pair counts across included grasp branches |
+| `endpoint_evaluated_count` | Number of candidates for which L3/L4 endpoint traversal actually began |
+| `endpoint_not_evaluated_count` | Structurally valid candidates left unvisited after the derived downstream capacity was filled |
 | `qualification_rpc_timeout_s` | Derived outer transport allowance covering all configured inner budgets plus transport grace |
 | deterministic random seeds | Hash-derived from batch/candidate/stage identity and recorded, never selected by the VLM |
 
@@ -606,6 +620,8 @@ A `PlacementDiversityPolicy` needs fields for:
 A `QualificationSchedulingPolicy` needs fields for:
 
 - deterministic source and grasp-branch fairness;
+- complete L1/L2 structural coverage before progressive endpoint work;
+- a pregrasp L3/L4 stop target derived from downstream L5 capacity;
 - stable full-plan submission order for at most four L4-PASS candidates;
 - treatment of L4-PASS candidates that remain `NOT_EVALUATED_AT_L5`.
 

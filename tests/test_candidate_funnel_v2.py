@@ -6,6 +6,8 @@ import json
 import pytest
 
 from agent.runtime.moveit_qualification import (
+    PROGRESSIVE_NOT_EVALUATED_REASON,
+    PROGRESSIVE_SCREENING_MODE,
     QUALIFICATION_SCHEMA,
     MoveItCandidateQualifier,
     MoveItQualificationEngine,
@@ -149,6 +151,104 @@ def test_full_planning_is_bounded_and_retains_every_pass():
         and item["reason"] == "full_plan_limit_not_submitted"
         for item in response["results"][4:]
     )
+
+
+def test_progressive_screening_prechecks_all_but_stops_endpoint_work_at_capacity():
+    workspace_calls = []
+    ik_calls = []
+    plan_calls = []
+    candidates = [
+        {
+            "id": f"g{index}",
+            "qualification_stages": [{"name": f"hover_{index}"}],
+        }
+        for index in range(10)
+    ]
+    request = _request(candidates, full_plan_limit=4)
+    request["funnel"] = {
+        "ik_seed_count": 8,
+        "full_plan_limit": 4,
+        "screening_mode": PROGRESSIVE_SCREENING_MODE,
+        "endpoint_pass_target": 4,
+    }
+
+    def workspace(target):
+        workspace_calls.append(target["name"])
+        return True
+
+    def ik(target, seed, collision):
+        ik_calls.append((target["name"], collision))
+        return {
+            "ok": True,
+            "joint_state": {"names": ["j1"], "positions": [0.5]},
+        }
+
+    def plan(target, start, timeout, attempts):
+        plan_calls.append(target["name"])
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.5]},
+        }
+
+    results = _engine(
+        workspace_filter=workspace,
+        compute_ik=ik,
+        plan_only=plan,
+    ).qualify(request)["results"]
+
+    assert workspace_calls == [f"hover_{index}" for index in range(10)]
+    assert {name for name, _collision in ik_calls} == {
+        f"hover_{index}" for index in range(4)
+    }
+    assert plan_calls == [f"hover_{index}" for index in range(4)]
+    assert all(item["verdict"] == "PASS" for item in results[:4])
+    assert all(
+        item["verdict"] == "NOT_EVALUATED"
+        and item["reason"] == PROGRESSIVE_NOT_EVALUATED_REASON
+        and item["workspace_pass"] is True
+        and item["endpoint_evaluated"] is False
+        and item["execution_started"] is False
+        for item in results[4:]
+    )
+
+
+def test_progressive_screening_exhausts_batch_when_capacity_is_not_reached():
+    seen = []
+    candidates = [
+        {
+            "id": f"g{index}",
+            "qualification_stages": [{"name": f"hover_{index}"}],
+        }
+        for index in range(6)
+    ]
+    request = _request(candidates, full_plan_limit=4)
+    request["funnel"] = {
+        "ik_seed_count": 8,
+        "full_plan_limit": 4,
+        "screening_mode": PROGRESSIVE_SCREENING_MODE,
+        "endpoint_pass_target": 4,
+    }
+
+    def ik(target, seed, collision):
+        seen.append(target["name"])
+        ok = target["name"] == "hover_5"
+        return {
+            "ok": ok,
+            **(
+                {"joint_state": {"names": ["j1"], "positions": [0.5]}}
+                if ok
+                else {}
+            ),
+        }
+
+    results = _engine(compute_ik=ik).qualify(request)["results"]
+
+    assert set(seen) == {f"hover_{index}" for index in range(6)}
+    assert sum(item.get("endpoint_evaluated") is True for item in results) == 6
+    assert sum(item["verdict"] == "PASS" for item in results) == 1
+    assert not any(item["verdict"] == "NOT_EVALUATED" for item in results)
 
 
 def test_virtual_scene_transition_uses_clone_without_real_revision_change():
@@ -549,6 +649,55 @@ def test_default_anyplace_pool_screens_all_96_but_only_plans_top_4():
     assert result.details["endpoint_pass_count"] == 96
     assert result.details["full_plan_submitted_count"] == 4
     assert result.details["candidate_count"] == 4
+
+
+def test_pregrasp_joint_progressive_counts_distinguish_produced_and_evaluated():
+    candidates = [
+        {
+            "id": f"pair_{index:03d}",
+            "qualification_stages": [{"name": f"hover_{index}"}],
+        }
+        for index in range(12)
+    ]
+
+    def rpc(name, request, timeout):
+        assert request["funnel"] == {
+            "ik_seed_count": 8,
+            "full_plan_limit": 4,
+            "screening_mode": PROGRESSIVE_SCREENING_MODE,
+            "endpoint_pass_target": 4,
+        }
+        return _engine().qualify(request)
+
+    result = MoveItCandidateQualifier(
+        rpc,
+        pregrasp_joint_full_plan_limit=4,
+    ).qualify_result(
+        ToolResult(
+            True,
+            "ok",
+            {
+                "placement_candidates": candidates,
+                "model_raw_candidate_count": 12,
+            },
+        ),
+        purpose="placement",
+        scene_epoch=1,
+        planning_scene_revision=4,
+        qualification_mode="pregrasp_joint",
+    )
+
+    assert result.details["coordinate_tcp_pass_count"] == 12
+    assert result.details["workspace_pass_count"] == 12
+    assert result.details["endpoint_evaluated_count"] == 4
+    assert result.details["endpoint_not_evaluated_count"] == 8
+    assert result.details["endpoint_pass_count"] == 4
+    assert result.details["full_plan_submitted_count"] == 4
+    assert result.details["full_plan_pass_count"] == 4
+    assert result.details["candidate_count"] == 4
+    assert result.details["rejection_reason_counts"] == {
+        PROGRESSIVE_NOT_EVALUATED_REASON: 8
+    }
 
 
 def test_ros_virtual_scene_diff_is_clone_only_and_payload_aware():

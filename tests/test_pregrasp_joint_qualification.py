@@ -111,7 +111,7 @@ def test_host_compiles_every_full_plan_pass_into_one_equal_status_queue() -> Non
     )
 
 
-def test_pregrasp_joint_search_keeps_full_pool_round_robin_and_filters_grasps() -> None:
+def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_grasps() -> None:
     captured: dict[str, Any] = {}
 
     def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
@@ -226,6 +226,10 @@ def test_pregrasp_joint_search_keeps_full_pool_round_robin_and_filters_grasps() 
 
     assert len(captured["candidates"]) == 384
     assert captured["funnel"]["full_plan_limit"] == 4
+    assert captured["funnel"]["screening_mode"] == (
+        "progressive_until_full_plan_capacity"
+    )
+    assert captured["funnel"]["endpoint_pass_target"] == 4
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0", "g2"]
     assert cache.resolve(purpose="grasp", candidate_id="g1") is None
     retained_cache = cache.resolve(purpose="grasp", candidate_id="g0")

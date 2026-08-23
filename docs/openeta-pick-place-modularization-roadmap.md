@@ -78,10 +78,12 @@ candidates.
 
 For pregrasp compatibility, the host constructs pairs from at most four grasp
 PASS candidates and the complete current 96-goal pool. Pair ordering is
-round-robin by grasp. Every constructed pair enters the coordinate, workspace,
-pure-IK, collision-IK, and endpoint layers, so the default ceiling is
-`4 x 96 = 384` screened pairs. Only full plan-only remains bounded to four
-fairly interleaved submissions.
+round-robin by grasp. Every constructed pair enters coordinate compilation and
+the conservative workspace/structural layer, so the default ceiling is
+`4 x 96 = 384` shallow-screened pairs. Multi-seed endpoint traversal stops
+after four endpoint PASS pairs have filled the downstream plan-only capacity,
+or exhausts the batch when fewer than four pass. Only those four fairly
+interleaved pairs enter full plan-only.
 
 After a real attach, only the absolute object goals that passed for the
 actually executed grasp are retained. They are recompiled using:
@@ -160,7 +162,7 @@ hashes, counters, and fail-closed tests.
 
 ### O2. Give pregrasp joint qualification its own budget policy
 
-Status: approved for implementation.
+Status: approved and implemented.
 
 Current issue:
 
@@ -174,21 +176,31 @@ Approved contract:
 JointQualificationBudget
   max_grasps = 4
   goals_considered_per_grasp = complete active goal batch (at most 96)
-  L1-L4 pair input = every constructed pair (at most 4 × 96)
+  L1-L2 pair input = every constructed pair (at most 4 × 96)
+  L3-L4 schedule = deterministic round-robin until four endpoint PASS
   L5 full_plan_submission_limit = 4
 ```
 
-There is no separate pair-screen limit and the ordinary placement diversity
-limit is not reused. After L4, at most four candidates are chosen by stable,
-deterministic grasp-branch fairness. They are insurance against individual
-full-planning failure, not a quality ranking. All four selected submissions are
-attempted even if an earlier one passes, and all L5 PASS results have equal
-qualification status.
+There is no independently configurable pair-screen limit and the ordinary
+placement diversity limit is not reused. Compilation and conservative
+structural checks run for the complete constructed pair batch. L3/L4 then
+traverse the existing branch-fair order until the four-slot L5 capacity is
+filled. If fewer than four endpoint-PASS pairs exist, traversal exhausts the
+remaining batch. If capacity is filled, structurally valid unvisited pairs are
+recorded as `NOT_EVALUATED` with
+`progressive_endpoint_capacity_reached`; they are not failures and cannot enter
+the qualified queue.
 
-Expected benefit: complete compatibility coverage before the expensive tail,
-truthful accounting, and no accidental loss of three grasp branches behind a
-global 96-pair cap. Risk: L2-L4 work increases and must be validated before
-later performance optimization.
+All four selected submissions are attempted even if an earlier one passes.
+They are insurance against individual full-planning failure, not a quality
+ranking, and all L5 PASS results have equal qualification status. The endpoint
+target is derived from the L5 capacity of four and is not a new hyperparameter.
+
+Expected benefit: complete cheap structural coverage, fair grasp-branch
+coverage, and no multi-seed work for pairs that cannot be submitted to L5.
+Risk: the endpoint layer is no longer exhaustive after its downstream capacity
+is filled, so accounting and artifacts must keep evaluated and NOT_EVALUATED
+counts distinct.
 
 ### O3. Remove redundant post-attachment AnyPlace inference — implemented
 
@@ -306,9 +318,10 @@ PlanSubmissionScheduler
 For joint candidates, the approved hierarchy is:
 
 ```text
-all constructed pairs through L1-L4
-→ deterministic fair traversal across grasp branches
-→ first four eligible pairs submitted to L5
+all constructed pairs through L1-L2
+→ deterministic L3/L4 traversal across grasp branches
+→ stop at four eligible pairs or exhaust the batch
+→ submit the eligible set to L5
 → every L5 PASS stored with equal qualification status
 ```
 
@@ -411,8 +424,39 @@ by handlers.
 The same decision record separates startup count/budget parameters, versioned
 producer/diversity profiles, derived values, and non-tunable safety or
 calibration invariants. The redundant VLM exposure settings are removed. O2
-requires every constructed pregrasp pair to enter L1-L4, so there is no
-pregrasp pair-screen parameter.
+requires every constructed pregrasp pair to enter L1-L2. L3/L4 use the approved
+progressive schedule whose endpoint target is derived from the four-slot L5
+capacity, so there is still no independent pregrasp pair-screen parameter.
+
+The six accepted remote chains at commits `4b90a5c` and `20e10ca` provide the
+following pre-optimization production/consumption baseline:
+
+| Stage | Six-run count | Interpretation |
+|---|---:|---|
+| GraspGenX backend samples | 40,480 | 3,680 for each of 11 inference calls |
+| Backend grasp reserve returned | 1,362 | 112-135 per call |
+| Host-prepared grasp variants | 5,448 | deterministic centering/symmetry/reversal derivations |
+| Grasp diversity batch | 704 | 64 per call |
+| Grasp endpoint PASS | 16 | 2.3% of the diversity batches |
+| Grasp full-plan and joint-compatible modes | 8 | six were ultimately executed, one per task |
+| AnyPlace model object goals | 960 | nine 96-goal pregrasp batches plus one real retry |
+| Constructed grasp-goal pairs | 1,440 | attachment-aware compatibility inputs |
+| Pair endpoint PASS | 102 | before the four-submission L5 bound |
+| Pair plan-only submissions / PASS | 24 / 21 | the three failures were the requested reject-first injections |
+| Executed placements | 6 | one per accepted chain |
+
+The ratio is intentionally wide because the final consumer needs one grasp and
+one placement, while downstream kinematics are sparse. It nevertheless shows
+two different kinds of redundancy. The 3,680-to-about-124 backend reduction is
+producer-side over-generation and should be profiled inside GraspGenX before
+changing its sampling profile. The 96-goal AnyPlace reserve is not yet shown to
+be excessive: only 76 of 864 pregrasp goals had an endpoint-PASS pair under at
+least one active grasp, and three goal batches produced none. The immediately
+actionable waste is repeated L3/L4 computation after four submit-eligible pairs
+already exist. Replaying the recorded ordering shows that progressive stopping
+would have left 707 of 1,440 pairs (49%) unvisited at L3/L4 while preserving the
+same four submitted pairs. This measurement is a general runtime baseline, not
+an acceptance-specific selection rule.
 
 Expected benefit: truthful health metadata, monotonic counters, and simpler
 verification without binding later architecture to one producer or scheduling
@@ -564,9 +608,10 @@ runtime dependency:
 
 1. **O8 Qualified-queue accounting** — remove the redundant exposure layer and
    make L5 PASS the single selectable candidate set.
-2. **O2/O6 joint coverage and scheduling** — screen every constructed pair
-   through L1-L4, submit four fairly and deterministically to L5, and treat all
-   L5 PASS candidates as equivalent.
+2. **O2/O6 joint coverage and scheduling** — compile and structurally screen
+   every constructed pair, traverse L3/L4 fairly until four endpoint PASS are
+   found (or the batch is exhausted), submit those four deterministically to
+   L5, and treat all L5 PASS candidates as equivalent.
 3. **O10 minimal internal event vocabulary** — establish the immutable
    candidate-selection and host-compilation evidence needed by O7/O12 while
    retaining legacy evidence during migration.
@@ -593,7 +638,7 @@ Use this table during later discussion. `Recorded` means documented only.
 | ID | Topic | Status | Decision / constraints |
 |---|---|---|---|
 | O1 | Split pregrasp coordinator | Recorded | No implementation authorized |
-| O2 | Explicit joint qualification budget | Approved | All constructed pairs enter L1-L4; four grasp branches × the complete active goal batch; L5 remains bounded to four |
+| O2 | Explicit joint qualification budget | Implemented | All constructed pairs enter L1-L2; branch-fair L3/L4 stops at the derived four-slot L5 capacity or exhausts the batch; unvisited pairs are NOT_EVALUATED |
 | O3 | Skip redundant post-attach inference | Implemented locally | Approved flow; independent observation retained, frozen-first qualification, one new-only model round on zero PASS; remote verification pending |
 | O4 | Typed geometry layer | Recorded | No implementation authorized |
 | O5 | Qualification-stage decomposition | Recorded | No implementation authorized |
