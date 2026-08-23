@@ -297,6 +297,7 @@ class AgentMemory:
             if isinstance(camera.extrinsics, dict) and camera.extrinsics
         ]
         runtime_sources: list[JsonDict] = []
+        current_sources: list[JsonDict] = []
         seen_sources: set[tuple[str, str]] = set()
         for artifact in observation.metadata.get("image_artifacts", []):
             if (
@@ -310,7 +311,9 @@ class AgentMemory:
             key = (frame_id, rgb_path)
             if key not in seen_sources:
                 seen_sources.add(key)
-                runtime_sources.append({"frame_id": frame_id, "rgb_path": rgb_path})
+                source = {"frame_id": frame_id, "rgb_path": rgb_path}
+                runtime_sources.append(source)
+                current_sources.append(dict(source))
         for artifact in self.artifacts.values():
             value = artifact.get("value") if isinstance(artifact, dict) else None
             if not isinstance(value, dict) or value.get("kind") != "rgbd_camera":
@@ -322,8 +325,9 @@ class AgentMemory:
                 seen_sources.add(key)
                 runtime_sources.append({"frame_id": frame_id, "rgb_path": rgb_path})
         summary["runtime_camera_sources"] = runtime_sources
+        summary["current_camera_sources"] = current_sources
         self.record("observation", summary)
-        self._capture_grasp_reestimation_observation()
+        self._capture_grasp_reestimation_observation(observation)
         reconciliation_updated = self._reconcile_unknown_motion(observation)
         attachment_updated = self._capture_attachment_observation_verdict(observation)
         if (
@@ -333,11 +337,33 @@ class AgentMemory:
         ):
             self._save_working_memory()
 
-    def _capture_grasp_reestimation_observation(self) -> bool:
+    def _capture_grasp_reestimation_observation(
+        self, observation: EnvObservation
+    ) -> bool:
         reestimate = _memory_fact_value(self.facts.get(GRASP_REESTIMATION_KEY))
         if not isinstance(reestimate, dict) or reestimate.get("status") != "pending_observation":
             return False
-        reestimate.update({"status": "ready", "observed_at_s": time.time()})
+        views = _complete_observation_rgbd_views(observation)
+        source_paths = {
+            str(path)
+            for path in reestimate.get("source_observation_rgb_paths", [])
+            if isinstance(path, str) and path
+        }
+        source_image = str(reestimate.get("source_image") or "")
+        if source_image:
+            source_paths.add(source_image)
+        fresh_views = [
+            view for view in views if str(view.get("rgb_path") or "") not in source_paths
+        ]
+        if not fresh_views:
+            return False
+        reestimate.update(
+            {
+                "status": "ready",
+                "observed_at_s": time.time(),
+                "observation_views": fresh_views,
+            }
+        )
         self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
             reestimate,
             source="candidate_reestimate_observation",
@@ -1420,6 +1446,24 @@ class AgentMemory:
             selected,
             source="select_sam3_detection",
         )
+        reestimate = self.grasp_reestimation()
+        if (
+            isinstance(reestimate, dict)
+            and reestimate.get("status") == "selection_pending"
+            and str(reestimate.get("segmentation_result_id") or "") == result_id
+        ):
+            reestimate.update(
+                {
+                    "status": "target_ready",
+                    "selected_detection_id": detection_id,
+                    "selected_source_image": selected.get("source_image"),
+                    "selected_at_s": selected["selected_at_s"],
+                }
+            )
+            self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                reestimate,
+                source="grasp_reestimate_target_selected",
+            )
         placement_key = (
             PLACEMENT_REGION_DETECTION_KEY
             if _placement_region_prompt(selected.get("target_prompt"))
@@ -1474,6 +1518,23 @@ class AgentMemory:
             no_detection,
             source="reject_sam3_detections",
         )
+        reestimate = self.grasp_reestimation()
+        if (
+            isinstance(reestimate, dict)
+            and reestimate.get("status") == "selection_pending"
+            and str(reestimate.get("segmentation_result_id") or "") == result_id
+        ):
+            reestimate.update(
+                {
+                    "status": "selection_rejected",
+                    "selection_rejection_reason": rejection_reason,
+                    "selection_rejected_at_s": time.time(),
+                }
+            )
+            self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                reestimate,
+                source="grasp_reestimate_target_rejected",
+            )
         self.record("sam3_detections_rejected", dict(no_detection))
         self._save_working_memory()
         return no_detection
@@ -1591,7 +1652,6 @@ class AgentMemory:
             detections = outputs.get("detections")
             if not isinstance(detections, list):
                 continue
-            self.facts.pop(GRASP_REESTIMATION_KEY, None)
             candidates = [
                 dict(candidate) for candidate in detections if isinstance(candidate, dict)
             ]
@@ -1643,6 +1703,40 @@ class AgentMemory:
             }
             if source_camera_role:
                 base["camera_role"] = source_camera_role
+            reestimate = self.grasp_reestimation()
+            reestimate_view_paths = {
+                str(view.get("rgb_path") or "")
+                for view in (
+                    reestimate.get("observation_views", [])
+                    if isinstance(reestimate, dict)
+                    else []
+                )
+                if isinstance(view, dict)
+            }
+            reestimate_segmentation = (
+                isinstance(reestimate, dict)
+                and reestimate.get("status") == "ready"
+                and str(reestimate.get("target_prompt") or "").strip()
+                == str(target_prompt or "").strip()
+                and str(source_image or "") in reestimate_view_paths
+            )
+            if reestimate_segmentation:
+                reestimate.update(
+                    {
+                        "status": (
+                            "selection_pending" if candidates else "segmentation_failed"
+                        ),
+                        "segmentation_result_id": result_id,
+                        "segmentation_source_image": source_image,
+                        "segmentation_frame_id": source_frame_id,
+                        "segmentation_candidate_count": len(candidates),
+                        "segmented_at_s": time.time(),
+                    }
+                )
+                self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                    reestimate,
+                    source="grasp_reestimate_segmentation",
+                )
             host_obligation = _action_host_obligation(action)
             preserve_scene_target = (
                 not candidates
@@ -2224,6 +2318,7 @@ class AgentMemory:
                                 "scene_epoch": self.scene_epoch(),
                                 "target_prompt": target_prompt,
                                 "source_image": source_rgb,
+                                "source_observation_rgb_paths": self._latest_current_observation_rgb_paths(),
                                 "previous_view": str(
                                     outputs.get("camera_frame_id")
                                     or source.get("camera_frame_id")
@@ -2520,6 +2615,7 @@ class AgentMemory:
                         "scene_epoch": self.scene_epoch(),
                         "target_prompt": target_prompt,
                         "source_image": source_rgb,
+                        "source_observation_rgb_paths": self._latest_current_observation_rgb_paths(),
                         "previous_view": camera_frame_id,
                         "source_tool": source_tool,
                         "source_backend": source_backend,
@@ -2625,6 +2721,22 @@ class AgentMemory:
                 if str(source.get("rgb_path") or "") == source_image:
                     return str(source.get("frame_id") or "")
         return ""
+
+    def _latest_current_observation_rgb_paths(self) -> list[str]:
+        for event in reversed(self.events):
+            if event.event_type != "observation":
+                continue
+            sources = event.payload.get("current_camera_sources")
+            if not isinstance(sources, list):
+                return []
+            return [
+                str(source["rgb_path"])
+                for source in sources
+                if isinstance(source, dict)
+                and isinstance(source.get("rgb_path"), str)
+                and source["rgb_path"]
+            ]
+        return []
 
     def _advance_anygrasp_candidate_after_rejection(self, action: EnvAction) -> bool:
         policy = self.grasp_candidate_policy()
@@ -9238,6 +9350,48 @@ def _looks_like_inline_blob_key(key: str) -> bool:
         "array",
         "raw_payload",
     }
+
+
+def _complete_observation_rgbd_views(observation: EnvObservation) -> list[JsonDict]:
+    artifacts = observation.metadata.get("image_artifacts")
+    if not isinstance(artifacts, list):
+        return []
+    cameras = {camera.frame_id: camera for camera in observation.cameras}
+    views: list[JsonDict] = []
+    for rgb in artifacts:
+        if (
+            not isinstance(rgb, dict)
+            or rgb.get("kind") != "rgb"
+            or not isinstance(rgb.get("path"), str)
+            or not rgb["path"]
+        ):
+            continue
+        frame_id = str(rgb.get("frame_id") or "")
+        depth = next(
+            (
+                artifact
+                for artifact in artifacts
+                if isinstance(artifact, dict)
+                and artifact.get("kind") == "depth"
+                and str(artifact.get("frame_id") or "") == frame_id
+                and isinstance(artifact.get("path"), str)
+                and artifact["path"]
+            ),
+            None,
+        )
+        camera = cameras.get(frame_id)
+        if not isinstance(depth, dict) or camera is None or not camera.intrinsics:
+            continue
+        view: JsonDict = {
+            "frame_id": frame_id,
+            "rgb_path": str(rgb["path"]),
+            "depth_path": str(depth["path"]),
+        }
+        role = str(rgb.get("role") or camera.role or "")
+        if role:
+            view["role"] = role
+        views.append(view)
+    return views
 
 
 def summarize_observation(observation: EnvObservation) -> JsonDict:

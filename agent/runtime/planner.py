@@ -660,6 +660,28 @@ def _host_obligation_decision(
             )
 
     reestimate = tool_context.get("grasp_reestimation")
+    if (
+        isinstance(reestimate, dict)
+        and reestimate.get("status") == "pending_observation"
+        and tools.can_execute("observe")
+    ):
+        return PlannerDecision(
+            action_type="tool_call",
+            action="observe",
+            parameters={},
+            reasoning=(
+                "The prior grasp batch produced no qualified grasp; acquire a new "
+                "complete RGB-D packet before selecting a view or re-segmenting."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.grasp_reestimate.v1",
+                    "tool": "observe",
+                    "stage": "fresh_rgbd_observation",
+                    "attempt_count": reestimate.get("attempt_count"),
+                }
+            },
+        )
     if isinstance(reestimate, dict) and reestimate.get("status") == "ready":
         previous_view = str(reestimate.get("previous_view") or "agentview")
         current_artifacts = [
@@ -3619,15 +3641,26 @@ def _build_tool_context_payload(
         and not isinstance(memory_context.get("pregrasp_placement_goal_pool"), dict)
         and not isinstance(execution, dict)
     )
-    grasp_target_selection = (
-        None
-        if pregrasp_pool_required
-        else (
+    reestimate = memory.grasp_reestimation()
+    reestimate_status = (
+        str(reestimate.get("status") or "") if isinstance(reestimate, dict) else ""
+    )
+    if pregrasp_pool_required or reestimate_status in {
+        "pending_observation",
+        "ready",
+        "selection_pending",
+        "segmentation_failed",
+        "selection_rejected",
+    }:
+        grasp_target_selection = None
+    elif reestimate_status == "target_ready":
+        grasp_target_selection = memory_context.get("selected_sam3_detection")
+    else:
+        grasp_target_selection = (
             memory_context.get("placement_object_detection")
             if isinstance(memory_context.get("pregrasp_placement_goal_pool"), dict)
             else memory_context.get("selected_sam3_detection")
         )
-    )
     grasp_visual_stage = _grasp_visual_stage_for_context(execution)
     if grasp_visual_stage:
         vision_image_paths = [

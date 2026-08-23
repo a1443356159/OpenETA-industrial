@@ -6,6 +6,7 @@ from agent.runtime import memory as memory_module
 from agent.tools.grasp_geometry import DEFAULT_GRASP_PROFILE, compile_grasp_seed
 
 import json
+from pathlib import Path
 
 
 def _candidate(candidate_id: str, score: float) -> dict:
@@ -254,6 +255,132 @@ def test_pregrasp_zero_pass_reestimates_object_not_placement_region() -> None:
     policy = memory.grasp_candidate_policy()
     assert policy["status"] == "stopped_requires_human"
     assert policy["zero_pass_reestimate_attempt_count"] == 3
+
+
+def test_zero_pass_reestimate_waits_for_a_new_complete_rgbd_packet(
+    tmp_path: Path,
+) -> None:
+    def observation(bundle: str) -> EnvObservation:
+        artifacts = []
+        cameras = []
+        for frame_id in ("top", "wrist"):
+            rgb = tmp_path / f"{bundle}.{frame_id}.rgb.png"
+            depth = tmp_path / f"{bundle}.{frame_id}.depth.png"
+            rgb.write_bytes(b"rgb")
+            depth.write_bytes(b"depth")
+            artifacts.extend(
+                [
+                    {"kind": "rgb", "frame_id": frame_id, "path": str(rgb)},
+                    {"kind": "depth", "frame_id": frame_id, "path": str(depth)},
+                ]
+            )
+            cameras.append(
+                CameraFrame(
+                    frame_id=frame_id,
+                    rgb=[[[0, 0, 0]]],
+                    depth=[[1.0]],
+                    intrinsics={"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0},
+                )
+            )
+        return EnvObservation(
+            task="pick and place",
+            cameras=cameras,
+            robot=RobotState(),
+            metadata={"image_artifacts": artifacts},
+        )
+
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block and place it in the green zone")
+    source = observation("source")
+    memory.add_observation(source)
+    memory.save_fact(
+        "placement_object_detection",
+        {"target_prompt": "red block"},
+        source="test",
+    )
+    memory.save_fact(
+        "pregrasp_placement_goal_pool",
+        {"status": "ready", "goal_count": 96},
+        source="test",
+    )
+    source_rgb = str(tmp_path / "source.top.rgb.png")
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "g0",
+                "selected_backend": "graspgenx",
+                "source_rgb": source_rgb,
+                "camera_frame_id": "top",
+                "source": {"rgb": source_rgb, "camera_frame_id": "top"},
+                "grasp_candidates": [],
+                "generated_candidate_count": 10,
+                "qualification_evidence": {"results": []},
+            },
+        )
+    )
+
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["status"] == "pending_observation"
+    assert set(reestimate["source_observation_rgb_paths"]) == {
+        str(tmp_path / "source.top.rgb.png"),
+        str(tmp_path / "source.wrist.rgb.png"),
+    }
+
+    memory.add_observation(source)
+    assert memory.grasp_reestimation()["status"] == "pending_observation"
+
+    memory.add_observation(observation("fresh"))
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["status"] == "ready"
+    assert {view["frame_id"] for view in reestimate["observation_views"]} == {
+        "top",
+        "wrist",
+    }
+
+    fresh_rgb = str(tmp_path / "fresh.top.rgb.png")
+    fresh_mask = str(tmp_path / "fresh.mask.png")
+    memory.add_action(
+        _tool_action(
+            "sam3",
+            {"image": fresh_rgb, "prompt": "red block"},
+            outputs={
+                "result_id": "sam3-fresh",
+                "source_image": fresh_rgb,
+                "prompt": "red block",
+                "detections": [{"id": "d0", "mask_ref": fresh_mask}],
+            },
+        )
+    )
+    assert memory.grasp_reestimation()["status"] == "selection_pending"
+    memory.resolve_sam3_selection(
+        result_id="sam3-fresh",
+        detection_id="d0",
+        selection_source="main_agent_vlm",
+    )
+    assert memory.grasp_reestimation()["status"] == "target_ready"
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "g1",
+                "selected_backend": "graspgenx",
+                "source_rgb": fresh_rgb,
+                "camera_frame_id": "top",
+                "source": {"rgb": fresh_rgb, "camera_frame_id": "top"},
+                "grasp_candidates": [],
+                "generated_candidate_count": 10,
+                "qualification_evidence": {"results": []},
+            },
+        )
+    )
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["status"] == "pending_observation"
+    assert reestimate["attempt_count"] == 2
+    assert reestimate["source_image"] == fresh_rgb
 
 
 def _tool_action(

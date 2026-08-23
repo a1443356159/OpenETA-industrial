@@ -141,6 +141,99 @@ def test_exhausted_placement_recovery_dispatches_fresh_observation() -> None:
     assert decision.metadata["host_obligation"]["stage"] == "reobserve_placement"
 
 
+def test_zero_pass_grasp_reestimate_dispatches_fresh_observation() -> None:
+    decision = _host_obligation_decision(
+        {
+            "grasp_reestimation": {
+                "schema_version": "openeta.grasp_reestimate.v1",
+                "status": "pending_observation",
+                "attempt_count": 1,
+            }
+        },
+        tools=_tools_with_handlers("observe"),
+    )
+
+    assert decision is not None
+    assert decision.action == "observe"
+    assert decision.parameters == {}
+    assert decision.metadata["host_obligation"]["stage"] == "fresh_rgbd_observation"
+
+
+def test_pregrasp_reestimate_never_falls_back_to_stale_object_mask(
+    tmp_path: Path,
+) -> None:
+    fresh_rgb = tmp_path / "fresh.rgb.png"
+    fresh_depth = tmp_path / "fresh.depth.png"
+    fresh_mask = tmp_path / "fresh.mask.png"
+    old_rgb = tmp_path / "old.rgb.png"
+    old_mask = tmp_path / "old.mask.png"
+    for path in (fresh_rgb, fresh_depth, fresh_mask, old_rgb, old_mask):
+        path.write_bytes(path.name.encode())
+    observation = _rgbd_observation(
+        task="pick and place",
+        views=[("top", fresh_rgb, fresh_depth)],
+    )
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "pregrasp_placement_goal_pool",
+        {"status": "ready", "goal_count": 96},
+        source="test",
+    )
+    memory.save_fact(
+        "placement_object_detection",
+        {
+            "result_id": "old-result",
+            "id": "old-detection",
+            "target_prompt": "red block",
+            "source_image": str(old_rgb),
+            "mask_ref": str(old_mask),
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "grasp_reestimation",
+        {"status": "segmentation_failed", "target_prompt": "red block"},
+        source="test",
+    )
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+    assert context["targeted_grasp_obligation"] is None
+
+    memory.save_fact(
+        "selected_sam3_detection",
+        {
+            "result_id": "fresh-result",
+            "id": "fresh-detection",
+            "target_prompt": "red block",
+            "source_image": str(fresh_rgb),
+            "source_frame_id": "top",
+            "mask_ref": str(fresh_mask),
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "grasp_reestimation",
+        {"status": "target_ready", "target_prompt": "red block"},
+        source="test",
+    )
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+    required = context["targeted_grasp_obligation"]["required_parameters"]
+    assert required["rgb"] == str(fresh_rgb)
+    assert required["object_mask"]["mask_ref"] == str(fresh_mask)
+
+
 def test_terminal_placement_recovery_hands_off_without_repeating_inference() -> None:
     decision = _host_obligation_decision(
         {
