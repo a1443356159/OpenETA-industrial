@@ -9,11 +9,13 @@ from agent.cli.openeta_cli import OpenEtaCli
 from agent.runtime.parallel import ParallelEpisodeSpec
 from agent.runtime.runtime_assembly import (
     ENVIRONMENT_PLACEHOLDER_TOOLS,
+    GRASP_BACKEND_ENV_VAR,
     REMOTE_PLACEHOLDER_TOOLS,
     RuntimeAssemblyConfig,
     RuntimeMcpEndpoints,
     assemble_runtime,
     resolve_runtime_mcp_endpoints,
+    runtime_grasp_backend_order_from_env,
 )
 from agent.runtime.session_workspace import SessionWorkspace
 from agent.runtime.supervision import SupervisionPolicy
@@ -186,6 +188,21 @@ def test_shared_endpoint_resolution_owns_names_aliases_and_overrides() -> None:
         ("depth-prior", "depth_prior", "unidepth"),
     ) in calls
     assert not any(name == "openeta-anygrasp" for name, _aliases in calls)
+
+
+def test_runtime_grasp_backend_policy_can_select_either_backend(monkeypatch) -> None:
+    monkeypatch.delenv(GRASP_BACKEND_ENV_VAR, raising=False)
+    assert runtime_grasp_backend_order_from_env() == (
+        "anygrasp",
+        "contact_graspnet",
+        "graspgenx",
+    )
+
+    monkeypatch.setenv(GRASP_BACKEND_ENV_VAR, "anygrasp")
+    assert runtime_grasp_backend_order_from_env() == ("anygrasp",)
+
+    monkeypatch.setenv(GRASP_BACKEND_ENV_VAR, "graspgenx")
+    assert runtime_grasp_backend_order_from_env() == ("graspgenx",)
 
 
 def test_contact_graspnet_is_disabled_from_executable_runtime(tmp_path) -> None:

@@ -304,6 +304,27 @@ class RuntimeMcpEndpoints:
     molmopoint_url: str = ""
 
 
+GRASP_BACKEND_ENV_VAR = "OPENETA_GRASP_BACKEND"
+GRASP_BACKEND_MODES = ("auto", "anygrasp", "graspgenx")
+
+
+def runtime_grasp_backend_order_from_env() -> tuple[str, ...]:
+    """Resolve the host-owned grasp backend policy for one runtime.
+
+    ``auto`` preserves the configured fallback order.  A concrete backend is
+    strict: the facade will not silently execute a different configured
+    backend when the requested one is unavailable or fails.
+    """
+
+    mode = os.environ.get(GRASP_BACKEND_ENV_VAR, "auto").strip().lower() or "auto"
+    if mode == "auto":
+        return tuple(DEFAULT_GRASP_POSE_BACKEND_ORDER)
+    if mode in GRASP_BACKEND_MODES:
+        return (mode,)
+    choices = ", ".join(GRASP_BACKEND_MODES)
+    raise ValueError(f"{GRASP_BACKEND_ENV_VAR} must be one of: {choices}")
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeCandidateCounts:
     """Host registration values that must match remote service metadata."""
@@ -375,6 +396,9 @@ class RuntimeAssemblyConfig:
     endpoints: RuntimeMcpEndpoints = field(default_factory=RuntimeMcpEndpoints)
     candidate_counts: RuntimeCandidateCounts = field(
         default_factory=runtime_candidate_counts_from_env
+    )
+    grasp_backend_order: tuple[str, ...] = field(
+        default_factory=runtime_grasp_backend_order_from_env
     )
     simulator_transport: SimulatorMcpTransport | None = None
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None
@@ -581,6 +605,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         simulator_proxy_config=simulator_proxy_config,
         candidate_qualifier=qualifier,
         candidate_counts=config.candidate_counts,
+        grasp_backend_order=config.grasp_backend_order,
         internal_candidate_compilers=internal_candidate_compilers,
     )
 
@@ -682,6 +707,7 @@ def bind_runtime_perception_tools(
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None,
     candidate_qualifier: MoveItCandidateQualifier | None = None,
     candidate_counts: RuntimeCandidateCounts | None = None,
+    grasp_backend_order: tuple[str, ...] = DEFAULT_GRASP_POSE_BACKEND_ORDER,
     internal_candidate_compilers: Mapping[str, ToolHandler] | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
@@ -871,7 +897,7 @@ def bind_runtime_perception_tools(
     if grasp_backends:
         grasp_handler = build_grasp_pose_estimate_handler(
             grasp_backends,
-            backend_order=DEFAULT_GRASP_POSE_BACKEND_ORDER,
+            backend_order=grasp_backend_order,
             graspgenx_gripper_name="robotiq_2f_85",
         )
         if candidate_qualifier is not None:
