@@ -2350,6 +2350,10 @@ def run_case(
     env.update(
         {
             "PYTHONPATH": python_path,
+            # Gazebo launches Python adapters outside the bench worker.  Pin
+            # those imports to this worktree instead of any editable install
+            # recorded in the shared application virtualenv.
+            "OPENETA_GAZEBO_SOURCE_ROOT": str(repo),
             "ROS_DOMAIN_ID": str(allocation.ros_domain_id),
             "GZ_PARTITION": allocation.gz_partition,
             "MCP_PORT": str(allocation.port),

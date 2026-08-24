@@ -524,6 +524,7 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
 
     active = tmp_path / "opt" / "ros" / "jazzy"
     overlay = tmp_path / "workspace" / "install"
+    source_root = tmp_path / "source" / "selected-worktree"
     foreign = tmp_path / "host-python" / "ros2_jazzy"
     active_python = active / "lib" / "python3.12" / "site-packages"
     overlay_python = overlay / "lib" / "python3.12" / "site-packages"
@@ -539,6 +540,7 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
         overlay / "lib",
         foreign / "lib",
         foreign / "opt" / "rviz_ogre_vendor" / "lib",
+        source_root / "extensions",
     ):
         path.mkdir(parents=True, exist_ok=True)
     environment = _gazebo_ros_abi_environment(
@@ -546,8 +548,14 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
             "ROS_DISTRO": "jazzy",
             "OPENETA_GAZEBO_SYSTEM_ROS_PREFIX": str(active),
             "OPENETA_GAZEBO_OVERLAY": str(overlay),
+            "OPENETA_GAZEBO_SOURCE_ROOT": str(source_root),
             "PYTHONPATH": os.pathsep.join(
-                (str(overlay_python), str(active_python), str(foreign_python))
+                (
+                    str(source_root),
+                    str(overlay_python),
+                    str(active_python),
+                    str(foreign_python),
+                )
             ),
             "LD_LIBRARY_PATH": os.pathsep.join(
                 (
@@ -562,7 +570,9 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
         }
     )
 
-    assert environment["PYTHONPATH"] == os.pathsep.join((str(overlay_python), str(active_python)))
+    assert environment["PYTHONPATH"] == os.pathsep.join(
+        (str(source_root), str(overlay_python), str(active_python))
+    )
     assert environment["LD_LIBRARY_PATH"] == os.pathsep.join(
         (str(overlay / "lib"), str(active / "lib"), "/usr/local/cuda/lib64")
     )
