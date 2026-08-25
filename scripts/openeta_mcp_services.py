@@ -135,7 +135,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frozen-pair-grasp-branch-limit", type=int)
     parser.add_argument("--frozen-pair-full-plan-limit", type=int)
     parser.add_argument("--moveit-ik-seed-count", type=int)
-    parser.add_argument("--anyplace-max-qualification-rounds", type=int)
     parser.add_argument(
         "--qualification-profile", choices=("legacy", "fast_v3", "shadow")
     )
@@ -549,7 +548,6 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
                 2,
             ),
             moveit_ik_seed_count=_startup_value(args, "moveit_ik_seed_count", "OPENETA_MOVEIT_IK_SEED_COUNT", 8),
-            anyplace_max_qualification_rounds=_startup_value(args, "anyplace_max_qualification_rounds", "OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
             qualification_profile=_startup_value(
                 args, "qualification_profile", "OPENETA_QUALIFICATION_PROFILE", "legacy"
             ),

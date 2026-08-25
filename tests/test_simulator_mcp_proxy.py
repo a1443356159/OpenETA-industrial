@@ -20,6 +20,7 @@ from agent.tools.sim_mcp import (
     SimulatorMcpToolProxyConfig,
     SseSimulatorMcpTransport,
     bind_simulator_mcp_tool_handlers,
+    call_read_only_mcp_tool_with_retry,
     close_simulator_mcp_env,
     _parse_mcp_tool_result,
     _parse_mcp_tools_result,
@@ -331,6 +332,82 @@ def test_sse_transport_unwraps_grouped_timeout(monkeypatch) -> None:
     assert str(raised.value) == "list_tools failed: TimeoutError: connect timed out"
 
 
+def test_read_only_mcp_retry_is_health_gated_and_host_stamped() -> None:
+    class RetryTransport:
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.health_calls = []
+
+        def call_tool(self, name, arguments, *, timeout_s=None):
+            self.call_count += 1
+            assert name == "predict_grasps"
+            assert arguments == {"depth": "fixture"}
+            assert timeout_s == 90.0
+            if self.call_count == 1:
+                raise sim_mcp.SimulatorMcpTransportError(
+                    "call_tool:predict_grasps",
+                    TimeoutError("lost SSE result"),
+                )
+            return {"success": True, "candidate_count": 200}
+
+        def list_tools(self, *, timeout_s=None):
+            self.health_calls.append(timeout_s)
+            return {"tools": [{"name": "predict_grasps"}], "tool_count": 1}
+
+    transport = RetryTransport()
+    result = call_read_only_mcp_tool_with_retry(
+        transport,
+        "predict_grasps",
+        {"depth": "fixture"},
+        timeout_s=90.0,
+    )
+
+    assert transport.call_count == 2
+    assert transport.health_calls == [5.0]
+    assert result["success"] is True
+    assert result["_openeta_transport_retry"] == {
+        "schema_version": "openeta.read_only_mcp_retry.v1",
+        "attempt_count": 2,
+        "retry_count": 1,
+        "health_check": "passed",
+        "tool": "predict_grasps",
+        "first_failure_code": "simulator_mcp_transport_timeout",
+        "first_failure_type": "TimeoutError",
+        "first_failure_elapsed_s": pytest.approx(0.0, abs=0.1),
+    }
+
+
+def test_read_only_mcp_retry_stops_when_health_check_loses_tool() -> None:
+    class UnhealthyTransport:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def call_tool(self, name, arguments, *, timeout_s=None):
+            del arguments, timeout_s
+            self.call_count += 1
+            raise sim_mcp.SimulatorMcpTransportError(
+                f"call_tool:{name}",
+                ConnectionResetError("connection reset"),
+            )
+
+        def list_tools(self, *, timeout_s=None):
+            assert timeout_s == 5.0
+            return {"tools": [{"name": "another_tool"}], "tool_count": 1}
+
+    transport = UnhealthyTransport()
+    with pytest.raises(sim_mcp.SimulatorMcpTransportError) as raised:
+        call_read_only_mcp_tool_with_retry(
+            transport,
+            "predict_grasps",
+            {},
+            timeout_s=90.0,
+        )
+
+    assert transport.call_count == 1
+    assert raised.value.operation == "health_check:predict_grasps"
+    assert "no longer advertises predict_grasps" in str(raised.value)
+
+
 def test_default_simulator_mcp_binding_uses_remote_stable_tools() -> None:
     transport = FakeSimulatorMcpTransport({"cameras": [], "robot": {}})
     tools = bind_simulator_mcp_tool_handlers(
@@ -575,6 +652,81 @@ def test_create_simulator_env_requires_env_id() -> None:
     assert result.success is False
     assert result.details["diagnostics"][0]["code"] == "missing_env_id"
     assert transport.calls == []
+
+
+def test_create_simulator_env_rolls_back_failed_reset_before_next_create(
+    tmp_path: Path,
+) -> None:
+    transport = SequencedSimulatorMcpTransport(
+        [
+            {
+                "success": True,
+                "handle": "env-failed-reset",
+                "session_id": "session-failed-reset",
+            },
+            {
+                "success": False,
+                "error": "Reset failed: controller readiness timeout",
+                "fatal": True,
+            },
+            {"ok": True},
+            {
+                "success": True,
+                "handle": "env-retry",
+                "session_id": "session-retry",
+            },
+            {"success": True, "cameras": [], "robot": {}},
+        ]
+    )
+    config = SimulatorMcpToolProxyConfig(
+        image_output_root=tmp_path / "images",
+        response_output_root=tmp_path / "responses",
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=config,
+        tool_names=("create_simulator_env",),
+    )
+
+    failed = tools.call(
+        "create_simulator_env",
+        {"env_id": "openeta/demo-v0", "seed": 0},
+    )
+
+    assert failed.success is False
+    assert [call["name"] for call in transport.calls] == [
+        "create_env",
+        "reset_env",
+        "close_env",
+    ]
+    assert failed.details["outputs"]["reset_failure_cleanup"] == {
+        "attempted": True,
+        "success": True,
+        "handle": "env-failed-reset",
+        "response": {"ok": True},
+    }
+    assert failed.details["state_delta"]["simulator_environment"]["status"] == (
+        "closed_after_reset_failure"
+    )
+    assert failed.details["environment_receipt"]["environment_closed"] is True
+    assert config.handle == ""
+    assert config.session_id == ""
+
+    retried = tools.call(
+        "create_simulator_env",
+        {"env_id": "openeta/demo-v0", "seed": 0},
+    )
+
+    assert retried.success is True
+    assert [call["name"] for call in transport.calls] == [
+        "create_env",
+        "reset_env",
+        "close_env",
+        "create_env",
+        "reset_env",
+    ]
+    assert config.handle == "env-retry"
 
 
 def test_close_simulator_env_closes_and_clears_bound_handle() -> None:
@@ -831,7 +983,7 @@ def test_move_to_proxy_converts_world_rotation_matrix_to_mcp_euler_angles() -> N
     assert arguments["yaw"] == 0.0
     # Semantic identity survives the generic x/y/z + Euler transport.  It is
     # not part of the motion command, but enables a backend to recognize a
-    # narrowly authorized recovery withdrawal after a rejected close.
+    # exact host-qualified terminal without changing its commanded geometry.
     assert arguments["motion_provenance"] == {
         "frame": "world",
         "rotation_matrix": [
@@ -842,7 +994,7 @@ def test_move_to_proxy_converts_world_rotation_matrix_to_mcp_euler_angles() -> N
     }
 
 
-def test_move_to_proxy_preserves_compiled_grasp_hover_identity() -> None:
+def test_move_to_proxy_preserves_compiled_grasp_contact_identity() -> None:
     transport = FakeSimulatorMcpTransport({"success": True})
     tools = bind_simulator_mcp_tool_handlers(
         build_default_tool_registry(),
@@ -859,14 +1011,14 @@ def test_move_to_proxy_preserves_compiled_grasp_hover_identity() -> None:
                 "xyz": [0.1, 0.2, 0.3],
                 "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                 "compiled_grasp_id": "grasp-7",
-                "grasp_stage": "hover",
+                "grasp_stage": "contact",
             }
         },
     )
 
     assert result.success is True
     assert transport.calls[0]["arguments"]["motion_provenance"]["compiled_grasp_id"] == "grasp-7"
-    assert transport.calls[0]["arguments"]["motion_provenance"]["grasp_stage"] == "hover"
+    assert transport.calls[0]["arguments"]["motion_provenance"]["grasp_stage"] == "contact"
 
 
 def test_move_to_proxy_rejects_unsupported_speed_parameter() -> None:
@@ -1806,7 +1958,7 @@ def test_proxy_can_override_agent_tool_name_to_simulator_mcp_tool(tmp_path: Path
     assert result.details["outputs"]["mcp"]["tool"] == "control_gripper"
 
 
-def test_proxy_structures_simulator_mcp_errors() -> None:
+def test_proxy_treats_bare_world_mutation_error_as_unknown_outcome() -> None:
     transport = FakeSimulatorMcpTransport({"error": "IK failed"})
     tools = bind_simulator_mcp_tool_handlers(
         build_default_tool_registry(),
@@ -1818,8 +1970,59 @@ def test_proxy_structures_simulator_mcp_errors() -> None:
     result = tools.call("move_to", {"target_pose": {"xyz": [99, 99, 99]}})
 
     assert result.success is False
-    assert result.details["diagnostics"][0]["code"] == "simulator_mcp_error"
+    assert result.details["outputs"]["motion_outcome"] == "unknown"
+    assert result.details["outputs"]["reconciliation_required"] is True
+    assert result.details["diagnostics"][0]["code"] == (
+        "simulator_mcp_action_receipt_unavailable"
+    )
     assert result.details["outputs"]["response"]["error"] == "IK failed"
+
+
+def test_proxy_keeps_structured_pre_execution_rejection_classifiable() -> None:
+    transport = FakeSimulatorMcpTransport(
+        {
+            "ok": False,
+            "error_code": "MOTION_PLAN_FAILED",
+            "motion_outcome": "failed",
+            "execution_started": False,
+        }
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-3", handle="env-3"),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call("move_to", {"target_pose": {"xyz": [99, 99, 99]}})
+
+    assert result.success is False
+    assert "reconciliation_required" not in result.details["outputs"]
+    assert result.details["diagnostics"][0]["code"] == "simulator_mcp_error"
+
+
+def test_proxy_surfaces_structured_unknown_outcome_for_host_reconciliation() -> None:
+    transport = FakeSimulatorMcpTransport(
+        {
+            "ok": False,
+            "error_code": "MOTION_OUTCOME_UNKNOWN",
+            "motion_outcome": "unknown",
+            "execution_started": None,
+            "reconciliation_required": True,
+        }
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-3", handle="env-3"),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call("move_to", {"target_pose": {"xyz": [0.1, 0.2, 0.3]}})
+
+    assert result.success is False
+    assert result.details["outputs"]["motion_outcome"] == "unknown"
+    assert result.details["outputs"]["reconciliation_required"] is True
 
 
 def test_proxy_reconciles_world_mutation_after_grouped_remote_protocol_failure() -> None:

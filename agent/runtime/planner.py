@@ -7,6 +7,7 @@ import math
 import re
 import time
 import urllib.parse
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -28,6 +29,10 @@ from agent.runtime.memory import (
 )
 from agent.runtime.planner_prompts import compose_main_planner_prompt
 from agent.runtime.rollout import RolloutRecorder, public_backend_details
+from agent.runtime.sam3_selection import (
+    BackendSam3SelectionReviewer,
+    Sam3SelectionParentContext,
+)
 from agent.backends.planner import (
     PlaceholderPlannerBackend,
     PlannerBackend,
@@ -42,6 +47,10 @@ from agent.runtime.task_playbooks import (
     select_task_playbook,
 )
 from agent.runtime.token_counting import DEFAULT_CONTEXT_WINDOW_TOKENS, estimate_json_tokens
+from agent.tools.grasp_geometry import (
+    GraspGeometryError,
+    project_attached_object_center_to_image,
+)
 from agent.tools.registry import ToolRegistry, ToolSpec
 
 
@@ -67,6 +76,11 @@ _SKILL_MATCH_STOPWORDS = {
 _PLACEMENT_EMPTY_GRIPPER_OPENNESS_MAX = 0.05
 _REFERENCE_VERIFIED_SAM3_MIN_SCORE = 0.90
 _REFERENCE_VERIFIED_SAM3_MIN_MARGIN = 0.20
+_SEMANTIC_PROMPT_REDUNDANT_SHAPE_WORDS = {
+    "rectangular",
+    "square",
+    "cylindrical",
+}
 _GRASP_FALLBACK_BACKEND_ORDER = ("anygrasp", "contact_graspnet", "graspgenx")
 _MOLMOPOINT_FALLBACK_MAX_ATTEMPTS = 2
 _CAMERA_ROLE_PREFERENCE = {
@@ -106,6 +120,12 @@ class PlannerContextConfig:
     auto_compact_max_events: int = 8
     approx_chars_per_token: int = 4
     token_estimator_model: str | None = None
+    model_context_projection_enabled: bool = True
+    model_context_soft_limit_tokens: int = 24_000
+    model_context_hard_limit_tokens: int = 32_000
+    max_model_conversation_messages: int = 9
+    max_model_tool_references: int = 8
+    max_model_skill_content_chars: int = 4_000
 
 
 class BasePlanner(ABC):
@@ -139,18 +159,28 @@ class ToolCallingPlanner(BasePlanner):
         max_validation_retries: int = 1,
         system_prompt: str = "",
         context_config: PlannerContextConfig | None = None,
+        sam3_selection_reviewer: Callable[[JsonDict], JsonDict] | None = None,
+        sam3_selection_parent_context: Sam3SelectionParentContext | None = None,
     ) -> None:
         self.backend = backend or PlaceholderPlannerBackend()
         self.max_validation_retries = max(0, max_validation_retries)
         base_prompt = system_prompt or _default_tool_planner_system_prompt()
         self.system_prompt, self.prompt_metadata = compose_main_planner_prompt(base_prompt)
         self.context_config = context_config or PlannerContextConfig()
+        self.sam3_selection_reviewer = sam3_selection_reviewer
+        self.sam3_selection_parent_context = sam3_selection_parent_context
         self.rollout_recorder: RolloutRecorder | None = None
 
     def set_rollout_recorder(self, recorder: RolloutRecorder | None) -> None:
         """Attach the training-data recorder owned by the runtime."""
 
         self.rollout_recorder = recorder
+
+    def reset_session_context(self) -> None:
+        """Reset bounded provider checkpoints owned by one agent session."""
+
+        if self.sam3_selection_parent_context is not None:
+            self.sam3_selection_parent_context.clear()
 
     def plan(
         self,
@@ -178,6 +208,21 @@ class ToolCallingPlanner(BasePlanner):
             )
             host_obligation.metadata["execution_model"] = "host_obligation_dispatch"
             return host_obligation
+        selection = tool_context.get("selection_obligation")
+        selection_bundle = (
+            selection.get("selection_bundle") if isinstance(selection, dict) else None
+        )
+        if (
+            isinstance(selection, dict)
+            and isinstance(selection_bundle, dict)
+            and isinstance(selection_bundle.get("original_image_ref"), str)
+            and isinstance(selection_bundle.get("contact_sheet_ref"), str)
+            and selection.get("semantic_role_source") == "explicit"
+        ):
+            return self._plan_isolated_sam3_selection(
+                selection,
+                tool_context=tool_context,
+            )
         if isinstance(self.backend, PlaceholderPlannerBackend) and not any(
             event.event_type == "observation" for event in memory.events[:-1]
         ):
@@ -192,6 +237,24 @@ class ToolCallingPlanner(BasePlanner):
                     backend=self.backend,
                 ),
             )
+        model_conversation_summary = memory.conversation_checkpoint_summary()[-4_000:]
+        model_tool_context, model_conversation_messages = _model_request_context(
+            tool_context,
+            memory=memory,
+            config=self.context_config,
+            system_prompt=self.system_prompt,
+            conversation_summary=model_conversation_summary,
+        )
+        tool_context["model_context_budget"] = dict(
+            model_tool_context.get("context_budget")
+            if isinstance(model_tool_context.get("context_budget"), dict)
+            else {}
+        )
+        tool_context["model_context_projection"] = dict(
+            model_tool_context.get("controller")
+            if isinstance(model_tool_context.get("controller"), dict)
+            else {}
+        )
         validation_errors: list[str] = []
         last_result: PlannerBackendResult | None = None
         backend_usage: JsonDict = {}
@@ -199,10 +262,10 @@ class ToolCallingPlanner(BasePlanner):
         validation_attempt_history: list[JsonDict] = []
         for attempt in range(1, self.max_validation_retries + 2):
             request = PlannerBackendRequest(
-                tool_context=tool_context,
+                tool_context=model_tool_context,
                 system_prompt=self.system_prompt,
-                conversation_messages=memory.model_conversation_messages(),
-                conversation_summary=memory.conversation_checkpoint_summary(),
+                conversation_messages=model_conversation_messages,
+                conversation_summary=model_conversation_summary,
                 attempt=attempt,
                 validation_errors=validation_errors,
                 metadata={"schema_version": "openeta.planner_decision.v1"},
@@ -210,6 +273,11 @@ class ToolCallingPlanner(BasePlanner):
             model_started_at_s = time.time()
             last_result = self.backend.decide(request)
             model_completed_at_s = time.time()
+            if (
+                self.sam3_selection_parent_context is not None
+                and not str(last_result.details.get("error_type") or "").strip()
+            ):
+                self.sam3_selection_parent_context.capture_if_empty(request)
             backend_usage = _merge_backend_usage(backend_usage, last_result.details)
             usage_source = str(last_result.details.get("usage_source") or "unknown")
             backend_usage_sources[usage_source] = (
@@ -408,6 +476,133 @@ class ToolCallingPlanner(BasePlanner):
             ),
         )
 
+    def _plan_isolated_sam3_selection(
+        self,
+        selection: JsonDict,
+        *,
+        tool_context: JsonDict,
+    ) -> PlannerDecision:
+        """Resolve a pending visual choice without the general planner transcript."""
+
+        failures: list[JsonDict] = []
+        embedded_review = selection.get("selection_review")
+        embedded_review = (
+            dict(embedded_review) if isinstance(embedded_review, Mapping) else {}
+        )
+        retry_exhausted = (
+            embedded_review.get("decision") == "deferred"
+            and embedded_review.get("infrastructure_retry_exhausted") is True
+        )
+        review: JsonDict | None = None
+        if retry_exhausted:
+            embedded_failures = embedded_review.get("failures")
+            failures = (
+                [dict(item) for item in embedded_failures if isinstance(item, Mapping)]
+                if isinstance(embedded_failures, list)
+                else [
+                    {
+                        "attempt_count": embedded_review.get("attempt_count"),
+                        "error_type": embedded_review.get("error_type"),
+                        "message": embedded_review.get("reason"),
+                    }
+                ]
+            )
+        else:
+            reviewer = self.sam3_selection_reviewer or BackendSam3SelectionReviewer(
+                self.backend
+            ).review
+            try:
+                review = reviewer(
+                    {
+                        "result_id": selection.get("result_id"),
+                        "semantic_role": selection.get("semantic_role")
+                        or "grasp_target",
+                        "target_prompt": selection.get("target_prompt"),
+                        "source_image": selection.get("source_image"),
+                        "candidates": selection.get("candidates") or [],
+                        "selection_bundle": selection.get("selection_bundle") or {},
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - reviewer owns its retry budget.
+                retry_failures = getattr(exc, "failures", None)
+                failures = (
+                    [dict(item) for item in retry_failures if isinstance(item, Mapping)]
+                    if isinstance(retry_failures, list)
+                    else [
+                        {
+                            "attempt_count": getattr(exc, "attempt_count", 1),
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    ]
+                )
+        if review is not None:
+            decision_name = (
+                "select_sam3_detection"
+                if review.get("decision") == "select"
+                else "reject_sam3_detections"
+            )
+            parameters: JsonDict = {
+                "sam3_result_id": str(selection.get("result_id") or ""),
+                "reason": str(review.get("reason") or ""),
+            }
+            if decision_name == "select_sam3_detection":
+                parameters.update(
+                    {
+                        "detection_id": str(review.get("detection_id") or ""),
+                        "selection_confidence": review.get("confidence"),
+                        "target_geometry_family": review.get(
+                            "target_geometry_family"
+                        ),
+                    }
+                )
+            return PlannerDecision(
+                action_type="tool_call",
+                action=decision_name,
+                parameters=parameters,
+                reasoning=(
+                    "A clean two-image semantic reviewer resolved the pending SAM3 "
+                    "mask without replaying the general embodied-agent context."
+                ),
+                metadata={
+                    **_planner_metadata(
+                        planner=self,
+                        tool_context=tool_context,
+                        backend=self.backend,
+                    ),
+                    "execution_model": "isolated_semantic_selection",
+                    "selection_review": review,
+                    "infrastructure_retry_count": review.get(
+                        "infrastructure_retry_count", 0
+                    ),
+                },
+            )
+        return PlannerDecision(
+            action_type="response",
+            action="ask_human",
+            parameters={
+                "question": (
+                    "The bounded SAM3 semantic reviewer exhausted its retry. Check the "
+                    "planner/VLM service before resuming this unchanged candidate bundle."
+                ),
+                "failure_code": "sam3_selection_infrastructure_failure",
+                "sam3_result_id": selection.get("result_id"),
+            },
+            reasoning=(
+                "Repeated bounded-review exceptions are infrastructure failures, not evidence "
+                "that any SAM3 candidate is semantically unreachable."
+            ),
+            metadata={
+                **_planner_metadata(
+                    planner=self,
+                    tool_context=tool_context,
+                    backend=self.backend,
+                ),
+                "execution_model": "isolated_semantic_selection",
+                "infrastructure_failures": failures,
+            },
+        )
+
 
 def _host_obligation_decision(
     tool_context: JsonDict,
@@ -548,57 +743,6 @@ def _host_obligation_decision(
                 }
             },
         )
-    if (
-        isinstance(placement_policy, dict)
-        and placement_policy.get("status") == "qualification_retry_required"
-    ):
-        recovery = placement_policy.get("recovery")
-        required = recovery.get("required_action") if isinstance(recovery, dict) else None
-        if (
-            isinstance(required, dict)
-            and required.get("name") == "anyplace"
-            and isinstance(required.get("parameters"), dict)
-            and tools.can_execute("anyplace")
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action="anyplace",
-                parameters=dict(required["parameters"]),
-                reasoning=(
-                    "The first frozen placement pool produced zero plan-only PASS candidates; "
-                    "run the one bounded new-seed inference on the same observation and "
-                    "qualify only that new pool without merging failed frozen goals."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": "openeta.placement_recovery.v3",
-                        "stage": "second_qualification_round",
-                        "requires_fresh_observation": False,
-                    }
-                },
-            )
-    if (
-        isinstance(placement_policy, dict)
-        and placement_policy.get("status") == "reobserve_required"
-        and tools.can_execute("observe")
-    ):
-        return PlannerDecision(
-            action_type="tool_call",
-            action="observe",
-            parameters={"reason": "placement_candidates_exhausted_attachment_preserved"},
-            reasoning=(
-                "All placement candidates failed before execution; keep the verified "
-                "attachment and acquire a fresh placement observation before rerunning AnyPlace."
-            ),
-            metadata={
-                "host_obligation": {
-                    "schema_version": "openeta.placement_recovery.v2",
-                    "tool": "observe",
-                    "stage": "reobserve_placement",
-                }
-            },
-        )
-
     recovery = tool_context.get("grasp_recovery")
     if isinstance(recovery, dict) and recovery.get("status") == "required":
         required = recovery.get("required_action")
@@ -764,7 +908,8 @@ def _host_obligation_decision(
                 parameters=dict(required["parameters"]),
                 reasoning=(
                     f"Grasp stage {stage} has one host-generated safe pose; dispatch "
-                    "it after semantic mask selection and before stale visual recovery."
+                    "it after semantic mask selection and before stale visual recovery. "
+                    "The independent action reviewer and runtime motion checks still apply."
                 ),
                 metadata={
                     "host_obligation": {
@@ -848,18 +993,6 @@ def _host_obligation_decision(
                 "alternate_camera_estimation": (
                     "The alternate camera target is selected; run the normalized "
                     "grasp estimator on this view before changing backend."
-                ),
-                "wrist_refinement_collision_check": (
-                    "Check the target-centric wrist observation hover path for obstacles."
-                ),
-                "wrist_refinement_move": (
-                    "Move to the checked observation hover before acquiring fresh wrist RGB-D."
-                ),
-                "wrist_refinement_segmentation": (
-                    "Segment the same target in the fresh close-range wrist RGB-D view."
-                ),
-                "wrist_refinement_estimation": (
-                    "Run a complete grasp estimate from the fresh close-range wrist packet."
                 ),
                 "alternate_backend": (
                     "All usable views were exhausted for the current estimator; dispatch "
@@ -1123,6 +1256,104 @@ def _host_obligation_decision(
                 },
             )
 
+    reference = tool_context.get("reference_localization_obligation")
+    if isinstance(reference, dict) and reference.get("required_next_tool") == "sam3":
+        required_parameter = str(reference.get("required_parameter") or "")
+        scene_image = reference.get("scene_image")
+        positive_points = reference.get("positive_points")
+        if (
+            required_parameter == "positive_points"
+            and isinstance(scene_image, str)
+            and isinstance(positive_points, list)
+            and tools.can_execute("sam3")
+        ):
+            return PlannerDecision(
+                action_type="tool_call",
+                action="sam3",
+                parameters={
+                    "image": scene_image,
+                    "positive_points": positive_points,
+                    **(
+                        {
+                            "semantic_role": reference.get("semantic_role"),
+                            "semantic_target": reference.get("target_object"),
+                            "perception_bundle_id": reference.get(
+                                "perception_bundle_id"
+                            ),
+                            "observation_id": reference.get("observation_id"),
+                            "scene_epoch": reference.get("scene_epoch"),
+                        }
+                        if reference.get("semantic_role")
+                        else {}
+                    ),
+                },
+                reasoning=(
+                    "The isolated reference localizer produced one exact scene image "
+                    "and foreground point set; dispatch the determined SAM3 point prompt."
+                ),
+                metadata={
+                    "host_obligation": {
+                        "schema_version": "openeta.reference_localization_obligation.v1",
+                        "tool": "sam3",
+                    }
+                },
+            )
+    semantic_perception = tool_context.get("semantic_perception_obligation")
+    if isinstance(semantic_perception, dict):
+        if semantic_perception.get("status") == "exhausted":
+            return PlannerDecision(
+                action_type="response",
+                action="ask_human",
+                parameters={
+                    "question": (
+                        "The bounded placement-region text and point localization "
+                        "attempts are exhausted. Provide visual guidance or refresh "
+                        "the perception services before continuing."
+                    ),
+                    "failure_code": semantic_perception.get("failure_code"),
+                },
+                reasoning=(
+                    "The typed perception state machine exhausted its deterministic "
+                    "budget; do not repeat an identical SAM3 or point request."
+                ),
+                metadata={
+                    "host_obligation": {
+                        "schema_version": semantic_perception.get("schema_version"),
+                        "status": "exhausted",
+                        "semantic_role": semantic_perception.get("semantic_role"),
+                    }
+                },
+            )
+        tool_name = str(semantic_perception.get("required_tool") or "")
+        parameters = semantic_perception.get("required_parameters")
+        if (
+            tool_name in {"observe", "sam3", "molmopoint"}
+            and isinstance(parameters, dict)
+            and tools.can_execute(tool_name)
+        ):
+            return PlannerDecision(
+                action_type="tool_call",
+                action=tool_name,
+                parameters=dict(parameters),
+                reasoning=(
+                    "Dispatch the one host-typed semantic role for this observation; "
+                    "role, bundle, and retry identity are not delegated to the model."
+                ),
+                metadata={
+                    "host_obligation": {
+                        "schema_version": semantic_perception.get("schema_version"),
+                        "tool": tool_name,
+                        "semantic_role": semantic_perception.get("semantic_role"),
+                        "perception_bundle_id": semantic_perception.get(
+                            "perception_bundle_id"
+                        ),
+                        "observation_id": semantic_perception.get("observation_id"),
+                        "scene_epoch": semantic_perception.get("scene_epoch"),
+                        "semantic_target": semantic_perception.get("semantic_target"),
+                        "attempt": semantic_perception.get("attempt"),
+                    }
+                },
+            )
     targeted = tool_context.get("targeted_grasp_obligation")
     if isinstance(targeted, dict):
         tool_name = str(targeted.get("required_tool") or "")
@@ -1378,7 +1609,12 @@ class RuleBasedPlanner(BasePlanner):
             return PlannerDecision(
                 action_type="tool_call",
                 action="sam3",
-                parameters={"image": _first_camera_id(observation), "prompt": target},
+                parameters={
+                    "image": _first_camera_id(observation),
+                    "prompt": target,
+                    "semantic_role": "grasp_target",
+                    "semantic_target": target,
+                },
                 reasoning=(
                     "Task asks for object acquisition; start with atomic "
                     f"segmentation of target `{target}`."
@@ -1729,6 +1965,16 @@ def _validate_web_fetch_parameters(parameters: JsonDict) -> list[str]:
 
 def _validate_sam3_parameters(parameters: JsonDict) -> list[str]:
     errors: list[str] = []
+    semantic_role = str(parameters.get("semantic_role") or "").strip().lower()
+    if semantic_role and semantic_role not in {
+        "grasp_target",
+        "placement_object",
+        "placement_region",
+    }:
+        errors.append(
+            "sam3 `parameters.semantic_role` must be grasp_target, "
+            "placement_object, or placement_region when provided."
+        )
     image = parameters.get("image")
     if not isinstance(image, str) or not image.strip() or _looks_like_placeholder_path(image):
         errors.append("sam3 requires `parameters.image` as a concrete local image path.")
@@ -1757,6 +2003,14 @@ def _validate_sam3_parameters(parameters: JsonDict) -> list[str]:
         if isinstance(points, list) and points:
             errors.append("sam3 text mode must not include non-empty `parameters.points`.")
         return errors
+    semantic_target = parameters.get("semantic_target")
+    if semantic_role and (
+        not isinstance(semantic_target, str) or not semantic_target.strip()
+    ):
+        errors.append(
+            "sam3 points mode requires `parameters.semantic_target` to preserve "
+            "the semantic role across text-to-point fallback."
+        )
     if isinstance(prompt, str) and prompt.strip():
         errors.append("sam3 points mode must not include a non-empty `parameters.prompt`.")
     if not isinstance(points, list) or not 1 <= len(points) <= 64:
@@ -2896,11 +3150,96 @@ def _canonicalize_host_parameters(
         ]
     if decision.action != "sam3":
         return []
-    if not _looks_like_placement_region_prompt(decision.parameters.get("prompt")):
+    obligation = tool_context.get("semantic_perception_obligation")
+    if not isinstance(obligation, dict):
         return []
-    # Placement perception is intentionally independent from grasp perception.
-    # Never rewrite a placement SAM3 call onto the pre-grasp RGB-D packet.
-    return []
+    semantic_role = str(obligation.get("semantic_role") or "").strip().lower()
+    if semantic_role not in {"grasp_target", "placement_object", "placement_region"}:
+        return []
+    canonicalizations: list[JsonDict] = []
+    parameters = dict(decision.parameters)
+    supplied_role = parameters.get("semantic_role")
+    if supplied_role != semantic_role:
+        parameters["semantic_role"] = semantic_role
+        canonicalizations.append(
+            {
+                "field": "semantic_role",
+                "tool": "sam3",
+                "reason": "bind_segmentation_to_host_phase_role",
+                "supplied": supplied_role,
+                "canonical": semantic_role,
+            }
+        )
+    mode = str(
+        parameters.get("mode")
+        or ("points" if parameters.get("positive_points") is not None else "text")
+    ).strip().lower()
+    prompt = str(parameters.get("prompt") or "").strip()
+    semantic_target = str(
+        (
+            prompt
+            if mode == "text" and prompt
+            else parameters.get("semantic_target")
+        )
+        or obligation.get("semantic_target")
+        or ""
+    ).strip()
+    if parameters.get("semantic_target") != semantic_target:
+        parameters["semantic_target"] = semantic_target
+        canonicalizations.append(
+            {
+                "field": "semantic_target",
+                "tool": "sam3",
+                "reason": (
+                    "bind_text_semantics_to_exact_visual_prompt"
+                    if mode == "text" and prompt
+                    else "preserve_semantics_across_text_and_point_modes"
+                ),
+                "canonical": semantic_target,
+            }
+        )
+    preferred_image = str(obligation.get("preferred_image") or "")
+    supplied_image = str(parameters.get("image") or "")
+    if semantic_role in {"placement_object", "placement_region"} and preferred_image and not _same_local_artifact(
+        supplied_image,
+        preferred_image,
+    ):
+        parameters["image"] = preferred_image
+        canonicalizations.append(
+            {
+                "field": "image",
+                "tool": "sam3",
+                "reason": "bind_placement_roles_to_one_fresh_rgbd_bundle",
+                "supplied": supplied_image,
+                "canonical": preferred_image,
+            }
+        )
+    image = str(parameters.get("image") or preferred_image)
+    observation_id = str(obligation.get("observation_id") or "")
+    scene_epoch = _coerce_nonnegative_int(obligation.get("scene_epoch"), default=0)
+    identity = _sam3_identity_from_parameters(
+        scene_epoch=scene_epoch,
+        observation_id=observation_id,
+        source_image=image,
+        semantic_role=semantic_role,
+        semantic_target=semantic_target,
+        parameters=parameters,
+    )
+    for parameter_name, value in identity.items():
+        if parameters.get(parameter_name) == value:
+            continue
+        canonicalizations.append(
+            {
+                "field": parameter_name,
+                "tool": "sam3",
+                "reason": "bind_deterministic_perception_attempt_identity",
+                "supplied": parameters.get(parameter_name),
+                "canonical": value,
+            }
+        )
+        parameters[parameter_name] = value
+    decision.parameters = parameters
+    return canonicalizations
 
 
 def _validate_closed_gripper_recovery(
@@ -3122,6 +3461,603 @@ def build_tool_context(
     return context
 
 
+def _model_request_context(
+    full_context: JsonDict,
+    *,
+    memory: AgentMemory,
+    config: PlannerContextConfig,
+    system_prompt: str = "",
+    conversation_summary: str = "",
+) -> tuple[JsonDict, list[JsonDict]]:
+    """Project private runtime state into one bounded coding-agent style turn."""
+
+    messages = memory.model_conversation_messages()
+    messages = messages[-max(1, config.max_model_conversation_messages) :]
+    if not config.model_context_projection_enabled:
+        projected = dict(full_context)
+        projected["context_budget"] = _model_projection_budget(
+            projected,
+            messages=messages,
+            config=config,
+            projection_level="disabled",
+            initial_tokens=None,
+            system_prompt=system_prompt,
+            conversation_summary=conversation_summary,
+        )
+        return projected, messages
+
+    phase, legal_tool_names = _model_phase_and_legal_tools(
+        full_context,
+        max_tools=config.max_model_tool_references,
+    )
+    tool_references = [
+        _compact_tool_reference_for_model(reference)
+        for reference in full_context.get("tool_references", [])
+        if isinstance(reference, dict)
+        and str(reference.get("name") or "") in legal_tool_names
+    ]
+    obligations = {
+        key: _compact_model_value(value, depth=0)
+        for key, value in full_context.items()
+        if key.endswith("_obligation") and value is not None
+    }
+    state_keys = (
+        "active_environment_task",
+        "task_completion_evidence",
+        "selected_sam3_detection",
+        "placement_object_detection",
+        "placement_region_detection",
+        "sam3_no_detection",
+        "sam3_semantic_state",
+        "grasp_candidate_policy",
+        "grasp_reestimation",
+        "retained_targeted_grasp",
+        "grasp_lift_probe",
+        "articulated_attachment_probe",
+        "grasp_execution",
+        "grasp_recovery",
+        "grasp_estimation_recovery",
+        "gripper_command_state",
+        "attachment_gate",
+        "placement_candidate_policy",
+        "placement_release",
+        "motion_reconciliation",
+    )
+    state = {
+        key: _compact_model_value(full_context.get(key), depth=0)
+        for key in state_keys
+        if full_context.get(key) is not None
+    }
+    selected_skills = []
+    for skill in full_context.get("selected_skill_guidance", [])[:1]:
+        if not isinstance(skill, dict):
+            continue
+        selected_skills.append(
+            {
+                key: (
+                    str(value)[: config.max_model_skill_content_chars]
+                    if key == "content"
+                    else _compact_model_value(value, depth=0)
+                )
+                for key, value in skill.items()
+                if key
+                in {
+                    "name",
+                    "description",
+                    "allowed_tools",
+                    "content",
+                    "version",
+                    "selection_reason",
+                }
+            }
+        )
+    memory_context = full_context.get("memory")
+    memory_context = memory_context if isinstance(memory_context, dict) else {}
+    recent_events = memory_context.get("recent_events")
+    recent_events = recent_events if isinstance(recent_events, list) else []
+    projected: JsonDict = {
+        "schema_version": "openeta.planner_model_context.v2",
+        "task": full_context.get("task"),
+        "controller": {
+            "architecture": "host_state_machine_with_typed_model_subtasks",
+            "phase": phase,
+            "legal_tool_names": legal_tool_names,
+            "rule": (
+                "Choose only a listed legal tool. The host owns phase transitions, "
+                "candidate joins, retries, safety proofs, and exact execution parameters."
+            ),
+        },
+        "observation": _compact_observation_for_model(full_context.get("observation")),
+        "vision_image_paths": list(full_context.get("vision_image_paths") or [])[:4],
+        "current_camera_artifacts": [
+            _compact_model_value(item, depth=0)
+            for item in (full_context.get("current_camera_artifacts") or [])[:8]
+            if isinstance(item, dict)
+        ],
+        "current_rgbd_views": [
+            _compact_model_value(item, depth=0)
+            for item in (full_context.get("current_rgbd_views") or [])[:4]
+            if isinstance(item, dict)
+        ],
+        "current_camera_calibrations": [
+            _compact_model_value(item, depth=0)
+            for item in (full_context.get("current_camera_calibrations") or [])[:4]
+            if isinstance(item, dict)
+        ],
+        "obligations": obligations,
+        # Keep obligation names at top level because the stable system prompt
+        # and existing provider integrations reference them directly.
+        **obligations,
+        "state": state,
+        **state,
+        "scene_epoch": full_context.get("scene_epoch"),
+        "latest_environment_receipt": _compact_model_value(
+            full_context.get("latest_environment_receipt"), depth=0
+        ),
+        "memory": {
+            "session_id": memory_context.get("session_id"),
+            "current_user_request": memory_context.get("current_user_request"),
+            "metadata": _compact_memory_metadata(memory_context.get("metadata")),
+            "compact_summary": str(
+                (
+                    (memory_context.get("working_memory") or {}).get("compact_summary")
+                    if isinstance(memory_context.get("working_memory"), dict)
+                    else ""
+                )
+                or ""
+            )[-2_000:],
+            "recent_events": [
+                _compact_model_value(event, depth=0) for event in recent_events[-2:]
+            ],
+        },
+        "task_playbook": _compact_model_value(
+            full_context.get("task_playbook"), depth=0
+        ),
+        "tool_references": tool_references,
+        "registered_tool_handlers": legal_tool_names,
+        "selected_skill_guidance": selected_skills,
+        "skill_usage": _compact_model_value(full_context.get("skill_usage"), depth=0),
+        "execution_rules": _compact_model_value(
+            full_context.get("execution_rules"), depth=0
+        ),
+    }
+    initial_budget = _model_projection_budget(
+        projected,
+        messages=messages,
+        config=config,
+        projection_level="phase",
+        initial_tokens=None,
+        system_prompt=system_prompt,
+        conversation_summary=conversation_summary,
+    )
+    initial_tokens = int(initial_budget["estimated_tokens"])
+    projection_level = "phase"
+    if initial_tokens > config.model_context_soft_limit_tokens:
+        projection_level = "soft_compacted"
+        messages = messages[-5:]
+        projected["memory"]["recent_events"] = []
+        projected["task_playbook"] = None
+        for skill in projected["selected_skill_guidance"]:
+            if isinstance(skill, dict) and isinstance(skill.get("content"), str):
+                skill["content"] = skill["content"][:1_500]
+        for reference in projected["tool_references"]:
+            if isinstance(reference, dict) and isinstance(reference.get("description"), str):
+                reference["description"] = reference["description"][:600]
+    budget = _model_projection_budget(
+        projected,
+        messages=messages,
+        config=config,
+        projection_level=projection_level,
+        initial_tokens=initial_tokens,
+        system_prompt=system_prompt,
+        conversation_summary=conversation_summary,
+    )
+    if int(budget["estimated_tokens"]) > config.model_context_hard_limit_tokens:
+        projection_level = "hard_compacted"
+        messages = messages[-1:]
+        projected["selected_skill_guidance"] = [
+            {
+                key: value
+                for key, value in skill.items()
+                if key in {"name", "description", "allowed_tools", "version"}
+            }
+            for skill in projected["selected_skill_guidance"]
+            if isinstance(skill, dict)
+        ]
+        projected["execution_rules"] = _hard_model_state_summary(
+            projected.get("execution_rules")
+        )
+        projected["current_camera_calibrations"] = []
+        projected["latest_environment_receipt"] = _hard_model_state_summary(
+            projected.get("latest_environment_receipt")
+        )
+        projected["state"] = {
+            key: _hard_model_state_summary(value)
+            for key, value in projected["state"].items()
+        }
+        projected["obligations"] = {
+            key: _hard_model_obligation(value)
+            for key, value in projected["obligations"].items()
+        }
+        for key in obligations:
+            projected[key] = projected["obligations"].get(key)
+        for key in state:
+            projected[key] = projected["state"].get(key)
+        projected["tool_references"] = [
+            _compact_tool_reference_for_model(reference, hard=True)
+            for reference in projected["tool_references"]
+            if isinstance(reference, dict)
+        ]
+        projected["task"] = str(projected.get("task") or "")[:8_000]
+        budget = _model_projection_budget(
+            projected,
+            messages=messages,
+            config=config,
+            projection_level=projection_level,
+            initial_tokens=initial_tokens,
+            system_prompt=system_prompt,
+            conversation_summary=conversation_summary,
+        )
+    if int(budget["estimated_tokens"]) > config.model_context_hard_limit_tokens:
+        projection_level = "minimal_hard_bound"
+        projected = {
+            "schema_version": "openeta.planner_model_context.v2",
+            "task": str(projected.get("task") or "")[:4_000],
+            "controller": projected["controller"],
+            "observation": projected["observation"],
+            "vision_image_paths": projected["vision_image_paths"][:2],
+            "current_rgbd_views": projected["current_rgbd_views"][:2],
+            "obligations": projected["obligations"],
+            **projected["obligations"],
+            "state": {
+                key: _hard_model_state_summary(value)
+                for key, value in projected["state"].items()
+            },
+            "tool_references": projected["tool_references"],
+            "registered_tool_handlers": legal_tool_names,
+            "selected_skill_guidance": projected["selected_skill_guidance"],
+        }
+        messages = []
+        budget = _model_projection_budget(
+            projected,
+            messages=messages,
+            config=config,
+            projection_level=projection_level,
+            initial_tokens=initial_tokens,
+            system_prompt=system_prompt,
+            conversation_summary=conversation_summary,
+        )
+    projected["context_budget"] = budget
+    return projected, messages
+
+
+def _model_phase_and_legal_tools(
+    context: JsonDict,
+    *,
+    max_tools: int,
+) -> tuple[str, list[str]]:
+    available = {
+        str(reference.get("name") or ""): reference
+        for reference in context.get("tool_references", [])
+        if isinstance(reference, dict) and str(reference.get("name") or "")
+    }
+    required: list[str] = []
+    for key, value in context.items():
+        if not key.endswith("_obligation") or not isinstance(value, dict):
+            continue
+        tool_name = str(value.get("required_tool") or "")
+        if tool_name:
+            required.append(tool_name)
+        action = value.get("required_action")
+        if isinstance(action, dict) and str(action.get("name") or ""):
+            required.append(str(action["name"]))
+    semantic = context.get("semantic_perception_obligation")
+    execution = context.get("grasp_execution")
+    active_environment = context.get("active_environment_task")
+    selected = context.get("selected_sam3_detection")
+    phase = "general"
+    preferred: list[str] = []
+    if isinstance(semantic, dict) and semantic.get("status") == "semantic_decision_required":
+        phase = "semantic_perception"
+        preferred = ["sam3", "observe"]
+    elif isinstance(execution, dict):
+        stage = str(execution.get("stage") or "")
+        phase = f"grasp_{stage or 'execution'}"
+        stage_tools = {
+            "prepare_probe": ["prepare_attachment_probe"],
+            "attachment": ["assess_attachment_probe", "observe"],
+            "align": ["sam3", "retrieve_asset_reference", "molmopoint"],
+        }
+        preferred = stage_tools.get(stage, [])
+    elif not isinstance(active_environment, dict):
+        phase = "environment_start"
+        preferred = [
+            "create_simulator_env",
+            "list_simulator_envs",
+            "observe",
+            "sense",
+        ]
+    elif not isinstance(selected, dict):
+        phase = "target_perception"
+        preferred = [
+            "observe",
+            "sam3",
+            "retrieve_asset_reference",
+            "molmopoint",
+        ]
+    elif not isinstance(context.get("frozen_placement_goal_pool"), dict):
+        phase = "frozen_placement_perception"
+        preferred = ["sam3", "molmopoint", "anyplace", "observe"]
+    elif not isinstance(context.get("grasp_candidate_policy"), dict):
+        phase = "grasp_generation"
+        preferred = [
+            "grasp_pose_estimate",
+            "anygrasp",
+            "graspgenx",
+            "contact_graspnet",
+        ]
+    else:
+        phase = "manipulation"
+        preferred = ["observe", "sam3", "prepare_attachment_probe"]
+    ordered: list[str] = []
+    for name in [*required, *preferred]:
+        if name in available and name not in ordered:
+            ordered.append(name)
+    if not ordered:
+        for skill in context.get("selected_skill_guidance", []):
+            if not isinstance(skill, dict):
+                continue
+            for name in skill.get("allowed_tools", []) or []:
+                if isinstance(name, str) and name in available and name not in ordered:
+                    ordered.append(name)
+                if len(ordered) >= max_tools:
+                    break
+            if ordered:
+                break
+    if not ordered:
+        ordered = list(available)[:max_tools]
+    return phase, ordered[: max(1, max_tools)]
+
+
+_MODEL_CONTEXT_DROP_KEYS = {
+    "artifacts",
+    "candidates",
+    "candidate_queue",
+    "host_candidate_compilations",
+    "host_candidate_compilation_queue",
+    "qualification_evidence",
+    "qualification_artifact",
+    "attachment_proof",
+    "probe_proof",
+    "observation_views",
+    "response",
+    "mcp_calls",
+}
+
+
+def _compact_model_value(value: object, *, depth: int) -> object:
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= 2_000 else value[:1_997] + "..."
+    if depth >= 5:
+        if isinstance(value, (dict, list, tuple)):
+            return {"summary": "nested_value_omitted", "count": len(value)}
+        return str(value)[:500]
+    if isinstance(value, dict):
+        compact: JsonDict = {}
+        for key, item in list(value.items())[:48]:
+            if key in _MODEL_CONTEXT_DROP_KEYS:
+                if isinstance(item, (dict, list, tuple)):
+                    compact[f"{key}_summary"] = {"count": len(item)}
+                continue
+            compact[str(key)] = _compact_model_value(item, depth=depth + 1)
+        return compact
+    if isinstance(value, (list, tuple)):
+        return [
+            _compact_model_value(item, depth=depth + 1) for item in list(value)[:6]
+        ]
+    return str(value)[:500]
+
+
+def _compact_observation_for_model(value: object) -> JsonDict:
+    observation = value if isinstance(value, dict) else {}
+    metadata = observation.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        "task": observation.get("task"),
+        "robot": _compact_model_value(observation.get("robot"), depth=0),
+        "objects": [
+            _compact_model_value(item, depth=0)
+            for item in (observation.get("objects") or [])[:8]
+            if isinstance(item, dict)
+        ],
+        "camera_ids": list(observation.get("camera_ids") or [])[:8],
+        "metadata": {
+            key: _compact_model_value(metadata.get(key), depth=0)
+            for key in (
+                "env_id",
+                "environment",
+                "step_idx",
+                "scene_epoch",
+                "planning_scene_revision",
+                "fresh_observation_required",
+            )
+            if key in metadata
+        },
+    }
+
+
+def _compact_memory_metadata(value: object) -> JsonDict:
+    metadata = value if isinstance(value, dict) else {}
+    return {
+        key: _compact_model_value(metadata.get(key), depth=0)
+        for key in ("source", "execution_profile", "workspace", "scenario")
+        if key in metadata
+    }
+
+
+def _compact_tool_reference_for_model(
+    reference: Mapping[str, object],
+    *,
+    hard: bool = False,
+) -> JsonDict:
+    """Keep a callable schema while bounding provider-facing prose and nesting."""
+
+    text_limit = 240 if hard else 800
+    item_limit = 16 if hard else 32
+    compact: JsonDict = {
+        key: _bounded_model_value(
+            reference[key],
+            text_limit=text_limit,
+            item_limit=item_limit,
+            depth=0,
+        )
+        for key in (
+            "name",
+            "category",
+            "description",
+            "parameters",
+            "safe_by_default",
+            "effect",
+            "batchable",
+            "requires_observation_after_call",
+        )
+        if key in reference
+    }
+    return compact
+
+
+def _hard_model_obligation(value: object) -> object:
+    if not isinstance(value, dict):
+        return _bounded_model_value(value, text_limit=500, item_limit=8, depth=0)
+    retained = {
+        key: value[key]
+        for key in (
+            "schema_version",
+            "status",
+            "stage",
+            "semantic_role",
+            "semantic_target",
+            "reason",
+            "failure_code",
+            "required_tool",
+            "required_parameter",
+            "required_parameters",
+            "required_action",
+            "preferred_image",
+            "allowed_images",
+            "target_object",
+            "retry_mode",
+            "attempt",
+            "rule",
+        )
+        if key in value
+    }
+    return _bounded_model_value(retained, text_limit=500, item_limit=16, depth=0)
+
+
+def _bounded_model_value(
+    value: object,
+    *,
+    text_limit: int,
+    item_limit: int,
+    depth: int,
+) -> object:
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= text_limit else value[: text_limit - 3] + "..."
+    if depth >= 5:
+        if isinstance(value, (dict, list, tuple)):
+            return {"summary": "nested_value_omitted", "count": len(value)}
+        return str(value)[:text_limit]
+    if isinstance(value, dict):
+        return {
+            str(key): _bounded_model_value(
+                item,
+                text_limit=text_limit,
+                item_limit=item_limit,
+                depth=depth + 1,
+            )
+            for key, item in list(value.items())[:item_limit]
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _bounded_model_value(
+                item,
+                text_limit=text_limit,
+                item_limit=item_limit,
+                depth=depth + 1,
+            )
+            for item in list(value)[:item_limit]
+        ]
+    return str(value)[:text_limit]
+
+
+def _hard_model_state_summary(value: object) -> object:
+    if not isinstance(value, dict):
+        return _compact_model_value(value, depth=0)
+    retained = {
+        key: value[key]
+        for key in (
+            "schema_version",
+            "status",
+            "stage",
+            "verdict",
+            "reason",
+            "failure_code",
+            "stop_reason",
+            "semantic_role",
+            "scene_epoch",
+            "planning_scene_revision",
+            "candidate_id",
+            "result_id",
+            "source_image",
+            "target_prompt",
+            "required_tool",
+            "required_action",
+        )
+        if key in value
+    }
+    return _compact_model_value(retained, depth=0)
+
+
+def _model_projection_budget(
+    context: JsonDict,
+    *,
+    messages: list[JsonDict],
+    config: PlannerContextConfig,
+    projection_level: str,
+    initial_tokens: int | None,
+    system_prompt: str,
+    conversation_summary: str,
+) -> JsonDict:
+    estimate = estimate_json_tokens(
+        {
+            "system_prompt": system_prompt,
+            "conversation_summary": conversation_summary,
+            "conversation_messages": messages,
+            "tool_context": context,
+        },
+        model=config.token_estimator_model,
+        approx_chars_per_token=config.approx_chars_per_token,
+    )
+    return {
+        "schema_version": "openeta.model_context_budget.v1",
+        "projection_level": projection_level,
+        "soft_limit_tokens": config.model_context_soft_limit_tokens,
+        "hard_limit_tokens": config.model_context_hard_limit_tokens,
+        "estimated_chars": estimate.chars,
+        "estimated_tokens": estimate.tokens,
+        "initial_estimated_tokens": initial_tokens,
+        "conversation_message_count": len(messages),
+        "within_soft_limit": estimate.tokens <= config.model_context_soft_limit_tokens,
+        "within_hard_limit": estimate.tokens <= config.model_context_hard_limit_tokens,
+        "estimator": estimate.estimator,
+    }
+
+
 def _build_tool_context_payload(
     *,
     observation: EnvObservation,
@@ -3279,6 +4215,12 @@ def _build_tool_context_payload(
             "frozen_placement_goal_pool"
         ),
         "sam3_no_detection": memory_context.get("sam3_no_detection"),
+        "sam3_semantic_state": memory_context.get("sam3_semantic_state"),
+        "semantic_perception_obligation": _semantic_perception_obligation(
+            observation=observation,
+            camera_artifacts=camera_artifacts,
+            memory_context=memory_context,
+        ),
         "grasp_view_selection_obligation": (
             {
                 **grasp_view_selection,
@@ -3597,6 +4539,14 @@ def _grasp_view_selection_obligation(
         "tool_parameters": {
             "image": "<one exact candidate_views[].rgb_path>",
             "prompt": prompt,
+            **(
+                {
+                    "semantic_role": "grasp_target",
+                    "semantic_target": prompt,
+                }
+                if reestimate.get("semantic_role_source") == "explicit"
+                else {}
+            ),
         },
     }
 
@@ -3879,7 +4829,7 @@ def _grasp_estimation_fallback_obligation(
     scene_epoch: object,
     working_artifacts: object = None,
 ) -> JsonDict | None:
-    """Recover refinable grasp exhaustion across passive views, wrist, then backends."""
+    """Recover an exhausted frozen grasp pool across passive views, then backends."""
 
     if isinstance(pending_selection, dict) or not isinstance(grasp_policy, dict):
         return None
@@ -3914,6 +4864,23 @@ def _grasp_estimation_fallback_obligation(
         attempt for attempt in attempts if str(attempt.get("backend") or "") == current_backend
     ]
     current_target = selected if isinstance(selected, dict) else None
+    policy_target = grasp_policy.get("target_detection")
+    semantic_provenance = (
+        current_target
+        if isinstance(current_target, dict)
+        else policy_target
+        if isinstance(policy_target, dict)
+        else None
+    )
+    semantic_fields = (
+        {
+            "semantic_role": "grasp_target",
+            "semantic_target": fallback_prompt,
+        }
+        if isinstance(semantic_provenance, dict)
+        and semantic_provenance.get("semantic_role_source") == "explicit"
+        else {}
+    )
     if isinstance(current_target, dict):
         selected_prompt = str(current_target.get("target_prompt") or "").strip()
         source_image = str(current_target.get("source_image") or "")
@@ -3934,19 +4901,7 @@ def _grasp_estimation_fallback_obligation(
                 return {
                     "schema_version": "openeta.grasp_estimation_recovery.v1",
                     "status": "required",
-                    "stage": (
-                        "wrist_refinement_estimation"
-                        if _frame_is_wrist_camera(
-                            _target_camera_frame(
-                                current_target,
-                                observation=observation,
-                                camera_artifacts=camera_artifacts,
-                            ),
-                            observation=observation,
-                            camera_artifacts=camera_artifacts,
-                        )
-                        else "alternate_camera_estimation"
-                    ),
+                    "stage": "alternate_camera_estimation",
                     "required_tool": "grasp_pose_estimate",
                     "required_parameters": targeted["required_parameters"],
                     "fallback_target_prompt": fallback_prompt,
@@ -3978,6 +4933,7 @@ def _grasp_estimation_fallback_obligation(
                 "mode": "text",
                 "image": next_view["rgb"],
                 "prompt": fallback_prompt,
+                **semantic_fields,
             },
             "camera_frame_id": next_view["camera_frame_id"],
             "fallback_target_prompt": fallback_prompt,
@@ -4480,6 +5436,7 @@ def _placement_obligation(
         "required_parameters": required,
         "object_detection_id": object_detection.get("id"),
         "placement_region_detection_id": region_detection.get("id"),
+        "perception_bundle_id": object_detection.get("perception_bundle_id"),
         "planning_scene_revision": (
             attachment.get("planning_scene_revision")
             if attached and isinstance(attachment.get("planning_scene_revision"), int)
@@ -4488,6 +5445,608 @@ def _placement_obligation(
         "phase": "post_attachment" if attached else "frozen_goal_pool",
         "independent_from_grasp": attached,
     }
+
+
+def _semantic_perception_obligation(
+    *,
+    observation: EnvObservation,
+    camera_artifacts: list[JsonDict],
+    memory_context: JsonDict,
+) -> JsonDict | None:
+    """Describe the one legal semantic role without asking the model to track phase."""
+
+    if isinstance(memory_context.get("selection_obligation"), dict) or isinstance(
+        memory_context.get("reference_localization_obligation"), dict
+    ):
+        return None
+    scene_epoch = _coerce_nonnegative_int(memory_context.get("scene_epoch"), default=0)
+    current_rgb = [
+        artifact
+        for artifact in camera_artifacts
+        if artifact.get("kind") == "rgb"
+        and isinstance(artifact.get("path"), str)
+        and _is_supported_perception_camera(artifact)
+    ]
+    if not current_rgb:
+        return None
+    preferred_rgb = next(
+        (
+            artifact
+            for artifact in current_rgb
+            if not _is_wrist_camera(artifact) and _is_primary_planner_camera(artifact)
+        ),
+        next(
+            (artifact for artifact in current_rgb if not _is_wrist_camera(artifact)),
+            current_rgb[0],
+        ),
+    )
+    object_detection = memory_context.get("placement_object_detection")
+    region_detection = memory_context.get("placement_region_detection")
+    current_object = _semantic_detection_is_current(
+        object_detection,
+        camera_artifacts=current_rgb,
+        scene_epoch=scene_epoch,
+    )
+    current_region = _semantic_detection_is_current(
+        region_detection,
+        camera_artifacts=current_rgb,
+        scene_epoch=scene_epoch,
+    )
+    selected = memory_context.get("selected_sam3_detection")
+    execution = memory_context.get("grasp_execution")
+    attachment = memory_context.get("attachment_gate")
+    attached = (
+        isinstance(execution, dict)
+        and execution.get("status") == "completed"
+        and execution.get("stage") == "attached"
+        and execution.get("attachment_mode") != "articulated_handle"
+        and isinstance(attachment, dict)
+        and attachment.get("status") == "resolved"
+        and str(attachment.get("verdict") or "").upper() == "PASS"
+    )
+    frozen_pool = memory_context.get("frozen_placement_goal_pool")
+    grasp_policy = memory_context.get("grasp_candidate_policy")
+
+    # The object and destination are segmented once before grasp generation.
+    # After native attachment succeeds, AnyPlace goals are rebound to the
+    # measured attachment transform without another SAM3 or model call.
+    if attached:
+        return None
+
+    semantic_role = ""
+    source_image = str(preferred_rgb.get("path") or "")
+    if not isinstance(execution, dict) and not isinstance(frozen_pool, dict):
+        if not isinstance(selected, dict):
+            semantic_role = "grasp_target"
+        elif not current_object:
+            semantic_role = "placement_object"
+        elif not current_region or not _semantic_detections_share_bundle(
+            object_detection,
+            region_detection,
+        ):
+            semantic_role = "placement_region"
+            source_image = str(object_detection.get("source_image") or source_image)
+        elif not isinstance(grasp_policy, dict):
+            return None
+    else:
+        return None
+
+    if semantic_role == "grasp_target" and _explicit_post_create_observe_required(
+        memory_context
+    ):
+        return {
+            "schema_version": "openeta.semantic_perception_obligation.v1",
+            "status": "required",
+            "semantic_role": semantic_role,
+            "required_tool": "observe",
+            "required_parameters": {
+                "reason": "explicit_post_create_observation_required"
+            },
+            "rule": (
+                "The task explicitly excludes create_simulator_env.initial_observation; "
+                "acquire one observe receipt before target perception."
+            ),
+        }
+
+    semantic_state = memory_context.get("sam3_semantic_state")
+    semantic_state = semantic_state if isinstance(semantic_state, dict) else {}
+    roles = semantic_state.get("roles")
+    roles = roles if isinstance(roles, dict) else {}
+    role_state = roles.get(semantic_role) if isinstance(roles, dict) else None
+    role_state = role_state if isinstance(role_state, dict) else {}
+    prompt = str(role_state.get("canonical_prompt") or "").strip()
+    if not prompt and semantic_role in {"grasp_target", "placement_object"}:
+        policy_target = (
+            grasp_policy.get("target_detection")
+            if isinstance(grasp_policy, dict)
+            else None
+        )
+        prompt = str(
+            (
+                policy_target.get("target_prompt")
+                if isinstance(policy_target, dict)
+                else None
+            )
+            or (selected.get("target_prompt") if isinstance(selected, dict) else None)
+            or ""
+        ).strip()
+    role_attempts = [
+        attempt
+        for attempt in (semantic_state.get("attempts") or [])
+        if isinstance(attempt, dict)
+        and str(attempt.get("semantic_role") or "") == semantic_role
+        and _coerce_nonnegative_int(attempt.get("scene_epoch"), default=-1)
+        == scene_epoch
+    ]
+    failed_text_paths = [
+        str(attempt.get("source_image") or "")
+        for attempt in role_attempts
+        if str(attempt.get("status") or "") in {"no_detection", "rejected"}
+        and str(attempt.get("mode") or "") != "point_prompt"
+        and str(attempt.get("source_image") or "")
+    ]
+    text_fallback_required = False
+    if semantic_role == "placement_object" and prompt:
+        ordered_sources = [str(preferred_rgb.get("path") or "")]
+        ordered_sources.extend(
+            str(artifact.get("path") or "")
+            for artifact in current_rgb
+            if str(artifact.get("path") or "") not in ordered_sources
+        )
+        untried_sources = [
+            candidate
+            for candidate in ordered_sources
+            if candidate
+            and not any(
+                _same_local_artifact(candidate, attempted)
+                for attempted in failed_text_paths
+            )
+        ]
+        if untried_sources:
+            source_image = untried_sources[0]
+        elif failed_text_paths:
+            # Point localization receives one deterministic primary scene image;
+            # a successful point-SAM result therefore rejoins placement-region
+            # perception on that exact bundle.
+            source_image = str(preferred_rgb.get("path") or source_image)
+            text_fallback_required = True
+    elif semantic_role == "placement_region" and prompt:
+        text_fallback_required = any(
+            _same_local_artifact(source_image, attempted)
+            for attempted in failed_text_paths
+        )
+    identity = _sam3_request_identity(
+        observation=observation,
+        scene_epoch=scene_epoch,
+        source_image=source_image,
+        semantic_role=semantic_role,
+        semantic_target=prompt,
+        mode="text",
+        prompt=prompt,
+        points=[],
+        roi_bbox_xyxy=None,
+    )
+    base: JsonDict = {
+        "schema_version": "openeta.semantic_perception_obligation.v1",
+        "status": "required" if prompt else "semantic_decision_required",
+        "semantic_role": semantic_role,
+        "semantic_target": prompt or None,
+        "scene_epoch": scene_epoch,
+        "perception_bundle_id": identity["perception_bundle_id"],
+        "observation_id": identity["observation_id"],
+        "preferred_image": source_image,
+        "allowed_images": [
+            str(artifact["path"])
+            for artifact in current_rgb
+            if isinstance(artifact.get("path"), str)
+        ],
+        "rule": (
+            "The host owns role and observation identity. The model may choose only "
+            "the visual phrase when semantic_target is absent."
+        ),
+    }
+    no_detection = role_state.get("no_detection")
+    if text_fallback_required and semantic_role in {
+        "placement_object",
+        "placement_region",
+    }:
+        completed_point_attempts = len(
+            {
+                str(attempt.get("attempt_id") or attempt.get("attempt_fingerprint") or "")
+                for attempt in role_attempts
+                if str(attempt.get("mode") or "") == "point_prompt"
+                and str(attempt.get("status") or "") in {
+                    "no_detection",
+                    "rejected",
+                }
+            }
+            - {""}
+        )
+        projection = (
+            _attached_object_image_projection(
+                observation=observation,
+                preferred_rgb=preferred_rgb,
+                attachment=attachment,
+            )
+            if semantic_role == "placement_object" and completed_point_attempts == 0
+            else None
+        )
+        if isinstance(projection, dict):
+            projected_source = str(preferred_rgb.get("path") or source_image)
+            point_xy = projection["point_xy"]
+            points: list[JsonDict] = [
+                {"x": float(point_xy[0]), "y": float(point_xy[1]), "label": 1}
+            ]
+            projected_identity = _sam3_request_identity(
+                observation=observation,
+                scene_epoch=scene_epoch,
+                source_image=projected_source,
+                semantic_role=semantic_role,
+                semantic_target=prompt,
+                mode="points",
+                prompt="",
+                points=points,
+                roi_bbox_xyxy=None,
+            )
+            return {
+                **base,
+                "status": "required",
+                "preferred_image": projected_source,
+                "perception_bundle_id": projected_identity["perception_bundle_id"],
+                "observation_id": projected_identity["observation_id"],
+                "required_tool": "sam3",
+                "required_parameters": {
+                    "mode": "points",
+                    "image": projected_source,
+                    "points": points,
+                    "semantic_role": semantic_role,
+                    "semantic_target": prompt,
+                    "point_prompt_source": "attachment_ack_projection",
+                    "projection_evidence": projection,
+                    **projected_identity,
+                },
+                "fallback": "attachment_projection_after_bounded_exact_views",
+                "projection_evidence": projection,
+            }
+        simplified_prompt = (
+            _simplify_semantic_text_prompt(prompt)
+            if semantic_role == "placement_object"
+            else ""
+        )
+        simplified_attempted = any(
+            str(attempt.get("target_prompt") or "").strip().lower()
+            == simplified_prompt.lower()
+            for attempt in role_attempts
+        )
+        if simplified_prompt and not simplified_attempted:
+            simplified_source = str(preferred_rgb.get("path") or source_image)
+            simplified_identity = _sam3_request_identity(
+                observation=observation,
+                scene_epoch=scene_epoch,
+                source_image=simplified_source,
+                semantic_role=semantic_role,
+                semantic_target=simplified_prompt,
+                mode="text",
+                prompt=simplified_prompt,
+                points=[],
+                roi_bbox_xyxy=None,
+            )
+            return {
+                **base,
+                "status": "required",
+                "semantic_target": simplified_prompt,
+                "preferred_image": simplified_source,
+                "perception_bundle_id": simplified_identity["perception_bundle_id"],
+                "observation_id": simplified_identity["observation_id"],
+                "required_tool": "sam3",
+                "required_parameters": {
+                    "mode": "text",
+                    "image": simplified_source,
+                    "prompt": simplified_prompt,
+                    "semantic_role": semantic_role,
+                    "semantic_target": simplified_prompt,
+                    **simplified_identity,
+                },
+                "fallback": "simplified_text_after_bounded_exact_views",
+                "canonical_semantic_target": prompt,
+            }
+        failure = memory_context.get("reference_localization_failure")
+        failed_molmopoint_attempts = (
+            _coerce_nonnegative_int(failure.get("molmopoint_attempts"), default=0)
+            if isinstance(failure, dict)
+            and str(failure.get("semantic_role") or "") == semantic_role
+            else 0
+        )
+        point_attempts = max(failed_molmopoint_attempts, completed_point_attempts)
+        point_target = (
+            prompt
+            or (
+                str(no_detection.get("target_prompt") or "")
+                if isinstance(no_detection, dict)
+                else ""
+            )
+            or semantic_role
+        )
+        if point_attempts >= 2:
+            return {
+                **base,
+                "status": "exhausted",
+                "failure_code": f"{semantic_role}_localization_exhausted",
+                "attempts": point_attempts,
+            }
+        return {
+            **base,
+            "required_tool": "molmopoint",
+            "required_parameters": {
+                "images": [source_image],
+                "prompt": (
+                    "Point to the interior center of the complete "
+                    f"{point_target}"
+                ),
+            },
+            "fallback": "point_localization_after_bounded_text_views",
+            "attempt": point_attempts + 1,
+        }
+    if prompt:
+        return {
+            **base,
+            "required_tool": "sam3",
+            "required_parameters": {
+                "mode": "text",
+                "image": source_image,
+                "prompt": prompt,
+                "semantic_role": semantic_role,
+                "semantic_target": prompt,
+                **identity,
+            },
+        }
+    return base
+
+
+def _attached_object_image_projection(
+    *,
+    observation: EnvObservation,
+    preferred_rgb: Mapping[str, object],
+    attachment: object,
+) -> JsonDict | None:
+    """Return a trusted post-attach object-center projection when fully provable."""
+
+    if not isinstance(attachment, Mapping):
+        return None
+    attachment_proof = attachment.get("attachment_proof")
+    if not isinstance(attachment_proof, Mapping):
+        return None
+    attachment_transform = attachment_proof.get("attachment_transform")
+    if not isinstance(attachment_transform, Mapping):
+        return None
+    frame_id = str(preferred_rgb.get("frame_id") or "")
+    camera = next(
+        (candidate for candidate in observation.cameras if candidate.frame_id == frame_id),
+        None,
+    )
+    if camera is None or not camera.intrinsics or not camera.extrinsics:
+        return None
+    width = _positive_image_extent(
+        preferred_rgb.get("width"),
+        camera.intrinsics.get("width"),
+        len(camera.rgb[0]) if camera.rgb and camera.rgb[0] else None,
+    )
+    height = _positive_image_extent(
+        preferred_rgb.get("height"),
+        camera.intrinsics.get("height"),
+        len(camera.rgb) if camera.rgb else None,
+    )
+    if width is None or height is None:
+        return None
+    try:
+        projection = project_attached_object_center_to_image(
+            current_eef_pose=observation.robot.end_effector_pose,
+            attachment_transform=attachment_transform,
+            intrinsics=camera.intrinsics,
+            camera_extrinsics=camera.extrinsics,
+            image_width=width,
+            image_height=height,
+        )
+    except (GraspGeometryError, TypeError, ValueError):
+        return None
+    projection["camera_frame_id"] = frame_id
+    projection["source_image"] = str(preferred_rgb.get("path") or "")
+    return projection
+
+
+def _positive_image_extent(*values: object) -> int | None:
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def _simplify_semantic_text_prompt(prompt: str) -> str:
+    """Return one conservative equivalent phrase for a failed text query."""
+
+    tokens = prompt.split()
+    simplified = [
+        token
+        for token in tokens
+        if token.lower().strip(".,;:()[]{}")
+        not in _SEMANTIC_PROMPT_REDUNDANT_SHAPE_WORDS
+    ]
+    if len(simplified) < 2 or simplified == tokens:
+        return ""
+    return " ".join(simplified)
+
+
+def _semantic_detection_is_current(
+    detection: object,
+    *,
+    camera_artifacts: list[JsonDict],
+    scene_epoch: int,
+) -> bool:
+    if not isinstance(detection, dict):
+        return False
+    source_image = detection.get("source_image")
+    if not isinstance(source_image, str) or not source_image:
+        return False
+    if (
+        detection.get("scene_epoch") is not None
+        and _coerce_nonnegative_int(detection.get("scene_epoch"), default=-1)
+        != scene_epoch
+    ):
+        return False
+    return any(
+        _same_local_artifact(artifact.get("path"), source_image)
+        for artifact in camera_artifacts
+    )
+
+
+def _explicit_post_create_observe_required(memory_context: JsonDict) -> bool:
+    task = str(
+        memory_context.get("current_user_request")
+        or memory_context.get("task")
+        or ""
+    ).lower()
+    explicitly_requested = (
+        "先 observe" in task
+        or "first observe" in task
+        or (
+            "initial observation" in task
+            and any(token in task for token in ("不计", "does not count", "excluded"))
+        )
+    )
+    if not explicitly_requested:
+        return False
+    receipt = memory_context.get("latest_environment_receipt")
+    info = receipt.get("info") if isinstance(receipt, dict) else None
+    previous_action = info.get("previous_action") if isinstance(info, dict) else None
+    request_name = (
+        str(previous_action.get("request_name") or "")
+        if isinstance(previous_action, dict)
+        else ""
+    )
+    return request_name == "create_simulator_env"
+
+
+def _semantic_detections_share_bundle(first: object, second: object) -> bool:
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False
+    first_bundle = str(first.get("perception_bundle_id") or "")
+    second_bundle = str(second.get("perception_bundle_id") or "")
+    if first_bundle or second_bundle:
+        return bool(first_bundle and first_bundle == second_bundle)
+    return _same_local_artifact(first.get("source_image"), second.get("source_image"))
+
+
+def _sam3_request_identity(
+    *,
+    observation: EnvObservation,
+    scene_epoch: int,
+    source_image: str,
+    semantic_role: str,
+    semantic_target: str,
+    mode: str,
+    prompt: str,
+    points: list[JsonDict],
+    roi_bbox_xyxy: object,
+) -> JsonDict:
+    raw_observation_id = (
+        observation.metadata.get("observation_id")
+        or observation.metadata.get("capture_id")
+    )
+    observation_identity = str(raw_observation_id or "").strip()
+    if not observation_identity:
+        observation_identity = sha256(
+            f"{scene_epoch}\0{source_image}".encode("utf-8")
+        ).hexdigest()[:16]
+    observation_id = f"observation-{observation_identity}"
+    perception_bundle_id = "perception-" + sha256(
+        f"{scene_epoch}\0{observation_id}\0{source_image}".encode("utf-8")
+    ).hexdigest()[:16]
+    fingerprint_payload = {
+        "perception_bundle_id": perception_bundle_id,
+        "semantic_role": semantic_role,
+        "mode": mode,
+        "semantic_target": semantic_target,
+        "prompt": prompt,
+        "points": points,
+        "roi_bbox_xyxy": roi_bbox_xyxy,
+    }
+    fingerprint = sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "scene_epoch": scene_epoch,
+        "observation_id": observation_id,
+        "perception_bundle_id": perception_bundle_id,
+        "attempt_id": f"sam3-attempt-{fingerprint[:16]}",
+        "attempt_fingerprint": fingerprint,
+    }
+
+
+def _sam3_identity_from_parameters(
+    *,
+    scene_epoch: int,
+    observation_id: str,
+    source_image: str,
+    semantic_role: str,
+    semantic_target: str,
+    parameters: JsonDict,
+) -> JsonDict:
+    normalized_observation_id = observation_id or (
+        "observation-"
+        + sha256(f"{scene_epoch}\0{source_image}".encode("utf-8")).hexdigest()[:16]
+    )
+    perception_bundle_id = "perception-" + sha256(
+        f"{scene_epoch}\0{normalized_observation_id}\0{source_image}".encode("utf-8")
+    ).hexdigest()[:16]
+    legacy_points = parameters.get("positive_points")
+    mode = str(
+        parameters.get("mode") or ("points" if legacy_points is not None else "text")
+    ).strip().lower()
+    points = parameters.get("points")
+    if points is None and legacy_points is not None:
+        points = legacy_points
+    points = points if isinstance(points, list) else []
+    fingerprint = sha256(
+        json.dumps(
+            {
+                "perception_bundle_id": perception_bundle_id,
+                "semantic_role": semantic_role,
+                "mode": mode,
+                "semantic_target": semantic_target,
+                "prompt": str(parameters.get("prompt") or ""),
+                "points": points,
+                "roi_bbox_xyxy": parameters.get("roi_bbox_xyxy"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "scene_epoch": scene_epoch,
+        "observation_id": normalized_observation_id,
+        "perception_bundle_id": perception_bundle_id,
+        "attempt_id": f"sam3-attempt-{fingerprint[:16]}",
+        "attempt_fingerprint": fingerprint,
+    }
+
+
+def _coerce_nonnegative_int(value: object, *, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _latest_anyplace_failure(memory_context: JsonDict) -> str | None:
@@ -4703,10 +6262,17 @@ def _target_reference_obligation(
 ) -> JsonDict | None:
     """Ground an exact task asset after text-only SAM3 returns no mask."""
 
+    semantic_role = (
+        str(no_detection.get("semantic_role") or "grasp_target").strip().lower()
+        if isinstance(no_detection, dict)
+        else ""
+    )
+    if semantic_role == "placement_region":
+        return None
     if (
         not isinstance(no_detection, dict)
         or isinstance(pending_selection, dict)
-        or isinstance(selected, dict)
+        or (isinstance(selected, dict) and semantic_role == "grasp_target")
         or isinstance(pending_localization, dict)
     ):
         return None
@@ -4756,6 +6322,19 @@ def _target_reference_obligation(
                     "image": current_scene,
                     "prompt": target_object,
                     "roi_bbox_xyxy": list(bbox_xyxy),
+                    **(
+                        {
+                            "semantic_role": semantic_role or "grasp_target",
+                            "semantic_target": target_object,
+                            "perception_bundle_id": no_detection.get(
+                                "perception_bundle_id"
+                            ),
+                            "observation_id": no_detection.get("observation_id"),
+                            "scene_epoch": no_detection.get("scene_epoch"),
+                        }
+                        if no_detection.get("semantic_role")
+                        else {}
+                    ),
                 },
                 "empty_sam3_result_id": no_detection.get("result_id"),
                 "failed_prompt": no_detection.get("target_prompt"),
@@ -5206,6 +6785,12 @@ def _tool_context_summary(context: JsonDict) -> JsonDict:
         if isinstance(context.get("skill_usage"), dict)
         else {},
         "context_budget": dict(budget) if isinstance(budget, dict) else {},
+        "model_context_budget": dict(context.get("model_context_budget"))
+        if isinstance(context.get("model_context_budget"), dict)
+        else {},
+        "model_context_projection": dict(context.get("model_context_projection"))
+        if isinstance(context.get("model_context_projection"), dict)
+        else {},
     }
 
 

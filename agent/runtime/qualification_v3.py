@@ -380,6 +380,66 @@ def candidate_physical_quality_key(result: Mapping[str, Any]) -> tuple[Any, ...]
     )
 
 
+def frozen_pair_l5_submission_order(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    prior_attempts: Sequence[Mapping[str, Any]] = (),
+) -> list[JsonDict]:
+    """Quality-sort frozen-pair L5 work while preserving branch diversity.
+
+    A plain physical-quality sort can concentrate early plans on near-duplicate
+    goals from the first grasp. Greedy novelty first prefers a new grasp and
+    placement cluster, then a new grasp, then a new cluster. Quality remains
+    deterministic within each tier; this function never deletes candidates.
+    """
+
+    remaining = [
+        dict(item)
+        for item in sorted(candidates, key=candidate_physical_quality_key)
+    ]
+    anchors = [dict(item) for item in prior_attempts]
+    ordered: list[JsonDict] = []
+    while remaining:
+        if not anchors:
+            selected_index = 0
+        else:
+            used_grasps = {
+                str(item.get("source_grasp_id") or "")
+                for item in anchors
+                if item.get("source_grasp_id")
+            }
+            used_clusters = {
+                str(item.get("se3_cluster_id") or "")
+                for item in anchors
+                if item.get("se3_cluster_id")
+            }
+
+            def novelty_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+                grasp = str(item.get("source_grasp_id") or "")
+                cluster = str(item.get("se3_cluster_id") or "")
+                new_grasp = bool(grasp and grasp not in used_grasps)
+                new_cluster = bool(cluster and cluster not in used_clusters)
+                tier = (
+                    0
+                    if new_grasp and new_cluster
+                    else 1
+                    if new_grasp
+                    else 2
+                    if new_cluster
+                    else 3
+                )
+                return (tier, *candidate_physical_quality_key(item))
+
+            selected_index = min(
+                range(len(remaining)),
+                key=lambda index: novelty_key(remaining[index]),
+            )
+        selected = remaining.pop(selected_index)
+        ordered.append(selected)
+        anchors.append(selected)
+    return ordered
+
+
 def select_grasp_branches(
     passed: Sequence[Mapping[str, Any]],
     *,

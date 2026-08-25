@@ -109,7 +109,7 @@ def test_planning_failure_rejects_only_active_placement_candidate() -> None:
     assert "current joint state" in policy["rejected_candidates"][0]["reason"]
 
 
-def test_all_placement_candidates_failed_requires_independent_reobservation() -> None:
+def test_all_placement_candidates_failed_stops_without_new_inference() -> None:
     memory = AgentMemory()
     memory.save_fact("placement_candidate_policy", _policy(["placement_000"]), source="test")
     memory.save_fact(
@@ -119,7 +119,6 @@ def test_all_placement_candidates_failed_requires_independent_reobservation() ->
             "stage": "attached",
             "candidate_id": "grasp_000",
             "compiled_grasp": {
-                "hover_pose": {"frame": "world", "xyz": [0.2, 0.0, 0.6]},
                 "contact_pose": {"frame": "world", "xyz": [0.2, 0.0, 0.45]},
             },
         },
@@ -129,11 +128,11 @@ def test_all_placement_candidates_failed_requires_independent_reobservation() ->
     memory.add_action(_planning_failure("placement_000", "fingerprint-only"))
 
     policy = memory.placement_candidate_policy()
-    assert policy["status"] == "reobserve_required"
+    assert policy["status"] == "stopped_requires_human"
+    assert policy["stop_reason"] == "CURRENT_GRASP_PLACE_INFEASIBLE"
     assert policy["recovery"] == {
-        "stage": "observe_placement",
-        "then": "resegment_placement_region_and_rerun_anyplace",
-        "preserve_attachment": True,
+        "stage": "manual_intervention",
+        "required_action": None,
     }
 
 
@@ -156,17 +155,17 @@ def test_failed_first_candidate_activates_precompiled_host_queue_fallback() -> N
     policy["scene_epoch"] = 0
     policy["host_candidate_compilations"] = {
         candidate_id: {
-            "schema_version": "openeta.compiled_placement_seed.v2",
+            "schema_version": "openeta.compiled_placement_seed.v3",
             "placement_candidate_id": candidate_id,
             "scene_epoch": 0,
             "scene_revision": 7,
             "selection_source": "host_qualified_queue",
-            "hover_pose": {
+            "release_pose": {
                 "frame": "world",
                 "purpose": "placement",
                 "placement_candidate_id": candidate_id,
-                "placement_stage": "hover",
-                "xyz": [0.4, 0.0, 0.6],
+                "placement_stage": "release",
+                "xyz": [0.4, 0.0, 0.5],
             },
         }
         for candidate_id in ("placement_000", "placement_001")
@@ -218,7 +217,7 @@ def test_repeated_failure_fingerprint_stops_fail_closed() -> None:
 
 
 
-def test_exhausted_recovery_reobserves_placement_and_preserves_attachment() -> None:
+def test_observe_cannot_reset_an_exhausted_frozen_pool() -> None:
     memory = AgentMemory()
     memory.save_fact("placement_candidate_policy", _policy(["placement_000"]), source="test")
     memory.save_fact(
@@ -228,7 +227,6 @@ def test_exhausted_recovery_reobserves_placement_and_preserves_attachment() -> N
             "stage": "attached",
             "candidate_id": "grasp_000",
             "compiled_grasp": {
-                "hover_pose": {"frame": "world", "xyz": [0.2, 0.0, 0.6]},
                 "contact_pose": {"frame": "world", "xyz": [0.2, 0.0, 0.45]},
             },
         },
@@ -238,17 +236,17 @@ def test_exhausted_recovery_reobserves_placement_and_preserves_attachment() -> N
     memory.save_fact("attachment_gate", {"status": "resolved", "verdict": "PASS"}, source="test")
     memory.add_action(_planning_failure("placement_000", "fingerprint-only"))
 
-    assert memory.placement_candidate_policy()["status"] == "reobserve_required"
+    assert memory.placement_candidate_policy()["status"] == "stopped_requires_human"
 
     memory.add_action(_successful_call("observe", {"reason": "fresh"}))
 
-    assert memory.placement_candidate_policy() is None
-    assert memory.selected_sam3_detection() is None
+    assert memory.placement_candidate_policy()["status"] == "stopped_requires_human"
+    assert memory.selected_sam3_detection() == {"id": "stale"}
     assert memory.grasp_execution()["stage"] == "attached"
     assert memory.attachment_gate() == {"status": "resolved", "verdict": "PASS"}
 
 
-def test_reobserve_recovery_does_not_require_source_return_or_detach() -> None:
+def test_exhausted_frozen_pool_has_no_automatic_recovery_action() -> None:
     memory = AgentMemory()
     memory.save_fact("placement_candidate_policy", _policy(["placement_000"]), source="test")
     memory.save_fact(
@@ -257,7 +255,6 @@ def test_reobserve_recovery_does_not_require_source_return_or_detach() -> None:
             "status": "completed",
             "stage": "attached",
             "compiled_grasp": {
-                "hover_pose": {"frame": "world", "xyz": [0.2, 0.0, 0.6]},
                 "contact_pose": {"frame": "world", "xyz": [0.2, 0.0, 0.45]},
             },
         },
@@ -266,6 +263,6 @@ def test_reobserve_recovery_does_not_require_source_return_or_detach() -> None:
     memory.add_action(_planning_failure("placement_000", "fingerprint-only"))
 
     policy = memory.placement_candidate_policy()
-    assert policy["status"] == "reobserve_required"
-    assert policy["recovery"]["preserve_attachment"] is True
+    assert policy["status"] == "stopped_requires_human"
+    assert policy["recovery"]["required_action"] is None
     assert memory.grasp_execution()["stage"] == "attached"

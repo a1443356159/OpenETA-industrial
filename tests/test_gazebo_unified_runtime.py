@@ -229,6 +229,32 @@ def test_runtime_action_observation_uses_ros_completion_barrier_without_callback
     assert camera.capture_arguments == [{"timeout_s": pytest.approx(30.0), "min_timestamp_s": 42.0, "min_received_monotonic_s": None}]
 
 
+def test_runtime_samples_fresh_robot_state_before_slow_camera_capture() -> None:
+    events = []
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+
+    class Camera(_Camera):
+        def capture(self, **kwargs):
+            events.append("camera")
+            return super().capture(**kwargs)
+
+    class Controller(_ResetController):
+        def state_provider(self):
+            events.append("robot")
+            return RobotState()
+
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [Camera(profile.cameras[0])]
+    runtime.controller = Controller(
+        [{"ok": True, "action_completed_ros_time_s": 42.0}]
+    )
+
+    runtime.execute({"action_type": "move_to"})
+
+    assert events == ["robot", "camera"]
+
+
 def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
     events = []
 
@@ -483,6 +509,7 @@ def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit
     assert config.ros_domain_id == 23
     assert config.gz_partition == "locked"
     assert config.launch_arguments == ("rviz:=false",)
+    assert config.startup_timeout_s == 45.0
     assert config.process_environment["ROS2CLI_NO_DAEMON"] == "1"
 
 
@@ -524,6 +551,7 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
 
     active = tmp_path / "opt" / "ros" / "jazzy"
     overlay = tmp_path / "workspace" / "install"
+    source_root = tmp_path / "source" / "selected-worktree"
     foreign = tmp_path / "host-python" / "ros2_jazzy"
     active_python = active / "lib" / "python3.12" / "site-packages"
     overlay_python = overlay / "lib" / "python3.12" / "site-packages"
@@ -539,6 +567,7 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
         overlay / "lib",
         foreign / "lib",
         foreign / "opt" / "rviz_ogre_vendor" / "lib",
+        source_root / "extensions",
     ):
         path.mkdir(parents=True, exist_ok=True)
     environment = _gazebo_ros_abi_environment(
@@ -546,8 +575,14 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
             "ROS_DISTRO": "jazzy",
             "OPENETA_GAZEBO_SYSTEM_ROS_PREFIX": str(active),
             "OPENETA_GAZEBO_OVERLAY": str(overlay),
+            "OPENETA_GAZEBO_SOURCE_ROOT": str(source_root),
             "PYTHONPATH": os.pathsep.join(
-                (str(overlay_python), str(active_python), str(foreign_python))
+                (
+                    str(source_root),
+                    str(overlay_python),
+                    str(active_python),
+                    str(foreign_python),
+                )
             ),
             "LD_LIBRARY_PATH": os.pathsep.join(
                 (
@@ -562,7 +597,9 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
         }
     )
 
-    assert environment["PYTHONPATH"] == os.pathsep.join((str(overlay_python), str(active_python)))
+    assert environment["PYTHONPATH"] == os.pathsep.join(
+        (str(source_root), str(overlay_python), str(active_python))
+    )
     assert environment["LD_LIBRARY_PATH"] == os.pathsep.join(
         (str(overlay / "lib"), str(active / "lib"), "/usr/local/cuda/lib64")
     )

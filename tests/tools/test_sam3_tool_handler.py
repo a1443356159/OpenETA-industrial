@@ -13,6 +13,7 @@ from PIL import Image
 pytest.importorskip("gymnasium")
 
 from adapter.protocol import CameraFrame, EnvObservation, RobotState
+from agent.runtime.sam3_selection import Sam3SelectionReviewError
 from agent.tools import handlers as handlers_module
 from agent.tools.handlers import (
     DEFAULT_SAM3_IMAGE_OUTPUT_ROOT,
@@ -263,6 +264,60 @@ def test_sam3_point_mode_routes_and_materializes_three_candidates(tmp_path: Path
     assert (result_dir / "tool_result.json").is_file()
     for path in result_dir.glob("*.json"):
         assert '"base64":' not in path.read_text()
+
+
+def test_sam3_projected_point_review_inherits_exact_semantic_target(
+    tmp_path: Path,
+) -> None:
+    image_size = Image.open(FIXTURE_IMAGE).size
+    review_requests: list[dict] = []
+
+    def review(request: dict) -> dict:
+        review_requests.append(deepcopy(request))
+        return {
+            "schema_version": "openeta.sam3_selection_review.v1",
+            "decision": "select",
+            "detection_id": "detection_000",
+            "confidence": 0.95,
+            "reason": "The first mask covers the complete held block.",
+            "target_geometry_family": "rectangular_block",
+            "selection_source": "isolated_main_vlm",
+            "isolated_context": True,
+        }
+
+    result = build_sam3_handler(
+        lambda _request: pytest.fail("text MCP must not be called"),
+        segment_points=lambda request: _point_response(
+            request,
+            image_size=image_size,
+        ),
+        selection_reviewer=review,
+        output_root=tmp_path,
+    )(
+        _context(
+            {
+                "mode": "points",
+                "image": str(FIXTURE_IMAGE),
+                "points": [{"x": 50.0, "y": 60.0, "label": 1}],
+                "semantic_role": "placement_object",
+                "semantic_target": "red rectangular block",
+                "point_prompt_source": "attachment_ack_projection",
+                "projection_evidence": {
+                    "schema_version": "openeta.attached_object_image_projection.v1",
+                    "point_xy": [50.0, 60.0],
+                    "depth_m": 0.7,
+                },
+            }
+        )
+    )
+
+    assert result.success is True
+    assert review_requests[0]["target_prompt"] == "red rectangular block"
+    assert review_requests[0]["semantic_target"] == "red rectangular block"
+    assert review_requests[0]["point_prompt_source"] == "attachment_ack_projection"
+    assert result.details["selection_required"] is False
+    assert result.details["selected_detection"]["id"] == "detection_000"
+    assert result.details["projection_evidence"]["point_xy"] == [50.0, 60.0]
 
 
 def test_sam3_point_audit_recursively_scrubs_base64_fields(tmp_path: Path) -> None:
@@ -753,6 +808,158 @@ def test_sam3_multiple_detections_require_explicit_selection(tmp_path: Path) -> 
     assert raw_detections[1]["mask"]["artifact_ref"] == result.details["detections"][
         0
     ]["mask_ref"]
+
+
+def test_sam3_handler_runs_typed_selection_review_inside_same_tool_call(
+    tmp_path: Path,
+) -> None:
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+    mcp_requests: list[dict] = []
+    review_requests: list[dict] = []
+
+    def segment(request: dict) -> dict:
+        mcp_requests.append(deepcopy(request))
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 2,
+                "detections": [
+                    {
+                        "label": "region-a",
+                        "score": 0.9,
+                        "bbox_xyxy": [10, 10, 20, 20],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 100,
+                    },
+                    {
+                        "label": "region-b",
+                        "score": 0.8,
+                        "bbox_xyxy": [30, 30, 40, 40],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 90,
+                    },
+                ],
+                "artifacts": [],
+            },
+        }
+
+    def review(request: dict) -> dict:
+        review_requests.append(deepcopy(request))
+        return {
+            "schema_version": "openeta.sam3_selection_review.v1",
+            "decision": "select",
+            "detection_id": "detection_001",
+            "confidence": 0.93,
+            "reason": "The second tile is the complete placement region.",
+            "target_geometry_family": "unknown",
+            "selection_source": "isolated_main_vlm",
+            "isolated_context": True,
+        }
+
+    handler = build_sam3_handler(
+        segment,
+        selection_reviewer=review,
+        output_root=tmp_path,
+    )
+    result = handler(
+        _context(
+            {
+                "mode": "text",
+                "image": str(FIXTURE_IMAGE),
+                "prompt": "green placement region",
+                "semantic_role": "placement_region",
+                "semantic_target": "placement_region",
+                "perception_bundle_id": "bundle-9",
+                "observation_id": "observation-9",
+                "scene_epoch": 3,
+                "attempt_id": "attempt-9",
+            }
+        )
+    )
+
+    assert result.success is True
+    assert len(review_requests) == 1
+    assert review_requests[0]["semantic_role"] == "placement_region"
+    assert review_requests[0]["semantic_target"] == "green placement region"
+    assert review_requests[0]["target_prompt"] == "green placement region"
+    assert review_requests[0]["perception_bundle_id"] == "bundle-9"
+    assert result.details["selection_required"] is False
+    assert result.details["selection_review"]["isolated_context"] is True
+    assert result.details["selected_detection"]["id"] == "detection_001"
+    assert result.details["selected_detection"]["selection_source"] == (
+        "isolated_main_vlm"
+    )
+    assert result.details["semantic_role"] == "placement_region"
+    assert result.details["perception_bundle_id"] == "bundle-9"
+    assert set(mcp_requests[0]) == {"image_base64", "image_format", "prompt"}
+
+
+def test_sam3_handler_keeps_candidates_when_bounded_review_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+
+    def segment(_request: dict) -> dict:
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 1,
+                "detections": [
+                    {
+                        "label": "region-a",
+                        "score": 0.9,
+                        "bbox_xyxy": [10, 10, 20, 20],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 100,
+                    }
+                ],
+                "artifacts": [],
+            },
+        }
+
+    def review(_request: dict) -> dict:
+        raise Sam3SelectionReviewError(
+            [
+                {
+                    "attempt": 1,
+                    "error_type": "TimeoutError",
+                    "message": "timeout one",
+                },
+                {
+                    "attempt": 2,
+                    "error_type": "TimeoutError",
+                    "message": "timeout two",
+                },
+            ]
+        )
+
+    result = build_sam3_handler(
+        segment,
+        selection_reviewer=review,
+        output_root=tmp_path,
+    )(
+        _context(
+            {
+                "mode": "text",
+                "image": str(FIXTURE_IMAGE),
+                "prompt": "green placement region",
+                "semantic_role": "placement_region",
+                "semantic_target": "green placement region",
+            }
+        )
+    )
+
+    assert result.success is True
+    assert result.details["selection_required"] is True
+    assert [item["id"] for item in result.details["detections"]] == [
+        "detection_000"
+    ]
+    assert result.details["selection_review"]["decision"] == "deferred"
+    assert result.details["selection_review"]["attempt_count"] == 2
+    assert result.details["selection_review"][
+        "infrastructure_retry_exhausted"
+    ] is True
+    assert len(result.details["selection_review"]["failures"]) == 2
 
 
 def test_sam3_handler_can_split_json_results_and_images(tmp_path: Path) -> None:

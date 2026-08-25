@@ -344,7 +344,7 @@ def test_provider_candidates_enter_funnel_without_host_pose_variants():
     assert result.details["raw_candidate_count"] == 1
     assert result.details["candidate_count"] == 1
 
-def test_second_zero_pass_round_has_no_source_return_recovery():
+def test_zero_pass_pool_returns_no_inference_recovery_contract():
     requested_candidate_ids = []
 
     def rpc(name, request, timeout):
@@ -361,47 +361,46 @@ def test_second_zero_pass_round_has_no_source_return_recovery():
         rpc,
         placement_diversity_limit=12,
         placement_full_plan_limit=12,
-        placement_max_rounds=2,
         compile_candidate=lambda *args: {
-            "qualification_stages": [{"name": "hover"}]
+            "qualification_stages": [{"name": "release"}]
         },
     )
     source = {
         "placement_observation": {"observation_id": "frozen"},
         "attachment_transform": {"translation": [0.0, 0.0, 0.1]},
     }
-    for index in range(2):
-        result = qualifier.qualify_result(
-            ToolResult(
-                True,
-                "ok",
-                {
-                    "placement_candidates": [
-                        {
-                            "id": f"p{index}",
-                            "object_goal_world": {
-                                "transform_matrix": [
-                                    [1.0, 0.0, 0.0, float(index)],
-                                    [0.0, 1.0, 0.0, 0.0],
-                                    [0.0, 0.0, 1.0, 0.0],
-                                    [0.0, 0.0, 0.0, 1.0],
-                                ]
-                            },
-                        }
-                    ],
-                    "model_raw_candidate_count": 1,
-                },
-            ),
-            purpose="placement",
-            scene_epoch=1,
-            planning_scene_revision=4,
-            source=source,
-        )
-    assert result.details["qualification_round"] == 2
+    result = qualifier.qualify_result(
+        ToolResult(
+            True,
+            "ok",
+            {
+                "placement_candidates": [
+                    {
+                        "id": "p0",
+                        "object_goal_world": {
+                            "transform_matrix": [
+                                [1.0, 0.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0, 0.0],
+                                [0.0, 0.0, 1.0, 0.0],
+                                [0.0, 0.0, 0.0, 1.0],
+                            ]
+                        },
+                    }
+                ],
+                "model_raw_candidate_count": 1,
+            },
+        ),
+        purpose="placement",
+        scene_epoch=1,
+        planning_scene_revision=4,
+        source=source,
+    )
+    assert "qualification_round" not in result.details
+    assert "max_qualification_rounds" not in result.details
     assert "source_return_qualification" not in result.details
     assert result.details["candidate_count"] == 0
     assert result.details["full_plan_pass_count"] == 0
-    assert requested_candidate_ids == [["p0"], ["p1"]]
+    assert requested_candidate_ids == [["p0"]]
 
 
 def test_default_anyplace_pool_structurally_screens_all_96_then_stops_endpoint_at_2():

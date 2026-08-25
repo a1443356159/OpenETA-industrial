@@ -89,6 +89,7 @@ def _gazebo_ros_abi_environment(source: dict[str, str]) -> dict[str, str]:
     system_prefix = child_env.get("OPENETA_GAZEBO_SYSTEM_ROS_PREFIX", "").strip()
     system_prefix = system_prefix or f"/opt/ros/{distro}"
     overlay = child_env.get("OPENETA_GAZEBO_OVERLAY", "").strip()
+    source_root = child_env.get("OPENETA_GAZEBO_SOURCE_ROOT", "").strip()
     trusted_prefixes = [system_prefix, *([overlay] if overlay else [])]
     python_paths = [
         path
@@ -106,6 +107,11 @@ def _gazebo_ros_abi_environment(source: dict[str, str]) -> dict[str, str]:
         for path in generated_ros_paths
         if any(_is_under(path, prefix) for prefix in trusted_prefixes)
     ]
+    active_source_paths = [
+        path
+        for path in python_paths
+        if source_root and _is_under(path, source_root)
+    ]
     if not active_ros_paths:
         # Do not invent a ROS prefix when callers have not sourced one.  The
         # existing runtime will then fail closed with ROS_NOT_READY.
@@ -118,7 +124,12 @@ def _gazebo_ros_abi_environment(source: dict[str, str]) -> dict[str, str]:
         for prefix in (_ros_prefix_for_python_path(path),)
         if prefix is not None
     }
-    child_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(active_ros_paths))
+    # ROS-launched Python adapters still import OpenETA modules.  Keep only the
+    # explicitly selected worktree ahead of the sourced ROS stack so an editable
+    # install in the shared virtualenv cannot redirect them to another worktree.
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        dict.fromkeys((*active_source_paths, *active_ros_paths))
+    )
     library_paths = [
         path
         for path in child_env.get("LD_LIBRARY_PATH", "").split(os.pathsep)

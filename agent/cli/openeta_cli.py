@@ -1899,6 +1899,8 @@ def _new_cli_backend(
     *,
     max_tokens: int | None = None,
     max_vision_images: int | None = None,
+    timeout_s: float | None = None,
+    max_attempts: int | None = None,
 ) -> OpenAICompatiblePlannerBackend:
     backend_config = OpenAICompatiblePlannerBackendConfig.from_provider_config(cli.state.config)
     if max_tokens is not None:
@@ -1907,6 +1909,13 @@ def _new_cli_backend(
         backend_config.max_vision_images = max(
             backend_config.max_vision_images,
             max_vision_images,
+        )
+    if timeout_s is not None:
+        backend_config.timeout_s = min(backend_config.timeout_s, float(timeout_s))
+    if max_attempts is not None:
+        backend_config.max_attempts = min(
+            backend_config.max_attempts,
+            max(1, int(max_attempts)),
         )
     return OpenAICompatiblePlannerBackend(backend_config)
 

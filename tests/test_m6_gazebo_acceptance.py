@@ -10,6 +10,9 @@ from scripts import m6_gazebo_acceptance as m6
 
 
 M6_RUNNER = Path(__file__).resolve().parents[1] / "scripts/run_m6_gazebo_acceptance.sh"
+PICK_PLACE_RUNNER = (
+    Path(__file__).resolve().parents[1] / "scripts/run_pick_place_acceptance.sh"
+)
 
 
 def test_m6_prepare_registers_real_services_and_constraint_prompt(
@@ -29,6 +32,7 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
 
     paths = m6.prepare_case(tmp_path, tmp_path / "run", allocation, services)
 
+    assert paths.root == tmp_path / "run" / "pick-place" / m6.MODE
     config = json.loads(paths.mcp_config.read_text(encoding="utf-8"))["mcpServers"]
     assert set(config) == {
         "openeta-sim",
@@ -54,11 +58,53 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert "不得调用 python_exec" in prompt
 
 
-def test_m6_order_helper_requires_frozen_anyplace_pool_before_grasp() -> None:
-    valid = ["observe", "anyplace", "grasp_pose_estimate", "move_to", "gripper_control"]
-    invalid = ["observe", "grasp_pose_estimate", "move_to", "gripper_control", "anyplace"]
+def test_pick_place_prepare_can_strictly_select_graspgenx(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = m6.base.Allocation(81, "openeta-pick-place-test", 18765, "run-id")
+    monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        m6.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+    services = m6._services_for_backend(
+        "graspgenx",
+        sam3_url="http://sam3/sse",
+        anygrasp_url="http://anygrasp/sse",
+        anyplace_url="http://anyplace/sse",
+        graspgenx_url="http://graspgenx/sse",
+    )
 
-    required = ("observe", "anyplace", "grasp_pose_estimate", "move_to", "gripper_control")
+    paths = m6.prepare_case(
+        tmp_path,
+        tmp_path / "run",
+        allocation,
+        services,
+        grasp_backend="graspgenx",
+    )
+
+    config = json.loads(paths.mcp_config.read_text(encoding="utf-8"))["mcpServers"]
+    assert set(config) == {
+        "openeta-sim",
+        "openeta-sam3",
+        "openeta-graspgenx",
+        "openeta-anyplace",
+    }
+    assert "openeta-anygrasp" not in config
+    assert "GraspGenX" in paths.instructions.read_text(encoding="utf-8")
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["grasp_backend_mode"] == "graspgenx"
+
+
+def test_m6_order_helper_requires_frozen_anyplace_pool_before_grasp() -> None:
+    valid = ["observe", "anyplace", "anygrasp", "move_to", "gripper_control"]
+    invalid = ["observe", "anygrasp", "move_to", "gripper_control", "anyplace"]
+
+    required = ("observe", "anyplace", "anygrasp", "move_to", "gripper_control")
     assert m6._ordered(valid, required)
     assert not m6._ordered(invalid, required)
 
@@ -134,6 +180,10 @@ def test_m6_canonical_runner_sources_ros_and_executes_m6() -> None:
     assert "ros2 pkg prefix openeta_rm75_robotiq2f85_sim" in source
     assert 'm6_gazebo_acceptance.py" "$@"' in source
 
+    capability_source = PICK_PLACE_RUNNER.read_text(encoding="utf-8")
+    assert os.access(PICK_PLACE_RUNNER, os.X_OK)
+    assert 'run_m6_gazebo_acceptance.sh" "$@"' in capability_source
+
 
 def test_m6_verifier_uses_model_raw_count_for_frozen_goal_requalification() -> None:
     call = {
@@ -150,6 +200,28 @@ def test_m6_verifier_uses_model_raw_count_for_frozen_goal_requalification() -> N
 
     assert m6._has_minimum_int_value(call, "model_raw_candidate_count", 96)
     assert not m6._has_minimum_int_value(call, "raw_candidate_count", 96)
+
+
+def test_m6_candidate_counts_ignore_nested_wave_cardinality() -> None:
+    call = {
+        "result": {
+            "details": {
+                "outputs": {
+                    "candidate_count": 1,
+                    "full_plan_pass_count": 1,
+                    "qualification_evidence": {
+                        "waves": [{"candidate_count": 2}]
+                    },
+                    "qualification_waves": [{"candidate_count": 2}],
+                }
+            }
+        }
+    }
+
+    outputs = m6._call_outputs(call)
+
+    assert outputs["candidate_count"] == 1
+    assert outputs["full_plan_pass_count"] == 1
 
 
 def test_m6_rejection_scenario_is_explicit_acceptance_only_fixture(
@@ -175,7 +247,8 @@ def test_m6_rejection_scenario_is_explicit_acceptance_only_fixture(
     assert scenario in prompt
     assert "execution_started=false" in prompt
     receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
-    assert receipt["m6_scenario"] == scenario
+    assert receipt["acceptance_scenario"] == scenario
+    assert receipt["grasp_backend_mode"] == m6.DEFAULT_GRASP_BACKEND
     unhashed = dict(receipt)
     supplied_hash = unhashed.pop("receipt_sha256")
     assert supplied_hash == m6.base.hashlib.sha256(

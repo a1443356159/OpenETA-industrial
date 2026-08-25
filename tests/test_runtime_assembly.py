@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import agent.cli.batch_eval as batch_eval
 import agent.cli.openeta_cli as cli_module
+import pytest
 from agent.backends.planner import StaticPlannerBackend
 from agent.backends.provider_config import PlannerProviderConfig
 from agent.cli.batch_eval import build_mcp_episode_worker_factory
@@ -9,11 +10,16 @@ from agent.cli.openeta_cli import OpenEtaCli
 from agent.runtime.parallel import ParallelEpisodeSpec
 from agent.runtime.runtime_assembly import (
     ENVIRONMENT_PLACEHOLDER_TOOLS,
+    GRASP_BACKEND_ENV_VAR,
+    PERCEPTION_RPC_TIMEOUT_ENV_VAR,
     REMOTE_PLACEHOLDER_TOOLS,
     RuntimeAssemblyConfig,
     RuntimeMcpEndpoints,
+    _build_sam3_selection_reviewer,
     assemble_runtime,
     resolve_runtime_mcp_endpoints,
+    runtime_grasp_backend_order_from_env,
+    runtime_perception_rpc_timeout_s_from_env,
 )
 from agent.runtime.session_workspace import SessionWorkspace
 from agent.runtime.supervision import SupervisionPolicy
@@ -58,6 +64,26 @@ def _contract_snapshot(assembly):
         ),
         "max_validation_retries": assembly.runtime.planner.max_validation_retries,
     }
+
+
+def test_sam3_selection_reviewer_has_one_shared_bounded_provider_budget() -> None:
+    calls = []
+
+    def factory(**kwargs):
+        calls.append(dict(kwargs))
+        return _backend_factory()
+
+    reviewer = _build_sam3_selection_reviewer(factory)
+
+    assert callable(reviewer)
+    assert calls == [
+        {
+            "max_tokens": 256,
+            "max_vision_images": 2,
+            "timeout_s": 30.0,
+            "max_attempts": 1,
+        }
+    ]
 
 
 def test_tui_and_batch_profiles_share_runtime_contracts(monkeypatch, tmp_path) -> None:
@@ -125,6 +151,16 @@ def test_tui_and_batch_profiles_share_runtime_contracts(monkeypatch, tmp_path) -
     assert batch.runtime.memory.store.root == batch_workspace.memory_root
     assert tui.runtime.memory.store.session_dir("tui") == tui_workspace.root
     assert batch.runtime.memory.store.session_dir("batch") == batch_workspace.root
+    assert tui.runtime.planner.sam3_selection_parent_context is not None
+    assert batch.runtime.planner.sam3_selection_parent_context is not None
+    assert (
+        tui.runtime.planner.sam3_selection_reviewer.__self__.parent_context
+        is tui.runtime.planner.sam3_selection_parent_context
+    )
+    assert (
+        batch.runtime.planner.sam3_selection_reviewer.__self__.parent_context
+        is batch.runtime.planner.sam3_selection_parent_context
+    )
     tui.runtime.start_session(task="tui task")
     batch.runtime.start_session(task="batch task")
     assert tui.runtime.memory.session_id == tui_workspace.session_id
@@ -186,6 +222,75 @@ def test_shared_endpoint_resolution_owns_names_aliases_and_overrides() -> None:
         ("depth-prior", "depth_prior", "unidepth"),
     ) in calls
     assert not any(name == "openeta-anygrasp" for name, _aliases in calls)
+
+
+def test_runtime_grasp_backend_policy_can_select_either_backend(monkeypatch) -> None:
+    monkeypatch.delenv(GRASP_BACKEND_ENV_VAR, raising=False)
+    assert runtime_grasp_backend_order_from_env() == (
+        "anygrasp",
+        "contact_graspnet",
+        "graspgenx",
+    )
+
+    monkeypatch.setenv(GRASP_BACKEND_ENV_VAR, "anygrasp")
+    assert runtime_grasp_backend_order_from_env() == ("anygrasp",)
+
+    monkeypatch.setenv(GRASP_BACKEND_ENV_VAR, "graspgenx")
+    assert runtime_grasp_backend_order_from_env() == ("graspgenx",)
+
+
+def test_runtime_perception_rpc_timeout_is_explicit_and_validated(monkeypatch) -> None:
+    monkeypatch.delenv(PERCEPTION_RPC_TIMEOUT_ENV_VAR, raising=False)
+    assert runtime_perception_rpc_timeout_s_from_env() == 600.0
+
+    monkeypatch.setenv(PERCEPTION_RPC_TIMEOUT_ENV_VAR, "90")
+    assert runtime_perception_rpc_timeout_s_from_env() == 90.0
+
+    for invalid in ("0", "-1", "nan", "invalid"):
+        monkeypatch.setenv(PERCEPTION_RPC_TIMEOUT_ENV_VAR, invalid)
+        with pytest.raises(ValueError, match="finite positive number"):
+            runtime_perception_rpc_timeout_s_from_env()
+
+
+def test_runtime_perception_rpc_timeout_reaches_remote_builder(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    captured = []
+    monkeypatch.setenv(PERCEPTION_RPC_TIMEOUT_ENV_VAR, "90")
+    monkeypatch.setattr(
+        "agent.runtime.runtime_assembly.load_configured_object_memory_bank",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "agent.runtime.runtime_assembly.load_configured_asset_reference_catalog",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "agent.runtime.runtime_assembly.build_sse_anyplace_mcp_placer",
+        lambda *, url, timeout_seconds: (
+            captured.append((url, timeout_seconds)) or (lambda _request: {})
+        ),
+    )
+
+    assemble_runtime(
+        RuntimeAssemblyConfig(
+            workspace=SessionWorkspace.create("rpc-timeout", root=tmp_path),
+            provider=PlannerProviderConfig(
+                model="fixture",
+                api_base="http://provider.example/v1",
+                api_key="test",
+            ),
+            backend_factory=_backend_factory,
+            supervision_policy=SupervisionPolicy.for_profile("standard"),
+            endpoints=RuntimeMcpEndpoints(
+                anyplace_url="http://anyplace.example/sse"
+            ),
+            web_access_config=WebAccessConfig(),
+        )
+    )
+
+    assert captured == [("http://anyplace.example/sse", 90.0)]
 
 
 def test_contact_graspnet_is_disabled_from_executable_runtime(tmp_path) -> None:

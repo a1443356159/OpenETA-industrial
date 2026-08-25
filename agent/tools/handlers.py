@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import math
@@ -26,7 +27,11 @@ from agent.tools.registry import (
     ToolResult,
     make_tool_result,
 )
-from agent.tools.sim_mcp import SimulatorMcpTransport, SseSimulatorMcpTransport
+from agent.tools.sim_mcp import (
+    SimulatorMcpTransport,
+    SseSimulatorMcpTransport,
+    call_read_only_mcp_tool_with_retry,
+)
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     DEFAULT_GRASP_RAW_POOL_SIZE,
@@ -37,6 +42,7 @@ from tools.candidate_config import (
 ApprovalCallback = Callable[[ToolExecutionContext], bool]
 Sam3SegmentCallable = Callable[[JsonDict], JsonDict]
 Sam3PointSegmentCallable = Callable[[JsonDict], JsonDict]
+Sam3SelectionReviewCallable = Callable[[JsonDict], JsonDict]
 AnyGraspDetectCallable = Callable[[JsonDict], JsonDict]
 ContactGraspNetPredictCallable = Callable[[JsonDict], JsonDict]
 AnyPlacePredictCallable = Callable[[JsonDict], JsonDict]
@@ -57,6 +63,16 @@ DEFAULT_SAM3_ROI_PADDING_RATIO = 0.12
 DEFAULT_SAM3_ROI_FALLBACK_PROMPT = "foreground object"
 SAM3_MAX_POINT_COUNT = 64
 DEFAULT_ANYPLACE_OUTPUT_ROOT = Path("tmp") / "tool_result" / "anyplace"
+ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA = (
+    "openeta.anyplace.object_mask_depth_cleanup.v1"
+)
+# This is intentionally a narrow observation repair, not a general point-cloud
+# filter. It only removes one tiny depth tail separated from the rest of a
+# SAM3 object mask by a physically large empty interval.
+ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M = 0.03
+ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION = 0.02
+ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS = 32
+ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS = 128
 DEFAULT_MOLMOPOINT_OUTPUT_ROOT = Path("tmp") / "tool_result" / "molmopoint"
 DEFAULT_GRASPGENX_OUTPUT_ROOT = Path("tmp") / "tool_result" / "graspgenx"
 DEFAULT_DEPTH_PRIOR_OUTPUT_ROOT = Path("tmp") / "tool_result" / "depth_prior"
@@ -166,6 +182,7 @@ def build_sam3_handler(
     segment: Sam3SegmentCallable,
     *,
     segment_points: Sam3PointSegmentCallable | None = None,
+    selection_reviewer: Sam3SelectionReviewCallable | None = None,
     depth_prior_prefetch: DepthPriorPrefetchCallable | None = None,
     output_root: str | Path | None = None,
     result_output_root: str | Path | None = None,
@@ -212,6 +229,14 @@ def build_sam3_handler(
             context.observation,
         )
         prompt = _string_param(context.parameters.get("prompt"))
+        semantic_metadata = _sam3_semantic_metadata(
+            parameters=context.parameters,
+            observation=context.observation,
+            source_image=image,
+            mode=mode,
+            prompt=prompt,
+            raw_points=raw_points,
+        )
         roi_bbox_value = context.parameters.get("roi_bbox_xyxy")
         points: list[JsonDict] = []
         request: JsonDict = {"mode": mode, "image": image}
@@ -228,6 +253,7 @@ def build_sam3_handler(
             request["roi_bbox_xyxy"] = roi_bbox_value
         if context.parameters.get("positive_points") is not None:
             request["positive_points"] = raw_points
+        request.update(semantic_metadata)
         context.parameters = dict(request)
 
         def finish(
@@ -543,6 +569,7 @@ def build_sam3_handler(
             output_metadata={
                 **source_camera_metadata,
                 **roi_metadata,
+                **semantic_metadata,
                 **({"positive_points": positive_points} if positive_points is not None else {}),
                 "segmentation_mode": (
                     "point_prompt"
@@ -563,6 +590,102 @@ def build_sam3_handler(
                 ),
             },
         )
+        if result.success and selection_reviewer is not None:
+            details = dict(result.details)
+            detections = details.get("detections")
+            if isinstance(detections, list) and detections:
+                try:
+                    review = selection_reviewer(
+                        {
+                            "result_id": details.get("result_id"),
+                            "semantic_role": semantic_metadata["semantic_role"],
+                            "target_prompt": semantic_metadata["semantic_target"],
+                            "source_image": image,
+                            "candidates": [
+                                dict(candidate)
+                                for candidate in detections
+                                if isinstance(candidate, dict)
+                            ],
+                            "selection_bundle": dict(
+                                details.get("selection_bundle")
+                                if isinstance(details.get("selection_bundle"), dict)
+                                else {}
+                            ),
+                            **semantic_metadata,
+                        }
+                    )
+                    details["selection_review"] = dict(review)
+                    if review.get("decision") == "select":
+                        detection_id = str(review.get("detection_id") or "")
+                        selected = next(
+                            (
+                                dict(candidate)
+                                for candidate in detections
+                                if isinstance(candidate, dict)
+                                and str(candidate.get("id") or "") == detection_id
+                            ),
+                            None,
+                        )
+                        if selected is None:
+                            raise ValueError(
+                                "selection reviewer chose a detection outside the result"
+                            )
+                        selected.update(
+                            {
+                                "selection_source": review.get("selection_source")
+                                or "isolated_main_vlm",
+                                "selection_confidence": review.get("confidence"),
+                                "selection_reason": review.get("reason"),
+                                "target_geometry_family": review.get(
+                                    "target_geometry_family"
+                                ),
+                            }
+                        )
+                        details["selected_detection"] = selected
+                        details["selection_required"] = False
+                    elif review.get("decision") == "reject":
+                        details["selected_detection"] = None
+                        details["selection_required"] = False
+                        details["selection_rejected"] = True
+                    else:
+                        raise ValueError("selection reviewer returned an invalid decision")
+                except Exception as exc:  # noqa: BLE001 - defer, never lose SAM3 evidence.
+                    retry_failures = getattr(exc, "failures", None)
+                    details["selected_detection"] = None
+                    details["selection_required"] = True
+                    details["selection_review"] = {
+                        "schema_version": "openeta.sam3_selection_review.v1",
+                        "decision": "deferred",
+                        "isolated_context": True,
+                        "error_type": type(exc).__name__,
+                        "reason": str(exc),
+                        "attempt_count": getattr(exc, "attempt_count", 1),
+                        "infrastructure_retry_exhausted": bool(
+                            getattr(exc, "retry_exhausted", False)
+                        ),
+                        **(
+                            {
+                                "failures": [
+                                    dict(item)
+                                    for item in retry_failures
+                                    if isinstance(item, Mapping)
+                                ]
+                            }
+                            if isinstance(retry_failures, list)
+                            else {}
+                        ),
+                    }
+                    diagnostics = details.get("diagnostics")
+                    diagnostics = list(diagnostics) if isinstance(diagnostics, list) else []
+                    diagnostics.append(
+                        {
+                            "code": "sam3_selection_review_deferred",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    )
+                    details["diagnostics"] = diagnostics
+                result.details = details
         reason = "" if result.success else _string_param(result.details.get("reason"))
         return finish(
             result,
@@ -572,6 +695,127 @@ def build_sam3_handler(
         )
 
     return handler
+
+
+def _sam3_semantic_metadata(
+    *,
+    parameters: Mapping[str, Any],
+    observation: Any,
+    source_image: str,
+    mode: str,
+    prompt: str,
+    raw_points: object,
+) -> JsonDict:
+    """Bind one SAM3 call to a typed role and deterministic observation attempt."""
+
+    supplied_role = _string_param(parameters.get("semantic_role")).strip().lower()
+    role = supplied_role if supplied_role in {
+        "grasp_target",
+        "placement_object",
+        "placement_region",
+    } else (
+        "placement_region"
+        if _sam3_placement_region_prompt(prompt)
+        else "grasp_target"
+    )
+    role_source = "explicit" if supplied_role == role else "legacy_prompt_inference"
+    semantic_target = (
+        prompt
+        if mode == "text" and prompt
+        else _string_param(parameters.get("semantic_target")) or prompt
+    )
+    observation_metadata = getattr(observation, "metadata", None)
+    observation_metadata = (
+        observation_metadata if isinstance(observation_metadata, Mapping) else {}
+    )
+    raw_scene_epoch = parameters.get("scene_epoch")
+    if raw_scene_epoch is None:
+        raw_scene_epoch = observation_metadata.get("scene_epoch", 0)
+    try:
+        scene_epoch = max(0, int(raw_scene_epoch))
+    except (TypeError, ValueError):
+        scene_epoch = 0
+    supplied_observation_id = _string_param(parameters.get("observation_id"))
+    observation_identity = supplied_observation_id or _string_param(
+        observation_metadata.get("observation_id")
+        or observation_metadata.get("capture_id")
+    )
+    if not observation_identity:
+        observation_identity = hashlib.sha256(
+            f"{scene_epoch}\0{source_image}".encode("utf-8")
+        ).hexdigest()[:16]
+    observation_id = (
+        observation_identity
+        if supplied_observation_id
+        else f"observation-{observation_identity}"
+    )
+    supplied_bundle_id = _string_param(parameters.get("perception_bundle_id"))
+    perception_bundle_id = supplied_bundle_id or (
+        "perception-"
+        + hashlib.sha256(
+            f"{scene_epoch}\0{observation_id}\0{source_image}".encode("utf-8")
+        ).hexdigest()[:16]
+    )
+    attempt_payload = {
+        "perception_bundle_id": perception_bundle_id,
+        "semantic_role": role,
+        "mode": mode,
+        "semantic_target": semantic_target,
+        "prompt": prompt,
+        "points": raw_points if isinstance(raw_points, list) else [],
+        "roi_bbox_xyxy": parameters.get("roi_bbox_xyxy"),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            attempt_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    attempt_id = _string_param(parameters.get("attempt_id")) or (
+        f"sam3-attempt-{fingerprint[:16]}"
+    )
+    return {
+        "semantic_role": role,
+        "semantic_role_source": role_source,
+        "semantic_target": semantic_target,
+        "perception_bundle_id": perception_bundle_id,
+        "observation_id": observation_id,
+        "scene_epoch": scene_epoch,
+        "attempt_id": attempt_id,
+        "attempt_fingerprint": fingerprint,
+        **(
+            {
+                "point_prompt_source": "attachment_ack_projection",
+                "projection_evidence": dict(parameters["projection_evidence"]),
+            }
+            if mode == "points"
+            and parameters.get("point_prompt_source") == "attachment_ack_projection"
+            and isinstance(parameters.get("projection_evidence"), Mapping)
+            else {}
+        ),
+    }
+
+
+def _sam3_placement_region_prompt(value: object) -> bool:
+    prompt = str(value or "").strip().lower()
+    return any(
+        token in prompt
+        for token in (
+            "placement",
+            "destination",
+            "target region",
+            "target area",
+            "marker",
+            "receptacle",
+            "bin",
+            "basket",
+            "zone",
+            "放置",
+            "目标区域",
+        )
+    )
 
 
 def _resolve_current_observation_rgb_path(image: str, observation: Any) -> str:
@@ -690,7 +934,12 @@ def build_sse_sam3_mcp_segmenter(
     transport = SseSimulatorMcpTransport(url)
 
     def segment(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return segment
 
@@ -843,7 +1092,12 @@ def build_sse_depth_prior_mcp_estimator(
     transport = SseSimulatorMcpTransport(url)
 
     def estimate(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return estimate
 
@@ -1790,16 +2044,6 @@ def build_anyplace_handler(
             placement_camera_to_world = _camera_to_world_opencv_transform(
                 placement_packet["camera_extrinsics"]
             )
-            mcp_request = {
-                "object_observation": _encode_anyplace_observation(
-                    object_packet, mask_key="object_mask"
-                ),
-                "placement_observation": _encode_anyplace_observation(
-                    placement_packet, mask_key="placement_region_mask"
-                ),
-                "object_camera_to_placement_camera": transform,
-                "placement_camera_to_world": placement_camera_to_world,
-            }
         except (ValueError, FileNotFoundError, OSError) as exc:
             return _anyplace_failure(
                 "invalid_independent_observation",
@@ -1816,6 +2060,29 @@ def build_anyplace_handler(
             prepared = pre_inference(context, request)
             if prepared is not None:
                 return prepared
+        try:
+            object_packet = _clean_anyplace_object_mask_sparse_depth_tail(
+                object_packet,
+                artifact_root=(
+                    artifact_session_root(output_root, session_id) / "preprocessing"
+                ),
+            )
+            request["object_observation"] = object_packet
+            mcp_request = {
+                "object_observation": _encode_anyplace_observation(
+                    object_packet, mask_key="object_mask"
+                ),
+                "placement_observation": _encode_anyplace_observation(
+                    placement_packet, mask_key="placement_region_mask"
+                ),
+                "object_camera_to_placement_camera": transform,
+                "placement_camera_to_world": placement_camera_to_world,
+            }
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            return _anyplace_failure(
+                "invalid_independent_observation",
+                f"AnyPlace placement prediction failed: {exc}",
+            )
         try:
             response = predict_placement(mcp_request)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured.
@@ -2217,7 +2484,12 @@ def build_sse_anygrasp_mcp_grasper(
     transport = SseSimulatorMcpTransport(url)
 
     def detect_grasps(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return detect_grasps
 
@@ -2264,7 +2536,12 @@ def build_sse_contact_graspnet_mcp_predictor(
     transport = SseSimulatorMcpTransport(url)
 
     def predict_grasps(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return predict_grasps
 
@@ -2311,7 +2588,12 @@ def build_sse_graspgenx_mcp_predictor(
     transport = SseSimulatorMcpTransport(url)
 
     def predict_grasps(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return predict_grasps
 
@@ -2358,7 +2640,12 @@ def build_sse_graspgenx_mcp_gripper_lister(
     transport = SseSimulatorMcpTransport(url)
 
     def list_grippers() -> JsonDict:
-        return transport.call_tool(tool_name, {}, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            {},
+            timeout_s=timeout_seconds,
+        )
 
     return list_grippers
 
@@ -2405,7 +2692,12 @@ def build_sse_molmopoint_mcp_pointer(
     transport = SseSimulatorMcpTransport(url)
 
     def point_images(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return point_images
 
@@ -2452,7 +2744,12 @@ def build_sse_anyplace_mcp_placer(
     transport = SseSimulatorMcpTransport(url)
 
     def predict_placement(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return predict_placement
 
@@ -5370,6 +5667,30 @@ def _normalise_anyplace_response(
         candidate["projection_summary"] = summary
     raw_output_ref = run_dir / "response.raw.json"
     _write_json(raw_output_ref, _scrub_anyplace_response(response))
+    object_preprocessing = _dict_or_empty(
+        request["object_observation"].get("object_mask_depth_cleanup")
+    )
+    artifacts: list[JsonDict] = [
+        {
+            "type": "placement_candidate_image",
+            "kind": "image",
+            "tool": "anyplace",
+            "path": candidate_image_ref,
+        }
+    ]
+    if object_preprocessing.get("applied") is True:
+        filtered_mask_ref = _string_param(
+            object_preprocessing.get("filtered_mask_ref")
+        )
+        if filtered_mask_ref:
+            artifacts.append(
+                {
+                    "type": "object_mask_depth_cleanup",
+                    "kind": "image",
+                    "tool": "anyplace",
+                    "path": filtered_mask_ref,
+                }
+            )
     result = ToolResult(
         True,
         content=_string_param(response.get("content"))
@@ -5402,14 +5723,12 @@ def _normalise_anyplace_response(
             "placement_candidates": candidates,
             "object_current_pose": dict(object_current_pose),
             "candidate_image_ref": candidate_image_ref,
-            "artifacts": [
-                {
-                    "type": "placement_candidate_image",
-                    "kind": "image",
-                    "tool": "anyplace",
-                    "path": candidate_image_ref,
-                }
-            ],
+            **(
+                {"object_mask_preprocessing": object_preprocessing}
+                if object_preprocessing
+                else {}
+            ),
+            "artifacts": artifacts,
             "metadata": _scrub_anyplace_response(_dict_or_empty(details.get("metadata"))),
         },
     )
@@ -6042,6 +6361,132 @@ def _normalise_anyplace_observation(value: Any, *, mask_key: str) -> JsonDict:
         "camera_extrinsics": dict(extrinsics),
         "camera_frame_id": _string_param(value.get("camera_frame_id")),
     }
+
+
+def _clean_anyplace_object_mask_sparse_depth_tail(
+    packet: Mapping[str, Any],
+    *,
+    artifact_root: Path,
+) -> JsonDict:
+    """Remove one unambiguous, tiny depth tail from an object mask.
+
+    A handful of support-surface pixels can expand a held object's point cloud
+    by many centimetres and make every otherwise valid AnyPlace target appear
+    unsupported. This bounded repair only applies when exactly one sorted
+    depth discontinuity isolates at most two percent (and at most 32 points)
+    at an outer tail. Ambiguous or larger clusters are preserved unchanged.
+    """
+
+    import numpy as np
+    from PIL import Image
+
+    normalized = dict(packet)
+    depth_path = Path(str(packet["depth"])).expanduser()
+    mask_path = Path(str(packet["mask"])).expanduser()
+    with Image.open(depth_path) as loaded_depth:
+        depth = np.asarray(loaded_depth, dtype=np.float64)
+    with Image.open(mask_path) as loaded_mask:
+        mask = np.asarray(loaded_mask.convert("L"), dtype=np.uint8) > 0
+    # The cleanup is an optional, narrow repair. Preserve the existing MCP
+    # contract for formats it cannot reason about and let the backend perform
+    # its normal input validation.
+    if depth.ndim != 2 or mask.shape != depth.shape:
+        return normalized
+
+    intrinsics = packet.get("intrinsics")
+    scale_value = intrinsics.get("scale") if isinstance(intrinsics, Mapping) else None
+    try:
+        scale = float(scale_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("object observation depth scale is invalid") from exc
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("object observation depth scale is invalid")
+
+    metric_depth = depth / scale
+    valid = mask & np.isfinite(metric_depth) & (metric_depth > 0.0)
+    values = np.sort(metric_depth[valid])
+    point_count = int(values.size)
+    if point_count <= ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS:
+        return normalized
+
+    gaps = np.diff(values)
+    qualifying: list[tuple[str, int, int, float, float]] = []
+    for index in np.flatnonzero(
+        gaps >= ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M
+    ).tolist():
+        lower_count = int(index) + 1
+        upper_count = point_count - lower_count
+        gap = float(gaps[index])
+        boundary = float((values[index] + values[index + 1]) / 2.0)
+        for side, sparse_count, retained_count in (
+            ("near", lower_count, upper_count),
+            ("far", upper_count, lower_count),
+        ):
+            if (
+                retained_count >= ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
+                and sparse_count <= ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS
+                and sparse_count / point_count
+                <= ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION
+            ):
+                qualifying.append((side, sparse_count, retained_count, gap, boundary))
+    if len(qualifying) != 1:
+        return normalized
+
+    side, sparse_count, retained_count, gap, boundary = qualifying[0]
+    sparse_pixels = valid & (
+        metric_depth < boundary if side == "near" else metric_depth > boundary
+    )
+    if int(np.count_nonzero(sparse_pixels)) != sparse_count:
+        return normalized
+
+    filtered_mask = mask.copy()
+    filtered_mask[sparse_pixels] = False
+    digest = hashlib.sha256()
+    digest.update(mask_path.resolve().as_posix().encode("utf-8"))
+    digest.update(mask_path.read_bytes())
+    digest.update(depth_path.resolve().as_posix().encode("utf-8"))
+    digest.update(depth_path.read_bytes())
+    digest.update(ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA.encode("ascii"))
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    filtered_ref = artifact_root / f"object-mask-depth-clean-{digest.hexdigest()[:16]}.png"
+    if not filtered_ref.is_file():
+        temporary_ref = filtered_ref.with_name(
+            f".{filtered_ref.name}.{uuid4().hex}.tmp.png"
+        )
+        Image.fromarray(filtered_mask.astype(np.uint8) * 255, mode="L").save(
+            temporary_ref
+        )
+        temporary_ref.replace(filtered_ref)
+
+    cleanup = {
+        "schema": ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA,
+        "applied": True,
+        "source_mask_ref": str(packet["mask"]),
+        "filtered_mask_ref": str(filtered_ref),
+        "valid_depth_points_before": point_count,
+        "valid_depth_points_after": retained_count,
+        "removed_depth_points": sparse_count,
+        "removed_tail": side,
+        "depth_gap_m": round(gap, 6),
+        "depth_boundary_m": round(boundary, 6),
+        "limits": {
+            "minimum_gap_m": ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M,
+            "maximum_sparse_fraction": (
+                ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION
+            ),
+            "maximum_sparse_points": ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS,
+            "minimum_retained_points": (
+                ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
+            ),
+        },
+    }
+    normalized["mask"] = str(filtered_ref)
+    normalized["mask_artifact"] = {
+        "mask_ref": str(filtered_ref),
+        "source_image": str(packet["rgb"]),
+    }
+    normalized["object_mask_depth_cleanup"] = cleanup
+    return normalized
 
 
 def _encode_anyplace_observation(

@@ -10,6 +10,7 @@ from agent.runtime.moveit_qualification import (
     QUALIFICATION_SCHEMA,
     MoveItCandidateQualifier,
     QualificationCache,
+    SAME_RUN_QUALIFICATION_SEED_FIELD,
 )
 from agent.runtime.runtime_assembly import (
     _FrozenGoalPairCoordinator,
@@ -30,6 +31,12 @@ def _pass_stage() -> dict[str, Any]:
         "execution_started": False,
         "start_joint_state_sha256": "start",
         "end_joint_state": {"joint_names": ["j1"], "positions": [0.0]},
+        "beam_solutions": [
+            {
+                "joint_state": {"names": ["j1"], "positions": [0.25]},
+                "state_valid": True,
+            }
+        ],
         "trajectory": {"point_count": 2},
     }
 
@@ -128,7 +135,7 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
             for index, item in enumerate(request["candidates"])
         ]
         return {
-            "schema_version": QUALIFICATION_SCHEMA,
+            "schema_version": request["schema_version"],
             "planning_scene_revision": request["planning_scene_revision"],
             "execution_started": False,
             "results": [
@@ -188,6 +195,8 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
                 }
             ]
         },
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
     )
     grasps = [{"id": f"g{index}"} for index in range(4)]
     proofs: dict[str, dict[str, Any]] = {}
@@ -250,6 +259,9 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
         "progressive_until_full_plan_capacity"
     )
     assert captured["funnel"]["endpoint_pass_target"] == 2
+    assert captured["funnel"]["l5_pass_target"] == 2
+    assert "l5_submission_limit" not in captured["funnel"]
+    assert captured["funnel"]["qualification_mode"] == "frozen_pair"
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0", "g2"]
     assert cache.resolve(purpose="grasp", candidate_id="g1") is None
     retained_cache = cache.resolve(purpose="grasp", candidate_id="g0")
@@ -293,6 +305,11 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
         0.43,
     ]
     assert frozen_goal["frozen_goal_frame_binding"]["physical_collision_goal"] is True
+    seed_evidence = frozen_goal[SAME_RUN_QUALIFICATION_SEED_FIELD]
+    assert seed_evidence["provenance"] == "frozen_pair_l5_pass"
+    assert seed_evidence["states"] == [
+        {"names": ["j1"], "positions": [0.25]}
+    ]
     assert postattach.details["frozen_goal_requalification"] is True
     assert postattach.details["discarded_postattach_model_candidate_count"] == 0
     assert postattach.details["model_raw_candidate_count"] == 96
@@ -388,7 +405,7 @@ def _anyplace_parameters(tmp_path: Path) -> dict[str, Any]:
 def _model_response() -> dict[str, Any]:
     return {
         "success": True,
-        "content": "new-seed AnyPlace inference",
+        "content": "AnyPlace model inference",
         "details": {
             "backend": "anyplace_mcp",
             "model": "anyplace_multitask",
@@ -402,7 +419,7 @@ def _model_response() -> dict[str, Any]:
             },
             "placement_candidates": [
                 {
-                    "id": "placement_new_seed",
+                    "id": "placement_model_goal",
                     "object_placement_transform": {
                         "frame": "placement_camera",
                         "camera_frame": "opencv",
@@ -600,7 +617,7 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
     assert [item["id"] for item in result.details["placement_candidates"]] == [
         "p-pass"
     ]
-    assert result.details["qualification_round"] == 1
+    assert "qualification_round" not in result.details
     assert result.details["model_raw_candidate_count"] == 96
     assert result.details["raw_candidate_count"] == 1
     assert result.details["anyplace_model_inference_invoked"] is False
@@ -612,11 +629,11 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
     assert captured_source["attachment_transform"] == measured_attachment
     assert captured_source["frozen_goal_requalification"] is True
     assert repeated.success is False
-    assert repeated.details["reason"] == "placement_model_retry_not_authorized"
+    assert repeated.details["reason"] == "frozen_goal_requalification_already_consumed"
     assert predictor_calls == []
 
 
-def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
+def test_frozen_zero_pass_never_reinvokes_anyplace_model(
     tmp_path: Path,
 ) -> None:
     predictor_calls: list[dict[str, Any]] = []
@@ -624,7 +641,6 @@ def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
 
     def rpc(_name, request, _timeout):
         qualification_requests.append(request)
-        second_round = len(qualification_requests) == 2
         return {
             "schema_version": QUALIFICATION_SCHEMA,
             "planning_scene_revision": request["planning_scene_revision"],
@@ -637,10 +653,10 @@ def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
                         "qualification_binding_sha256"
                     ],
                     "execution_started": False,
-                    "verdict": "PASS" if second_round and index == 0 else "FAIL",
-                    "reason": "qualified" if second_round and index == 0 else "ik_failed",
-                    "stages": [_pass_stage()] if second_round and index == 0 else [],
-                    "full_plan_submitted": second_round and index == 0,
+                    "verdict": "FAIL",
+                    "reason": "ik_failed",
+                    "stages": [],
+                    "full_plan_submitted": False,
                 }
                 for index, item in enumerate(request["candidates"])
             ],
@@ -689,78 +705,15 @@ def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
         predictor=lambda request: predictor_calls.append(request) or _model_response(),
     )
     frozen = handler(_context(tmp_path, measured_attachment=measured_attachment))
-    retry_parameters = {
-        key: frozen.details["source"][key]
-        for key in (
-            "object_observation",
-            "placement_observation",
-            "object_camera_to_placement_camera",
-            "placement_camera_to_world",
-        )
-    }
-    retry_parameters["scene_revision"] = frozen.details["scene_revision"]
-    mismatched_retry_context = _context(
-        tmp_path, measured_attachment=measured_attachment
-    )
-    mismatched_retry_context.parameters = retry_parameters
-    mismatched_retry_context.metadata["supervision_context"]["memory"][
-        "placement_candidate_policy"
-    ] = {
-        "status": "qualification_retry_required",
-        "scene_revision": 6,
-        "planning_scene_revision": 6,
-        "recovery": {
-            "required_action": {
-                "name": "anyplace",
-                "parameters": retry_parameters,
-            }
-        },
-    }
-    mismatched_retry = handler(mismatched_retry_context)
-    assert mismatched_retry.success is False
-    assert mismatched_retry.details["reason"] == "placement_model_retry_not_authorized"
-    assert predictor_calls == []
-
-    retry_context = _context(tmp_path, measured_attachment=measured_attachment)
-    retry_context.parameters = retry_parameters
-    retry_context.metadata["supervision_context"]["memory"][
-        "placement_candidate_policy"
-    ] = {
-        "status": "qualification_retry_required",
-        "scene_revision": 7,
-        "planning_scene_revision": 7,
-        "recovery": {
-            "required_action": {
-                "name": "anyplace",
-                "parameters": retry_parameters,
-            }
-        },
-    }
-    regenerated = handler(retry_context)
-    repeated_retry = handler(retry_context)
-
+    repeated = handler(_context(tmp_path, measured_attachment=measured_attachment))
     assert frozen.success and frozen.details["candidate_count"] == 0
-    assert frozen.details["qualification_round"] == 1
-    assert len(predictor_calls) == 1
-    assert regenerated.success and regenerated.details["candidate_count"] == 1
-    assert regenerated.details["qualification_round"] == 2
-    assert repeated_retry.success is False
-    assert repeated_retry.details["reason"] == "placement_model_retry_already_consumed"
-    assert len(predictor_calls) == 1
-    assert regenerated.details["source"]["object_observation"] == frozen.details[
-        "source"
-    ]["object_observation"]
-    assert regenerated.details["source"]["placement_observation"] == frozen.details[
-        "source"
-    ]["placement_observation"]
-    second_ids = {
-        item["candidate_id"] for item in qualification_requests[1]["candidates"]
-    }
-    assert "p-frozen-fail" not in second_ids
-    assert "placement_new_seed" in second_ids
+    assert repeated.success is False
+    assert repeated.details["reason"] == "frozen_goal_requalification_already_consumed"
+    assert predictor_calls == []
+    assert len(qualification_requests) == 1
 
 
-def test_no_attachment_or_matching_frozen_pool_calls_model_normally(
+def test_only_unattached_goal_generation_may_call_anyplace_model(
     tmp_path: Path,
 ) -> None:
     predictor_calls: list[dict[str, Any]] = []
@@ -796,12 +749,7 @@ def test_no_attachment_or_matching_frozen_pool_calls_model_normally(
     )
 
     assert unattached.success
-    assert attached_without_matching_pool.success
-    assert len(predictor_calls) == 2
+    assert attached_without_matching_pool.success is False
+    assert attached_without_matching_pool.details["reason"] == "frozen_goal_pool_missing"
+    assert len(predictor_calls) == 1
     assert unattached.details.get("frozen_goal_requalification") is not True
-    assert (
-        attached_without_matching_pool.details.get(
-            "frozen_goal_requalification"
-        )
-        is not True
-    )

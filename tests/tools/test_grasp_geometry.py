@@ -17,6 +17,7 @@ from agent.tools.grasp_geometry import (
     materialize_world_object_goal,
     materialize_world_object_goal_from_current_pose,
     predicted_attachment_from_grasp,
+    project_attached_object_center_to_image,
     qualification_grasp_pose_chain,
 )
 from agent.tools.registry import ToolExecutionContext, ToolSpec
@@ -57,6 +58,60 @@ def _grasp_parameters() -> dict:
         "target_class": "upright_can",
         "scene_epoch": 0,
     }
+
+
+def test_project_attached_object_center_uses_native_ack_geometry() -> None:
+    projection = project_attached_object_center_to_image(
+        current_eef_pose={
+            "xyz": [0.1, -0.2, 1.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        attachment_transform={
+            "schema_version": "openeta.attachment_transform.v1",
+            "parent_frame": "eef",
+            "child_frame": "object",
+            "measurement_boundary": "native_attach_ack",
+            "translation_xyz": [0.1, 0.1, 0.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        intrinsics={"fx": 100.0, "fy": 100.0, "cx": 50.0, "cy": 40.0},
+        camera_extrinsics={
+            "pos": [0.0, 0.0, 0.0],
+            "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "camera_frame": "opencv",
+        },
+        image_width=100,
+        image_height=80,
+    )
+
+    assert projection["point_xy"] == pytest.approx([70.0, 30.0])
+    assert projection["depth_m"] == pytest.approx(1.0)
+
+
+def test_project_attached_object_center_rejects_non_ack_transform() -> None:
+    with pytest.raises(GraspGeometryError, match="native T_eef_object"):
+        project_attached_object_center_to_image(
+            current_eef_pose={
+                "xyz": [0.0, 0.0, 1.0],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+            attachment_transform={
+                "schema_version": "openeta.attachment_transform.v1",
+                "parent_frame": "eef",
+                "child_frame": "object",
+                "measurement_boundary": "predicted",
+                "translation_xyz": [0.0, 0.0, 0.0],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+            intrinsics={"fx": 100.0, "fy": 100.0, "cx": 50.0, "cy": 40.0},
+            camera_extrinsics={
+                "pos": [0.0, 0.0, 0.0],
+                "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                "camera_frame": "opencv",
+            },
+            image_width=100,
+            image_height=80,
+        )
 
 
 def _compiler_spec() -> ToolSpec:

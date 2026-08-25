@@ -247,6 +247,12 @@ class GazeboRuntime:
         if not self.started or self.closed:
             raise GazeboProcessError("Gazebo runtime must be reset before observe")
         deadline = time.monotonic() + (timeout_s or self.deployment.observation_timeout_s)
+        # Sample robot state before the potentially slower RGB-D transfers.
+        # In particular, an action receipt may have just supplied the final
+        # still-fresh state from its execution interval.  Deferring this read
+        # until after two camera captures can age that evidence past the state
+        # freshness bound even though the physical action completed correctly.
+        robot = self._robot_state()
         frames = [
             camera.capture(
                 timeout_s=self._remaining(deadline),
@@ -258,7 +264,7 @@ class GazeboRuntime:
         return EnvObservation(
             task=self.task,
             cameras=frames,
-            robot=self._robot_state(),
+            robot=robot,
             metadata={
                 "backend": "gazebo",
                 "profile": self.profile.name,

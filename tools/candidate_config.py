@@ -16,7 +16,6 @@ DEFAULT_ANYPLACE_FULL_PLAN_LIMIT = 2
 DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT = 4
 DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT = 2
 DEFAULT_MOVEIT_IK_SEED_COUNT = 8
-DEFAULT_ANYPLACE_MAX_QUALIFICATION_ROUNDS = 2
 
 QUALIFICATION_PROFILES = ("legacy", "fast_v3", "shadow")
 SOLVER_PROFILES = (
@@ -134,7 +133,6 @@ class CandidateFunnelConfig:
     frozen_pair_grasp_branch_limit: int = DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT
     frozen_pair_full_plan_limit: int = DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT
     moveit_ik_seed_count: int = DEFAULT_MOVEIT_IK_SEED_COUNT
-    anyplace_max_qualification_rounds: int = DEFAULT_ANYPLACE_MAX_QUALIFICATION_ROUNDS
     qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE
     solver_profile: str = DEFAULT_SOLVER_PROFILE
     fast_beam_width: int = DEFAULT_FAST_BEAM_WIDTH
@@ -160,7 +158,6 @@ class CandidateFunnelConfig:
             ("frozen_pair_grasp_branch_limit", 4),
             ("frozen_pair_full_plan_limit", 512),
             ("moveit_ik_seed_count", 64),
-            ("anyplace_max_qualification_rounds", 16),
             ("fast_beam_width", 8),
             ("max_ik_concurrency", 64),
             ("max_state_validity_concurrency", 64),

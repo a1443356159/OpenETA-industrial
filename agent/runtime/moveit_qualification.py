@@ -39,6 +39,7 @@ from agent.runtime.qualification_v3 import (
     joint_limit_margin,
     latency_summary,
     normalized_joint_distance,
+    frozen_pair_l5_submission_order,
     schedule_candidate_waves,
     select_grasp_branches,
 )
@@ -63,6 +64,13 @@ STATE_VALIDITY_TIMEOUT_S = 2.0
 QUALIFICATION_RPC_GRACE_S = 30.0
 PROGRESSIVE_SCREENING_MODE = "progressive_until_full_plan_capacity"
 PROGRESSIVE_NOT_EVALUATED_REASON = "progressive_endpoint_capacity_reached"
+SAME_RUN_QUALIFICATION_SEED_FIELD = (
+    "_openeta_same_run_qualification_seed_evidence"
+)
+SAME_RUN_QUALIFICATION_SEED_SCHEMA = (
+    "openeta.same_run_qualification_seed_evidence.v1"
+)
+SAME_RUN_QUALIFICATION_SEED_PROVENANCE = "frozen_pair_l5_pass"
 
 
 def _hash(value: object) -> str:
@@ -111,6 +119,78 @@ def _valid_joint_state(value: object) -> bool:
     except (TypeError, ValueError):
         return False
     return all(math.isfinite(position) for position in parsed)
+
+
+def _sanitized_joint_state(value: object) -> JsonDict | None:
+    if not _valid_joint_state(value):
+        return None
+    assert isinstance(value, Mapping)
+    return {
+        "names": [str(name) for name in value.get("names") or []],
+        "positions": [float(position) for position in value.get("positions") or []],
+    }
+
+
+def _same_run_seed_evidence(
+    proof: Mapping[str, Any], *, source_candidate_id: str
+) -> JsonDict | None:
+    """Extract bounded, validated seeds from this run's first planned stage."""
+
+    stages = proof.get("stages")
+    if not isinstance(stages, list) or not stages:
+        return None
+    first = stages[0]
+    if not isinstance(first, Mapping):
+        return None
+    raw_states: list[Mapping[str, Any]] = []
+    planned_end = first.get("end_joint_state")
+    if isinstance(planned_end, Mapping):
+        raw_states.append(planned_end)
+    beam = first.get("beam_solutions")
+    if isinstance(beam, list):
+        for solution in beam:
+            state = (
+                solution.get("joint_state")
+                if isinstance(solution, Mapping)
+                else None
+            )
+            if isinstance(state, Mapping):
+                raw_states.append(state)
+    sanitized = [
+        state
+        for value in raw_states
+        if (state := _sanitized_joint_state(value)) is not None
+    ]
+    states = _unique_joint_state_seeds(sanitized, limit=2)
+    if not states:
+        return None
+    return {
+        "schema_version": SAME_RUN_QUALIFICATION_SEED_SCHEMA,
+        "provenance": SAME_RUN_QUALIFICATION_SEED_PROVENANCE,
+        "source_candidate_id": source_candidate_id,
+        "source_stage_index": 0,
+        "source_stage_name": str(first.get("name") or "stage_0"),
+        "states": states,
+    }
+
+
+def _candidate_same_run_seed_states(candidate: Mapping[str, Any]) -> list[JsonDict]:
+    evidence = candidate.get(SAME_RUN_QUALIFICATION_SEED_FIELD)
+    if not (
+        isinstance(evidence, Mapping)
+        and evidence.get("schema_version") == SAME_RUN_QUALIFICATION_SEED_SCHEMA
+        and evidence.get("provenance") == SAME_RUN_QUALIFICATION_SEED_PROVENANCE
+    ):
+        return []
+    raw_states = evidence.get("states")
+    if not isinstance(raw_states, list):
+        return []
+    sanitized = [
+        state
+        for value in raw_states
+        if (state := _sanitized_joint_state(value)) is not None
+    ]
+    return _unique_joint_state_seeds(sanitized, limit=2)
 
 
 class _QualificationInfrastructureError(RuntimeError):
@@ -214,7 +294,6 @@ class MoveItCandidateQualifier:
         placement_full_plan_limit: int = DEFAULT_ANYPLACE_FULL_PLAN_LIMIT,
         frozen_pair_full_plan_limit: int = DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
         ik_seed_count: int = DEFAULT_MOVEIT_IK_SEED_COUNT,
-        placement_max_rounds: int = 2,
         qualification_profile: str = "legacy",
         solver_profile: str = "auto",
         beam_width: int = 2,
@@ -242,7 +321,6 @@ class MoveItCandidateQualifier:
         }
         self.frozen_pair_full_plan_limit = int(frozen_pair_full_plan_limit)
         self.ik_seed_count = int(ik_seed_count)
-        self.placement_max_rounds = int(placement_max_rounds)
         self.qualification_profile = str(qualification_profile)
         self.solver_profile = str(solver_profile)
         self.beam_width = int(beam_width)
@@ -255,7 +333,6 @@ class MoveItCandidateQualifier:
         self.fast_ik_timeout_s = float(fast_ik_timeout_s)
         self.recovery_ik_timeout_s = float(recovery_ik_timeout_s)
         self.capability_map_id = str(capability_map_id)
-        self._placement_rounds: dict[str, int] = {}
 
     def qualify_result(
         self,
@@ -284,21 +361,7 @@ class MoveItCandidateQualifier:
             # or reverse it into a new candidate.
             raw = [dict(candidate) for candidate in raw if isinstance(candidate, Mapping)]
             details[key] = raw
-        qualification_round = 1
         if purpose == "placement" and qualification_mode == "standard":
-            pool_key = _hash(
-                {
-                    "placement_observation": (source or {}).get("placement_observation"),
-                    "attachment_transform": (source or {}).get("attachment_transform"),
-                    "planning_scene_revision": planning_scene_revision,
-                }
-            )
-            qualification_round = self._placement_rounds.get(pool_key, 0) + 1
-            self._placement_rounds[pool_key] = qualification_round
-            # Each model inference round is an independent qualification pool.
-            # Do not synthesize placement translations between rounds: AnyPlace
-            # owns terminal object-goal generation and all 96 results remain
-            # available to the deterministic waves.
             combined = list(raw)
             if fast_profile:
                 if self.qualification_profile == "shadow":
@@ -306,7 +369,7 @@ class MoveItCandidateQualifier:
                         str(candidate.get("id") or "")
                         for candidate in _deduplicate_se3_candidates(
                             combined,
-                            round_index=qualification_round,
+                            round_index=1,
                         )
                     }
                 # Every AnyPlace result remains an independent scheduling
@@ -314,12 +377,12 @@ class MoveItCandidateQualifier:
                 # never deleted; only missing/duplicate IDs are repaired.
                 raw = _preserve_candidate_pool(
                     combined,
-                    round_index=qualification_round,
+                    round_index=1,
                 )
             else:
                 raw = _deduplicate_se3_candidates(
                     combined,
-                    round_index=qualification_round,
+                    round_index=1,
                 )
             details[key] = raw
         generated = len(raw)
@@ -430,9 +493,20 @@ class MoveItCandidateQualifier:
                     "fast_ik_timeout_s": self.fast_ik_timeout_s,
                     "recovery_ik_timeout_s": self.recovery_ik_timeout_s,
                     "capability_map_id": self.capability_map_id,
-                    "l5_pass_target": 2 if purpose == "grasp" else 1,
+                    "l5_pass_target": (
+                        full_plan_limit
+                        if qualification_mode == "frozen_pair"
+                        else 2
+                        if purpose == "grasp"
+                        else 1
+                    ),
                 }
             )
+            if qualification_mode == "frozen_pair":
+                # Preserve up to the configured number of independently
+                # qualified frozen alternates, but continue L5 attempts until
+                # that PASS target is met or the deterministic pool exhausts.
+                funnel_config["qualification_mode"] = "frozen_pair"
             if self.qualification_profile == "shadow":
                 shadow_legacy_candidates = diversify_compiled_candidates(
                     [
@@ -575,7 +649,8 @@ class MoveItCandidateQualifier:
             )
         ]
         for candidate in passed:
-            proof = proofs.get(str(candidate.get("id") or ""), {})
+            candidate_id = str(candidate.get("id") or "")
+            proof = proofs.get(candidate_id, {})
             goal_legality = proof.get("goal_legality")
             checks = (
                 goal_legality.get("checks")
@@ -600,6 +675,13 @@ class MoveItCandidateQualifier:
                 candidate["qualified_world_collision_object_goal_pose"] = dict(
                     collision_goal
                 )
+            if qualification_mode == "frozen_pair":
+                seed_evidence = _same_run_seed_evidence(
+                    proof,
+                    source_candidate_id=candidate_id,
+                )
+                if seed_evidence is not None:
+                    candidate[SAME_RUN_QUALIFICATION_SEED_FIELD] = seed_evidence
         pass_proofs = {
             str(candidate["id"]): proofs[str(candidate["id"])] for candidate in passed
         }
@@ -633,8 +715,6 @@ class MoveItCandidateQualifier:
         details.update(
             {
                 "selection_required": bool(passed),
-                "qualification_round": qualification_round,
-                "max_qualification_rounds": self.placement_max_rounds if purpose == "placement" else 1,
                 "model_raw_candidate_count": int(
                     details.get("model_raw_candidate_count", raw_count)
                 ),
@@ -1589,6 +1669,7 @@ class MoveItQualificationEngine:
         stop_reason = "candidate_pool_exhausted"
         first_l5_pass_elapsed_s: float | None = None
         target = int(funnel.get("l5_pass_target", 2 if purpose == "grasp" else 1))
+        qualification_mode = str(funnel.get("qualification_mode") or "")
 
         def target_reached() -> bool:
             if purpose == "placement":
@@ -1703,6 +1784,11 @@ class MoveItQualificationEngine:
                     ),
                     key=candidate_physical_quality_key,
                 )
+                if qualification_mode == "frozen_pair":
+                    ranked = frozen_pair_l5_submission_order(
+                        ranked,
+                        prior_attempts=l5_attempts,
+                    )
                 for screened in ranked:
                     candidate_id = str(screened.get("candidate_id") or "")
                     descriptor = descriptor_by_id[candidate_id]
@@ -1722,6 +1808,14 @@ class MoveItQualificationEngine:
                             "candidate_id": candidate_id,
                             "fixed_candidate_index": planned.get(
                                 "fixed_candidate_index"
+                            ),
+                            "source_grasp_id": planned.get("source_grasp_id"),
+                            "source_object_goal_id": planned.get(
+                                "source_object_goal_id"
+                            ),
+                            "se3_cluster_id": planned.get("se3_cluster_id"),
+                            "grasp_symmetry_family_id": planned.get(
+                                "grasp_symmetry_family_id"
                             ),
                             "wave_index": wave.wave_index,
                             "recovery_layer": recovery,
@@ -1833,7 +1927,12 @@ class MoveItQualificationEngine:
             )
         else:
             selected_ids = (
-                [str(l5_passes[0].get("candidate_id") or "")]
+                [
+                    str(item.get("candidate_id") or "")
+                    for item in l5_passes
+                ]
+                if qualification_mode == "frozen_pair"
+                else [str(l5_passes[0].get("candidate_id") or "")]
                 if l5_passes
                 else []
             )
@@ -2077,6 +2176,10 @@ class MoveItQualificationEngine:
                 ),
                 "capability_score": dict(descriptor.get("capability_score") or {}),
                 "generator_score": generator_score(candidate),
+                "source_grasp_id": str(candidate.get("source_grasp_id") or ""),
+                "source_object_goal_id": str(
+                    candidate.get("source_object_goal_id") or ""
+                ),
                 "endpoint_evaluated": True,
                 "stages": [],
             }
@@ -2181,6 +2284,11 @@ class MoveItQualificationEngine:
                     "candidate_start_state"
                     if isinstance(candidate_start, Mapping)
                     else "current_robot_state"
+                ),
+                candidate_seed_states=(
+                    _candidate_same_run_seed_states(candidate)
+                    if stage_index == 0
+                    else ()
                 ),
             )
             evidence: JsonDict = {
@@ -2463,6 +2571,7 @@ class MoveItQualificationEngine:
         count: int,
         recovery: bool,
         initial_seed_source: str,
+        candidate_seed_states: Sequence[Mapping[str, Any]] = (),
     ) -> list[JsonDict]:
         if recovery:
             seeds = fixed_recovery_seeds(start, source=source, count=count)
@@ -2491,10 +2600,17 @@ class MoveItQualificationEngine:
             seed["_chain_parent_state"] = dict(start)
             seeds.append(seed)
         if len(seeds) < count:
+            start_names = [str(name) for name in start.get("names") or []]
+            trusted_candidate_seeds = [
+                value
+                for value in candidate_seed_states
+                if _valid_joint_state(value)
+                and [str(name) for name in value.get("names") or []] == start_names
+            ]
             ordered_supplements: list[tuple[Mapping[str, Any], str]] = [
-                (value, "batch_cache")
+                (value, "frozen_pair_qualified_same_run")
                 for value in sorted(
-                    batch_cache,
+                    trusted_candidate_seeds,
                     key=lambda value: (
                         normalized_joint_distance(start, value, source=source),
                         _hash(
@@ -2506,6 +2622,23 @@ class MoveItQualificationEngine:
                     ),
                 )
             ]
+            ordered_supplements.extend(
+                [
+                    (value, "batch_cache")
+                    for value in sorted(
+                        batch_cache,
+                        key=lambda value: (
+                            normalized_joint_distance(start, value, source=source),
+                            _hash(
+                                {
+                                    "names": value.get("names"),
+                                    "positions": value.get("positions"),
+                                }
+                            ),
+                        ),
+                    )
+                ]
+            )
             home = source.get("home_joint_state") or current_state.get(
                 "home_joint_state"
             )

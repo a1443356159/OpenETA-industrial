@@ -16,16 +16,29 @@ from scripts import tui_gazebo_acceptance as base
 from agent.runtime.calibration_registry import RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE
 
 
-SCHEMA_VERSION = "openeta.gazebo_m6_acceptance.v1"
-MILESTONE = "m6"
+SCHEMA_VERSION = "openeta.gazebo_pick_place_acceptance.v1"
+SUITE = "pick-place"
+# Compatibility alias for callers that imported the historical module.
+MILESTONE = SUITE
 MODE = base.SCRIPTED_TUI
 ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
-DEFAULT_SERVICES = {
+GRASP_BACKENDS = ("anygrasp", "graspgenx")
+DEFAULT_GRASP_BACKEND = "anygrasp"
+DEFAULT_SERVICE_URLS = {
     "openeta-sam3": "http://127.0.0.1:8773/sse",
     "openeta-anygrasp": "http://127.0.0.1:8774/sse",
     "openeta-anyplace": "http://127.0.0.1:8775/sse",
+    "openeta-graspgenx": "http://127.0.0.1:8778/sse",
 }
-REQUIRED_REAL_M6_TOOLS = (
+GRASP_SERVICE_NAMES = {
+    "anygrasp": "openeta-anygrasp",
+    "graspgenx": "openeta-graspgenx",
+}
+DEFAULT_SERVICES = {
+    name: DEFAULT_SERVICE_URLS[name]
+    for name in ("openeta-sam3", "openeta-anygrasp", "openeta-anyplace")
+}
+REQUIRED_REAL_PICK_PLACE_TOOLS = (
     "create_simulator_env",
     "observe",
     "sam3",
@@ -34,6 +47,8 @@ REQUIRED_REAL_M6_TOOLS = (
     "anyplace",
     "close_simulator_env",
 )
+# Compatibility alias for tests and integrations importing the historical name.
+REQUIRED_REAL_M6_TOOLS = REQUIRED_REAL_PICK_PLACE_TOOLS
 SCENARIOS = ("normal", "reject-first")
 GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
@@ -71,6 +86,11 @@ acceptance 和 post-release retreat。
 60 秒是性能目标而非硬截止；基础设施错误不得记为不可达，也不得重复失败 fingerprint。
 """.strip() + "\n"
 
+GRASPGENX_INSTRUCTIONS = INSTRUCTIONS.replace(
+    "配置的抓取 provider",
+    "GraspGenX provider（gripper_name=robotiq_2f_85）",
+)
+
 
 SCENARIO_INSTRUCTIONS = {
     "normal": "执行正常放置路径；不得主动制造规划失败。",
@@ -82,6 +102,55 @@ SCENARIO_INSTRUCTIONS = {
 }
 
 
+def _validated_grasp_backend(value: str) -> str:
+    backend = str(value).strip().lower()
+    if backend not in GRASP_BACKENDS:
+        choices = ", ".join(GRASP_BACKENDS)
+        raise ValueError(f"grasp backend must be one of: {choices}")
+    return backend
+
+
+def _instructions_for_backend(grasp_backend: str) -> str:
+    return (
+        GRASPGENX_INSTRUCTIONS
+        if _validated_grasp_backend(grasp_backend) == "graspgenx"
+        else INSTRUCTIONS
+    )
+
+
+def _required_tools_for_backend(grasp_backend: str) -> tuple[str, ...]:
+    backend = _validated_grasp_backend(grasp_backend)
+    return tuple(
+        backend if name == DEFAULT_GRASP_BACKEND else name
+        for name in REQUIRED_REAL_PICK_PLACE_TOOLS
+    )
+
+
+def _services_for_backend(
+    grasp_backend: str,
+    *,
+    sam3_url: str,
+    anygrasp_url: str,
+    anyplace_url: str,
+    graspgenx_url: str,
+) -> dict[str, str]:
+    backend = _validated_grasp_backend(grasp_backend)
+    urls = {
+        "openeta-sam3": sam3_url,
+        "openeta-anygrasp": anygrasp_url,
+        "openeta-anyplace": anyplace_url,
+        "openeta-graspgenx": graspgenx_url,
+    }
+    return {
+        name: urls[name]
+        for name in (
+            "openeta-sam3",
+            GRASP_SERVICE_NAMES[backend],
+            "openeta-anyplace",
+        )
+    }
+
+
 def _health_url(sse_url: str) -> str:
     return sse_url.removesuffix("/sse").rstrip("/") + "/"
 
@@ -91,6 +160,7 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
         "openeta-sam3": "sam3",
         "openeta-anygrasp": "anygrasp",
         "openeta-anyplace": "anyplace",
+        "openeta-graspgenx": "openeta-graspgenx",
     }
     rows: dict[str, Any] = {}
     for name, url in services.items():
@@ -164,7 +234,7 @@ def gazebo_runtime_preflight(repo: Path) -> dict[str, Any]:
     """Fail before allocation when the ROS underlay/overlay was not loaded.
 
     Shell setup files cannot safely be applied to an already-running Python
-    process. The canonical M6 wrapper sources them before exec; this check
+    process. The canonical pick-place wrapper sources them before exec; this check
     makes an accidental direct invocation fail immediately and precisely.
     """
 
@@ -199,7 +269,7 @@ def gazebo_runtime_preflight(repo: Path) -> dict[str, Any]:
         "status": "passed" if not errors else "blocked",
         "reason_codes": errors,
         "canonical_runner": str(
-            (repo / "scripts/run_m6_gazebo_acceptance.sh").resolve()
+            (repo / "scripts/run_pick_place_acceptance.sh").resolve()
         ),
         "expected_overlay": str(expected_overlay),
         "declared_overlay": os.environ.get("OPENETA_GAZEBO_OVERLAY", ""),
@@ -217,9 +287,18 @@ def prepare_case(
     allocation: base.Allocation,
     services: Mapping[str, str],
     scenario: str = "normal",
+    grasp_backend: str = DEFAULT_GRASP_BACKEND,
 ) -> base.CasePaths:
     if scenario not in SCENARIOS:
-        raise ValueError(f"unsupported M6 acceptance scenario: {scenario}")
+        raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
+    backend = _validated_grasp_backend(grasp_backend)
+    configured_grasp_services = set(services).intersection(GRASP_SERVICE_NAMES.values())
+    required_grasp_service = GRASP_SERVICE_NAMES[backend]
+    if configured_grasp_services != {required_grasp_service}:
+        raise ValueError(
+            "strict acceptance requires exactly one grasp service: "
+            f"{required_grasp_service}"
+        )
     paths = base.case_paths(run_root, MILESTONE, MODE)
     paths.root.mkdir(parents=True, exist_ok=False)
     base._json_dump(
@@ -232,7 +311,7 @@ def prepare_case(
         },
     )
     paths.instructions.write_text(
-        INSTRUCTIONS
+        _instructions_for_backend(backend)
         + "\n验收场景："
         + scenario
         + "。"
@@ -246,7 +325,8 @@ def prepare_case(
         case_name=f"{MILESTONE}-{MODE}",
         before=base._process_snapshot(),
     )
-    receipt["m6_scenario"] = scenario
+    receipt["acceptance_scenario"] = scenario
+    receipt["grasp_backend_mode"] = backend
     base._json_dump(paths.receipt, base.seal_environment_receipt(receipt))
     return paths
 
@@ -275,6 +355,18 @@ def _has_minimum_int_value(payload: object, key: str, minimum: int) -> bool:
         for value in base._values(payload, key)
         if isinstance(value, int) and not isinstance(value, bool)
     )
+
+
+def _call_outputs(call: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the public tool-output object without descending into evidence."""
+
+    result = call.get("result")
+    result = result if isinstance(result, Mapping) else call
+    details = result.get("details")
+    if not isinstance(details, Mapping):
+        return {}
+    outputs = details.get("outputs")
+    return outputs if isinstance(outputs, Mapping) else {}
 
 
 def _parameters(call: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -456,7 +548,14 @@ def _has_bounded_grasp_l5_evidence(
     )
 
 
-def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str, Any]:
+def verify_case(
+    paths: base.CasePaths,
+    *,
+    scenario: str = "normal",
+    grasp_backend: str = DEFAULT_GRASP_BACKEND,
+) -> dict[str, Any]:
+    backend = _validated_grasp_backend(grasp_backend)
+    backend_label = "GraspGenX" if backend == "graspgenx" else "AnyGrasp"
     errors: list[str] = []
     try:
         events, trace_paths = base._load_trace_events(paths.trace_root)
@@ -465,14 +564,13 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         payloads, mcp_errors = base._mcp_response_payloads(calls, paths)
         errors.extend(mcp_errors)
         names = [_name(call) for call in calls]
-        for required in REQUIRED_REAL_M6_TOOLS:
+        for required in _required_tools_for_backend(backend):
             if required not in names:
-                errors.append(f"required real M6 tool call missing: {required}")
+                errors.append(f"required real pick-place tool call missing: {required}")
         if names.count("sam3") < 2:
             errors.append("target-object and placement-region SAM3 calls are required")
-        grasp_call_names = {"grasp_pose_estimate", "anygrasp", "graspgenx"}
         grasp_indices = [
-            index for index, name in enumerate(names) if name in grasp_call_names
+            index for index, name in enumerate(names) if name == backend
         ]
         sam_indices = [index for index, name in enumerate(names) if name == "sam3"]
         if grasp_indices and sam_indices and max(sam_indices) > min(grasp_indices):
@@ -482,7 +580,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             (
                 "observe",
                 "anyplace",
-                "grasp_pose_estimate",
+                backend,
                 "move_to",
                 "gripper_control",
                 "anyplace",
@@ -524,7 +622,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             for event in events
         ):
             errors.append("host grasp candidate compilation evidence missing")
-        grasp_calls = [call for call in calls if _name(call) in grasp_call_names]
+        grasp_calls = [call for call in calls if _name(call) == backend]
         final_grasp = grasp_calls[-1] if grasp_calls else {}
         raw_grasp_counts = [
             int(value)
@@ -532,7 +630,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             if isinstance(value, int) and not isinstance(value, bool)
         ]
         if not raw_grasp_counts or raw_grasp_counts[-1] < 10:
-            errors.append("grasp-provider raw candidate count evidence is missing")
+            errors.append(f"{backend_label} raw candidate count evidence is missing")
         has_legacy_diversity_pool = any(
             1 <= value <= 64
             for value in base._values(final_grasp, "diversity_selected_count")
@@ -541,14 +639,15 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         if not has_legacy_diversity_pool and not _has_v3_grasp_diversity_evidence(
             final_grasp, artifact_root=paths.root
         ):
-            errors.append("grasp-provider diversity pool evidence is missing")
+            errors.append(f"{backend_label} diversity pool evidence is missing")
         if not _has_bounded_grasp_l5_evidence(
             final_grasp, artifact_root=paths.root
         ):
-            errors.append("grasp-provider L5 diversity evidence is missing")
+            errors.append(f"{backend_label} L5 diversity evidence is missing")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}
+        anyplace_outputs = _call_outputs(anyplace)
         if len(anyplace_calls) != 2:
             errors.append("normal flow requires one model AnyPlace call and one frozen-pool requalification")
         if anyplace_calls and not base._contains(
@@ -562,22 +661,21 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         }
         if not _has_minimum_int_value(anyplace, "model_raw_candidate_count", 96):
             errors.append("AnyPlace model raw pool evidence is missing")
-        candidate_counts = [
-            int(value)
-            for value in base._values(anyplace, "candidate_count")
-            if isinstance(value, int) and not isinstance(value, bool)
-        ]
-        full_plan_pass_counts = [
-            int(value)
-            for value in base._values(anyplace, "full_plan_pass_count")
-            if isinstance(value, int) and not isinstance(value, bool)
-        ]
-        if not candidate_counts or candidate_counts[-1] < 1:
+        candidate_count = anyplace_outputs.get("candidate_count")
+        full_plan_pass_count = anyplace_outputs.get("full_plan_pass_count")
+        candidate_count_valid = (
+            isinstance(candidate_count, int) and not isinstance(candidate_count, bool)
+        )
+        full_plan_pass_count_valid = (
+            isinstance(full_plan_pass_count, int)
+            and not isinstance(full_plan_pass_count, bool)
+        )
+        if not candidate_count_valid or candidate_count < 1:
             errors.append("final AnyPlace result stored no MoveIt PASS candidate")
         if (
-            not full_plan_pass_counts
-            or not candidate_counts
-            or full_plan_pass_counts[-1] != candidate_counts[-1]
+            not full_plan_pass_count_valid
+            or not candidate_count_valid
+            or full_plan_pass_count != candidate_count
         ):
             errors.append("AnyPlace candidate_count/full_plan_pass_count mismatch")
         if not candidate_ids:
@@ -738,6 +836,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             "trace_paths": [str(path.resolve()) for path in trace_paths],
             "tool_call_count": len(calls),
             "scenario": scenario,
+            "grasp_backend": backend,
         }
     except Exception as exc:  # noqa: BLE001 - verifier must return a report.
         return {
@@ -745,6 +844,8 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             "errors": [f"evidence unreadable: {type(exc).__name__}: {exc}"],
             "trace_paths": [],
             "tool_call_count": 0,
+            "scenario": scenario,
+            "grasp_backend": backend,
         }
 
 
@@ -755,7 +856,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--skip-provider-preflight", action="store_true")
     parser.add_argument("--scenario", choices=SCENARIOS, default="normal")
-    for name, url in DEFAULT_SERVICES.items():
+    parser.add_argument(
+        "--grasp-backend",
+        choices=GRASP_BACKENDS,
+        default=DEFAULT_GRASP_BACKEND,
+        help="Strict grasp backend for this acceptance run; no cross-backend fallback.",
+    )
+    for name, url in DEFAULT_SERVICE_URLS.items():
         parser.add_argument("--" + name.removeprefix("openeta-") + "-url", default=url)
     return parser
 
@@ -764,21 +871,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     repo = Path(__file__).resolve().parents[1]
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    run_root = Path(args.run_root).resolve() if args.run_root else repo / ".cache/reports" / f"m6-gazebo-{stamp}"
+    run_root = Path(args.run_root).resolve() if args.run_root else repo / ".cache/reports" / f"pick-place-gazebo-{stamp}"
     paths = base.case_paths(run_root, MILESTONE, MODE)
     if args.verify_only:
-        report = verify_case(paths, scenario=args.scenario)
+        report = verify_case(
+            paths,
+            scenario=args.scenario,
+            grasp_backend=args.grasp_backend,
+        )
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "passed" else 1
     runtime = gazebo_runtime_preflight(repo)
     if runtime["status"] != "passed":
         print(json.dumps(runtime, ensure_ascii=False, indent=2))
         return 2
-    services = {
-        "openeta-sam3": args.sam3_url,
-        "openeta-anygrasp": args.anygrasp_url,
-        "openeta-anyplace": args.anyplace_url,
-    }
+    services = _services_for_backend(
+        args.grasp_backend,
+        sam3_url=args.sam3_url,
+        anygrasp_url=args.anygrasp_url,
+        anyplace_url=args.anyplace_url,
+        graspgenx_url=args.graspgenx_url,
+    )
     run_root.mkdir(parents=True, exist_ok=False)
     preflight = service_preflight(services)
     base._json_dump(run_root / "service-preflight.json", preflight)
@@ -792,7 +905,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(provider, ensure_ascii=False, indent=2))
             return 2
     allocation = base.allocate(f"{MILESTONE}-{MODE}", preflight=not args.prepare_only)
-    paths = prepare_case(repo, run_root, allocation, services, scenario=args.scenario)
+    paths = prepare_case(
+        repo,
+        run_root,
+        allocation,
+        services,
+        scenario=args.scenario,
+        grasp_backend=args.grasp_backend,
+    )
     if args.prepare_only:
         print(run_root)
         return 0
@@ -803,11 +923,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
         extra_environment={
             "OPENETA_EPISODE_MAX_TOTAL_TOKENS": "10000000",
+            "OPENETA_GRASP_BACKEND": args.grasp_backend,
             # Cold software-rendered Gazebo launches occasionally need more
             # than the deployment default before the documented world-control
             # service is discoverable.  This affects startup only; motion,
             # planning, execution, and verification deadlines stay unchanged.
             "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": "90",
+            # Model inference is read-only and normally completes well below
+            # this bound.  A broken legacy SSE return channel is retried once
+            # inside the host, without adding a TUI/model-planner turn.
+            "OPENETA_PERCEPTION_RPC_TIMEOUT_S": "90",
             **(
                 {"OPENETA_ACCEPTANCE_PLACEMENT_FAULT": args.scenario}
                 if args.scenario != "normal"
@@ -815,7 +940,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
         },
     )
-    report = verify_case(paths, scenario=args.scenario)
+    report = verify_case(
+        paths,
+        scenario=args.scenario,
+        grasp_backend=args.grasp_backend,
+    )
     report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})
     base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)
     print(json.dumps(report, ensure_ascii=False, indent=2))

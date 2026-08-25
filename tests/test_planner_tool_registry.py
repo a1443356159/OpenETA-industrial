@@ -29,6 +29,7 @@ from agent.runtime.planner import (
     PlannerDecision,
     PlannerContextConfig,
     ToolCallingPlanner,
+    _canonicalize_host_parameters,
     _default_tool_planner_system_prompt,
     _host_obligation_decision,
     _matching_depth_enhancement,
@@ -67,6 +68,38 @@ def _observation() -> EnvObservation:
         robot=RobotState(end_effector_pose={"xyz": [0.0, 0.0, 0.5]}),
         objects=[{"name": "cube"}],
         metadata={"step_idx": 1},
+    )
+
+
+def test_text_sam3_canonicalizes_semantic_alias_to_visual_prompt() -> None:
+    decision = PlannerDecision(
+        action_type="tool_call",
+        action="sam3",
+        parameters={
+            "mode": "text",
+            "image": "/tmp/top.png",
+            "prompt": "red rectangular block",
+            "semantic_role": "grasp_target",
+            "semantic_target": "target_object",
+        },
+    )
+    canonicalizations = _canonicalize_host_parameters(
+        decision,
+        tool_context={
+            "semantic_perception_obligation": {
+                "semantic_role": "grasp_target",
+                "semantic_target": None,
+                "scene_epoch": 1,
+                "observation_id": "observation-1",
+                "preferred_image": "/tmp/top.png",
+            }
+        },
+    )
+
+    assert decision.parameters["semantic_target"] == "red rectangular block"
+    assert any(
+        item["reason"] == "bind_text_semantics_to_exact_visual_prompt"
+        for item in canonicalizations
     )
 
 
@@ -121,23 +154,22 @@ def _tools_with_handlers(*names: str) -> ToolRegistry:
     return tools
 
 
-def test_exhausted_placement_recovery_dispatches_fresh_observation() -> None:
+def test_exhausted_placement_pool_hands_off_without_new_inference() -> None:
     decision = _host_obligation_decision(
         {
-            "placement_candidate_policy": {
-                "status": "reobserve_required",
-                "recovery": {"stage": "observe_placement"},
-            }
+                "placement_candidate_policy": {
+                    "status": "stopped_requires_human",
+                    "stop_reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
+                    "recovery": {"stage": "manual_intervention", "required_action": None},
+                }
         },
         tools=_tools_with_handlers("observe"),
     )
 
     assert decision is not None
-    assert decision.action == "observe"
-    assert decision.parameters == {
-        "reason": "placement_candidates_exhausted_attachment_preserved"
-    }
-    assert decision.metadata["host_obligation"]["stage"] == "reobserve_placement"
+    assert decision.action_type == "response"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "CURRENT_GRASP_PLACE_INFEASIBLE"
 
 
 def test_zero_pass_grasp_reestimate_dispatches_fresh_observation() -> None:
@@ -5125,8 +5157,6 @@ def test_unknown_native_attachment_allows_immediate_human_stop() -> None:
     assert decision.action == "ask_human"
     assert decision.parameters == requested["parameters"]
     assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
-
-
 
 
 @pytest.mark.parametrize("failure_reason", ["empty_target_mask"])

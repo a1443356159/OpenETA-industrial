@@ -94,6 +94,8 @@ class OpenEtaAgentRuntime:
         metadata: JsonDict | None = None,
         session_id: str | None = None,
     ) -> None:
+        if isinstance(self.planner, ToolCallingPlanner):
+            self.planner.reset_session_context()
         self.memory.start_session(
             task=task,
             metadata=metadata,
@@ -118,6 +120,8 @@ class OpenEtaAgentRuntime:
         )
 
     def resume_session(self, session_id: str, *, max_events: int | None = 64) -> None:
+        if isinstance(self.planner, ToolCallingPlanner):
+            self.planner.reset_session_context()
         self.memory.resume_session(session_id, max_events=max_events)
         if self.rollout_recorder is not None:
             self.rollout_recorder.start_session(

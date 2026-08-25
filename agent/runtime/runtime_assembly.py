@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -27,6 +28,7 @@ from agent.runtime.moveit_qualification import (
     MoveItCandidateQualifier,
     QualificationCache,
     PRIVATE_RPC_NAME,
+    SAME_RUN_QUALIFICATION_SEED_FIELD,
     private_qualification_rpc,
 )
 from agent.runtime.qualification_v3 import grasp_symmetry_family_id
@@ -43,6 +45,13 @@ from agent.runtime.self_improvement import (
     SelfImprovementConfig,
     SelfImprovementReviewer,
     SkillReviewProposalStore,
+)
+from agent.runtime.sam3_selection import (
+    BackendSam3SelectionReviewer,
+    SAM3_SELECTION_REVIEW_MAX_ATTEMPTS,
+    SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
+    SAM3_SELECTION_REVIEW_TIMEOUT_S,
+    Sam3SelectionParentContext,
 )
 from agent.runtime.session_workspace import SessionWorkspace
 from agent.runtime.skill_authoring import (
@@ -298,6 +307,44 @@ class RuntimeMcpEndpoints:
     molmopoint_url: str = ""
 
 
+GRASP_BACKEND_ENV_VAR = "OPENETA_GRASP_BACKEND"
+GRASP_BACKEND_MODES = ("auto", "anygrasp", "graspgenx")
+PERCEPTION_RPC_TIMEOUT_ENV_VAR = "OPENETA_PERCEPTION_RPC_TIMEOUT_S"
+DEFAULT_PERCEPTION_RPC_TIMEOUT_S = 600.0
+
+
+def runtime_grasp_backend_order_from_env() -> tuple[str, ...]:
+    """Resolve the configured facade order; concrete modes never cross-fallback."""
+
+    mode = os.environ.get(GRASP_BACKEND_ENV_VAR, "auto").strip().lower() or "auto"
+    if mode == "auto":
+        return tuple(DEFAULT_GRASP_POSE_BACKEND_ORDER)
+    if mode in GRASP_BACKEND_MODES:
+        return (mode,)
+    choices = ", ".join(GRASP_BACKEND_MODES)
+    raise ValueError(f"{GRASP_BACKEND_ENV_VAR} must be one of: {choices}")
+
+
+def runtime_perception_rpc_timeout_s_from_env() -> float:
+    """Return the bounded deadline for one remote perception RPC attempt."""
+
+    raw = os.environ.get(
+        PERCEPTION_RPC_TIMEOUT_ENV_VAR,
+        str(DEFAULT_PERCEPTION_RPC_TIMEOUT_S),
+    )
+    try:
+        timeout_s = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{PERCEPTION_RPC_TIMEOUT_ENV_VAR} must be a finite positive number"
+        ) from exc
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError(
+            f"{PERCEPTION_RPC_TIMEOUT_ENV_VAR} must be a finite positive number"
+        )
+    return timeout_s
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeCandidateCounts:
     """Host registration values that must match remote service metadata."""
@@ -312,7 +359,6 @@ class RuntimeCandidateCounts:
     frozen_pair_grasp_branch_limit: int = 4
     frozen_pair_full_plan_limit: int = 2
     moveit_ik_seed_count: int = 8
-    anyplace_max_qualification_rounds: int = 2
     qualification_profile: str = "legacy"
     solver_profile: str = "auto"
     fast_beam_width: int = 2
@@ -338,7 +384,6 @@ class RuntimeCandidateCounts:
             frozen_pair_grasp_branch_limit=self.frozen_pair_grasp_branch_limit,
             frozen_pair_full_plan_limit=self.frozen_pair_full_plan_limit,
             moveit_ik_seed_count=self.moveit_ik_seed_count,
-            anyplace_max_qualification_rounds=self.anyplace_max_qualification_rounds,
             qualification_profile=self.qualification_profile,
             solver_profile=self.solver_profile,
             fast_beam_width=self.fast_beam_width,
@@ -357,7 +402,6 @@ class RuntimeCandidateCounts:
             "grasp_diversity_pool_size", "anyplace_diversity_pool_size",
             "grasp_full_plan_limit", "anyplace_full_plan_limit", "moveit_ik_seed_count",
             "frozen_pair_grasp_branch_limit", "frozen_pair_full_plan_limit",
-            "anyplace_max_qualification_rounds",
             "qualification_profile", "solver_profile", "fast_beam_width",
             "grasp_waves", "placement_waves", "max_ik_concurrency",
             "max_state_validity_concurrency", "fast_ik_seed_count",
@@ -383,7 +427,6 @@ def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
             "OPENETA_FROZEN_PAIR_FULL_PLAN_LIMIT", 2
         ),
         moveit_ik_seed_count=os.environ.get("OPENETA_MOVEIT_IK_SEED_COUNT", 8),
-        anyplace_max_qualification_rounds=os.environ.get("OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
         qualification_profile=os.environ.get("OPENETA_QUALIFICATION_PROFILE", "legacy"),
         solver_profile=os.environ.get("OPENETA_QUALIFICATION_SOLVER_PROFILE", "auto"),
         fast_beam_width=os.environ.get("OPENETA_QUALIFICATION_BEAM_WIDTH", 2),
@@ -416,6 +459,9 @@ class RuntimeAssemblyConfig:
     endpoints: RuntimeMcpEndpoints = field(default_factory=RuntimeMcpEndpoints)
     candidate_counts: RuntimeCandidateCounts = field(
         default_factory=runtime_candidate_counts_from_env
+    )
+    grasp_backend_order: tuple[str, ...] = field(
+        default_factory=runtime_grasp_backend_order_from_env
     )
     simulator_transport: SimulatorMcpTransport | None = None
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None
@@ -579,6 +625,11 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         config=config.web_access_config,
         provider_config=config.provider,
     )
+    sam3_selection_parent_context = Sam3SelectionParentContext()
+    sam3_selection_reviewer = _build_sam3_selection_reviewer(
+        config.backend_factory,
+        parent_context=sam3_selection_parent_context,
+    )
     depth_prefetch = bind_runtime_perception_tools(
         tools,
         endpoints=config.endpoints,
@@ -588,7 +639,9 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         simulator_proxy_config=simulator_proxy_config,
         candidate_qualifier=qualifier,
         candidate_counts=config.candidate_counts,
+        grasp_backend_order=config.grasp_backend_order,
         internal_candidate_compilers=internal_candidate_compilers,
+        selection_reviewer=sam3_selection_reviewer,
     )
 
     planner = ToolCallingPlanner(
@@ -598,6 +651,8 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
             context_window_tokens=config.provider.context_window_tokens,
             token_estimator_model=config.provider.model,
         ),
+        sam3_selection_reviewer=sam3_selection_reviewer,
+        sam3_selection_parent_context=sam3_selection_parent_context,
     )
     skill_review_config = SelfImprovementConfig(
         proposal_root=workspace.working_dir / "skill_reviews" / "pending",
@@ -678,6 +733,26 @@ def configure_runtime_self_improvement(
     )
 
 
+def _build_sam3_selection_reviewer(
+    backend_factory: BackendFactory,
+    *,
+    parent_context: Sam3SelectionParentContext | None = None,
+) -> Callable[[JsonDict], JsonDict]:
+    """Build one bounded reviewer shared by inline and fallback selection."""
+
+    backend = backend_factory(
+        max_tokens=SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
+        max_vision_images=2,
+        timeout_s=SAM3_SELECTION_REVIEW_TIMEOUT_S,
+        max_attempts=1,
+    )
+    return BackendSam3SelectionReviewer(
+        backend,
+        max_attempts=SAM3_SELECTION_REVIEW_MAX_ATTEMPTS,
+        parent_context=parent_context,
+    ).review
+
+
 def bind_runtime_perception_tools(
     tools: ToolRegistry,
     *,
@@ -689,9 +764,24 @@ def bind_runtime_perception_tools(
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None,
     candidate_qualifier: MoveItCandidateQualifier | None = None,
     candidate_counts: RuntimeCandidateCounts | None = None,
+    grasp_backend_order: tuple[str, ...] = DEFAULT_GRASP_POSE_BACKEND_ORDER,
     internal_candidate_compilers: Mapping[str, ToolHandler] | None = None,
+    selection_reviewer: Callable[[JsonDict], JsonDict] | None = None,
+    perception_rpc_timeout_s: float | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
+    rpc_timeout_s = (
+        runtime_perception_rpc_timeout_s_from_env()
+        if perception_rpc_timeout_s is None
+        else float(perception_rpc_timeout_s)
+    )
+    if not math.isfinite(rpc_timeout_s) or rpc_timeout_s <= 0:
+        raise ValueError("perception_rpc_timeout_s must be finite and positive")
+    rpc_timeout_kwargs = (
+        {}
+        if rpc_timeout_s == DEFAULT_PERCEPTION_RPC_TIMEOUT_S
+        else {"timeout_seconds": rpc_timeout_s}
+    )
     frozen_pair_coordinator = (
         _FrozenGoalPairCoordinator(
             candidate_qualifier,
@@ -752,7 +842,10 @@ def bind_runtime_perception_tools(
     depth_prefetch: DepthPriorPrefetchCoordinator | None = None
     if endpoints.depth_prior_url:
         depth_handler = build_depth_prior_handler(
-            build_sse_depth_prior_mcp_estimator(url=endpoints.depth_prior_url),
+            build_sse_depth_prior_mcp_estimator(
+                url=endpoints.depth_prior_url,
+                **rpc_timeout_kwargs,
+            ),
             output_root=artifact_root / "depth_prior_results",
         )
         depth_prefetch = DepthPriorPrefetchCoordinator(
@@ -769,6 +862,11 @@ def bind_runtime_perception_tools(
         # pipeline over the existing simulator MCP transport; it is exposed
         # instead of sam3, never alongside it.
         if simulator_transport is not None:
+            bounded_selection_reviewer = (
+                selection_reviewer
+                if selection_reviewer is not None
+                else _build_sam3_selection_reviewer(backend_factory)
+            )
             proxy_config = simulator_proxy_config or SimulatorMcpToolProxyConfig()
             oracle_mcp_evidence = _OracleMcpEvidence(
                 proxy_config=proxy_config,
@@ -781,6 +879,7 @@ def bind_runtime_perception_tools(
                     session_id_provider=lambda: proxy_config.session_id,
                     response_callback=oracle_mcp_evidence.record,
                 ),
+                selection_reviewer=bounded_selection_reviewer,
                 tool_name="oracle_perceive",
                 output_root=artifact_root / "oracle_perceive_images",
                 result_output_root=artifact_root / "oracle_perceive_results",
@@ -796,14 +895,24 @@ def bind_runtime_perception_tools(
                 replace=True,
             )
     elif endpoints.sam3_url:
+        bounded_selection_reviewer = (
+            selection_reviewer
+            if selection_reviewer is not None
+            else _build_sam3_selection_reviewer(backend_factory)
+        )
         tools.bind_handler(
             "sam3",
             build_sam3_handler(
-                build_sse_sam3_mcp_segmenter(url=endpoints.sam3_url),
+                build_sse_sam3_mcp_segmenter(
+                    url=endpoints.sam3_url,
+                    **rpc_timeout_kwargs,
+                ),
                 segment_points=build_sse_sam3_mcp_segmenter(
                     url=endpoints.sam3_url,
                     tool_name="segment_points",
+                    **rpc_timeout_kwargs,
                 ),
+                selection_reviewer=bounded_selection_reviewer,
                 depth_prior_prefetch=(
                     depth_prefetch.prefetch_for_sam3
                     if depth_prefetch is not None
@@ -818,14 +927,20 @@ def bind_runtime_perception_tools(
         tools.bind_handler(
             "molmopoint",
             build_molmopoint_handler(
-                build_sse_molmopoint_mcp_pointer(url=endpoints.molmopoint_url),
+                build_sse_molmopoint_mcp_pointer(
+                    url=endpoints.molmopoint_url,
+                    **rpc_timeout_kwargs,
+                ),
                 output_root=artifact_root / "molmopoint_results",
             ),
             replace=True,
         )
     if endpoints.anyplace_url:
         anyplace_handler = build_anyplace_handler(
-            build_sse_anyplace_mcp_placer(url=endpoints.anyplace_url),
+            build_sse_anyplace_mcp_placer(
+                url=endpoints.anyplace_url,
+                **rpc_timeout_kwargs,
+            ),
             output_root=artifact_root / "anyplace_results",
             expected_raw_pool_size=counts.anyplace_raw_pool_size,
             pre_inference=(
@@ -857,16 +972,23 @@ def bind_runtime_perception_tools(
     grasp_backends = {}
     if endpoints.anygrasp_url:
         grasp_backends["anygrasp"] = build_anygrasp_handler(
-            build_sse_anygrasp_mcp_grasper(url=endpoints.anygrasp_url),
+            build_sse_anygrasp_mcp_grasper(
+                url=endpoints.anygrasp_url,
+                **rpc_timeout_kwargs,
+            ),
             output_root=artifact_root / "anygrasp_results",
             expected_raw_pool_size=counts.anygrasp_raw_pool_size,
         )
     if endpoints.graspgenx_url:
         list_grippers = build_sse_graspgenx_mcp_gripper_lister(
-            url=endpoints.graspgenx_url
+            url=endpoints.graspgenx_url,
+            **rpc_timeout_kwargs,
         )
         grasp_backends["graspgenx"] = build_graspgenx_handler(
-            build_sse_graspgenx_mcp_predictor(url=endpoints.graspgenx_url),
+            build_sse_graspgenx_mcp_predictor(
+                url=endpoints.graspgenx_url,
+                **rpc_timeout_kwargs,
+            ),
             list_grippers,
             output_root=artifact_root / "graspgenx_results",
             expected_raw_pool_size=counts.graspgenx_raw_pool_size,
@@ -875,14 +997,17 @@ def bind_runtime_perception_tools(
     # but keep the backend disabled until its planner-facing contract is
     # explicitly re-enabled for the target deployment.
     if endpoints.contact_graspnet_url:
-        build_sse_contact_graspnet_mcp_predictor(url=endpoints.contact_graspnet_url)
+        build_sse_contact_graspnet_mcp_predictor(
+            url=endpoints.contact_graspnet_url,
+            **rpc_timeout_kwargs,
+        )
     # Contact-GraspNet is temporarily disabled for the simulator drawer track.
     # Keep its endpoint/configuration and implementation available for a later
     # re-enable, but do not expose it as an executable grasp backend here.
     if grasp_backends:
         grasp_handler = build_grasp_pose_estimate_handler(
             grasp_backends,
-            backend_order=DEFAULT_GRASP_POSE_BACKEND_ORDER,
+            backend_order=grasp_backend_order,
             graspgenx_gripper_name="robotiq_2f_85",
         )
         if candidate_qualifier is not None:
@@ -942,7 +1067,6 @@ def _runtime_candidate_qualifier(
         placement_full_plan_limit=counts.anyplace_full_plan_limit,
         frozen_pair_full_plan_limit=counts.frozen_pair_full_plan_limit,
         ik_seed_count=counts.moveit_ik_seed_count,
-        placement_max_rounds=counts.anyplace_max_qualification_rounds,
         qualification_profile=counts.qualification_profile,
         solver_profile=counts.solver_profile,
         beam_width=counts.fast_beam_width,
@@ -1175,7 +1299,6 @@ class _FrozenGoalPairCoordinator:
     planning_scene_revision: int = -1
     qualified_goals_by_grasp: dict[str, list[JsonDict]] = field(default_factory=dict)
     consumed_attachment_bindings: set[str] = field(default_factory=set)
-    consumed_model_retry_bindings: set[str] = field(default_factory=set)
     source_model_raw_candidate_count: int = 0
     source_candidate_image_ref: str = ""
     source_candidate_artifacts: list[JsonDict] = field(default_factory=list)
@@ -1229,7 +1352,6 @@ class _FrozenGoalPairCoordinator:
         self.planning_scene_revision = planning_scene_revision
         self.qualified_goals_by_grasp.clear()
         self.consumed_attachment_bindings.clear()
-        self.consumed_model_retry_bindings.clear()
         model_raw_count = result.details.get("model_raw_candidate_count")
         self.source_model_raw_candidate_count = (
             model_raw_count
@@ -1405,6 +1527,11 @@ class _FrozenGoalPairCoordinator:
             if not isinstance(original, Mapping):
                 continue
             frozen_goal = json.loads(json.dumps(original))
+            seed_evidence = pair.get(SAME_RUN_QUALIFICATION_SEED_FIELD)
+            if isinstance(seed_evidence, Mapping):
+                frozen_goal[SAME_RUN_QUALIFICATION_SEED_FIELD] = json.loads(
+                    json.dumps(seed_evidence)
+                )
             physical_goal = pair.get(
                 "qualified_world_collision_object_goal_pose"
             )
@@ -1566,21 +1693,6 @@ class _FrozenGoalPairCoordinator:
             attachment_transform=attachment_transform,
         ) in self.consumed_attachment_bindings
 
-    def consume_model_retry_binding(
-        self,
-        *,
-        source_grasp_id: str,
-        attachment_transform: Mapping[str, object],
-    ) -> bool:
-        binding = self.attachment_binding(
-            source_grasp_id=source_grasp_id,
-            attachment_transform=attachment_transform,
-        )
-        if binding in self.consumed_model_retry_bindings:
-            return False
-        self.consumed_model_retry_bindings.add(binding)
-        return True
-
     def _replace_grasps(
         self,
         result: ToolResult,
@@ -1637,17 +1749,47 @@ def _prepare_postattachment_frozen_goals(
         else None
     )
     if not isinstance(attachment_transform, Mapping):
-        return None
+        return ToolResult(
+            False,
+            "measured attachment transform is required for frozen-goal requalification",
+            {
+                "reason": "frozen_goal_attachment_transform_missing",
+                "execution_started": False,
+            },
+        )
     compiled_source_grasp = execution.get("compiled_grasp")
     source_grasp_id = _active_source_grasp_id(
         memory,
         compiled_source_grasp=compiled_source_grasp,
     )
     if not source_grasp_id:
-        return None
+        return ToolResult(
+            False,
+            "source grasp identity is required for frozen-goal requalification",
+            {
+                "reason": "frozen_goal_source_grasp_missing",
+                "execution_started": False,
+            },
+        )
+    if not coordinator.has_frozen_goals(source_grasp_id):
+        return ToolResult(
+            False,
+            "no frozen AnyPlace goals are bound to the attached grasp",
+            {
+                "reason": "frozen_goal_pool_missing",
+                "execution_started": False,
+            },
+        )
     scene_revision = request.get("scene_revision")
     if not isinstance(scene_revision, int) or isinstance(scene_revision, bool):
-        return None
+        return ToolResult(
+            False,
+            "scene revision is required for frozen-goal requalification",
+            {
+                "reason": "frozen_goal_scene_revision_missing",
+                "execution_started": False,
+            },
+        )
     attachment_revision = attachment_gate.get("planning_scene_revision")
     if (
         isinstance(attachment_revision, int)
@@ -1666,28 +1808,11 @@ def _prepare_postattachment_frozen_goals(
         source_grasp_id=source_grasp_id,
         attachment_transform=attachment_transform,
     ):
-        if _placement_model_retry_authorized(memory, request):
-            if coordinator.consume_model_retry_binding(
-                source_grasp_id=source_grasp_id,
-                attachment_transform=attachment_transform,
-            ):
-                return None
-            return ToolResult(
-                False,
-                "The bounded new-seed AnyPlace inference was already consumed.",
-                {
-                    "reason": "placement_model_retry_already_consumed",
-                    "execution_started": False,
-                },
-            )
         return ToolResult(
             False,
-            (
-                "AnyPlace inference is blocked until a zero-PASS frozen-goal "
-                "qualification authorizes the bounded new-seed retry."
-            ),
+            "The measured-attachment frozen-goal pool was already consumed.",
             {
-                "reason": "placement_model_retry_not_authorized",
+                "reason": "frozen_goal_requalification_already_consumed",
                 "execution_started": False,
             },
         )
@@ -1717,39 +1842,6 @@ def _prepare_postattachment_frozen_goals(
         attachment_transform=attachment_transform,
         source=source,
         scene_revision=scene_revision,
-    )
-
-
-def _placement_model_retry_authorized(
-    memory: Mapping[str, object],
-    request: Mapping[str, object],
-) -> bool:
-    policy = memory.get("placement_candidate_policy")
-    if not (
-        isinstance(policy, Mapping)
-        and policy.get("status") == "qualification_retry_required"
-    ):
-        return False
-    policy_revision = policy.get("planning_scene_revision", policy.get("scene_revision"))
-    request_revision = request.get("scene_revision")
-    if (
-        not isinstance(policy_revision, int)
-        or isinstance(policy_revision, bool)
-        or policy_revision != request_revision
-    ):
-        return False
-    recovery = policy.get("recovery")
-    required_action = (
-        recovery.get("required_action") if isinstance(recovery, Mapping) else None
-    )
-    required_parameters = (
-        required_action.get("parameters")
-        if isinstance(required_action, Mapping)
-        and required_action.get("name") == "anyplace"
-        else None
-    )
-    return isinstance(required_parameters, Mapping) and dict(required_parameters) == dict(
-        request
     )
 
 
@@ -1785,8 +1877,6 @@ def _qualifying_handler(
                 {
                     "reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
                     "execution_started": False,
-                    "qualification_round": placement_policy.get("qualification_round"),
-                    "max_qualification_rounds": placement_policy.get("max_qualification_rounds"),
                 },
             )
         result = handler(context)

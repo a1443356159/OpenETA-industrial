@@ -782,11 +782,10 @@ def move_to(handle: str, x: float, y: float, z: float, *,
             if len(quat) < 4:
                 return {"ok": False, "error_code": "ROBOT_STATE_UNAVAILABLE",
                         "error": "fresh end-effector orientation is unavailable"}
-        # Preserve semantic identity separately from the executable pose.
-        # In particular, Gazebo's native-grasp verifier needs to recognize an
-        # exact, already-host-compiled hover withdrawal after a rejected
-        # close.  Provenance is deliberately unable to override xyz or the
-        # quaternion calculated by this transport boundary.
+        # Preserve semantic identity separately from the executable pose so
+        # Gazebo can bind an exact host-compiled terminal to its qualification
+        # evidence. Provenance cannot override xyz or the quaternion computed
+        # by this transport boundary.
         provenance = (
             {
                 key: value

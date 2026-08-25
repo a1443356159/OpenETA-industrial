@@ -59,6 +59,9 @@ DEFAULT_SIMULATOR_IMAGE_WIDTH = 512
 DEFAULT_SIMULATOR_IMAGE_HEIGHT = 512
 DEFAULT_MCP_SSE_READ_TIMEOUT_S = 300.0
 MCP_SSE_TIMEOUT_GRACE_S = 5.0
+DEFAULT_READ_ONLY_MCP_MAX_ATTEMPTS = 2
+DEFAULT_READ_ONLY_MCP_HEALTH_TIMEOUT_S = 5.0
+READ_ONLY_MCP_RETRY_RECEIPT_SCHEMA_VERSION = "openeta.read_only_mcp_retry.v1"
 ENVIRONMENT_RECEIPT_SCHEMA_VERSION = "openeta.environment_receipt.v1"
 
 # Controller-produced evidence that must remain available after the raw MCP
@@ -183,6 +186,102 @@ class SimulatorMcpTransportError(RuntimeError):
         self.code = code
         self.operation = operation
         self.cause_type = type(primary).__name__
+
+
+READ_ONLY_MCP_TRANSIENT_ERROR_CODES = frozenset(
+    {
+        "simulator_mcp_transport_timeout",
+        "simulator_mcp_transport_connection_lost",
+    }
+)
+
+
+def call_read_only_mcp_tool_with_retry(
+    transport: SimulatorMcpTransport,
+    name: str,
+    arguments: JsonDict,
+    *,
+    timeout_s: float | None = None,
+    max_attempts: int = DEFAULT_READ_ONLY_MCP_MAX_ATTEMPTS,
+    health_timeout_s: float = DEFAULT_READ_ONLY_MCP_HEALTH_TIMEOUT_S,
+) -> JsonDict:
+    """Call a read-only MCP tool with one bounded, health-gated retry.
+
+    Legacy SSE transports can lose the POST acknowledgement after a backend
+    has already completed inference.  Retrying inside the host keeps that
+    transport incident out of the planner transcript and does not consume a
+    second TUI/model turn.  This helper is intentionally not used for
+    simulator mutation tools because their execution outcome may be unknown.
+    """
+
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+        raise TypeError("max_attempts must be an integer")
+    attempts = int(max_attempts)
+    if attempts not in (1, 2):
+        raise ValueError("max_attempts must be 1 or 2")
+    health_timeout = float(health_timeout_s)
+    if not math.isfinite(health_timeout) or health_timeout <= 0:
+        raise ValueError("health_timeout_s must be finite and positive")
+
+    first_failure: SimulatorMcpTransportError | None = None
+    first_failure_elapsed_s = 0.0
+    started = time.monotonic()
+    for attempt in range(1, attempts + 1):
+        try:
+            response = transport.call_tool(
+                name,
+                dict(arguments),
+                timeout_s=timeout_s,
+            )
+        except SimulatorMcpTransportError as exc:
+            if (
+                attempt >= attempts
+                or exc.code not in READ_ONLY_MCP_TRANSIENT_ERROR_CODES
+            ):
+                raise
+            first_failure = exc
+            first_failure_elapsed_s = time.monotonic() - started
+            # A retry is permitted only after a fresh MCP session proves the
+            # server is reachable and still advertises the exact tool.
+            listing = transport.list_tools(
+                timeout_s=min(
+                    health_timeout,
+                    (
+                        float(timeout_s)
+                        if timeout_s is not None and timeout_s > 0
+                        else health_timeout
+                    ),
+                )
+            )
+            raw_tools = listing.get("tools") if isinstance(listing, Mapping) else None
+            advertised = {
+                str(item.get("name") or "")
+                for item in raw_tools or []
+                if isinstance(item, Mapping)
+            }
+            if name not in advertised:
+                raise SimulatorMcpTransportError(
+                    f"health_check:{name}",
+                    RuntimeError(f"read-only MCP service no longer advertises {name}"),
+                ) from exc
+            continue
+
+        if first_failure is None:
+            return response
+        payload = dict(response)
+        payload["_openeta_transport_retry"] = {
+            "schema_version": READ_ONLY_MCP_RETRY_RECEIPT_SCHEMA_VERSION,
+            "attempt_count": attempt,
+            "retry_count": attempt - 1,
+            "health_check": "passed",
+            "tool": name,
+            "first_failure_code": first_failure.code,
+            "first_failure_type": first_failure.cause_type,
+            "first_failure_elapsed_s": round(first_failure_elapsed_s, 6),
+        }
+        return payload
+
+    raise RuntimeError("read-only MCP retry loop exhausted")  # pragma: no cover
 
 
 SimulatorMcpResponseCallback = Callable[[str, JsonDict, JsonDict], None]
@@ -591,7 +690,10 @@ class SimulatorMcpToolProxy:
         response_unknown = incomplete_motion_receipt or (
             not success
             and context.spec.effect.value == "world_mutating"
-            and _response_lost_action_receipt(raw_response)
+            and (
+                _response_reports_unknown_action_outcome(raw_response)
+                or _response_lost_action_receipt(raw_response)
+            )
         )
         if response_unknown:
             normalized["outputs"].update(
@@ -680,10 +782,9 @@ class SimulatorMcpToolProxy:
         arguments: JsonDict = {"x": x, "y": y, "z": z}
         # ``move_to`` is encoded for the generic simulator transport as
         # x/y/z plus an orientation.  Keep the remaining, non-kinematic pose
-        # identity in a separate envelope so a backend can prove that a
-        # requested withdrawal is the exact host-compiled pose that preceded
-        # a failed grasp close.  The transport owns x/y/z/quaternion and will
-        # never let this envelope alter the commanded motion.
+        # identity in a separate envelope so a backend can bind the exact
+        # host-compiled terminal to its qualification proof. The transport
+        # owns x/y/z/quaternion and never lets this envelope alter motion.
         pose = (
             parameters.get("target_pose")
             or parameters.get("pose")
@@ -1028,6 +1129,26 @@ class SimulatorEnvironmentCreator:
         reset_ref = reset_normalized["outputs"]["response"]
         self._notify("reset_env", reset_args, reset_ref)
         success = _response_success(reset_response)
+        reset_failure_cleanup: JsonDict | None = None
+        if not success:
+            # A failed reset is terminal for this freshly created handle. Roll
+            # it back inside the host tool so the planner does not spend extra
+            # turns trying observe/create against a half-started environment.
+            with self.config.lifecycle_lock:
+                owns_handle = self.config.handle == handle
+                if owns_handle:
+                    self.config.handle = ""
+            if owns_handle:
+                cleanup_response = self._close_abandoned_environment(
+                    handle=handle,
+                    session_id=session_id,
+                )
+                reset_failure_cleanup = {
+                    "attempted": True,
+                    "success": _response_success(cleanup_response),
+                    "handle": handle,
+                    "response": cleanup_response,
+                }
         assigned_task = _response_assigned_task(reset_ref)
         server_url = mcp_server_url_from_transport(self.transport)
         dashboard_url = mcp_dashboard_url(server_url, session_id)
@@ -1065,6 +1186,8 @@ class SimulatorEnvironmentCreator:
             "create_response": create_ref,
             "initial_observation": reset_ref,
         }
+        if reset_failure_cleanup is not None:
+            outputs["reset_failure_cleanup"] = reset_failure_cleanup
         if assigned_task:
             outputs["assigned_task"] = assigned_task
         for key in ("observation_summary",):
@@ -1093,14 +1216,41 @@ class SimulatorEnvironmentCreator:
                 ],
                 state_delta={
                     **reset_normalized["state_delta"],
-                    "simulator_environment": environment,
+                    "simulator_environment": (
+                        {
+                            "handle": "",
+                            "session_id": "",
+                            "status": "closed_after_reset_failure",
+                        }
+                        if reset_failure_cleanup
+                        and reset_failure_cleanup["success"] is True
+                        else environment
+                    ),
                 },
                 environment_receipt={
                     **reset_normalized["environment_receipt"],
                     "simulator_session_id": session_id,
                     "handle": handle,
+                    "environment_closed": bool(
+                        reset_failure_cleanup
+                        and reset_failure_cleanup["success"] is True
+                    ),
                 },
-                diagnostics=[] if success else _response_diagnostics(reset_response),
+                diagnostics=(
+                    []
+                    if success
+                    else [
+                        *_response_diagnostics(reset_response),
+                        {
+                            "code": "simulator_reset_failure_cleanup",
+                            "attempted": reset_failure_cleanup is not None,
+                            "success": bool(
+                                reset_failure_cleanup
+                                and reset_failure_cleanup["success"] is True
+                            ),
+                        },
+                    ]
+                ),
             ),
         )
 
@@ -1143,7 +1293,9 @@ class SimulatorEnvironmentCreator:
         if self.response_callback is not None:
             self.response_callback(name, arguments, response)
 
-    def _close_abandoned_environment(self, *, handle: str, session_id: str) -> None:
+    def _close_abandoned_environment(
+        self, *, handle: str, session_id: str
+    ) -> JsonDict:
         result = close_simulator_mcp_env(
             self.transport,
             handle=handle,
@@ -1151,11 +1303,17 @@ class SimulatorEnvironmentCreator:
             timeout_s=min(self.config.timeout_s, 30.0),
         )
         if _response_success(result):
-            return
+            with self.config.lifecycle_lock:
+                if not self.config.handle:
+                    self.config.session_id = ""
+                    self.config.image_bundle_id = ""
+            return result
         with self.config.lifecycle_lock:
             if not self.config.handle:
                 self.config.handle = handle
                 self.config.session_id = session_id
+                self.config.image_bundle_id = session_id or handle
+        return result
 
     def _transport_failure(
         self,
@@ -2018,8 +2176,36 @@ def _is_transient_mcp_transport_error(exc: BaseException) -> bool:
 def _response_lost_action_receipt(response: JsonDict) -> bool:
     """Return true when a mutating call may have run but its receipt was lost."""
 
+    # A structured controller outcome is safe to classify even when it is a
+    # rejection.  A bare remote error is not: the HTTP/MCP handler may have
+    # failed while serializing the observation after the physical action had
+    # already completed.  Treat that boundary as outcome-unknown so the host
+    # performs its bounded observe/reconcile path without another planner turn.
+    if any(
+        key in response
+        for key in (
+            "execution_started",
+            "motion_outcome",
+            "reached_goal",
+            "terminal_status",
+        )
+    ):
+        return False
     message = str(response.get("error") or response.get("content") or "").lower()
-    return "out of range float values are not json compliant" in message
+    return bool(message)
+
+
+def _response_reports_unknown_action_outcome(response: JsonDict) -> bool:
+    """Recognize a structured controller result that requires reconciliation."""
+
+    return (
+        response.get("reconciliation_required") is True
+        or str(response.get("motion_outcome") or "").lower() == "unknown"
+        or (
+            "execution_started" in response
+            and response.get("execution_started") is None
+        )
+    )
 
 
 def _move_response_lacks_completion_receipt(response: JsonDict) -> bool:

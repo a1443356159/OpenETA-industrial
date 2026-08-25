@@ -699,29 +699,14 @@ The two claims are different.
 
 ---
 
-## 11.2 V1 grasp verification
+## 11.2 Native grasp verification
 
-Implement a Gazebo-grounded attachment / lift checker.
-
-After closing the gripper:
-
-```text
-close
-↓
-small lift probe
-↓
-observe simulator state
-```
-
-Evaluate evidence such as:
-
-```text
-target moved upward
-target remains spatially coupled with EEF
-target does not remain on support surface
-gripper state is compatible with holding an object
-optional Gazebo contact / attachment signal
-```
+Implement a Gazebo-grounded contact and attachment checker. MoveIt plans once
+from the current state to the exact provider contact pose. After the gripper
+closes, accept the grasp only when both finger pads have native contact with
+the intended target and Gazebo returns the matching attached-object ACK,
+including the measured `T_eef_object_attached`. Do not add a lift probe or
+infer attachment from commanded motion.
 
 Return three-state semantics when possible:
 
@@ -1144,7 +1129,7 @@ feat(gazebo): add simulator lifecycle MCP tools
 
 feat(moveit): add manipulation execution backend
 
-feat(verify): add grasp lift-probe checker
+feat(verify): add native contact/attachment checker
 
 feat(perception): add industrial SAM3 adapter
 
@@ -1358,11 +1343,12 @@ repeatable controlled motion
 
 ## M3 — Physical Verification
 
-Status: implemented but not formally accepted. M3 admits attach only after
-native bilateral contact and attached ACK, then requires actual child-link
-state proof of >=80 mm lift and <=10 mm capture-relative translation. Missing
-contact/ACK/DART proof fails closed. Historic soft-adhesion results are not
-acceptance evidence.
+Status: implemented but not formally accepted. M3 moves directly to the exact
+provider contact pose and admits attachment only after native bilateral target
+contact plus the matching attached ACK. The ACK supplies the measured
+`T_eef_object_attached`; no pregrasp, hover, lift probe, or retreat is an
+acceptance requirement. Missing contact/ACK evidence fails closed. Historic
+soft-adhesion and commanded-displacement results are not acceptance evidence.
 
 ---
 
@@ -1384,7 +1370,7 @@ an opt-in run sends the current top RGB artifact to an already-running upstream
 SAM3 SSE MCP `segment` tool, requires exactly one candidate, resolves it only
 through the existing host-owned selection contract, strictly back-projects its
 case-local mask against that same RGB-D frame, then executes unchanged M3
-native-contact/attach/lift/detach verification. Ground truth is recorded only
+native-contact/attach/detach verification. Ground truth is recorded only
 after motion as non-control evaluation metadata. The report scope is
 `control_only_real_sam3_no_planner_not_formal_tui`; it is not a formal
 PTY/TUI, Planner/LLM, generalization, or benchmark result.
@@ -1399,47 +1385,34 @@ same manipulation flow works with SAM3 perception
 
 ---
 
-## M6 — Real GraspGenX/AnyPlace, constraint-correct placement, and recovery
+## M6 — Exact model terminals and frozen-pool qualification
 
-Grasp and placement perception are independent. A fresh grasp RGB-D packet
-feeds target SAM3 and GraspGenX with the `robotiq_2f_85` embodiment. GraspGenX
-and AnyGrasp retain up to 200 raw poses. After compiling candidates to world EEF
-poses, the host keeps a source/position/approach/wrist-diverse pool of at most
-64, applies `openeta.moveit_candidate_funnel.v2`, and sends at most 12
-candidates through complete segment planning. The main VLM sees at most ten
-PASS ids and never receives the reserve pool.
+Before grasp generation, one aligned RGB-D bundle feeds SAM3 for the target
+object and destination region, then AnyPlace produces all 96 unmodified
+`T_world_object_goal` poses. GraspGenX or AnyGrasp produces exact terminal EEF
+contact poses for the `robotiq_2f_85` embodiment. The host never translates,
+rotates, mirrors, reverses, or offsets either provider's pose.
 
-Only after close, attach acknowledgement, and the unchanged M3 lift gate pass
-does the host measure and freeze `T_eef_object_attached`. A new placement RGB-D
-observation independently feeds SAM3 for the attached object and destination
-region, then AnyPlace. AnyPlace outputs up to 96 unmodified
-`T_world_object_goal` poses; it neither accepts a source grasp nor produces an
-EEF/grasp pose. The host composes
-`T_world_eef_goal = T_world_object_goal * inverse(T_eef_object_attached)`, sends
-a 64-pose object/EEF-diverse pool through the same bounded funnel, and lets the
-main VLM select only a PASS id with `compile_placement_seed`.
+The host retains two distinct qualified grasp branches and pairs each with all
+96 frozen AnyPlace goals. It applies goal legality once per AnyPlace goal,
+grasp-goal legality per pair, then progressive Beam-2 IK and deterministic L5
+plan-only checks. Candidate completion order cannot affect ranking. Legal
+filters may hard-reject only invalid math, invalid transforms, gripper-width
+violations, definite analytic workspace violations, and proven scene
+collisions; capability data changes order only.
 
-Counts remain distinct from model raw output through coordinate/TCP, workspace,
-pure IK, collision IK, endpoint, full-plan, qualification, and exposure stages.
-Compatibility aliases map `generated_candidate_count` to the returned raw pool
-and `submitted_candidate_count` to full-plan submissions. Qualification
-trajectories are proof only and are discarded; execution always replans from
-current state.
+MoveIt owns each complete path: current state to exact contact, and attached
+state to the exact release EEF pose computed as
+`T_world_object_goal * inverse(T_eef_object_attached)`. There are no pregrasp,
+hover, approach, lift, descent, clearance, or retreat waypoints. Qualification
+trajectories are discarded and execution replans from the current state.
 
-After the unchanged M3 lift gate, MoveIt plans directly to the compiled
-pre-place hover and then to release. There is no fixed world wrist orientation,
-5 cm lateral waypoint chain, preview tool, route planner, or goal-region API.
-Gazebo synchronizes table, distractor, target, allowed fingertip contact, and
-attached payload into the MoveIt planning scene with apply/readback gates.
-
-One planning rejection means only that the request failed for the current joint
-state, target, tolerances, and scene. Reject that candidate when execution did
-not start; never claim its coordinate is permanently unreachable. Do not retry
-an identical request fingerprint. Zero placement PASS first preserves the
-frozen placement observation and absolute goals, runs one new-seed AnyPlace
-round, adds only footprint-eroded stable samples and declared object
-symmetries, merges/deduplicates, and requalifies. Two zero-PASS rounds produce
-`CURRENT_GRASP_PLACE_INFEASIBLE` and stop for human assistance.
+After native bilateral contact and attached ACK, the host rebinds the frozen
+goals to the measured `T_eef_object_attached` and requalifies them without
+SAM3 or AnyPlace inference. A failed candidate advances only within the frozen
+qualified queue. When the complete pool and deterministic IK recovery budget
+are exhausted, return `CURRENT_GRASP_PLACE_INFEASIBLE`; do not reobserve,
+resample, or start a second model-inference round automatically.
 
 ---
 
