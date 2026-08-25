@@ -59,6 +59,9 @@ DEFAULT_SIMULATOR_IMAGE_WIDTH = 512
 DEFAULT_SIMULATOR_IMAGE_HEIGHT = 512
 DEFAULT_MCP_SSE_READ_TIMEOUT_S = 300.0
 MCP_SSE_TIMEOUT_GRACE_S = 5.0
+DEFAULT_READ_ONLY_MCP_MAX_ATTEMPTS = 2
+DEFAULT_READ_ONLY_MCP_HEALTH_TIMEOUT_S = 5.0
+READ_ONLY_MCP_RETRY_RECEIPT_SCHEMA_VERSION = "openeta.read_only_mcp_retry.v1"
 ENVIRONMENT_RECEIPT_SCHEMA_VERSION = "openeta.environment_receipt.v1"
 
 # Controller-produced evidence that must remain available after the raw MCP
@@ -183,6 +186,102 @@ class SimulatorMcpTransportError(RuntimeError):
         self.code = code
         self.operation = operation
         self.cause_type = type(primary).__name__
+
+
+READ_ONLY_MCP_TRANSIENT_ERROR_CODES = frozenset(
+    {
+        "simulator_mcp_transport_timeout",
+        "simulator_mcp_transport_connection_lost",
+    }
+)
+
+
+def call_read_only_mcp_tool_with_retry(
+    transport: SimulatorMcpTransport,
+    name: str,
+    arguments: JsonDict,
+    *,
+    timeout_s: float | None = None,
+    max_attempts: int = DEFAULT_READ_ONLY_MCP_MAX_ATTEMPTS,
+    health_timeout_s: float = DEFAULT_READ_ONLY_MCP_HEALTH_TIMEOUT_S,
+) -> JsonDict:
+    """Call a read-only MCP tool with one bounded, health-gated retry.
+
+    Legacy SSE transports can lose the POST acknowledgement after a backend
+    has already completed inference.  Retrying inside the host keeps that
+    transport incident out of the planner transcript and does not consume a
+    second TUI/model turn.  This helper is intentionally not used for
+    simulator mutation tools because their execution outcome may be unknown.
+    """
+
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+        raise TypeError("max_attempts must be an integer")
+    attempts = int(max_attempts)
+    if attempts not in (1, 2):
+        raise ValueError("max_attempts must be 1 or 2")
+    health_timeout = float(health_timeout_s)
+    if not math.isfinite(health_timeout) or health_timeout <= 0:
+        raise ValueError("health_timeout_s must be finite and positive")
+
+    first_failure: SimulatorMcpTransportError | None = None
+    first_failure_elapsed_s = 0.0
+    started = time.monotonic()
+    for attempt in range(1, attempts + 1):
+        try:
+            response = transport.call_tool(
+                name,
+                dict(arguments),
+                timeout_s=timeout_s,
+            )
+        except SimulatorMcpTransportError as exc:
+            if (
+                attempt >= attempts
+                or exc.code not in READ_ONLY_MCP_TRANSIENT_ERROR_CODES
+            ):
+                raise
+            first_failure = exc
+            first_failure_elapsed_s = time.monotonic() - started
+            # A retry is permitted only after a fresh MCP session proves the
+            # server is reachable and still advertises the exact tool.
+            listing = transport.list_tools(
+                timeout_s=min(
+                    health_timeout,
+                    (
+                        float(timeout_s)
+                        if timeout_s is not None and timeout_s > 0
+                        else health_timeout
+                    ),
+                )
+            )
+            raw_tools = listing.get("tools") if isinstance(listing, Mapping) else None
+            advertised = {
+                str(item.get("name") or "")
+                for item in raw_tools or []
+                if isinstance(item, Mapping)
+            }
+            if name not in advertised:
+                raise SimulatorMcpTransportError(
+                    f"health_check:{name}",
+                    RuntimeError(f"read-only MCP service no longer advertises {name}"),
+                ) from exc
+            continue
+
+        if first_failure is None:
+            return response
+        payload = dict(response)
+        payload["_openeta_transport_retry"] = {
+            "schema_version": READ_ONLY_MCP_RETRY_RECEIPT_SCHEMA_VERSION,
+            "attempt_count": attempt,
+            "retry_count": attempt - 1,
+            "health_check": "passed",
+            "tool": name,
+            "first_failure_code": first_failure.code,
+            "first_failure_type": first_failure.cause_type,
+            "first_failure_elapsed_s": round(first_failure_elapsed_s, 6),
+        }
+        return payload
+
+    raise RuntimeError("read-only MCP retry loop exhausted")  # pragma: no cover
 
 
 SimulatorMcpResponseCallback = Callable[[str, JsonDict, JsonDict], None]

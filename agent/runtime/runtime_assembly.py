@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -315,6 +316,8 @@ class RuntimeMcpEndpoints:
 
 GRASP_BACKEND_ENV_VAR = "OPENETA_GRASP_BACKEND"
 GRASP_BACKEND_MODES = ("auto", "anygrasp", "graspgenx")
+PERCEPTION_RPC_TIMEOUT_ENV_VAR = "OPENETA_PERCEPTION_RPC_TIMEOUT_S"
+DEFAULT_PERCEPTION_RPC_TIMEOUT_S = 600.0
 
 
 def runtime_grasp_backend_order_from_env() -> tuple[str, ...]:
@@ -327,6 +330,26 @@ def runtime_grasp_backend_order_from_env() -> tuple[str, ...]:
         return (mode,)
     choices = ", ".join(GRASP_BACKEND_MODES)
     raise ValueError(f"{GRASP_BACKEND_ENV_VAR} must be one of: {choices}")
+
+
+def runtime_perception_rpc_timeout_s_from_env() -> float:
+    """Return the bounded deadline for one remote perception RPC attempt."""
+
+    raw = os.environ.get(
+        PERCEPTION_RPC_TIMEOUT_ENV_VAR,
+        str(DEFAULT_PERCEPTION_RPC_TIMEOUT_S),
+    )
+    try:
+        timeout_s = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{PERCEPTION_RPC_TIMEOUT_ENV_VAR} must be a finite positive number"
+        ) from exc
+    if not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError(
+            f"{PERCEPTION_RPC_TIMEOUT_ENV_VAR} must be a finite positive number"
+        )
+    return timeout_s
 
 
 @dataclass(frozen=True, slots=True)
@@ -789,8 +812,21 @@ def bind_runtime_perception_tools(
     grasp_backend_order: tuple[str, ...] = DEFAULT_GRASP_POSE_BACKEND_ORDER,
     internal_candidate_compilers: Mapping[str, ToolHandler] | None = None,
     selection_reviewer: Callable[[JsonDict], JsonDict] | None = None,
+    perception_rpc_timeout_s: float | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
+    rpc_timeout_s = (
+        runtime_perception_rpc_timeout_s_from_env()
+        if perception_rpc_timeout_s is None
+        else float(perception_rpc_timeout_s)
+    )
+    if not math.isfinite(rpc_timeout_s) or rpc_timeout_s <= 0:
+        raise ValueError("perception_rpc_timeout_s must be finite and positive")
+    rpc_timeout_kwargs = (
+        {}
+        if rpc_timeout_s == DEFAULT_PERCEPTION_RPC_TIMEOUT_S
+        else {"timeout_seconds": rpc_timeout_s}
+    )
     pregrasp_coordinator = (
         _PregraspGraspPlaceCoordinator(
             candidate_qualifier,
@@ -851,7 +887,10 @@ def bind_runtime_perception_tools(
     depth_prefetch: DepthPriorPrefetchCoordinator | None = None
     if endpoints.depth_prior_url:
         depth_handler = build_depth_prior_handler(
-            build_sse_depth_prior_mcp_estimator(url=endpoints.depth_prior_url),
+            build_sse_depth_prior_mcp_estimator(
+                url=endpoints.depth_prior_url,
+                **rpc_timeout_kwargs,
+            ),
             output_root=artifact_root / "depth_prior_results",
         )
         depth_prefetch = DepthPriorPrefetchCoordinator(
@@ -909,10 +948,14 @@ def bind_runtime_perception_tools(
         tools.bind_handler(
             "sam3",
             build_sam3_handler(
-                build_sse_sam3_mcp_segmenter(url=endpoints.sam3_url),
+                build_sse_sam3_mcp_segmenter(
+                    url=endpoints.sam3_url,
+                    **rpc_timeout_kwargs,
+                ),
                 segment_points=build_sse_sam3_mcp_segmenter(
                     url=endpoints.sam3_url,
                     tool_name="segment_points",
+                    **rpc_timeout_kwargs,
                 ),
                 selection_reviewer=bounded_selection_reviewer,
                 depth_prior_prefetch=(
@@ -929,14 +972,20 @@ def bind_runtime_perception_tools(
         tools.bind_handler(
             "molmopoint",
             build_molmopoint_handler(
-                build_sse_molmopoint_mcp_pointer(url=endpoints.molmopoint_url),
+                build_sse_molmopoint_mcp_pointer(
+                    url=endpoints.molmopoint_url,
+                    **rpc_timeout_kwargs,
+                ),
                 output_root=artifact_root / "molmopoint_results",
             ),
             replace=True,
         )
     if endpoints.anyplace_url:
         anyplace_handler = build_anyplace_handler(
-            build_sse_anyplace_mcp_placer(url=endpoints.anyplace_url),
+            build_sse_anyplace_mcp_placer(
+                url=endpoints.anyplace_url,
+                **rpc_timeout_kwargs,
+            ),
             output_root=artifact_root / "anyplace_results",
             expected_raw_pool_size=counts.anyplace_raw_pool_size,
             pre_inference=(
@@ -968,16 +1017,23 @@ def bind_runtime_perception_tools(
     grasp_backends = {}
     if endpoints.anygrasp_url:
         grasp_backends["anygrasp"] = build_anygrasp_handler(
-            build_sse_anygrasp_mcp_grasper(url=endpoints.anygrasp_url),
+            build_sse_anygrasp_mcp_grasper(
+                url=endpoints.anygrasp_url,
+                **rpc_timeout_kwargs,
+            ),
             output_root=artifact_root / "anygrasp_results",
             expected_raw_pool_size=counts.anygrasp_raw_pool_size,
         )
     if endpoints.graspgenx_url:
         list_grippers = build_sse_graspgenx_mcp_gripper_lister(
-            url=endpoints.graspgenx_url
+            url=endpoints.graspgenx_url,
+            **rpc_timeout_kwargs,
         )
         grasp_backends["graspgenx"] = build_graspgenx_handler(
-            build_sse_graspgenx_mcp_predictor(url=endpoints.graspgenx_url),
+            build_sse_graspgenx_mcp_predictor(
+                url=endpoints.graspgenx_url,
+                **rpc_timeout_kwargs,
+            ),
             list_grippers,
             output_root=artifact_root / "graspgenx_results",
             expected_raw_pool_size=counts.graspgenx_raw_pool_size,
@@ -986,7 +1042,10 @@ def bind_runtime_perception_tools(
     # but keep the backend disabled until its planner-facing contract is
     # explicitly re-enabled for the target deployment.
     if endpoints.contact_graspnet_url:
-        build_sse_contact_graspnet_mcp_predictor(url=endpoints.contact_graspnet_url)
+        build_sse_contact_graspnet_mcp_predictor(
+            url=endpoints.contact_graspnet_url,
+            **rpc_timeout_kwargs,
+        )
     # Contact-GraspNet is temporarily disabled for the simulator drawer track.
     # Keep its endpoint/configuration and implementation available for a later
     # re-enable, but do not expose it as an executable grasp backend here.

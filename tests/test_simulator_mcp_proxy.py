@@ -20,6 +20,7 @@ from agent.tools.sim_mcp import (
     SimulatorMcpToolProxyConfig,
     SseSimulatorMcpTransport,
     bind_simulator_mcp_tool_handlers,
+    call_read_only_mcp_tool_with_retry,
     close_simulator_mcp_env,
     _parse_mcp_tool_result,
     _parse_mcp_tools_result,
@@ -329,6 +330,82 @@ def test_sse_transport_unwraps_grouped_timeout(monkeypatch) -> None:
     assert raised.value.operation == "list_tools"
     assert raised.value.cause_type == "TimeoutError"
     assert str(raised.value) == "list_tools failed: TimeoutError: connect timed out"
+
+
+def test_read_only_mcp_retry_is_health_gated_and_host_stamped() -> None:
+    class RetryTransport:
+        def __init__(self) -> None:
+            self.call_count = 0
+            self.health_calls = []
+
+        def call_tool(self, name, arguments, *, timeout_s=None):
+            self.call_count += 1
+            assert name == "predict_grasps"
+            assert arguments == {"depth": "fixture"}
+            assert timeout_s == 90.0
+            if self.call_count == 1:
+                raise sim_mcp.SimulatorMcpTransportError(
+                    "call_tool:predict_grasps",
+                    TimeoutError("lost SSE result"),
+                )
+            return {"success": True, "candidate_count": 200}
+
+        def list_tools(self, *, timeout_s=None):
+            self.health_calls.append(timeout_s)
+            return {"tools": [{"name": "predict_grasps"}], "tool_count": 1}
+
+    transport = RetryTransport()
+    result = call_read_only_mcp_tool_with_retry(
+        transport,
+        "predict_grasps",
+        {"depth": "fixture"},
+        timeout_s=90.0,
+    )
+
+    assert transport.call_count == 2
+    assert transport.health_calls == [5.0]
+    assert result["success"] is True
+    assert result["_openeta_transport_retry"] == {
+        "schema_version": "openeta.read_only_mcp_retry.v1",
+        "attempt_count": 2,
+        "retry_count": 1,
+        "health_check": "passed",
+        "tool": "predict_grasps",
+        "first_failure_code": "simulator_mcp_transport_timeout",
+        "first_failure_type": "TimeoutError",
+        "first_failure_elapsed_s": pytest.approx(0.0, abs=0.1),
+    }
+
+
+def test_read_only_mcp_retry_stops_when_health_check_loses_tool() -> None:
+    class UnhealthyTransport:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def call_tool(self, name, arguments, *, timeout_s=None):
+            del arguments, timeout_s
+            self.call_count += 1
+            raise sim_mcp.SimulatorMcpTransportError(
+                f"call_tool:{name}",
+                ConnectionResetError("connection reset"),
+            )
+
+        def list_tools(self, *, timeout_s=None):
+            assert timeout_s == 5.0
+            return {"tools": [{"name": "another_tool"}], "tool_count": 1}
+
+    transport = UnhealthyTransport()
+    with pytest.raises(sim_mcp.SimulatorMcpTransportError) as raised:
+        call_read_only_mcp_tool_with_retry(
+            transport,
+            "predict_grasps",
+            {},
+            timeout_s=90.0,
+        )
+
+    assert transport.call_count == 1
+    assert raised.value.operation == "health_check:predict_grasps"
+    assert "no longer advertises predict_grasps" in str(raised.value)
 
 
 def test_default_simulator_mcp_binding_uses_remote_stable_tools() -> None:

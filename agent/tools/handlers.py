@@ -30,7 +30,11 @@ from agent.tools.registry import (
     ToolResult,
     make_tool_result,
 )
-from agent.tools.sim_mcp import SimulatorMcpTransport, SseSimulatorMcpTransport
+from agent.tools.sim_mcp import (
+    SimulatorMcpTransport,
+    SseSimulatorMcpTransport,
+    call_read_only_mcp_tool_with_retry,
+)
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     DEFAULT_GRASP_RAW_POOL_SIZE,
@@ -924,7 +928,12 @@ def build_sse_sam3_mcp_segmenter(
     transport = SseSimulatorMcpTransport(url)
 
     def segment(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return segment
 
@@ -1077,7 +1086,12 @@ def build_sse_depth_prior_mcp_estimator(
     transport = SseSimulatorMcpTransport(url)
 
     def estimate(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return estimate
 
@@ -2434,7 +2448,12 @@ def build_sse_anygrasp_mcp_grasper(
     transport = SseSimulatorMcpTransport(url)
 
     def detect_grasps(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return detect_grasps
 
@@ -2481,7 +2500,12 @@ def build_sse_contact_graspnet_mcp_predictor(
     transport = SseSimulatorMcpTransport(url)
 
     def predict_grasps(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return predict_grasps
 
@@ -2528,7 +2552,12 @@ def build_sse_graspgenx_mcp_predictor(
     transport = SseSimulatorMcpTransport(url)
 
     def predict_grasps(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return predict_grasps
 
@@ -2575,7 +2604,12 @@ def build_sse_graspgenx_mcp_gripper_lister(
     transport = SseSimulatorMcpTransport(url)
 
     def list_grippers() -> JsonDict:
-        return transport.call_tool(tool_name, {}, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            {},
+            timeout_s=timeout_seconds,
+        )
 
     return list_grippers
 
@@ -2622,7 +2656,12 @@ def build_sse_molmopoint_mcp_pointer(
     transport = SseSimulatorMcpTransport(url)
 
     def point_images(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return point_images
 
@@ -2669,7 +2708,12 @@ def build_sse_anyplace_mcp_placer(
     transport = SseSimulatorMcpTransport(url)
 
     def predict_placement(request: JsonDict) -> JsonDict:
-        return transport.call_tool(tool_name, request, timeout_s=timeout_seconds)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            tool_name,
+            request,
+            timeout_s=timeout_seconds,
+        )
 
     return predict_placement
 

@@ -886,6 +886,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             # service is discoverable.  This affects startup only; motion,
             # planning, execution, and verification deadlines stay unchanged.
             "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": "90",
+            # Model inference is read-only and normally completes well below
+            # this bound.  A broken legacy SSE return channel is retried once
+            # inside the host, without adding a TUI/model-planner turn.
+            "OPENETA_PERCEPTION_RPC_TIMEOUT_S": "90",
             **(
                 {"OPENETA_ACCEPTANCE_PLACEMENT_FAULT": args.scenario}
                 if args.scenario != "normal"
