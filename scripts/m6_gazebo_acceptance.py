@@ -123,7 +123,7 @@ def _instructions_for_backend(grasp_backend: str) -> str:
 def _required_tools_for_backend(grasp_backend: str) -> tuple[str, ...]:
     backend = _validated_grasp_backend(grasp_backend)
     return tuple(
-        backend if name == DEFAULT_GRASP_BACKEND else name
+        backend if name == "grasp_pose_estimate" else name
         for name in REQUIRED_REAL_PICK_PLACE_TOOLS
     )
 

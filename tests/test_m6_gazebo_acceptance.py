@@ -128,6 +128,10 @@ def test_m6_canonicalizes_public_grasp_tool_only_with_real_anygrasp_backend() ->
 def test_m6_requires_only_executable_public_grasp_tools() -> None:
     assert "grasp_pose_estimate" in m6.REQUIRED_REAL_M6_TOOLS
     assert "anygrasp" not in m6.REQUIRED_REAL_M6_TOOLS
+    assert "grasp_pose_estimate" not in m6._required_tools_for_backend("anygrasp")
+    assert "anygrasp" in m6._required_tools_for_backend("anygrasp")
+    assert "grasp_pose_estimate" not in m6._required_tools_for_backend("graspgenx")
+    assert "graspgenx" in m6._required_tools_for_backend("graspgenx")
 
 
 def test_m6_health_url_preserves_service_root() -> None:
