@@ -297,8 +297,8 @@ class MoveItCandidateQualifier:
         qualification_profile: str = "legacy",
         solver_profile: str = "auto",
         beam_width: int = 2,
-        grasp_waves: Sequence[int] = (16, 32, 64),
-        placement_waves: Sequence[int] = (12, 24, 48, 96),
+        grasp_waves: Sequence[int] = (4, 8, 16, 32, 64),
+        placement_waves: Sequence[int] = (4, 8, 16, 32, 96),
         max_ik_concurrency: int = 8,
         max_state_validity_concurrency: int = 8,
         fast_seed_count: int = 2,
@@ -345,6 +345,7 @@ class MoveItCandidateQualifier:
         cache_result: bool = True,
         qualification_mode: str = "standard",
         l5_pass_target: int | None = None,
+        l5_min_pass_target: int | None = None,
     ) -> ToolResult:
         if not result.success:
             return result
@@ -479,6 +480,16 @@ class MoveItCandidateQualifier:
                 raise ValueError("l5_pass_target must be a positive integer")
             if fast_profile:
                 full_plan_limit = max(full_plan_limit, l5_pass_target)
+        if l5_min_pass_target is not None:
+            if (
+                isinstance(l5_min_pass_target, bool)
+                or not isinstance(l5_min_pass_target, int)
+                or l5_min_pass_target <= 0
+            ):
+                raise ValueError("l5_min_pass_target must be a positive integer")
+            effective_target = l5_pass_target or full_plan_limit
+            if l5_min_pass_target > effective_target:
+                raise ValueError("l5_min_pass_target cannot exceed l5_pass_target")
         funnel_config: JsonDict = {
             "ik_seed_count": self.ik_seed_count,
             "full_plan_limit": full_plan_limit,
@@ -505,6 +516,17 @@ class MoveItCandidateQualifier:
                     "capability_map_id": self.capability_map_id,
                     "l5_pass_target": (
                         l5_pass_target
+                        if l5_pass_target is not None
+                        else full_plan_limit
+                        if qualification_mode == "frozen_pair"
+                        else 2
+                        if purpose == "grasp"
+                        else 1
+                    ),
+                    "l5_min_pass_target": (
+                        l5_min_pass_target
+                        if l5_min_pass_target is not None
+                        else l5_pass_target
                         if l5_pass_target is not None
                         else full_plan_limit
                         if qualification_mode == "frozen_pair"
@@ -1496,9 +1518,11 @@ class MoveItQualificationEngine:
             != int(funnel.get("ik_seed_count", DEFAULT_MOVEIT_IK_SEED_COUNT))
         ):
             raise ValueError("invalid fast_v3 Beam/seed budget")
-        grasp_waves = self._integer_waves(funnel.get("grasp_waves"), (16, 32, 64))
+        grasp_waves = self._integer_waves(
+            funnel.get("grasp_waves"), (4, 8, 16, 32, 64)
+        )
         placement_waves = self._integer_waves(
-            funnel.get("placement_waves"), (12, 24, 48, 96)
+            funnel.get("placement_waves"), (4, 8, 16, 32, 96)
         )
         max_ik = max(1, int(funnel.get("max_ik_concurrency", 8)))
         max_validity = max(
@@ -1638,7 +1662,7 @@ class MoveItQualificationEngine:
             )
 
         try:
-            descriptors, prechecks, schedulable, legality_metrics = (
+            descriptors, prechecks, schedulable, legality_metrics, legality_scene = (
                 self._fast_legality_prechecks(
                     candidates,
                     purpose=purpose,
@@ -1683,6 +1707,7 @@ class MoveItQualificationEngine:
         planned_ids: set[str] = set()
         l5_attempts: list[JsonDict] = []
         wave_evidence: list[JsonDict] = []
+        pair_legality_cache: dict[tuple[str, str], tuple[str, JsonDict]] = {}
         infrastructure_error = next(
             (
                 str(precheck.get("reason") or "legality_precheck_error")
@@ -1694,11 +1719,31 @@ class MoveItQualificationEngine:
         stop_reason = "candidate_pool_exhausted"
         first_l5_pass_elapsed_s: float | None = None
         target = int(funnel.get("l5_pass_target", 2 if purpose == "grasp" else 1))
+        minimum_target = int(funnel.get("l5_min_pass_target", target))
+        if target <= 0 or minimum_target <= 0 or minimum_target > target:
+            raise ValueError("invalid fast_v3 L5 pass targets")
         qualification_mode = str(funnel.get("qualification_mode") or "")
 
-        def target_reached() -> bool:
+        def pass_target_reached(required: int) -> bool:
+            if len(l5_passes) < required:
+                return False
+            if purpose == "placement" and qualification_mode == "frozen_pair":
+                grasp_ids = {
+                    str(
+                        item.get("source_grasp_id")
+                        or item.get("candidate_id")
+                        or ""
+                    )
+                    for item in l5_passes
+                    if str(
+                        item.get("source_grasp_id")
+                        or item.get("candidate_id")
+                        or ""
+                    )
+                }
+                return len(grasp_ids) >= required
             if purpose == "placement":
-                return len(l5_passes) >= target
+                return True
             clusters = {
                 str(item.get("se3_cluster_id") or "") for item in l5_passes
             }
@@ -1707,58 +1752,86 @@ class MoveItQualificationEngine:
                 for item in l5_passes
             }
             return (
-                len(l5_passes) >= target
-                and len(clusters) >= target
-                and len(families) >= target
+                len(clusters) >= required
+                and len(families) >= required
             )
+
+        def target_reached() -> bool:
+            return pass_target_reached(target)
+
+        def minimum_target_reached() -> bool:
+            return pass_target_reached(minimum_target)
+
+        def acceptable_target_reached() -> bool:
+            return target_reached() or minimum_target_reached()
 
         def run_wave(wave: CandidateWave, *, recovery: bool) -> bool:
             nonlocal infrastructure_error, stop_reason, first_l5_pass_elapsed_s
             wave_started = time.monotonic()
-            completed: list[JsonDict] = []
-            workers = max(1, min(len(wave.candidates), max(max_ik, max_validity)))
-            with ThreadPoolExecutor(
-                max_workers=workers,
-                thread_name_prefix="openeta-qualification-v3",
-            ) as executor:
-                futures = {
-                    executor.submit(
-                        self._screen_fast_candidate,
-                        descriptor,
-                        revision,
-                        legality_precheck=prechecks[
-                            str(descriptor.get("candidate_id") or "")
-                        ],
-                        source=source,
-                        current_state=current_state,
-                        batch_cache=tuple(batch_cache),
-                        beam_width=beam_width,
-                        seed_count=(recovery_seed_count if recovery else fast_seed_count),
-                        timeout_s=(recovery_timeout_s if recovery else fast_timeout_s),
-                        recovery=recovery,
-                        solver_profile=(
-                            "pick_ik_global"
-                            if recovery and solver_profile == "pick_ik_local"
-                            else solver_profile
-                        ),
-                        ik_gate=ik_gate,
-                        validity_gate=validity_gate,
-                    ): descriptor
-                    for descriptor in wave.candidates
-                }
-                for future in as_completed(futures):
-                    descriptor = futures[future]
-                    try:
-                        screened = future.result()
-                    except Exception as exc:  # noqa: BLE001 - worker boundary.
-                        screened = {
-                            **prechecks[str(descriptor.get("candidate_id") or "")],
-                            "verdict": "UNKNOWN",
-                            "reason": "qualification_worker_error",
-                            "infrastructure_error": True,
-                            "error_type": type(exc).__name__,
-                        }
-                    completed.append(screened)
+            deep_candidates = tuple(wave.candidates)
+            pair_rejections: list[JsonDict] = []
+            if purpose == "placement":
+                deep_candidates, pair_rejections = self._apply_fast_pair_legality_wave(
+                    deep_candidates,
+                    prechecks=prechecks,
+                    scene=legality_scene,
+                    pair_cache=pair_legality_cache,
+                    metrics=legality_metrics,
+                )
+            completed: list[JsonDict] = [dict(item) for item in pair_rejections]
+            if deep_candidates:
+                workers = max(
+                    1,
+                    min(len(deep_candidates), max(max_ik, max_validity)),
+                )
+                with ThreadPoolExecutor(
+                    max_workers=workers,
+                    thread_name_prefix="openeta-qualification-v3",
+                ) as executor:
+                    futures = {
+                        executor.submit(
+                            self._screen_fast_candidate,
+                            descriptor,
+                            revision,
+                            legality_precheck=prechecks[
+                                str(descriptor.get("candidate_id") or "")
+                            ],
+                            source=source,
+                            current_state=current_state,
+                            batch_cache=tuple(batch_cache),
+                            beam_width=beam_width,
+                            seed_count=(
+                                recovery_seed_count if recovery else fast_seed_count
+                            ),
+                            timeout_s=(
+                                recovery_timeout_s if recovery else fast_timeout_s
+                            ),
+                            recovery=recovery,
+                            solver_profile=(
+                                "pick_ik_global"
+                                if recovery and solver_profile == "pick_ik_local"
+                                else solver_profile
+                            ),
+                            ik_gate=ik_gate,
+                            validity_gate=validity_gate,
+                        ): descriptor
+                        for descriptor in deep_candidates
+                    }
+                    for future in as_completed(futures):
+                        descriptor = futures[future]
+                        try:
+                            screened = future.result()
+                        except Exception as exc:  # noqa: BLE001 - worker boundary.
+                            screened = {
+                                **prechecks[
+                                    str(descriptor.get("candidate_id") or "")
+                                ],
+                                "verdict": "UNKNOWN",
+                                "reason": "qualification_worker_error",
+                                "infrastructure_error": True,
+                                "error_type": type(exc).__name__,
+                            }
+                        completed.append(screened)
             completed.sort(key=lambda item: int(item.get("fixed_candidate_index", 0)))
             for screened in completed:
                 candidate_id = str(screened.get("candidate_id") or "")
@@ -1816,6 +1889,21 @@ class MoveItQualificationEngine:
                     )
                 for screened in ranked:
                     candidate_id = str(screened.get("candidate_id") or "")
+                    source_grasp_id = str(screened.get("source_grasp_id") or "")
+                    if qualification_mode == "frozen_pair" and source_grasp_id:
+                        passed_grasp_ids = {
+                            str(item.get("source_grasp_id") or "")
+                            for item in l5_passes
+                            if str(item.get("source_grasp_id") or "")
+                        }
+                        if (
+                            source_grasp_id in passed_grasp_ids
+                            and len(passed_grasp_ids) < target
+                        ):
+                            # Another goal for an already-proven grasp cannot
+                            # fill the independent-backup slot.  Preserve it in
+                            # the frozen frontier instead of spending L5 now.
+                            continue
                     descriptor = descriptor_by_id[candidate_id]
                     planned_ids.add(candidate_id)
                     submitted_this_wave += 1
@@ -1868,6 +1956,8 @@ class MoveItQualificationEngine:
                 "recovery_layer": recovery,
                 "cumulative_per_branch": wave.cumulative_per_branch,
                 "candidate_count": len(wave.candidates),
+                "deep_candidate_count": len(deep_candidates),
+                "pair_legality_reject_count": len(pair_rejections),
                 "endpoint_pass_count": sum(
                     item.get("endpoint_pass") is True for item in completed
                 ),
@@ -1887,14 +1977,14 @@ class MoveItQualificationEngine:
                     }
                 )
             wave_evidence.append(wave_record)
-            return bool(infrastructure_error or target_reached())
+            return bool(infrastructure_error or acceptable_target_reached())
 
         if not infrastructure_error:
             for wave in waves:
                 if run_wave(wave, recovery=False):
                     break
 
-        if not infrastructure_error and not target_reached():
+        if not infrastructure_error and not acceptable_target_reached():
             # Only after the complete fast pool fails do the fixed remaining
             # six seeds become eligible.  Preserve the same waves and barriers.
             recovery_waves: list[CandidateWave] = []
@@ -1906,6 +1996,17 @@ class MoveItQualificationEngine:
                     descriptor
                     for descriptor in wave.candidates
                     if str(descriptor.get("candidate_id") or "") not in l5_pass_ids
+                    and prechecks[
+                        str(descriptor.get("candidate_id") or "")
+                    ].get("verdict")
+                    == "PASS"
+                    and (
+                        purpose != "placement"
+                        or prechecks[
+                            str(descriptor.get("candidate_id") or "")
+                        ].get("pair_legality_pass")
+                        is True
+                    )
                 )
                 if retry:
                     recovery_waves.append(
@@ -1949,12 +2050,14 @@ class MoveItQualificationEngine:
             stop_reason = "infrastructure_error"
         elif target_reached():
             stop_reason = "complete_l5_pass_found"
-        elif purpose == "grasp" and len(l5_passes) >= target:
+        elif minimum_target_reached():
+            stop_reason = "complete_l5_pass_found_minimum_lookahead"
+        elif purpose == "grasp" and len(l5_passes) >= minimum_target:
             # No two independent symmetry families / SE(3) clusters survived.
             # The contract then falls back to the joint-farthest pair only
             # after exhaustive coverage.
             stop_reason = "complete_l5_pass_found_joint_space_fallback"
-        elif purpose == "grasp" and len(l5_passes) >= min(2, target):
+        elif purpose == "grasp" and len(l5_passes) >= min(2, minimum_target):
             # A look-ahead request may ask for four branches even when the
             # frozen model output contains only two or three executable ones.
             # Keep the proven primary set; never turn it into a false zero-pass.
@@ -1969,20 +2072,47 @@ class MoveItQualificationEngine:
                     source=source,
                     limit=min(target, len(l5_passes)),
                 )
-                if len(l5_passes) >= min(2, target)
+                if len(l5_passes) >= min(2, minimum_target)
                 else []
             )
         else:
-            selected_ids = (
-                [
+            if qualification_mode == "frozen_pair":
+                ordered_passes = sorted(
+                    l5_passes,
+                    key=candidate_physical_quality_key,
+                )
+                selected_passes: list[JsonDict] = []
+                selected_grasps: set[str] = set()
+                for item in ordered_passes:
+                    grasp_id = str(item.get("source_grasp_id") or "")
+                    if grasp_id and grasp_id in selected_grasps:
+                        continue
+                    selected_passes.append(item)
+                    if grasp_id:
+                        selected_grasps.add(grasp_id)
+                    if len(selected_passes) >= target:
+                        break
+                if len(selected_passes) < target:
+                    selected_ids_seen = {
+                        str(item.get("candidate_id") or "")
+                        for item in selected_passes
+                    }
+                    selected_passes.extend(
+                        item
+                        for item in ordered_passes
+                        if str(item.get("candidate_id") or "")
+                        not in selected_ids_seen
+                    )
+                selected_ids = [
                     str(item.get("candidate_id") or "")
-                    for item in l5_passes
+                    for item in selected_passes[:target]
                 ]
-                if qualification_mode == "frozen_pair"
-                else [str(l5_passes[0].get("candidate_id") or "")]
-                if l5_passes
-                else []
-            )
+            else:
+                selected_ids = (
+                    [str(l5_passes[0].get("candidate_id") or "")]
+                    if l5_passes
+                    else []
+                )
         binding = str(request.get("qualification_binding_sha256") or "")
         results: list[JsonDict] = []
         for fixed_index, raw_descriptor in enumerate(candidates):
@@ -2096,6 +2226,8 @@ class MoveItQualificationEngine:
             "first_l5_pass_s": first_l5_pass_elapsed_s,
             "total_elapsed_s": time.monotonic() - start_time,
             "capability_map_status": capability_map_status,
+            "l5_pass_target": target,
+            "l5_min_pass_target": minimum_target,
             **legality_metrics,
         }
         return {
@@ -2126,6 +2258,8 @@ class MoveItQualificationEngine:
             },
             "waves": wave_evidence,
             "l5_attempts": l5_attempts,
+            "l5_pass_target": target,
+            "l5_min_pass_target": minimum_target,
             "selected_candidate_ids": selected_ids,
             "stop_reason": stop_reason,
             "infrastructure_error": bool(infrastructure_error),
@@ -3091,8 +3225,21 @@ class MoveItQualificationEngine:
         *,
         purpose: str,
         revision: int,
-    ) -> tuple[list[JsonDict], dict[str, JsonDict], list[JsonDict], JsonDict]:
-        """Run the goal barrier, then the grasp/goal-pair barrier, before IK."""
+    ) -> tuple[
+        list[JsonDict],
+        dict[str, JsonDict],
+        list[JsonDict],
+        JsonDict,
+        object,
+    ]:
+        """Run the complete cheap breadth barrier before wave-local deep work.
+
+        Placement-goal legality and strict analytic workspace checks are pure,
+        inexpensive functions of the frozen scene/candidate packet, so every
+        candidate pays them once up front.  Grasp/goal-pair collision geometry
+        is deliberately left pending until its candidate reaches a deep wave;
+        an early L5 success therefore avoids pair work for the untouched tail.
+        """
 
         descriptors: list[JsonDict] = []
         for fixed_index, raw_descriptor in enumerate(candidates):
@@ -3157,12 +3304,8 @@ class MoveItQualificationEngine:
                     )
         goal_elapsed_s = time.monotonic() - goal_started
 
-        pair_started = time.monotonic()
-        pair_cache: dict[tuple[str, str], tuple[str, JsonDict]] = {}
         prechecks: dict[str, JsonDict] = {}
         schedulable: list[JsonDict] = []
-        pair_evaluation_count = 0
-        pair_shared_count = 0
         for descriptor in descriptors:
             candidate_id = str(descriptor.get("candidate_id") or "")
             candidate = descriptor.get("candidate")
@@ -3204,71 +3347,19 @@ class MoveItQualificationEngine:
                         }
                     )
                 elif precheck.get("verdict") == "PASS":
-                    explicit_family = str(
-                        candidate.get("source_grasp_equivalence_id") or ""
-                    )
-                    family = explicit_family or str(
-                        candidate.get("source_grasp_id")
-                        or candidate.get("id")
-                        or candidate_id
-                    )
-                    # Reuse is enabled only by the host's explicit equivalence
-                    # marker. Merely sharing a textual grasp ID is insufficient.
-                    cache_key = (
-                        (goal_id, family)
-                        if explicit_family
-                        else (candidate_id, candidate_id)
-                    )
-                    cached = pair_cache.get(cache_key)
-                    if cached is None:
-                        pair_evidence = evaluate_grasp_placement_pair_legality(
-                            descriptor,
-                            scene=scene,
-                            workspace_filter=self.workspace_filter,
-                        )
-                        pair_evidence["screening_reused"] = False
-                        pair_evidence["symmetry_equivalence_id"] = family
-                        pair_cache[cache_key] = (candidate_id, pair_evidence)
-                        pair_evaluation_count += 1
-                    else:
-                        shared_from, shared_evidence = cached
-                        pair_evidence = json.loads(json.dumps(shared_evidence))
-                        pair_evidence.update(
-                            {
-                                "candidate_id": candidate_id,
-                                "source_grasp_id": str(
-                                    candidate.get("source_grasp_id") or ""
-                                ),
-                                "source_object_goal_id": goal_id,
-                                "screening_reused": True,
-                                "shared_from_candidate_id": shared_from,
-                                "symmetry_equivalent": True,
-                            }
-                        )
-                        pair_shared_count += 1
-                    precheck["pair_legality"] = pair_evidence
-                    precheck["pair_legality_pass"] = (
-                        pair_evidence.get("verdict") == "PASS"
-                    )
-                    precheck["legality_pass"] = (
-                        pair_evidence.get("verdict") == "PASS"
-                    )
-                    if pair_evidence.get("verdict") != "PASS":
-                        precheck.update(
-                            {
-                                "workspace_pass": False,
-                                "verdict": str(
-                                    pair_evidence.get("verdict") or "UNKNOWN"
-                                ),
-                                "reason": str(
-                                    pair_evidence.get("reason")
-                                    or "pair_legality_rejected"
-                                ),
-                                "infrastructure_error": bool(
-                                    pair_evidence.get("infrastructure_error")
-                                ),
-                            }
-                        )
+                    precheck["pair_legality"] = {
+                        "schema_version": "openeta.grasp_placement_pair_legality.v1",
+                        "candidate_id": candidate_id,
+                        "source_grasp_id": str(
+                            candidate.get("source_grasp_id") or ""
+                        ),
+                        "source_object_goal_id": goal_id,
+                        "verdict": "NOT_EVALUATED",
+                        "reason": "pending_candidate_wave",
+                        "execution_started": False,
+                    }
+                    precheck["pair_legality_pass"] = None
+                    precheck["legality_pass"] = True
                 else:
                     precheck["pair_legality"] = {
                         "verdict": "NOT_EVALUATED",
@@ -3286,7 +3377,6 @@ class MoveItQualificationEngine:
             if precheck.get("verdict") == "PASS":
                 schedulable.append(descriptor)
 
-        pair_elapsed_s = time.monotonic() - pair_started
         goal_values = list(goal_by_id.values())
         return (
             descriptors,
@@ -3304,20 +3394,151 @@ class MoveItQualificationEngine:
                 "pair_legality_candidate_count": (
                     len(descriptors) if purpose == "placement" else 0
                 ),
-                "pair_legality_evaluation_count": pair_evaluation_count,
-                "pair_legality_shared_count": pair_shared_count,
+                "pair_legality_reached_count": 0,
+                "pair_legality_evaluation_count": 0,
+                "pair_legality_shared_count": 0,
+                "pair_legality_pass_count": 0,
+                "pair_legality_reject_count": 0,
+                "pair_legality_pending_count": sum(
+                    precheck.get("pair_legality_pass") is None
+                    for precheck in prechecks.values()
+                ),
+                "pair_legality_elapsed_s": 0.0,
+            },
+            scene,
+        )
+
+    def _apply_fast_pair_legality_wave(
+        self,
+        descriptors: Sequence[Mapping[str, Any]],
+        *,
+        prechecks: dict[str, JsonDict],
+        scene: object,
+        pair_cache: dict[tuple[str, str], tuple[str, JsonDict]],
+        metrics: JsonDict,
+    ) -> tuple[tuple[JsonDict, ...], list[JsonDict]]:
+        """Advance one deterministic placement wave through its pair gate."""
+
+        started = time.monotonic()
+        deep_candidates: list[JsonDict] = []
+        rejected: list[JsonDict] = []
+        for raw_descriptor in descriptors:
+            descriptor = dict(raw_descriptor)
+            candidate_id = str(descriptor.get("candidate_id") or "")
+            precheck = prechecks[candidate_id]
+            already_evaluated = precheck.get("pair_legality_pass")
+            if already_evaluated is True:
+                deep_candidates.append(descriptor)
+                continue
+            if already_evaluated is False or precheck.get("verdict") != "PASS":
+                rejected.append(dict(precheck))
+                continue
+
+            candidate = descriptor.get("candidate")
+            candidate = candidate if isinstance(candidate, Mapping) else {}
+            goal_id = str(
+                candidate.get("source_object_goal_id")
+                or candidate.get("id")
+                or candidate_id
+            )
+            explicit_family = str(
+                candidate.get("source_grasp_equivalence_id") or ""
+            )
+            family = explicit_family or str(
+                candidate.get("source_grasp_id")
+                or candidate.get("id")
+                or candidate_id
+            )
+            # Only an explicit host equivalence family may share geometry.
+            # Unmarked candidates retain independent evidence even when their
+            # provider labels happen to match.
+            cache_key = (
+                (goal_id, family)
+                if explicit_family
+                else (candidate_id, candidate_id)
+            )
+            cached = pair_cache.get(cache_key)
+            if cached is None:
+                pair_evidence = evaluate_grasp_placement_pair_legality(
+                    descriptor,
+                    scene=scene,
+                    workspace_filter=self.workspace_filter,
+                )
+                pair_evidence["screening_reused"] = False
+                pair_evidence["symmetry_equivalence_id"] = family
+                pair_cache[cache_key] = (candidate_id, dict(pair_evidence))
+                metrics["pair_legality_evaluation_count"] = (
+                    int(metrics.get("pair_legality_evaluation_count") or 0) + 1
+                )
+            else:
+                shared_from, shared_evidence = cached
+                pair_evidence = json.loads(json.dumps(shared_evidence))
+                pair_evidence.update(
+                    {
+                        "candidate_id": candidate_id,
+                        "source_grasp_id": str(
+                            candidate.get("source_grasp_id") or ""
+                        ),
+                        "source_object_goal_id": goal_id,
+                        "screening_reused": True,
+                        "shared_from_candidate_id": shared_from,
+                        "symmetry_equivalent": True,
+                    }
+                )
+                metrics["pair_legality_shared_count"] = (
+                    int(metrics.get("pair_legality_shared_count") or 0) + 1
+                )
+
+            passed = pair_evidence.get("verdict") == "PASS"
+            precheck["pair_legality"] = pair_evidence
+            precheck["pair_legality_pass"] = passed
+            precheck["legality_pass"] = passed
+            if passed:
+                deep_candidates.append(descriptor)
+            else:
+                precheck.update(
+                    {
+                        "verdict": str(pair_evidence.get("verdict") or "UNKNOWN"),
+                        "reason": str(
+                            pair_evidence.get("reason")
+                            or "pair_legality_rejected"
+                        ),
+                        "infrastructure_error": bool(
+                            pair_evidence.get("infrastructure_error")
+                        ),
+                    }
+                )
+                rejected.append(dict(precheck))
+
+        pair_rows = [
+            precheck
+            for precheck in prechecks.values()
+            if precheck.get("pair_legality_pass") is not None
+        ]
+        metrics.update(
+            {
+                "pair_legality_reached_count": len(pair_rows),
                 "pair_legality_pass_count": sum(
                     precheck.get("pair_legality_pass") is True
-                    for precheck in prechecks.values()
+                    for precheck in pair_rows
                 ),
                 "pair_legality_reject_count": sum(
                     isinstance(precheck.get("pair_legality"), Mapping)
                     and precheck["pair_legality"].get("verdict") == "FAIL"
+                    for precheck in pair_rows
+                ),
+                "pair_legality_pending_count": sum(
+                    precheck.get("pair_legality_pass") is None
                     for precheck in prechecks.values()
                 ),
-                "pair_legality_elapsed_s": pair_elapsed_s,
-            },
+                "pair_legality_elapsed_s": float(
+                    metrics.get("pair_legality_elapsed_s") or 0.0
+                )
+                + time.monotonic()
+                - started,
+            }
         )
+        return tuple(deep_candidates), rejected
 
     def _fast_workspace_precheck(self, descriptor: object) -> JsonDict:
         """Add only mathematical/structural hard rejects to the legacy L2 gate."""

@@ -2621,8 +2621,17 @@ class AgentMemory:
                     frozen_pair_count = _optional_int(
                         outputs.get("frozen_pair_count"), default=0
                     )
+                    frozen_frontier_remaining = _optional_int(
+                        outputs.get("frozen_grasp_frontier_remaining_count"),
+                        default=0,
+                    )
+                    frozen_frontier_available = (
+                        frozen_pool_active and frozen_frontier_remaining > 0
+                    )
                     frozen_stop_reason = (
-                        "frozen_grasp_place_pool_exhausted"
+                        "frozen_grasp_frontier_expansion_required"
+                        if frozen_frontier_available
+                        else "frozen_grasp_place_pool_exhausted"
                         if frozen_pair_count > 0
                         else "frozen_grasp_pool_exhausted"
                     )
@@ -2631,7 +2640,9 @@ class AgentMemory:
                         "source_tool": source_tool,
                         "source_backend": source_backend,
                         "status": (
-                            "stopped_requires_human"
+                            "frozen_frontier_required"
+                            if frozen_frontier_available
+                            else "stopped_requires_human"
                             if frozen_pool_active
                             else "exhausted"
                         ),
@@ -2656,7 +2667,6 @@ class AgentMemory:
                     if frozen_pool_active:
                         policy.update(
                             {
-                                "failure_code": "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE",
                                 "frozen_pair_count": frozen_pair_count,
                                 "frozen_pair_grasp_branch_limit": _optional_int(
                                     outputs.get("frozen_pair_grasp_branch_limit"),
@@ -2670,8 +2680,19 @@ class AgentMemory:
                                     outputs.get("frozen_pair_full_plan_pass_count"),
                                     default=0,
                                 ),
+                                "frozen_grasp_frontier_remaining_count": (
+                                    frozen_frontier_remaining
+                                ),
+                                "frozen_grasp_frontier_generation": _optional_int(
+                                    outputs.get("frozen_grasp_frontier_generation"),
+                                    default=0,
+                                ),
                             }
                         )
+                        if not frozen_frontier_available:
+                            policy["failure_code"] = (
+                                "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE"
+                            )
                     else:
                         policy["reestimate_required"] = {
                             "status": "pending_recovery",
@@ -2686,7 +2707,14 @@ class AgentMemory:
                     self.record("grasp_candidates_moveit_rejected", dict(policy))
                     if frozen_pool_active:
                         self.facts.pop(GRASP_REESTIMATION_KEY, None)
-                        self.record("frozen_grasp_pool_exhausted", dict(policy))
+                        self.record(
+                            (
+                                "frozen_grasp_frontier_expansion_required"
+                                if frozen_frontier_available
+                                else "frozen_grasp_pool_exhausted"
+                            ),
+                            dict(policy),
+                        )
                         continue
                     selected_target = (
                         self.placement_object_detection()
@@ -2919,6 +2947,17 @@ class AgentMemory:
                     for candidate in width_rejections
                 ],
                 "scene_epoch": self.scene_epoch(),
+                "planning_scene_revision": _optional_int(
+                    outputs.get("scene_revision"),
+                    default=_optional_int(
+                        (outputs.get("qualification_evidence") or {}).get(
+                            "planning_scene_revision"
+                        )
+                        if isinstance(outputs.get("qualification_evidence"), dict)
+                        else None,
+                        default=-1,
+                    ),
+                ),
                 "activated_at_s": time.time(),
             }
             if isinstance(self.frozen_placement_goal_pool(), dict):
@@ -2935,6 +2974,14 @@ class AgentMemory:
                         "frozen_pair_full_plan_pass_count": _optional_int(
                             outputs.get("frozen_pair_full_plan_pass_count"),
                             default=len(candidates),
+                        ),
+                        "frozen_grasp_frontier_remaining_count": _optional_int(
+                            outputs.get("frozen_grasp_frontier_remaining_count"),
+                            default=0,
+                        ),
+                        "frozen_grasp_frontier_generation": _optional_int(
+                            outputs.get("frozen_grasp_frontier_generation"),
+                            default=0,
                         ),
                     }
                 )
@@ -3769,6 +3816,56 @@ class AgentMemory:
                 "path_owner": "moveit",
             }
         if next_candidate is None:
+            frozen_frontier_remaining = _optional_int(
+                policy.get("frozen_grasp_frontier_remaining_count"),
+                default=0,
+            )
+            policy_revision = _optional_int(
+                policy.get("planning_scene_revision"), default=-1
+            )
+            rejection_revision = _optional_int(
+                rejection.get("planning_scene_revision"), default=-2
+            )
+            planning_scene_unchanged = (
+                policy_revision >= 0 and rejection_revision == policy_revision
+            )
+            if (
+                isinstance(frozen_pool, dict)
+                and frozen_pool.get("status") == "ready"
+                and frozen_frontier_remaining > 0
+                and (
+                    not qualification_invalidated
+                    or rejection.get("execution_started") is False
+                    or planning_scene_unchanged
+                )
+            ):
+                policy.update(
+                    {
+                        "status": "frozen_frontier_required",
+                        "active_rank": None,
+                        "active_candidate": None,
+                        "remaining_candidate_ids": [],
+                        "stop_reason": "frozen_grasp_frontier_expansion_required",
+                    }
+                )
+                policy.pop("reestimate_required", None)
+                self.facts.pop(GRASP_REESTIMATION_KEY, None)
+                self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                    policy,
+                    source="frozen_grasp_frontier",
+                )
+                self.record(
+                    "frozen_grasp_frontier_expansion_required",
+                    {
+                        "remaining_count": frozen_frontier_remaining,
+                        "generation": policy.get(
+                            "frozen_grasp_frontier_generation"
+                        ),
+                        "model_inference_invoked": False,
+                        "planning_scene_revision": policy_revision,
+                    },
+                )
+                return True
             # Once the bounded candidate budget is exhausted, keep the highest
             # scoring candidate only when compilation rejected a strategy-level
             # geometry preference. Motion, safety, and structured perception
@@ -6557,11 +6654,18 @@ def _motion_rejection_fingerprint(call: JsonDict) -> JsonDict:
     receipt = details.get("environment_receipt")
     if isinstance(receipt, dict):
         sources.append(receipt)
+    evidence: JsonDict = {}
     for source in sources:
         fingerprint = str(source.get("request_fingerprint") or "").strip()
-        if fingerprint:
-            return {"request_fingerprint": fingerprint}
-    return {}
+        if fingerprint and "request_fingerprint" not in evidence:
+            evidence["request_fingerprint"] = fingerprint
+        execution_started = source.get("execution_started")
+        if isinstance(execution_started, bool):
+            evidence.setdefault("execution_started", execution_started)
+        revision = source.get("planning_scene_revision")
+        if isinstance(revision, int) and not isinstance(revision, bool):
+            evidence.setdefault("planning_scene_revision", revision)
+    return evidence
 
 
 def _host_stage_motion_review_rejection(
@@ -6635,6 +6739,7 @@ def _host_stage_close_rejection(
         "target_tool": "gripper_control",
         "grasp_stage": "close",
         "reason": _call_failure_reason(call),
+        **_motion_rejection_fingerprint(call),
     }
 
 

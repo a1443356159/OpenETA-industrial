@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path
@@ -194,6 +193,88 @@ def test_scripted_acceptance_starts_exact_environment_without_model_routing() ->
         "task": "normal pick and place",
     }
     assert decision.metadata["host_obligation"]["source"] == "scripted_task_marker"
+
+
+def test_agentic_acceptance_routes_exact_environment_choice_through_model() -> None:
+    env_id = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "[automation=scripted_tui; planner_mode=agentic_closed_loop; "
+            f"environment_id={env_id}; environment_task=normal_pick_and_place] "
+            "run the acceptance"
+        )
+    )
+    tools = _tools_with_handlers("create_simulator_env")
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        return {
+            "kind": "tool_call",
+            "name": "create_simulator_env",
+            "parameters": {
+                "env_id": env_id,
+                "seed": 0,
+                "task": "normal pick and place",
+            },
+        }
+
+    planner = ToolCallingPlanner(CallablePlannerBackend(decide))
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=tools,
+        skills=build_default_skill_registry(),
+    )
+
+    assert len(requests) == 1
+    assert requests[0].tool_context["planner_mode"] == "agentic_closed_loop"
+    assert requests[0].tool_context["controller"]["architecture"] == (
+        "agentic_closed_loop_with_host_execution_gates"
+    )
+    assert decision.action == "create_simulator_env"
+    assert decision.metadata["execution_model"] == "closed_loop_tool_calling"
+    assert decision.metadata["planner_mode"] == "agentic_closed_loop"
+
+
+def test_frozen_grasp_frontier_is_a_model_visible_no_inference_obligation() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "grasp_candidate_policy",
+        {
+            "status": "frozen_frontier_required",
+            "frozen_grasp_frontier_remaining_count": 17,
+            "frozen_grasp_frontier_generation": 1,
+            "planning_scene_revision": 4,
+        },
+        source="test",
+    )
+
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["grasp_frontier_obligation"] == {
+        "schema_version": "openeta.frozen_grasp_frontier_obligation.v1",
+        "status": "required",
+        "required_tool": "grasp_pose_estimate",
+        "required_parameters": {
+            "mode": "frozen_frontier",
+            "model_inference": False,
+            "scene_revision": 4,
+        },
+        "remaining_candidate_count": 17,
+        "generation": 1,
+        "rule": (
+            "Continue the frozen provider output at the next qualification wave; "
+            "do not call SAM3, AnyPlace inference, or a grasp model."
+        ),
+    }
 
 
 def test_environment_id_in_ordinary_prose_does_not_trigger_host_creation() -> None:

@@ -564,13 +564,13 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
                 args,
                 "qualification_grasp_waves",
                 "OPENETA_QUALIFICATION_GRASP_WAVES",
-                "16,32,64",
+                "4,8,16,32,64",
             ),
             placement_waves=_startup_value(
                 args,
                 "qualification_placement_waves",
                 "OPENETA_QUALIFICATION_PLACEMENT_WAVES",
-                "12,24,48,96",
+                "4,8,16,32,96",
             ),
             max_ik_concurrency=_startup_value(
                 args,

@@ -54,10 +54,12 @@ GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
 
 INSTRUCTIONS = f"""
-[automation=scripted_tui; environment_id={ENV_ID}; environment_task=normal_pick_and_place; grasp_target=red_rectangular_block; placement_object=red_rectangular_block; placement_region=green_placement_zone_marker] 在隔离 Gazebo RM75/Robotiq 环境完成一次 normal 拾放。
+[automation=scripted_tui; planner_mode=agentic_closed_loop; environment_id={ENV_ID}; environment_task=normal_pick_and_place; grasp_target=red_rectangular_block; placement_object=red_rectangular_block; placement_region=green_placement_zone_marker] 在隔离 Gazebo RM75/Robotiq 环境完成一次 normal 拾放。
 创建环境后只做一次显式 observe；create 返回的 initial observation 不计作这次显式 observe。
 用固定语义 `red rectangular block` 选择目标，
-用 `green placement zone marker` 选择放置区；允许主 VLM 检查 SAM3 候选图，但
+用 `green placement zone marker` 选择放置区。主 VLM 必须在每个闭环回合显式选择
+下一合法工具或终止响应；宿主 obligation 只约束工具、精确参数、几何与安全门，不能
+代替 Planner 串行派发整条任务。SAM3 有多个候选时由主 VLM 检查候选图，但
 不得固定 detection id、使用 Oracle 或假候选，也不得调用 python_exec 或具体抓取后端。
 目标 mask 必须覆盖完整目标轮廓且不粘连邻物；放置区 mask 必须对应完整绿色标记区。
 红色方块对应场景中的 target_object；物体与放置区必须各自使用独立 placement RGB-D 证据包。
@@ -69,12 +71,14 @@ centering、镜像、180度变体、reverse、pregrasp、hover、precontact、ap
 和 fixed lift。MoveIt 从当前状态一次规划到精确 contact，闭合后必须由双垫 native
 target contact 与 attach ACK 直接证明抓取。
 
-漏斗先对 96 个 AnyPlace 目标各做一次目标合法性，再对主批两个抓取分支与目标配对做
-attached-object/夹爪/解析边界合法性；之后才进入 Beam-2 IK 和完整 MoveIt plan-only。
-主批 2×96 均失败时，只从同一 GraspGenX 输出池启用一个包含两个抓取分支的 reserve
-批次，最多覆盖 4×96；不得重跑任何模型。候选以确定波次展开，经验分数只能排序。
-一个候选失败只切换冻结池中下一合格候选；本次验收不得重跑 SAM3、抓取模型或
-AnyPlace，主批与 reserve 池耗尽时显式失败。
+漏斗先对全部模型候选做一次廉价合法性广度检查并缓存。昂贵链路使用 Best-first 小波次
+深度贯通：抓取按每批 4 个增量展开；放置对两个抓取分支交错按每分支
+`4 → 8 → 16 → 32 → 剩余` 展开。候选进入当前波次后才连续执行配对合法性、
+Beam-2 链式 IK、MoveIt 状态有效性和 L5 plan-only；波次 barrier 后按固定编号归并。
+得到主方案和不同 SE(3)/物理族的备用抓取后立即进入执行，不为凑满第三或第四分支
+进入全池或恢复层。若当前物理方案失败，先切换同波次已通过备用，再由 Planner 显式
+请求 `model_inference=false` 的 frozen_frontier 扩展；只补做下一波次资格检查，不重跑
+SAM3、抓取模型或 AnyPlace。冻结池与恢复预算真正耗尽时才显式失败。
 
 attach 后宿主直接复用冻结目标池，以实测 T_eef_object 和当前 PlanningScene revision
 重新计算 exact release EEF，并通过一次 inference=false 的内部 AnyPlace 资格调用。
@@ -403,6 +407,108 @@ def _repeated_failed_motion_fingerprints(
     return {fingerprint for fingerprint, count in counts.items() if count > 1}
 
 
+def _agentic_planner_evidence(
+    events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Summarize decision provenance from durable action commands only."""
+
+    closed_loop_actions = 0
+    closed_loop_tool_calls = 0
+    isolated_selection_actions = 0
+    wrong_planner_mode_actions = 0
+    host_dispatches: list[dict[str, str]] = []
+    missing_or_unknown_actions = 0
+    providers: set[str] = set()
+    models: set[str] = set()
+    for event in events:
+        if event.get("event_type") != "action":
+            continue
+        payload = event.get("payload")
+        command = payload.get("command") if isinstance(payload, Mapping) else None
+        if not isinstance(command, Mapping):
+            continue
+        metadata = command.get("metadata")
+        planner_metadata = (
+            metadata.get("planner_metadata")
+            if isinstance(metadata, Mapping)
+            else None
+        )
+        if not isinstance(planner_metadata, Mapping):
+            missing_or_unknown_actions += 1
+            continue
+        execution_model = str(planner_metadata.get("execution_model") or "")
+        if str(planner_metadata.get("planner_mode") or "") != "agentic_closed_loop":
+            wrong_planner_mode_actions += 1
+        request = command.get("request")
+        request = request if isinstance(request, Mapping) else {}
+        if execution_model == "closed_loop_tool_calling":
+            closed_loop_actions += 1
+            if request.get("kind") == "tool_call":
+                closed_loop_tool_calls += 1
+            provider = str(planner_metadata.get("backend_provider") or "")
+            model = str(planner_metadata.get("backend_model") or "")
+            if provider:
+                providers.add(provider)
+            if model:
+                models.add(model)
+        elif execution_model == "isolated_semantic_selection":
+            isolated_selection_actions += 1
+            provider = str(planner_metadata.get("backend_provider") or "")
+            model = str(planner_metadata.get("backend_model") or "")
+            if provider:
+                providers.add(provider)
+            if model:
+                models.add(model)
+        elif execution_model == "host_obligation_dispatch":
+            obligation = planner_metadata.get("host_obligation")
+            obligation = obligation if isinstance(obligation, Mapping) else {}
+            host_dispatches.append(
+                {
+                    "schema_version": str(obligation.get("schema_version") or ""),
+                    "tool": str(request.get("name") or ""),
+                }
+            )
+        else:
+            missing_or_unknown_actions += 1
+
+    episode_total_tokens = 0
+    token_usage_sources: dict[str, int] = {}
+    for event in events:
+        if event.get("event_type") != "episode_result":
+            continue
+        payload = event.get("payload")
+        metadata = payload.get("metadata") if isinstance(payload, Mapping) else None
+        usage = metadata.get("usage") if isinstance(metadata, Mapping) else None
+        if not isinstance(usage, Mapping):
+            continue
+        total = usage.get("total_tokens")
+        if isinstance(total, int) and not isinstance(total, bool):
+            episode_total_tokens = max(episode_total_tokens, total)
+        sources = usage.get("token_usage_sources")
+        if isinstance(sources, Mapping):
+            token_usage_sources = {
+                str(key): int(value)
+                for key, value in sources.items()
+                if isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+    return {
+        "planner_mode": "agentic_closed_loop",
+        "closed_loop_action_count": closed_loop_actions,
+        "closed_loop_tool_call_count": closed_loop_tool_calls,
+        "isolated_selection_action_count": isolated_selection_actions,
+        "host_dispatches": host_dispatches,
+        "host_dispatch_count": len(host_dispatches),
+        "missing_or_unknown_action_count": missing_or_unknown_actions,
+        "wrong_planner_mode_action_count": wrong_planner_mode_actions,
+        "providers": sorted(providers),
+        "models": sorted(models),
+        "total_tokens": episode_total_tokens,
+        "token_usage_sources": token_usage_sources,
+    }
+
+
 def _qualification_blocks(
     call: Mapping[str, Any], *, artifact_root: Path
 ) -> list[Mapping[str, Any]]:
@@ -444,7 +550,7 @@ def _qualification_blocks(
 def _has_v3_grasp_diversity_evidence(
     call: Mapping[str, Any], *, artifact_root: Path
 ) -> bool:
-    """Accept two primary branches plus at most one frozen reserve batch."""
+    """Accept the deterministic two-branch best-first grasp result."""
 
     reported_counts = {
         int(value)
@@ -460,6 +566,7 @@ def _has_v3_grasp_diversity_evidence(
             or block.get("stop_reason")
             not in {
                 "complete_l5_pass_found",
+                "complete_l5_pass_found_minimum_lookahead",
                 "complete_l5_pass_found_joint_space_fallback",
                 "complete_l5_pass_found_partial_lookahead",
             }
@@ -487,7 +594,7 @@ def _has_v3_grasp_diversity_evidence(
             and isinstance(l5_pass_count, int)
             and not isinstance(l5_pass_count, bool)
             and l5_pass_count >= 2
-            and 2 <= len(selected_ids) <= 4
+            and len(selected_ids) == 2
             and len(set(selected_ids)) == len(selected_ids)
         ):
             continue
@@ -537,12 +644,7 @@ def _has_v3_grasp_diversity_evidence(
 def _has_bounded_grasp_l5_evidence(
     call: Mapping[str, Any], *, artifact_root: Path
 ) -> bool:
-    """Accept the legacy submit cap or the v3 primary-plus-reserve proof.
-
-    V3 may need one frozen two-branch reserve batch when the primary branches
-    cannot form any feasible placement pair. Its artifact therefore binds two
-    to four distinct PASS candidates without permitting another model call.
-    """
+    """Accept the legacy submit cap or the v3 two-branch proof."""
 
     legacy_bound = any(
         1 <= value <= 2
@@ -567,6 +669,30 @@ def verify_case(
         events, trace_paths = base._load_trace_events(paths.trace_root)
         calls = base._tool_calls(events)
         errors.extend(base._base_errors(paths, events))
+        planner_evidence = _agentic_planner_evidence(events)
+        allowed_host_dispatch_schemas = {
+            "openeta.fresh_observation_obligation.v1",
+            "openeta.motion_reconciliation.v1",
+        }
+        disallowed_host_dispatches = [
+            dispatch
+            for dispatch in planner_evidence["host_dispatches"]
+            if dispatch.get("schema_version") not in allowed_host_dispatch_schemas
+        ]
+        if disallowed_host_dispatches:
+            errors.append(
+                "agentic normal used host dispatch for planner-owned task progression"
+            )
+        if planner_evidence["missing_or_unknown_action_count"]:
+            errors.append("one or more actions lack planner decision provenance")
+        if planner_evidence["wrong_planner_mode_action_count"]:
+            errors.append("one or more actions were not bound to agentic_closed_loop mode")
+        if planner_evidence["closed_loop_tool_call_count"] < 10:
+            errors.append("too few normal tool decisions reached the main VLM planner")
+        if planner_evidence["total_tokens"] <= 0:
+            errors.append("agentic normal recorded zero main-VLM token usage")
+        if not planner_evidence["providers"] or not planner_evidence["models"]:
+            errors.append("agentic normal lacks concrete planner provider/model evidence")
         payloads, mcp_errors = base._mcp_response_payloads(calls, paths)
         errors.extend(mcp_errors)
         names = [_name(call) for call in calls]
@@ -629,25 +755,53 @@ def verify_case(
         ):
             errors.append("host grasp candidate compilation evidence missing")
         grasp_calls = [call for call in calls if _name(call) == backend]
-        final_grasp = grasp_calls[-1] if grasp_calls else {}
+        provider_inference_calls = [
+            call
+            for call in grasp_calls
+            if _parameters(call).get("mode") != "frozen_frontier"
+        ]
+        if len(provider_inference_calls) != 1:
+            errors.append(
+                f"normal requires exactly one {backend_label} model inference"
+            )
+        for call in grasp_calls:
+            if _parameters(call).get("mode") != "frozen_frontier":
+                continue
+            if (
+                _parameters(call).get("model_inference") is not False
+                or not base._contains(call, "model_inference_invoked", False)
+            ):
+                errors.append(
+                    "frozen grasp frontier expansion did not prove model-inference bypass"
+                )
         raw_grasp_counts = [
             int(value)
-            for value in base._values(final_grasp, "raw_candidate_count")
-            if isinstance(value, int) and not isinstance(value, bool)
+            for grasp_call in grasp_calls
+            for value in base._values(grasp_call, "raw_candidate_count")
+            if isinstance(value, int)
+            and not isinstance(value, bool)
         ]
-        if not raw_grasp_counts or raw_grasp_counts[-1] < 10:
+        if not raw_grasp_counts or max(raw_grasp_counts) < 10:
             errors.append(f"{backend_label} raw candidate count evidence is missing")
         has_legacy_diversity_pool = any(
             1 <= value <= 64
-            for value in base._values(final_grasp, "diversity_selected_count")
+            for grasp_call in grasp_calls
+            for value in base._values(grasp_call, "diversity_selected_count")
             if isinstance(value, int) and not isinstance(value, bool)
         )
-        if not has_legacy_diversity_pool and not _has_v3_grasp_diversity_evidence(
-            final_grasp, artifact_root=paths.root
-        ):
+        has_v3_diversity = any(
+            _has_v3_grasp_diversity_evidence(
+                grasp_call, artifact_root=paths.root
+            )
+            for grasp_call in grasp_calls
+        )
+        if not has_legacy_diversity_pool and not has_v3_diversity:
             errors.append(f"{backend_label} diversity pool evidence is missing")
-        if not _has_bounded_grasp_l5_evidence(
-            final_grasp, artifact_root=paths.root
+        if not any(
+            _has_bounded_grasp_l5_evidence(
+                grasp_call, artifact_root=paths.root
+            )
+            for grasp_call in grasp_calls
         ):
             errors.append(f"{backend_label} L5 diversity evidence is missing")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
@@ -801,7 +955,10 @@ def verify_case(
             errors.append("normal scenario unexpectedly injected a placement rejection")
         frozen_pair_qualification_blocks = [
             block
-            for block in _qualification_blocks(final_grasp, artifact_root=paths.root)
+            for grasp_call in grasp_calls
+            for block in _qualification_blocks(
+                grasp_call, artifact_root=paths.root
+            )
             if block.get("purpose") == "placement"
         ]
         qualification_results = [
@@ -841,6 +998,7 @@ def verify_case(
             "errors": list(dict.fromkeys(errors)),
             "trace_paths": [str(path.resolve()) for path in trace_paths],
             "tool_call_count": len(calls),
+            "planner_evidence": planner_evidence,
             "scenario": scenario,
             "grasp_backend": backend,
         }
@@ -850,6 +1008,7 @@ def verify_case(
             "errors": [f"evidence unreadable: {type(exc).__name__}: {exc}"],
             "trace_paths": [],
             "tool_call_count": 0,
+            "planner_evidence": {},
             "scenario": scenario,
             "grasp_backend": backend,
         }

@@ -362,8 +362,8 @@ class RuntimeCandidateCounts:
     qualification_profile: str = "legacy"
     solver_profile: str = "auto"
     fast_beam_width: int = 2
-    grasp_waves: tuple[int, ...] | str = (16, 32, 64)
-    placement_waves: tuple[int, ...] | str = (12, 24, 48, 96)
+    grasp_waves: tuple[int, ...] | str = (4, 8, 16, 32, 64)
+    placement_waves: tuple[int, ...] | str = (4, 8, 16, 32, 96)
     max_ik_concurrency: int = 8
     max_state_validity_concurrency: int = 8
     fast_ik_seed_count: int = 2
@@ -430,9 +430,11 @@ def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
         qualification_profile=os.environ.get("OPENETA_QUALIFICATION_PROFILE", "legacy"),
         solver_profile=os.environ.get("OPENETA_QUALIFICATION_SOLVER_PROFILE", "auto"),
         fast_beam_width=os.environ.get("OPENETA_QUALIFICATION_BEAM_WIDTH", 2),
-        grasp_waves=os.environ.get("OPENETA_QUALIFICATION_GRASP_WAVES", "16,32,64"),
+        grasp_waves=os.environ.get(
+            "OPENETA_QUALIFICATION_GRASP_WAVES", "4,8,16,32,64"
+        ),
         placement_waves=os.environ.get(
-            "OPENETA_QUALIFICATION_PLACEMENT_WAVES", "12,24,48,96"
+            "OPENETA_QUALIFICATION_PLACEMENT_WAVES", "4,8,16,32,96"
         ),
         max_ik_concurrency=os.environ.get("OPENETA_QUALIFICATION_MAX_IK_CONCURRENCY", 8),
         max_state_validity_concurrency=os.environ.get(
@@ -641,7 +643,6 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         candidate_counts=config.candidate_counts,
         grasp_backend_order=config.grasp_backend_order,
         internal_candidate_compilers=internal_candidate_compilers,
-        selection_reviewer=sam3_selection_reviewer,
     )
 
     planner = ToolCallingPlanner(
@@ -858,11 +859,6 @@ def bind_runtime_perception_tools(
         # pipeline over the existing simulator MCP transport; it is exposed
         # instead of sam3, never alongside it.
         if simulator_transport is not None:
-            bounded_selection_reviewer = (
-                selection_reviewer
-                if selection_reviewer is not None
-                else _build_sam3_selection_reviewer(backend_factory)
-            )
             proxy_config = simulator_proxy_config or SimulatorMcpToolProxyConfig()
             oracle_mcp_evidence = _OracleMcpEvidence(
                 proxy_config=proxy_config,
@@ -875,7 +871,7 @@ def bind_runtime_perception_tools(
                     session_id_provider=lambda: proxy_config.session_id,
                     response_callback=oracle_mcp_evidence.record,
                 ),
-                selection_reviewer=bounded_selection_reviewer,
+                selection_reviewer=selection_reviewer,
                 tool_name="oracle_perceive",
                 output_root=artifact_root / "oracle_perceive_images",
                 result_output_root=artifact_root / "oracle_perceive_results",
@@ -891,11 +887,6 @@ def bind_runtime_perception_tools(
                 replace=True,
             )
     elif endpoints.sam3_url:
-        bounded_selection_reviewer = (
-            selection_reviewer
-            if selection_reviewer is not None
-            else _build_sam3_selection_reviewer(backend_factory)
-        )
         tools.bind_handler(
             "sam3",
             build_sam3_handler(
@@ -908,7 +899,7 @@ def bind_runtime_perception_tools(
                     tool_name="segment_points",
                     **rpc_timeout_kwargs,
                 ),
-                selection_reviewer=bounded_selection_reviewer,
+                selection_reviewer=selection_reviewer,
                 depth_prior_prefetch=(
                     depth_prefetch.prefetch_for_sam3
                     if depth_prefetch is not None
@@ -1299,6 +1290,11 @@ class _FrozenGoalPairCoordinator:
     source_candidate_image_ref: str = ""
     source_candidate_artifacts: list[JsonDict] = field(default_factory=list)
     source_binding: JsonDict = field(default_factory=dict)
+    grasp_frontier_candidates: list[JsonDict] = field(default_factory=list)
+    grasp_frontier_template: JsonDict = field(default_factory=dict)
+    grasp_frontier_scene_epoch: int = -1
+    grasp_frontier_planning_scene_revision: int = -1
+    grasp_frontier_generation: int = 0
 
     def retain_goal_pool(
         self,
@@ -1348,6 +1344,11 @@ class _FrozenGoalPairCoordinator:
         self.planning_scene_revision = planning_scene_revision
         self.qualified_goals_by_grasp.clear()
         self.consumed_attachment_bindings.clear()
+        self.grasp_frontier_candidates.clear()
+        self.grasp_frontier_template.clear()
+        self.grasp_frontier_scene_epoch = -1
+        self.grasp_frontier_planning_scene_revision = -1
+        self.grasp_frontier_generation = 0
         model_raw_count = result.details.get("model_raw_candidate_count")
         self.source_model_raw_candidate_count = (
             model_raw_count
@@ -1388,6 +1389,147 @@ class _FrozenGoalPairCoordinator:
             "model-goal grasp-place qualification."
         )
         return result
+
+    def update_grasp_frontier(
+        self,
+        provider_result: ToolResult,
+        qualified_result: ToolResult,
+        *,
+        scene_epoch: int,
+        planning_scene_revision: int,
+    ) -> None:
+        """Retain only the unvisited tail of one frozen provider result."""
+
+        raw = provider_result.details.get("grasp_candidates")
+        raw = raw if isinstance(raw, list) else []
+        raw_by_id = {
+            str(candidate.get("id") or ""): json.loads(json.dumps(candidate))
+            for candidate in raw
+            if isinstance(candidate, Mapping) and str(candidate.get("id") or "")
+        }
+        frontier_ids: list[str] = []
+        artifact = qualified_result.details.get("qualification_artifact")
+        artifact_path = (
+            artifact.get("path") if isinstance(artifact, Mapping) else None
+        )
+        if isinstance(artifact_path, str):
+            try:
+                payload = json.loads(Path(artifact_path).read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            rows = payload.get("results") if isinstance(payload, Mapping) else None
+            if isinstance(rows, list):
+                frontier_ids = [
+                    str(row.get("candidate_id") or "")
+                    for row in rows
+                    if isinstance(row, Mapping)
+                    and row.get("verdict") == "NOT_EVALUATED"
+                    and str(row.get("candidate_id") or "") in raw_by_id
+                ]
+        if not frontier_ids and qualified_result.details.get(
+            "qualification_profile"
+        ) == "fast_v3" and str(
+            qualified_result.details.get("qualification_stop_reason") or ""
+        ).startswith("complete_l5_pass_found"):
+            selected_ids = {
+                str(candidate.get("id") or "")
+                for candidate in qualified_result.details.get("grasp_candidates", [])
+                if isinstance(candidate, Mapping)
+            }
+            # Artifact-free test/integration adapters cannot distinguish a
+            # hard rejection from an untouched tail.  Preserve recall in that
+            # degraded evidence mode; the next deterministic qualification
+            # call will re-prove every retained entry before exposure.
+            frontier_ids = [
+                candidate_id
+                for candidate_id in raw_by_id
+                if candidate_id not in selected_ids
+            ]
+        self.grasp_frontier_candidates = [
+            raw_by_id[candidate_id]
+            for candidate_id in frontier_ids
+            if candidate_id in raw_by_id
+        ]
+        self.grasp_frontier_template = {
+            key: json.loads(json.dumps(value))
+            for key, value in provider_result.details.items()
+            if key != "grasp_candidates"
+        }
+        self.grasp_frontier_scene_epoch = scene_epoch
+        self.grasp_frontier_planning_scene_revision = planning_scene_revision
+        self.grasp_frontier_generation += 1
+        qualified_result.details.update(
+            {
+                "frozen_grasp_frontier_remaining_count": len(
+                    self.grasp_frontier_candidates
+                ),
+                "frozen_grasp_frontier_generation": self.grasp_frontier_generation,
+                "frozen_grasp_frontier_model_inference_invoked": False,
+            }
+        )
+
+    def prepare_grasp_frontier_expansion(
+        self,
+        *,
+        scene_epoch: int,
+        planning_scene_revision: int,
+    ) -> ToolResult:
+        """Materialize the frozen unvisited tail without invoking a model."""
+
+        if not self.grasp_frontier_candidates:
+            return ToolResult(
+                False,
+                "The frozen grasp frontier is exhausted.",
+                {
+                    "reason": "frozen_grasp_frontier_exhausted",
+                    "model_inference_invoked": False,
+                    "execution_started": False,
+                },
+            )
+        if planning_scene_revision != self.grasp_frontier_planning_scene_revision:
+            return ToolResult(
+                False,
+                "The frozen grasp frontier no longer matches the PlanningScene revision.",
+                {
+                    "reason": "frozen_grasp_frontier_scene_revision_changed",
+                    "source_planning_scene_revision": (
+                        self.grasp_frontier_planning_scene_revision
+                    ),
+                    "planning_scene_revision": planning_scene_revision,
+                    "model_inference_invoked": False,
+                    "execution_started": False,
+                },
+            )
+        # A failed plan with execution_started=false may advance the runtime's
+        # bookkeeping epoch while leaving the physical PlanningScene revision
+        # unchanged.  The frontier obligation is emitted only for that safe
+        # case; rebind the frozen goal packet to the current bookkeeping epoch
+        # before the new grasp/pair proof is compiled.
+        self.scene_epoch = scene_epoch
+        details = json.loads(json.dumps(self.grasp_frontier_template))
+        details.update(
+            {
+                "grasp_candidates": json.loads(
+                    json.dumps(self.grasp_frontier_candidates)
+                ),
+                "candidate_count": len(self.grasp_frontier_candidates),
+                "generated_candidate_count": len(self.grasp_frontier_candidates),
+                "scene_epoch": scene_epoch,
+                "scene_revision": planning_scene_revision,
+                "frozen_grasp_frontier_expansion": True,
+                "frozen_grasp_frontier_generation": self.grasp_frontier_generation,
+                "model_inference_invoked": False,
+                "execution_started": False,
+            }
+        )
+        return ToolResult(
+            True,
+            (
+                f"Prepared {len(self.grasp_frontier_candidates)} frozen grasp "
+                "candidates for the next qualification wave without model inference."
+            ),
+            details,
+        )
 
     def filter_grasps(
         self,
@@ -1896,11 +2038,82 @@ def _qualifying_handler(
                     "execution_started": False,
                 },
             )
-        result = handler(context)
-        if not result.success:
-            return result
         observation_metadata = (
             context.observation.metadata if context.observation is not None else {}
+        )
+        frozen_frontier_requested = (
+            purpose == "grasp"
+            and frozen_pair_coordinator is not None
+            and context.parameters.get("mode") == "frozen_frontier"
+            and context.parameters.get("model_inference") is False
+        )
+        if frozen_frontier_requested:
+            frontier_scene_epoch = (
+                memory.get("scene_epoch")
+                if isinstance(memory, Mapping)
+                and isinstance(memory.get("scene_epoch"), int)
+                and not isinstance(memory.get("scene_epoch"), bool)
+                else observation_metadata.get("scene_epoch", 0)
+            )
+            frontier_revision = context.parameters.get("scene_revision")
+            if not isinstance(frontier_revision, int) or isinstance(
+                frontier_revision, bool
+            ):
+                frontier_revision = observation_metadata.get(
+                    "planning_scene_revision", frontier_scene_epoch
+                )
+            observed_revision = observation_metadata.get(
+                "planning_scene_revision"
+            )
+            if (
+                isinstance(observed_revision, int)
+                and not isinstance(observed_revision, bool)
+                and isinstance(frontier_revision, int)
+                and not isinstance(frontier_revision, bool)
+                and observed_revision != frontier_revision
+            ):
+                return ToolResult(
+                    False,
+                    (
+                        "The frozen grasp frontier no longer matches the "
+                        "observed PlanningScene revision."
+                    ),
+                    {
+                        "reason": "frozen_grasp_frontier_scene_revision_changed",
+                        "source_planning_scene_revision": frontier_revision,
+                        "planning_scene_revision": observed_revision,
+                        "model_inference_invoked": False,
+                        "execution_started": False,
+                    },
+                )
+            result = frozen_pair_coordinator.prepare_grasp_frontier_expansion(
+                scene_epoch=(
+                    frontier_scene_epoch
+                    if isinstance(frontier_scene_epoch, int)
+                    and not isinstance(frontier_scene_epoch, bool)
+                    else 0
+                ),
+                planning_scene_revision=(
+                    frontier_revision
+                    if isinstance(frontier_revision, int)
+                    and not isinstance(frontier_revision, bool)
+                    else 0
+                ),
+            )
+        else:
+            result = handler(context)
+        if not result.success:
+            return result
+        provider_result_snapshot = (
+            ToolResult(
+                True,
+                result.content,
+                json.loads(json.dumps(result.details)),
+            )
+            if purpose == "grasp"
+            and frozen_pair_coordinator is not None
+            and frozen_pair_coordinator.object_goals
+            else None
         )
         # Use the runtime invalidation epoch consistently for qualification,
         # cache storage, and later compilation.  A simulator observation can
@@ -2050,10 +2263,15 @@ def _qualifying_handler(
             if isinstance(compiled_source_grasp, dict):
                 source["source_grasp_compiled"] = dict(compiled_source_grasp)
         grasp_lookahead_target = (
-            frozen_pair_coordinator.grasp_branch_limit
+            min(2, frozen_pair_coordinator.grasp_branch_limit)
             if purpose == "grasp"
             and frozen_pair_coordinator is not None
             and frozen_pair_coordinator.object_goals
+            else None
+        )
+        grasp_minimum_target = (
+            min(2, grasp_lookahead_target)
+            if grasp_lookahead_target is not None
             else None
         )
         qualified_result = qualifier.qualify_result(
@@ -2063,8 +2281,16 @@ def _qualifying_handler(
             planning_scene_revision=revision_value,
             source=source,
             l5_pass_target=grasp_lookahead_target,
+            l5_min_pass_target=grasp_minimum_target,
         )
         if purpose == "grasp" and frozen_pair_coordinator is not None:
+            if provider_result_snapshot is not None:
+                frozen_pair_coordinator.update_grasp_frontier(
+                    provider_result_snapshot,
+                    qualified_result,
+                    scene_epoch=scene_epoch,
+                    planning_scene_revision=revision_value,
+                )
             qualified_result = frozen_pair_coordinator.filter_grasps(
                 qualified_result,
                 scene_epoch=scene_epoch,

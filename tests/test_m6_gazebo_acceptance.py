@@ -42,6 +42,7 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     }
     prompt = paths.instructions.read_text(encoding="utf-8")
     assert (
+        "planner_mode=agentic_closed_loop; "
         f"environment_id={m6.ENV_ID}; environment_task=normal_pick_and_place"
         in prompt
     )
@@ -56,8 +57,9 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert "`red rectangular block`" in prompt
     assert "独立 placement RGB-D" in prompt
     assert "冻结目标池" in prompt
-    assert "主批 2×96" in prompt and "最多覆盖 4×96" in prompt
-    assert "reserve" in prompt and "不得重跑任何模型" in prompt
+    assert "Best-first 小波次" in prompt and "4 → 8 → 16 → 32 → 剩余" in prompt
+    assert "frozen_frontier" in prompt and "不重跑" in prompt
+    assert "主 VLM 必须" in prompt and "不能" in prompt
     assert "compile_placement_seed" not in prompt
     assert "实测 T_eef_object" in prompt
     assert "不得固定 detection id" in prompt
@@ -402,7 +404,7 @@ def test_m6_accepts_complete_v3_grasp_pool_with_two_l5_branches(tmp_path) -> Non
     assert not m6._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
 
-def test_m6_accepts_one_frozen_two_branch_reserve_batch(tmp_path) -> None:
+def test_m6_rejects_obsolete_four_branch_lookahead(tmp_path) -> None:
     artifact = tmp_path / "qualification-v3-reserve.json"
     results = [
         {
@@ -432,12 +434,67 @@ def test_m6_accepts_one_frozen_two_branch_reserve_batch(tmp_path) -> None:
         "qualification_artifact": {"kind": "json", "path": artifact.name},
     }
 
-    assert m6._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
-    assert m6._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
-
-    proof["selected_candidate_ids"].append("grasp_004")
-    artifact.write_text(json.dumps(proof), encoding="utf-8")
     assert not m6._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert not m6._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
+
+
+def test_m6_agentic_planner_evidence_counts_model_and_bounded_host_actions() -> None:
+    def action(execution_model, *, schema="", name="observe", tokens=0):
+        planner_metadata = {
+            "execution_model": execution_model,
+            "planner_mode": "agentic_closed_loop",
+            "backend_provider": "fixture-provider",
+            "backend_model": "fixture-model",
+            "backend_usage": {"total_tokens": tokens},
+        }
+        if schema:
+            planner_metadata["host_obligation"] = {
+                "schema_version": schema,
+            }
+        return {
+            "event_type": "action",
+            "payload": {
+                "command": {
+                    "request": {
+                        "kind": "tool_call",
+                        "name": name,
+                        "parameters": {},
+                    },
+                    "metadata": {"planner_metadata": planner_metadata},
+                }
+            },
+        }
+
+    events = [
+        action("closed_loop_tool_calling", name="sam3", tokens=120),
+        action(
+            "host_obligation_dispatch",
+            schema="openeta.fresh_observation_obligation.v1",
+        ),
+        {
+            "event_type": "episode_result",
+            "payload": {
+                "metadata": {
+                    "usage": {
+                        "total_tokens": 120,
+                        "token_usage_sources": {"provider": 1},
+                    }
+                }
+            },
+        },
+    ]
+
+    evidence = m6._agentic_planner_evidence(events)
+
+    assert evidence["closed_loop_tool_call_count"] == 1
+    assert evidence["host_dispatches"] == [
+        {
+            "schema_version": "openeta.fresh_observation_obligation.v1",
+            "tool": "observe",
+        }
+    ]
+    assert evidence["total_tokens"] == 120
+    assert evidence["providers"] == ["fixture-provider"]
 
 
 def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:

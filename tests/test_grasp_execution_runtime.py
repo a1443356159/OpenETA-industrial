@@ -1793,6 +1793,96 @@ def test_failed_close_reuses_next_frozen_exact_terminal_without_model_rerun() ->
     )
 
 
+def test_exhausted_backup_resumes_frozen_frontier_when_scene_revision_is_unchanged() -> None:
+    candidate = {
+        **_candidate("grasp_000", 0.9),
+        "grasp_place_joint_qualified": True,
+    }
+    compiled = _compiled_candidate(candidate)
+    compilation = _host_grasp_compilation_event(
+        compiled, queue_position=0, queue_count=1
+    )
+    compilation["planning_scene_revision"] = 7
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.add_action(
+        _tool_action(
+            "anyplace",
+            {},
+            outputs={
+                "frozen_goal_pool_ready": True,
+                "frozen_goal_pool_count": 96,
+            },
+        )
+    )
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "frozen-qualified-grasps",
+                "selected_backend": "graspgenx",
+                "scene_revision": 7,
+                "grasp_candidates": [candidate],
+                "qualification_evidence": {
+                    "schema_version": "openeta.moveit_candidate_qualification.v3",
+                    "scene_epoch": 0,
+                    "planning_scene_revision": 7,
+                },
+                "frozen_pair_grasp_branch_limit": 2,
+                "frozen_pair_lookahead_grasp_count": 1,
+                "frozen_pair_full_plan_pass_count": 1,
+                "frozen_grasp_frontier_remaining_count": 12,
+                "frozen_grasp_frontier_generation": 1,
+                "host_selected_candidate_id": candidate["id"],
+                "host_candidate_compilation": compilation,
+                "host_candidate_compilation_queue": [compilation],
+            },
+        )
+    )
+    memory.save_fact("scene_epoch", {"epoch": 3}, source="test")
+    execution = memory.grasp_execution()
+    execution.update(
+        {
+            "stage": "contact",
+            "required_action": {
+                "name": "move_to",
+                "parameters": {
+                    "target_pose": {
+                        "source_grasp_id": candidate["id"],
+                        "xyz": compiled["contact_pose"]["xyz"],
+                    }
+                },
+            },
+        }
+    )
+    memory.save_fact("grasp_execution", execution, source="test")
+    required = execution["required_action"]
+
+    memory.add_action(
+        _tool_action(
+            required["name"],
+            required["parameters"],
+            success=False,
+            outputs={
+                "motion_summary": {"reached_target": False},
+            },
+            environment_receipt={
+                "execution_started": True,
+                "planning_scene_revision": 7,
+                "request_fingerprint": "failed-g0",
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "frozen_frontier_required"
+    assert policy["planning_scene_revision"] == 7
+    assert policy["frozen_grasp_frontier_remaining_count"] == 12
+    assert policy["last_rejection"]["execution_started"] is True
+    assert policy["last_rejection"]["planning_scene_revision"] == 7
+
+
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:
     memory = _memory_with_candidates()
     memory.add_action(_tool_action("gripper_control", {"position": 1}))

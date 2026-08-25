@@ -1164,10 +1164,12 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                 "Generate one normalized score-descending camera-frame grasp "
                 "candidate queue from aligned RGB-D and an optional target mask. "
                 "The host selects compatible AnyGrasp, Contact-GraspNet, or "
-                "GraspGenX backends and performs structured fallback."
+                "GraspGenX backends and performs structured fallback. A host-issued "
+                "frozen_frontier request resumes an already generated candidate tail "
+                "with model_inference=false."
             ),
             parameters={
-                "mode": "targeted or scene; defaults to targeted",
+                "mode": "targeted, scene, or host-obligated frozen_frontier",
                 "rgb": "local RGB image path from the current observation",
                 "depth": "aligned local raw-depth image path from the same camera",
                 "object_mask": (

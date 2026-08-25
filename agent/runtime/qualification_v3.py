@@ -181,8 +181,8 @@ def schedule_candidate_waves(
     descriptors: Sequence[Mapping[str, Any]],
     *,
     purpose: str,
-    grasp_waves: Sequence[int] = (16, 32, 64),
-    placement_waves: Sequence[int] = (12, 24, 48, 96),
+    grasp_waves: Sequence[int] = (4, 8, 16, 32, 64),
+    placement_waves: Sequence[int] = (4, 8, 16, 32, 96),
     capability_map: SparseCapabilityMap | None = None,
 ) -> list[CandidateWave]:
     """Build cumulative waves without deleting any structurally valid candidate."""

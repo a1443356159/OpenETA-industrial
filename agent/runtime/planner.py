@@ -104,6 +104,10 @@ _SCRIPTED_ENVIRONMENT_TASK_RE = re.compile(
     r"(?:^|;)\s*environment_task=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
 )
+_SCRIPTED_PLANNER_MODE_RE = re.compile(
+    r"(?:^|;)\s*planner_mode=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
+    flags=re.IGNORECASE,
+)
 _SCRIPTED_SEMANTIC_FIELD_RE = re.compile(
     r"(?:^|;)\s*(?P<role>grasp_target|placement_object|placement_region)="
     r"(?P<value>[A-Za-z0-9_-]+)\s*(?=;|$)",
@@ -554,6 +558,31 @@ class ToolCallingPlanner(BasePlanner):
                     ]
                 )
         if review is not None:
+            provider_details = review.get("provider_details")
+            provider_details = (
+                dict(provider_details)
+                if isinstance(provider_details, Mapping)
+                else {}
+            )
+            provider_usage = provider_details.get("usage")
+            provider_usage = (
+                dict(provider_usage) if isinstance(provider_usage, Mapping) else {}
+            )
+            usage_source = str(provider_details.get("usage_source") or "unknown")
+            planner_metadata = _planner_metadata(
+                planner=self,
+                tool_context=tool_context,
+                backend=self.backend,
+                backend_usage=provider_usage,
+                backend_usage_sources={usage_source: 1} if provider_usage else None,
+            )
+            planner_metadata.update(
+                {
+                    "backend_provider": str(review.get("provider") or ""),
+                    "backend_model": str(review.get("model") or ""),
+                    "backend_details": provider_details,
+                }
+            )
             decision_name = (
                 "select_sam3_detection"
                 if review.get("decision") == "select"
@@ -582,11 +611,7 @@ class ToolCallingPlanner(BasePlanner):
                     "mask without replaying the general embodied-agent context."
                 ),
                 metadata={
-                    **_planner_metadata(
-                        planner=self,
-                        tool_context=tool_context,
-                        backend=self.backend,
-                    ),
+                    **planner_metadata,
                     "execution_model": "isolated_semantic_selection",
                     "selection_review": review,
                     "infrastructure_retry_count": review.get(
@@ -628,9 +653,11 @@ def _host_obligation_decision(
 ) -> PlannerDecision | None:
     """Dispatch fully determined structured joins without model JSON copying."""
 
+    agentic_closed_loop = _agentic_closed_loop_enabled(tool_context)
     completion = tool_context.get("task_completion_evidence")
     if (
-        isinstance(completion, dict)
+        not agentic_closed_loop
+        and isinstance(completion, dict)
         and completion.get("status") == "proven"
         and completion.get("outcome") == "success"
         and completion.get("environment_closed") is True
@@ -658,7 +685,8 @@ def _host_obligation_decision(
 
     environment_start = tool_context.get("environment_start_obligation")
     if (
-        isinstance(environment_start, dict)
+        not agentic_closed_loop
+        and isinstance(environment_start, dict)
         and environment_start.get("status") == "required"
         and environment_start.get("required_tool") == "create_simulator_env"
         and isinstance(environment_start.get("required_parameters"), dict)
@@ -851,6 +879,14 @@ def _host_obligation_decision(
                 }
             },
         )
+    if agentic_closed_loop:
+        # In a formal agentic episode obligations constrain the next model
+        # decision; they are not a hidden executable task macro.  The host may
+        # still force fresh observation/reconciliation above and may terminate
+        # unsafe or exhausted states, but semantic perception, planning-tool
+        # selection, every AtomAction, lifecycle completion, and recovery
+        # progression must fall through to the configured Planner backend.
+        return None
     if isinstance(recovery, dict) and recovery.get("status") == "required":
         required = recovery.get("required_action")
         if (
@@ -2193,8 +2229,26 @@ def _validate_molmopoint_parameters(parameters: JsonDict) -> list[str]:
 def _validate_grasp_pose_estimate_parameters(parameters: JsonDict) -> list[str]:
     errors: list[str] = []
     mode = str(parameters.get("mode") or "targeted").strip().lower()
+    if mode == "frozen_frontier":
+        if parameters.get("model_inference") is not False:
+            errors.append(
+                "grasp_pose_estimate frozen_frontier mode requires model_inference=false."
+            )
+        revision = parameters.get("scene_revision")
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+        ):
+            errors.append(
+                "grasp_pose_estimate frozen_frontier mode requires a non-negative "
+                "scene_revision."
+            )
+        return errors
     if mode not in {"targeted", "scene"}:
-        errors.append("grasp_pose_estimate mode must be targeted or scene.")
+        errors.append(
+            "grasp_pose_estimate mode must be targeted, scene, or frozen_frontier."
+        )
     for key in ("rgb", "depth"):
         value = parameters.get(key)
         if not isinstance(value, str) or not value.strip() or _looks_like_placeholder_path(value):
@@ -2535,7 +2589,10 @@ def _default_tool_planner_system_prompt() -> str:
         "failed call. Selected skills are editable text guidance, not executable macros; "
         "choose every tool call explicitly. Use tool_call::skill_call only to inspect "
         "guidance, and inspect skill_usage.inspection_required before world-mutating "
-        "control. "
+        "control. In planner_mode=agentic_closed_loop, host obligations are constraints, "
+        "not decisions: explicitly choose the next legal tool, copy any required_action "
+        "or required_parameters exactly, inspect the resulting world feedback, and only "
+        "then choose the next action. "
         "Use create_simulator_env and close_simulator_env only when those lifecycle "
         "tools are currently executable; do not bypass their host-owned lifecycle with "
         "ad-hoc environment calls. When active_environment_task is present, continue its "
@@ -2790,6 +2847,13 @@ def _validate_detection_selection_obligation(
             "result with select_sam3_detection before calling another tool; do not "
             "overwrite it with another SAM3 request."
         ]
+    frontier = tool_context.get("grasp_frontier_obligation")
+    if (
+        decision.action == "grasp_pose_estimate"
+        and isinstance(frontier, dict)
+        and decision.parameters == frontier.get("required_parameters")
+    ):
+        return []
     if decision.action not in {"grasp_pose_estimate", "anygrasp", "graspgenx"}:
         return []
     if decision.action == "grasp_pose_estimate":
@@ -2890,6 +2954,14 @@ def _validate_anygrasp_candidate_policy(
         and fallback.get("status") == "required"
         and decision.action == fallback.get("required_tool")
         and decision.parameters == fallback.get("required_parameters")
+    ):
+        return []
+    frontier = tool_context.get("grasp_frontier_obligation")
+    if (
+        isinstance(frontier, dict)
+        and frontier.get("status") == "required"
+        and decision.action == frontier.get("required_tool")
+        and decision.parameters == frontier.get("required_parameters")
     ):
         return []
     status = str(policy.get("status") or "")
@@ -3665,15 +3737,27 @@ def _model_request_context(
     memory_context = memory_context if isinstance(memory_context, dict) else {}
     recent_events = memory_context.get("recent_events")
     recent_events = recent_events if isinstance(recent_events, list) else []
+    planner_mode = str(full_context.get("planner_mode") or "default")
+    agentic_closed_loop = planner_mode == "agentic_closed_loop"
     projected: JsonDict = {
         "schema_version": "openeta.planner_model_context.v2",
         "task": full_context.get("task"),
+        "planner_mode": planner_mode,
         "controller": {
-            "architecture": "host_state_machine_with_typed_model_subtasks",
+            "architecture": (
+                "agentic_closed_loop_with_host_execution_gates"
+                if agentic_closed_loop
+                else "host_state_machine_with_typed_model_subtasks"
+            ),
             "phase": phase,
             "legal_tool_names": legal_tool_names,
             "rule": (
-                "Choose only a listed legal tool. The host owns phase transitions, "
+                "Choose the next tool or terminal response explicitly. When a typed "
+                "obligation supplies required_tool/required_action, use it and copy its "
+                "required parameters exactly. The host owns geometry, candidate joins, "
+                "bounded infrastructure retries, safety proofs, and execution details."
+                if agentic_closed_loop
+                else "Choose only a listed legal tool. The host owns phase transitions, "
                 "candidate joins, retries, safety proofs, and exact execution parameters."
             ),
         },
@@ -3813,6 +3897,7 @@ def _model_request_context(
         projected = {
             "schema_version": "openeta.planner_model_context.v2",
             "task": str(projected.get("task") or "")[:4_000],
+            "planner_mode": planner_mode,
             "controller": projected["controller"],
             "observation": projected["observation"],
             "vision_image_paths": projected["vision_image_paths"][:2],
@@ -4301,6 +4386,7 @@ def _build_tool_context_payload(
     return {
         "schema_version": "openeta.planner_context.v1",
         "task": effective_task,
+        "planner_mode": _scripted_planner_mode(scripted_task) or "default",
         "active_environment_task": memory_context.get("active_environment_task"),
         "environment_start_obligation": _scripted_environment_start_obligation(
             task=scripted_task,
@@ -4371,6 +4457,9 @@ def _build_tool_context_payload(
             recovery=memory_context.get("grasp_estimation_recovery"),
             scene_epoch=memory_context.get("scene_epoch"),
             working_artifacts=working_artifacts,
+        ),
+        "grasp_frontier_obligation": _frozen_grasp_frontier_obligation(
+            memory_context.get("grasp_candidate_policy")
         ),
         "molmopoint_fallback_obligation": _molmopoint_fallback_obligation(
             no_detection=(
@@ -4759,6 +4848,42 @@ def _frame_is_wrist_camera(
         None,
     )
     return camera is not None and _is_wrist_camera(camera)
+
+
+def _frozen_grasp_frontier_obligation(grasp_policy: object) -> JsonDict | None:
+    """Expose a frozen-provider expansion as an explicit agent decision."""
+
+    if not isinstance(grasp_policy, Mapping) or grasp_policy.get(
+        "status"
+    ) != "frozen_frontier_required":
+        return None
+    remaining = grasp_policy.get("frozen_grasp_frontier_remaining_count")
+    revision = grasp_policy.get("planning_scene_revision")
+    if (
+        isinstance(remaining, bool)
+        or not isinstance(remaining, int)
+        or remaining <= 0
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+    ):
+        return None
+    return {
+        "schema_version": "openeta.frozen_grasp_frontier_obligation.v1",
+        "status": "required",
+        "required_tool": "grasp_pose_estimate",
+        "required_parameters": {
+            "mode": "frozen_frontier",
+            "model_inference": False,
+            "scene_revision": revision,
+        },
+        "remaining_candidate_count": remaining,
+        "generation": grasp_policy.get("frozen_grasp_frontier_generation"),
+        "rule": (
+            "Continue the frozen provider output at the next qualification wave; "
+            "do not call SAM3, AnyPlace inference, or a grasp model."
+        ),
+    }
 
 
 def _targeted_grasp_obligation(
@@ -5997,6 +6122,36 @@ def _scripted_semantic_prompts(task: str) -> dict[str, str]:
     return prompts
 
 
+def _scripted_planner_mode(task: str) -> str:
+    """Return the explicitly requested planner mode from one acceptance marker."""
+
+    marker = _SCRIPTED_AUTOMATION_MARKER_RE.search(task)
+    if marker is None:
+        return ""
+    match = _SCRIPTED_PLANNER_MODE_RE.search(marker.group("body"))
+    if match is None:
+        return ""
+    value = match.group("value").strip().lower()
+    return "agentic_closed_loop" if value in {
+        "agentic",
+        "agentic_closed_loop",
+        "model_closed_loop",
+    } else value
+
+
+def _agentic_closed_loop_enabled(tool_context: Mapping[str, object]) -> bool:
+    """Whether planner-owned decisions must reach the configured model backend."""
+
+    explicit = str(tool_context.get("planner_mode") or "").strip().lower()
+    if explicit == "agentic_closed_loop":
+        return True
+    task = str(tool_context.get("task") or "")
+    memory = tool_context.get("memory")
+    if isinstance(memory, Mapping):
+        task = str(memory.get("current_user_request") or task)
+    return _scripted_planner_mode(task) == "agentic_closed_loop"
+
+
 def _attached_object_image_projection(
     *,
     observation: EnvObservation,
@@ -6840,6 +6995,7 @@ def _planner_metadata(
         "tool_context_summary": _tool_context_summary(tool_context),
         "backend": backend.descriptor(),
         "execution_model": "closed_loop_tool_calling",
+        "planner_mode": str(tool_context.get("planner_mode") or "default"),
         "planner_prompt": dict(planner.prompt_metadata),
     }
     if backend_result is not None:

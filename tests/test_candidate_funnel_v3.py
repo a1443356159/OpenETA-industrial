@@ -53,8 +53,8 @@ def _request(candidates, *, purpose="placement", overrides=None):
         "recovery_ik_timeout_s": 0.2,
         "max_ik_concurrency": 8,
         "max_state_validity_concurrency": 8,
-        "grasp_waves": [16, 32, 64],
-        "placement_waves": [12, 24, 48, 96],
+        "grasp_waves": [4, 8, 16, 32, 64],
+        "placement_waves": [4, 8, 16, 32, 96],
         "full_plan_limit": 2,
         "l5_pass_target": 2 if purpose == "grasp" else 1,
     }
@@ -186,6 +186,50 @@ def test_frozen_pair_l5_order_prefers_distinct_grasp_and_goal_cluster():
     ]
 
 
+def test_grasp_minimum_two_stops_after_small_wave_without_recovery_chase():
+    candidates = [_candidate(index) for index in range(8)]
+    for index, candidate in enumerate(candidates):
+        candidate["qualification_stages"][0]["xyz"][0] = 0.4 + index * 0.02
+
+    def plan_only(target, start, timeout, attempts):
+        del start, timeout, attempts
+        candidate_index = int(str(target["name"]).split("_stage", 1)[0][1:])
+        passed = candidate_index < 2
+        return {
+            "ok": passed,
+            "execution_started": False,
+            "trajectory_points": ([{"positions": [0.2]}] if passed else []),
+            "end_joint_state": (
+                {"names": ["j1"], "positions": [0.2]} if passed else None
+            ),
+        }
+
+    response = _engine(plan_only=plan_only).qualify(
+        _request(
+            candidates,
+            purpose="grasp",
+            overrides={
+                "l5_pass_target": 4,
+                "l5_min_pass_target": 2,
+                "grasp_waves": [4, 8],
+            },
+        )
+    )
+
+    assert response["stop_reason"] == (
+        "complete_l5_pass_found_minimum_lookahead"
+    )
+    assert response["selected_candidate_ids"] == ["c0", "c1"]
+    assert len(response["waves"]) == 1
+    assert response["waves"][0]["candidate_count"] == 4
+    assert response["waves"][0]["recovery_layer"] is False
+    assert response["metrics"]["screening_attempt_count"] == 4
+    assert all(
+        row["verdict"] == "NOT_EVALUATED"
+        for row in response["results"][4:]
+    )
+
+
 def test_same_run_frozen_pair_seed_is_used_as_second_fast_seed():
     candidate = _candidate(0)
     candidate[SAME_RUN_QUALIFICATION_SEED_FIELD] = {
@@ -262,12 +306,12 @@ def test_joint_scheduler_covers_two_complete_anyplace_branches():
 
     waves = schedule_candidate_waves(descriptors, purpose="placement")
 
-    assert [wave.cumulative_per_branch for wave in waves] == [12, 24, 48, 96]
-    assert [len(wave.candidates) for wave in waves] == [24, 24, 48, 96]
+    assert [wave.cumulative_per_branch for wave in waves] == [4, 8, 16, 32, 96]
+    assert [len(wave.candidates) for wave in waves] == [8, 8, 16, 32, 128]
     assert sum(len(wave.candidates) for wave in waves) == 192
     assert [
         wave.candidates[0]["candidate"]["source_grasp_id"] for wave in waves
-    ] == ["g0"] * 4
+    ] == ["g0"] * 5
     assert [
         waves[0].candidates[0]["candidate"]["source_grasp_id"],
         waves[0].candidates[1]["candidate"]["source_grasp_id"],
@@ -298,35 +342,39 @@ def test_joint_scheduler_defers_frozen_reserve_branches_until_primary_exhausts()
 
     waves = schedule_candidate_waves(descriptors, purpose="placement")
 
-    assert [wave.frozen_pair_batch_index for wave in waves] == [0] * 4 + [1] * 4
+    assert [wave.frozen_pair_batch_index for wave in waves] == [0] * 5 + [1] * 5
     assert [wave.cumulative_per_branch for wave in waves] == [
-        12,
-        24,
-        48,
+        4,
+        8,
+        16,
+        32,
         96,
-        12,
-        24,
-        48,
+        4,
+        8,
+        16,
+        32,
         96,
     ]
     assert [len(wave.candidates) for wave in waves] == [
-        24,
-        24,
-        48,
-        96,
-        24,
-        24,
-        48,
-        96,
+        8,
+        8,
+        16,
+        32,
+        128,
+        8,
+        8,
+        16,
+        32,
+        128,
     ]
     assert all(
         int(descriptor["candidate"]["source_grasp_id"][1:]) < 2
-        for wave in waves[:4]
+        for wave in waves[:5]
         for descriptor in wave.candidates
     )
     assert all(
         int(descriptor["candidate"]["source_grasp_id"][1:]) >= 2
-        for wave in waves[4:]
+        for wave in waves[5:]
         for descriptor in wave.candidates
     )
 
@@ -411,6 +459,48 @@ def test_parallel_gripper_symmetry_shares_pair_gate_but_keeps_two_evidence_copie
     assert second["pair_legality"]["screening_reused"] is True
     assert second["pair_legality"]["shared_from_candidate_id"] == "c0"
     assert [first["candidate_id"], second["candidate_id"]] == ["c0", "c1"]
+
+
+def test_pair_legality_runs_only_for_the_current_small_deep_wave():
+    candidates = []
+    for goal_index in range(10):
+        for grasp_index in range(2):
+            candidate = _candidate(goal_index * 2 + grasp_index)
+            candidate.update(
+                {
+                    "source_grasp_id": f"g{grasp_index}",
+                    "source_grasp_equivalence_id": f"g{grasp_index}",
+                    "source_object_goal_id": f"p{goal_index}",
+                    "object_goal_pose": {
+                        "frame": "world",
+                        "translation_xyz": [0.48, -0.1, 0.43],
+                        "rotation_matrix": [
+                            [1.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0],
+                            [0.0, 0.0, 1.0],
+                        ],
+                    },
+                }
+            )
+            candidates.append(candidate)
+
+    response = _engine(clone_scene=_placement_scene).qualify(
+        _request(
+            candidates,
+            overrides={
+                "l5_pass_target": 1,
+                "placement_waves": [4, 8, 10],
+            },
+        )
+    )
+
+    assert response["metrics"]["goal_legality_unique_count"] == 10
+    assert response["metrics"]["pair_legality_reached_count"] == 8
+    assert response["metrics"]["pair_legality_evaluation_count"] == 8
+    assert response["metrics"]["pair_legality_pending_count"] == 12
+    assert len(response["waves"]) == 1
+    assert response["waves"][0]["candidate_count"] == 8
+    assert response["waves"][0]["deep_candidate_count"] == 8
 
 
 def test_frozen_goal_binds_anyplace_motion_to_scene_box_not_pointcloud_centroid():

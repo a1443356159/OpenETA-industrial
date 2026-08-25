@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import agent.cli.batch_eval as batch_eval
 import agent.cli.openeta_cli as cli_module
 import pytest
+from adapter.protocol import EnvObservation, RobotState
 from agent.backends.planner import StaticPlannerBackend
 from agent.backends.provider_config import PlannerProviderConfig
 from agent.cli.batch_eval import build_mcp_episode_worker_factory
@@ -15,7 +19,9 @@ from agent.runtime.runtime_assembly import (
     REMOTE_PLACEHOLDER_TOOLS,
     RuntimeAssemblyConfig,
     RuntimeMcpEndpoints,
+    _FrozenGoalPairCoordinator,
     _build_sam3_selection_reviewer,
+    _qualifying_handler,
     assemble_runtime,
     resolve_runtime_mcp_endpoints,
     runtime_grasp_backend_order_from_env,
@@ -25,6 +31,11 @@ from agent.runtime.session_workspace import SessionWorkspace
 from agent.runtime.supervision import SupervisionPolicy
 from agent.tools.sim_mcp import SimulatorMcpToolProxyConfig
 from agent.tools.web_access import WebAccessConfig
+from agent.tools.registry import (
+    ToolExecutionContext,
+    ToolResult,
+    build_default_tool_registry,
+)
 
 
 class FakeSimulatorTransport:
@@ -84,6 +95,165 @@ def test_sam3_selection_reviewer_has_one_shared_bounded_provider_budget() -> Non
             "max_attempts": 1,
         }
     ]
+
+
+def test_frozen_grasp_frontier_retains_only_not_evaluated_provider_tail(
+    tmp_path,
+) -> None:
+    artifact = tmp_path / "qualification.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {"candidate_id": "g0", "verdict": "PASS"},
+                    {"candidate_id": "g1", "verdict": "FAIL"},
+                    {"candidate_id": "g2", "verdict": "NOT_EVALUATED"},
+                    {"candidate_id": "g3", "verdict": "NOT_EVALUATED"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    coordinator = _FrozenGoalPairCoordinator(qualifier=SimpleNamespace())
+    provider_result = ToolResult(
+        True,
+        "provider output",
+        {
+            "backend": "graspgenx_mcp",
+            "grasp_candidates": [{"id": f"g{index}"} for index in range(4)],
+        },
+    )
+    qualified_result = ToolResult(
+        True,
+        "qualified",
+        {
+            "qualification_profile": "fast_v3",
+            "qualification_stop_reason": "complete_l5_pass_found",
+            "qualification_artifact": {"path": str(artifact)},
+            "grasp_candidates": [{"id": "g0"}],
+        },
+    )
+
+    coordinator.update_grasp_frontier(
+        provider_result,
+        qualified_result,
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+    expanded = coordinator.prepare_grasp_frontier_expansion(
+        scene_epoch=2,
+        planning_scene_revision=4,
+    )
+
+    assert [
+        candidate["id"] for candidate in expanded.details["grasp_candidates"]
+    ] == ["g2", "g3"]
+    assert expanded.details["model_inference_invoked"] is False
+    assert qualified_result.details["frozen_grasp_frontier_remaining_count"] == 2
+    assert coordinator.scene_epoch == 2
+
+
+def test_frozen_grasp_frontier_expansion_bypasses_provider_inference() -> None:
+    provider_calls: list[dict] = []
+    qualifier_calls: list[dict] = []
+    coordinator_calls: list[tuple[str, int, int]] = []
+
+    class Qualifier:
+        def qualify_result(self, result, **kwargs):
+            qualifier_calls.append(dict(kwargs))
+            result.details["qualification_profile"] = "fast_v3"
+            result.details["qualification_stop_reason"] = (
+                "complete_l5_pass_found"
+            )
+            return result
+
+    class Coordinator:
+        object_goals = [{"id": "p0"}]
+        grasp_branch_limit = 2
+
+        def prepare_grasp_frontier_expansion(
+            self, *, scene_epoch, planning_scene_revision
+        ):
+            coordinator_calls.append(
+                ("prepare", scene_epoch, planning_scene_revision)
+            )
+            return ToolResult(
+                True,
+                "frozen",
+                {
+                    "grasp_candidates": [{"id": "g2"}],
+                    "model_inference_invoked": False,
+                    "scene_revision": planning_scene_revision,
+                },
+            )
+
+        def update_grasp_frontier(
+            self,
+            _provider_result,
+            _qualified_result,
+            *,
+            scene_epoch,
+            planning_scene_revision,
+        ):
+            coordinator_calls.append(
+                ("update", scene_epoch, planning_scene_revision)
+            )
+
+        def filter_grasps(
+            self,
+            result,
+            *,
+            scene_epoch,
+            planning_scene_revision,
+            source,
+        ):
+            del source
+            coordinator_calls.append(
+                ("filter", scene_epoch, planning_scene_revision)
+            )
+            return result
+
+    def provider(_context):
+        provider_calls.append({"called": True})
+        raise AssertionError("frozen frontier must not invoke the grasp provider")
+
+    wrapped = _qualifying_handler(
+        provider,
+        Qualifier(),
+        purpose="grasp",
+        frozen_pair_coordinator=Coordinator(),
+    )
+    context = ToolExecutionContext(
+        name="grasp_pose_estimate",
+        spec=build_default_tool_registry().get("grasp_pose_estimate"),
+        parameters={
+            "mode": "frozen_frontier",
+            "model_inference": False,
+            "scene_revision": 7,
+        },
+        observation=EnvObservation(
+            task="pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"planning_scene_revision": 7},
+        ),
+        metadata={
+            "supervision_context": {"memory": {"scene_epoch": 3}}
+        },
+    )
+
+    result = wrapped(context)
+
+    assert result.success
+    assert result.details["model_inference_invoked"] is False
+    assert provider_calls == []
+    assert coordinator_calls == [
+        ("prepare", 3, 7),
+        ("update", 3, 7),
+        ("filter", 3, 7),
+    ]
+    assert qualifier_calls[0]["l5_pass_target"] == 2
+    assert qualifier_calls[0]["l5_min_pass_target"] == 2
 
 
 def test_tui_and_batch_profiles_share_runtime_contracts(monkeypatch, tmp_path) -> None:

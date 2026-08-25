@@ -451,6 +451,48 @@ def test_exhausted_embedded_review_does_not_start_second_retry_layer() -> None:
     )
 
 
+def test_isolated_selection_charges_provider_usage_to_episode_action() -> None:
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(lambda _request: pytest.fail("general planner must not run")),
+        sam3_selection_reviewer=lambda _request: {
+            "decision": "select",
+            "detection_id": "detection_000",
+            "confidence": 0.9,
+            "reason": "The tile covers the complete red block.",
+            "target_geometry_family": "boxed_item",
+            "provider": "fixture-provider",
+            "model": "fixture-vlm",
+            "provider_details": {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                },
+                "usage_source": "provider",
+            },
+        },
+    )
+
+    decision = planner._plan_isolated_sam3_selection(
+        {
+            "result_id": "sam3-result-usage",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red block",
+            "candidates": [{"id": "detection_000"}],
+            "selection_bundle": {
+                "original_image_ref": "/tmp/original.png",
+                "contact_sheet_ref": "/tmp/contact-sheet.png",
+            },
+        },
+        tool_context={"planner_mode": "agentic_closed_loop"},
+    )
+
+    assert decision.metadata["backend_usage"]["total_tokens"] == 120
+    assert decision.metadata["backend_usage_sources"] == {"provider": 1}
+    assert decision.metadata["backend_provider"] == "fixture-provider"
+    assert decision.metadata["backend_model"] == "fixture-vlm"
+
+
 def test_bounded_review_failure_keeps_candidates_and_retry_evidence() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick the red block")

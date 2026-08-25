@@ -29,8 +29,8 @@ SOLVER_PROFILES = (
 DEFAULT_QUALIFICATION_PROFILE = "legacy"
 DEFAULT_SOLVER_PROFILE = "auto"
 DEFAULT_FAST_BEAM_WIDTH = 2
-DEFAULT_GRASP_WAVES = (16, 32, 64)
-DEFAULT_PLACEMENT_WAVES = (12, 24, 48, 96)
+DEFAULT_GRASP_WAVES = (4, 8, 16, 32, 64)
+DEFAULT_PLACEMENT_WAVES = (4, 8, 16, 32, 96)
 DEFAULT_QUALIFICATION_MAX_CONCURRENCY = 8
 DEFAULT_FAST_IK_SEED_COUNT = 2
 DEFAULT_RECOVERY_IK_SEED_COUNT = 6
@@ -193,7 +193,7 @@ class CandidateFunnelConfig:
         placement_waves_value = self.placement_waves
         placement_uses_default = placement_waves_value == DEFAULT_PLACEMENT_WAVES or (
             isinstance(placement_waves_value, str)
-            and placement_waves_value.replace(" ", "") == "12,24,48,96"
+            and placement_waves_value.replace(" ", "") == "4,8,16,32,96"
         )
         if placement_uses_default and self.anyplace_raw_pool_size != DEFAULT_ANYPLACE_RAW_POOL_SIZE:
             placement_waves_value = tuple(
