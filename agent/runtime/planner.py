@@ -81,6 +81,11 @@ _PLACEMENT_RELEASE_Z_TOLERANCE_M = 0.01
 _PLACEMENT_POST_RELEASE_RETREAT_M = 0.10
 _REFERENCE_VERIFIED_SAM3_MIN_SCORE = 0.90
 _REFERENCE_VERIFIED_SAM3_MIN_MARGIN = 0.20
+_SEMANTIC_PROMPT_REDUNDANT_SHAPE_WORDS = {
+    "rectangular",
+    "square",
+    "cylindrical",
+}
 _GRASP_FALLBACK_BACKEND_ORDER = ("anygrasp", "contact_graspnet", "graspgenx")
 _MOLMOPOINT_FALLBACK_MAX_ATTEMPTS = 2
 _CAMERA_ROLE_PREFERENCE = {
@@ -3537,9 +3542,17 @@ def _canonicalize_host_parameters(
                 "canonical": semantic_role,
             }
         )
+    mode = str(
+        parameters.get("mode")
+        or ("points" if parameters.get("positive_points") is not None else "text")
+    ).strip().lower()
+    prompt = str(parameters.get("prompt") or "").strip()
     semantic_target = str(
-        parameters.get("semantic_target")
-        or parameters.get("prompt")
+        (
+            prompt
+            if mode == "text" and prompt
+            else parameters.get("semantic_target")
+        )
         or obligation.get("semantic_target")
         or ""
     ).strip()
@@ -3549,7 +3562,11 @@ def _canonicalize_host_parameters(
             {
                 "field": "semantic_target",
                 "tool": "sam3",
-                "reason": "preserve_semantics_across_text_and_point_modes",
+                "reason": (
+                    "bind_text_semantics_to_exact_visual_prompt"
+                    if mode == "text" and prompt
+                    else "preserve_semantics_across_text_and_point_modes"
+                ),
                 "canonical": semantic_target,
             }
         )
@@ -6196,6 +6213,48 @@ def _semantic_perception_obligation(
         "placement_object",
         "placement_region",
     }:
+        simplified_prompt = (
+            _simplify_semantic_text_prompt(prompt)
+            if semantic_role == "placement_object"
+            else ""
+        )
+        simplified_attempted = any(
+            str(attempt.get("target_prompt") or "").strip().lower()
+            == simplified_prompt.lower()
+            for attempt in role_attempts
+        )
+        if simplified_prompt and not simplified_attempted:
+            simplified_source = str(preferred_rgb.get("path") or source_image)
+            simplified_identity = _sam3_request_identity(
+                observation=observation,
+                scene_epoch=scene_epoch,
+                source_image=simplified_source,
+                semantic_role=semantic_role,
+                semantic_target=simplified_prompt,
+                mode="text",
+                prompt=simplified_prompt,
+                points=[],
+                roi_bbox_xyxy=None,
+            )
+            return {
+                **base,
+                "status": "required",
+                "semantic_target": simplified_prompt,
+                "preferred_image": simplified_source,
+                "perception_bundle_id": simplified_identity["perception_bundle_id"],
+                "observation_id": simplified_identity["observation_id"],
+                "required_tool": "sam3",
+                "required_parameters": {
+                    "mode": "text",
+                    "image": simplified_source,
+                    "prompt": simplified_prompt,
+                    "semantic_role": semantic_role,
+                    "semantic_target": simplified_prompt,
+                    **simplified_identity,
+                },
+                "fallback": "simplified_text_after_bounded_exact_views",
+                "canonical_semantic_target": prompt,
+            }
         failure = memory_context.get("reference_localization_failure")
         failed_molmopoint_attempts = (
             _coerce_nonnegative_int(failure.get("molmopoint_attempts"), default=0)
@@ -6259,6 +6318,21 @@ def _semantic_perception_obligation(
             },
         }
     return base
+
+
+def _simplify_semantic_text_prompt(prompt: str) -> str:
+    """Return one conservative equivalent phrase for a failed text query."""
+
+    tokens = prompt.split()
+    simplified = [
+        token
+        for token in tokens
+        if token.lower().strip(".,;:()[]{}")
+        not in _SEMANTIC_PROMPT_REDUNDANT_SHAPE_WORDS
+    ]
+    if len(simplified) < 2 or simplified == tokens:
+        return ""
+    return " ".join(simplified)
 
 
 def _semantic_detection_is_current(

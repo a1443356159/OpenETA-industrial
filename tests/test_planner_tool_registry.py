@@ -29,6 +29,7 @@ from agent.runtime.planner import (
     PlannerDecision,
     PlannerContextConfig,
     ToolCallingPlanner,
+    _canonicalize_host_parameters,
     _default_tool_planner_system_prompt,
     _host_obligation_decision,
     _matching_depth_enhancement,
@@ -68,6 +69,38 @@ def _observation() -> EnvObservation:
         robot=RobotState(end_effector_pose={"xyz": [0.0, 0.0, 0.5]}),
         objects=[{"name": "cube"}],
         metadata={"step_idx": 1},
+    )
+
+
+def test_text_sam3_canonicalizes_semantic_alias_to_visual_prompt() -> None:
+    decision = PlannerDecision(
+        action_type="tool_call",
+        action="sam3",
+        parameters={
+            "mode": "text",
+            "image": "/tmp/top.png",
+            "prompt": "red rectangular block",
+            "semantic_role": "grasp_target",
+            "semantic_target": "target_object",
+        },
+    )
+    canonicalizations = _canonicalize_host_parameters(
+        decision,
+        tool_context={
+            "semantic_perception_obligation": {
+                "semantic_role": "grasp_target",
+                "semantic_target": None,
+                "scene_epoch": 1,
+                "observation_id": "observation-1",
+                "preferred_image": "/tmp/top.png",
+            }
+        },
+    )
+
+    assert decision.parameters["semantic_target"] == "red rectangular block"
+    assert any(
+        item["reason"] == "bind_text_semantics_to_exact_visual_prompt"
+        for item in canonicalizations
     )
 
 

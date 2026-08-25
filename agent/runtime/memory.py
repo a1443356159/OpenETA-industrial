@@ -1892,11 +1892,15 @@ class AgentMemory:
                 or parameters.get("semantic_role_source")
                 or ""
             ).strip()
+            # The actual text prompt is the canonical visual phrase.  A model
+            # may also emit an abstract semantic_target such as
+            # ``target_object``; never let that alias replace the phrase used
+            # successfully by the segmenter and required by later views.
             target_prompt = (
-                outputs.get("semantic_target")
-                or parameters.get("semantic_target")
-                or outputs.get("prompt")
+                outputs.get("prompt")
                 or parameters.get("prompt")
+                or outputs.get("semantic_target")
+                or parameters.get("semantic_target")
             )
             previous_no_detection = self.sam3_no_detection(
                 semantic_role if semantic_role in SAM3_SEMANTIC_ROLES else ""

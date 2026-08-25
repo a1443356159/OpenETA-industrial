@@ -814,7 +814,7 @@ def test_sam3_handler_runs_typed_selection_review_inside_same_tool_call(
                 "image": str(FIXTURE_IMAGE),
                 "prompt": "green placement region",
                 "semantic_role": "placement_region",
-                "semantic_target": "green placement region",
+                "semantic_target": "placement_region",
                 "perception_bundle_id": "bundle-9",
                 "observation_id": "observation-9",
                 "scene_epoch": 3,
@@ -827,6 +827,7 @@ def test_sam3_handler_runs_typed_selection_review_inside_same_tool_call(
     assert len(review_requests) == 1
     assert review_requests[0]["semantic_role"] == "placement_region"
     assert review_requests[0]["semantic_target"] == "green placement region"
+    assert review_requests[0]["target_prompt"] == "green placement region"
     assert review_requests[0]["perception_bundle_id"] == "bundle-9"
     assert result.details["selection_required"] is False
     assert result.details["selection_review"]["isolated_context"] is True

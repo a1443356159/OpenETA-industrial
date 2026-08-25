@@ -533,7 +533,7 @@ def test_embedded_selection_review_updates_only_its_semantic_role() -> None:
         "prompt": "green placement region",
         "semantic_role": "placement_region",
         "semantic_role_source": "explicit",
-        "semantic_target": "green placement region",
+        "semantic_target": "placement_region",
         "perception_bundle_id": "bundle-current",
         "observation_id": "observation-7",
         "scene_epoch": 0,
@@ -589,6 +589,9 @@ def test_embedded_selection_review_updates_only_its_semantic_role() -> None:
     assert memory.selected_sam3_detection()["id"] == "grasp-mask"
     assert memory.placement_object_detection()["id"] == "held-object-mask"
     assert memory.placement_region_detection()["id"] == "detection_000"
+    assert memory.placement_region_detection()["target_prompt"] == (
+        "green placement region"
+    )
     assert memory.placement_region_detection()["perception_bundle_id"] == "bundle-current"
     assert memory.sam3_role_state("placement_region")["status"] == "selected"
     duplicate_error = memory.detection_selection_gate_error(
@@ -670,7 +673,7 @@ def test_model_projection_bounds_context_without_deleting_host_evidence() -> Non
     )
 
 
-def test_placement_object_fallback_tries_each_view_once_then_points() -> None:
+def test_placement_object_fallback_tries_views_then_one_simplified_prompt() -> None:
     observation = EnvObservation(
         task="pick and place",
         cameras=[],
@@ -728,6 +731,26 @@ def test_placement_object_fallback_tries_each_view_once_then_points() -> None:
             **top_failure,
             "source_image": "/tmp/wrist.png",
             "attempt_id": "wrist-text",
+        }
+    )
+    text_fallback = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=camera_artifacts,
+        memory_context=two_failure_context,
+    )
+
+    assert text_fallback["required_tool"] == "sam3"
+    assert text_fallback["required_parameters"]["image"] == "/tmp/top.png"
+    assert text_fallback["required_parameters"]["prompt"] == "red block"
+    assert text_fallback["fallback"] == (
+        "simplified_text_after_bounded_exact_views"
+    )
+
+    two_failure_context["sam3_semantic_state"]["attempts"].append(
+        {
+            **top_failure,
+            "target_prompt": "red block",
+            "attempt_id": "top-simplified-text",
         }
     )
     point_fallback = _semantic_perception_obligation(

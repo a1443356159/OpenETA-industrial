@@ -589,7 +589,7 @@ def build_sam3_handler(
                         {
                             "result_id": details.get("result_id"),
                             "semantic_role": semantic_metadata["semantic_role"],
-                            "target_prompt": semantic_metadata["semantic_target"],
+                            "target_prompt": prompt,
                             "source_image": image,
                             "candidates": [
                                 dict(candidate)
@@ -709,7 +709,11 @@ def _sam3_semantic_metadata(
         else "grasp_target"
     )
     role_source = "explicit" if supplied_role == role else "legacy_prompt_inference"
-    semantic_target = _string_param(parameters.get("semantic_target")) or prompt
+    semantic_target = (
+        prompt
+        if mode == "text" and prompt
+        else _string_param(parameters.get("semantic_target")) or prompt
+    )
     observation_metadata = getattr(observation, "metadata", None)
     observation_metadata = (
         observation_metadata if isinstance(observation_metadata, Mapping) else {}
