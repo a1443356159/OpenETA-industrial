@@ -6480,6 +6480,62 @@ def test_anyplace_host_dispatches_exact_independent_observation_packet() -> None
     assert decision.metadata["execution_model"] == "host_obligation_dispatch"
 
 
+def test_attached_grasp_requalifies_frozen_anyplace_pool_without_vlm() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cube and place it in basket")
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "status": "completed",
+            "stage": "attached",
+            "candidate_id": "grasp_000",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "attachment_gate",
+        {
+            "status": "resolved",
+            "verdict": "PASS",
+            "candidate_id": "grasp_000",
+            "planning_scene_revision": 2,
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "frozen_placement_goal_pool",
+        {
+            "schema_version": "openeta.frozen_placement_goal_pool.v1",
+            "status": "ready",
+            "goal_count": 96,
+            "execution_started": False,
+        },
+        source="test",
+    )
+    planner = ToolCallingPlanner(
+        StaticPlannerBackend(
+            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
+        )
+    )
+
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("anyplace"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "anyplace"
+    assert decision.parameters == {
+        "reuse_frozen_goal_pool": True,
+        "scene_revision": 2,
+    }
+    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
+    assert decision.metadata["host_obligation"]["schema_version"] == (
+        "openeta.placement_obligation.v3"
+    )
+
+
 def test_anyplace_host_does_not_repeat_a_deterministic_failure() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")

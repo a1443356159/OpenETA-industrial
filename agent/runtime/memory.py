@@ -4305,6 +4305,12 @@ class AgentMemory:
         candidate_id = (
             str(active.get("id") or "") if isinstance(active, dict) else ""
         )
+        execution = self.grasp_execution()
+        if (
+            isinstance(execution, dict)
+            and str(execution.get("candidate_id") or "") == candidate_id
+        ):
+            return False
         compiled_by_id = policy.get("host_candidate_compilations")
         compiled = (
             compiled_by_id.get(candidate_id)
@@ -6974,11 +6980,16 @@ def _trusted_native_attachment_proof(
     attached = receipt.get("detachable_joint")
     attachment_transform = receipt.get("attachment_transform")
     contact_gate = receipt.get("native_contact_gate")
+    if not isinstance(contact_gate, dict) and isinstance(proof, dict):
+        proof_evidence = proof.get("evidence")
+        contact_gate = (
+            proof_evidence.get("gate")
+            if isinstance(proof_evidence, dict)
+            else None
+        )
     reasons: list[str] = []
     if receipt.get("ok") is not True:
         reasons.append("native_motion_not_successful")
-    if str(receipt.get("motion_outcome") or "") != "completed":
-        reasons.append("native_motion_completion_missing")
     if not isinstance(proof, dict) or proof.get("schema_version") != NATIVE_GRASP_SCHEMA_VERSION:
         reasons.append("native_proof_schema_mismatch")
     if isinstance(proof, dict) and (
@@ -6997,6 +7008,7 @@ def _trusted_native_attachment_proof(
         and contact_gate.get("reason_code") == "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED"
         and isinstance(contact_gate.get("evidence"), dict)
         and contact_gate["evidence"].get("source") == "gazebo_native_contacts"
+        and contact_gate["evidence"].get("target_id") == "target_object"
     ):
         reasons.append("native_bilateral_contact_proof_missing")
     if not _valid_attachment_transform(attachment_transform):

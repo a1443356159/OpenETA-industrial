@@ -533,6 +533,80 @@ def test_native_attachment_proof_requires_exact_identity_and_revision() -> None:
     assert wrong_target[:2] == (False, "native_proof_target_mismatch")
 
 
+def test_native_attachment_proof_accepts_object_blocked_close_receipt() -> None:
+    receipt = _native_proof_receipt()
+    contact_gate = receipt.pop("native_contact_gate")
+    receipt.pop("motion_outcome")
+    receipt.update(
+        {
+            "reached_goal": False,
+            "stalled": True,
+            "terminal_status": "not_succeeded",
+            "physical_verification": {
+                **receipt["physical_verification"],
+                "evidence": {"gate": contact_gate},
+            },
+        }
+    )
+
+    trusted = memory_module._trusted_native_attachment_proof(
+        receipt,
+        planning_scene_revision=2,
+    )
+
+    assert trusted[0] is True
+    assert trusted[1] == "trusted_native_contact_attach_ack"
+    assert trusted[2]["native_contact_gate"] == contact_gate
+
+
+def test_object_blocked_close_completes_portable_attachment() -> None:
+    memory = _memory_with_candidates()
+    compiled = _compiled(memory)
+    memory.add_action(
+        _tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled)
+    )
+    policy = memory.grasp_candidate_policy()
+    policy["status"] = "accepted"
+    memory.save_fact("grasp_candidate_policy", policy, source="test")
+    execution = memory.grasp_execution()
+    execution.update(
+        {
+            "stage": "close",
+            "required_action": {
+                "name": "gripper_control",
+                "parameters": {"position": 0},
+            },
+        }
+    )
+    memory.save_fact("grasp_execution", execution, source="test")
+    receipt = _native_proof_receipt()
+    contact_gate = receipt.pop("native_contact_gate")
+    receipt.pop("motion_outcome")
+    receipt.update(
+        {
+            "reached_goal": False,
+            "stalled": True,
+            "physical_verification": {
+                **receipt["physical_verification"],
+                "evidence": {"gate": contact_gate},
+            },
+        }
+    )
+
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 0},
+            environment_receipt=receipt,
+        )
+    )
+
+    assert memory.attachment_gate()["verdict"] == "PASS"
+    assert memory.attachment_gate()["status"] == "resolved"
+    assert memory.grasp_execution()["status"] == "completed"
+    assert memory.grasp_execution()["stage"] == "attached"
+
+
 def _memory_with_candidates() -> AgentMemory:
     memory = AgentMemory()
     memory.start_session(task="pick up alphabat soup and place it into basket")
