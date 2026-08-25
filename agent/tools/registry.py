@@ -959,6 +959,25 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             ),
             parameters={
                 "mode": "text | points; defaults to text for backward compatibility",
+                "semantic_role": (
+                    "required planner role: grasp_target | placement_object | "
+                    "placement_region; point prompts must preserve the role of the "
+                    "semantic target they refine"
+                ),
+                "semantic_target": (
+                    "required semantic target phrase for mode=points; for mode=text "
+                    "it defaults to prompt"
+                ),
+                "perception_bundle_id": (
+                    "optional host-bound id shared only by roles from the same scene "
+                    "observation; never invent a cross-observation join"
+                ),
+                "observation_id": "optional host-bound current observation id",
+                "scene_epoch": "optional host-bound non-negative scene epoch",
+                "attempt_id": (
+                    "optional deterministic host-bound attempt id; identical role, "
+                    "image, mode, and prompt inputs must reuse the same id"
+                ),
                 "image": (
                     "exact local RGB image path (preferred), or a frame id present in the "
                     "current observation's image_artifacts"

@@ -824,13 +824,46 @@ def _planner_user_content(
     if not config.enable_vision:
         return text, []
     explicit_paths = request.tool_context.get("vision_image_paths")
-    paths = (
+    generic_paths = (
         [value for value in explicit_paths if isinstance(value, str) and value]
         if isinstance(explicit_paths, list)
         else []
     )
+    selection = request.tool_context.get("selection_obligation")
+    # A mask-selection call is a typed visual subtask. Its original RGB and
+    # labelled contact sheet must occupy the limited image slots before any
+    # generic top/wrist scene attachments.
+    paths: list[str] = [] if isinstance(selection, dict) else list(generic_paths)
     localization = request.tool_context.get("reference_localization_obligation")
-    if isinstance(localization, dict):
+    if isinstance(selection, dict):
+        bundle = selection.get("selection_bundle")
+        if not isinstance(bundle, dict):
+            bundle = {}
+        for field in ("original_image_ref", "contact_sheet_ref"):
+            value = bundle.get(field)
+            if isinstance(value, str) and value and value not in paths:
+                paths.append(value)
+        if len(paths) < config.max_vision_images:
+            candidates = bundle.get("candidates")
+            if not isinstance(candidates, list):
+                candidates = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                for field in ("overlay_ref", "crop_ref"):
+                    value = candidate.get(field)
+                    if isinstance(value, str) and value and value not in paths:
+                        paths.append(value)
+                    if len(paths) >= config.max_vision_images:
+                        break
+                if len(paths) >= config.max_vision_images:
+                    break
+        for value in generic_paths:
+            if len(paths) >= config.max_vision_images:
+                break
+            if value not in paths:
+                paths.append(value)
+    elif isinstance(localization, dict):
         if localization.get("required_parameter") != "positive_points":
             scene_image = localization.get("scene_image")
             if isinstance(scene_image, str) and scene_image and scene_image not in paths:
@@ -840,31 +873,6 @@ def _planner_user_content(
                 for value in references:
                     if isinstance(value, str) and value and value not in paths:
                         paths.append(value)
-                    if len(paths) >= config.max_vision_images:
-                        break
-    else:
-        obligation = request.tool_context.get("selection_obligation")
-        if isinstance(obligation, dict):
-            bundle = obligation.get("selection_bundle")
-            if not isinstance(bundle, dict):
-                bundle = {}
-            for field in ("original_image_ref", "contact_sheet_ref"):
-                value = bundle.get(field)
-                if isinstance(value, str) and value and value not in paths:
-                    paths.append(value)
-            if len(paths) < config.max_vision_images:
-                candidates = bundle.get("candidates")
-                if not isinstance(candidates, list):
-                    candidates = []
-                for candidate in candidates:
-                    if not isinstance(candidate, dict):
-                        continue
-                    for field in ("overlay_ref", "crop_ref"):
-                        value = candidate.get(field)
-                        if isinstance(value, str) and value and value not in paths:
-                            paths.append(value)
-                        if len(paths) >= config.max_vision_images:
-                            break
                     if len(paths) >= config.max_vision_images:
                         break
     if not paths:

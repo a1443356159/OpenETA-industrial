@@ -49,6 +49,10 @@ from agent.runtime.self_improvement import (
     SelfImprovementReviewer,
     SkillReviewProposalStore,
 )
+from agent.runtime.sam3_selection import (
+    BackendSam3SelectionReviewer,
+    SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
+)
 from agent.runtime.session_workspace import SessionWorkspace
 from agent.runtime.skill_authoring import (
     SKILL_AUTHORING_MAX_OUTPUT_TOKENS,
@@ -822,6 +826,12 @@ def bind_runtime_perception_tools(
                     session_id_provider=lambda: proxy_config.session_id,
                     response_callback=oracle_mcp_evidence.record,
                 ),
+                selection_reviewer=BackendSam3SelectionReviewer(
+                    backend_factory(
+                        max_tokens=SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
+                        max_vision_images=2,
+                    )
+                ).review,
                 tool_name="oracle_perceive",
                 output_root=artifact_root / "oracle_perceive_images",
                 result_output_root=artifact_root / "oracle_perceive_results",
@@ -845,6 +855,12 @@ def bind_runtime_perception_tools(
                     url=endpoints.sam3_url,
                     tool_name="segment_points",
                 ),
+                selection_reviewer=BackendSam3SelectionReviewer(
+                    backend_factory(
+                        max_tokens=SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
+                        max_vision_images=2,
+                    )
+                ).review,
                 depth_prior_prefetch=(
                     depth_prefetch.prefetch_for_sam3
                     if depth_prefetch is not None

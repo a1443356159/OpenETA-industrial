@@ -755,6 +755,89 @@ def test_sam3_multiple_detections_require_explicit_selection(tmp_path: Path) -> 
     ]["mask_ref"]
 
 
+def test_sam3_handler_runs_typed_selection_review_inside_same_tool_call(
+    tmp_path: Path,
+) -> None:
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+    mcp_requests: list[dict] = []
+    review_requests: list[dict] = []
+
+    def segment(request: dict) -> dict:
+        mcp_requests.append(deepcopy(request))
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 2,
+                "detections": [
+                    {
+                        "label": "region-a",
+                        "score": 0.9,
+                        "bbox_xyxy": [10, 10, 20, 20],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 100,
+                    },
+                    {
+                        "label": "region-b",
+                        "score": 0.8,
+                        "bbox_xyxy": [30, 30, 40, 40],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 90,
+                    },
+                ],
+                "artifacts": [],
+            },
+        }
+
+    def review(request: dict) -> dict:
+        review_requests.append(deepcopy(request))
+        return {
+            "schema_version": "openeta.sam3_selection_review.v1",
+            "decision": "select",
+            "detection_id": "detection_001",
+            "confidence": 0.93,
+            "reason": "The second tile is the complete placement region.",
+            "target_geometry_family": "unknown",
+            "selection_source": "isolated_main_vlm",
+            "isolated_context": True,
+        }
+
+    handler = build_sam3_handler(
+        segment,
+        selection_reviewer=review,
+        output_root=tmp_path,
+    )
+    result = handler(
+        _context(
+            {
+                "mode": "text",
+                "image": str(FIXTURE_IMAGE),
+                "prompt": "green placement region",
+                "semantic_role": "placement_region",
+                "semantic_target": "green placement region",
+                "perception_bundle_id": "bundle-9",
+                "observation_id": "observation-9",
+                "scene_epoch": 3,
+                "attempt_id": "attempt-9",
+            }
+        )
+    )
+
+    assert result.success is True
+    assert len(review_requests) == 1
+    assert review_requests[0]["semantic_role"] == "placement_region"
+    assert review_requests[0]["semantic_target"] == "green placement region"
+    assert review_requests[0]["perception_bundle_id"] == "bundle-9"
+    assert result.details["selection_required"] is False
+    assert result.details["selection_review"]["isolated_context"] is True
+    assert result.details["selected_detection"]["id"] == "detection_001"
+    assert result.details["selected_detection"]["selection_source"] == (
+        "isolated_main_vlm"
+    )
+    assert result.details["semantic_role"] == "placement_region"
+    assert result.details["perception_bundle_id"] == "bundle-9"
+    assert set(mcp_requests[0]) == {"image_base64", "image_format", "prompt"}
+
+
 def test_sam3_handler_can_split_json_results_and_images(tmp_path: Path) -> None:
     def segment(_request: dict) -> dict:
         return {

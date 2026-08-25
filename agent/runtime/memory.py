@@ -37,6 +37,10 @@ REFERENCE_LOCALIZATION_FAILURE_KEY = "reference_localization_failure"
 TARGET_LOCALIZATION_BUDGET_KEY = "target_localization_budget"
 TARGET_ASSET_REFERENCE_KEY = "target_asset_reference"
 SAM3_NO_DETECTION_KEY = "sam3_no_detection"
+SAM3_SEMANTIC_STATE_KEY = "sam3_semantic_state"
+SAM3_SEMANTIC_ROLES = frozenset(
+    {"grasp_target", "placement_object", "placement_region"}
+)
 GRASP_CANDIDATE_POLICY_KEY = "grasp_candidate_policy"
 LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY = "anygrasp_candidate_policy"
 GRASP_REESTIMATION_KEY = "grasp_reestimation"
@@ -737,8 +741,31 @@ class AgentMemory:
     def reference_localization_failure(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(REFERENCE_LOCALIZATION_FAILURE_KEY))
 
-    def sam3_no_detection(self) -> JsonDict | None:
+    def sam3_no_detection(self, semantic_role: str = "") -> JsonDict | None:
+        role = semantic_role.strip().lower()
+        if role in SAM3_SEMANTIC_ROLES:
+            role_state = self.sam3_role_state(role)
+            value = role_state.get("no_detection") if isinstance(role_state, dict) else None
+            return dict(value) if isinstance(value, dict) else None
         return _memory_fact_value(self.facts.get(SAM3_NO_DETECTION_KEY))
+
+    def sam3_semantic_state(self) -> JsonDict:
+        value = _memory_fact_value(self.facts.get(SAM3_SEMANTIC_STATE_KEY))
+        if not isinstance(value, dict):
+            return {
+                "schema_version": "openeta.sam3_semantic_state.v1",
+                "roles": {},
+                "attempts": [],
+            }
+        return dict(value)
+
+    def sam3_role_state(self, semantic_role: str) -> JsonDict | None:
+        role = semantic_role.strip().lower()
+        if role not in SAM3_SEMANTIC_ROLES:
+            return None
+        roles = self.sam3_semantic_state().get("roles")
+        value = roles.get(role) if isinstance(roles, dict) else None
+        return dict(value) if isinstance(value, dict) else None
 
     def grasp_candidate_policy(self) -> JsonDict | None:
         return _memory_fact_value(
@@ -1007,7 +1034,7 @@ class AgentMemory:
         *,
         source: str,
     ) -> None:
-        """Retain only object/region masks from the same placement image."""
+        """Retain only object/region masks from one fresh perception bundle."""
 
         other_key = (
             PLACEMENT_REGION_DETECTION_KEY
@@ -1016,11 +1043,24 @@ class AgentMemory:
         )
         other = _memory_fact_value(self.facts.get(other_key))
         source_image = detection.get("source_image")
+        bundle_id = str(detection.get("perception_bundle_id") or "")
+        other_bundle_id = (
+            str(other.get("perception_bundle_id") or "")
+            if isinstance(other, dict)
+            else ""
+        )
         if (
             isinstance(other, dict)
-            and isinstance(source_image, str)
-            and source_image
-            and other.get("source_image") != source_image
+            and (
+                (bundle_id and other_bundle_id and bundle_id != other_bundle_id)
+                or (
+                    not bundle_id
+                    and not other_bundle_id
+                    and isinstance(source_image, str)
+                    and source_image
+                    and other.get("source_image") != source_image
+                )
+            )
         ):
             self.facts.pop(other_key, None)
             self.record(
@@ -1029,9 +1069,92 @@ class AgentMemory:
                     "cleared_key": other_key,
                     "replacement_key": key,
                     "replacement_source_image": source_image,
+                    "replacement_perception_bundle_id": bundle_id or None,
                 },
             )
         self.facts[key] = _memory_fact_entry(detection, source=source)
+
+    def _record_sam3_semantic_result(
+        self,
+        result: JsonDict,
+        *,
+        status: str,
+    ) -> None:
+        role = str(result.get("semantic_role") or "").strip().lower()
+        if role not in SAM3_SEMANTIC_ROLES:
+            return
+        state = self.sam3_semantic_state()
+        roles = state.get("roles")
+        roles = dict(roles) if isinstance(roles, dict) else {}
+        role_state = roles.get(role)
+        role_state = dict(role_state) if isinstance(role_state, dict) else {}
+        target_prompt = str(result.get("target_prompt") or "").strip()
+        if target_prompt and target_prompt.lower() != "point_prompt":
+            role_state["canonical_prompt"] = target_prompt
+        role_state.update(
+            {
+                "semantic_role": role,
+                "status": status,
+                "scene_epoch": _optional_int(
+                    result.get("scene_epoch"), default=self.scene_epoch()
+                ),
+                "perception_bundle_id": result.get("perception_bundle_id"),
+                "observation_id": result.get("observation_id"),
+                "last_result_id": result.get("result_id"),
+                "last_attempt_id": result.get("attempt_id"),
+                "updated_at_s": time.time(),
+            }
+        )
+        if status == "selected":
+            role_state["selected_detection"] = dict(result)
+            role_state.pop("no_detection", None)
+        elif status in {"no_detection", "rejected"}:
+            role_state["no_detection"] = dict(result)
+        roles[role] = role_state
+        attempts = state.get("attempts")
+        attempts = [dict(item) for item in attempts if isinstance(item, dict)] if isinstance(
+            attempts, list
+        ) else []
+        fingerprint = str(result.get("attempt_fingerprint") or "")
+        attempt_id = str(result.get("attempt_id") or "")
+        if fingerprint or attempt_id:
+            attempts = [
+                item
+                for item in attempts
+                if not (
+                    fingerprint
+                    and str(item.get("attempt_fingerprint") or "") == fingerprint
+                )
+                and not (attempt_id and str(item.get("attempt_id") or "") == attempt_id)
+            ]
+            attempts.append(
+                {
+                    "semantic_role": role,
+                    "status": status,
+                    "result_id": result.get("result_id"),
+                    "source_image": result.get("source_image"),
+                    "mode": result.get("segmentation_mode"),
+                    "target_prompt": target_prompt,
+                    "scene_epoch": role_state["scene_epoch"],
+                    "perception_bundle_id": result.get("perception_bundle_id"),
+                    "observation_id": result.get("observation_id"),
+                    "attempt_id": attempt_id or None,
+                    "attempt_fingerprint": fingerprint or None,
+                    "completed_at_s": time.time(),
+                }
+            )
+        state.update(
+            {
+                "schema_version": "openeta.sam3_semantic_state.v1",
+                "roles": roles,
+                "attempts": attempts[-24:],
+                "updated_at_s": time.time(),
+            }
+        )
+        self.facts[SAM3_SEMANTIC_STATE_KEY] = _memory_fact_entry(
+            state,
+            source="sam3_semantic_state",
+        )
 
     def motion_reconciliation(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(MOTION_RECONCILIATION_KEY))
@@ -1434,6 +1557,14 @@ class AgentMemory:
                     pending.get("scene_epoch"),
                     default=self.scene_epoch(),
                 ),
+                "semantic_role": pending.get("semantic_role") or "grasp_target",
+                "semantic_role_source": pending.get("semantic_role_source"),
+                "semantic_target": pending.get("semantic_target")
+                or pending.get("target_prompt"),
+                "perception_bundle_id": pending.get("perception_bundle_id"),
+                "observation_id": pending.get("observation_id"),
+                "attempt_id": pending.get("attempt_id"),
+                "attempt_fingerprint": pending.get("attempt_fingerprint"),
             }
         )
         camera_role = pending.get("camera_role")
@@ -1441,11 +1572,16 @@ class AgentMemory:
             selected["source_camera_role"] = camera_role
         if geometry_family and geometry_family != "unknown":
             selected["target_geometry_family"] = geometry_family
+        semantic_role = str(selected.get("semantic_role") or "grasp_target").strip().lower()
+        if semantic_role not in SAM3_SEMANTIC_ROLES:
+            semantic_role = "grasp_target"
+            selected["semantic_role"] = semantic_role
         self.facts.pop(PENDING_SAM3_SELECTION_KEY, None)
-        self.facts[SELECTED_SAM3_DETECTION_KEY] = _memory_fact_entry(
-            selected,
-            source="select_sam3_detection",
-        )
+        if semantic_role == "grasp_target":
+            self.facts[SELECTED_SAM3_DETECTION_KEY] = _memory_fact_entry(
+                selected,
+                source="select_sam3_detection",
+            )
         reestimate = self.grasp_reestimation()
         if (
             isinstance(reestimate, dict)
@@ -1466,7 +1602,7 @@ class AgentMemory:
             )
         placement_key = (
             PLACEMENT_REGION_DETECTION_KEY
-            if _placement_region_prompt(selected.get("target_prompt"))
+            if semantic_role == "placement_region"
             else PLACEMENT_OBJECT_DETECTION_KEY
         )
         self._save_placement_detection(
@@ -1474,6 +1610,7 @@ class AgentMemory:
             selected,
             source="select_sam3_detection",
         )
+        self._record_sam3_semantic_result(selected, status="selected")
         self.facts.pop(TARGET_LOCALIZATION_BUDGET_KEY, None)
         self.record(
             "sam3_detection_selected",
@@ -1482,6 +1619,7 @@ class AgentMemory:
                 "detection_id": detection_id,
                 "selection_source": selected["selection_source"],
                 "selection_confidence": confidence,
+                "semantic_role": semantic_role,
             },
         )
         self._save_working_memory()
@@ -1511,13 +1649,26 @@ class AgentMemory:
             "segmentation_mode": pending.get("segmentation_mode"),
             "rejected_detection_ids": rejected_ids,
             "rejection_reason": rejection_reason,
+            "semantic_role": pending.get("semantic_role") or "grasp_target",
+            "semantic_role_source": pending.get("semantic_role_source"),
+            "semantic_target": pending.get("semantic_target")
+            or pending.get("target_prompt"),
+            "perception_bundle_id": pending.get("perception_bundle_id"),
+            "observation_id": pending.get("observation_id"),
+            "scene_epoch": _optional_int(
+                pending.get("scene_epoch"), default=self.scene_epoch()
+            ),
+            "attempt_id": pending.get("attempt_id"),
+            "attempt_fingerprint": pending.get("attempt_fingerprint"),
         }
         self.facts.pop(PENDING_SAM3_SELECTION_KEY, None)
-        self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
+        if str(no_detection["semantic_role"]) == "grasp_target":
+            self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
         self.facts[SAM3_NO_DETECTION_KEY] = _memory_fact_entry(
             no_detection,
             source="reject_sam3_detections",
         )
+        self._record_sam3_semantic_result(no_detection, status="rejected")
         reestimate = self.grasp_reestimation()
         if (
             isinstance(reestimate, dict)
@@ -1550,6 +1701,38 @@ class AgentMemory:
         parameters: JsonDict,
         world_mutating: bool = False,
     ) -> str | None:
+        if tool_name == "sam3":
+            semantic_role = str(parameters.get("semantic_role") or "").strip().lower()
+            if semantic_role and semantic_role not in SAM3_SEMANTIC_ROLES:
+                return (
+                    "SAM3 semantic_role must be grasp_target, placement_object, or "
+                    "placement_region."
+                )
+            attempt_id = str(parameters.get("attempt_id") or "")
+            fingerprint = str(parameters.get("attempt_fingerprint") or "")
+            attempts = self.sam3_semantic_state().get("attempts")
+            duplicate = next(
+                (
+                    attempt
+                    for attempt in (attempts if isinstance(attempts, list) else [])
+                    if isinstance(attempt, dict)
+                    and (
+                        (attempt_id and str(attempt.get("attempt_id") or "") == attempt_id)
+                        or (
+                            fingerprint
+                            and str(attempt.get("attempt_fingerprint") or "")
+                            == fingerprint
+                        )
+                    )
+                ),
+                None,
+            )
+            if isinstance(duplicate, dict):
+                return (
+                    "This deterministic SAM3 role/image/mode attempt already completed "
+                    f"with status {duplicate.get('status')!r}; use the bounded next "
+                    "fallback or a genuinely fresh observation instead of retrying it."
+                )
         no_detection = self.sam3_no_detection()
         reference_failure = _memory_fact_value(
             self.facts.get(REFERENCE_LOCALIZATION_FAILURE_KEY)
@@ -1699,8 +1882,25 @@ class AgentMemory:
             if not isinstance(parameters, dict):
                 parameters = {}
             source_image = outputs.get("source_image") or parameters.get("image")
-            target_prompt = outputs.get("prompt") or parameters.get("prompt")
-            previous_no_detection = self.sam3_no_detection()
+            semantic_role = str(
+                outputs.get("semantic_role")
+                or parameters.get("semantic_role")
+                or ""
+            ).strip().lower()
+            semantic_role_source = str(
+                outputs.get("semantic_role_source")
+                or parameters.get("semantic_role_source")
+                or ""
+            ).strip()
+            target_prompt = (
+                outputs.get("semantic_target")
+                or parameters.get("semantic_target")
+                or outputs.get("prompt")
+                or parameters.get("prompt")
+            )
+            previous_no_detection = self.sam3_no_detection(
+                semantic_role if semantic_role in SAM3_SEMANTIC_ROLES else ""
+            )
             generic_point_prompt = str(target_prompt or "").strip().lower() in {
                 "",
                 "point_prompt",
@@ -1747,6 +1947,18 @@ class AgentMemory:
                 # label ``point_prompt`` is misclassified as the object mask
                 # and the host can never build the AnyPlace obligation.
                 target_prompt = previous_prompt
+                if semantic_role not in SAM3_SEMANTIC_ROLES:
+                    semantic_role = str(
+                        previous_no_detection.get("semantic_role") or ""
+                    ).strip().lower()
+                    semantic_role_source = "inherited_previous_attempt"
+            if semantic_role not in SAM3_SEMANTIC_ROLES:
+                semantic_role = (
+                    "placement_region"
+                    if _placement_region_prompt(target_prompt)
+                    else "grasp_target"
+                )
+                semantic_role_source = semantic_role_source or "legacy_prompt_inference"
             source_camera_role = str(
                 outputs.get("source_camera_role")
                 or details.get("source_camera_role")
@@ -1772,7 +1984,20 @@ class AgentMemory:
                 "candidates": candidates,
                 "selection_bundle": dict(selection_bundle),
                 "segmentation_mode": outputs.get("segmentation_mode"),
-                "scene_epoch": self.scene_epoch(),
+                "scene_epoch": _optional_int(
+                    outputs.get("scene_epoch") or parameters.get("scene_epoch"),
+                    default=self.scene_epoch(),
+                ),
+                "semantic_role": semantic_role,
+                "semantic_role_source": semantic_role_source or "explicit",
+                "semantic_target": target_prompt,
+                "perception_bundle_id": outputs.get("perception_bundle_id")
+                or parameters.get("perception_bundle_id"),
+                "observation_id": outputs.get("observation_id")
+                or parameters.get("observation_id"),
+                "attempt_id": outputs.get("attempt_id") or parameters.get("attempt_id"),
+                "attempt_fingerprint": outputs.get("attempt_fingerprint")
+                or parameters.get("attempt_fingerprint"),
             }
             if source_camera_role:
                 base["camera_role"] = source_camera_role
@@ -1834,7 +2059,7 @@ class AgentMemory:
                 ):
                     base["reference_verification"] = dict(verification)
             self.facts.pop(PENDING_SAM3_SELECTION_KEY, None)
-            if not preserve_scene_target:
+            if semantic_role == "grasp_target" and not preserve_scene_target:
                 self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
             if candidates:
                 self.facts.pop(SAM3_NO_DETECTION_KEY, None)
@@ -1842,33 +2067,36 @@ class AgentMemory:
                     base,
                     source=segmenter_tool_name,
                 )
-                # A single post-attachment placement-region detection is already
-                # unambiguous (SAM3 explicitly reports selection_required=false).
-                # Keep the normal pending-selection record for traceability, but
-                # also retain this host-determined input so the AnyPlace join does
-                # not depend on the VLM copying a nested mask artifact verbatim.
-                # Object detections deliberately remain VLM-selected: their
-                # identity must be checked against the held object.
+                self._record_sam3_semantic_result(
+                    base,
+                    status="selection_pending",
+                )
+                review = outputs.get("selection_review")
+                review = dict(review) if isinstance(review, dict) else {}
+                review_decision = str(review.get("decision") or "").strip().lower()
                 attachment = self.attachment_gate()
-                if (
-                    len(candidates) == 1
+                legacy_single_region = (
+                    not review_decision
+                    and semantic_role_source == "legacy_prompt_inference"
+                    and semantic_role == "placement_region"
+                    and len(candidates) == 1
                     and outputs.get("selection_required") is False
                     and isinstance(attachment, dict)
                     and attachment.get("status") == "resolved"
                     and str(attachment.get("verdict") or "").upper() == "PASS"
-                    and _placement_region_prompt(target_prompt)
-                ):
+                )
+                if legacy_single_region:
                     region = dict(candidates[0])
                     region.update(
                         {
-                            "result_id": result_id,
-                            "source_image": source_image,
+                            **{
+                                key: value
+                                for key, value in base.items()
+                                if key not in {"candidates", "selection_bundle"}
+                            },
                             "source_frame_id": source_frame_id,
-                            "target_prompt": target_prompt,
-                            "segmentation_mode": outputs.get("segmentation_mode"),
                             "selection_source": "host_single_detection",
                             "selected_at_s": time.time(),
-                            "scene_epoch": self.scene_epoch(),
                         }
                     )
                     if source_camera_role:
@@ -1878,23 +2106,75 @@ class AgentMemory:
                         region,
                         source="sam3_single_placement_region",
                     )
-                self.record(
-                    "sam3_detection_selection_required",
-                    {
-                        "result_id": result_id,
-                        "candidate_count": len(candidates),
-                        "verification_scope": (
-                            "single_detection" if len(candidates) == 1 else "multiple_detections"
-                        ),
-                    },
-                )
+                    self._record_sam3_semantic_result(region, status="selected")
+                if review_decision == "select":
+                    detection_id = str(review.get("detection_id") or "")
+                    try:
+                        self.resolve_sam3_selection(
+                            result_id=result_id,
+                            detection_id=detection_id,
+                            selection_source=str(
+                                review.get("selection_source") or "isolated_main_vlm"
+                            ),
+                            confidence=_optional_float(review.get("confidence")),
+                            reason=str(review.get("reason") or ""),
+                            target_geometry_family=str(
+                                review.get("target_geometry_family") or ""
+                            ),
+                        )
+                    except ValueError as exc:
+                        review_decision = "deferred"
+                        self.record(
+                            "sam3_selection_review_invalid",
+                            {
+                                "result_id": result_id,
+                                "semantic_role": semantic_role,
+                                "error": str(exc),
+                            },
+                        )
+                elif review_decision == "reject":
+                    try:
+                        self.reject_sam3_detections(
+                            result_id=result_id,
+                            reason=str(review.get("reason") or "Visual reviewer rejected all masks."),
+                        )
+                    except ValueError as exc:
+                        review_decision = "deferred"
+                        self.record(
+                            "sam3_selection_review_invalid",
+                            {
+                                "result_id": result_id,
+                                "semantic_role": semantic_role,
+                                "error": str(exc),
+                            },
+                        )
+                if review_decision not in {"select", "reject"}:
+                    self.record(
+                        "sam3_detection_selection_required",
+                        {
+                            "result_id": result_id,
+                            "candidate_count": len(candidates),
+                            "semantic_role": semantic_role,
+                            "review_status": review_decision or "not_configured",
+                            "verification_scope": (
+                                "single_detection"
+                                if len(candidates) == 1
+                                else "multiple_detections"
+                            ),
+                        },
+                    )
             else:
                 self.facts[SAM3_NO_DETECTION_KEY] = _memory_fact_entry(
                     base,
                     source=segmenter_tool_name,
                 )
-                self._capture_grasp_fallback_segmentation_failure(base)
-                self.record("sam3_no_detection", {"result_id": result_id})
+                self._record_sam3_semantic_result(base, status="no_detection")
+                if semantic_role == "grasp_target":
+                    self._capture_grasp_fallback_segmentation_failure(base)
+                self.record(
+                    "sam3_no_detection",
+                    {"result_id": result_id, "semantic_role": semantic_role},
+                )
             self._save_working_memory()
 
     def _capture_grasp_fallback_segmentation_failure(self, sam3_result: JsonDict) -> None:
@@ -1986,6 +2266,11 @@ class AgentMemory:
                         "sam3_result_id": no_detection.get("result_id"),
                         "target_object": target_object,
                         "scene_image": scene_image,
+                        "semantic_role": no_detection.get("semantic_role"),
+                        "perception_bundle_id": no_detection.get(
+                            "perception_bundle_id"
+                        ),
+                        "observation_id": no_detection.get("observation_id"),
                         "scene_epoch": current_epoch,
                         "failed_at_s": time.time(),
                         "molmopoint_attempts": (
@@ -2002,7 +2287,15 @@ class AgentMemory:
                     self._save_working_memory()
                 continue
             if name == "molmopoint":
-                no_detection = self.sam3_no_detection()
+                host_obligation = _action_host_obligation(action)
+                host_semantic_role = str(
+                    host_obligation.get("semantic_role") or ""
+                ).strip().lower()
+                no_detection = (
+                    self.sam3_no_detection(host_semantic_role)
+                    if host_semantic_role in SAM3_SEMANTIC_ROLES
+                    else None
+                ) or self.sam3_no_detection()
                 if isinstance(no_detection, dict):
                     failure = self.reference_localization_failure() or {}
                     if str(failure.get("sam3_result_id") or "") != str(
@@ -2010,8 +2303,17 @@ class AgentMemory:
                     ):
                         failure = {
                             "sam3_result_id": no_detection.get("result_id"),
-                            "target_object": no_detection.get("target_prompt"),
+                            "target_object": host_obligation.get("semantic_target")
+                            or no_detection.get("target_prompt"),
                             "scene_image": no_detection.get("source_image"),
+                            "semantic_role": host_semantic_role
+                            or no_detection.get("semantic_role"),
+                            "perception_bundle_id": host_obligation.get(
+                                "perception_bundle_id"
+                            )
+                            or no_detection.get("perception_bundle_id"),
+                            "observation_id": host_obligation.get("observation_id")
+                            or no_detection.get("observation_id"),
                             "failed_at_s": time.time(),
                             "molmopoint_attempts": 0,
                         }
@@ -2114,6 +2416,16 @@ class AgentMemory:
                     "exact_instance_verification": exact_instance_verification,
                     "required_next_tool": "sam3",
                     "required_parameter": ("positive_points" if point_prompt else "roi_bbox_xyxy"),
+                    "semantic_role": (
+                        self.sam3_no_detection() or {}
+                    ).get("semantic_role"),
+                    "perception_bundle_id": (
+                        self.sam3_no_detection() or {}
+                    ).get("perception_bundle_id"),
+                    "observation_id": (
+                        self.sam3_no_detection() or {}
+                    ).get("observation_id"),
+                    "scene_epoch": self.scene_epoch(),
                 }
                 self.facts[PENDING_REFERENCE_LOCALIZATION_KEY] = _memory_fact_entry(
                     obligation,
@@ -2139,7 +2451,8 @@ class AgentMemory:
                     source=name,
                 )
                 self.facts.pop(PENDING_SAM3_SELECTION_KEY, None)
-                self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
+                if str(obligation.get("semantic_role") or "grasp_target") == "grasp_target":
+                    self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
                 self.record(
                     "asset_reference_localization_required",
                     {
@@ -2151,7 +2464,15 @@ class AgentMemory:
                 self._save_working_memory()
                 continue
             if name == "molmopoint":
-                no_detection = self.sam3_no_detection()
+                host_obligation = _action_host_obligation(action)
+                host_semantic_role = str(
+                    host_obligation.get("semantic_role") or ""
+                ).strip().lower()
+                no_detection = (
+                    self.sam3_no_detection(host_semantic_role)
+                    if host_semantic_role in SAM3_SEMANTIC_ROLES
+                    else None
+                ) or self.sam3_no_detection()
                 points = outputs.get("points")
                 image_sources = outputs.get("image_sources")
                 if (
@@ -2203,6 +2524,19 @@ class AgentMemory:
                     "exact_instance_verification": None,
                     "required_next_tool": "sam3",
                     "required_parameter": "positive_points",
+                    "semantic_role": host_semantic_role
+                    or no_detection.get("semantic_role"),
+                    "perception_bundle_id": host_obligation.get(
+                        "perception_bundle_id"
+                    )
+                    or no_detection.get("perception_bundle_id"),
+                    "observation_id": host_obligation.get("observation_id")
+                    or no_detection.get("observation_id"),
+                    "scene_epoch": _optional_int(
+                        host_obligation.get("scene_epoch")
+                        or no_detection.get("scene_epoch"),
+                        default=self.scene_epoch(),
+                    ),
                 }
                 self.facts[PENDING_REFERENCE_LOCALIZATION_KEY] = _memory_fact_entry(
                     obligation,
@@ -2210,7 +2544,8 @@ class AgentMemory:
                 )
                 self.facts.pop(REFERENCE_LOCALIZATION_FAILURE_KEY, None)
                 self.facts.pop(PENDING_SAM3_SELECTION_KEY, None)
-                self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
+                if str(obligation.get("semantic_role") or "grasp_target") == "grasp_target":
+                    self.facts.pop(SELECTED_SAM3_DETECTION_KEY, None)
                 self.record(
                     "molmopoint_localization_required",
                     {
@@ -6377,6 +6712,7 @@ class AgentMemory:
             "target_asset_reference": self.target_asset_reference(),
             "reference_localization_failure": self.reference_localization_failure(),
             "sam3_no_detection": self.sam3_no_detection(),
+            "sam3_semantic_state": self.sam3_semantic_state(),
             "grasp_candidate_policy": self.anygrasp_candidate_policy(),
             "retained_targeted_grasp": self.retained_targeted_grasp(),
             "grasp_lift_probe": self.grasp_lift_probe(),
@@ -6409,6 +6745,7 @@ class AgentMemory:
                         REFERENCE_LOCALIZATION_FAILURE_KEY,
                         TARGET_ASSET_REFERENCE_KEY,
                         SAM3_NO_DETECTION_KEY,
+                        SAM3_SEMANTIC_STATE_KEY,
                         GRASP_CANDIDATE_POLICY_KEY,
                         LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
                         GRASP_LIFT_PROBE_KEY,
@@ -7287,6 +7624,10 @@ def _finite_number(value: object) -> bool:
         and not isinstance(value, bool)
         and math.isfinite(float(value))
     )
+
+
+def _optional_float(value: object) -> float | None:
+    return float(value) if _finite_number(value) else None
 
 
 def _candidate_linked_motion_succeeded(

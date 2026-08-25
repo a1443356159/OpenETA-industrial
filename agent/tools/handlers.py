@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import math
@@ -40,6 +41,7 @@ from tools.candidate_config import (
 ApprovalCallback = Callable[[ToolExecutionContext], bool]
 Sam3SegmentCallable = Callable[[JsonDict], JsonDict]
 Sam3PointSegmentCallable = Callable[[JsonDict], JsonDict]
+Sam3SelectionReviewCallable = Callable[[JsonDict], JsonDict]
 AnyGraspDetectCallable = Callable[[JsonDict], JsonDict]
 ContactGraspNetPredictCallable = Callable[[JsonDict], JsonDict]
 AnyPlacePredictCallable = Callable[[JsonDict], JsonDict]
@@ -170,6 +172,7 @@ def build_sam3_handler(
     segment: Sam3SegmentCallable,
     *,
     segment_points: Sam3PointSegmentCallable | None = None,
+    selection_reviewer: Sam3SelectionReviewCallable | None = None,
     depth_prior_prefetch: DepthPriorPrefetchCallable | None = None,
     output_root: str | Path | None = None,
     result_output_root: str | Path | None = None,
@@ -216,6 +219,14 @@ def build_sam3_handler(
             context.observation,
         )
         prompt = _string_param(context.parameters.get("prompt"))
+        semantic_metadata = _sam3_semantic_metadata(
+            parameters=context.parameters,
+            observation=context.observation,
+            source_image=image,
+            mode=mode,
+            prompt=prompt,
+            raw_points=raw_points,
+        )
         roi_bbox_value = context.parameters.get("roi_bbox_xyxy")
         points: list[JsonDict] = []
         request: JsonDict = {"mode": mode, "image": image}
@@ -232,6 +243,7 @@ def build_sam3_handler(
             request["roi_bbox_xyxy"] = roi_bbox_value
         if context.parameters.get("positive_points") is not None:
             request["positive_points"] = raw_points
+        request.update(semantic_metadata)
         context.parameters = dict(request)
 
         def finish(
@@ -547,6 +559,7 @@ def build_sam3_handler(
             output_metadata={
                 **source_camera_metadata,
                 **roi_metadata,
+                **semantic_metadata,
                 **({"positive_points": positive_points} if positive_points is not None else {}),
                 "segmentation_mode": (
                     "point_prompt"
@@ -567,6 +580,84 @@ def build_sam3_handler(
                 ),
             },
         )
+        if result.success and selection_reviewer is not None:
+            details = dict(result.details)
+            detections = details.get("detections")
+            if isinstance(detections, list) and detections:
+                try:
+                    review = selection_reviewer(
+                        {
+                            "result_id": details.get("result_id"),
+                            "semantic_role": semantic_metadata["semantic_role"],
+                            "target_prompt": semantic_metadata["semantic_target"],
+                            "source_image": image,
+                            "candidates": [
+                                dict(candidate)
+                                for candidate in detections
+                                if isinstance(candidate, dict)
+                            ],
+                            "selection_bundle": dict(
+                                details.get("selection_bundle")
+                                if isinstance(details.get("selection_bundle"), dict)
+                                else {}
+                            ),
+                            **semantic_metadata,
+                        }
+                    )
+                    details["selection_review"] = dict(review)
+                    if review.get("decision") == "select":
+                        detection_id = str(review.get("detection_id") or "")
+                        selected = next(
+                            (
+                                dict(candidate)
+                                for candidate in detections
+                                if isinstance(candidate, dict)
+                                and str(candidate.get("id") or "") == detection_id
+                            ),
+                            None,
+                        )
+                        if selected is None:
+                            raise ValueError(
+                                "selection reviewer chose a detection outside the result"
+                            )
+                        selected.update(
+                            {
+                                "selection_source": review.get("selection_source")
+                                or "isolated_main_vlm",
+                                "selection_confidence": review.get("confidence"),
+                                "selection_reason": review.get("reason"),
+                                "target_geometry_family": review.get(
+                                    "target_geometry_family"
+                                ),
+                            }
+                        )
+                        details["selected_detection"] = selected
+                        details["selection_required"] = False
+                    elif review.get("decision") == "reject":
+                        details["selected_detection"] = None
+                        details["selection_required"] = False
+                        details["selection_rejected"] = True
+                    else:
+                        raise ValueError("selection reviewer returned an invalid decision")
+                except Exception as exc:  # noqa: BLE001 - defer, never lose SAM3 evidence.
+                    details["selection_review"] = {
+                        "schema_version": "openeta.sam3_selection_review.v1",
+                        "decision": "deferred",
+                        "isolated_context": True,
+                        "error_type": type(exc).__name__,
+                        "reason": str(exc),
+                    }
+                    diagnostics = details.get("diagnostics")
+                    diagnostics = list(diagnostics) if isinstance(diagnostics, list) else []
+                    diagnostics.append(
+                        {
+                            "code": "sam3_selection_review_deferred",
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    )
+                    details["diagnostics"] = diagnostics
+                result.details = details
         reason = "" if result.success else _string_param(result.details.get("reason"))
         return finish(
             result,
@@ -576,6 +667,114 @@ def build_sam3_handler(
         )
 
     return handler
+
+
+def _sam3_semantic_metadata(
+    *,
+    parameters: Mapping[str, Any],
+    observation: Any,
+    source_image: str,
+    mode: str,
+    prompt: str,
+    raw_points: object,
+) -> JsonDict:
+    """Bind one SAM3 call to a typed role and deterministic observation attempt."""
+
+    supplied_role = _string_param(parameters.get("semantic_role")).strip().lower()
+    role = supplied_role if supplied_role in {
+        "grasp_target",
+        "placement_object",
+        "placement_region",
+    } else (
+        "placement_region"
+        if _sam3_placement_region_prompt(prompt)
+        else "grasp_target"
+    )
+    role_source = "explicit" if supplied_role == role else "legacy_prompt_inference"
+    semantic_target = _string_param(parameters.get("semantic_target")) or prompt
+    observation_metadata = getattr(observation, "metadata", None)
+    observation_metadata = (
+        observation_metadata if isinstance(observation_metadata, Mapping) else {}
+    )
+    raw_scene_epoch = parameters.get("scene_epoch")
+    if raw_scene_epoch is None:
+        raw_scene_epoch = observation_metadata.get("scene_epoch", 0)
+    try:
+        scene_epoch = max(0, int(raw_scene_epoch))
+    except (TypeError, ValueError):
+        scene_epoch = 0
+    supplied_observation_id = _string_param(parameters.get("observation_id"))
+    observation_identity = supplied_observation_id or _string_param(
+        observation_metadata.get("observation_id")
+        or observation_metadata.get("capture_id")
+        or observation_metadata.get("step_idx")
+    )
+    if not observation_identity:
+        observation_identity = hashlib.sha256(
+            f"{scene_epoch}\0{source_image}".encode("utf-8")
+        ).hexdigest()[:16]
+    observation_id = (
+        observation_identity
+        if supplied_observation_id
+        else f"observation-{observation_identity}"
+    )
+    supplied_bundle_id = _string_param(parameters.get("perception_bundle_id"))
+    perception_bundle_id = supplied_bundle_id or (
+        "perception-"
+        + hashlib.sha256(
+            f"{scene_epoch}\0{observation_id}\0{source_image}".encode("utf-8")
+        ).hexdigest()[:16]
+    )
+    attempt_payload = {
+        "perception_bundle_id": perception_bundle_id,
+        "semantic_role": role,
+        "mode": mode,
+        "semantic_target": semantic_target,
+        "prompt": prompt,
+        "points": raw_points if isinstance(raw_points, list) else [],
+        "roi_bbox_xyxy": parameters.get("roi_bbox_xyxy"),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            attempt_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    attempt_id = _string_param(parameters.get("attempt_id")) or (
+        f"sam3-attempt-{fingerprint[:16]}"
+    )
+    return {
+        "semantic_role": role,
+        "semantic_role_source": role_source,
+        "semantic_target": semantic_target,
+        "perception_bundle_id": perception_bundle_id,
+        "observation_id": observation_id,
+        "scene_epoch": scene_epoch,
+        "attempt_id": attempt_id,
+        "attempt_fingerprint": fingerprint,
+    }
+
+
+def _sam3_placement_region_prompt(value: object) -> bool:
+    prompt = str(value or "").strip().lower()
+    return any(
+        token in prompt
+        for token in (
+            "placement",
+            "destination",
+            "target region",
+            "target area",
+            "marker",
+            "receptacle",
+            "bin",
+            "basket",
+            "zone",
+            "放置",
+            "目标区域",
+        )
+    )
 
 
 def _resolve_current_observation_rgb_path(image: str, observation: Any) -> str:
