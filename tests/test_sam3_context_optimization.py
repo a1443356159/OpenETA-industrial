@@ -15,6 +15,7 @@ from agent.runtime.planner import (
     PlannerContextConfig,
     _default_tool_planner_system_prompt,
     _model_request_context,
+    _sam3_request_identity,
     _semantic_perception_obligation,
 )
 from agent.runtime.sam3_selection import BackendSam3SelectionReviewer
@@ -465,3 +466,64 @@ def test_molmopoint_result_preserves_host_role_and_bundle_for_point_sam() -> Non
     assert obligation["scene_image"] == "/tmp/top.png"
     assert obligation["perception_bundle_id"] == "host-top-bundle"
     assert obligation["observation_id"] == "observation-21"
+
+
+def test_same_materialized_rgb_keeps_bundle_across_agent_step_numbers() -> None:
+    identities = []
+    for step_idx in (2, 9):
+        identities.append(
+            _sam3_request_identity(
+                observation=EnvObservation(
+                    task="pick and place",
+                    cameras=[],
+                    robot=RobotState(),
+                    metadata={"step_idx": step_idx},
+                ),
+                scene_epoch=3,
+                source_image="/tmp/one-materialized-capture.png",
+                semantic_role="placement_object",
+                semantic_target="red block",
+                mode="text",
+                prompt="red block",
+                points=[],
+                roi_bbox_xyxy=None,
+            )
+        )
+
+    assert identities[0]["observation_id"] == identities[1]["observation_id"]
+    assert identities[0]["perception_bundle_id"] == identities[1]["perception_bundle_id"]
+
+
+def test_explicit_post_create_observe_precedes_semantic_perception() -> None:
+    observation = EnvObservation(
+        task="normal",
+        cameras=[],
+        robot=RobotState(),
+        metadata={"step_idx": 2},
+    )
+    camera_artifacts = [
+        {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/reset.png"}
+    ]
+    memory_context = {
+        "scene_epoch": 1,
+        "current_user_request": (
+            "创建环境后先 observe；create 返回的 initial observation 不计作显式 observe。"
+        ),
+        "latest_environment_receipt": {
+            "info": {
+                "previous_action": {"request_name": "create_simulator_env"}
+            }
+        },
+        "sam3_semantic_state": {"roles": {}, "attempts": []},
+    }
+
+    obligation = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=camera_artifacts,
+        memory_context=memory_context,
+    )
+
+    assert obligation["required_tool"] == "observe"
+    assert obligation["required_parameters"] == {
+        "reason": "explicit_post_create_observation_required"
+    }

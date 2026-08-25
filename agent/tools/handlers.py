@@ -707,7 +707,6 @@ def _sam3_semantic_metadata(
     observation_identity = supplied_observation_id or _string_param(
         observation_metadata.get("observation_id")
         or observation_metadata.get("capture_id")
-        or observation_metadata.get("step_idx")
     )
     if not observation_identity:
         observation_identity = hashlib.sha256(

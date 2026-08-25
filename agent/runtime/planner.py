@@ -1494,7 +1494,7 @@ def _host_obligation_decision(
         tool_name = str(semantic_perception.get("required_tool") or "")
         parameters = semantic_perception.get("required_parameters")
         if (
-            tool_name in {"sam3", "molmopoint"}
+            tool_name in {"observe", "sam3", "molmopoint"}
             and isinstance(parameters, dict)
             and tools.can_execute(tool_name)
         ):
@@ -6026,6 +6026,23 @@ def _semantic_perception_obligation(
     else:
         return None
 
+    if semantic_role == "grasp_target" and _explicit_post_create_observe_required(
+        memory_context
+    ):
+        return {
+            "schema_version": "openeta.semantic_perception_obligation.v1",
+            "status": "required",
+            "semantic_role": semantic_role,
+            "required_tool": "observe",
+            "required_parameters": {
+                "reason": "explicit_post_create_observation_required"
+            },
+            "rule": (
+                "The task explicitly excludes create_simulator_env.initial_observation; "
+                "acquire one observe receipt before target perception."
+            ),
+        }
+
     semantic_state = memory_context.get("sam3_semantic_state")
     semantic_state = semantic_state if isinstance(semantic_state, dict) else {}
     roles = semantic_state.get("roles")
@@ -6216,6 +6233,33 @@ def _semantic_detection_is_current(
     )
 
 
+def _explicit_post_create_observe_required(memory_context: JsonDict) -> bool:
+    task = str(
+        memory_context.get("current_user_request")
+        or memory_context.get("task")
+        or ""
+    ).lower()
+    explicitly_requested = (
+        "先 observe" in task
+        or "first observe" in task
+        or (
+            "initial observation" in task
+            and any(token in task for token in ("不计", "does not count", "excluded"))
+        )
+    )
+    if not explicitly_requested:
+        return False
+    receipt = memory_context.get("latest_environment_receipt")
+    info = receipt.get("info") if isinstance(receipt, dict) else None
+    previous_action = info.get("previous_action") if isinstance(info, dict) else None
+    request_name = (
+        str(previous_action.get("request_name") or "")
+        if isinstance(previous_action, dict)
+        else ""
+    )
+    return request_name == "create_simulator_env"
+
+
 def _semantic_detections_share_bundle(first: object, second: object) -> bool:
     if not isinstance(first, dict) or not isinstance(second, dict):
         return False
@@ -6241,7 +6285,6 @@ def _sam3_request_identity(
     raw_observation_id = (
         observation.metadata.get("observation_id")
         or observation.metadata.get("capture_id")
-        or observation.metadata.get("step_idx")
     )
     observation_identity = str(raw_observation_id or "").strip()
     if not observation_identity:
