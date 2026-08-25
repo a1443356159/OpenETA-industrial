@@ -72,7 +72,7 @@ target contact 与 attach ACK 直接证明抓取。
 漏斗先对 96 个 AnyPlace 目标各做一次目标合法性，再对两个抓取分支与目标配对做
 attached-object/夹爪/解析边界合法性；之后才进入 Beam-2 IK 和完整 MoveIt plan-only。
 候选以确定波次展开，经验分数只能排序。一个候选失败只切换同一模型池中下一合格
-候选；池未耗尽不得重跑 SAM3、抓取模型或 AnyPlace。
+候选；本次验收不得重跑 SAM3、抓取模型或 AnyPlace，池耗尽时显式失败。
 
 attach 后宿主直接复用冻结目标池，以实测 T_eef_object 和当前 PlanningScene revision
 重新计算 exact release EEF，并通过一次 inference=false 的内部 AnyPlace 资格调用。
@@ -702,9 +702,9 @@ def verify_case(
         ]
         if len(rotations) < len(candidate_ids):
             errors.append("AnyPlace PASS candidates do not retain full rotations")
-        # The bounded retry may use the host-normalized frozen packet
-        # (mask/mask_artifact). Validate the independent public observations on
-        # the initial inference call, before that internal replay boundary.
+        # Measured-attachment requalification uses the host-normalized frozen
+        # packet. Validate independent public observations on the one model
+        # inference call before that non-inference replay boundary.
         anyplace_parameters = _parameters(first_anyplace)
         object_observation = anyplace_parameters.get("object_observation")
         placement_observation = anyplace_parameters.get("placement_observation")
