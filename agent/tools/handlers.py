@@ -593,7 +593,51 @@ def build_sam3_handler(
         if result.success and selection_reviewer is not None:
             details = dict(result.details)
             detections = details.get("detections")
-            if isinstance(detections, list) and detections:
+            if (
+                mode == "text"
+                and isinstance(detections, list)
+                and len(detections) == 1
+                and isinstance(detections[0], Mapping)
+            ):
+                # There is no candidate-choice problem for a structurally valid
+                # singleton text result. Keep VLM review for ambiguous multi-mask
+                # outputs, but do not make one SAM detection depend on another
+                # network service merely to echo its only candidate id.
+                selected = dict(detections[0])
+                raw_confidence = selected.get("score")
+                confidence = (
+                    float(raw_confidence)
+                    if isinstance(raw_confidence, int | float)
+                    and not isinstance(raw_confidence, bool)
+                    else None
+                )
+                selection_reason = (
+                    "The text-conditioned SAM3 result contains exactly one "
+                    "structurally valid candidate."
+                )
+                selected.update(
+                    {
+                        "selection_source": "host_singleton_text_detection",
+                        "selection_confidence": confidence,
+                        "selection_reason": selection_reason,
+                        "target_geometry_family": "unknown",
+                    }
+                )
+                details["selected_detection"] = selected
+                details["selection_required"] = False
+                details["selection_review"] = {
+                    "schema_version": "openeta.sam3_selection_review.v1",
+                    "decision": "select",
+                    "detection_id": str(selected.get("id") or ""),
+                    "confidence": confidence,
+                    "reason": selection_reason,
+                    "target_geometry_family": "unknown",
+                    "selection_source": "host_singleton_text_detection",
+                    "isolated_context": True,
+                    "deterministic_singleton": True,
+                    "model_review_invoked": False,
+                }
+            elif isinstance(detections, list) and detections:
                 try:
                     review = selection_reviewer(
                         {
@@ -685,7 +729,7 @@ def build_sam3_handler(
                         }
                     )
                     details["diagnostics"] = diagnostics
-                result.details = details
+            result.details = details
         reason = "" if result.success else _string_param(result.details.get("reason"))
         return finish(
             result,

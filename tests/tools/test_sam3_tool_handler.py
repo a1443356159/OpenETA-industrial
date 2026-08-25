@@ -13,7 +13,6 @@ from PIL import Image
 pytest.importorskip("gymnasium")
 
 from adapter.protocol import CameraFrame, EnvObservation, RobotState
-from agent.runtime.sam3_selection import Sam3SelectionReviewError
 from agent.tools import handlers as handlers_module
 from agent.tools.handlers import (
     DEFAULT_SAM3_IMAGE_OUTPUT_ROOT,
@@ -894,10 +893,11 @@ def test_sam3_handler_runs_typed_selection_review_inside_same_tool_call(
     assert set(mcp_requests[0]) == {"image_base64", "image_format", "prompt"}
 
 
-def test_sam3_handler_keeps_candidates_when_bounded_review_is_exhausted(
+def test_sam3_handler_selects_single_text_candidate_without_vlm_review(
     tmp_path: Path,
 ) -> None:
     valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+    review_calls = 0
 
     def segment(_request: dict) -> dict:
         return {
@@ -918,20 +918,9 @@ def test_sam3_handler_keeps_candidates_when_bounded_review_is_exhausted(
         }
 
     def review(_request: dict) -> dict:
-        raise Sam3SelectionReviewError(
-            [
-                {
-                    "attempt": 1,
-                    "error_type": "TimeoutError",
-                    "message": "timeout one",
-                },
-                {
-                    "attempt": 2,
-                    "error_type": "TimeoutError",
-                    "message": "timeout two",
-                },
-            ]
-        )
+        nonlocal review_calls
+        review_calls += 1
+        raise AssertionError("singleton text detection must not invoke VLM review")
 
     result = build_sam3_handler(
         segment,
@@ -950,16 +939,18 @@ def test_sam3_handler_keeps_candidates_when_bounded_review_is_exhausted(
     )
 
     assert result.success is True
-    assert result.details["selection_required"] is True
+    assert review_calls == 0
+    assert result.details["selection_required"] is False
     assert [item["id"] for item in result.details["detections"]] == [
         "detection_000"
     ]
-    assert result.details["selection_review"]["decision"] == "deferred"
-    assert result.details["selection_review"]["attempt_count"] == 2
-    assert result.details["selection_review"][
-        "infrastructure_retry_exhausted"
-    ] is True
-    assert len(result.details["selection_review"]["failures"]) == 2
+    assert result.details["selected_detection"]["id"] == "detection_000"
+    assert result.details["selected_detection"]["selection_source"] == (
+        "host_singleton_text_detection"
+    )
+    assert result.details["selection_review"]["decision"] == "select"
+    assert result.details["selection_review"]["deterministic_singleton"] is True
+    assert result.details["selection_review"]["model_review_invoked"] is False
 
 
 def test_sam3_handler_can_split_json_results_and_images(tmp_path: Path) -> None:
