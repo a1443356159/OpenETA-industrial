@@ -6068,6 +6068,24 @@ def _semantic_perception_obligation(
     )
     pregrasp_pool = memory_context.get("pregrasp_placement_goal_pool")
     grasp_policy = memory_context.get("grasp_candidate_policy")
+    placement_policy = memory_context.get("placement_candidate_policy")
+
+    # Once the host has activated a fully qualified, attachment-bound
+    # placement candidate, later hover/descend observations are execution
+    # receipts rather than new AnyPlace inputs.  Their scene epoch changes on
+    # every physical move, but that must not invalidate the independent
+    # post-attachment object/region bundle already used to compile and L5-check
+    # the active target.  Re-segmenting here cannot change the locked motion
+    # and adds four SAM recovery calls after each stage.
+    placement_execution_locked = (
+        isinstance(placement_policy, dict)
+        and placement_policy.get("status") == "active"
+        and isinstance(placement_policy.get("active_candidate_id"), str)
+        and bool(placement_policy.get("active_candidate_id"))
+        and isinstance(placement_policy.get("compiled_placement"), dict)
+    )
+    if attached and placement_execution_locked:
+        return None
 
     semantic_role = ""
     source_image = str(preferred_rgb.get("path") or "")

@@ -937,6 +937,55 @@ def test_placement_region_fallback_stays_on_object_bundle() -> None:
     assert region_fallback["perception_bundle_id"] == object_bundle
 
 
+def test_active_compiled_placement_does_not_resegment_after_motion() -> None:
+    observation = EnvObservation(
+        task="pick and place",
+        cameras=[],
+        robot=RobotState(),
+        metadata={"step_idx": 19},
+    )
+    camera_artifacts = [
+        {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/post-hover.png"}
+    ]
+    memory_context = {
+        "scene_epoch": 9,
+        "grasp_execution": {
+            "status": "completed",
+            "stage": "attached",
+            "attachment_mode": "portable_object",
+        },
+        "attachment_gate": {"status": "resolved", "verdict": "PASS"},
+        "placement_object_detection": {
+            "id": "object-mask",
+            "source_image": "/tmp/pre-placement.png",
+            "scene_epoch": 8,
+            "perception_bundle_id": "placement-bundle",
+        },
+        "placement_region_detection": {
+            "id": "region-mask",
+            "source_image": "/tmp/pre-placement.png",
+            "scene_epoch": 8,
+            "perception_bundle_id": "placement-bundle",
+        },
+        "placement_candidate_policy": {
+            "status": "active",
+            "active_candidate_id": "placement_079",
+            "compiled_placement": {
+                "compiled_placement_id": "compiled-079",
+                "scene_epoch": 8,
+            },
+        },
+    }
+
+    obligation = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=camera_artifacts,
+        memory_context=memory_context,
+    )
+
+    assert obligation is None
+
+
 def test_molmopoint_result_preserves_host_role_and_bundle_for_point_sam() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick and place")
