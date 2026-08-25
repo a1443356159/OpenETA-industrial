@@ -497,11 +497,34 @@ class OpenEtaAgentRuntime:
                 ),
             )
         except ValueError as exc:
-            return make_tool_result(
-                context,
-                success=False,
-                content=str(exc),
-                diagnostics=[{"code": "invalid_detection_selection"}],
+            # A singleton text result is now resolved by the production SAM3
+            # handler before it reaches memory.  The legacy M5 control-only
+            # contract still requires one explicit selection-tool receipt.
+            # Permit that protected host path to attest the exact already
+            # selected singleton once; no planner-visible parameter can enter
+            # this branch, and mismatched result/candidate ids still fail.
+            existing = self.memory.selected_sam3_detection()
+            if not (
+                selection_source == "scripted_single_candidate"
+                and isinstance(existing, dict)
+                and existing.get("selection_source")
+                == "host_singleton_text_detection"
+                and str(existing.get("result_id") or "") == result_id
+                and str(existing.get("id") or "") == detection_id
+            ):
+                return make_tool_result(
+                    context,
+                    success=False,
+                    content=str(exc),
+                    diagnostics=[{"code": "invalid_detection_selection"}],
+                )
+            selected = dict(existing)
+            selected.update(
+                {
+                    "selection_source": selection_source,
+                    "selection_confidence": confidence,
+                    "selection_reason": str(context.parameters.get("reason") or ""),
+                }
             )
         artifacts = []
         mask_ref = selected.get("mask_ref")

@@ -1768,10 +1768,10 @@ class _FrozenGoalPairCoordinator:
         source: Mapping[str, object],
         scene_revision: int,
     ) -> ToolResult | None:
-        """Prepare one measured-attachment qualification without model inference."""
+        """Prepare one measured-attachment frontier without model inference."""
 
-        goals = self.qualified_goals_by_grasp.get(source_grasp_id)
-        if not goals:
+        priority_goals = self.qualified_goals_by_grasp.get(source_grasp_id)
+        if not priority_goals:
             return None
         binding = self.attachment_binding(
             source_grasp_id=source_grasp_id,
@@ -1780,7 +1780,25 @@ class _FrozenGoalPairCoordinator:
         if binding in self.consumed_attachment_bindings:
             return None
         self.consumed_attachment_bindings.add(binding)
-        frozen = [json.loads(json.dumps(goal)) for goal in goals]
+        # A predicted attachment can make a goal look executable before the
+        # grasp, then fail after the measured attachment transform is known.
+        # Keep those L5-PASS goals at the head for the common fast path, but
+        # continue from the complete frozen AnyPlace pool on failure.  The
+        # post-attachment qualifier repeats goal/pair legality and advances
+        # through its small deterministic waves until the first complete L5
+        # PASS; merely materializing this frontier does not plan all 96 goals.
+        frozen: list[JsonDict] = []
+        prioritized_ids: set[str] = set()
+        for goal in priority_goals:
+            frozen.append(json.loads(json.dumps(goal)))
+            goal_id = str(goal.get("id") or "")
+            if goal_id:
+                prioritized_ids.add(goal_id)
+        for goal in self.object_goals:
+            goal_id = str(goal.get("id") or "")
+            if goal_id and goal_id in prioritized_ids:
+                continue
+            frozen.append(json.loads(json.dumps(goal)))
         artifacts: list[JsonDict] = []
         for source_artifact in self.source_candidate_artifacts:
             artifact = json.loads(json.dumps(source_artifact))
@@ -1789,14 +1807,17 @@ class _FrozenGoalPairCoordinator:
             artifact["anyplace_model_inference_invoked"] = False
             artifacts.append(artifact)
         metadata = {
-            "candidate_source": "frozen_pair_pass_goals",
+            "candidate_source": "frozen_anyplace_goal_frontier",
+            "priority_pair_pass_goal_count": len(priority_goals),
+            "frozen_frontier_goal_count": len(frozen),
             "source_model_raw_candidate_count": self.source_model_raw_candidate_count,
             "anyplace_model_inference_invoked": False,
         }
         return ToolResult(
             True,
             (
-                f"Prepared {len(frozen)} frozen pair-PASS object goals for "
+                f"Prepared {len(frozen)} frozen object goals, with "
+                f"{len(priority_goals)} predicted pair-PASS goals first, for "
                 "measured-attachment qualification without AnyPlace inference."
             ),
             {
@@ -1815,6 +1836,8 @@ class _FrozenGoalPairCoordinator:
                 "metadata": metadata,
                 "frozen_goal_requalification": True,
                 "frozen_goal_count": len(frozen),
+                "frozen_goal_priority_count": len(priority_goals),
+                "frozen_goal_frontier_count": len(frozen),
                 "discarded_postattach_model_candidate_count": 0,
                 "anyplace_model_inference_invoked": False,
                 "execution_started": False,
@@ -1883,7 +1906,7 @@ def _prepare_postattachment_frozen_goals(
     *,
     coordinator: _FrozenGoalPairCoordinator,
 ) -> ToolResult | None:
-    """Short-circuit model inference for the selected grasp's frozen PASS goals."""
+    """Short-circuit inference with the selected grasp's frozen goal frontier."""
 
     supervision = context.metadata.get("supervision_context")
     memory = supervision.get("memory") if isinstance(supervision, Mapping) else None

@@ -291,7 +291,8 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     )
     assert postattach is not None
     assert [item["id"] for item in postattach.details["placement_candidates"]] == [
-        "p0"
+        "p0",
+        *[f"p{index}" for index in range(1, 96)],
     ]
     frozen_goal = postattach.details["placement_candidates"][0]
     assert frozen_goal["world_object_goal_pose"]["translation_xyz"] == [
@@ -313,7 +314,12 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     assert postattach.details["frozen_goal_requalification"] is True
     assert postattach.details["discarded_postattach_model_candidate_count"] == 0
     assert postattach.details["model_raw_candidate_count"] == 96
-    assert postattach.details["raw_candidate_count"] == 1
+    assert postattach.details["raw_candidate_count"] == 96
+    assert postattach.details["frozen_goal_priority_count"] == 1
+    assert postattach.details["frozen_goal_frontier_count"] == 96
+    assert postattach.details["metadata"]["candidate_source"] == (
+        "frozen_anyplace_goal_frontier"
+    )
     assert postattach.details["anyplace_model_inference_invoked"] is False
     assert postattach.details["candidate_image_ref"] == "/frozen-goals/candidates.png"
     assert postattach.details["artifacts"][0]["provenance"] == (
@@ -630,6 +636,97 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
     assert captured_source["frozen_goal_requalification"] is True
     assert repeated.success is False
     assert repeated.details["reason"] == "frozen_goal_requalification_already_consumed"
+    assert predictor_calls == []
+
+
+def test_postattach_continues_frozen_frontier_after_priority_goal_fails(
+    tmp_path: Path,
+) -> None:
+    predictor_calls: list[dict[str, Any]] = []
+    qualification_candidate_ids: list[str] = []
+
+    def rpc(_name, request, _timeout):
+        qualification_candidate_ids.extend(
+            item["candidate_id"] for item in request["candidates"]
+        )
+        results = []
+        for item in request["candidates"]:
+            passed = item["candidate_id"] == "p-frontier"
+            results.append(
+                {
+                    "candidate_id": item["candidate_id"],
+                    "candidate_pose_sha256": item["candidate_pose_sha256"],
+                    "qualification_binding_sha256": request[
+                        "qualification_binding_sha256"
+                    ],
+                    "execution_started": False,
+                    "verdict": "PASS" if passed else "FAIL",
+                    "reason": "qualified" if passed else "collision_state_invalid",
+                    "stages": [_pass_stage()] if passed else [],
+                    "full_plan_submitted": passed,
+                }
+            )
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "results": results,
+        }
+
+    def goal(candidate_id: str, x: float) -> dict[str, Any]:
+        return {
+            "id": candidate_id,
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [x, -0.1, 0.43],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            },
+        }
+
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                }
+            ]
+        },
+        placement_full_plan_limit=4,
+        placement_diversity_limit=96,
+    )
+    priority = goal("p-priority", 0.48)
+    coordinator = _FrozenGoalPairCoordinator(
+        qualifier,
+        object_goals=[goal("p-priority", 0.48), goal("p-frontier", 0.58)],
+        qualified_goals_by_grasp={"g-selected": [priority]},
+        source_model_raw_candidate_count=96,
+    )
+    measured_attachment = {
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": [0.001, -0.015, 0.153],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    handler = _postattachment_handler(
+        tmp_path,
+        qualifier=qualifier,
+        coordinator=coordinator,
+        predictor=lambda request: predictor_calls.append(request) or _model_response(),
+    )
+
+    result = handler(_context(tmp_path, measured_attachment=measured_attachment))
+
+    assert result.success
+    assert qualification_candidate_ids == ["p-priority", "p-frontier"]
+    assert [item["id"] for item in result.details["placement_candidates"]] == [
+        "p-frontier"
+    ]
+    assert result.details["raw_candidate_count"] == 2
+    assert result.details["frozen_goal_priority_count"] == 1
+    assert result.details["anyplace_model_inference_invoked"] is False
     assert predictor_calls == []
 
 
