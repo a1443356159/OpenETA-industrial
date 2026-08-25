@@ -22,6 +22,7 @@ from agent.runtime.planner import (
 from agent.runtime.sam3_selection import (
     BackendSam3SelectionReviewer,
     Sam3SelectionReviewError,
+    Sam3SelectionParentContext,
 )
 
 
@@ -81,6 +82,88 @@ def test_isolated_sam3_reviewer_receives_only_typed_bundle_and_two_images() -> N
     assert request.tool_context["semantic_role"] == "grasp_target"
     assert request.tool_context["target_prompt"] == "alphabet soup can"
     assert "mask_ref" not in request.tool_context["candidates"][0]
+
+
+def test_sam3_reviewer_forks_latest_bounded_parent_planner_context() -> None:
+    parent_context = Sam3SelectionParentContext()
+    parent_context.capture(
+        PlannerBackendRequest(
+            system_prompt="parent planner system contract",
+            tool_context={
+                "task": "pick and place the red block",
+                "controller": {"phase": "semantic_perception"},
+                "current_camera_artifacts": [{"path": "/tmp/stale.png"}],
+                "current_rgbd_views": [{"rgb_path": "/tmp/stale.png"}],
+                "semantic_perception_obligation": {"role": "grasp_target"},
+                "selected_skill_guidance": [{"name": "pick"}],
+            },
+            conversation_messages=[
+                {"role": "user", "content": "pick and place the red block"}
+            ],
+            conversation_summary="bounded parent summary",
+            metadata={"schema_version": "openeta.planner_decision.v1"},
+        )
+    )
+    requests: list[PlannerBackendRequest] = []
+
+    def decide(request: PlannerBackendRequest) -> PlannerBackendResult:
+        requests.append(request)
+        return PlannerBackendResult(
+            payload={
+                "kind": "tool_call",
+                "name": "select_sam3_detection",
+                "parameters": {
+                    "sam3_result_id": "sam3-parent-fork",
+                    "detection_id": "detection_000",
+                    "reason": "The labelled mask covers the complete red block.",
+                },
+                "reasoning": "The two images agree.",
+            },
+            provider="fixture-provider",
+            model="fixture-vlm",
+        )
+
+    review = BackendSam3SelectionReviewer(
+        CallablePlannerBackend(decide),
+        parent_context=parent_context,
+    ).review(
+        {
+            "result_id": "sam3-parent-fork",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red rectangular block",
+            "candidates": [{"id": "detection_000", "rank": 0}],
+            "selection_bundle": {
+                "original_image_ref": "/tmp/original.png",
+                "contact_sheet_ref": "/tmp/contact-sheet.png",
+            },
+        }
+    )
+
+    assert review["decision"] == "select"
+    assert review["detection_id"] == "detection_000"
+    assert review["context_strategy"] == "parent_planner_fork"
+    assert review["parent_context_fork"] is True
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.system_prompt == "parent planner system contract"
+    assert request.conversation_messages == [
+        {"role": "user", "content": "pick and place the red block"}
+    ]
+    assert request.conversation_summary == "bounded parent summary"
+    assert request.metadata["parent_context_fork"] is True
+    assert request.tool_context["vision_image_paths"] == [
+        "/tmp/original.png",
+        "/tmp/contact-sheet.png",
+    ]
+    assert request.tool_context["controller"]["phase"] == "semantic_selection"
+    assert request.tool_context["registered_tool_handlers"] == [
+        "select_sam3_detection",
+        "reject_sam3_detections",
+    ]
+    assert "current_camera_artifacts" not in request.tool_context
+    assert "current_rgbd_views" not in request.tool_context
+    assert "semantic_perception_obligation" not in request.tool_context
+    assert request.tool_context["selected_skill_guidance"] == [{"name": "pick"}]
 
 
 def test_isolated_sam3_reviewer_rejects_unknown_candidate_id() -> None:

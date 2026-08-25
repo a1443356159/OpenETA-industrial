@@ -77,7 +77,7 @@ def test_sam3_selection_reviewer_has_one_shared_bounded_provider_budget() -> Non
         {
             "max_tokens": 256,
             "max_vision_images": 2,
-            "timeout_s": 45.0,
+            "timeout_s": 30.0,
             "max_attempts": 1,
         }
     ]
@@ -148,6 +148,16 @@ def test_tui_and_batch_profiles_share_runtime_contracts(monkeypatch, tmp_path) -
     assert batch.runtime.memory.store.root == batch_workspace.memory_root
     assert tui.runtime.memory.store.session_dir("tui") == tui_workspace.root
     assert batch.runtime.memory.store.session_dir("batch") == batch_workspace.root
+    assert tui.runtime.planner.sam3_selection_parent_context is not None
+    assert batch.runtime.planner.sam3_selection_parent_context is not None
+    assert (
+        tui.runtime.planner.sam3_selection_reviewer.__self__.parent_context
+        is tui.runtime.planner.sam3_selection_parent_context
+    )
+    assert (
+        batch.runtime.planner.sam3_selection_reviewer.__self__.parent_context
+        is batch.runtime.planner.sam3_selection_parent_context
+    )
     tui.runtime.start_session(task="tui task")
     batch.runtime.start_session(task="batch task")
     assert tui.runtime.memory.session_id == tui_workspace.session_id

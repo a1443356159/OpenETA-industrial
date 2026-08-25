@@ -54,6 +54,7 @@ from agent.runtime.sam3_selection import (
     SAM3_SELECTION_REVIEW_MAX_ATTEMPTS,
     SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
     SAM3_SELECTION_REVIEW_TIMEOUT_S,
+    Sam3SelectionParentContext,
 )
 from agent.runtime.session_workspace import SessionWorkspace
 from agent.runtime.skill_authoring import (
@@ -645,8 +646,10 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         config=config.web_access_config,
         provider_config=config.provider,
     )
+    sam3_selection_parent_context = Sam3SelectionParentContext()
     sam3_selection_reviewer = _build_sam3_selection_reviewer(
-        config.backend_factory
+        config.backend_factory,
+        parent_context=sam3_selection_parent_context,
     )
     depth_prefetch = bind_runtime_perception_tools(
         tools,
@@ -670,6 +673,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
             token_estimator_model=config.provider.model,
         ),
         sam3_selection_reviewer=sam3_selection_reviewer,
+        sam3_selection_parent_context=sam3_selection_parent_context,
     )
     skill_review_config = SelfImprovementConfig(
         proposal_root=workspace.working_dir / "skill_reviews" / "pending",
@@ -752,6 +756,8 @@ def configure_runtime_self_improvement(
 
 def _build_sam3_selection_reviewer(
     backend_factory: BackendFactory,
+    *,
+    parent_context: Sam3SelectionParentContext | None = None,
 ) -> Callable[[JsonDict], JsonDict]:
     """Build one bounded reviewer shared by inline and fallback selection."""
 
@@ -764,6 +770,7 @@ def _build_sam3_selection_reviewer(
     return BackendSam3SelectionReviewer(
         backend,
         max_attempts=SAM3_SELECTION_REVIEW_MAX_ATTEMPTS,
+        parent_context=parent_context,
     ).review
 
 

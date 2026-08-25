@@ -1,10 +1,10 @@
-"""Isolated visual reviewer for one SAM3 candidate bundle.
+"""Bounded visual reviewer for one SAM3 candidate bundle.
 
 The ordinary planner owns task progression, while this reviewer owns exactly
 one narrow semantic question: which materialized SAM3 mask matches the stated
-role and prompt.  Keeping that question on a fresh model context mirrors the
-small, typed subroutines used by coding agents and prevents a long embodied
-transcript from dominating a two-image visual comparison.
+role and prompt.  The reviewer forks the latest bounded planner projection so
+providers see the same stable request shape, then replaces its phase and visual
+evidence with a typed two-image comparison.
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ import json
 import math
 import time
 from collections.abc import Mapping
+from copy import deepcopy
+from threading import Lock
 from typing import Any
 
 from adapter.protocol import JsonDict
@@ -22,7 +24,7 @@ from agent.backends.planner import PlannerBackend, PlannerBackendRequest
 SAM3_SELECTION_REVIEW_SCHEMA_VERSION = "openeta.sam3_selection_review.v1"
 SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS = 256
 SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS = 16_000
-SAM3_SELECTION_REVIEW_TIMEOUT_S = 45.0
+SAM3_SELECTION_REVIEW_TIMEOUT_S = 30.0
 SAM3_SELECTION_REVIEW_MAX_ATTEMPTS = 2
 
 SAM3_SELECTION_REVIEW_SYSTEM_PROMPT = """You are an isolated OpenETA mask reviewer.
@@ -81,12 +83,39 @@ class _Sam3SelectionProviderError(RuntimeError):
         super().__init__(message)
 
 
-class BackendSam3SelectionReviewer:
-    """Use the configured main-model provider with a clean two-image context."""
+class Sam3SelectionParentContext:
+    """Thread-safe latest planner request used as a stable reviewer fork."""
 
-    def __init__(self, backend: PlannerBackend, *, max_attempts: int = 1) -> None:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._request: PlannerBackendRequest | None = None
+
+    def capture(self, request: PlannerBackendRequest) -> None:
+        with self._lock:
+            self._request = _copy_planner_request(request)
+
+    def snapshot(self) -> PlannerBackendRequest | None:
+        with self._lock:
+            return (
+                _copy_planner_request(self._request)
+                if self._request is not None
+                else None
+            )
+
+
+class BackendSam3SelectionReviewer:
+    """Use the configured main-model provider for a bounded two-image review."""
+
+    def __init__(
+        self,
+        backend: PlannerBackend,
+        *,
+        max_attempts: int = 1,
+        parent_context: Sam3SelectionParentContext | None = None,
+    ) -> None:
         self.backend = backend
         self.max_attempts = max(1, int(max_attempts))
+        self.parent_context = parent_context
 
     def review(self, request: JsonDict) -> JsonDict:
         failures: list[JsonDict] = []
@@ -153,20 +182,13 @@ class BackendSam3SelectionReviewer:
             "vision_image_paths": [original, contact_sheet],
             "input_token_budget": SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS,
         }
-        started = time.monotonic()
-        result = self.backend.decide(
-            PlannerBackendRequest(
-                system_prompt=SAM3_SELECTION_REVIEW_SYSTEM_PROMPT,
-                tool_context=tool_context,
-                conversation_messages=[],
-                conversation_summary="",
-                metadata={
-                    "schema_version": SAM3_SELECTION_REVIEW_SCHEMA_VERSION,
-                    "isolated_context": True,
-                    "context_budget_tokens": SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS,
-                },
-            )
+        planner_request, context_strategy = self._planner_request(
+            tool_context=tool_context,
+            original=original,
+            contact_sheet=contact_sheet,
         )
+        started = time.monotonic()
+        result = self.backend.decide(planner_request)
         elapsed_s = time.monotonic() - started
         payload = _json_object(result.payload)
         provider_error_type = str(result.details.get("error_type") or "").strip()
@@ -234,12 +256,168 @@ class BackendSam3SelectionReviewer:
             "target_geometry_family": geometry_family,
             "selection_source": "isolated_main_vlm",
             "isolated_context": True,
+            "context_strategy": context_strategy,
+            "parent_context_fork": context_strategy == "parent_planner_fork",
             "vision_image_paths": [original, contact_sheet],
             "provider": result.provider,
             "model": result.model,
             "elapsed_s": round(elapsed_s, 6),
             "provider_details": _compact_provider_details(result.details),
         }
+
+    def _planner_request(
+        self,
+        *,
+        tool_context: JsonDict,
+        original: str,
+        contact_sheet: str,
+    ) -> tuple[PlannerBackendRequest, str]:
+        parent = self.parent_context.snapshot() if self.parent_context is not None else None
+        if parent is None:
+            return (
+                PlannerBackendRequest(
+                    system_prompt=SAM3_SELECTION_REVIEW_SYSTEM_PROMPT,
+                    tool_context=tool_context,
+                    conversation_messages=[],
+                    conversation_summary="",
+                    metadata={
+                        "schema_version": SAM3_SELECTION_REVIEW_SCHEMA_VERSION,
+                        "isolated_context": True,
+                        "context_budget_tokens": SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS,
+                    },
+                ),
+                "isolated_minimal",
+            )
+
+        fork_context = deepcopy(parent.tool_context)
+        for key in (
+            "current_camera_artifacts",
+            "current_rgbd_views",
+            "grasp_view_selection_obligation",
+            "obligations",
+            "semantic_perception_obligation",
+        ):
+            fork_context.pop(key, None)
+        selection_bundle = {
+            "original_image_ref": original,
+            "contact_sheet_ref": contact_sheet,
+            "candidate_count": tool_context["candidate_count"],
+            "candidates": deepcopy(tool_context["candidates"]),
+        }
+        fork_context.update(
+            {
+                "controller": {
+                    "architecture": "host_state_machine_with_typed_model_subtasks",
+                    "phase": "semantic_selection",
+                    "legal_tool_names": [
+                        "select_sam3_detection",
+                        "reject_sam3_detections",
+                    ],
+                    "rule": (
+                        "Choose only a listed legal tool. Inspect both attached images; "
+                        "scores and ranks are never semantic proof."
+                    ),
+                },
+                "selection_obligation": {
+                    "result_id": tool_context["result_id"],
+                    "semantic_role": tool_context["semantic_role"],
+                    "semantic_role_source": "explicit",
+                    "target_prompt": tool_context["target_prompt"],
+                    "candidates": deepcopy(tool_context["candidates"]),
+                    "selection_bundle": selection_bundle,
+                },
+                "selection_review_contract": {
+                    "image_order": [
+                        {"image_number": 1, "role": "original_rgb"},
+                        {"image_number": 2, "role": "candidate_contact_sheet"},
+                    ],
+                    "rules": [
+                        "Inspect both images; rank and score are tie-breakers only.",
+                        (
+                            "grasp_target and placement_object must cover the complete "
+                            "intended object, not one face or broad background."
+                        ),
+                        (
+                            "placement_region must cover the intended support region, "
+                            "not the held object or unrelated workspace."
+                        ),
+                        "Reject all candidates when none truthfully matches.",
+                    ],
+                },
+                "vision_image_paths": [original, contact_sheet],
+                "tool_references": _selection_tool_references(),
+                "registered_tool_handlers": [
+                    "select_sam3_detection",
+                    "reject_sam3_detections",
+                ],
+            }
+        )
+        return (
+            PlannerBackendRequest(
+                system_prompt=parent.system_prompt,
+                tool_context=fork_context,
+                conversation_messages=_bounded_parent_messages(
+                    parent.conversation_messages
+                ),
+                conversation_summary=parent.conversation_summary,
+                metadata={
+                    "schema_version": SAM3_SELECTION_REVIEW_SCHEMA_VERSION,
+                    "parent_context_fork": True,
+                    "context_budget_tokens": SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS,
+                },
+            ),
+            "parent_planner_fork",
+        )
+
+
+def _copy_planner_request(request: PlannerBackendRequest) -> PlannerBackendRequest:
+    return PlannerBackendRequest(
+        system_prompt=request.system_prompt,
+        tool_context=deepcopy(request.tool_context),
+        conversation_messages=deepcopy(request.conversation_messages),
+        conversation_summary=request.conversation_summary,
+        attempt=request.attempt,
+        validation_errors=list(request.validation_errors),
+        metadata=deepcopy(request.metadata),
+    )
+
+
+def _selection_tool_references() -> list[JsonDict]:
+    return [
+        {
+            "name": "select_sam3_detection",
+            "category": "perception",
+            "effect": "bookkeeping",
+            "description": "Select one exact SAM3 detection after visual review.",
+            "parameters": {
+                "sam3_result_id": "exact result id",
+                "detection_id": "exact candidate id",
+                "selection_confidence": "optional numeric confidence from 0 to 1",
+                "reason": "concise visual reason",
+                "target_geometry_family": (
+                    "optional: upright_can, upright_bottle, boxed_item, bowl, apple, "
+                    "articulated_handle, drawer_handle, other, or unknown"
+                ),
+            },
+        },
+        {
+            "name": "reject_sam3_detections",
+            "category": "perception",
+            "effect": "bookkeeping",
+            "description": "Reject all candidates after visual review.",
+            "parameters": {
+                "sam3_result_id": "exact result id",
+                "reason": "concise visual reason",
+            },
+        },
+    ]
+
+
+def _bounded_parent_messages(messages: list[JsonDict]) -> list[JsonDict]:
+    copied = deepcopy(messages)
+    if len(copied) <= 5:
+        return copied
+    return [copied[0], *copied[-4:]]
 
 
 def _candidate_summary(candidate: Mapping[str, Any]) -> JsonDict:

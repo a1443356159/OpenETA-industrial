@@ -29,7 +29,10 @@ from agent.runtime.memory import (
 )
 from agent.runtime.planner_prompts import compose_main_planner_prompt
 from agent.runtime.rollout import RolloutRecorder, public_backend_details
-from agent.runtime.sam3_selection import BackendSam3SelectionReviewer
+from agent.runtime.sam3_selection import (
+    BackendSam3SelectionReviewer,
+    Sam3SelectionParentContext,
+)
 from agent.backends.planner import (
     PlaceholderPlannerBackend,
     PlannerBackend,
@@ -157,6 +160,7 @@ class ToolCallingPlanner(BasePlanner):
         system_prompt: str = "",
         context_config: PlannerContextConfig | None = None,
         sam3_selection_reviewer: Callable[[JsonDict], JsonDict] | None = None,
+        sam3_selection_parent_context: Sam3SelectionParentContext | None = None,
     ) -> None:
         self.backend = backend or PlaceholderPlannerBackend()
         self.max_validation_retries = max(0, max_validation_retries)
@@ -164,12 +168,39 @@ class ToolCallingPlanner(BasePlanner):
         self.system_prompt, self.prompt_metadata = compose_main_planner_prompt(base_prompt)
         self.context_config = context_config or PlannerContextConfig()
         self.sam3_selection_reviewer = sam3_selection_reviewer
+        self.sam3_selection_parent_context = sam3_selection_parent_context
         self.rollout_recorder: RolloutRecorder | None = None
 
     def set_rollout_recorder(self, recorder: RolloutRecorder | None) -> None:
         """Attach the training-data recorder owned by the runtime."""
 
         self.rollout_recorder = recorder
+
+    def _capture_sam3_parent_context(
+        self,
+        *,
+        tool_context: JsonDict,
+        memory: AgentMemory,
+    ) -> None:
+        if self.sam3_selection_parent_context is None:
+            return
+        conversation_summary = memory.conversation_checkpoint_summary()[-4_000:]
+        model_tool_context, conversation_messages = _model_request_context(
+            tool_context,
+            memory=memory,
+            config=self.context_config,
+            system_prompt=self.system_prompt,
+            conversation_summary=conversation_summary,
+        )
+        self.sam3_selection_parent_context.capture(
+            PlannerBackendRequest(
+                tool_context=model_tool_context,
+                system_prompt=self.system_prompt,
+                conversation_messages=conversation_messages,
+                conversation_summary=conversation_summary,
+                metadata={"schema_version": "openeta.planner_decision.v1"},
+            )
+        )
 
     def plan(
         self,
@@ -188,6 +219,11 @@ class ToolCallingPlanner(BasePlanner):
         )
         host_obligation = _host_obligation_decision(tool_context, tools=tools)
         if host_obligation is not None:
+            if host_obligation.action == "sam3":
+                self._capture_sam3_parent_context(
+                    tool_context=tool_context,
+                    memory=memory,
+                )
             host_obligation.metadata.update(
                 _planner_metadata(
                     planner=self,
@@ -208,6 +244,10 @@ class ToolCallingPlanner(BasePlanner):
             and isinstance(selection_bundle.get("contact_sheet_ref"), str)
             and selection.get("semantic_role_source") == "explicit"
         ):
+            self._capture_sam3_parent_context(
+                tool_context=tool_context,
+                memory=memory,
+            )
             return self._plan_isolated_sam3_selection(
                 selection,
                 tool_context=tool_context,
@@ -259,6 +299,8 @@ class ToolCallingPlanner(BasePlanner):
                 validation_errors=validation_errors,
                 metadata={"schema_version": "openeta.planner_decision.v1"},
             )
+            if self.sam3_selection_parent_context is not None:
+                self.sam3_selection_parent_context.capture(request)
             model_started_at_s = time.time()
             last_result = self.backend.decide(request)
             model_completed_at_s = time.time()
