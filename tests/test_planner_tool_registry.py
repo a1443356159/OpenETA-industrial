@@ -3200,6 +3200,29 @@ def test_planner_context_can_disable_context_window_threshold() -> None:
     assert context["context_budget"]["trigger_tokens"] is None
 
 
+def test_host_macro_skips_provider_token_estimation() -> None:
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "[automation=scripted_tui; planner_mode=host_macro; "
+            "environment_id=openeta/test-v0; environment_task=normal_pick_and_place] "
+            "run control smoke"
+        )
+    )
+
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=build_default_tool_registry(),
+        skills=build_default_skill_registry(),
+    )
+
+    budget = context["context_budget"]
+    assert budget["estimator"]["method"] == "skipped_host_macro_no_model"
+    assert budget["estimated_tokens"] == 0
+    assert budget["should_auto_compact"] is False
+
+
 def test_token_estimator_reports_method_metadata() -> None:
     estimate = estimate_text_tokens("hello world", model="unknown-provider-model")
 
@@ -8996,11 +9019,13 @@ def test_openai_compatible_backend_attaches_pending_selection_images(tmp_path: P
         PlannerBackendRequest(
             tool_context={
                 "task": "pick alphabet soup",
-                "selection_obligation": {
-                    "result_id": "sam3-run-selection",
-                    "selection_bundle": {
-                        "original_image_ref": str(original),
-                        "contact_sheet_ref": str(contact_sheet),
+                "obligations": {
+                    "selection_obligation": {
+                        "result_id": "sam3-run-selection",
+                        "selection_bundle": {
+                            "original_image_ref": str(original),
+                            "contact_sheet_ref": str(contact_sheet),
+                        },
                     },
                 },
             },
@@ -9139,9 +9164,11 @@ def test_openai_compatible_backend_attaches_scene_and_asset_reference(tmp_path: 
         PlannerBackendRequest(
             tool_context={
                 "task": "pick alphabet soup",
-                "reference_localization_obligation": {
-                    "scene_image": str(scene),
-                    "reference_images": [str(reference)],
+                "obligations": {
+                    "reference_localization_obligation": {
+                        "scene_image": str(scene),
+                        "reference_images": [str(reference)],
+                    },
                 },
             },
             system_prompt="return json",

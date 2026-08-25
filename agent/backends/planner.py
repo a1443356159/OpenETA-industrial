@@ -829,12 +829,15 @@ def _planner_user_content(
         if isinstance(explicit_paths, list)
         else []
     )
-    selection = request.tool_context.get("selection_obligation")
+    selection = _planner_obligation(request.tool_context, "selection_obligation")
     # A mask-selection call is a typed visual subtask. Its original RGB and
     # labelled contact sheet must occupy the limited image slots before any
     # generic top/wrist scene attachments.
     paths: list[str] = [] if isinstance(selection, dict) else list(generic_paths)
-    localization = request.tool_context.get("reference_localization_obligation")
+    localization = _planner_obligation(
+        request.tool_context,
+        "reference_localization_obligation",
+    )
     if isinstance(selection, dict):
         bundle = selection.get("selection_bundle")
         if not isinstance(bundle, dict):
@@ -980,6 +983,15 @@ def _validated_conversation_messages(messages: list[JsonDict]) -> list[JsonDict]
             continue
         validated.append({"role": role, "content": content})
     return validated
+
+
+def _planner_obligation(context: JsonDict, name: str) -> object:
+    """Read v3 nested obligations while accepting older projected contexts."""
+
+    obligations = context.get("obligations")
+    if isinstance(obligations, dict) and name in obligations:
+        return obligations[name]
+    return context.get(name)
 
 
 def _usage_estimation_body(body: JsonDict) -> JsonDict:

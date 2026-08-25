@@ -703,17 +703,71 @@ def test_model_projection_bounds_context_without_deleting_host_evidence() -> Non
     )
 
     budget = projected["context_budget"]
-    assert budget["projection_level"] in {"hard_compacted", "minimal_hard_bound"}
+    assert budget["projection_level"] in {
+        "soft_compacted",
+        "hard_compacted",
+        "minimal_hard_bound",
+    }
     assert budget["within_hard_limit"] is True
     assert budget["estimated_tokens"] <= budget["hard_limit_tokens"]
-    assert len(messages) <= 9
+    assert len(messages) <= 5
     assert projected["controller"]["legal_tool_names"] == ["sam3"]
     assert [reference["name"] for reference in projected["tool_references"]] == ["sam3"]
+    assert projected["schema_version"] == "openeta.planner_model_context.v3"
+    assert "semantic_perception_obligation" not in projected
+    assert "grasp_candidate_policy" not in projected
+    assert "current_camera_artifacts" not in projected
+    assert "current_camera_calibrations" not in projected
+    assert "current_user_request" not in projected["memory"]
+    assert "recent_events" not in projected["memory"]
     assert private_marker not in json.dumps(projected)
     assert (
         full_context["grasp_candidate_policy"]["qualification_artifact"]["proof"]
         == private_marker
     )
+
+
+def test_model_projection_deduplicates_task_and_omits_images_for_typed_action() -> None:
+    task = "pick the red block"
+    memory = AgentMemory()
+    memory.start_session(task=task)
+    full_context = {
+        "task": task,
+        "planner_mode": "agentic_closed_loop",
+        "observation": {"task": task, "camera_ids": ["top"]},
+        "vision_image_paths": ["/tmp/top.png"],
+        "current_rgbd_views": [
+            {
+                "frame_id": "top",
+                "rgb_path": "/tmp/top.png",
+                "depth_path": "/tmp/top-depth.png",
+            }
+        ],
+        "tool_references": [
+            {"name": "observe", "description": "observe", "parameters": {}}
+        ],
+        "fresh_observation_obligation": {
+            "status": "required",
+            "required_tool": "observe",
+            "required_parameters": {"reason": "fresh_state"},
+        },
+        "memory": {"metadata": {}, "latest_human_interaction": None},
+        "selected_skill_guidance": [],
+        "skill_usage": {},
+    }
+
+    projected, messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    assert messages == []
+    assert projected["vision_image_paths"] == []
+    assert projected["current_rgbd_views"] == []
+    assert projected["obligations"]["fresh_observation_obligation"][
+        "required_parameters"
+    ] == {"reason": "fresh_state"}
 
 
 def test_attached_object_never_triggers_postattach_semantic_retry() -> None:
