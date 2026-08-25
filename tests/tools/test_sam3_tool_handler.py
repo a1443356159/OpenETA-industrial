@@ -953,6 +953,50 @@ def test_sam3_handler_selects_single_text_candidate_without_vlm_review(
     assert result.details["selection_review"]["model_review_invoked"] is False
 
 
+def test_sam3_handler_selects_single_text_candidate_when_reviewer_is_disabled(
+    tmp_path: Path,
+) -> None:
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+
+    result = build_sam3_handler(
+        lambda _request: {
+            "success": True,
+            "details": {
+                "detection_count": 1,
+                "detections": [
+                    {
+                        "label": "red block",
+                        "score": 0.95,
+                        "bbox_xyxy": [10, 10, 20, 20],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 100,
+                    }
+                ],
+                "artifacts": [],
+            },
+        },
+        selection_reviewer=None,
+        output_root=tmp_path,
+    )(
+        _context(
+            {
+                "mode": "text",
+                "image": str(FIXTURE_IMAGE),
+                "prompt": "red block",
+                "semantic_role": "grasp_target",
+                "semantic_target": "red block",
+            }
+        )
+    )
+
+    assert result.success is True
+    assert result.details["selection_required"] is False
+    assert result.details["selected_detection"]["id"] == "detection_000"
+    assert result.details["selection_review"]["decision"] == "select"
+    assert result.details["selection_review"]["deterministic_singleton"] is True
+    assert result.details["selection_review"]["model_review_invoked"] is False
+
+
 def test_sam3_handler_can_split_json_results_and_images(tmp_path: Path) -> None:
     def segment(_request: dict) -> dict:
         return {

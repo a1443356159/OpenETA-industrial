@@ -590,7 +590,7 @@ def build_sam3_handler(
                 ),
             },
         )
-        if result.success and selection_reviewer is not None:
+        if result.success:
             details = dict(result.details)
             detections = details.get("detections")
             if (
@@ -637,7 +637,11 @@ def build_sam3_handler(
                     "deterministic_singleton": True,
                     "model_review_invoked": False,
                 }
-            elif isinstance(detections, list) and detections:
+            elif (
+                selection_reviewer is not None
+                and isinstance(detections, list)
+                and detections
+            ):
                 try:
                     review = selection_reviewer(
                         {
