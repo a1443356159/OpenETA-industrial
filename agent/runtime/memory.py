@@ -6341,7 +6341,9 @@ class AgentMemory:
             self.store.save_working_memory(self)
 
 
-def _grasp_candidate_sort_key(candidate: JsonDict) -> tuple[float, int]:
+def _grasp_candidate_sort_key(candidate: JsonDict) -> tuple[int, int, float, int]:
+    """Prefer host-proven physical order, then the provider's native score."""
+
     try:
         score = float(candidate.get("score"))
     except (TypeError, ValueError):
@@ -6350,7 +6352,27 @@ def _grasp_candidate_sort_key(candidate: JsonDict) -> tuple[float, int]:
         rank = int(candidate.get("rank"))
     except (TypeError, ValueError):
         rank = 1_000_000
-    return (-score, rank)
+    physical_rank: int | None = None
+    if candidate.get("grasp_place_joint_qualified") is True:
+        for key in (
+            "grasp_place_frontier_quality_rank",
+            "grasp_place_physical_quality_rank",
+        ):
+            value = candidate.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                physical_rank = value
+                break
+    if physical_rank is not None:
+        return (0, physical_rank, -score, rank)
+    moveit_rank = candidate.get("moveit_physical_quality_rank")
+    if (
+        candidate.get("moveit_l5_qualified") is True
+        and isinstance(moveit_rank, int)
+        and not isinstance(moveit_rank, bool)
+        and moveit_rank >= 0
+    ):
+        return (1, moveit_rank, -score, rank)
+    return (2, 0, -score, rank)
 
 
 def _normalize_grasp_geometry_family(value: object) -> str:

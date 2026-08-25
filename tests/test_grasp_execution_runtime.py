@@ -1216,6 +1216,50 @@ def test_graspgenx_memory_preserves_formal_counts_without_post_moveit_reordering
     assert "qualified_candidate_count" not in policy
 
 
+def test_memory_preserves_fast_joint_physical_quality_over_generator_score() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick red block")
+    model_favorite = {
+        **_candidate("model-favorite", 0.99),
+        "grasp_place_joint_qualified": True,
+        "grasp_place_frontier_quality_rank": 1,
+        "grasp_place_physical_quality_rank": 0,
+        "moveit_l5_qualified": True,
+        "moveit_physical_quality_rank": 0,
+    }
+    physical_favorite = {
+        **_candidate("physical-favorite", 0.60),
+        "grasp_place_joint_qualified": True,
+        "grasp_place_frontier_quality_rank": 0,
+        "grasp_place_physical_quality_rank": 1,
+        "moveit_l5_qualified": True,
+        "moveit_physical_quality_rank": 1,
+    }
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "fast-joint-ranked",
+                "selected_backend": "graspgenx",
+                "qualification_profile": "fast_v3",
+                "ranking": "grasp_place_physical_quality",
+                "grasp_candidates": [model_favorite, physical_favorite],
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["ranking"] == "grasp_place_physical_quality"
+    assert [candidate["id"] for candidate in policy["candidates"]] == [
+        "physical-favorite",
+        "model-favorite",
+    ]
+    assert policy["active_candidate"]["id"] == "physical-favorite"
+    assert policy["active_candidate"]["score"] == 0.60
+
+
 def test_selected_mask_geometry_becomes_task_strategy_compile_hint() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick alphabet soup")

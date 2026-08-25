@@ -1866,6 +1866,8 @@ class _FrozenGoalPairCoordinator:
                 )
 
         final_grasps = list(retained.values())[:target]
+        for frontier_rank, grasp in enumerate(final_grasps):
+            grasp["grasp_place_frontier_quality_rank"] = frontier_rank
         final_ids = [str(grasp.get("id") or "") for grasp in final_grasps]
         self.qualified_goals_by_grasp = {
             grasp_id: retained_goals[grasp_id]
@@ -1890,6 +1892,7 @@ class _FrozenGoalPairCoordinator:
                 ),
                 "frozen_grasp_frontier_generation": self.grasp_frontier_generation,
                 "frozen_grasp_frontier_model_inference_invoked": False,
+                "ranking": "grasp_place_physical_quality",
             }
         )
         if pair_artifacts:
@@ -2057,18 +2060,20 @@ class _FrozenGoalPairCoordinator:
         result.details.update(goal_legality_summary)
         pass_count: dict[str, int] = {}
         goal_ids: dict[str, list[str]] = {}
+        physical_rank_by_grasp: dict[str, int] = {}
         goal_lookup = {
             str(goal.get("id") or ""): goal
             for goal in self.object_goals
             if isinstance(goal, Mapping) and str(goal.get("id") or "")
         }
         qualified_goals: dict[str, list[JsonDict]] = {}
-        for pair in passed_pairs:
+        for pair_rank, pair in enumerate(passed_pairs):
             if not isinstance(pair, Mapping):
                 continue
             grasp_id = str(pair.get("source_grasp_id") or "")
             if not grasp_id:
                 continue
+            physical_rank_by_grasp.setdefault(grasp_id, pair_rank)
             pass_count[grasp_id] = pass_count.get(grasp_id, 0) + 1
             goal_id = str(pair.get("source_object_goal_id") or "")
             goal_ids.setdefault(grasp_id, []).append(goal_id)
@@ -2108,6 +2113,9 @@ class _FrozenGoalPairCoordinator:
             annotated["grasp_place_joint_qualified"] = True
             annotated["grasp_place_pass_count"] = pass_count[grasp_id]
             annotated["grasp_place_goal_ids"] = goal_ids.get(grasp_id, [])
+            annotated["grasp_place_physical_quality_rank"] = (
+                physical_rank_by_grasp[grasp_id]
+            )
             retained.append(annotated)
             cached_candidate = entry.get("candidate")
             if isinstance(cached_candidate, Mapping):
@@ -2150,6 +2158,13 @@ class _FrozenGoalPairCoordinator:
         result.details["frozen_pair_full_plan_pass_count"] = joint.details.get(
             "full_plan_pass_count", 0
         )
+        if retained:
+            retained.sort(
+                key=lambda grasp: int(
+                    grasp.get("grasp_place_physical_quality_rank", 1_000_000)
+                )
+            )
+            result.details["ranking"] = "grasp_place_physical_quality"
         if joint.details.get("qualification_artifact"):
             result.details["frozen_pair_qualification_artifact"] = joint.details[
                 "qualification_artifact"

@@ -1408,6 +1408,15 @@ def test_fast_grasp_lookahead_expands_l5_capacity_without_model_rerun():
     assert result.details["candidate_count"] == 4
     assert len(result.details["grasp_candidates"]) == 4
     assert len({item["id"] for item in result.details["grasp_candidates"]}) == 4
+    assert result.details["ranking"] == "moveit_physical_quality"
+    assert [
+        item["moveit_physical_quality_rank"]
+        for item in result.details["grasp_candidates"]
+    ] == [0, 1, 2, 3]
+    assert all(
+        item["moveit_l5_qualified"] is True
+        for item in result.details["grasp_candidates"]
+    )
 
 
 def test_shadow_preserves_complete_fast_pool_but_legacy_uses_old_dedup_subset():

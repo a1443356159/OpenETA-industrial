@@ -263,6 +263,11 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     assert "l5_submission_limit" not in captured["funnel"]
     assert captured["funnel"]["qualification_mode"] == "frozen_pair"
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0", "g2"]
+    assert result.details["ranking"] == "grasp_place_physical_quality"
+    assert [
+        item["grasp_place_physical_quality_rank"]
+        for item in result.details["grasp_candidates"]
+    ] == [0, 1]
     assert cache.resolve(purpose="grasp", candidate_id="g1") is None
     retained_cache = cache.resolve(purpose="grasp", candidate_id="g0")
     assert retained_cache is not None
@@ -495,6 +500,11 @@ def test_fast_pair_search_deepens_frozen_grasp_frontier_inside_one_tool_call(
     assert result.details["frozen_pair_frontier_expansion_count"] == 1
     assert result.details["frozen_grasp_frontier_remaining_count"] == 0
     assert result.details["frozen_grasp_frontier_model_inference_invoked"] is False
+    assert result.details["ranking"] == "grasp_place_physical_quality"
+    assert [
+        candidate["grasp_place_frontier_quality_rank"]
+        for candidate in result.details["grasp_candidates"]
+    ] == [0, 1]
     assert len(result.details["frozen_pair_qualification_artifacts"]) == 2
     assert len(result.details["frozen_grasp_frontier_qualification_artifacts"]) == 1
     assert [

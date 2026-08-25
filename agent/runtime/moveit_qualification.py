@@ -695,9 +695,16 @@ class MoveItCandidateQualifier:
                 if candidate_id in raw_by_id
                 and proofs.get(candidate_id, {}).get("verdict") == "PASS"
             ]
-        for candidate in passed:
+        for physical_rank, candidate in enumerate(passed):
             candidate_id = str(candidate.get("id") or "")
             proof = proofs.get(candidate_id, {})
+            if self.qualification_profile == "fast_v3":
+                # Preserve the engine's deterministic L5 quality order across
+                # the public tool boundary.  Generator score remains a final
+                # tie-breaker; it must not undo joint margin, singularity,
+                # travel, rescue, and fixed-index ordering after MoveIt proof.
+                candidate["moveit_physical_quality_rank"] = physical_rank
+                candidate["moveit_l5_qualified"] = True
             goal_legality = proof.get("goal_legality")
             checks = (
                 goal_legality.get("checks")
@@ -792,6 +799,11 @@ class MoveItCandidateQualifier:
                 "qualification_stop_reason": evidence.get("stop_reason"),
                 "qualification_waves": list(evidence.get("waves") or []),
                 "qualification_metrics": dict(evidence.get("metrics") or {}),
+                "ranking": (
+                    "moveit_physical_quality"
+                    if self.qualification_profile == "fast_v3" and passed
+                    else details.get("ranking") or "score_descending"
+                ),
             }
         )
         if artifact is not None:
