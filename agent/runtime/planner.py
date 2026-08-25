@@ -176,31 +176,11 @@ class ToolCallingPlanner(BasePlanner):
 
         self.rollout_recorder = recorder
 
-    def _capture_sam3_parent_context(
-        self,
-        *,
-        tool_context: JsonDict,
-        memory: AgentMemory,
-    ) -> None:
-        if self.sam3_selection_parent_context is None:
-            return
-        conversation_summary = memory.conversation_checkpoint_summary()[-4_000:]
-        model_tool_context, conversation_messages = _model_request_context(
-            tool_context,
-            memory=memory,
-            config=self.context_config,
-            system_prompt=self.system_prompt,
-            conversation_summary=conversation_summary,
-        )
-        self.sam3_selection_parent_context.capture(
-            PlannerBackendRequest(
-                tool_context=model_tool_context,
-                system_prompt=self.system_prompt,
-                conversation_messages=conversation_messages,
-                conversation_summary=conversation_summary,
-                metadata={"schema_version": "openeta.planner_decision.v1"},
-            )
-        )
+    def reset_session_context(self) -> None:
+        """Reset bounded provider checkpoints owned by one agent session."""
+
+        if self.sam3_selection_parent_context is not None:
+            self.sam3_selection_parent_context.clear()
 
     def plan(
         self,
@@ -219,11 +199,6 @@ class ToolCallingPlanner(BasePlanner):
         )
         host_obligation = _host_obligation_decision(tool_context, tools=tools)
         if host_obligation is not None:
-            if host_obligation.action == "sam3":
-                self._capture_sam3_parent_context(
-                    tool_context=tool_context,
-                    memory=memory,
-                )
             host_obligation.metadata.update(
                 _planner_metadata(
                     planner=self,
@@ -244,10 +219,6 @@ class ToolCallingPlanner(BasePlanner):
             and isinstance(selection_bundle.get("contact_sheet_ref"), str)
             and selection.get("semantic_role_source") == "explicit"
         ):
-            self._capture_sam3_parent_context(
-                tool_context=tool_context,
-                memory=memory,
-            )
             return self._plan_isolated_sam3_selection(
                 selection,
                 tool_context=tool_context,
@@ -299,11 +270,14 @@ class ToolCallingPlanner(BasePlanner):
                 validation_errors=validation_errors,
                 metadata={"schema_version": "openeta.planner_decision.v1"},
             )
-            if self.sam3_selection_parent_context is not None:
-                self.sam3_selection_parent_context.capture(request)
             model_started_at_s = time.time()
             last_result = self.backend.decide(request)
             model_completed_at_s = time.time()
+            if (
+                self.sam3_selection_parent_context is not None
+                and not str(last_result.details.get("error_type") or "").strip()
+            ):
+                self.sam3_selection_parent_context.capture_if_empty(request)
             backend_usage = _merge_backend_usage(backend_usage, last_result.details)
             usage_source = str(last_result.details.get("usage_source") or "unknown")
             backend_usage_sources[usage_source] = (
@@ -615,14 +589,14 @@ class ToolCallingPlanner(BasePlanner):
             action="ask_human",
             parameters={
                 "question": (
-                    "The isolated SAM3 semantic reviewer exhausted its bounded retry. Check the "
+                    "The bounded SAM3 semantic reviewer exhausted its retry. Check the "
                     "planner/VLM service before resuming this unchanged candidate bundle."
                 ),
                 "failure_code": "sam3_selection_infrastructure_failure",
                 "sam3_result_id": selection.get("result_id"),
             },
             reasoning=(
-                "Repeated reviewer exceptions are infrastructure failures, not evidence "
+                "Repeated bounded-review exceptions are infrastructure failures, not evidence "
                 "that any SAM3 candidate is semantically unreachable."
             ),
             metadata={

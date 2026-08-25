@@ -2,9 +2,9 @@
 
 The ordinary planner owns task progression, while this reviewer owns exactly
 one narrow semantic question: which materialized SAM3 mask matches the stated
-role and prompt.  The reviewer forks the latest bounded planner projection so
-providers see the same stable request shape, then replaces its phase and visual
-evidence with a typed two-image comparison.
+role and prompt.  The reviewer forks the first provider-confirmed planner
+checkpoint so providers see a stable request shape, then replaces its phase and
+visual evidence with a typed two-image comparison.
 """
 
 from __future__ import annotations
@@ -84,7 +84,15 @@ class _Sam3SelectionProviderError(RuntimeError):
 
 
 class Sam3SelectionParentContext:
-    """Thread-safe latest planner request used as a stable reviewer fork."""
+    """Thread-safe confirmed planner checkpoint used as a reviewer fork.
+
+    The first provider-confirmed planner request is intentionally retained for
+    the lifetime of one runtime session.  Host-dispatched turns can accumulate
+    large qualification and motion evidence even though none of it is relevant
+    to a two-image mask choice.  Keeping the first confirmed request gives the
+    reviewer a provider-proven coding-agent request envelope whose size does
+    not grow with the embodied episode.
+    """
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -93,6 +101,21 @@ class Sam3SelectionParentContext:
     def capture(self, request: PlannerBackendRequest) -> None:
         with self._lock:
             self._request = _copy_planner_request(request)
+
+    def capture_if_empty(self, request: PlannerBackendRequest) -> bool:
+        """Retain the first confirmed request and report whether it was stored."""
+
+        with self._lock:
+            if self._request is not None:
+                return False
+            self._request = _copy_planner_request(request)
+            return True
+
+    def clear(self) -> None:
+        """Drop the checkpoint when the owning runtime starts another session."""
+
+        with self._lock:
+            self._request = None
 
     def snapshot(self) -> PlannerBackendRequest | None:
         with self._lock:
@@ -187,6 +210,18 @@ class BackendSam3SelectionReviewer:
             original=original,
             contact_sheet=contact_sheet,
         )
+        request_estimated_chars = len(
+            json.dumps(
+                {
+                    "system_prompt": planner_request.system_prompt,
+                    "tool_context": planner_request.tool_context,
+                    "conversation_messages": planner_request.conversation_messages,
+                    "conversation_summary": planner_request.conversation_summary,
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+        )
         started = time.monotonic()
         result = self.backend.decide(planner_request)
         elapsed_s = time.monotonic() - started
@@ -209,6 +244,13 @@ class BackendSam3SelectionReviewer:
                         "provider_switch_count",
                     )
                     if key in result.details
+                }
+                | {
+                    "context_strategy": context_strategy,
+                    "request_estimated_chars": request_estimated_chars,
+                    "conversation_message_count": len(
+                        planner_request.conversation_messages
+                    ),
                 },
             )
         decision = str(payload.get("decision") or "").strip().lower()
@@ -254,14 +296,20 @@ class BackendSam3SelectionReviewer:
             ),
             "reason": reason,
             "target_geometry_family": geometry_family,
-            "selection_source": "isolated_main_vlm",
-            "isolated_context": True,
+            "selection_source": (
+                "parent_context_main_vlm"
+                if context_strategy == "parent_planner_fork"
+                else "isolated_main_vlm"
+            ),
+            "isolated_context": context_strategy == "isolated_minimal",
             "context_strategy": context_strategy,
             "parent_context_fork": context_strategy == "parent_planner_fork",
             "vision_image_paths": [original, contact_sheet],
             "provider": result.provider,
             "model": result.model,
             "elapsed_s": round(elapsed_s, 6),
+            "request_estimated_chars": request_estimated_chars,
+            "conversation_message_count": len(planner_request.conversation_messages),
             "provider_details": _compact_provider_details(result.details),
         }
 

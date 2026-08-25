@@ -19,6 +19,7 @@ from agent.runtime.planner import (
     _sam3_request_identity,
     _semantic_perception_obligation,
 )
+from agent.runtime.runtime import OpenEtaAgentRuntime
 from agent.runtime.sam3_selection import (
     BackendSam3SelectionReviewer,
     Sam3SelectionReviewError,
@@ -84,7 +85,7 @@ def test_isolated_sam3_reviewer_receives_only_typed_bundle_and_two_images() -> N
     assert "mask_ref" not in request.tool_context["candidates"][0]
 
 
-def test_sam3_reviewer_forks_latest_bounded_parent_planner_context() -> None:
+def test_sam3_reviewer_forks_confirmed_bounded_parent_planner_context() -> None:
     parent_context = Sam3SelectionParentContext()
     parent_context.capture(
         PlannerBackendRequest(
@@ -143,6 +144,8 @@ def test_sam3_reviewer_forks_latest_bounded_parent_planner_context() -> None:
     assert review["detection_id"] == "detection_000"
     assert review["context_strategy"] == "parent_planner_fork"
     assert review["parent_context_fork"] is True
+    assert review["isolated_context"] is False
+    assert review["selection_source"] == "parent_context_main_vlm"
     assert len(requests) == 1
     request = requests[0]
     assert request.system_prompt == "parent planner system contract"
@@ -164,6 +167,53 @@ def test_sam3_reviewer_forks_latest_bounded_parent_planner_context() -> None:
     assert "current_rgbd_views" not in request.tool_context
     assert "semantic_perception_obligation" not in request.tool_context
     assert request.tool_context["selected_skill_guidance"] == [{"name": "pick"}]
+
+
+def test_sam3_parent_context_retains_first_confirmed_checkpoint() -> None:
+    parent_context = Sam3SelectionParentContext()
+    first = PlannerBackendRequest(
+        system_prompt="confirmed small request",
+        tool_context={"task": "pick and place", "checkpoint": "first"},
+        conversation_messages=[{"role": "user", "content": "pick and place"}],
+    )
+    later = PlannerBackendRequest(
+        system_prompt="later accumulated request",
+        tool_context={"task": "pick and place", "checkpoint": "later", "noise": "x" * 50_000},
+        conversation_messages=[{"role": "assistant", "content": "many later turns"}],
+    )
+
+    assert parent_context.capture_if_empty(first) is True
+    assert parent_context.capture_if_empty(later) is False
+
+    snapshot = parent_context.snapshot()
+    assert snapshot is not None
+    assert snapshot.system_prompt == "confirmed small request"
+    assert snapshot.tool_context == {"task": "pick and place", "checkpoint": "first"}
+    assert snapshot.conversation_messages == [
+        {"role": "user", "content": "pick and place"}
+    ]
+
+    parent_context.clear()
+    assert parent_context.snapshot() is None
+
+
+def test_runtime_session_start_clears_sam3_parent_checkpoint() -> None:
+    parent_context = Sam3SelectionParentContext()
+    parent_context.capture(
+        PlannerBackendRequest(
+            system_prompt="previous session",
+            tool_context={"task": "previous"},
+        )
+    )
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(lambda _request: {"kind": "response", "name": "talk"}),
+        sam3_selection_parent_context=parent_context,
+    )
+    runtime = OpenEtaAgentRuntime(planner=planner, rollout_enabled=False)
+
+    runtime.start_session(task="new session")
+
+    assert parent_context.snapshot() is None
 
 
 def test_isolated_sam3_reviewer_rejects_unknown_candidate_id() -> None:
@@ -317,10 +367,12 @@ def test_isolated_sam3_reviewer_recovers_backend_failure_payload_type() -> None:
         "TimeoutError",
         "TimeoutError",
     ]
-    assert error.value.failures[0]["provider_details"] == {
-        "provider_attempts": 1,
-        "provider_role": "primary",
-    }
+    provider_details = error.value.failures[0]["provider_details"]
+    assert provider_details["provider_attempts"] == 1
+    assert provider_details["provider_role"] == "primary"
+    assert provider_details["context_strategy"] == "isolated_minimal"
+    assert provider_details["conversation_message_count"] == 0
+    assert provider_details["request_estimated_chars"] > 0
 
 
 def test_isolated_sam3_reviewer_defaults_missing_confidence_without_retry() -> None:
