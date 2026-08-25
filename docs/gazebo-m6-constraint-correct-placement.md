@@ -22,23 +22,27 @@ after the applicable pool is exhausted or evidence is stale.
 
 ## Legality barriers and qualification
 
-Before Beam-2 IK, the host evaluates two deterministic barriers:
+Before Beam-2 IK, the host evaluates one complete cheap barrier:
 
 1. Each AnyPlace object goal is checked once for finite valid SE(3), full
    footprint containment, legal support height and bounding box, static-scene
    penetration, and mathematically certain workspace exclusion.
-2. Each surviving grasp-goal pair is checked using the exact contact terminal,
-   predicted attachment transform, and exact release terminal. Attached-object
-   and gripper geometry must be collision-free at terminal states, and each
-   terminal must remain inside the conservative analytic reach envelope.
+
+Pair checks are wave-local. When a grasp-goal pair reaches the current deep
+wave, it is checked using the exact contact terminal, predicted attachment
+transform, and exact release terminal. Attached-object and gripper geometry
+must be collision-free at terminal states, and each terminal must remain inside
+the conservative analytic reach envelope. The untouched tail remains
+`NOT_EVALUATED` and incurs no pair-collision work.
 
 Parallel-jaw symmetric equivalents may share the physical legality
 calculation, while retaining separate candidate evidence. No empirical score,
 capability-map hole, or heuristic can permanently reject a candidate.
 
-The host retains two diverse grasp branches and schedules cumulative grasp
-waves `16 → 32 → 64 → all`. Each branch covers cumulative AnyPlace waves
-`12 → 24 → 48 → 96`, giving a complete `2 × 96 = 192` pair search when needed.
+The host retains a primary and a diverse backup grasp and schedules incremental
+grasp slices at cumulative limits `4 → 8 → 16 → 32 → 64 → all`. Each branch
+covers AnyPlace waves at cumulative limits `4 → 8 → 16 → 32 → 96`, giving a
+complete `2 × 96 = 192` pair search when needed.
 Different candidates run concurrently, but each candidate's dependent stages
 remain ordered and wave results merge by fixed candidate ID.
 
@@ -47,7 +51,10 @@ success is checked once with MoveIt state validity. A colliding solution gets
 at most one collision-aware rescue; a pure no-solution gets no random fast-path
 retry. L5 plan-only attempts are serialized in deterministic physical-quality
 order. A candidate L5 failure advances to the next candidate and then the next
-wave. Infrastructure timeout/error is health-checked and retried once, then
+wave; the search stops as soon as a primary and distinct backup are proven. A
+later candidate-linked execution failure uses that backup, then resumes the
+unvisited frozen provider frontier with `model_inference=false`.
+Infrastructure timeout/error is health-checked and retried once, then
 terminates the run as infrastructure failure rather than “unreachable”.
 
 ## Exact grasp and placement execution
@@ -69,8 +76,12 @@ invalidate prior qualification evidence.
 
 ## VLM contract
 
-The VLM identifies the requested target and placement region, chooses among
-host-provided calibrated observations, and calls the existing tools. It is told
+The VLM runs the observe-decide-act loop: it explicitly chooses each semantic,
+lifecycle, recovery, and motion tool after inspecting current feedback. Typed
+host obligations constrain exact parameters, geometry, joins, and safety but
+do not act as a hidden task macro. The VLM identifies the requested target and
+placement region, chooses among host-provided calibrated observations, and
+calls the existing tools. It is told
 explicitly that provider/AnyPlace poses are immutable model outputs and that
 MoveIt owns the route. It must not estimate offsets, create waypoint variants,
 repeat inference while a frozen pool remains, or treat a generic MoveIt error

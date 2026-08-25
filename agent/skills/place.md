@@ -19,8 +19,9 @@ allowed_tools:
 ---
 # Place
 
-This is decision guidance, not an executable macro. AnyPlace predicts object
-goal poses; MoveIt owns robot paths.
+This is decision guidance, not an executable macro. The planner explicitly
+chooses every tool from fresh feedback. AnyPlace predicts object goal poses;
+the host proves exact geometry and MoveIt owns robot paths.
 
 ## Normal flow
 
@@ -32,16 +33,19 @@ goal poses; MoveIt owns robot paths.
    SE(3), valid rotation, full footprint inside the placement region, legal
    support/height/bounds, no static-scene penetration, and mathematically
    certain workspace limits.
-3. For each retained grasp-goal pair, the host derives the exact release EEF
-   pose as `object_goal * inverse(measured_attachment)`. Pair legality checks
-   that exact terminal state, attached object, gripper, static scene, and strict
-   analytic reach bounds. Parallel-gripper-equivalent evidence may share a
-   result but both candidate records remain.
-4. Qualification covers placement goals per grasp in deterministic
-   `12 -> 24 -> 48 -> 96` waves and alternates grasp/goal clusters. Beam-2
-   propagates joint branches only for exact terminal targets. MoveIt plan-only
-   proves the complete attached current-state-to-release path; no host waypoint
-   is inserted.
+3. For each pair that reaches the current deep wave, the host derives the exact release EEF
+   pose as `object_goal * inverse(measured_attachment)`. Pair
+   legality checks that exact terminal state, attached object, gripper, static
+   scene, and strict analytic reach bounds. This relatively expensive geometry
+   is not computed for the untouched tail. Parallel-gripper-equivalent evidence
+   may share a result but both candidate records remain.
+4. Qualification alternates the two grasp branches and covers placement goals
+   per branch in deterministic incremental `4 -> 8 -> 16 -> 32 -> 96` waves.
+   A candidate that enters a wave proceeds immediately through pair legality,
+   Beam-2, state validity, and L5 plan-only. Wave results merge at a stable
+   barrier. Stop when a primary and distinct-grasp backup are proven; otherwise
+   advance the frozen frontier without rerunning AnyPlace. No host waypoint is
+   inserted.
 5. After native contact+attach PASS, reuse the frozen AnyPlace goals and
    recompile them with the measured attachment and current PlanningScene
    revision. Do not rerun AnyPlace simply because a pair or later L5 plan fails.
@@ -63,8 +67,9 @@ goal poses; MoveIt owns robot paths.
    environment exactly once and report task completion. No post-release motion
    is part of the acceptance contract.
 10. If MoveIt rejects before execution starts, reject only that pair and try
-    the next already-qualified candidate. Transport-unknown or service errors
-    are infrastructure failures and must not be recorded as unreachable.
+    the next already-qualified candidate, then continue the frozen pair
+    frontier. Transport-unknown or service errors are infrastructure failures
+    and must not be recorded as unreachable.
 
 Never edit model goals, add offsets, retry an unchanged failed fingerprint, or
 claim success without native state validity, complete MoveIt plan proof, and

@@ -27,8 +27,11 @@ allowed_tools:
 ---
 # Pick
 
-This is decision guidance, not an executable macro. The host owns geometry,
-qualification, candidate order, and state transitions.
+This is decision guidance, not an executable macro. The planner chooses every
+semantic, lifecycle, and motion tool from fresh feedback. The host owns exact
+geometry, qualification evidence, candidate joins, and safety gates; a typed
+host obligation constrains the next choice but does not execute the task for
+the planner.
 
 ## Normal flow
 
@@ -51,26 +54,29 @@ qualification, candidate order, and state transitions.
    violations, or deterministic collision/scene illegality. Scores and
    capability maps may reorder candidates but never permanently delete a valid
    model pose.
-5. Qualification expands the cached model pool in deterministic
-   `16 -> 32 -> 64 -> all` waves and retains two qualified grasps from
-   different SE(3) clusters when available. Beam-2 propagates at most two joint
-   solutions for the exact contact target; MoveIt then proves a complete
-   collision-aware current-state-to-contact plan. The planner never copies or
+5. Qualification runs the complete cheap structural/workspace breadth check
+   once, then expands the frozen model pool in deterministic incremental
+   `4 -> 8 -> 16 -> 32 -> 64 -> all` waves. Each wave takes its candidates
+   straight through Beam-2, state validity, and L5 plan-only before the next
+   wave begins. Stop as soon as two qualified grasps from different SE(3) and
+   physical symmetry families are available. Beam-2 propagates at most two
+   joint solutions for each exact contact target; the planner never copies or
    edits the pose.
-6. Follow the host-owned execution edges directly: open only if needed, one
-   `move_to` to the exact contact pose, then
-   `gripper_control position=0`. There is no pregrasp, hover, precontact,
+6. Explicitly choose each constrained execution edge after inspecting the
+   latest receipt: open only if needed, one `move_to` to the exact contact
+   pose, then `gripper_control position=0`. There is no pregrasp, hover, precontact,
    approach offset, or fixed lift.
 7. Portable attachment PASS requires native bilateral target contact plus the
    DetachableJoint attach ACK. Gripper acknowledgement, openness, a static
    image, or a lift displacement is not proof. Attached transport is rechecked
    for relative-pose drift on every MoveIt receipt.
 8. If contact motion or close fails with a known candidate-linked outcome,
-   consume only that candidate. Reopen once, synchronize the measured target
-   pose into PlanningScene, and activate the next already-qualified cached
-   candidate. Do not rerun SAM3 or grasp inference while that queue remains.
-   Fresh passive perception/backend inference is allowed only after the
-   qualified pool is exhausted.
+   consume only that candidate. Reopen once, use an already-qualified distinct
+   backup first, then explicitly request the host's `frozen_frontier`
+   obligation when it is offered. That request has `model_inference=false` and
+   qualifies the next unvisited wave from the original provider output. Do not rerun SAM3 or grasp inference while that queue remains; do not rerun AnyPlace while either frozen queue remains. Only a
+   genuinely changed scene or complete frozen-pool exhaustion permits fresh
+   perception/model inference.
 9. A timeout, service exception, missing calibration, OOM, or unavailable model
    is infrastructure failure, not candidate unreachability. Reconcile an
    unknown motion outcome on the same environment and retry infrastructure only

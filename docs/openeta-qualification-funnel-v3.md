@@ -10,14 +10,17 @@ the replay and shadow gates below pass.
 - AnyPlace's returned pool is already model-filtered. v3 does not apply a
   second hard Top-K. Two surviving grasp branches produce the complete
   `2 × 96 = 192` frozen grasp-goal pair pool.
-- Before IK, placement qualification executes two complete deterministic
-  barriers. The first evaluates each unique AnyPlace object goal exactly once:
+- Before IK, placement qualification executes one complete cheap deterministic
+  barrier. It evaluates each unique AnyPlace object goal exactly once:
   proper finite SE(3), complete footprint inside the declared placement
   region, exact scene-object bounding box/support height, static-box
-  penetration, and the conservative analytic workspace envelope. The second
-  evaluates every surviving grasp/goal pair: exact model-derived release
+  penetration, and the conservative analytic workspace envelope. Pair-level
+  geometry is evaluated only when a candidate reaches its small deep wave:
+  exact model-derived release
   consistency, terminal analytic reach, attached-object collision, and exact
-  URDF primitive collision for the gripper mount. No hover, lift, descent
+  URDF primitive collision for the gripper mount. Untouched pairs remain
+  explicitly `NOT_EVALUATED`, so an early solution does not pay for all 192
+  pair checks. No hover, lift, descent
   offset, clearance pose, or retreat is compiled. These analytic proofs are
   prefilters only; every selected state still requires MoveIt state validity
   and L5 plan-only proof.
@@ -25,15 +28,18 @@ the replay and shadow gates below pass.
   but reuses the pair-legality proof of its explicitly marked physical family.
   Such a twin cannot consume the second grasp-diversity slot while an
   independent family remains available.
-- Grasp waves are cumulative `16 → 32 → 64 → all`. Placement waves are
-  cumulative `12 → 24 → 48 → 96` per grasp branch. Candidate IDs, branch IDs,
+- Grasp waves are incremental slices with cumulative limits
+  `4 → 8 → 16 → 32 → 64 → all`. Placement waves use cumulative limits
+  `4 → 8 → 16 → 32 → 96` per grasp branch. Candidate IDs, branch IDs,
   and 10 mm / 10 degree SE(3) cluster IDs determine a stable round-robin order.
 - Capability-map density, joint margin, singular value, and generator score
   alter ordering only. A missing cell has zero confidence and cannot reject a
   candidate. The map content hash is bound to URDF, SRDF, planning group, TCP,
   and gripper; a missing configured file or cross-model map fails as
   configuration evidence rather than producing an unreachable verdict.
-- Each wave is a barrier. Up to eight IK and eight state-validity calls run for
+- Within a wave, each candidate proceeds directly through pair legality,
+  Beam-2 IK, state validity, and then the serial L5 tail. Each wave ends at a
+  deterministic barrier. Up to eight IK and eight state-validity calls run for
   different candidates, while each candidate's stage chain remains ordered.
   Results are merged by fixed candidate index, and the run-local seed cache is
   updated only after that merge.
@@ -61,7 +67,15 @@ joint branch with a geometric Jacobian parsed from the same expanded URDF. A
 missing or malformed runtime chain is a configuration error; it is never
 silently replaced by a reachability verdict.
 
-Only after every fast wave has failed does v3 use six fixed low-discrepancy
+The first two distinct grasp/physical-family L5 passes form the primary and
+backup and stop grasp expansion; v3 never continues merely to fill a third or
+fourth reserve slot. A candidate-linked execution failure consumes the proven
+backup first, then resumes the unvisited tail of the same frozen provider
+result through an explicit `model_inference=false` frontier request. SAM3,
+AnyPlace, and the grasp model are not rerun unless the scene actually changed
+or the frozen pool was exhausted.
+
+Only after every applicable fast wave has failed does v3 use six fixed low-discrepancy
 recovery seeds, completing the existing eight-seed budget. Runtime RNG and
 uncontrolled `${HOME}/.ros` caches are not inputs.
 
@@ -88,8 +102,8 @@ record robot/scene/capability-map hashes, provider and solver versions,
 candidate/cluster/wave/seed lineage, endpoint timing and rescue evidence,
 joint-quality values, L5 attempt order, concurrency/cache metrics, and the
 final stop reason. Goal and pair evidence additionally records unique goal
-count, pair-evaluation/reuse counts, hard-rejection reasons, and both barrier
-latencies. The reader continues to accept v1 and v2 artifacts.
+count, pair-reached/evaluation/reuse/pending counts, hard-rejection reasons,
+and goal/pair latencies. The reader continues to accept v1 and v2 artifacts.
 The read-only Dashboard keeps first-L5 latency history partitioned by solver
 configuration and displays its P50/P95 alongside wave, concurrency, cache,
 rescue, layer-count, and failure-reason metrics. It is not an input to the
