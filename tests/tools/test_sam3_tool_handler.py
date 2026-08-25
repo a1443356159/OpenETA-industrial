@@ -266,6 +266,60 @@ def test_sam3_point_mode_routes_and_materializes_three_candidates(tmp_path: Path
         assert '"base64":' not in path.read_text()
 
 
+def test_sam3_projected_point_review_inherits_exact_semantic_target(
+    tmp_path: Path,
+) -> None:
+    image_size = Image.open(FIXTURE_IMAGE).size
+    review_requests: list[dict] = []
+
+    def review(request: dict) -> dict:
+        review_requests.append(deepcopy(request))
+        return {
+            "schema_version": "openeta.sam3_selection_review.v1",
+            "decision": "select",
+            "detection_id": "detection_000",
+            "confidence": 0.95,
+            "reason": "The first mask covers the complete held block.",
+            "target_geometry_family": "rectangular_block",
+            "selection_source": "isolated_main_vlm",
+            "isolated_context": True,
+        }
+
+    result = build_sam3_handler(
+        lambda _request: pytest.fail("text MCP must not be called"),
+        segment_points=lambda request: _point_response(
+            request,
+            image_size=image_size,
+        ),
+        selection_reviewer=review,
+        output_root=tmp_path,
+    )(
+        _context(
+            {
+                "mode": "points",
+                "image": str(FIXTURE_IMAGE),
+                "points": [{"x": 50.0, "y": 60.0, "label": 1}],
+                "semantic_role": "placement_object",
+                "semantic_target": "red rectangular block",
+                "point_prompt_source": "attachment_ack_projection",
+                "projection_evidence": {
+                    "schema_version": "openeta.attached_object_image_projection.v1",
+                    "point_xy": [50.0, 60.0],
+                    "depth_m": 0.7,
+                },
+            }
+        )
+    )
+
+    assert result.success is True
+    assert review_requests[0]["target_prompt"] == "red rectangular block"
+    assert review_requests[0]["semantic_target"] == "red rectangular block"
+    assert review_requests[0]["point_prompt_source"] == "attachment_ack_projection"
+    assert result.details["selection_required"] is False
+    assert result.details["selected_detection"]["id"] == "detection_000"
+    assert result.details["projection_evidence"]["point_xy"] == [50.0, 60.0]
+
+
 def test_sam3_point_audit_recursively_scrubs_base64_fields(tmp_path: Path) -> None:
     image_size = Image.open(FIXTURE_IMAGE).size
 

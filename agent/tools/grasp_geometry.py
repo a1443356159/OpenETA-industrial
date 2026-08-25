@@ -1075,6 +1075,81 @@ def camera_optical_forward_world(camera_extrinsics: Mapping[str, Any]) -> list[f
     return _normalise([r_world_cv[row][2] for row in range(3)], "camera optical forward")
 
 
+def project_attached_object_center_to_image(
+    *,
+    current_eef_pose: Mapping[str, Any],
+    attachment_transform: Mapping[str, Any],
+    intrinsics: Mapping[str, Any],
+    camera_extrinsics: Mapping[str, Any],
+    image_width: int,
+    image_height: int,
+) -> JsonDict:
+    """Project the center of a trusted attached object into one RGB image.
+
+    The projection is intentionally limited to a native attach-ack transform.
+    It combines ``T_world_eef`` from the current robot observation with the
+    accepted ``T_eef_object`` proof and the camera calibration; simulator
+    object state is neither required nor accepted as an input.
+    """
+
+    if (
+        attachment_transform.get("schema_version")
+        != "openeta.attachment_transform.v1"
+        or attachment_transform.get("parent_frame") != "eef"
+        or attachment_transform.get("child_frame") != "object"
+        or attachment_transform.get("measurement_boundary")
+        != "native_attach_ack"
+    ):
+        raise GraspGeometryError(
+            "attachment_transform must be a native T_eef_object attach ACK"
+        )
+    if (
+        isinstance(image_width, bool)
+        or not isinstance(image_width, int)
+        or image_width <= 0
+    ):
+        raise GraspGeometryError("image_width must be a positive integer")
+    if (
+        isinstance(image_height, bool)
+        or not isinstance(image_height, int)
+        or image_height <= 0
+    ):
+        raise GraspGeometryError("image_height must be a positive integer")
+
+    fx = _positive_float(intrinsics.get("fx"), "intrinsics.fx")
+    fy = _positive_float(intrinsics.get("fy"), "intrinsics.fy")
+    cx = _finite_float(intrinsics.get("cx"), "intrinsics.cx")
+    cy = _finite_float(intrinsics.get("cy"), "intrinsics.cy")
+    t_world_eef = _pose_transform(current_eef_pose, "current_eef_pose")
+    t_eef_object = _pose_transform(attachment_transform, "attachment_transform")
+    t_world_object = _matmul4(t_world_eef, t_eef_object)
+    object_world = [float(t_world_object[row][3]) for row in range(3)]
+    r_world_cv, camera_world = _opencv_camera_to_world(camera_extrinsics)
+    r_cv_world = [
+        [float(r_world_cv[column][row]) for column in range(3)]
+        for row in range(3)
+    ]
+    object_camera = _matvec3(
+        r_cv_world,
+        [object_world[index] - camera_world[index] for index in range(3)],
+    )
+    depth_m = object_camera[2]
+    if depth_m <= 1e-6:
+        raise GraspGeometryError("attached object center is behind the camera")
+    x = fx * object_camera[0] / depth_m + cx
+    y = fy * object_camera[1] / depth_m + cy
+    if not 0.0 <= x < float(image_width) or not 0.0 <= y < float(image_height):
+        raise GraspGeometryError("attached object center projects outside the image")
+    return {
+        "schema_version": "openeta.attached_object_image_projection.v1",
+        "point_xy": _round_vector([x, y]),
+        "depth_m": round(float(depth_m), 9),
+        "image_width": image_width,
+        "image_height": image_height,
+        "provenance": "native_attach_ack_current_eef_and_camera_calibration",
+    }
+
+
 def grasp_refinement_hover_pose(
     camera_pose: Mapping[str, Any],
     camera_extrinsics: Mapping[str, Any],

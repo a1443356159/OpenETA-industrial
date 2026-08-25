@@ -21,6 +21,7 @@ from agent.tools.grasp_geometry import (
     grasp_refinement_hover_pose,
     materialize_world_object_goal,
     pregrasp_eef_goal_from_object_motion,
+    project_attached_object_center_to_image,
     qualification_grasp_pose_chain,
 )
 from agent.tools.registry import ToolExecutionContext, ToolSpec
@@ -65,6 +66,130 @@ def _compile_parameters() -> dict:
         "target_class": "upright_can",
         "scene_epoch": 0,
     }
+
+
+def test_project_attached_object_center_uses_ack_eef_and_camera_geometry() -> None:
+    projection = project_attached_object_center_to_image(
+        current_eef_pose={
+            "xyz": [0.1, -0.2, 1.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        attachment_transform={
+            "schema_version": "openeta.attachment_transform.v1",
+            "parent_frame": "eef",
+            "child_frame": "object",
+            "measurement_boundary": "native_attach_ack",
+            "translation_xyz": [0.1, 0.1, 0.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        intrinsics={"fx": 100.0, "fy": 100.0, "cx": 50.0, "cy": 40.0},
+        camera_extrinsics={
+            "pos": [0.0, 0.0, 0.0],
+            "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "camera_frame": "opencv",
+        },
+        image_width=100,
+        image_height=80,
+    )
+
+    assert projection["point_xy"] == pytest.approx([70.0, 30.0])
+    assert projection["depth_m"] == pytest.approx(1.0)
+    assert projection["provenance"] == (
+        "native_attach_ack_current_eef_and_camera_calibration"
+    )
+
+
+def test_project_attached_object_center_rejects_untrusted_or_invisible_geometry() -> None:
+    common = {
+        "current_eef_pose": {
+            "xyz": [0.0, 0.0, -1.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "intrinsics": {"fx": 100.0, "fy": 100.0, "cx": 50.0, "cy": 40.0},
+        "camera_extrinsics": {
+            "pos": [0.0, 0.0, 0.0],
+            "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            "camera_frame": "opencv",
+        },
+        "image_width": 100,
+        "image_height": 80,
+    }
+    untrusted = {
+        "schema_version": "openeta.attachment_transform.v1",
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "measurement_boundary": "predicted",
+        "translation_xyz": [0.0, 0.0, 0.0],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+
+    with pytest.raises(GraspGeometryError, match="native T_eef_object"):
+        project_attached_object_center_to_image(
+            attachment_transform=untrusted,
+            **common,
+        )
+    with pytest.raises(GraspGeometryError, match="behind the camera"):
+        project_attached_object_center_to_image(
+            attachment_transform={
+                **untrusted,
+                "measurement_boundary": "native_attach_ack",
+            },
+            **common,
+        )
+
+
+def test_project_attached_object_center_matches_rm75_normal_replay() -> None:
+    projection = project_attached_object_center_to_image(
+        current_eef_pose={
+            "xyz": [
+                0.12246404146090668,
+                -0.09330010282075724,
+                0.5674058161019178,
+            ],
+            "quat_xyzw": [
+                -0.4931377427165815,
+                0.5629648077829315,
+                -0.47139933874942436,
+                0.4665495207723691,
+            ],
+        },
+        attachment_transform={
+            "schema_version": "openeta.attachment_transform.v1",
+            "parent_frame": "eef",
+            "child_frame": "object",
+            "measurement_boundary": "native_attach_ack",
+            "translation_xyz": [
+                0.0014207395441613521,
+                0.017997083388840283,
+                0.16107302657024597,
+            ],
+            "quat_xyzw": [
+                0.49654903547559087,
+                -0.5566934514841542,
+                0.44595305802095453,
+                0.49462847318434816,
+            ],
+        },
+        intrinsics={
+            "fx": 554.3827128226441,
+            "fy": 554.3827128226441,
+            "cx": 320.0,
+            "cy": 240.0,
+        },
+        camera_extrinsics={
+            "pos": [0.35, 0.0, 1.3],
+            "quat_xyzw": [0.7071067812, -0.7071067812, 0.0, 0.0],
+            "camera_frame": "opencv",
+        },
+        image_width=640,
+        image_height=480,
+    )
+
+    assert projection["point_xy"] == pytest.approx(
+        [395.4964, 290.5677],
+        abs=1e-4,
+    )
+    assert projection["depth_m"] == pytest.approx(0.769879, abs=1e-6)
 
 
 def test_pregrasp_eef_goal_applies_world_object_motion_to_contact_pose() -> None:

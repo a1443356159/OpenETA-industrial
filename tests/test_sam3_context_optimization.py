@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from adapter.protocol import EnvAction, EnvObservation, RobotState
+from adapter.protocol import CameraFrame, EnvAction, EnvObservation, RobotState
 from agent.backends.planner import (
     CallablePlannerBackend,
     PlannerBackendRequest,
@@ -762,6 +762,111 @@ def test_placement_object_fallback_tries_views_then_one_simplified_prompt() -> N
     assert point_fallback["required_tool"] == "molmopoint"
     assert point_fallback["required_parameters"]["images"] == ["/tmp/top.png"]
     assert point_fallback["attempt"] == 1
+
+
+def test_placement_object_fallback_projects_trusted_attached_center() -> None:
+    observation = EnvObservation(
+        task="pick and place",
+        cameras=[
+            CameraFrame(
+                frame_id="agentview",
+                rgb=[[[0, 0, 0]] for _ in range(100)],
+                intrinsics={
+                    "fx": 100.0,
+                    "fy": 100.0,
+                    "cx": 50.0,
+                    "cy": 50.0,
+                    "width": 100,
+                    "height": 100,
+                },
+                extrinsics={
+                    "pos": [0.0, 0.0, 0.0],
+                    "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+                    "camera_frame": "opencv",
+                },
+            )
+        ],
+        robot=RobotState(
+            end_effector_pose={
+                "xyz": [0.0, 0.0, 1.0],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+        ),
+        metadata={"step_idx": 11},
+    )
+    failures = [
+        {
+            "semantic_role": "placement_object",
+            "status": "no_detection",
+            "source_image": path,
+            "mode": "full_frame",
+            "scene_epoch": 5,
+            "attempt_id": attempt_id,
+        }
+        for path, attempt_id in (
+            ("/tmp/top.png", "top-text"),
+            ("/tmp/wrist.png", "wrist-text"),
+        )
+    ]
+    context = {
+        "scene_epoch": 5,
+        "selected_sam3_detection": {
+            "id": "grasp-mask",
+            "target_prompt": "red rectangular block",
+        },
+        "grasp_execution": {
+            "status": "completed",
+            "stage": "attached",
+            "attachment_mode": "portable_object",
+        },
+        "attachment_gate": {
+            "status": "resolved",
+            "verdict": "PASS",
+            "full_lift_proof": {
+                "attachment_transform": {
+                    "schema_version": "openeta.attachment_transform.v1",
+                    "parent_frame": "eef",
+                    "child_frame": "object",
+                    "measurement_boundary": "native_attach_ack",
+                    "translation_xyz": [0.0, 0.0, 0.0],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            },
+        },
+        "sam3_semantic_state": {
+            "roles": {
+                "placement_object": {"canonical_prompt": "red rectangular block"}
+            },
+            "attempts": failures,
+        },
+    }
+
+    fallback = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=[
+            {
+                "kind": "rgb",
+                "frame_id": "agentview",
+                "path": "/tmp/top.png",
+                "width": 100,
+                "height": 100,
+            },
+            {"kind": "rgb", "frame_id": "wrist", "path": "/tmp/wrist.png"},
+        ],
+        memory_context=context,
+    )
+
+    assert fallback["required_tool"] == "sam3"
+    assert fallback["required_parameters"]["mode"] == "points"
+    assert fallback["required_parameters"]["points"] == [
+        {"x": 50.0, "y": 50.0, "label": 1}
+    ]
+    assert fallback["required_parameters"]["semantic_target"] == (
+        "red rectangular block"
+    )
+    assert fallback["fallback"] == (
+        "attachment_projection_after_bounded_exact_views"
+    )
 
 
 def test_placement_region_fallback_stays_on_object_bundle() -> None:

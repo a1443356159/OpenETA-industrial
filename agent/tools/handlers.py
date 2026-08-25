@@ -589,7 +589,7 @@ def build_sam3_handler(
                         {
                             "result_id": details.get("result_id"),
                             "semantic_role": semantic_metadata["semantic_role"],
-                            "target_prompt": prompt,
+                            "target_prompt": semantic_metadata["semantic_target"],
                             "source_image": image,
                             "candidates": [
                                 dict(candidate)
@@ -775,6 +775,16 @@ def _sam3_semantic_metadata(
         "scene_epoch": scene_epoch,
         "attempt_id": attempt_id,
         "attempt_fingerprint": fingerprint,
+        **(
+            {
+                "point_prompt_source": "attachment_ack_projection",
+                "projection_evidence": dict(parameters["projection_evidence"]),
+            }
+            if mode == "points"
+            and parameters.get("point_prompt_source") == "attachment_ack_projection"
+            and isinstance(parameters.get("projection_evidence"), Mapping)
+            else {}
+        ),
     }
 
 

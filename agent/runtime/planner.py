@@ -47,7 +47,11 @@ from agent.runtime.task_playbooks import (
     select_task_playbook,
 )
 from agent.runtime.token_counting import DEFAULT_CONTEXT_WINDOW_TOKENS, estimate_json_tokens
-from agent.tools.grasp_geometry import GraspGeometryError, grasp_refinement_hover_pose
+from agent.tools.grasp_geometry import (
+    GraspGeometryError,
+    grasp_refinement_hover_pose,
+    project_attached_object_center_to_image,
+)
 from agent.tools.registry import ToolRegistry, ToolSpec
 
 
@@ -6213,6 +6217,64 @@ def _semantic_perception_obligation(
         "placement_object",
         "placement_region",
     }:
+        completed_point_attempts = len(
+            {
+                str(attempt.get("attempt_id") or attempt.get("attempt_fingerprint") or "")
+                for attempt in role_attempts
+                if str(attempt.get("mode") or "") == "point_prompt"
+                and str(attempt.get("status") or "") in {
+                    "no_detection",
+                    "rejected",
+                }
+            }
+            - {""}
+        )
+        projection = (
+            _attached_object_image_projection(
+                observation=observation,
+                preferred_rgb=preferred_rgb,
+                attachment=attachment,
+            )
+            if semantic_role == "placement_object" and completed_point_attempts == 0
+            else None
+        )
+        if isinstance(projection, dict):
+            projected_source = str(preferred_rgb.get("path") or source_image)
+            point_xy = projection["point_xy"]
+            points: list[JsonDict] = [
+                {"x": float(point_xy[0]), "y": float(point_xy[1]), "label": 1}
+            ]
+            projected_identity = _sam3_request_identity(
+                observation=observation,
+                scene_epoch=scene_epoch,
+                source_image=projected_source,
+                semantic_role=semantic_role,
+                semantic_target=prompt,
+                mode="points",
+                prompt="",
+                points=points,
+                roi_bbox_xyxy=None,
+            )
+            return {
+                **base,
+                "status": "required",
+                "preferred_image": projected_source,
+                "perception_bundle_id": projected_identity["perception_bundle_id"],
+                "observation_id": projected_identity["observation_id"],
+                "required_tool": "sam3",
+                "required_parameters": {
+                    "mode": "points",
+                    "image": projected_source,
+                    "points": points,
+                    "semantic_role": semantic_role,
+                    "semantic_target": prompt,
+                    "point_prompt_source": "attachment_ack_projection",
+                    "projection_evidence": projection,
+                    **projected_identity,
+                },
+                "fallback": "attachment_projection_after_bounded_exact_views",
+                "projection_evidence": projection,
+            }
         simplified_prompt = (
             _simplify_semantic_text_prompt(prompt)
             if semantic_role == "placement_object"
@@ -6262,18 +6324,6 @@ def _semantic_perception_obligation(
             and str(failure.get("semantic_role") or "") == semantic_role
             else 0
         )
-        completed_point_attempts = len(
-            {
-                str(attempt.get("attempt_id") or attempt.get("attempt_fingerprint") or "")
-                for attempt in role_attempts
-                if str(attempt.get("mode") or "") == "point_prompt"
-                and str(attempt.get("status") or "") in {
-                    "no_detection",
-                    "rejected",
-                }
-            }
-            - {""}
-        )
         point_attempts = max(failed_molmopoint_attempts, completed_point_attempts)
         point_target = (
             prompt
@@ -6318,6 +6368,70 @@ def _semantic_perception_obligation(
             },
         }
     return base
+
+
+def _attached_object_image_projection(
+    *,
+    observation: EnvObservation,
+    preferred_rgb: Mapping[str, object],
+    attachment: object,
+) -> JsonDict | None:
+    """Return a trusted post-lift object-center projection when fully provable."""
+
+    if not isinstance(attachment, Mapping):
+        return None
+    full_lift_proof = attachment.get("full_lift_proof")
+    if not isinstance(full_lift_proof, Mapping):
+        return None
+    attachment_transform = full_lift_proof.get("attachment_transform")
+    if not isinstance(attachment_transform, Mapping):
+        return None
+    frame_id = str(preferred_rgb.get("frame_id") or "")
+    camera = next(
+        (candidate for candidate in observation.cameras if candidate.frame_id == frame_id),
+        None,
+    )
+    if camera is None or not camera.intrinsics or not camera.extrinsics:
+        return None
+    width = _positive_image_extent(
+        preferred_rgb.get("width"),
+        camera.intrinsics.get("width"),
+        len(camera.rgb[0]) if camera.rgb and camera.rgb[0] else None,
+    )
+    height = _positive_image_extent(
+        preferred_rgb.get("height"),
+        camera.intrinsics.get("height"),
+        len(camera.rgb) if camera.rgb else None,
+    )
+    if width is None or height is None:
+        return None
+    try:
+        projection = project_attached_object_center_to_image(
+            current_eef_pose=observation.robot.end_effector_pose,
+            attachment_transform=attachment_transform,
+            intrinsics=camera.intrinsics,
+            camera_extrinsics=camera.extrinsics,
+            image_width=width,
+            image_height=height,
+        )
+    except (GraspGeometryError, TypeError, ValueError):
+        return None
+    projection["camera_frame_id"] = frame_id
+    projection["source_image"] = str(preferred_rgb.get("path") or "")
+    return projection
+
+
+def _positive_image_extent(*values: object) -> int | None:
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            return parsed
+    return None
 
 
 def _simplify_semantic_text_prompt(prompt: str) -> str:
