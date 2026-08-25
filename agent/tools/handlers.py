@@ -640,12 +640,30 @@ def build_sam3_handler(
                     else:
                         raise ValueError("selection reviewer returned an invalid decision")
                 except Exception as exc:  # noqa: BLE001 - defer, never lose SAM3 evidence.
+                    retry_failures = getattr(exc, "failures", None)
+                    details["selected_detection"] = None
+                    details["selection_required"] = True
                     details["selection_review"] = {
                         "schema_version": "openeta.sam3_selection_review.v1",
                         "decision": "deferred",
                         "isolated_context": True,
                         "error_type": type(exc).__name__,
                         "reason": str(exc),
+                        "attempt_count": getattr(exc, "attempt_count", 1),
+                        "infrastructure_retry_exhausted": bool(
+                            getattr(exc, "retry_exhausted", False)
+                        ),
+                        **(
+                            {
+                                "failures": [
+                                    dict(item)
+                                    for item in retry_failures
+                                    if isinstance(item, Mapping)
+                                ]
+                            }
+                            if isinstance(retry_failures, list)
+                            else {}
+                        ),
                     }
                     diagnostics = details.get("diagnostics")
                     diagnostics = list(diagnostics) if isinstance(diagnostics, list) else []

@@ -1999,6 +1999,9 @@ class AgentMemory:
                 "attempt_fingerprint": outputs.get("attempt_fingerprint")
                 or parameters.get("attempt_fingerprint"),
             }
+            selection_review = outputs.get("selection_review")
+            if isinstance(selection_review, dict):
+                base["selection_review"] = dict(selection_review)
             if source_camera_role:
                 base["camera_role"] = source_camera_role
             reestimate = self.grasp_reestimation()

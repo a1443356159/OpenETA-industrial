@@ -13,6 +13,7 @@ from PIL import Image
 pytest.importorskip("gymnasium")
 
 from adapter.protocol import CameraFrame, EnvObservation, RobotState
+from agent.runtime.sam3_selection import Sam3SelectionReviewError
 from agent.tools import handlers as handlers_module
 from agent.tools.handlers import (
     DEFAULT_SAM3_IMAGE_OUTPUT_ROOT,
@@ -836,6 +837,74 @@ def test_sam3_handler_runs_typed_selection_review_inside_same_tool_call(
     assert result.details["semantic_role"] == "placement_region"
     assert result.details["perception_bundle_id"] == "bundle-9"
     assert set(mcp_requests[0]) == {"image_base64", "image_format", "prompt"}
+
+
+def test_sam3_handler_keeps_candidates_when_bounded_review_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+
+    def segment(_request: dict) -> dict:
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 1,
+                "detections": [
+                    {
+                        "label": "region-a",
+                        "score": 0.9,
+                        "bbox_xyxy": [10, 10, 20, 20],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 100,
+                    }
+                ],
+                "artifacts": [],
+            },
+        }
+
+    def review(_request: dict) -> dict:
+        raise Sam3SelectionReviewError(
+            [
+                {
+                    "attempt": 1,
+                    "error_type": "TimeoutError",
+                    "message": "timeout one",
+                },
+                {
+                    "attempt": 2,
+                    "error_type": "TimeoutError",
+                    "message": "timeout two",
+                },
+            ]
+        )
+
+    result = build_sam3_handler(
+        segment,
+        selection_reviewer=review,
+        output_root=tmp_path,
+    )(
+        _context(
+            {
+                "mode": "text",
+                "image": str(FIXTURE_IMAGE),
+                "prompt": "green placement region",
+                "semantic_role": "placement_region",
+                "semantic_target": "green placement region",
+            }
+        )
+    )
+
+    assert result.success is True
+    assert result.details["selection_required"] is True
+    assert [item["id"] for item in result.details["detections"]] == [
+        "detection_000"
+    ]
+    assert result.details["selection_review"]["decision"] == "deferred"
+    assert result.details["selection_review"]["attempt_count"] == 2
+    assert result.details["selection_review"][
+        "infrastructure_retry_exhausted"
+    ] is True
+    assert len(result.details["selection_review"]["failures"]) == 2
 
 
 def test_sam3_handler_can_split_json_results_and_images(tmp_path: Path) -> None:

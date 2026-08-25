@@ -7,7 +7,7 @@ import math
 import re
 import time
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from hashlib import sha256
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -156,12 +156,14 @@ class ToolCallingPlanner(BasePlanner):
         max_validation_retries: int = 1,
         system_prompt: str = "",
         context_config: PlannerContextConfig | None = None,
+        sam3_selection_reviewer: Callable[[JsonDict], JsonDict] | None = None,
     ) -> None:
         self.backend = backend or PlaceholderPlannerBackend()
         self.max_validation_retries = max(0, max_validation_retries)
         base_prompt = system_prompt or _default_tool_planner_system_prompt()
         self.system_prompt, self.prompt_metadata = compose_main_planner_prompt(base_prompt)
         self.context_config = context_config or PlannerContextConfig()
+        self.sam3_selection_reviewer = sam3_selection_reviewer
         self.rollout_recorder: RolloutRecorder | None = None
 
     def set_rollout_recorder(self, recorder: RolloutRecorder | None) -> None:
@@ -473,11 +475,35 @@ class ToolCallingPlanner(BasePlanner):
     ) -> PlannerDecision:
         """Resolve a pending visual choice without the general planner transcript."""
 
-        reviewer = BackendSam3SelectionReviewer(self.backend)
         failures: list[JsonDict] = []
-        for attempt in range(1, 3):
+        embedded_review = selection.get("selection_review")
+        embedded_review = (
+            dict(embedded_review) if isinstance(embedded_review, Mapping) else {}
+        )
+        retry_exhausted = (
+            embedded_review.get("decision") == "deferred"
+            and embedded_review.get("infrastructure_retry_exhausted") is True
+        )
+        review: JsonDict | None = None
+        if retry_exhausted:
+            embedded_failures = embedded_review.get("failures")
+            failures = (
+                [dict(item) for item in embedded_failures if isinstance(item, Mapping)]
+                if isinstance(embedded_failures, list)
+                else [
+                    {
+                        "attempt_count": embedded_review.get("attempt_count"),
+                        "error_type": embedded_review.get("error_type"),
+                        "message": embedded_review.get("reason"),
+                    }
+                ]
+            )
+        else:
+            reviewer = self.sam3_selection_reviewer or BackendSam3SelectionReviewer(
+                self.backend
+            ).review
             try:
-                review = reviewer.review(
+                review = reviewer(
                     {
                         "result_id": selection.get("result_id"),
                         "semantic_role": selection.get("semantic_role")
@@ -488,15 +514,20 @@ class ToolCallingPlanner(BasePlanner):
                         "selection_bundle": selection.get("selection_bundle") or {},
                     }
                 )
-            except Exception as exc:  # noqa: BLE001 - one bounded infrastructure retry.
-                failures.append(
-                    {
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
-                        "message": str(exc),
-                    }
+            except Exception as exc:  # noqa: BLE001 - reviewer owns its retry budget.
+                retry_failures = getattr(exc, "failures", None)
+                failures = (
+                    [dict(item) for item in retry_failures if isinstance(item, Mapping)]
+                    if isinstance(retry_failures, list)
+                    else [
+                        {
+                            "attempt_count": getattr(exc, "attempt_count", 1),
+                            "error_type": type(exc).__name__,
+                            "message": str(exc),
+                        }
+                    ]
                 )
-                continue
+        if review is not None:
             decision_name = (
                 "select_sam3_detection"
                 if review.get("decision") == "select"
@@ -532,7 +563,9 @@ class ToolCallingPlanner(BasePlanner):
                     ),
                     "execution_model": "isolated_semantic_selection",
                     "selection_review": review,
-                    "infrastructure_retry_count": attempt - 1,
+                    "infrastructure_retry_count": review.get(
+                        "infrastructure_retry_count", 0
+                    ),
                 },
             )
         return PlannerDecision(
@@ -540,7 +573,7 @@ class ToolCallingPlanner(BasePlanner):
             action="ask_human",
             parameters={
                 "question": (
-                    "The isolated SAM3 semantic reviewer failed twice. Check the "
+                    "The isolated SAM3 semantic reviewer exhausted its bounded retry. Check the "
                     "planner/VLM service before resuming this unchanged candidate bundle."
                 ),
                 "failure_code": "sam3_selection_infrastructure_failure",

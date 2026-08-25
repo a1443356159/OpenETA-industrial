@@ -22,6 +22,8 @@ from agent.backends.planner import PlannerBackend, PlannerBackendRequest
 SAM3_SELECTION_REVIEW_SCHEMA_VERSION = "openeta.sam3_selection_review.v1"
 SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS = 256
 SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS = 16_000
+SAM3_SELECTION_REVIEW_TIMEOUT_S = 45.0
+SAM3_SELECTION_REVIEW_MAX_ATTEMPTS = 2
 
 SAM3_SELECTION_REVIEW_SYSTEM_PROMPT = """You are an isolated OpenETA mask reviewer.
 Image #1 is the original RGB observation. Image #2 is a contact sheet whose
@@ -55,13 +57,52 @@ _GEOMETRY_FAMILIES = {
 }
 
 
+class Sam3SelectionReviewError(RuntimeError):
+    """Raised after the complete bounded semantic-review budget is exhausted."""
+
+    retry_exhausted = True
+
+    def __init__(self, failures: list[JsonDict]) -> None:
+        self.failures = [dict(failure) for failure in failures]
+        self.attempt_count = len(self.failures)
+        last = self.failures[-1] if self.failures else {}
+        message = str(last.get("message") or "unknown reviewer failure")
+        super().__init__(
+            f"SAM3 selection review failed after {self.attempt_count} attempts: {message}"
+        )
+
+
 class BackendSam3SelectionReviewer:
     """Use the configured main-model provider with a clean two-image context."""
 
-    def __init__(self, backend: PlannerBackend) -> None:
+    def __init__(self, backend: PlannerBackend, *, max_attempts: int = 1) -> None:
         self.backend = backend
+        self.max_attempts = max(1, int(max_attempts))
 
     def review(self, request: JsonDict) -> JsonDict:
+        failures: list[JsonDict] = []
+        last_exception: Exception | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                result = self._review_once(request)
+            except Exception as exc:  # noqa: BLE001 - bounded provider/schema retry.
+                last_exception = exc
+                failures.append(
+                    {
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+                continue
+            result["review_attempt_count"] = attempt
+            result["infrastructure_retry_count"] = attempt - 1
+            return result
+        if self.max_attempts == 1 and last_exception is not None:
+            raise last_exception
+        raise Sam3SelectionReviewError(failures)
+
+    def _review_once(self, request: JsonDict) -> JsonDict:
         result_id = str(request.get("result_id") or "").strip()
         semantic_role = str(request.get("semantic_role") or "").strip()
         target_prompt = str(request.get("target_prompt") or "").strip()

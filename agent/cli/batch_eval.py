@@ -160,11 +160,15 @@ def build_mcp_episode_worker_factory(
         *,
         max_tokens: int | None = None,
         max_vision_images: int | None = None,
+        timeout_s: float | None = None,
+        max_attempts: int | None = None,
     ) -> PlannerBackend:
         return _new_batch_backend(
             provider,
             max_tokens=max_tokens,
             max_vision_images=max_vision_images,
+            timeout_s=timeout_s,
+            max_attempts=max_attempts,
             provider_limiter=provider_limiter,
         )
 
@@ -341,6 +345,8 @@ def _new_batch_backend(
     *,
     max_tokens: int | None = None,
     max_vision_images: int | None = None,
+    timeout_s: float | None = None,
+    max_attempts: int | None = None,
     provider_limiter: ProviderConcurrencyLimiter | None = None,
 ) -> PlannerBackend:
     config = OpenAICompatiblePlannerBackendConfig.from_provider_config(provider)
@@ -348,6 +354,10 @@ def _new_batch_backend(
         config.max_tokens = max_tokens
     if max_vision_images is not None:
         config.max_vision_images = max(config.max_vision_images, max_vision_images)
+    if timeout_s is not None:
+        config.timeout_s = min(config.timeout_s, float(timeout_s))
+    if max_attempts is not None:
+        config.max_attempts = min(config.max_attempts, max(1, int(max_attempts)))
     backend = OpenAICompatiblePlannerBackend(config)
     return provider_limiter.wrap(backend) if provider_limiter is not None else backend
 

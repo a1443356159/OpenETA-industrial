@@ -51,7 +51,9 @@ from agent.runtime.self_improvement import (
 )
 from agent.runtime.sam3_selection import (
     BackendSam3SelectionReviewer,
+    SAM3_SELECTION_REVIEW_MAX_ATTEMPTS,
     SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
+    SAM3_SELECTION_REVIEW_TIMEOUT_S,
 )
 from agent.runtime.session_workspace import SessionWorkspace
 from agent.runtime.skill_authoring import (
@@ -643,6 +645,9 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         config=config.web_access_config,
         provider_config=config.provider,
     )
+    sam3_selection_reviewer = _build_sam3_selection_reviewer(
+        config.backend_factory
+    )
     depth_prefetch = bind_runtime_perception_tools(
         tools,
         endpoints=config.endpoints,
@@ -654,6 +659,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         candidate_counts=config.candidate_counts,
         grasp_backend_order=config.grasp_backend_order,
         internal_candidate_compilers=internal_candidate_compilers,
+        selection_reviewer=sam3_selection_reviewer,
     )
 
     planner = ToolCallingPlanner(
@@ -663,6 +669,7 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
             context_window_tokens=config.provider.context_window_tokens,
             token_estimator_model=config.provider.model,
         ),
+        sam3_selection_reviewer=sam3_selection_reviewer,
     )
     skill_review_config = SelfImprovementConfig(
         proposal_root=workspace.working_dir / "skill_reviews" / "pending",
@@ -743,6 +750,23 @@ def configure_runtime_self_improvement(
     )
 
 
+def _build_sam3_selection_reviewer(
+    backend_factory: BackendFactory,
+) -> Callable[[JsonDict], JsonDict]:
+    """Build one bounded reviewer shared by inline and fallback selection."""
+
+    backend = backend_factory(
+        max_tokens=SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
+        max_vision_images=2,
+        timeout_s=SAM3_SELECTION_REVIEW_TIMEOUT_S,
+        max_attempts=1,
+    )
+    return BackendSam3SelectionReviewer(
+        backend,
+        max_attempts=SAM3_SELECTION_REVIEW_MAX_ATTEMPTS,
+    ).review
+
+
 def bind_runtime_perception_tools(
     tools: ToolRegistry,
     *,
@@ -756,6 +780,7 @@ def bind_runtime_perception_tools(
     candidate_counts: RuntimeCandidateCounts | None = None,
     grasp_backend_order: tuple[str, ...] = DEFAULT_GRASP_POSE_BACKEND_ORDER,
     internal_candidate_compilers: Mapping[str, ToolHandler] | None = None,
+    selection_reviewer: Callable[[JsonDict], JsonDict] | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
     pregrasp_coordinator = (
@@ -835,6 +860,11 @@ def bind_runtime_perception_tools(
         # pipeline over the existing simulator MCP transport; it is exposed
         # instead of sam3, never alongside it.
         if simulator_transport is not None:
+            bounded_selection_reviewer = (
+                selection_reviewer
+                if selection_reviewer is not None
+                else _build_sam3_selection_reviewer(backend_factory)
+            )
             proxy_config = simulator_proxy_config or SimulatorMcpToolProxyConfig()
             oracle_mcp_evidence = _OracleMcpEvidence(
                 proxy_config=proxy_config,
@@ -847,12 +877,7 @@ def bind_runtime_perception_tools(
                     session_id_provider=lambda: proxy_config.session_id,
                     response_callback=oracle_mcp_evidence.record,
                 ),
-                selection_reviewer=BackendSam3SelectionReviewer(
-                    backend_factory(
-                        max_tokens=SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
-                        max_vision_images=2,
-                    )
-                ).review,
+                selection_reviewer=bounded_selection_reviewer,
                 tool_name="oracle_perceive",
                 output_root=artifact_root / "oracle_perceive_images",
                 result_output_root=artifact_root / "oracle_perceive_results",
@@ -868,6 +893,11 @@ def bind_runtime_perception_tools(
                 replace=True,
             )
     elif endpoints.sam3_url:
+        bounded_selection_reviewer = (
+            selection_reviewer
+            if selection_reviewer is not None
+            else _build_sam3_selection_reviewer(backend_factory)
+        )
         tools.bind_handler(
             "sam3",
             build_sam3_handler(
@@ -876,12 +906,7 @@ def bind_runtime_perception_tools(
                     url=endpoints.sam3_url,
                     tool_name="segment_points",
                 ),
-                selection_reviewer=BackendSam3SelectionReviewer(
-                    backend_factory(
-                        max_tokens=SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS,
-                        max_vision_images=2,
-                    )
-                ).review,
+                selection_reviewer=bounded_selection_reviewer,
                 depth_prior_prefetch=(
                     depth_prefetch.prefetch_for_sam3
                     if depth_prefetch is not None

@@ -13,6 +13,7 @@ from agent.runtime.runtime_assembly import (
     REMOTE_PLACEHOLDER_TOOLS,
     RuntimeAssemblyConfig,
     RuntimeMcpEndpoints,
+    _build_sam3_selection_reviewer,
     assemble_runtime,
     resolve_runtime_mcp_endpoints,
     runtime_grasp_backend_order_from_env,
@@ -60,6 +61,26 @@ def _contract_snapshot(assembly):
         ),
         "max_validation_retries": assembly.runtime.planner.max_validation_retries,
     }
+
+
+def test_sam3_selection_reviewer_has_one_shared_bounded_provider_budget() -> None:
+    calls = []
+
+    def factory(**kwargs):
+        calls.append(dict(kwargs))
+        return _backend_factory()
+
+    reviewer = _build_sam3_selection_reviewer(factory)
+
+    assert callable(reviewer)
+    assert calls == [
+        {
+            "max_tokens": 256,
+            "max_vision_images": 2,
+            "timeout_s": 45.0,
+            "max_attempts": 1,
+        }
+    ]
 
 
 def test_tui_and_batch_profiles_share_runtime_contracts(monkeypatch, tmp_path) -> None:

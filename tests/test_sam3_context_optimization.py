@@ -13,12 +13,16 @@ from agent.backends.planner import (
 from agent.runtime.memory import AgentMemory
 from agent.runtime.planner import (
     PlannerContextConfig,
+    ToolCallingPlanner,
     _default_tool_planner_system_prompt,
     _model_request_context,
     _sam3_request_identity,
     _semantic_perception_obligation,
 )
-from agent.runtime.sam3_selection import BackendSam3SelectionReviewer
+from agent.runtime.sam3_selection import (
+    BackendSam3SelectionReviewer,
+    Sam3SelectionReviewError,
+)
 
 
 def test_isolated_sam3_reviewer_receives_only_typed_bundle_and_two_images() -> None:
@@ -105,6 +109,176 @@ def test_isolated_sam3_reviewer_rejects_unknown_candidate_id() -> None:
                 },
             }
         )
+
+
+def test_isolated_sam3_reviewer_retries_once_inside_bounded_subroutine() -> None:
+    attempts = 0
+
+    def decide(_request: PlannerBackendRequest):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("fixture provider timeout")
+        return {
+            "decision": "select",
+            "detection_id": "detection_000",
+            "confidence": 0.91,
+            "reason": "The only tile covers the complete target.",
+            "target_geometry_family": "boxed_item",
+        }
+
+    reviewer = BackendSam3SelectionReviewer(
+        CallablePlannerBackend(decide),
+        max_attempts=2,
+    )
+
+    review = reviewer.review(
+        {
+            "result_id": "sam3-result-retry",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red block",
+            "candidates": [{"id": "detection_000"}],
+            "selection_bundle": {
+                "original_image_ref": "/tmp/original.png",
+                "contact_sheet_ref": "/tmp/contact-sheet.png",
+            },
+        }
+    )
+
+    assert attempts == 2
+    assert review["review_attempt_count"] == 2
+    assert review["infrastructure_retry_count"] == 1
+
+
+def test_isolated_sam3_reviewer_reports_complete_bounded_failure() -> None:
+    attempts = 0
+
+    def fail(_request: PlannerBackendRequest):
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError(f"fixture provider timeout {attempts}")
+
+    reviewer = BackendSam3SelectionReviewer(
+        CallablePlannerBackend(fail),
+        max_attempts=2,
+    )
+
+    with pytest.raises(Sam3SelectionReviewError) as error:
+        reviewer.review(
+            {
+                "result_id": "sam3-result-exhausted",
+                "semantic_role": "grasp_target",
+                "target_prompt": "red block",
+                "candidates": [{"id": "detection_000"}],
+                "selection_bundle": {
+                    "original_image_ref": "/tmp/original.png",
+                    "contact_sheet_ref": "/tmp/contact-sheet.png",
+                },
+            }
+        )
+
+    assert attempts == 2
+    assert error.value.retry_exhausted is True
+    assert error.value.attempt_count == 2
+    assert [failure["attempt"] for failure in error.value.failures] == [1, 2]
+
+
+def test_exhausted_embedded_review_does_not_start_second_retry_layer() -> None:
+    reviewer_calls = 0
+
+    def unexpected_review(_request):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        raise AssertionError("a second reviewer layer must not run")
+
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(lambda _request: pytest.fail("main backend must not run")),
+        sam3_selection_reviewer=unexpected_review,
+    )
+    decision = planner._plan_isolated_sam3_selection(
+        {
+            "result_id": "sam3-result-exhausted",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red block",
+            "candidates": [{"id": "detection_000"}],
+            "selection_bundle": {
+                "original_image_ref": "/tmp/original.png",
+                "contact_sheet_ref": "/tmp/contact-sheet.png",
+            },
+            "selection_review": {
+                "decision": "deferred",
+                "attempt_count": 2,
+                "infrastructure_retry_exhausted": True,
+                "error_type": "Sam3SelectionReviewError",
+                "reason": "provider timed out twice",
+            },
+        },
+        tool_context={},
+    )
+
+    assert reviewer_calls == 0
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == (
+        "sam3_selection_infrastructure_failure"
+    )
+
+
+def test_bounded_review_failure_keeps_candidates_and_retry_evidence() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block")
+    parameters = {
+        "mode": "text",
+        "image": "/tmp/original.png",
+        "prompt": "red block",
+        "semantic_role": "grasp_target",
+        "semantic_target": "red block",
+    }
+    review = {
+        "schema_version": "openeta.sam3_selection_review.v1",
+        "decision": "deferred",
+        "attempt_count": 2,
+        "infrastructure_retry_exhausted": True,
+        "error_type": "Sam3SelectionReviewError",
+        "reason": "provider timed out twice",
+    }
+    outputs = {
+        **parameters,
+        "result_id": "sam3-result-exhausted",
+        "source_image": "/tmp/original.png",
+        "ranking": "score_descending",
+        "detections": [{"id": "detection_000", "rank": 0, "score": 0.9}],
+        "selection_bundle": {
+            "original_image_ref": "/tmp/original.png",
+            "contact_sheet_ref": "/tmp/contact-sheet.png",
+        },
+        "selection_review": review,
+    }
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {"name": "sam3", "parameters": parameters},
+                "tool_calls": [
+                    {
+                        "name": "sam3",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "parameters": parameters,
+                                "outputs": outputs,
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    pending = memory.pending_sam3_selection()
+    assert pending is not None
+    assert pending["candidates"][0]["id"] == "detection_000"
+    assert pending["selection_review"] == review
 
 
 def test_embedded_selection_review_updates_only_its_semantic_role() -> None:
