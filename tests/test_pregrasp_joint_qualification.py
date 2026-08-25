@@ -356,6 +356,80 @@ def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:
     assert returned.details["grasp_candidates"] == [{"id": "g0"}]
 
 
+def test_complete_goal_legality_evidence_caches_only_physical_pass_frontier() -> None:
+    coordinator = _FrozenGoalPairCoordinator(
+        MoveItCandidateQualifier(lambda *_args: {}),
+        object_goals=[
+            {
+                "id": candidate_id,
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [x, 0.0, 0.45],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                },
+                "world_object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [x, 0.0, 0.45],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                },
+            }
+            for candidate_id, x in (("p-pass", 0.48), ("p-reject", 0.58))
+        ],
+    )
+    physical_goal = {
+        "frame": "world",
+        "translation_xyz": [0.475, 0.0, 0.43],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    summary = coordinator._cache_goal_legality_frontier(  # noqa: SLF001
+        ToolResult(
+            True,
+            "qualified",
+            {
+                "qualification_evidence": {
+                    "results": [
+                        {
+                            "candidate_id": "pair-pass",
+                            "goal_legality": {
+                                "goal_id": "p-pass",
+                                "verdict": "PASS",
+                                "checks": {
+                                    "object_frame_binding": {
+                                        "collision_goal_pose": physical_goal
+                                    }
+                                },
+                            },
+                        },
+                        {
+                            "candidate_id": "pair-reject",
+                            "goal_legality": {
+                                "goal_id": "p-reject",
+                                "verdict": "FAIL",
+                                "checks": {},
+                            },
+                        },
+                    ]
+                }
+            },
+        ),
+        pairs=[
+            {"id": "pair-pass", "source_object_goal_id": "p-pass"},
+            {"id": "pair-reject", "source_object_goal_id": "p-reject"},
+        ],
+    )
+
+    assert summary["frozen_goal_legality_screen_complete"] is True
+    assert summary["frozen_goal_legality_frontier_count"] == 1
+    assert [goal["id"] for goal in coordinator.object_goals] == ["p-pass"]
+    retained = coordinator.object_goals[0]
+    assert retained["object_goal_pose"] == physical_goal
+    assert retained["model_pointcloud_object_goal_pose"]["translation_xyz"] == [
+        0.48,
+        0.0,
+        0.45,
+    ]
+
+
 def _identity_extrinsics() -> dict[str, Any]:
     return {
         "camera_frame": "opencv",
@@ -727,6 +801,117 @@ def test_postattach_continues_frozen_frontier_after_priority_goal_fails(
     assert result.details["raw_candidate_count"] == 2
     assert result.details["frozen_goal_priority_count"] == 1
     assert result.details["anyplace_model_inference_invoked"] is False
+    assert predictor_calls == []
+
+
+def test_postattach_resume_excludes_failed_physical_goal_without_model_inference(
+    tmp_path: Path,
+) -> None:
+    predictor_calls: list[dict[str, Any]] = []
+    qualification_rounds: list[list[str]] = []
+
+    def rpc(_name, request, _timeout):
+        candidate_ids = [item["candidate_id"] for item in request["candidates"]]
+        qualification_rounds.append(candidate_ids)
+        pass_id = "p-priority" if len(qualification_rounds) == 1 else "p-next"
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "results": [
+                {
+                    "candidate_id": item["candidate_id"],
+                    "candidate_pose_sha256": item["candidate_pose_sha256"],
+                    "qualification_binding_sha256": request[
+                        "qualification_binding_sha256"
+                    ],
+                    "execution_started": False,
+                    "verdict": (
+                        "PASS" if item["candidate_id"] == pass_id else "FAIL"
+                    ),
+                    "reason": (
+                        "qualified"
+                        if item["candidate_id"] == pass_id
+                        else "not_evaluated"
+                    ),
+                    "stages": (
+                        [_pass_stage()]
+                        if item["candidate_id"] == pass_id
+                        else []
+                    ),
+                    "full_plan_submitted": item["candidate_id"] == pass_id,
+                }
+                for item in request["candidates"]
+            ],
+        }
+
+    def goal(candidate_id: str, x: float) -> dict[str, Any]:
+        return {
+            "id": candidate_id,
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [x, -0.1, 0.43],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            },
+        }
+
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                }
+            ]
+        },
+        placement_full_plan_limit=4,
+        placement_diversity_limit=96,
+    )
+    coordinator = _FrozenGoalPairCoordinator(
+        qualifier,
+        object_goals=[goal("p-priority", 0.48), goal("p-next", 0.58)],
+        qualified_goals_by_grasp={"g-selected": [goal("p-priority", 0.48)]},
+        source_model_raw_candidate_count=96,
+        source_binding={"placement_observation": {"frozen": True}},
+    )
+    measured_attachment = {
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": [0.001, -0.015, 0.153],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    handler = _postattachment_handler(
+        tmp_path,
+        qualifier=qualifier,
+        coordinator=coordinator,
+        predictor=lambda request: predictor_calls.append(request) or _model_response(),
+    )
+    context = _context(tmp_path, measured_attachment=measured_attachment)
+    context.parameters = {"reuse_frozen_goal_pool": True, "scene_revision": 7}
+
+    first = handler(context)
+    context.parameters = {
+        "reuse_frozen_goal_pool": True,
+        "resume_frozen_goal_frontier": True,
+        "excluded_frozen_goal_ids": ["p-priority"],
+        "scene_revision": 7,
+    }
+    second = handler(context)
+    repeated = handler(context)
+
+    assert first.success and second.success
+    assert [item["id"] for item in first.details["placement_candidates"]] == [
+        "p-priority"
+    ]
+    assert [item["id"] for item in second.details["placement_candidates"]] == [
+        "p-next"
+    ]
+    assert qualification_rounds == [["p-priority", "p-next"], ["p-next"]]
+    assert second.details["frozen_goal_frontier_generation"] == 1
+    assert second.details["frozen_goal_excluded_count"] == 1
+    assert repeated.success is False
     assert predictor_calls == []
 
 

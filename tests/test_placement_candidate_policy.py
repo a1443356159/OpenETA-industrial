@@ -26,7 +26,18 @@ def _planning_failure(
     execution_started=False,
     error_code="MOTION_PLAN_FAILED",
     motion_outcome=None,
+    receipt_overrides=None,
 ) -> EnvAction:
+    receipt = {
+        "error_code": error_code,
+        "moveit_error_code": 99999,
+        "planned_point_count": 0,
+        "execution_started": execution_started,
+        "motion_outcome": motion_outcome,
+        "planning_scene_revision": 7,
+        "request_fingerprint": fingerprint,
+    }
+    receipt.update(receipt_overrides or {})
     return EnvAction(
         action_type="tool_call",
         command={
@@ -58,15 +69,7 @@ def _planning_failure(
                     "result": {
                         "success": False,
                         "details": {
-                            "environment_receipt": {
-                                "error_code": error_code,
-                                "moveit_error_code": 99999,
-                                "planned_point_count": 0,
-                                "execution_started": execution_started,
-                                "motion_outcome": motion_outcome,
-                                "planning_scene_revision": 7,
-                                "request_fingerprint": fingerprint,
-                            }
+                            "environment_receipt": receipt
                         },
                     },
                 }
@@ -199,6 +202,85 @@ def test_started_or_unknown_placement_motion_stops_without_switching_candidate()
         assert policy["status"] == "stopped_requires_human"
         assert policy["active_candidate_id"] == "placement_000"
         assert policy["rejected_candidates"] == []
+
+
+def test_known_terminal_miss_with_retained_attachment_resumes_frozen_frontier() -> None:
+    memory = AgentMemory()
+    policy = _policy(["placement_006"])
+    policy.update(
+        {
+            "frozen_goal_requalification": True,
+            "frozen_goal_frontier_count": 26,
+            "frozen_goal_total_eligible_count": 26,
+            "frozen_goal_frontier_generation": 0,
+        }
+    )
+    memory.save_fact("placement_candidate_policy", policy, source="test")
+    retained_receipt = {
+        "physical_verification": {
+            "schema_version": "openeta.gazebo.native_grasp.v1",
+            "verdict": "PASS",
+            "reason_code": "NATIVE_GRASP_TARGET_HELD",
+            "grasp_confirmed": True,
+            "target_id": "target_object",
+        },
+        "detachable_joint": {"state": "attached"},
+        "attachment_transform": {
+            "schema_version": "openeta.attachment_transform.v1",
+            "parent_frame": "eef",
+            "child_frame": "object",
+            "measurement_boundary": "native_attach_ack",
+            "translation_xyz": [0.0, 0.01, 0.16],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "child_link_proof": {
+            "prior_attachment_confirmed": True,
+            "capture_relative_translation_m": 0.0001,
+            "maximum_capture_relative_translation_m": 0.01,
+        },
+        "end_state": {
+            "end_effector_pose": {"frame": "world", "xyz": [0.4, 0.0, 0.5]},
+            "joint_positions": [0.1] * 7,
+        },
+        "position_error_m": 0.008,
+        "orientation_error_rad": 0.05,
+        "planned_point_count": 47,
+    }
+
+    memory.add_action(
+        _planning_failure(
+            "placement_006",
+            "terminal-miss-006",
+            execution_started=True,
+            error_code="MOTION_TARGET_NOT_REACHED",
+            motion_outcome="failed",
+            receipt_overrides=retained_receipt,
+        )
+    )
+
+    resumed = memory.placement_candidate_policy()
+    assert resumed["status"] == "frozen_frontier_required"
+    assert resumed["active_candidate_id"] is None
+    assert resumed["compiled_placement"] is None
+    assert resumed["failed_request_fingerprints"] == ["terminal-miss-006"]
+    assert resumed["rejected_candidates"] == [
+        {
+            "candidate_id": "placement_006",
+            "request_fingerprint": "terminal-miss-006",
+            "error_code": "MOTION_TARGET_NOT_REACHED",
+            "execution_started": True,
+            "motion_outcome": "failed",
+            "planned_point_count": 47,
+            "scene_revision": 7,
+            "position_error_m": 0.008,
+            "orientation_error_rad": 0.05,
+            "attachment_retained": True,
+            "reason": (
+                "known terminal miss with retained native attachment; requalify "
+                "the next frozen goal from the observed end state"
+            ),
+        }
+    ]
 
 
 def test_repeated_failure_fingerprint_stops_fail_closed() -> None:

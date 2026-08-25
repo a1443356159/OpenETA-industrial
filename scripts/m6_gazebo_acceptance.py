@@ -92,7 +92,9 @@ Beam-2 链式 IK、MoveIt 状态有效性和 L5 plan-only；波次 barrier 后�
 SAM3、抓取模型或 AnyPlace。冻结池与恢复预算真正耗尽时才显式失败。
 
 attach 后宿主直接复用冻结目标池，以实测 T_eef_object 和当前 PlanningScene revision
-重新计算 exact release EEF，并通过一次 inference=false 的内部 AnyPlace 资格调用。
+重新计算 exact release EEF，并通过 inference=false 的内部 AnyPlace 资格波次调用。
+若物理 transport 已知失败但 attach、终态和场景版本仍有完整证明，排除该目标并从
+冻结前沿继续下一波；不得重复相同 request fingerprint，也不得重新运行 AnyPlace 模型。
 不得重新分割物体/放置区。MoveIt 一次规划当前 attached 状态到 exact release；每个
 transport receipt 必须验证 attached ACK 和相对漂移 <=10 mm。到达后原地开爪；禁止
 carry lift、placement hover、descend offset、release clearance、adaptive near-target
@@ -928,12 +930,21 @@ def verify_case(
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}
         anyplace_outputs = _call_outputs(anyplace)
-        if len(anyplace_calls) != 2:
-            errors.append("normal flow requires one model AnyPlace call and one frozen-pool requalification")
-        if anyplace_calls and not base._contains(
-            anyplace, "anyplace_model_inference_invoked", False
+        if len(anyplace_calls) < 2:
+            errors.append(
+                "normal flow requires one model AnyPlace call and at least one "
+                "frozen-pool requalification"
+            )
+        for requalification_index, requalification in enumerate(
+            anyplace_calls[1:], start=1
         ):
-            errors.append("post-attach AnyPlace call did not prove frozen-pool inference bypass")
+            if not base._contains(
+                requalification, "anyplace_model_inference_invoked", False
+            ):
+                errors.append(
+                    "post-attach AnyPlace requalification "
+                    f"{requalification_index} did not prove frozen-pool inference bypass"
+                )
         candidate_ids = {
             str(value)
             for value in base._values(anyplace, "id")

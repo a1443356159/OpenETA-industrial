@@ -2065,12 +2065,18 @@ def build_anyplace_handler(
             context.parameters.get("reuse_frozen_goal_pool") is True
             and pre_inference is not None
         ):
+            frozen_request: JsonDict = {
+                "reuse_frozen_goal_pool": True,
+                "scene_revision": scene_revision,
+            }
+            if context.parameters.get("resume_frozen_goal_frontier") is True:
+                frozen_request["resume_frozen_goal_frontier"] = True
+            excluded_goal_ids = context.parameters.get("excluded_frozen_goal_ids")
+            if isinstance(excluded_goal_ids, list):
+                frozen_request["excluded_frozen_goal_ids"] = list(excluded_goal_ids)
             prepared = pre_inference(
                 context,
-                {
-                    "reuse_frozen_goal_pool": True,
-                    "scene_revision": scene_revision,
-                },
+                frozen_request,
             )
             if prepared is not None:
                 return prepared

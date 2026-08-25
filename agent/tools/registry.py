@@ -1281,6 +1281,15 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                     "integer planning-scene revision inherited from the trusted "
                     "native attachment gate"
                 ),
+                "reuse_frozen_goal_pool": (
+                    "host-only measured-attachment qualification without model inference"
+                ),
+                "resume_frozen_goal_frontier": (
+                    "host-only continuation after a proven retained-attachment motion failure"
+                ),
+                "excluded_frozen_goal_ids": (
+                    "host-owned cumulative ids already rejected by physical execution"
+                ),
             },
             safe_by_default=False,
             effect=ToolEffect.PLANNING,

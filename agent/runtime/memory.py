@@ -4456,6 +4456,7 @@ class AgentMemory:
         if call is None:
             return False
         outputs = _tool_call_outputs(call)
+        previous_policy = self.placement_candidate_policy()
         if outputs.get("frozen_goal_pool_ready") is True:
             pool = {
                 "schema_version": "openeta.frozen_placement_goal_pool.v1",
@@ -4478,6 +4479,21 @@ class AgentMemory:
         candidates = outputs.get("placement_candidates")
         if not isinstance(candidates, list) or not candidates:
             if isinstance(outputs.get("qualification_evidence"), dict):
+                zero_pass_resume = (
+                    isinstance(previous_policy, dict)
+                    and previous_policy.get("status") == "frozen_frontier_required"
+                    and outputs.get("frozen_goal_frontier_resume") is True
+                )
+                prior_rejected = (
+                    list(previous_policy.get("rejected_candidates") or [])
+                    if zero_pass_resume
+                    else []
+                )
+                prior_fingerprints = (
+                    list(previous_policy.get("failed_request_fingerprints") or [])
+                    if zero_pass_resume
+                    else []
+                )
                 policy = {
                     "schema_version": "openeta.placement_candidate_policy.v2",
                     "status": "stopped_requires_human",
@@ -4487,16 +4503,20 @@ class AgentMemory:
                     # remain in the host-only qualification artifact. There is
                     # no selectable queue in a zero-PASS round, so exposing
                     # those entries to planner memory has no control purpose.
-                    "rejected_candidates": [],
-                    "rejected_candidate_count": len(
-                        private_qualification.get("results", [])
-                    ),
-                    "failed_request_fingerprints": [],
+                    "rejected_candidates": prior_rejected,
+                    "rejected_candidate_count": len(prior_rejected)
+                    + len(private_qualification.get("results", [])),
+                    "failed_request_fingerprints": prior_fingerprints,
                     "scene_revision": outputs.get("scene_revision"),
                     "planning_scene_revision": outputs.get("scene_revision"),
                     "scene_epoch": self.scene_epoch(),
                     "selection_source": None,
                     "stop_reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
+                    "frozen_goal_requalification": outputs.get(
+                        "frozen_goal_requalification"
+                    )
+                    is True,
+                    "frozen_goal_frontier_exhausted": True,
                     "recovery": {
                         "stage": "manual_intervention",
                         "required_action": None,
@@ -4567,13 +4587,28 @@ class AgentMemory:
             # The proof's compiled poses are bound to this simulator epoch;
             # never substitute the internal action counter for it.
             return False
+        resuming_frontier = (
+            isinstance(previous_policy, dict)
+            and previous_policy.get("status") == "frozen_frontier_required"
+            and outputs.get("frozen_goal_frontier_resume") is True
+        )
+        prior_rejected = (
+            list(previous_policy.get("rejected_candidates") or [])
+            if resuming_frontier
+            else []
+        )
+        prior_fingerprints = (
+            list(previous_policy.get("failed_request_fingerprints") or [])
+            if resuming_frontier
+            else []
+        )
         policy = {
             "schema_version": "openeta.placement_candidate_policy.v2",
             "status": "selection_required",
             "candidate_queue": queue,
             "active_candidate_id": None,
-            "rejected_candidates": [],
-            "failed_request_fingerprints": [],
+            "rejected_candidates": prior_rejected,
+            "failed_request_fingerprints": prior_fingerprints,
             "scene_revision": scene_revision,
             "planning_scene_revision": scene_revision,
             "revision_provenance": (
@@ -4581,6 +4616,20 @@ class AgentMemory:
             ),
             "scene_epoch": qualification_scene_epoch,
             "selection_source": None,
+            "frozen_goal_requalification": outputs.get(
+                "frozen_goal_requalification"
+            )
+            is True,
+            "frozen_goal_frontier_count": _optional_int(
+                outputs.get("frozen_goal_frontier_count"), default=len(queue)
+            ),
+            "frozen_goal_total_eligible_count": _optional_int(
+                outputs.get("frozen_goal_total_eligible_count"),
+                default=len(queue),
+            ),
+            "frozen_goal_frontier_generation": _optional_int(
+                outputs.get("frozen_goal_frontier_generation"), default=0
+            ),
             "attachment_transform_sha256": hashlib.sha256(
                 json.dumps(
                     attachment_transform, sort_keys=True, separators=(",", ":")
@@ -4724,10 +4773,16 @@ class AgentMemory:
             )
             return True
         result_success = result.get("success") if isinstance(result, dict) else None
+        retained_failure = result_success is False and (
+            _trusted_retained_attachment_motion_failure(
+                receipt,
+                planning_scene_revision=expected_revision,
+            )
+        )
         if result_success is False and not (
             receipt.get("error_code") == "MOTION_PLAN_FAILED"
             and receipt.get("execution_started") is False
-        ):
+        ) and not retained_failure:
             policy.update(
                 {
                     "status": "stopped_requires_human",
@@ -4736,6 +4791,92 @@ class AgentMemory:
             )
             self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
                 policy, source="placement_motion_uncertain"
+            )
+            return True
+        if retained_failure:
+            fingerprint = str(receipt.get("request_fingerprint") or "").strip()
+            failed = list(policy.get("failed_request_fingerprints") or [])
+            if fingerprint and fingerprint in failed:
+                policy.update(
+                    {
+                        "status": "stopped_requires_human",
+                        "stop_reason": "repeated_failed_request_fingerprint",
+                    }
+                )
+                self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                    policy, source="placement_fingerprint_repeated"
+                )
+                return True
+            if fingerprint:
+                failed.append(fingerprint)
+            rejected = list(policy.get("rejected_candidates") or [])
+            rejected.append(
+                {
+                    "candidate_id": candidate_id,
+                    "request_fingerprint": fingerprint,
+                    "error_code": receipt.get("error_code"),
+                    "execution_started": True,
+                    "motion_outcome": "failed",
+                    "planned_point_count": receipt.get("planned_point_count", 0),
+                    "scene_revision": receipt.get("planning_scene_revision"),
+                    "position_error_m": receipt.get("position_error_m"),
+                    "orientation_error_rad": receipt.get("orientation_error_rad"),
+                    "attachment_retained": True,
+                    "reason": (
+                        "known terminal miss with retained native attachment; "
+                        "requalify the next frozen goal from the observed end state"
+                    ),
+                }
+            )
+            rejected_ids = {
+                str(item.get("candidate_id") or "")
+                for item in rejected
+                if isinstance(item, dict) and str(item.get("candidate_id") or "")
+            }
+            total_eligible = _optional_int(
+                policy.get("frozen_goal_total_eligible_count"), default=0
+            )
+            resume_available = (
+                policy.get("frozen_goal_requalification") is True
+                and total_eligible > len(rejected_ids)
+            )
+            policy.update(
+                {
+                    "active_candidate_id": None,
+                    "compiled_placement": None,
+                    "rejected_candidates": rejected,
+                    "failed_request_fingerprints": failed,
+                    "status": (
+                        "frozen_frontier_required"
+                        if resume_available
+                        else "stopped_requires_human"
+                    ),
+                    "stop_reason": (
+                        "frozen_placement_frontier_requalification_required"
+                        if resume_available
+                        else "CURRENT_GRASP_PLACE_INFEASIBLE"
+                    ),
+                    "recovery": {
+                        "stage": (
+                            "measured_attachment_frontier_requalification"
+                            if resume_available
+                            else "manual_intervention"
+                        ),
+                        "required_action": None,
+                    },
+                }
+            )
+            self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+                policy,
+                source=(
+                    "frozen_placement_frontier"
+                    if resume_available
+                    else "placement_motion_terminal_miss"
+                ),
+            )
+            self.record(
+                "placement_candidate_terminal_miss",
+                dict(rejected[-1]),
             )
             return True
         if (
@@ -4776,6 +4917,19 @@ class AgentMemory:
             for candidate in policy.get("candidate_queue", [])
             if candidate not in {str(item.get("candidate_id") or "") for item in rejected}
         ]
+        rejected_ids = {
+            str(item.get("candidate_id") or "")
+            for item in rejected
+            if isinstance(item, dict) and str(item.get("candidate_id") or "")
+        }
+        total_eligible = _optional_int(
+            policy.get("frozen_goal_total_eligible_count"), default=0
+        )
+        resume_available = (
+            not remaining
+            and policy.get("frozen_goal_requalification") is True
+            and total_eligible > len(rejected_ids)
+        )
         policy.update(
             {
                 "active_candidate_id": None,
@@ -4785,11 +4939,21 @@ class AgentMemory:
                 "status": (
                     "selection_required"
                     if remaining
+                    else "frozen_frontier_required"
+                    if resume_available
                     else "stopped_requires_human"
                 ),
             }
         )
-        if not remaining:
+        if resume_available:
+            policy["stop_reason"] = (
+                "frozen_placement_frontier_requalification_required"
+            )
+            policy["recovery"] = {
+                "stage": "measured_attachment_frontier_requalification",
+                "required_action": None,
+            }
+        elif not remaining:
             policy["stop_reason"] = "CURRENT_GRASP_PLACE_INFEASIBLE"
             policy["recovery"] = {
                 "stage": "manual_intervention",
@@ -7067,6 +7231,55 @@ def _environment_receipt(call: JsonDict) -> JsonDict:
         return {}
     response = outputs.get("response")
     return dict(response) if isinstance(response, dict) else {}
+
+
+def _trusted_retained_attachment_motion_failure(
+    receipt: Mapping[str, object],
+    *,
+    planning_scene_revision: int,
+) -> bool:
+    """Return whether a failed placement motion has a safe, known restart state."""
+
+    proof = receipt.get("physical_verification")
+    attached = receipt.get("detachable_joint")
+    child_proof = receipt.get("child_link_proof")
+    end_state = receipt.get("end_state")
+    if not (
+        receipt.get("error_code") == "MOTION_TARGET_NOT_REACHED"
+        and receipt.get("execution_started") is True
+        and receipt.get("motion_outcome") == "failed"
+        and receipt.get("planning_scene_revision") == planning_scene_revision
+        and isinstance(proof, Mapping)
+        and proof.get("schema_version") == NATIVE_GRASP_SCHEMA_VERSION
+        and proof.get("verdict") == "PASS"
+        and proof.get("reason_code") == "NATIVE_GRASP_TARGET_HELD"
+        and proof.get("grasp_confirmed") is True
+        and proof.get("target_id") == "target_object"
+        and isinstance(attached, Mapping)
+        and attached.get("state") == "attached"
+        and _valid_attachment_transform(receipt.get("attachment_transform"))
+        and isinstance(child_proof, Mapping)
+        and child_proof.get("prior_attachment_confirmed") is True
+        and isinstance(end_state, Mapping)
+        and isinstance(end_state.get("end_effector_pose"), Mapping)
+        and isinstance(end_state.get("joint_positions"), list)
+        and end_state.get("joint_positions")
+    ):
+        return False
+    try:
+        drift = float(child_proof.get("capture_relative_translation_m"))
+        maximum = float(
+            child_proof.get(
+                "maximum_capture_relative_translation_m",
+                NATIVE_GRASP_MAXIMUM_DRIFT_M,
+            )
+        )
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(drift) and math.isfinite(maximum) and 0.0 <= drift <= min(
+        maximum,
+        NATIVE_GRASP_MAXIMUM_DRIFT_M,
+    )
 
 
 def _trusted_native_attachment_proof(

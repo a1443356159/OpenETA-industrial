@@ -5607,22 +5607,51 @@ def _placement_obligation(
         return None
     frozen_pool = memory_context.get("frozen_placement_goal_pool")
     if attached and isinstance(frozen_pool, dict):
-        if isinstance(memory_context.get("placement_candidate_policy"), dict):
+        placement_policy = memory_context.get("placement_candidate_policy")
+        resume_frontier = (
+            isinstance(placement_policy, dict)
+            and placement_policy.get("status") == "frozen_frontier_required"
+        )
+        if isinstance(placement_policy, dict) and not resume_frontier:
             return None
         if _latest_anyplace_failure(memory_context) is not None:
             return None
         revision = attachment.get("planning_scene_revision")
         if not isinstance(revision, int) or isinstance(revision, bool):
             return None
+        required_parameters: JsonDict = {
+            "reuse_frozen_goal_pool": True,
+            "scene_revision": revision,
+        }
+        excluded_goal_ids: list[str] = []
+        if resume_frontier:
+            rejected = placement_policy.get("rejected_candidates")
+            excluded_goal_ids = sorted(
+                {
+                    str(item.get("candidate_id") or "")
+                    for item in rejected
+                    if isinstance(item, dict) and str(item.get("candidate_id") or "")
+                }
+            ) if isinstance(rejected, list) else []
+            if not excluded_goal_ids:
+                return None
+            required_parameters.update(
+                {
+                    "resume_frozen_goal_frontier": True,
+                    "excluded_frozen_goal_ids": excluded_goal_ids,
+                }
+            )
         return {
             "schema_version": "openeta.placement_obligation.v3",
             "required_tool": "anyplace",
-            "required_parameters": {
-                "reuse_frozen_goal_pool": True,
-                "scene_revision": revision,
-            },
+            "required_parameters": required_parameters,
             "planning_scene_revision": revision,
-            "phase": "measured_attachment_requalification",
+            "phase": (
+                "measured_attachment_frontier_resume"
+                if resume_frontier
+                else "measured_attachment_requalification"
+            ),
+            "excluded_goal_count": len(excluded_goal_ids),
             "model_inference_allowed": False,
             "requires_fresh_segmentation": False,
         }

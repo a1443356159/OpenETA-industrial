@@ -9,7 +9,7 @@ import math
 import os
 from pathlib import Path
 import time
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 from uuid import uuid4
 
 from adapter.protocol import JsonDict
@@ -1286,6 +1286,12 @@ class _FrozenGoalPairCoordinator:
     planning_scene_revision: int = -1
     qualified_goals_by_grasp: dict[str, list[JsonDict]] = field(default_factory=dict)
     consumed_attachment_bindings: set[str] = field(default_factory=set)
+    attachment_exposed_goal_ids: dict[str, set[str]] = field(default_factory=dict)
+    attachment_prepared_exclusions: dict[str, frozenset[str]] = field(
+        default_factory=dict
+    )
+    attachment_frontier_generations: dict[str, int] = field(default_factory=dict)
+    active_attachment_binding: str = ""
     source_model_raw_candidate_count: int = 0
     source_candidate_image_ref: str = ""
     source_candidate_artifacts: list[JsonDict] = field(default_factory=list)
@@ -1344,6 +1350,10 @@ class _FrozenGoalPairCoordinator:
         self.planning_scene_revision = planning_scene_revision
         self.qualified_goals_by_grasp.clear()
         self.consumed_attachment_bindings.clear()
+        self.attachment_exposed_goal_ids.clear()
+        self.attachment_prepared_exclusions.clear()
+        self.attachment_frontier_generations.clear()
+        self.active_attachment_binding = ""
         self.grasp_frontier_candidates.clear()
         self.grasp_frontier_template.clear()
         self.grasp_frontier_scene_epoch = -1
@@ -1531,6 +1541,125 @@ class _FrozenGoalPairCoordinator:
             details,
         )
 
+    @staticmethod
+    def _qualification_result_rows(result: ToolResult) -> list[JsonDict]:
+        """Load host-private rows needed to cache goal-legality bindings."""
+
+        artifact = result.details.get("qualification_artifact")
+        artifact_path = artifact.get("path") if isinstance(artifact, Mapping) else None
+        if isinstance(artifact_path, str):
+            try:
+                path = Path(artifact_path)
+                if path.is_file() and path.stat().st_size <= 64 * 1024 * 1024:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    rows = payload.get("results") if isinstance(payload, Mapping) else None
+                    if isinstance(rows, list):
+                        return [dict(row) for row in rows if isinstance(row, Mapping)]
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+        evidence = result.details.get("qualification_evidence")
+        rows = evidence.get("results") if isinstance(evidence, Mapping) else None
+        return [dict(row) for row in rows if isinstance(row, Mapping)] if isinstance(rows, list) else []
+
+    @staticmethod
+    def _bind_physical_collision_goal(
+        goal: Mapping[str, object],
+        *,
+        goal_id: str,
+        collision_goal: object,
+    ) -> JsonDict:
+        frozen_goal = json.loads(json.dumps(goal))
+        if not isinstance(collision_goal, Mapping):
+            return frozen_goal
+        model_goal = (
+            frozen_goal.get("model_pointcloud_object_goal_pose")
+            or frozen_goal.get("world_object_goal_pose")
+            or frozen_goal.get("object_goal_pose")
+        )
+        if isinstance(model_goal, Mapping):
+            frozen_goal["model_pointcloud_object_goal_pose"] = dict(model_goal)
+        frozen_goal["world_object_goal_pose"] = dict(collision_goal)
+        frozen_goal["object_goal_pose"] = dict(collision_goal)
+        frozen_goal["frozen_goal_frame_binding"] = {
+            "schema_version": "openeta.frozen_physical_object_goal.v1",
+            "source": "frozen_goal_legality",
+            "source_object_goal_id": goal_id,
+            "physical_collision_goal": True,
+        }
+        return frozen_goal
+
+    def _cache_goal_legality_frontier(
+        self,
+        joint: ToolResult,
+        *,
+        pairs: Sequence[Mapping[str, object]],
+    ) -> JsonDict:
+        """Cache one physical object goal per legal AnyPlace target."""
+
+        pair_goal_ids = {
+            str(pair.get("id") or ""): str(pair.get("source_object_goal_id") or "")
+            for pair in pairs
+            if str(pair.get("id") or "") and str(pair.get("source_object_goal_id") or "")
+        }
+        legality_by_goal: dict[str, Mapping[str, object]] = {}
+        for row in self._qualification_result_rows(joint):
+            legality = row.get("goal_legality")
+            if not isinstance(legality, Mapping):
+                continue
+            goal_id = str(legality.get("goal_id") or "") or pair_goal_ids.get(
+                str(row.get("candidate_id") or ""), ""
+            )
+            if goal_id:
+                legality_by_goal.setdefault(goal_id, legality)
+        expected_ids = {
+            str(goal.get("id") or "")
+            for goal in self.object_goals
+            if str(goal.get("id") or "")
+        }
+        complete = bool(expected_ids) and expected_ids.issubset(legality_by_goal)
+        screened: list[JsonDict] = []
+        pass_count = 0
+        reject_count = 0
+        for goal in self.object_goals:
+            goal_id = str(goal.get("id") or "")
+            legality = legality_by_goal.get(goal_id)
+            verdict = str(legality.get("verdict") or "") if legality else ""
+            if verdict == "PASS":
+                pass_count += 1
+            elif verdict == "FAIL":
+                reject_count += 1
+            if complete and verdict != "PASS":
+                continue
+            checks = legality.get("checks") if isinstance(legality, Mapping) else None
+            binding = (
+                checks.get("object_frame_binding")
+                if isinstance(checks, Mapping)
+                else None
+            )
+            collision_goal = (
+                binding.get("collision_goal_pose")
+                if isinstance(binding, Mapping)
+                else None
+            )
+            screened.append(
+                self._bind_physical_collision_goal(
+                    goal,
+                    goal_id=goal_id,
+                    collision_goal=collision_goal,
+                )
+            )
+        # Only a complete first-layer result may permanently remove hard
+        # rejects. In artifact-free/degraded adapters, preserve the raw pool
+        # and let the measured-attachment qualifier prove it again.
+        self.object_goals = screened
+        return {
+            "frozen_goal_legality_screen_complete": complete,
+            "frozen_goal_legality_evidence_count": len(legality_by_goal),
+            "frozen_goal_legality_pass_count": pass_count,
+            "frozen_goal_legality_reject_count": reject_count,
+            "frozen_goal_legality_frontier_count": len(screened),
+        }
+
     def filter_grasps(
         self,
         result: ToolResult,
@@ -1648,6 +1777,11 @@ class _FrozenGoalPairCoordinator:
         )
         passed_pairs = joint.details.get("placement_candidates")
         passed_pairs = passed_pairs if isinstance(passed_pairs, list) else []
+        goal_legality_summary = self._cache_goal_legality_frontier(
+            joint,
+            pairs=pairs,
+        )
+        result.details.update(goal_legality_summary)
         pass_count: dict[str, int] = {}
         goal_ids: dict[str, list[str]] = {}
         goal_lookup = {
@@ -1678,19 +1812,15 @@ class _FrozenGoalPairCoordinator:
                 "qualified_world_collision_object_goal_pose"
             )
             if isinstance(physical_goal, Mapping):
-                model_goal = frozen_goal.get("world_object_goal_pose") or frozen_goal.get(
-                    "object_goal_pose"
+                frozen_goal = self._bind_physical_collision_goal(
+                    frozen_goal,
+                    goal_id=goal_id,
+                    collision_goal=physical_goal,
                 )
-                if isinstance(model_goal, Mapping):
-                    frozen_goal["model_pointcloud_object_goal_pose"] = dict(model_goal)
-                frozen_goal["world_object_goal_pose"] = dict(physical_goal)
-                frozen_goal["object_goal_pose"] = dict(physical_goal)
-                frozen_goal["frozen_goal_frame_binding"] = {
-                    "schema_version": "openeta.frozen_physical_object_goal.v1",
-                    "source": "frozen_goal_legality",
-                    "source_object_goal_id": goal_id,
-                    "physical_collision_goal": True,
-                }
+                if isinstance(seed_evidence, Mapping):
+                    frozen_goal[SAME_RUN_QUALIFICATION_SEED_FIELD] = json.loads(
+                        json.dumps(seed_evidence)
+                    )
             qualified_goals.setdefault(grasp_id, []).append(frozen_goal)
         self.qualified_goals_by_grasp = qualified_goals
         retained: list[JsonDict] = []
@@ -1767,6 +1897,8 @@ class _FrozenGoalPairCoordinator:
         attachment_transform: Mapping[str, object],
         source: Mapping[str, object],
         scene_revision: int,
+        resume_frontier: bool = False,
+        excluded_goal_ids: Sequence[str] = (),
     ) -> ToolResult | None:
         """Prepare one measured-attachment frontier without model inference."""
 
@@ -1777,9 +1909,28 @@ class _FrozenGoalPairCoordinator:
             source_grasp_id=source_grasp_id,
             attachment_transform=attachment_transform,
         )
+        excluded = {str(goal_id) for goal_id in excluded_goal_ids if str(goal_id)}
         if binding in self.consumed_attachment_bindings:
-            return None
-        self.consumed_attachment_bindings.add(binding)
+            exposed = self.attachment_exposed_goal_ids.get(binding, set())
+            previous = self.attachment_prepared_exclusions.get(binding, frozenset())
+            if not (
+                resume_frontier
+                and excluded
+                and excluded.issubset(exposed)
+                and previous.issubset(excluded)
+                and frozenset(excluded) != previous
+            ):
+                return None
+            generation = self.attachment_frontier_generations.get(binding, 0) + 1
+        else:
+            if resume_frontier or excluded:
+                return None
+            self.consumed_attachment_bindings.add(binding)
+            self.attachment_exposed_goal_ids[binding] = set()
+            generation = 0
+        self.attachment_prepared_exclusions[binding] = frozenset(excluded)
+        self.attachment_frontier_generations[binding] = generation
+        self.active_attachment_binding = binding
         # A predicted attachment can make a goal look executable before the
         # grasp, then fail after the measured attachment transform is known.
         # Keep those L5-PASS goals at the head for the common fast path, but
@@ -1789,14 +1940,18 @@ class _FrozenGoalPairCoordinator:
         # PASS; merely materializing this frontier does not plan all 96 goals.
         frozen: list[JsonDict] = []
         prioritized_ids: set[str] = set()
+        included_priority_count = 0
         for goal in priority_goals:
-            frozen.append(json.loads(json.dumps(goal)))
             goal_id = str(goal.get("id") or "")
+            if goal_id and goal_id in excluded:
+                continue
+            frozen.append(json.loads(json.dumps(goal)))
+            included_priority_count += 1
             if goal_id:
                 prioritized_ids.add(goal_id)
         for goal in self.object_goals:
             goal_id = str(goal.get("id") or "")
-            if goal_id and goal_id in prioritized_ids:
+            if goal_id and (goal_id in prioritized_ids or goal_id in excluded):
                 continue
             frozen.append(json.loads(json.dumps(goal)))
         artifacts: list[JsonDict] = []
@@ -1808,8 +1963,10 @@ class _FrozenGoalPairCoordinator:
             artifacts.append(artifact)
         metadata = {
             "candidate_source": "frozen_anyplace_goal_frontier",
-            "priority_pair_pass_goal_count": len(priority_goals),
+            "priority_pair_pass_goal_count": included_priority_count,
             "frozen_frontier_goal_count": len(frozen),
+            "frozen_frontier_excluded_goal_count": len(excluded),
+            "frozen_frontier_generation": generation,
             "source_model_raw_candidate_count": self.source_model_raw_candidate_count,
             "anyplace_model_inference_invoked": False,
         }
@@ -1817,8 +1974,9 @@ class _FrozenGoalPairCoordinator:
             True,
             (
                 f"Prepared {len(frozen)} frozen object goals, with "
-                f"{len(priority_goals)} predicted pair-PASS goals first, for "
-                "measured-attachment qualification without AnyPlace inference."
+                f"{included_priority_count} predicted pair-PASS goals first, for "
+                f"measured-attachment frontier generation {generation} without "
+                "AnyPlace inference."
             ),
             {
                 "tool": "anyplace",
@@ -1836,13 +1994,34 @@ class _FrozenGoalPairCoordinator:
                 "metadata": metadata,
                 "frozen_goal_requalification": True,
                 "frozen_goal_count": len(frozen),
-                "frozen_goal_priority_count": len(priority_goals),
+                "frozen_goal_priority_count": included_priority_count,
                 "frozen_goal_frontier_count": len(frozen),
+                "frozen_goal_excluded_count": len(excluded),
+                "frozen_goal_total_eligible_count": len(frozen) + len(excluded),
+                "frozen_goal_frontier_generation": generation,
+                "frozen_goal_frontier_resume": resume_frontier,
                 "discarded_postattach_model_candidate_count": 0,
                 "anyplace_model_inference_invoked": False,
                 "execution_started": False,
             },
         )
+
+    def record_attachment_qualification(self, result: ToolResult) -> None:
+        """Record only goals actually exposed by a measured-attachment round."""
+
+        binding = self.active_attachment_binding
+        if not binding or result.details.get("frozen_goal_requalification") is not True:
+            return
+        candidates = result.details.get("placement_candidates")
+        if not isinstance(candidates, list):
+            return
+        exposed = self.attachment_exposed_goal_ids.setdefault(binding, set())
+        exposed.update(
+            str(candidate.get("id") or "")
+            for candidate in candidates
+            if isinstance(candidate, Mapping) and str(candidate.get("id") or "")
+        )
+        result.details["frozen_goal_exposed_count"] = len(exposed)
 
     def attachment_binding(
         self,
@@ -1986,15 +2165,29 @@ def _prepare_postattachment_frozen_goals(
                 "execution_started": False,
             },
         )
+    resume_frontier = request.get("resume_frozen_goal_frontier") is True
     if coordinator.attachment_binding_consumed(
         source_grasp_id=source_grasp_id,
         attachment_transform=attachment_transform,
-    ):
+    ) and not resume_frontier:
         return ToolResult(
             False,
             "The measured-attachment frozen-goal pool was already consumed.",
             {
                 "reason": "frozen_goal_requalification_already_consumed",
+                "execution_started": False,
+            },
+        )
+    raw_excluded_goal_ids = request.get("excluded_frozen_goal_ids", [])
+    if not isinstance(raw_excluded_goal_ids, list) or any(
+        not isinstance(goal_id, str) or not goal_id
+        for goal_id in raw_excluded_goal_ids
+    ):
+        return ToolResult(
+            False,
+            "frozen placement frontier exclusions are invalid",
+            {
+                "reason": "frozen_goal_frontier_exclusions_invalid",
                 "execution_started": False,
             },
         )
@@ -2024,6 +2217,8 @@ def _prepare_postattachment_frozen_goals(
         attachment_transform=attachment_transform,
         source=source,
         scene_revision=scene_revision,
+        resume_frontier=resume_frontier,
+        excluded_goal_ids=raw_excluded_goal_ids,
     )
 
 
@@ -2306,6 +2501,14 @@ def _qualifying_handler(
             l5_pass_target=grasp_lookahead_target,
             l5_min_pass_target=grasp_minimum_target,
         )
+        if (
+            purpose == "placement"
+            and frozen_goal_requalification
+            and frozen_pair_coordinator is not None
+        ):
+            frozen_pair_coordinator.record_attachment_qualification(
+                qualified_result
+            )
         if purpose == "grasp" and frozen_pair_coordinator is not None:
             if provider_result_snapshot is not None:
                 frozen_pair_coordinator.update_grasp_frontier(
