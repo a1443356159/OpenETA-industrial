@@ -238,6 +238,39 @@ def test_agentic_acceptance_routes_exact_environment_choice_through_model() -> N
     assert decision.metadata["planner_mode"] == "agentic_closed_loop"
 
 
+def test_host_macro_profile_fails_closed_without_calling_model() -> None:
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "[automation=scripted_tui; planner_mode=host_macro; "
+            "execution_profile=smoke_normal] run the no-VLM smoke"
+        )
+    )
+    backend_requests = []
+
+    def decide(request):
+        backend_requests.append(request)
+        return {
+            "kind": "response",
+            "name": "talk",
+            "parameters": {"message": "must not run"},
+        }
+
+    planner = ToolCallingPlanner(CallablePlannerBackend(decide))
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("observe"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert backend_requests == []
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "HOST_MACRO_NO_VLM_DECISION_GAP"
+    assert decision.metadata["planner_mode"] == "host_macro"
+    assert decision.metadata["execution_model"] == "host_macro_no_vlm_block"
+
+
 def test_frozen_grasp_frontier_is_a_model_visible_no_inference_obligation() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick and place")

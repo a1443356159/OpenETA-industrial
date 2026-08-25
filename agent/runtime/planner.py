@@ -229,6 +229,33 @@ class ToolCallingPlanner(BasePlanner):
             )
             host_obligation.metadata["execution_model"] = "host_obligation_dispatch"
             return host_obligation
+        if str(tool_context.get("planner_mode") or "") == "host_macro":
+            # ``host_macro`` is an explicit no-VLM diagnostic profile.  If the
+            # deterministic obligation graph has no next edge (including an
+            # ambiguous SAM3 selection), fail closed immediately instead of
+            # silently falling through to the configured planner backend.
+            blocked = PlannerDecision(
+                action_type="response",
+                action="ask_human",
+                parameters={
+                    "question": (
+                        "The no-VLM smoke reached a decision that is not covered by "
+                        "the deterministic host obligation graph."
+                    ),
+                    "failure_code": "HOST_MACRO_NO_VLM_DECISION_GAP",
+                },
+                reasoning=(
+                    "smoke_normal forbids planner/VLM invocation; stop at the first "
+                    "uncovered or ambiguous decision."
+                ),
+                metadata=_planner_metadata(
+                    planner=self,
+                    tool_context=tool_context,
+                    backend=self.backend,
+                ),
+            )
+            blocked.metadata["execution_model"] = "host_macro_no_vlm_block"
+            return blocked
         selection = tool_context.get("selection_obligation")
         selection_bundle = (
             selection.get("selection_bundle") if isinstance(selection, dict) else None

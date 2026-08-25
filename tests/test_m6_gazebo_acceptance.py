@@ -108,6 +108,79 @@ def test_pick_place_prepare_can_strictly_select_graspgenx(
     assert receipt["grasp_backend_mode"] == "graspgenx"
 
 
+def test_pick_place_prepare_smoke_normal_is_explicitly_no_vlm(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = m6.base.Allocation(81, "openeta-smoke-normal", 18765, "run-id")
+    monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        m6.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    paths = m6.prepare_case(
+        tmp_path,
+        tmp_path / "run",
+        allocation,
+        dict(m6.DEFAULT_SERVICES),
+        execution_profile="smoke_normal",
+    )
+
+    prompt = paths.instructions.read_text(encoding="utf-8")
+    assert "planner_mode=host_macro; execution_profile=smoke_normal" in prompt
+    assert "禁止调用 Planner/VLM" in prompt
+    assert "主 VLM 必须" not in prompt
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["execution_profile"] == "smoke_normal"
+    assert receipt["planner_mode"] == "host_macro"
+    assert receipt["planner_provider_expected"] is False
+    assert receipt["acceptance_scope"] == (
+        "control_only_no_vlm_smoke_normal_not_agentic_acceptance"
+    )
+
+
+def test_smoke_normal_planner_evidence_requires_host_only_and_zero_tokens() -> None:
+    def host_action(name: str) -> dict:
+        return {
+            "event_type": "action",
+            "payload": {
+                "command": {
+                    "request": {"kind": "tool_call", "name": name, "parameters": {}},
+                    "metadata": {
+                        "planner_metadata": {
+                            "execution_model": "host_obligation_dispatch",
+                            "planner_mode": "host_macro",
+                            "host_obligation": {
+                                "schema_version": "openeta.fixture_obligation.v1"
+                            },
+                        }
+                    },
+                }
+            },
+        }
+
+    events = [host_action(f"tool-{index}") for index in range(10)]
+    events.append(
+        {
+            "event_type": "episode_result",
+            "payload": {"metadata": {"usage": {"total_tokens": 0}}},
+        }
+    )
+    evidence = m6._planner_evidence(events, expected_planner_mode="host_macro")
+
+    assert m6._planner_evidence_errors(
+        evidence,
+        execution_profile="smoke_normal",
+    ) == []
+    assert evidence["host_dispatch_count"] == 10
+    assert evidence["closed_loop_action_count"] == 0
+    assert evidence["total_tokens"] == 0
+
+
 def test_m6_order_helper_requires_frozen_anyplace_pool_before_grasp() -> None:
     valid = ["observe", "anyplace", "anygrasp", "move_to", "gripper_control"]
     invalid = ["observe", "anygrasp", "move_to", "gripper_control", "anyplace"]

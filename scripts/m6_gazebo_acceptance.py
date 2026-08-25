@@ -50,7 +50,18 @@ REQUIRED_REAL_PICK_PLACE_TOOLS = (
 # Compatibility alias for tests and integrations importing the historical name.
 REQUIRED_REAL_M6_TOOLS = REQUIRED_REAL_PICK_PLACE_TOOLS
 SCENARIOS = ("normal", "reject-first")
+EXECUTION_PROFILES = ("agentic_normal", "smoke_normal")
+DEFAULT_EXECUTION_PROFILE = "agentic_normal"
 GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
+
+EXECUTION_PROFILE_PLANNER_MODES = {
+    "agentic_normal": "agentic_closed_loop",
+    "smoke_normal": "host_macro",
+}
+EXECUTION_PROFILE_SCOPES = {
+    "agentic_normal": "agentic_normal_vlm_acceptance",
+    "smoke_normal": "control_only_no_vlm_smoke_normal_not_agentic_acceptance",
+}
 
 
 INSTRUCTIONS = f"""
@@ -116,12 +127,47 @@ def _validated_grasp_backend(value: str) -> str:
     return backend
 
 
-def _instructions_for_backend(grasp_backend: str) -> str:
-    return (
+def _validated_execution_profile(value: str) -> str:
+    profile = str(value).strip().lower()
+    if profile not in EXECUTION_PROFILES:
+        choices = ", ".join(EXECUTION_PROFILES)
+        raise ValueError(f"execution profile must be one of: {choices}")
+    return profile
+
+
+def _instructions_for_backend(
+    grasp_backend: str,
+    *,
+    execution_profile: str = DEFAULT_EXECUTION_PROFILE,
+) -> str:
+    instructions = (
         GRASPGENX_INSTRUCTIONS
         if _validated_grasp_backend(grasp_backend) == "graspgenx"
         else INSTRUCTIONS
     )
+    profile = _validated_execution_profile(execution_profile)
+    if profile != "smoke_normal":
+        return instructions
+    instructions = instructions.replace(
+        "planner_mode=agentic_closed_loop;",
+        "planner_mode=host_macro; execution_profile=smoke_normal;",
+        1,
+    )
+    instructions = instructions.replace(
+        "用 `green placement zone marker` 选择放置区。主 VLM 必须在每个闭环回合显式选择\n"
+        "下一合法工具或终止响应；宿主 obligation 只约束工具、精确参数、几何与安全门，不能\n"
+        "代替 Planner 串行派发整条任务。SAM3 有多个候选时由主 VLM 检查候选图，但\n",
+        "用 `green placement zone marker` 选择放置区。本 smoke_normal 只验证无 VLM 控制链：\n"
+        "所有确定性 obligation 由宿主逐步派发，禁止调用 Planner/VLM。SAM3 必须返回无需\n"
+        "语义复核的唯一合法候选；若出现多候选歧义，立即阻断而不是调用 VLM。\n",
+        1,
+    )
+    instructions = instructions.replace(
+        "再由 Planner 显式\n请求 `model_inference=false` 的 frozen_frontier 扩展",
+        "再由宿主从冻结前沿\n请求 `model_inference=false` 的 frozen_frontier 扩展",
+        1,
+    )
+    return instructions
 
 
 def _required_tools_for_backend(grasp_backend: str) -> tuple[str, ...]:
@@ -294,10 +340,14 @@ def prepare_case(
     services: Mapping[str, str],
     scenario: str = "normal",
     grasp_backend: str = DEFAULT_GRASP_BACKEND,
+    execution_profile: str = DEFAULT_EXECUTION_PROFILE,
 ) -> base.CasePaths:
     if scenario not in SCENARIOS:
         raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
     backend = _validated_grasp_backend(grasp_backend)
+    profile = _validated_execution_profile(execution_profile)
+    if profile == "smoke_normal" and scenario != "normal":
+        raise ValueError("smoke_normal execution profile requires scenario=normal")
     configured_grasp_services = set(services).intersection(GRASP_SERVICE_NAMES.values())
     required_grasp_service = GRASP_SERVICE_NAMES[backend]
     if configured_grasp_services != {required_grasp_service}:
@@ -317,7 +367,7 @@ def prepare_case(
         },
     )
     paths.instructions.write_text(
-        _instructions_for_backend(backend)
+        _instructions_for_backend(backend, execution_profile=profile)
         + "\n验收场景："
         + scenario
         + "。"
@@ -333,6 +383,10 @@ def prepare_case(
     )
     receipt["acceptance_scenario"] = scenario
     receipt["grasp_backend_mode"] = backend
+    receipt["execution_profile"] = profile
+    receipt["planner_mode"] = EXECUTION_PROFILE_PLANNER_MODES[profile]
+    receipt["acceptance_scope"] = EXECUTION_PROFILE_SCOPES[profile]
+    receipt["planner_provider_expected"] = profile == "agentic_normal"
     base._json_dump(paths.receipt, base.seal_environment_receipt(receipt))
     return paths
 
@@ -407,22 +461,28 @@ def _repeated_failed_motion_fingerprints(
     return {fingerprint for fingerprint, count in counts.items() if count > 1}
 
 
-def _agentic_planner_evidence(
+def _planner_evidence(
     events: Sequence[Mapping[str, Any]],
+    *,
+    expected_planner_mode: str,
 ) -> dict[str, Any]:
     """Summarize decision provenance from durable action commands only."""
 
+    action_count = 0
     closed_loop_actions = 0
     closed_loop_tool_calls = 0
     isolated_selection_actions = 0
+    no_vlm_block_actions = 0
     wrong_planner_mode_actions = 0
     host_dispatches: list[dict[str, str]] = []
     missing_or_unknown_actions = 0
     providers: set[str] = set()
     models: set[str] = set()
+    observed_planner_modes: set[str] = set()
     for event in events:
         if event.get("event_type") != "action":
             continue
+        action_count += 1
         payload = event.get("payload")
         command = payload.get("command") if isinstance(payload, Mapping) else None
         if not isinstance(command, Mapping):
@@ -437,7 +497,10 @@ def _agentic_planner_evidence(
             missing_or_unknown_actions += 1
             continue
         execution_model = str(planner_metadata.get("execution_model") or "")
-        if str(planner_metadata.get("planner_mode") or "") != "agentic_closed_loop":
+        planner_mode = str(planner_metadata.get("planner_mode") or "")
+        if planner_mode:
+            observed_planner_modes.add(planner_mode)
+        if planner_mode != expected_planner_mode:
             wrong_planner_mode_actions += 1
         request = command.get("request")
         request = request if isinstance(request, Mapping) else {}
@@ -468,6 +531,8 @@ def _agentic_planner_evidence(
                     "tool": str(request.get("name") or ""),
                 }
             )
+        elif execution_model == "host_macro_no_vlm_block":
+            no_vlm_block_actions += 1
         else:
             missing_or_unknown_actions += 1
 
@@ -494,10 +559,13 @@ def _agentic_planner_evidence(
                 and value >= 0
             }
     return {
-        "planner_mode": "agentic_closed_loop",
+        "planner_mode": expected_planner_mode,
+        "observed_planner_modes": sorted(observed_planner_modes),
+        "action_count": action_count,
         "closed_loop_action_count": closed_loop_actions,
         "closed_loop_tool_call_count": closed_loop_tool_calls,
         "isolated_selection_action_count": isolated_selection_actions,
+        "no_vlm_block_action_count": no_vlm_block_actions,
         "host_dispatches": host_dispatches,
         "host_dispatch_count": len(host_dispatches),
         "missing_or_unknown_action_count": missing_or_unknown_actions,
@@ -507,6 +575,70 @@ def _agentic_planner_evidence(
         "total_tokens": episode_total_tokens,
         "token_usage_sources": token_usage_sources,
     }
+
+
+def _agentic_planner_evidence(
+    events: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Compatibility wrapper for the formal agentic-normal verifier."""
+
+    return _planner_evidence(
+        events,
+        expected_planner_mode=EXECUTION_PROFILE_PLANNER_MODES["agentic_normal"],
+    )
+
+
+def _planner_evidence_errors(
+    evidence: Mapping[str, Any],
+    *,
+    execution_profile: str,
+) -> list[str]:
+    """Validate that decision provenance matches the requested run profile."""
+
+    profile = _validated_execution_profile(execution_profile)
+    errors: list[str] = []
+    if evidence.get("missing_or_unknown_action_count"):
+        errors.append("one or more actions lack planner decision provenance")
+    if evidence.get("wrong_planner_mode_action_count"):
+        errors.append(
+            "one or more actions were not bound to "
+            + EXECUTION_PROFILE_PLANNER_MODES[profile]
+            + " mode"
+        )
+    if profile == "smoke_normal":
+        if evidence.get("closed_loop_action_count"):
+            errors.append("smoke_normal unexpectedly invoked the main VLM planner")
+        if evidence.get("isolated_selection_action_count"):
+            errors.append("smoke_normal unexpectedly invoked VLM semantic selection")
+        if evidence.get("no_vlm_block_action_count"):
+            errors.append("smoke_normal stopped at an obligation not covered by the host macro")
+        if evidence.get("total_tokens"):
+            errors.append("smoke_normal recorded non-zero VLM token usage")
+        if evidence.get("providers") or evidence.get("models"):
+            errors.append("smoke_normal recorded planner provider/model invocation")
+        if int(evidence.get("host_dispatch_count") or 0) < 10:
+            errors.append("smoke_normal has too few host-dispatched control decisions")
+        return errors
+
+    allowed_host_dispatch_schemas = {
+        "openeta.fresh_observation_obligation.v1",
+        "openeta.motion_reconciliation.v1",
+    }
+    disallowed_host_dispatches = [
+        dispatch
+        for dispatch in evidence.get("host_dispatches", [])
+        if isinstance(dispatch, Mapping)
+        and dispatch.get("schema_version") not in allowed_host_dispatch_schemas
+    ]
+    if disallowed_host_dispatches:
+        errors.append("agentic normal used host dispatch for planner-owned task progression")
+    if int(evidence.get("closed_loop_tool_call_count") or 0) < 10:
+        errors.append("too few normal tool decisions reached the main VLM planner")
+    if int(evidence.get("total_tokens") or 0) <= 0:
+        errors.append("agentic normal recorded zero main-VLM token usage")
+    if not evidence.get("providers") or not evidence.get("models"):
+        errors.append("agentic normal lacks concrete planner provider/model evidence")
+    return errors
 
 
 def _qualification_blocks(
@@ -661,38 +793,26 @@ def verify_case(
     *,
     scenario: str = "normal",
     grasp_backend: str = DEFAULT_GRASP_BACKEND,
+    execution_profile: str = DEFAULT_EXECUTION_PROFILE,
 ) -> dict[str, Any]:
     backend = _validated_grasp_backend(grasp_backend)
+    profile = _validated_execution_profile(execution_profile)
     backend_label = "GraspGenX" if backend == "graspgenx" else "AnyGrasp"
     errors: list[str] = []
     try:
         events, trace_paths = base._load_trace_events(paths.trace_root)
         calls = base._tool_calls(events)
         errors.extend(base._base_errors(paths, events))
-        planner_evidence = _agentic_planner_evidence(events)
-        allowed_host_dispatch_schemas = {
-            "openeta.fresh_observation_obligation.v1",
-            "openeta.motion_reconciliation.v1",
-        }
-        disallowed_host_dispatches = [
-            dispatch
-            for dispatch in planner_evidence["host_dispatches"]
-            if dispatch.get("schema_version") not in allowed_host_dispatch_schemas
-        ]
-        if disallowed_host_dispatches:
-            errors.append(
-                "agentic normal used host dispatch for planner-owned task progression"
+        planner_evidence = _planner_evidence(
+            events,
+            expected_planner_mode=EXECUTION_PROFILE_PLANNER_MODES[profile],
+        )
+        errors.extend(
+            _planner_evidence_errors(
+                planner_evidence,
+                execution_profile=profile,
             )
-        if planner_evidence["missing_or_unknown_action_count"]:
-            errors.append("one or more actions lack planner decision provenance")
-        if planner_evidence["wrong_planner_mode_action_count"]:
-            errors.append("one or more actions were not bound to agentic_closed_loop mode")
-        if planner_evidence["closed_loop_tool_call_count"] < 10:
-            errors.append("too few normal tool decisions reached the main VLM planner")
-        if planner_evidence["total_tokens"] <= 0:
-            errors.append("agentic normal recorded zero main-VLM token usage")
-        if not planner_evidence["providers"] or not planner_evidence["models"]:
-            errors.append("agentic normal lacks concrete planner provider/model evidence")
+        )
         payloads, mcp_errors = base._mcp_response_payloads(calls, paths)
         errors.extend(mcp_errors)
         names = [_name(call) for call in calls]
@@ -999,6 +1119,13 @@ def verify_case(
             "trace_paths": [str(path.resolve()) for path in trace_paths],
             "tool_call_count": len(calls),
             "planner_evidence": planner_evidence,
+            "execution_profile": profile,
+            "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
+            "planner_provider_invoked": bool(
+                planner_evidence["closed_loop_action_count"]
+                or planner_evidence["isolated_selection_action_count"]
+                or planner_evidence["total_tokens"]
+            ),
             "scenario": scenario,
             "grasp_backend": backend,
         }
@@ -1009,6 +1136,9 @@ def verify_case(
             "trace_paths": [],
             "tool_call_count": 0,
             "planner_evidence": {},
+            "execution_profile": profile,
+            "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
+            "planner_provider_invoked": None,
             "scenario": scenario,
             "grasp_backend": backend,
         }
@@ -1022,6 +1152,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-provider-preflight", action="store_true")
     parser.add_argument("--scenario", choices=SCENARIOS, default="normal")
     parser.add_argument(
+        "--execution-profile",
+        choices=EXECUTION_PROFILES,
+        default=DEFAULT_EXECUTION_PROFILE,
+        help=(
+            "agentic_normal requires planner/VLM decisions; smoke_normal exercises "
+            "the same normal model/control chain through deterministic host obligations "
+            "and forbids planner/VLM invocation."
+        ),
+    )
+    parser.add_argument(
         "--grasp-backend",
         choices=GRASP_BACKENDS,
         default=DEFAULT_GRASP_BACKEND,
@@ -1034,6 +1174,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.execution_profile == "smoke_normal" and args.scenario != "normal":
+        raise base.AcceptanceError(
+            "--execution-profile smoke_normal requires --scenario normal"
+        )
     repo = Path(__file__).resolve().parents[1]
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_root = Path(args.run_root).resolve() if args.run_root else repo / ".cache/reports" / f"pick-place-gazebo-{stamp}"
@@ -1043,6 +1187,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths,
             scenario=args.scenario,
             grasp_backend=args.grasp_backend,
+            execution_profile=args.execution_profile,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "passed" else 1
@@ -1063,7 +1208,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if preflight["status"] != "passed":
         print(json.dumps(preflight, ensure_ascii=False, indent=2))
         return 2
-    if not args.skip_provider_preflight:
+    if args.execution_profile == "smoke_normal":
+        base._json_dump(
+            run_root / base.PROVIDER_PREFLIGHT_FILENAME,
+            {
+                "schema_version": "openeta.planner_provider_preflight.v1",
+                "status": "not_run",
+                "reason": "smoke_normal_forbids_planner_vlm",
+                "planner_provider_invoked": False,
+            },
+        )
+    elif not args.skip_provider_preflight:
         provider = base._provider_preflight_result(repo)
         base._json_dump(run_root / base.PROVIDER_PREFLIGHT_FILENAME, provider)
         if provider["status"] != "passed":
@@ -1077,6 +1232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         services,
         scenario=args.scenario,
         grasp_backend=args.grasp_backend,
+        execution_profile=args.execution_profile,
     )
     if args.prepare_only:
         print(run_root)
@@ -1087,7 +1243,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         allocation,
         calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
         extra_environment={
-            "OPENETA_EPISODE_MAX_TOTAL_TOKENS": "10000000",
+            "OPENETA_EPISODE_MAX_TOTAL_TOKENS": (
+                "1"
+                if args.execution_profile == "smoke_normal"
+                else "10000000"
+            ),
             "OPENETA_GRASP_BACKEND": args.grasp_backend,
             # Cold software-rendered Gazebo launches occasionally need more
             # than the deployment default before the documented world-control
@@ -1109,6 +1269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         paths,
         scenario=args.scenario,
         grasp_backend=args.grasp_backend,
+        execution_profile=args.execution_profile,
     )
     report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})
     base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)

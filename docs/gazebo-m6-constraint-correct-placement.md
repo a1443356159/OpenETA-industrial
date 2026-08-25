@@ -104,6 +104,22 @@ Run the canonical acceptance entry point with:
 scripts/run_m6_gazebo_acceptance.sh --scenario normal
 ```
 
+When the planner provider is unavailable, the same perception, frozen-pool,
+qualification, MoveIt, and physical chain can be exercised without a VLM:
+
+```bash
+scripts/run_m6_gazebo_acceptance.sh \
+  --scenario normal \
+  --execution-profile smoke_normal
+```
+
+`smoke_normal` is deliberately reported as
+`control_only_no_vlm_smoke_normal_not_agentic_acceptance`. It requires zero
+planner tokens and host-only decision provenance. An ambiguous semantic result
+or missing deterministic obligation fails closed; it never falls through to a
+configured VLM. This smoke is useful control-chain evidence, but it does not
+replace the default `agentic_normal` acceptance.
+
 The wrapper validates Python, ROS, Gazebo, overlay provenance, provider
 endpoints, and checkout consistency before starting an isolated run. Use
 `--verify-only` to re-verify an existing evidence directory without launching
