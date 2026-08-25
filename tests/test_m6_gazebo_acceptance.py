@@ -41,6 +41,10 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
         "openeta-anyplace",
     }
     prompt = paths.instructions.read_text(encoding="utf-8")
+    assert (
+        f"environment_id={m6.ENV_ID}; environment_task=normal_pick_and_place"
+        in prompt
+    )
     assert "grasp_pose_estimate" in prompt and "AnyPlace" in prompt
     assert "精确 EEF contact" in prompt
     assert "一次规划到精确 contact" in prompt

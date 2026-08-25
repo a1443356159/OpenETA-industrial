@@ -53,8 +53,8 @@ SCENARIOS = ("normal", "reject-first")
 GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
 
-INSTRUCTIONS = """
-[automation=scripted_tui] 在隔离 Gazebo RM75/Robotiq 环境完成一次 normal 拾放。
+INSTRUCTIONS = f"""
+[automation=scripted_tui; environment_id={ENV_ID}; environment_task=normal_pick_and_place] 在隔离 Gazebo RM75/Robotiq 环境完成一次 normal 拾放。
 创建环境后只做一次显式 observe；create 返回的 initial observation 不计作这次显式 observe。
 用固定语义 `red rectangular block` 选择目标，
 用 `green placement zone marker` 选择放置区；允许主 VLM 检查 SAM3 候选图，但

@@ -870,7 +870,8 @@ def _register_gazebo_envs() -> None:
             task_description=(
                 "native-grasp native Gazebo contact pick/place with the stock fixed "
                 "DetachableJoint; attach and transport fail closed without "
-                "contact, ACK, and child-link lift evidence."
+                "dual-pad contact, native attach ACK, and bounded relative-pose "
+                "drift evidence."
             ),
             display_name="Gazebo 仿真环境（原生接触 DetachableJoint 拾放）",
             max_episode_steps=1_000_000,

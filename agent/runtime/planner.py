@@ -92,6 +92,18 @@ _CAMERA_ROLE_PREFERENCE = {
 _CAMERA_ROLE_ALIASES = {
     "wrist": "wrist_primary",
 }
+_SCRIPTED_AUTOMATION_MARKER_RE = re.compile(
+    r"\[automation=scripted_tui;(?P<body>[^\]]+)\]",
+    flags=re.IGNORECASE,
+)
+_SCRIPTED_ENVIRONMENT_ID_RE = re.compile(
+    r"(?:^|;)\s*environment_id=(?P<value>[A-Za-z0-9._:/-]+)\s*(?:;|$)",
+    flags=re.IGNORECASE,
+)
+_SCRIPTED_ENVIRONMENT_TASK_RE = re.compile(
+    r"(?:^|;)\s*environment_task=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -635,6 +647,32 @@ def _host_obligation_decision(
                     "schema_version": completion.get("schema_version"),
                     "stage": "task_complete",
                     "source": completion.get("source"),
+                }
+            },
+        )
+
+    environment_start = tool_context.get("environment_start_obligation")
+    if (
+        isinstance(environment_start, dict)
+        and environment_start.get("status") == "required"
+        and environment_start.get("required_tool") == "create_simulator_env"
+        and isinstance(environment_start.get("required_parameters"), dict)
+        and tools.can_execute("create_simulator_env")
+    ):
+        return PlannerDecision(
+            action_type="tool_call",
+            action="create_simulator_env",
+            parameters=dict(environment_start["required_parameters"]),
+            reasoning=(
+                "The scripted acceptance task declares one exact environment ID; "
+                "start that environment deterministically without a model routing turn."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": environment_start.get("schema_version"),
+                    "tool": "create_simulator_env",
+                    "environment_id": environment_start.get("environment_id"),
+                    "source": environment_start.get("source"),
                 }
             },
         )
@@ -1301,14 +1339,17 @@ def _host_obligation_decision(
     semantic_perception = tool_context.get("semantic_perception_obligation")
     if isinstance(semantic_perception, dict):
         if semantic_perception.get("status") == "exhausted":
+            semantic_role = str(
+                semantic_perception.get("semantic_role") or "target"
+            )
             return PlannerDecision(
                 action_type="response",
                 action="ask_human",
                 parameters={
                     "question": (
-                        "The bounded placement-region text and point localization "
-                        "attempts are exhausted. Provide visual guidance or refresh "
-                        "the perception services before continuing."
+                        f"The bounded {semantic_role} localization attempts are "
+                        "exhausted. Provide visual guidance or refresh the perception "
+                        "services before continuing."
                     ),
                     "failure_code": semantic_perception.get("failure_code"),
                 },
@@ -4076,6 +4117,9 @@ def _build_tool_context_payload(
     skill_usage = _skill_usage_guidance(selected_skill_guidance, memory, config=config)
     memory_context = memory.planning_context(max_events=config.max_memory_events)
     effective_task = _effective_task_text(observation, memory)
+    scripted_task = str(
+        memory_context.get("current_user_request") or effective_task or ""
+    )
     task_playbook = _matched_task_playbook(
         observation=observation,
         memory=memory,
@@ -4189,6 +4233,10 @@ def _build_tool_context_payload(
         "schema_version": "openeta.planner_context.v1",
         "task": effective_task,
         "active_environment_task": memory_context.get("active_environment_task"),
+        "environment_start_obligation": _scripted_environment_start_obligation(
+            task=scripted_task,
+            active_environment_task=memory_context.get("active_environment_task"),
+        ),
         "task_completion_evidence": memory_context.get("task_completion_evidence"),
         "task_playbook": task_playbook,
         "observation": _observation_summary(observation),
@@ -5583,10 +5631,15 @@ def _semantic_perception_obligation(
         for attempt in role_attempts
         if str(attempt.get("status") or "") in {"no_detection", "rejected"}
         and str(attempt.get("mode") or "") != "point_prompt"
+        and (
+            not str(attempt.get("target_prompt") or "").strip()
+            or str(attempt.get("target_prompt") or "").strip().lower()
+            == prompt.lower()
+        )
         and str(attempt.get("source_image") or "")
     ]
     text_fallback_required = False
-    if semantic_role == "placement_object" and prompt:
+    if semantic_role in {"grasp_target", "placement_object"} and prompt:
         ordered_sources = [str(preferred_rgb.get("path") or "")]
         ordered_sources.extend(
             str(artifact.get("path") or "")
@@ -5605,9 +5658,8 @@ def _semantic_perception_obligation(
         if untried_sources:
             source_image = untried_sources[0]
         elif failed_text_paths:
-            # Point localization receives one deterministic primary scene image;
-            # a successful point-SAM result therefore rejoins placement-region
-            # perception on that exact bundle.
+            # Every exact text/view pair has completed. Any role-specific bounded
+            # fallback receives one deterministic primary scene image.
             source_image = str(preferred_rgb.get("path") or source_image)
             text_fallback_required = True
     elif semantic_role == "placement_region" and prompt:
@@ -5647,6 +5699,7 @@ def _semantic_perception_obligation(
     }
     no_detection = role_state.get("no_detection")
     if text_fallback_required and semantic_role in {
+        "grasp_target",
         "placement_object",
         "placement_region",
     }:
@@ -5710,7 +5763,7 @@ def _semantic_perception_obligation(
             }
         simplified_prompt = (
             _simplify_semantic_text_prompt(prompt)
-            if semantic_role == "placement_object"
+            if semantic_role in {"grasp_target", "placement_object"}
             else ""
         )
         simplified_attempted = any(
@@ -5749,6 +5802,14 @@ def _semantic_perception_obligation(
                 },
                 "fallback": "simplified_text_after_bounded_exact_views",
                 "canonical_semantic_target": prompt,
+            }
+        if semantic_role == "grasp_target":
+            return {
+                **base,
+                "status": "exhausted",
+                "failure_code": "grasp_target_localization_exhausted",
+                "attempts": len(role_attempts),
+                "fallback": "bounded_text_views_and_simplified_text_exhausted",
             }
         failure = memory_context.get("reference_localization_failure")
         failed_molmopoint_attempts = (
@@ -5801,6 +5862,44 @@ def _semantic_perception_obligation(
             },
         }
     return base
+
+
+def _scripted_environment_start_obligation(
+    *,
+    task: str,
+    active_environment_task: object,
+) -> JsonDict | None:
+    """Return the exact environment creation call declared by scripted acceptance.
+
+    This route is intentionally opt-in: ordinary user prose cannot trigger it. The
+    acceptance prompt must contain one structured ``automation=scripted_tui`` block
+    with an explicit environment ID.
+    """
+
+    if isinstance(active_environment_task, Mapping):
+        return None
+    marker = _SCRIPTED_AUTOMATION_MARKER_RE.search(task)
+    if marker is None:
+        return None
+    body = marker.group("body")
+    environment_match = _SCRIPTED_ENVIRONMENT_ID_RE.search(body)
+    if environment_match is None:
+        return None
+    environment_id = environment_match.group("value")
+    parameters: JsonDict = {"env_id": environment_id, "seed": 0}
+    task_match = _SCRIPTED_ENVIRONMENT_TASK_RE.search(body)
+    if task_match is not None:
+        assigned_task = task_match.group("value").replace("_", " ").strip()
+        if assigned_task:
+            parameters["task"] = assigned_task
+    return {
+        "schema_version": "openeta.environment_start_obligation.v1",
+        "status": "required",
+        "required_tool": "create_simulator_env",
+        "required_parameters": parameters,
+        "environment_id": environment_id,
+        "source": "scripted_task_marker",
+    }
 
 
 def _attached_object_image_projection(

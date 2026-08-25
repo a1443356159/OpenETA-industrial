@@ -1017,3 +1017,145 @@ def test_explicit_post_create_observe_precedes_semantic_perception() -> None:
     assert obligation["required_parameters"] == {
         "reason": "explicit_post_create_observation_required"
     }
+
+
+def _grasp_target_retry_obligation(
+    attempts: list[dict[str, object]],
+) -> dict[str, object]:
+    obligation = _semantic_perception_obligation(
+        observation=EnvObservation(
+            task="normal pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"step_idx": 2},
+        ),
+        camera_artifacts=[
+            {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/top.png"},
+            {"kind": "rgb", "frame_id": "wrist", "path": "/tmp/wrist.png"},
+        ],
+        memory_context={
+            "scene_epoch": 4,
+            "sam3_semantic_state": {
+                "roles": {
+                    "grasp_target": {
+                        "canonical_prompt": "red rectangular block",
+                        "scene_epoch": 4,
+                    }
+                },
+                "attempts": attempts,
+            },
+        },
+    )
+    assert obligation is not None
+    return obligation
+
+
+def _failed_grasp_target_attempt(
+    *, source_image: str, prompt: str, attempt_id: str
+) -> dict[str, object]:
+    return {
+        "semantic_role": "grasp_target",
+        "status": "no_detection",
+        "source_image": source_image,
+        "mode": "text",
+        "target_prompt": prompt,
+        "scene_epoch": 4,
+        "attempt_id": attempt_id,
+        "attempt_fingerprint": f"fingerprint-{attempt_id}",
+    }
+
+
+def test_grasp_target_no_detection_advances_to_next_exact_view() -> None:
+    obligation = _grasp_target_retry_obligation(
+        [
+            _failed_grasp_target_attempt(
+                source_image="/tmp/top.png",
+                prompt="red rectangular block",
+                attempt_id="top-exact",
+            )
+        ]
+    )
+
+    assert obligation["required_tool"] == "sam3"
+    assert obligation["required_parameters"]["image"] == "/tmp/wrist.png"
+    assert obligation["required_parameters"]["prompt"] == "red rectangular block"
+    assert (
+        obligation["required_parameters"]["attempt_fingerprint"]
+        != "fingerprint-top-exact"
+    )
+
+
+def test_grasp_target_exact_views_advance_to_one_simplified_prompt() -> None:
+    exact_attempts = [
+        _failed_grasp_target_attempt(
+            source_image=source,
+            prompt="red rectangular block",
+            attempt_id=attempt_id,
+        )
+        for source, attempt_id in (
+            ("/tmp/top.png", "top-exact"),
+            ("/tmp/wrist.png", "wrist-exact"),
+        )
+    ]
+
+    obligation = _grasp_target_retry_obligation(exact_attempts)
+
+    assert obligation["fallback"] == "simplified_text_after_bounded_exact_views"
+    assert obligation["required_parameters"]["image"] == "/tmp/top.png"
+    assert obligation["required_parameters"]["prompt"] == "red block"
+    assert obligation["canonical_semantic_target"] == "red rectangular block"
+
+
+def test_grasp_target_retry_budget_exhausts_without_repeating_sam3() -> None:
+    attempts = [
+        _failed_grasp_target_attempt(
+            source_image=source,
+            prompt=prompt,
+            attempt_id=attempt_id,
+        )
+        for source, prompt, attempt_id in (
+            ("/tmp/top.png", "red rectangular block", "top-exact"),
+            ("/tmp/wrist.png", "red rectangular block", "wrist-exact"),
+            ("/tmp/top.png", "red block", "top-simplified"),
+        )
+    ]
+
+    obligation = _grasp_target_retry_obligation(attempts)
+
+    assert obligation["status"] == "exhausted"
+    assert obligation["failure_code"] == "grasp_target_localization_exhausted"
+    assert "required_tool" not in obligation
+
+
+def test_simplified_retry_does_not_replace_canonical_semantic_prompt() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="normal pick and place")
+    memory._record_sam3_semantic_result(  # noqa: SLF001 - state-machine unit test.
+        {
+            "result_id": "top-exact",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red rectangular block",
+            "source_image": "/tmp/top.png",
+            "segmentation_mode": "text",
+            "scene_epoch": 4,
+            "attempt_id": "top-exact",
+            "attempt_fingerprint": "fingerprint-top-exact",
+        },
+        status="no_detection",
+    )
+    memory._record_sam3_semantic_result(  # noqa: SLF001 - state-machine unit test.
+        {
+            "result_id": "top-simplified",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red block",
+            "source_image": "/tmp/top.png",
+            "segmentation_mode": "text",
+            "scene_epoch": 4,
+            "attempt_id": "top-simplified",
+            "attempt_fingerprint": "fingerprint-top-simplified",
+        },
+        status="no_detection",
+    )
+
+    role = memory.sam3_semantic_state()["roles"]["grasp_target"]
+    assert role["canonical_prompt"] == "red rectangular block"

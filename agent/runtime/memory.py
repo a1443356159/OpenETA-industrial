@@ -1060,15 +1060,26 @@ class AgentMemory:
         role_state = roles.get(role)
         role_state = dict(role_state) if isinstance(role_state, dict) else {}
         target_prompt = str(result.get("target_prompt") or "").strip()
-        if target_prompt and target_prompt.lower() != "point_prompt":
+        result_scene_epoch = _optional_int(
+            result.get("scene_epoch"), default=self.scene_epoch()
+        )
+        previous_scene_epoch = _optional_int(
+            role_state.get("scene_epoch"), default=-1
+        )
+        if (
+            target_prompt
+            and target_prompt.lower() != "point_prompt"
+            and (
+                not str(role_state.get("canonical_prompt") or "").strip()
+                or previous_scene_epoch != result_scene_epoch
+            )
+        ):
             role_state["canonical_prompt"] = target_prompt
         role_state.update(
             {
                 "semantic_role": role,
                 "status": status,
-                "scene_epoch": _optional_int(
-                    result.get("scene_epoch"), default=self.scene_epoch()
-                ),
+                "scene_epoch": result_scene_epoch,
                 "perception_bundle_id": result.get("perception_bundle_id"),
                 "observation_id": result.get("observation_id"),
                 "last_result_id": result.get("result_id"),

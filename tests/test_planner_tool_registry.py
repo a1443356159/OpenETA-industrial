@@ -154,6 +154,67 @@ def _tools_with_handlers(*names: str) -> ToolRegistry:
     return tools
 
 
+def test_scripted_acceptance_starts_exact_environment_without_model_routing() -> None:
+    env_id = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "[automation=scripted_tui; "
+            f"environment_id={env_id}; environment_task=normal_pick_and_place] "
+            "run the acceptance"
+        )
+    )
+    tools = _tools_with_handlers("create_simulator_env")
+
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=tools,
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["environment_start_obligation"] == {
+        "schema_version": "openeta.environment_start_obligation.v1",
+        "status": "required",
+        "required_tool": "create_simulator_env",
+        "required_parameters": {
+            "env_id": env_id,
+            "seed": 0,
+            "task": "normal pick and place",
+        },
+        "environment_id": env_id,
+        "source": "scripted_task_marker",
+    }
+    decision = _host_obligation_decision(context, tools=tools)
+    assert decision is not None
+    assert decision.action == "create_simulator_env"
+    assert decision.parameters == {
+        "env_id": env_id,
+        "seed": 0,
+        "task": "normal pick and place",
+    }
+    assert decision.metadata["host_obligation"]["source"] == "scripted_task_marker"
+
+
+def test_environment_id_in_ordinary_prose_does_not_trigger_host_creation() -> None:
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "Please inspect environment_id=openeta/gazebo_rm75_robotiq2f85-v0 "
+            "without creating it."
+        )
+    )
+
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=_tools_with_handlers("create_simulator_env"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["environment_start_obligation"] is None
+
+
 def test_exhausted_placement_pool_hands_off_without_new_inference() -> None:
     decision = _host_obligation_decision(
         {
