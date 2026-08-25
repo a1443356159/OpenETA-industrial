@@ -786,6 +786,38 @@ def _host_obligation_decision(
             },
         )
 
+    recovery = tool_context.get("grasp_recovery")
+    if (
+        isinstance(recovery, dict)
+        and recovery.get("status") == "stopped_requires_human"
+    ):
+        stop_reason = str(
+            recovery.get("stop_reason") or "grasp_recovery_not_completed"
+        )
+        return PlannerDecision(
+            action_type="response",
+            action="ask_human",
+            parameters={
+                "question": (
+                    "The gripper recovery could not be proven from the simulator "
+                    "receipt or follow-up observation. Inspect the cell before "
+                    "continuing the frozen grasp queue."
+                ),
+                "failure_code": stop_reason,
+            },
+            reasoning=(
+                "The bounded host recovery is terminal; stop instead of falling "
+                "through to a model-planned retry."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": recovery.get("schema_version"),
+                    "status": "stopped_requires_human",
+                    "stage": recovery.get("stage"),
+                }
+            },
+        )
+
     placement_policy = tool_context.get("placement_candidate_policy")
     if (
         isinstance(placement_policy, dict)
@@ -819,7 +851,6 @@ def _host_obligation_decision(
                 }
             },
         )
-    recovery = tool_context.get("grasp_recovery")
     if isinstance(recovery, dict) and recovery.get("status") == "required":
         required = recovery.get("required_action")
         if (

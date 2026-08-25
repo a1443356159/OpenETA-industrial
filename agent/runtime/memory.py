@@ -2883,7 +2883,26 @@ class AgentMemory:
                 "grasp_calibration_id": capabilities["calibration_id"],
                 "grasp_calibration_profile_path": capabilities["profile_path"],
                 "candidate_attempt_count": 0,
-                "max_candidate_attempts": GRASP_CANDIDATE_MAX_ATTEMPTS,
+                "max_candidate_attempts": (
+                    max(
+                        GRASP_CANDIDATE_MAX_ATTEMPTS,
+                        min(
+                            len(candidates),
+                            max(
+                                _optional_int(
+                                    outputs.get("frozen_pair_grasp_branch_limit"),
+                                    default=0,
+                                ),
+                                _optional_int(
+                                    outputs.get("frozen_pair_lookahead_grasp_count"),
+                                    default=0,
+                                ),
+                            ),
+                        ),
+                    )
+                    if isinstance(self.frozen_placement_goal_pool(), dict)
+                    else GRASP_CANDIDATE_MAX_ATTEMPTS
+                ),
                 "candidate_fallback": False,
                 "failed_request_fingerprints": failed_request_fingerprints,
                 "rejected_candidates": [
@@ -2902,6 +2921,23 @@ class AgentMemory:
                 "scene_epoch": self.scene_epoch(),
                 "activated_at_s": time.time(),
             }
+            if isinstance(self.frozen_placement_goal_pool(), dict):
+                policy.update(
+                    {
+                        "frozen_pair_grasp_branch_limit": _optional_int(
+                            outputs.get("frozen_pair_grasp_branch_limit"),
+                            default=0,
+                        ),
+                        "frozen_pair_lookahead_grasp_count": _optional_int(
+                            outputs.get("frozen_pair_lookahead_grasp_count"),
+                            default=len(candidates),
+                        ),
+                        "frozen_pair_full_plan_pass_count": _optional_int(
+                            outputs.get("frozen_pair_full_plan_pass_count"),
+                            default=len(candidates),
+                        ),
+                    }
+                )
             compilation_queue = outputs.get("host_candidate_compilation_queue")
             if isinstance(compilation_queue, list):
                 policy["host_candidate_compilations"] = {
@@ -3333,6 +3369,36 @@ class AgentMemory:
         completed = _call_result_success(call) and not _motion_call_rejects_candidate(call)
         if recovery.get("stage") == "reopen":
             if not completed:
+                reconciliation = self.motion_reconciliation()
+                intended_parameters = (
+                    reconciliation.get("intended_parameters")
+                    if isinstance(reconciliation, dict)
+                    else None
+                )
+                if (
+                    isinstance(reconciliation, dict)
+                    and reconciliation.get("status") in {"required", "unresolved"}
+                    and reconciliation.get("tool") == name
+                    and intended_parameters == required.get("parameters")
+                ):
+                    recovery.update(
+                        {
+                            "status": "reconciling",
+                            "required_action": None,
+                            "reconciliation_created_at_s": reconciliation.get(
+                                "created_at_s"
+                            ),
+                        }
+                    )
+                    self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+                        recovery,
+                        source="candidate_gripper_reopen_reconciling",
+                    )
+                    self.record(
+                        "grasp_recovery_gripper_reopen_reconciling",
+                        dict(recovery),
+                    )
+                    return True
                 recovery.update(
                     {
                         "status": "stopped_requires_human",
@@ -3401,6 +3467,61 @@ class AgentMemory:
                     source="candidate_reestimate_recovery_completed",
                 )
                 self.record("grasp_reestimate_observation_required", dict(reestimate))
+        return True
+
+    def _resolve_reconciled_grasp_recovery(
+        self,
+        *,
+        tool_name: str,
+        requested_position: object,
+        verdict: str,
+    ) -> bool:
+        """Resolve an unknown reopen from observed physical gripper state."""
+
+        recovery = self.grasp_recovery()
+        if not (
+            tool_name == "gripper_control"
+            and _binary_gripper_position(requested_position) == 1
+            and isinstance(recovery, dict)
+            and recovery.get("status") == "reconciling"
+            and recovery.get("stage") == "reopen"
+        ):
+            return False
+        if verdict == "completed":
+            observe_after_reopen = recovery.get("observe_after_reopen") is True
+            recovery.update(
+                {
+                    "status": "required" if observe_after_reopen else "completed",
+                    "stage": "observe" if observe_after_reopen else "completed",
+                    "required_action": (
+                        {"name": "observe", "parameters": {}}
+                        if observe_after_reopen
+                        else None
+                    ),
+                    "gripper_reopened_at_s": time.time(),
+                    "reconciled_from_observation": True,
+                    **(
+                        {"completed_at_s": time.time()}
+                        if not observe_after_reopen
+                        else {}
+                    ),
+                }
+            )
+            source = "candidate_gripper_reopen_reconciled"
+        elif verdict == "failed":
+            recovery.update(
+                {
+                    "status": "stopped_requires_human",
+                    "required_action": None,
+                    "stop_reason": "gripper_reopen_reconciliation_failed",
+                    "completed_at_s": time.time(),
+                }
+            )
+            source = "candidate_gripper_reopen_reconciliation_failed"
+        else:
+            return False
+        self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(recovery, source=source)
+        self.record("grasp_recovery_gripper_reopen_reconciled", dict(recovery))
         return True
 
     def _schedule_grasp_estimation_recovery(
@@ -3588,10 +3709,27 @@ class AgentMemory:
             and isinstance(candidates[next_rank], dict)
             else None
         )
-        qualification_invalidated = (
+        qualification_scene_changed = (
             isinstance(policy.get("qualification_evidence"), dict)
             and _optional_int(policy.get("scene_epoch"), default=-1)
             != self.scene_epoch()
+        )
+        frozen_pool = self.frozen_placement_goal_pool()
+        attachment = self.attachment_gate()
+        frozen_candidate_retry = (
+            qualification_scene_changed
+            and next_candidate is not None
+            and next_candidate.get("grasp_place_joint_qualified") is True
+            and isinstance(frozen_pool, dict)
+            and frozen_pool.get("status") == "ready"
+            and not (
+                isinstance(attachment, dict)
+                and attachment.get("status") == "resolved"
+                and str(attachment.get("verdict") or "").upper() == "PASS"
+            )
+        )
+        qualification_invalidated = (
+            qualification_scene_changed and not frozen_candidate_retry
         )
         if qualification_invalidated:
             next_candidate = None
@@ -3620,6 +3758,16 @@ class AgentMemory:
                 "last_rejection": dict(rejection),
             }
         )
+        if frozen_candidate_retry and next_candidate is not None:
+            policy["frozen_model_pool_retry"] = {
+                "schema_version": "openeta.frozen_grasp_retry.v1",
+                "source_scene_epoch": policy.get("scene_epoch"),
+                "current_scene_epoch": self.scene_epoch(),
+                "candidate_id": next_candidate.get("id"),
+                "model_inference_invoked": False,
+                "terminal_pose_reused": True,
+                "path_owner": "moveit",
+            }
         if next_candidate is None:
             # Once the bounded candidate budget is exhausted, keep the highest
             # scoring candidate only when compilation rejected a strategy-level
@@ -4165,6 +4313,37 @@ class AgentMemory:
         )
         if not isinstance(compiled, dict):
             return False
+        compiled = json.loads(json.dumps(compiled))
+        compiled_scene_epoch = _optional_int(compiled.get("scene_epoch"), default=-1)
+        if compiled_scene_epoch != self.scene_epoch():
+            frozen_pool = self.frozen_placement_goal_pool()
+            if not (
+                isinstance(active, dict)
+                and active.get("grasp_place_joint_qualified") is True
+                and isinstance(frozen_pool, dict)
+                and frozen_pool.get("status") == "ready"
+            ):
+                return False
+            contact = compiled.get("contact_pose")
+            if not isinstance(contact, dict):
+                return False
+            rebound_contact = dict(contact)
+            rebound_contact["scene_epoch"] = self.scene_epoch()
+            compiled.update(
+                {
+                    "scene_epoch": self.scene_epoch(),
+                    "contact_pose": rebound_contact,
+                    "selection_source": "host_frozen_qualified_queue_retry",
+                    "frozen_model_pool_reuse": {
+                        "schema_version": "openeta.frozen_grasp_retry.v1",
+                        "source_scene_epoch": compiled_scene_epoch,
+                        "current_scene_epoch": self.scene_epoch(),
+                        "model_inference_invoked": False,
+                        "terminal_pose_reused": True,
+                        "path_owner": "moveit",
+                    },
+                }
+            )
         return self._capture_compiled_grasp(
             _host_compilation_action(purpose="grasp", compiled=compiled)
         )
@@ -5376,6 +5555,11 @@ class AgentMemory:
                     "measured_gripper_state": dict(observation.robot.gripper_state),
                     "resolved_at_s": time.time(),
                 }
+            )
+            self._resolve_reconciled_grasp_recovery(
+                tool_name=tool_name,
+                requested_position=requested_position,
+                verdict=verdict,
             )
         elif _finite_xyz(target_xyz) and _finite_xyz(measured_xyz):
             distance = math.sqrt(

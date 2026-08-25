@@ -256,6 +256,29 @@ def test_exhausted_frozen_grasp_pool_hands_off_without_model_rerun() -> None:
     )
 
 
+def test_terminal_gripper_recovery_hands_off_without_vlm_fallthrough() -> None:
+    decision = _host_obligation_decision(
+        {
+            "grasp_recovery": {
+                "schema_version": "openeta.grasp_recovery.v1",
+                "status": "stopped_requires_human",
+                "stage": "reopen",
+                "stop_reason": "gripper_reopen_reconciliation_failed",
+            }
+        },
+        tools=_tools_with_handlers("observe", "gripper_control", "grasp_pose_estimate"),
+    )
+
+    assert decision is not None
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == (
+        "gripper_reopen_reconciliation_failed"
+    )
+    assert decision.metadata["host_obligation"]["status"] == (
+        "stopped_requires_human"
+    )
+
+
 def test_zero_pass_grasp_reestimate_dispatches_fresh_observation() -> None:
     decision = _host_obligation_decision(
         {

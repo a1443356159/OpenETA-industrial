@@ -1588,6 +1588,137 @@ def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None
     assert recovery["required_action"] == {"name": "observe", "parameters": {}}
 
 
+def test_failed_close_reuses_next_frozen_exact_terminal_without_model_rerun() -> None:
+    candidates = [
+        {
+            **_candidate(f"grasp_{index:03d}", 0.9 - index * 0.1),
+            "grasp_place_joint_qualified": True,
+        }
+        for index in range(4)
+    ]
+    compiled = [_compiled_candidate(candidate) for candidate in candidates]
+    events = [
+        _host_grasp_compilation_event(
+            item,
+            queue_position=index,
+            queue_count=len(compiled),
+        )
+        for index, item in enumerate(compiled)
+    ]
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block and place it in the green zone")
+    memory.add_action(
+        _tool_action(
+            "anyplace",
+            {},
+            outputs={
+                "frozen_goal_pool_ready": True,
+                "frozen_goal_pool_count": 96,
+            },
+        )
+    )
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "frozen-qualified-grasps",
+                "selected_backend": "graspgenx",
+                "grasp_candidates": candidates,
+                "qualification_evidence": {
+                    "schema_version": "openeta.moveit_candidate_qualification.v3",
+                    "scene_epoch": 0,
+                },
+                "frozen_pair_grasp_branch_limit": 4,
+                "frozen_pair_lookahead_grasp_count": 4,
+                "frozen_pair_full_plan_pass_count": 4,
+                "host_selected_candidate_id": candidates[0]["id"],
+                "host_candidate_compilation": events[0],
+                "host_candidate_compilation_queue": events,
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["max_candidate_attempts"] == 4
+    policy["status"] = "accepted"
+    memory.save_fact("grasp_candidate_policy", policy, source="test")
+    memory.save_fact("scene_epoch", {"epoch": 3}, source="test")
+    execution = memory.grasp_execution()
+    execution.update(
+        {
+            "stage": "close",
+            "required_action": {
+                "name": "gripper_control",
+                "parameters": {"position": 0},
+            },
+        }
+    )
+    memory.save_fact("grasp_execution", execution, source="test")
+
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 0},
+            success=False,
+            outputs={"motion_outcome": "failed", "error_code": "CONTACT_REJECTED"},
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "active"
+    assert policy["active_candidate"]["id"] == candidates[1]["id"]
+    assert "reestimate_required" not in policy
+    assert policy["frozen_model_pool_retry"] == {
+        "schema_version": "openeta.frozen_grasp_retry.v1",
+        "source_scene_epoch": 0,
+        "current_scene_epoch": 3,
+        "candidate_id": candidates[1]["id"],
+        "model_inference_invoked": False,
+        "terminal_pose_reused": True,
+        "path_owner": "moveit",
+    }
+    execution = memory.grasp_execution()
+    assert execution["candidate_id"] == candidates[1]["id"]
+    assert execution["stage"] == "open"
+    reused = execution["compiled_grasp"]
+    assert reused["scene_epoch"] == 3
+    assert reused["contact_pose"]["xyz"] == compiled[1]["contact_pose"]["xyz"]
+    assert reused["contact_pose"]["rotation_matrix"] == compiled[1]["contact_pose"][
+        "rotation_matrix"
+    ]
+    assert reused["frozen_model_pool_reuse"]["model_inference_invoked"] is False
+
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 1},
+            success=False,
+            outputs={"motion_outcome": "unknown", "reconciliation_required": True},
+        )
+    )
+    assert memory.motion_reconciliation()["status"] == "required"
+    assert memory.grasp_recovery()["status"] == "reconciling"
+
+    memory.add_observation(
+        EnvObservation(
+            task="pick and place",
+            cameras=[],
+            robot=RobotState(gripper_state={"open": True, "openness": 0.99}),
+        )
+    )
+
+    assert memory.motion_reconciliation()["status"] == "completed"
+    assert memory.grasp_recovery()["status"] == "completed"
+    execution = memory.grasp_execution()
+    assert execution["candidate_id"] == candidates[1]["id"]
+    assert execution["stage"] == "contact"
+    assert execution["required_action"]["name"] == "move_to"
+    assert execution["required_action"]["parameters"]["target_pose"]["xyz"] == (
+        compiled[1]["contact_pose"]["xyz"]
+    )
+
+
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:
     memory = _memory_with_candidates()
     memory.add_action(_tool_action("gripper_control", {"position": 1}))
