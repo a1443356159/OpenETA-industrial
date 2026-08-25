@@ -56,6 +56,8 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert "`red rectangular block`" in prompt
     assert "独立 placement RGB-D" in prompt
     assert "冻结目标池" in prompt
+    assert "主批 2×96" in prompt and "最多覆盖 4×96" in prompt
+    assert "reserve" in prompt and "不得重跑任何模型" in prompt
     assert "compile_placement_seed" not in prompt
     assert "实测 T_eef_object" in prompt
     assert "不得固定 detection id" in prompt
@@ -394,6 +396,44 @@ def test_m6_accepts_complete_v3_grasp_pool_with_two_l5_branches(tmp_path) -> Non
     artifact.write_text(json.dumps(proof), encoding="utf-8")
     assert not m6._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
     assert not m6._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
+
+
+def test_m6_accepts_one_frozen_two_branch_reserve_batch(tmp_path) -> None:
+    artifact = tmp_path / "qualification-v3-reserve.json"
+    results = [
+        {
+            "candidate_id": f"grasp_{index:03d}",
+            "endpoint_pass": index < 4,
+            "se3_cluster_id": f"se3_{index:04d}",
+            "verdict": "PASS" if index < 4 else "FAIL",
+        }
+        for index in range(65)
+    ]
+    proof = {
+        "schema_version": "openeta.moveit_candidate_funnel.v3",
+        "artifact_schema_version": "openeta.moveit_candidate_qualification.v3",
+        "purpose": "grasp",
+        "stop_reason": "complete_l5_pass_found",
+        "selected_candidate_ids": [f"grasp_{index:03d}" for index in range(4)],
+        "metrics": {"generated_count": 65, "l5_pass_count": 4},
+        "l5_attempts": [
+            {"candidate_id": f"grasp_{index:03d}", "verdict": "PASS"}
+            for index in range(4)
+        ],
+        "results": results,
+    }
+    artifact.write_text(json.dumps(proof), encoding="utf-8")
+    call = {
+        "diversity_selected_count": 65,
+        "qualification_artifact": {"kind": "json", "path": artifact.name},
+    }
+
+    assert m6._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert m6._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
+
+    proof["selected_candidate_ids"].append("grasp_004")
+    artifact.write_text(json.dumps(proof), encoding="utf-8")
+    assert not m6._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
 
 
 def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:

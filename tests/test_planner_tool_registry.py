@@ -233,6 +233,29 @@ def test_exhausted_placement_pool_hands_off_without_new_inference() -> None:
     assert decision.parameters["failure_code"] == "CURRENT_GRASP_PLACE_INFEASIBLE"
 
 
+def test_exhausted_frozen_grasp_pool_hands_off_without_model_rerun() -> None:
+    decision = _host_obligation_decision(
+        {
+            "grasp_candidate_policy": {
+                "status": "stopped_requires_human",
+                "stop_reason": "frozen_grasp_place_pool_exhausted",
+                "failure_code": "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE",
+                "frozen_pair_count": 384,
+            }
+        },
+        tools=_tools_with_handlers("observe", "grasp_pose_estimate"),
+    )
+
+    assert decision is not None
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == (
+        "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE"
+    )
+    assert decision.metadata["host_obligation"]["status"] == (
+        "stopped_requires_human"
+    )
+
+
 def test_zero_pass_grasp_reestimate_dispatches_fresh_observation() -> None:
     decision = _host_obligation_decision(
         {

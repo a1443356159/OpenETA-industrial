@@ -199,7 +199,7 @@ def test_zero_moveit_pass_reestimates_same_grasp_backend_with_fresh_observation(
     assert reestimate["attempt_count"] == 1
 
 
-def test_zero_pass_reestimates_object_without_recomputing_frozen_place_goals() -> None:
+def test_zero_pass_frozen_model_pool_stops_without_model_rerun() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick the red block and place it in the green zone")
     memory.add_observation(
@@ -236,25 +236,23 @@ def test_zero_pass_reestimates_object_without_recomputing_frozen_place_goals() -
         "generated_candidate_count": 10,
         "qualification_evidence": {"results": []},
     }
-    memory.add_action(_tool_action("grasp_pose_estimate", {}, outputs=outputs))
-
-    assert memory.grasp_reestimation()["target_prompt"] == "red block"
-    assert memory.grasp_reestimation()["attempt_count"] == 1
-
-    memory.add_observation(
-        EnvObservation(task="pick and place", cameras=[], robot=RobotState())
+    outputs.update(
+        {
+            "frozen_pair_count": 384,
+            "frozen_pair_grasp_branch_limit": 4,
+            "frozen_pair_lookahead_grasp_count": 4,
+            "frozen_pair_full_plan_pass_count": 0,
+        }
     )
     memory.add_action(_tool_action("grasp_pose_estimate", {}, outputs=outputs))
-    assert memory.grasp_reestimation()["attempt_count"] == 2
 
-    memory.add_observation(
-        EnvObservation(task="pick and place", cameras=[], robot=RobotState())
-    )
-    memory.add_action(_tool_action("grasp_pose_estimate", {}, outputs=outputs))
     assert memory.grasp_reestimation() is None
     policy = memory.grasp_candidate_policy()
     assert policy["status"] == "stopped_requires_human"
-    assert policy["zero_pass_reestimate_attempt_count"] == 3
+    assert policy["stop_reason"] == "frozen_grasp_place_pool_exhausted"
+    assert policy["failure_code"] == "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE"
+    assert policy["frozen_pair_count"] == 384
+    assert "reestimate_required" not in policy
 
 
 def test_zero_pass_reestimate_waits_for_a_new_complete_rgbd_packet(
@@ -294,13 +292,8 @@ def test_zero_pass_reestimate_waits_for_a_new_complete_rgbd_packet(
     source = observation("source")
     memory.add_observation(source)
     memory.save_fact(
-        "placement_object_detection",
+        "selected_sam3_detection",
         {"target_prompt": "red block"},
-        source="test",
-    )
-    memory.save_fact(
-        "frozen_placement_goal_pool",
-        {"status": "ready", "goal_count": 96},
         source="test",
     )
     source_rgb = str(tmp_path / "source.top.rgb.png")

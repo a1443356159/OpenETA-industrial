@@ -69,10 +69,12 @@ centering、镜像、180度变体、reverse、pregrasp、hover、precontact、ap
 和 fixed lift。MoveIt 从当前状态一次规划到精确 contact，闭合后必须由双垫 native
 target contact 与 attach ACK 直接证明抓取。
 
-漏斗先对 96 个 AnyPlace 目标各做一次目标合法性，再对两个抓取分支与目标配对做
+漏斗先对 96 个 AnyPlace 目标各做一次目标合法性，再对主批两个抓取分支与目标配对做
 attached-object/夹爪/解析边界合法性；之后才进入 Beam-2 IK 和完整 MoveIt plan-only。
-候选以确定波次展开，经验分数只能排序。一个候选失败只切换同一模型池中下一合格
-候选；本次验收不得重跑 SAM3、抓取模型或 AnyPlace，池耗尽时显式失败。
+主批 2×96 均失败时，只从同一 GraspGenX 输出池启用一个包含两个抓取分支的 reserve
+批次，最多覆盖 4×96；不得重跑任何模型。候选以确定波次展开，经验分数只能排序。
+一个候选失败只切换冻结池中下一合格候选；本次验收不得重跑 SAM3、抓取模型或
+AnyPlace，主批与 reserve 池耗尽时显式失败。
 
 attach 后宿主直接复用冻结目标池，以实测 T_eef_object 和当前 PlanningScene revision
 重新计算 exact release EEF，并通过一次 inference=false 的内部 AnyPlace 资格调用。
@@ -442,7 +444,7 @@ def _qualification_blocks(
 def _has_v3_grasp_diversity_evidence(
     call: Mapping[str, Any], *, artifact_root: Path
 ) -> bool:
-    """Accept a full v3 grasp pool only when its two L5 branches are proven."""
+    """Accept two primary branches plus at most one frozen reserve batch."""
 
     reported_counts = {
         int(value)
@@ -455,7 +457,12 @@ def _has_v3_grasp_diversity_evidence(
             or block.get("artifact_schema_version")
             != "openeta.moveit_candidate_qualification.v3"
             or block.get("purpose") != "grasp"
-            or block.get("stop_reason") != "complete_l5_pass_found"
+            or block.get("stop_reason")
+            not in {
+                "complete_l5_pass_found",
+                "complete_l5_pass_found_joint_space_fallback",
+                "complete_l5_pass_found_partial_lookahead",
+            }
         ):
             continue
         results = block.get("results")
@@ -480,8 +487,8 @@ def _has_v3_grasp_diversity_evidence(
             and isinstance(l5_pass_count, int)
             and not isinstance(l5_pass_count, bool)
             and l5_pass_count >= 2
-            and len(selected_ids) == 2
-            and len(set(selected_ids)) == 2
+            and 2 <= len(selected_ids) <= 4
+            and len(set(selected_ids)) == len(selected_ids)
         ):
             continue
         result_by_id = {
@@ -519,7 +526,7 @@ def _has_v3_grasp_diversity_evidence(
             and isinstance(row.get("se3_cluster_id"), str)
             and row.get("se3_cluster_id")
         }
-        if not qualified_clusters or len(selected_clusters) != min(
+        if not qualified_clusters or len(selected_clusters) < min(
             2, len(qualified_clusters)
         ):
             continue
@@ -530,12 +537,11 @@ def _has_v3_grasp_diversity_evidence(
 def _has_bounded_grasp_l5_evidence(
     call: Mapping[str, Any], *, artifact_root: Path
 ) -> bool:
-    """Accept the legacy submit cap or the stricter v3 two-branch proof.
+    """Accept the legacy submit cap or the v3 primary-plus-reserve proof.
 
-    V3 may need more than two L5 attempts to obtain two PASS branches from
-    distinct SE(3) clusters.  Its artifact binds the final queue to exactly two
-    distinct PASS candidates, so the old raw submission-count cap is no longer
-    the relevant bound.
+    V3 may need one frozen two-branch reserve batch when the primary branches
+    cannot form any feasible placement pair. Its artifact therefore binds two
+    to four distinct PASS candidates without permitting another model call.
     """
 
     legacy_bound = any(

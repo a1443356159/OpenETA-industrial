@@ -174,6 +174,7 @@ class CandidateWave:
     cumulative_per_branch: int
     candidates: tuple[JsonDict, ...]
     recovery: bool = False
+    frozen_pair_batch_index: int = 0
 
 
 def schedule_candidate_waves(
@@ -207,6 +208,7 @@ def schedule_candidate_waves(
 
     branches: dict[str, list[JsonDict]] = {}
     branch_order: list[str] = []
+    branch_batch: dict[str, int] = {}
     for descriptor in annotated:
         candidate = descriptor.get("candidate")
         candidate = candidate if isinstance(candidate, Mapping) else {}
@@ -214,28 +216,53 @@ def schedule_candidate_waves(
         if branch not in branches:
             branches[branch] = []
             branch_order.append(branch)
+            raw_batch = candidate.get("frozen_pair_batch_index", 0)
+            branch_batch[branch] = (
+                raw_batch
+                if isinstance(raw_batch, int)
+                and not isinstance(raw_batch, bool)
+                and raw_batch >= 0
+                else 0
+            )
         branches[branch].append(descriptor)
     ordered_branches = {
         branch: _cluster_round_robin(branches[branch]) for branch in branch_order
     }
-    maximum = max((len(values) for values in ordered_branches.values()), default=0)
-    cumulative = sorted(
-        set([value for value in placement_waves if value < maximum] + [maximum])
-    )
-    waves = []
-    previous = 0
-    for wave_index, limit in enumerate(cumulative):
-        # Interleave grasp branches at every depth so completion timing cannot
-        # let one branch consume the entire first wave.
-        batch = tuple(
-            ordered_branches[branch][index]
-            for index in range(previous, limit)
+    waves: list[CandidateWave] = []
+    for batch_index in sorted(set(branch_batch.values())):
+        current_branches = [
+            branch
             for branch in branch_order
-            if index < len(ordered_branches[branch])
+            if branch_batch[branch] == batch_index
+        ]
+        maximum = max(
+            (len(ordered_branches[branch]) for branch in current_branches),
+            default=0,
         )
-        if batch:
-            waves.append(CandidateWave(wave_index, limit, batch))
-        previous = limit
+        cumulative = sorted(
+            set([value for value in placement_waves if value < maximum] + [maximum])
+        )
+        previous = 0
+        for limit in cumulative:
+            # Interleave grasp branches within one batch at every depth. A
+            # reserve batch gets its own later waves, so it cannot consume IK
+            # or L5 capacity before the primary frozen branches are exhausted.
+            batch = tuple(
+                ordered_branches[branch][index]
+                for index in range(previous, limit)
+                for branch in current_branches
+                if index < len(ordered_branches[branch])
+            )
+            if batch:
+                waves.append(
+                    CandidateWave(
+                        len(waves),
+                        limit,
+                        batch,
+                        frozen_pair_batch_index=batch_index,
+                    )
+                )
+            previous = limit
     return waves
 
 
@@ -451,6 +478,7 @@ def select_grasp_branches(
     ordered = sorted(passed, key=candidate_physical_quality_key)
     if len(ordered) <= limit:
         return [str(item.get("candidate_id") or "") for item in ordered]
+    primary_limit = min(2, limit)
     selected = [ordered[0]]
     for item in ordered[1:]:
         if (
@@ -460,7 +488,7 @@ def select_grasp_branches(
         ):
             selected.append(item)
             break
-    if len(selected) < limit:
+    if len(selected) < primary_limit:
         for item in ordered[1:]:
             if (
                 item.get("grasp_symmetry_family_id")
@@ -468,12 +496,12 @@ def select_grasp_branches(
             ):
                 selected.append(item)
                 break
-    if len(selected) < limit:
+    if len(selected) < primary_limit:
         for item in ordered[1:]:
             if item.get("se3_cluster_id") != selected[0].get("se3_cluster_id"):
                 selected.append(item)
                 break
-    if len(selected) < limit:
+    if len(selected) < primary_limit:
         best_pair: tuple[float, int, int] | None = None
         for left_index, left in enumerate(ordered):
             left_state = _result_end_state(left)
@@ -493,6 +521,57 @@ def select_grasp_branches(
             selected = [ordered[-best_pair[1]], ordered[-best_pair[2]]]
         else:
             selected = ordered[:limit]
+    while len(selected) < limit:
+        selected_ids = {
+            str(item.get("candidate_id") or "") for item in selected
+        }
+        remaining = [
+            item
+            for item in ordered
+            if str(item.get("candidate_id") or "") not in selected_ids
+        ]
+        if not remaining:
+            break
+        used_clusters = {
+            str(item.get("se3_cluster_id") or "") for item in selected
+        }
+        used_families = {
+            str(item.get("grasp_symmetry_family_id") or "") for item in selected
+        }
+
+        def expansion_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+            cluster = str(item.get("se3_cluster_id") or "")
+            family = str(item.get("grasp_symmetry_family_id") or "")
+            new_cluster = bool(cluster and cluster not in used_clusters)
+            new_family = bool(family and family not in used_families)
+            tier = (
+                0
+                if new_cluster and new_family
+                else 1
+                if new_family
+                else 2
+                if new_cluster
+                else 3
+            )
+            state = _result_end_state(item)
+            distances: list[float] = []
+            if state is not None:
+                for selected_item in selected:
+                    selected_state = _result_end_state(selected_item)
+                    if selected_state is not None:
+                        distances.append(
+                            normalized_joint_distance(
+                                state, selected_state, source=source
+                            )
+                        )
+            min_distance = min(distances, default=0.0)
+            return (
+                tier,
+                -min_distance,
+                *candidate_physical_quality_key(item),
+            )
+
+        selected.append(min(remaining, key=expansion_key))
     return [str(item.get("candidate_id") or "") for item in selected[:limit]]
 
 

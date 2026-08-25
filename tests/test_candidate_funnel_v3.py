@@ -274,6 +274,63 @@ def test_joint_scheduler_covers_two_complete_anyplace_branches():
     ] == ["g0", "g1"]
 
 
+def test_joint_scheduler_defers_frozen_reserve_branches_until_primary_exhausts():
+    descriptors = []
+    for placement_index in range(96):
+        for grasp_index in range(4):
+            candidate = _candidate(placement_index * 4 + grasp_index)
+            candidate.update(
+                {
+                    "source_grasp_id": f"g{grasp_index}",
+                    "frozen_pair_batch_index": grasp_index // 2,
+                    "frozen_pair_batch_role": (
+                        "primary" if grasp_index < 2 else "reserve"
+                    ),
+                }
+            )
+            descriptors.append(
+                {
+                    "candidate_id": candidate["id"],
+                    "candidate": candidate,
+                    "candidate_pose_sha256": _hash(candidate),
+                }
+            )
+
+    waves = schedule_candidate_waves(descriptors, purpose="placement")
+
+    assert [wave.frozen_pair_batch_index for wave in waves] == [0] * 4 + [1] * 4
+    assert [wave.cumulative_per_branch for wave in waves] == [
+        12,
+        24,
+        48,
+        96,
+        12,
+        24,
+        48,
+        96,
+    ]
+    assert [len(wave.candidates) for wave in waves] == [
+        24,
+        24,
+        48,
+        96,
+        24,
+        24,
+        48,
+        96,
+    ]
+    assert all(
+        int(descriptor["candidate"]["source_grasp_id"][1:]) < 2
+        for wave in waves[:4]
+        for descriptor in wave.candidates
+    )
+    assert all(
+        int(descriptor["candidate"]["source_grasp_id"][1:]) >= 2
+        for wave in waves[4:]
+        for descriptor in wave.candidates
+    )
+
+
 def test_goal_legality_barrier_evaluates_one_goal_once_and_rejects_before_ik():
     ik_calls = 0
     candidates = []
@@ -1231,6 +1288,36 @@ def test_fast_profile_preserves_exact_duplicate_anyplace_results():
         "c0",
         "c1",
     ]
+
+
+def test_fast_grasp_lookahead_expands_l5_capacity_without_model_rerun():
+    captured = {}
+    candidates = [_candidate(index) for index in range(5)]
+    for index, candidate in enumerate(candidates):
+        candidate["qualification_stages"][0]["xyz"][0] = 0.4 + (index % 3) * 0.02
+
+    def rpc(_name, request, _timeout):
+        captured.update(request)
+        return _engine().qualify(request)
+
+    result = MoveItCandidateQualifier(
+        rpc,
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    ).qualify_result(
+        ToolResult(True, "one frozen model output", {"grasp_candidates": candidates}),
+        purpose="grasp",
+        scene_epoch=1,
+        planning_scene_revision=4,
+        l5_pass_target=4,
+    )
+
+    assert captured["funnel"]["full_plan_limit"] == 4
+    assert captured["funnel"]["endpoint_pass_target"] == 4
+    assert captured["funnel"]["l5_pass_target"] == 4
+    assert result.details["candidate_count"] == 4
+    assert len(result.details["grasp_candidates"]) == 4
+    assert len({item["id"] for item in result.details["grasp_candidates"]}) == 4
 
 
 def test_shadow_preserves_complete_fast_pool_but_legacy_uses_old_dedup_subset():

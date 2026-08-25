@@ -785,11 +785,7 @@ def bind_runtime_perception_tools(
     frozen_pair_coordinator = (
         _FrozenGoalPairCoordinator(
             candidate_qualifier,
-            grasp_branch_limit=(
-                2
-                if counts.qualification_profile in {"fast_v3", "shadow"}
-                else counts.frozen_pair_grasp_branch_limit
-            ),
+            grasp_branch_limit=counts.frozen_pair_grasp_branch_limit,
         )
         if candidate_qualifier is not None
         else None
@@ -1422,7 +1418,7 @@ class _FrozenGoalPairCoordinator:
         # L3/L4 then traverse the round-robin pair order progressively until
         # the two-slot plan-only capacity is filled or the batch is exhausted.
         current_goals = [dict(goal) for goal in self.object_goals]
-        for grasp in grasps[: self.grasp_branch_limit]:
+        for grasp_index, grasp in enumerate(grasps[: self.grasp_branch_limit]):
             if not isinstance(grasp, Mapping):
                 continue
             grasp_id = str(grasp.get("id") or "")
@@ -1466,6 +1462,10 @@ class _FrozenGoalPairCoordinator:
                 pair["source_grasp_equivalence_id"] = grasp_equivalence_id
                 pair["source_grasp_symmetry_equivalent"] = bool(
                     grasp.get("symmetry_parent_id")
+                )
+                pair["frozen_pair_batch_index"] = grasp_index // 2
+                pair["frozen_pair_batch_role"] = (
+                    "primary" if grasp_index < 2 else "reserve"
                 )
                 pair["source_object_goal_id"] = goal_id
                 pair["frozen_contact_pose"] = dict(contact)
@@ -1570,6 +1570,23 @@ class _FrozenGoalPairCoordinator:
             if isinstance(entry.get("proof"), Mapping):
                 proofs[grasp_id] = entry["proof"]
         result.details["frozen_pair_count"] = len(pairs)
+        result.details["frozen_pair_grasp_branch_limit"] = self.grasp_branch_limit
+        result.details["frozen_pair_lookahead_grasp_count"] = len(retained_entries)
+        result.details["frozen_pair_primary_grasp_count"] = min(
+            2, len(retained_entries)
+        )
+        result.details["frozen_pair_reserve_grasp_count"] = max(
+            0, len(retained_entries) - 2
+        )
+        qualification_waves = joint.details.get("qualification_waves")
+        qualification_waves = (
+            qualification_waves if isinstance(qualification_waves, list) else []
+        )
+        result.details["frozen_pair_reserve_activated"] = any(
+            isinstance(wave, Mapping)
+            and wave.get("frozen_pair_batch_index") == 1
+            for wave in qualification_waves
+        )
         result.details["frozen_pair_workspace_pass_count"] = joint.details.get(
             "workspace_pass_count", 0
         )
@@ -2032,12 +2049,20 @@ def _qualifying_handler(
                 source["frozen_goal_requalification"] = True
             if isinstance(compiled_source_grasp, dict):
                 source["source_grasp_compiled"] = dict(compiled_source_grasp)
+        grasp_lookahead_target = (
+            frozen_pair_coordinator.grasp_branch_limit
+            if purpose == "grasp"
+            and frozen_pair_coordinator is not None
+            and frozen_pair_coordinator.object_goals
+            else None
+        )
         qualified_result = qualifier.qualify_result(
             result,
             purpose=purpose,
             scene_epoch=scene_epoch,
             planning_scene_revision=revision_value,
             source=source,
+            l5_pass_target=grasp_lookahead_target,
         )
         if purpose == "grasp" and frozen_pair_coordinator is not None:
             qualified_result = frozen_pair_coordinator.filter_grasps(

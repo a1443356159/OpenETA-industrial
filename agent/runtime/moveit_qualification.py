@@ -344,6 +344,7 @@ class MoveItCandidateQualifier:
         source: Mapping[str, Any] | None = None,
         cache_result: bool = True,
         qualification_mode: str = "standard",
+        l5_pass_target: int | None = None,
     ) -> ToolResult:
         if not result.success:
             return result
@@ -469,6 +470,15 @@ class MoveItCandidateQualifier:
                 limit=self.diversity_limits[purpose],
             )
             full_plan_limit = self.full_plan_limits[purpose]
+        if l5_pass_target is not None:
+            if (
+                isinstance(l5_pass_target, bool)
+                or not isinstance(l5_pass_target, int)
+                or l5_pass_target <= 0
+            ):
+                raise ValueError("l5_pass_target must be a positive integer")
+            if fast_profile:
+                full_plan_limit = max(full_plan_limit, l5_pass_target)
         funnel_config: JsonDict = {
             "ik_seed_count": self.ik_seed_count,
             "full_plan_limit": full_plan_limit,
@@ -494,7 +504,9 @@ class MoveItCandidateQualifier:
                     "recovery_ik_timeout_s": self.recovery_ik_timeout_s,
                     "capability_map_id": self.capability_map_id,
                     "l5_pass_target": (
-                        full_plan_limit
+                        l5_pass_target
+                        if l5_pass_target is not None
+                        else full_plan_limit
                         if qualification_mode == "frozen_pair"
                         else 2
                         if purpose == "grasp"
@@ -632,22 +644,35 @@ class MoveItCandidateQualifier:
             ]
             evidence["results"].append(item)
         proofs = {item["candidate_id"]: item for item in evidence["results"]}
-        selected_candidate_ids = evidence.get("selected_candidate_ids")
-        selected_candidate_ids = (
-            {str(value) for value in selected_candidate_ids}
-            if isinstance(selected_candidate_ids, list)
+        raw_selected_candidate_ids = evidence.get("selected_candidate_ids")
+        selected_candidate_order = (
+            [str(value) for value in raw_selected_candidate_ids]
+            if isinstance(raw_selected_candidate_ids, list)
             else None
         )
-        passed = [
-            dict(candidate)
+        raw_by_id = {
+            str(candidate.get("id") or ""): candidate
             for candidate in raw
             if isinstance(candidate, Mapping)
-            and proofs.get(str(candidate.get("id") or ""), {}).get("verdict") == "PASS"
-            and (
-                selected_candidate_ids is None
-                or str(candidate.get("id") or "") in selected_candidate_ids
-            )
-        ]
+        }
+        if selected_candidate_order is None:
+            passed = [
+                dict(candidate)
+                for candidate in raw
+                if isinstance(candidate, Mapping)
+                and proofs.get(str(candidate.get("id") or ""), {}).get("verdict")
+                == "PASS"
+            ]
+        else:
+            # The engine's selected order is the deterministic physical-quality
+            # order. Preserve it for the primary/reserve split instead of
+            # reducing the evidence to an unordered membership set.
+            passed = [
+                dict(raw_by_id[candidate_id])
+                for candidate_id in selected_candidate_order
+                if candidate_id in raw_by_id
+                and proofs.get(candidate_id, {}).get("verdict") == "PASS"
+            ]
         for candidate in passed:
             candidate_id = str(candidate.get("id") or "")
             proof = proofs.get(candidate_id, {})
@@ -1838,20 +1863,30 @@ class MoveItQualificationEngine:
                         if target_reached():
                             stop_reason = "complete_l5_pass_found"
                             break
-            wave_evidence.append(
-                {
-                    "wave_index": wave.wave_index,
-                    "recovery_layer": recovery,
-                    "cumulative_per_branch": wave.cumulative_per_branch,
-                    "candidate_count": len(wave.candidates),
-                    "endpoint_pass_count": sum(
-                        item.get("endpoint_pass") is True for item in completed
-                    ),
-                    "l5_submitted_count": submitted_this_wave,
-                    "l5_pass_count": passed_this_wave,
-                    "elapsed_s": time.monotonic() - wave_started,
-                }
-            )
+            wave_record: JsonDict = {
+                "wave_index": wave.wave_index,
+                "recovery_layer": recovery,
+                "cumulative_per_branch": wave.cumulative_per_branch,
+                "candidate_count": len(wave.candidates),
+                "endpoint_pass_count": sum(
+                    item.get("endpoint_pass") is True for item in completed
+                ),
+                "l5_submitted_count": submitted_this_wave,
+                "l5_pass_count": passed_this_wave,
+                "elapsed_s": time.monotonic() - wave_started,
+            }
+            if qualification_mode == "frozen_pair":
+                wave_record.update(
+                    {
+                        "frozen_pair_batch_index": wave.frozen_pair_batch_index,
+                        "frozen_pair_batch_role": (
+                            "primary"
+                            if wave.frozen_pair_batch_index == 0
+                            else "reserve"
+                        ),
+                    }
+                )
+            wave_evidence.append(wave_record)
             return bool(infrastructure_error or target_reached())
 
         if not infrastructure_error:
@@ -1879,6 +1914,9 @@ class MoveItQualificationEngine:
                             cumulative_per_branch=wave.cumulative_per_branch,
                             candidates=retry,
                             recovery=True,
+                            frozen_pair_batch_index=(
+                                wave.frozen_pair_batch_index
+                            ),
                         )
                     )
             recovery_solver_mode_switched = False
@@ -1916,13 +1954,22 @@ class MoveItQualificationEngine:
             # The contract then falls back to the joint-farthest pair only
             # after exhaustive coverage.
             stop_reason = "complete_l5_pass_found_joint_space_fallback"
+        elif purpose == "grasp" and len(l5_passes) >= min(2, target):
+            # A look-ahead request may ask for four branches even when the
+            # frozen model output contains only two or three executable ones.
+            # Keep the proven primary set; never turn it into a false zero-pass.
+            stop_reason = "complete_l5_pass_found_partial_lookahead"
         else:
             stop_reason = "candidate_and_recovery_exhausted"
 
         if purpose == "grasp":
             selected_ids = (
-                select_grasp_branches(l5_passes, source=source, limit=target)
-                if len(l5_passes) >= target
+                select_grasp_branches(
+                    l5_passes,
+                    source=source,
+                    limit=min(target, len(l5_passes)),
+                )
+                if len(l5_passes) >= min(2, target)
                 else []
             )
         else:
@@ -2179,6 +2226,12 @@ class MoveItQualificationEngine:
                 "source_grasp_id": str(candidate.get("source_grasp_id") or ""),
                 "source_object_goal_id": str(
                     candidate.get("source_object_goal_id") or ""
+                ),
+                "frozen_pair_batch_index": candidate.get(
+                    "frozen_pair_batch_index", 0
+                ),
+                "frozen_pair_batch_role": str(
+                    candidate.get("frozen_pair_batch_role") or ""
                 ),
                 "endpoint_evaluated": True,
                 "stages": [],

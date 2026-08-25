@@ -702,6 +702,39 @@ def _host_obligation_decision(
             },
         )
 
+    if (
+        isinstance(grasp_policy, dict)
+        and grasp_policy.get("status") == "stopped_requires_human"
+        and str(grasp_policy.get("stop_reason") or "").startswith("frozen_")
+    ):
+        return PlannerDecision(
+            action_type="response",
+            action="ask_human",
+            parameters={
+                "question": (
+                    "The frozen grasp/place model pool exhausted its deterministic "
+                    "look-ahead budget. Inspect the cell or provide a new task before "
+                    "starting another model inference."
+                ),
+                "failure_code": str(
+                    grasp_policy.get("failure_code")
+                    or grasp_policy.get("stop_reason")
+                    or "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE"
+                ),
+            },
+            reasoning=(
+                "The primary and reserve branches from the frozen model output are "
+                "exhausted; stop instead of re-observing or rerunning a model."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.frozen_model_pool_stop.v1",
+                    "status": "stopped_requires_human",
+                    "stop_reason": grasp_policy.get("stop_reason"),
+                }
+            },
+        )
+
     refresh = tool_context.get("fresh_observation_obligation")
     if (
         isinstance(refresh, dict)

@@ -2615,12 +2615,31 @@ class AgentMemory:
             if not raw_candidates:
                 if isinstance(outputs.get("qualification_evidence"), dict):
                     source_backend = str(outputs.get("selected_backend") or source_tool)
+                    frozen_pool_active = isinstance(
+                        self.frozen_placement_goal_pool(), dict
+                    )
+                    frozen_pair_count = _optional_int(
+                        outputs.get("frozen_pair_count"), default=0
+                    )
+                    frozen_stop_reason = (
+                        "frozen_grasp_place_pool_exhausted"
+                        if frozen_pair_count > 0
+                        else "frozen_grasp_pool_exhausted"
+                    )
                     policy = {
                         "result_id": str(outputs.get("result_id") or ""),
                         "source_tool": source_tool,
                         "source_backend": source_backend,
-                        "status": "exhausted",
-                        "stop_reason": "no_moveit_qualified_candidates",
+                        "status": (
+                            "stopped_requires_human"
+                            if frozen_pool_active
+                            else "exhausted"
+                        ),
+                        "stop_reason": (
+                            frozen_stop_reason
+                            if frozen_pool_active
+                            else "no_moveit_qualified_candidates"
+                        ),
                         "candidate_count": 0,
                         "raw_candidate_count": raw_candidate_count,
                         "generated_candidate_count": generated_candidate_count,
@@ -2630,25 +2649,48 @@ class AgentMemory:
                         "active_candidate": None,
                         "remaining_candidate_ids": [],
                         "candidates": [],
-                        "reestimate_required": {
+                        "qualification_evidence": dict(
+                            outputs["qualification_evidence"]
+                        ),
+                    }
+                    if frozen_pool_active:
+                        policy.update(
+                            {
+                                "failure_code": "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE",
+                                "frozen_pair_count": frozen_pair_count,
+                                "frozen_pair_grasp_branch_limit": _optional_int(
+                                    outputs.get("frozen_pair_grasp_branch_limit"),
+                                    default=0,
+                                ),
+                                "frozen_pair_lookahead_grasp_count": _optional_int(
+                                    outputs.get("frozen_pair_lookahead_grasp_count"),
+                                    default=0,
+                                ),
+                                "frozen_pair_full_plan_pass_count": _optional_int(
+                                    outputs.get("frozen_pair_full_plan_pass_count"),
+                                    default=0,
+                                ),
+                            }
+                        )
+                    else:
+                        policy["reestimate_required"] = {
                             "status": "pending_recovery",
                             "reason": "no_moveit_qualified_candidates",
                             "backend": source_backend,
                             "requires_fresh_observation": True,
                             "backend_switch_allowed": False,
-                        },
-                        "qualification_evidence": dict(
-                            outputs["qualification_evidence"]
-                        ),
-                    }
+                        }
                     self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
                         policy, source="moveit_qualification"
                     )
                     self.record("grasp_candidates_moveit_rejected", dict(policy))
+                    if frozen_pool_active:
+                        self.facts.pop(GRASP_REESTIMATION_KEY, None)
+                        self.record("frozen_grasp_pool_exhausted", dict(policy))
+                        continue
                     selected_target = (
                         self.placement_object_detection()
-                        if self.frozen_placement_goal_pool() is not None
-                        else self.selected_sam3_detection()
+                        if frozen_pool_active else self.selected_sam3_detection()
                     )
                     source = outputs.get("source")
                     source = source if isinstance(source, dict) else {}
