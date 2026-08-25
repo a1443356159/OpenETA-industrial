@@ -10,6 +10,7 @@ from agent.runtime.moveit_qualification import (
     QUALIFICATION_SCHEMA,
     MoveItCandidateQualifier,
     QualificationCache,
+    SAME_RUN_QUALIFICATION_SEED_FIELD,
 )
 from agent.runtime.runtime_assembly import (
     _PregraspGraspPlaceCoordinator,
@@ -30,6 +31,12 @@ def _pass_stage() -> dict[str, Any]:
         "execution_started": False,
         "start_joint_state_sha256": "start",
         "end_joint_state": {"joint_names": ["j1"], "positions": [0.0]},
+        "beam_solutions": [
+            {
+                "joint_state": {"names": ["j1"], "positions": [0.25]},
+                "state_valid": True,
+            }
+        ],
         "trajectory": {"point_count": 2},
     }
 
@@ -302,6 +309,11 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
         0.43,
     ]
     assert frozen_goal["frozen_goal_frame_binding"]["physical_collision_goal"] is True
+    seed_evidence = frozen_goal[SAME_RUN_QUALIFICATION_SEED_FIELD]
+    assert seed_evidence["provenance"] == "pregrasp_joint_l5_pass"
+    assert seed_evidence["states"] == [
+        {"names": ["j1"], "positions": [0.25]}
+    ]
     assert postattach.details["frozen_pregrasp_goal_requalification"] is True
     assert postattach.details["discarded_postattach_model_candidate_count"] == 0
     assert postattach.details["model_raw_candidate_count"] == 96

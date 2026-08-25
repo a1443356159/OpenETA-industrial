@@ -12,6 +12,9 @@ from agent.runtime.moveit_qualification import (
     QUALIFICATION_SCHEMA_V3,
     MoveItCandidateQualifier,
     MoveItQualificationEngine,
+    SAME_RUN_QUALIFICATION_SEED_FIELD,
+    SAME_RUN_QUALIFICATION_SEED_PROVENANCE,
+    SAME_RUN_QUALIFICATION_SEED_SCHEMA,
 )
 from agent.runtime.qualification_v3 import schedule_candidate_waves
 from agent.tools.registry import ToolResult
@@ -135,6 +138,81 @@ def test_pregrasp_joint_retains_two_l5_passes_within_submission_budget():
     assert response["metrics"]["l5_pass_count"] == 2
     assert response["selected_candidate_ids"] == ["c0", "c1"]
     assert response["results"][2]["verdict"] == "NOT_EVALUATED"
+
+
+def test_pregrasp_joint_l5_slots_prefer_distinct_grasp_and_goal_cluster():
+    candidates = []
+    for index, (grasp_id, score) in enumerate(
+        (("g0", 4.0), ("g0", 3.0), ("g1", 2.0), ("g1", 1.0))
+    ):
+        candidate = _candidate(index, score=score)
+        candidate.update(
+            {
+                "source_grasp_id": grasp_id,
+                "source_grasp_equivalence_id": grasp_id,
+                "source_object_goal_id": "p0",
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [0.48, -0.1, 0.43],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                },
+            }
+        )
+        candidates.append(candidate)
+    # c0/c1/c2 share one 10 mm cluster. c3 is the lower-scored, but only,
+    # candidate that provides both a second grasp and a second goal cluster.
+    candidates[3]["qualification_stages"][0]["xyz"][0] = 0.43
+
+    request = _request(
+        candidates,
+        overrides={
+            "qualification_mode": "pregrasp_joint",
+            "l5_pass_target": 2,
+            "l5_submission_limit": 2,
+        },
+    )
+    response = _engine(clone_scene=_placement_scene).qualify(request)
+
+    assert response["selected_candidate_ids"] == ["c0", "c3"]
+    assert [attempt["source_grasp_id"] for attempt in response["l5_attempts"]] == [
+        "g0",
+        "g1",
+    ]
+    assert [attempt["se3_cluster_id"] for attempt in response["l5_attempts"]] == [
+        "se3_0000",
+        "se3_0001",
+    ]
+
+
+def test_same_run_pregrasp_seed_is_used_as_second_fast_seed():
+    candidate = _candidate(0)
+    candidate[SAME_RUN_QUALIFICATION_SEED_FIELD] = {
+        "schema_version": SAME_RUN_QUALIFICATION_SEED_SCHEMA,
+        "provenance": SAME_RUN_QUALIFICATION_SEED_PROVENANCE,
+        "source_candidate_id": "pregrasp_pair_g0_p0",
+        "states": [{"names": ["j1"], "positions": [0.35]}],
+    }
+    sources = []
+
+    def ik(target, seed, collision):
+        del target, collision
+        sources.append(str(seed.get("seed_source") or ""))
+        if seed.get("seed_source") != "pregrasp_qualified_same_run":
+            return {"ok": False}
+        return {
+            "ok": True,
+            "joint_state": {"names": ["j1"], "positions": [0.2]},
+            "min_singular_value": 0.3,
+        }
+
+    response = _engine(compute_ik=ik).qualify(_request([candidate]))
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert sources == ["current_robot_state", "pregrasp_qualified_same_run"]
 
 
 def _placement_scene():

@@ -32,6 +32,7 @@ from agent.runtime.moveit_qualification import (
     MoveItCandidateQualifier,
     QualificationCache,
     PRIVATE_RPC_NAME,
+    SAME_RUN_QUALIFICATION_SEED_FIELD,
     private_qualification_rpc,
 )
 from agent.runtime.qualification_v3 import grasp_symmetry_family_id
@@ -1549,6 +1550,11 @@ class _PregraspGraspPlaceCoordinator:
             if not isinstance(original, Mapping):
                 continue
             frozen_goal = json.loads(json.dumps(original))
+            seed_evidence = pair.get(SAME_RUN_QUALIFICATION_SEED_FIELD)
+            if isinstance(seed_evidence, Mapping):
+                frozen_goal[SAME_RUN_QUALIFICATION_SEED_FIELD] = json.loads(
+                    json.dumps(seed_evidence)
+                )
             physical_goal = pair.get(
                 "qualified_world_collision_object_goal_pose"
             )
