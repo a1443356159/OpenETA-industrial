@@ -1664,9 +1664,15 @@ class _RosRuntime:
         _populate_recovery_trajectory_goal(
             goal, point, duration, candidate_positions
         )
+        # Keep only samples produced after this recovery began.  The
+        # controller result is itself the completion ACK, so the last
+        # still-fresh sample from the trajectory is valid terminal evidence
+        # even when the broadcaster does not publish again after the ACK.
+        self.state_source.clear(min_ros_timestamp_s=started)
         try:
             handle = self._await(
-                self.trajectory_client.send_goal_async(goal), min(1.0, remaining())
+                self.trajectory_client.send_goal_async(goal),
+                min(1.0, remaining()),
             )
         except Exception:
             return failed("RECOVERY_TRAJECTORY_SEND_FAILED")
@@ -1692,7 +1698,6 @@ class _RosRuntime:
             self.state_source.clear()
             return failed("RECOVERY_TRAJECTORY_FAILED", result_code=result_code)
 
-        self.state_source.clear()
         try:
             post_state = self.state_source.wait_fresh(remaining())
         except Exception:
@@ -1735,6 +1740,7 @@ class _RosRuntime:
     def return_home(self, timeout_s: float) -> Mapping[str, Any]:
         """Command all arm joints to zero through the trajectory controller."""
 
+        action_started = self.ros_time_s()
         goal = self.follow_trajectory_action_type.Goal()
         point = self.trajectory_point_type()
         duration_ns = int(2.0 * 1_000_000_000)
@@ -1745,11 +1751,11 @@ class _RosRuntime:
         _populate_recovery_trajectory_goal(
             goal, point, duration, [0.0] * len(ARM_JOINTS)
         )
+        self.state_source.clear(min_ros_timestamp_s=action_started)
         handle = self._await(self.trajectory_client.send_goal_async(goal), min(5.0, timeout_s))
         if not handle.accepted:
             raise RuntimeError("HOME_TRAJECTORY_REJECTED")
         wrapped = self._await(handle.get_result_async(), timeout_s)
-        self.state_source.clear()
         if int(wrapped.result.error_code) != int(self.follow_trajectory_action_type.Result.SUCCESSFUL):
             raise RuntimeError("HOME_TRAJECTORY_FAILED")
         return {"ok": True, "trajectory_result_code": int(wrapped.result.error_code)}
@@ -1772,15 +1778,18 @@ class _RosRuntime:
             payload["action_started_ros_time_s"] = action_started
             completed = self.ros_time_s()
             payload["action_completed_ros_time_s"] = completed
-            # GazeboController asks for state immediately after this method.  Drop
-            # every sample accumulated during planning/execution so that read
-            # must observe a JointState published after the result boundary.
-            self.state_source.clear(min_ros_timestamp_s=completed)
+            # Preserve the latest still-fresh state received during execution.
+            # Some real controllers stop publishing as soon as their result ACK
+            # is emitted.  Requiring an additional sample after that ACK drops
+            # truthful terminal evidence and converts a completed motion into a
+            # JOINT_STATE_TIMEOUT.  The action-start ROS barrier below rejects
+            # queued pre-action samples; GazeboController additionally verifies
+            # the measured terminal pose against the requested target.
             return payload
 
         # The start state read in GazeboController happened before this call.  Do
         # not permit it to double as post-action reconciliation state.
-        self.state_source.clear()
+        self.state_source.clear(min_ros_timestamp_s=action_started)
         request = MoveGroup.Goal()
         request.request.group_name = goal["group_name"]
         # OMPL is stochastic: a single attempt can return a needlessly long
@@ -2019,10 +2028,9 @@ class _RosRuntime:
             # Diagnostics only: wall-clock duration and terminal status do
             # not affect the strict success predicate below.
             payload["wall_elapsed_ms"] = round((time.monotonic() - wall_started) * 1000, 3)
-            self.state_source.clear(min_ros_timestamp_s=completed)
             return payload
 
-        self.state_source.clear()
+        self.state_source.clear(min_ros_timestamp_s=action_started)
         goal = ParallelGripperCommand.Goal()
         goal.command.name = ["gripper_left_finger_joint"]
         goal.command.position = [float(position)]

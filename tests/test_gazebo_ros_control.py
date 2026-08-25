@@ -356,9 +356,11 @@ class _StateSource:
     def __init__(self, post_state):
         self.post_state = post_state
         self.clear_calls = 0
+        self.clear_arguments = []
 
-    def clear(self, **_kwargs):
+    def clear(self, **kwargs):
         self.clear_calls += 1
+        self.clear_arguments.append(dict(kwargs))
 
     def wait_fresh(self, timeout_s):
         if isinstance(self.post_state, Exception):
@@ -407,6 +409,9 @@ def test_ros_recovery_validates_candidate_then_executes_physical_inset() -> None
     assert evidence["post_joint_state_timestamp_s"] == 7.0
     assert len(validity_client.calls) == 1
     assert len(trajectory_client.calls) == 1
+    assert runtime.state_source.clear_arguments == [
+        {"min_ros_timestamp_s": 100.0}
+    ]
     assert trajectory_client.calls[0].trajectory.points[0].positions[2] == pytest.approx(
         3.105
     )

@@ -229,6 +229,32 @@ def test_runtime_action_observation_uses_ros_completion_barrier_without_callback
     assert camera.capture_arguments == [{"timeout_s": pytest.approx(30.0), "min_timestamp_s": 42.0, "min_received_monotonic_s": None}]
 
 
+def test_runtime_samples_fresh_robot_state_before_slow_camera_capture() -> None:
+    events = []
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+
+    class Camera(_Camera):
+        def capture(self, **kwargs):
+            events.append("camera")
+            return super().capture(**kwargs)
+
+    class Controller(_ResetController):
+        def state_provider(self):
+            events.append("robot")
+            return RobotState()
+
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [Camera(profile.cameras[0])]
+    runtime.controller = Controller(
+        [{"ok": True, "action_completed_ros_time_s": 42.0}]
+    )
+
+    runtime.execute({"action_type": "move_to"})
+
+    assert events == ["robot", "camera"]
+
+
 def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
     events = []
 

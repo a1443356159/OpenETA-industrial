@@ -591,7 +591,10 @@ class SimulatorMcpToolProxy:
         response_unknown = incomplete_motion_receipt or (
             not success
             and context.spec.effect.value == "world_mutating"
-            and _response_lost_action_receipt(raw_response)
+            and (
+                _response_reports_unknown_action_outcome(raw_response)
+                or _response_lost_action_receipt(raw_response)
+            )
         )
         if response_unknown:
             normalized["outputs"].update(
@@ -2075,8 +2078,36 @@ def _is_transient_mcp_transport_error(exc: BaseException) -> bool:
 def _response_lost_action_receipt(response: JsonDict) -> bool:
     """Return true when a mutating call may have run but its receipt was lost."""
 
+    # A structured controller outcome is safe to classify even when it is a
+    # rejection.  A bare remote error is not: the HTTP/MCP handler may have
+    # failed while serializing the observation after the physical action had
+    # already completed.  Treat that boundary as outcome-unknown so the host
+    # performs its bounded observe/reconcile path without another planner turn.
+    if any(
+        key in response
+        for key in (
+            "execution_started",
+            "motion_outcome",
+            "reached_goal",
+            "terminal_status",
+        )
+    ):
+        return False
     message = str(response.get("error") or response.get("content") or "").lower()
-    return "out of range float values are not json compliant" in message
+    return bool(message)
+
+
+def _response_reports_unknown_action_outcome(response: JsonDict) -> bool:
+    """Recognize a structured controller result that requires reconciliation."""
+
+    return (
+        response.get("reconciliation_required") is True
+        or str(response.get("motion_outcome") or "").lower() == "unknown"
+        or (
+            "execution_started" in response
+            and response.get("execution_started") is None
+        )
+    )
 
 
 def _move_response_lacks_completion_receipt(response: JsonDict) -> bool:

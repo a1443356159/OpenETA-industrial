@@ -1881,7 +1881,7 @@ def test_proxy_can_override_agent_tool_name_to_simulator_mcp_tool(tmp_path: Path
     assert result.details["outputs"]["mcp"]["tool"] == "control_gripper"
 
 
-def test_proxy_structures_simulator_mcp_errors() -> None:
+def test_proxy_treats_bare_world_mutation_error_as_unknown_outcome() -> None:
     transport = FakeSimulatorMcpTransport({"error": "IK failed"})
     tools = bind_simulator_mcp_tool_handlers(
         build_default_tool_registry(),
@@ -1893,8 +1893,59 @@ def test_proxy_structures_simulator_mcp_errors() -> None:
     result = tools.call("move_to", {"target_pose": {"xyz": [99, 99, 99]}})
 
     assert result.success is False
-    assert result.details["diagnostics"][0]["code"] == "simulator_mcp_error"
+    assert result.details["outputs"]["motion_outcome"] == "unknown"
+    assert result.details["outputs"]["reconciliation_required"] is True
+    assert result.details["diagnostics"][0]["code"] == (
+        "simulator_mcp_action_receipt_unavailable"
+    )
     assert result.details["outputs"]["response"]["error"] == "IK failed"
+
+
+def test_proxy_keeps_structured_pre_execution_rejection_classifiable() -> None:
+    transport = FakeSimulatorMcpTransport(
+        {
+            "ok": False,
+            "error_code": "MOTION_PLAN_FAILED",
+            "motion_outcome": "failed",
+            "execution_started": False,
+        }
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-3", handle="env-3"),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call("move_to", {"target_pose": {"xyz": [99, 99, 99]}})
+
+    assert result.success is False
+    assert "reconciliation_required" not in result.details["outputs"]
+    assert result.details["diagnostics"][0]["code"] == "simulator_mcp_error"
+
+
+def test_proxy_surfaces_structured_unknown_outcome_for_host_reconciliation() -> None:
+    transport = FakeSimulatorMcpTransport(
+        {
+            "ok": False,
+            "error_code": "MOTION_OUTCOME_UNKNOWN",
+            "motion_outcome": "unknown",
+            "execution_started": None,
+            "reconciliation_required": True,
+        }
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(session_id="session-3", handle="env-3"),
+        tool_names=("move_to",),
+    )
+
+    result = tools.call("move_to", {"target_pose": {"xyz": [0.1, 0.2, 0.3]}})
+
+    assert result.success is False
+    assert result.details["outputs"]["motion_outcome"] == "unknown"
+    assert result.details["outputs"]["reconciliation_required"] is True
 
 
 def test_proxy_reconciles_world_mutation_after_grouped_remote_protocol_failure() -> None:
