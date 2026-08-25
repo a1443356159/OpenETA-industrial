@@ -183,6 +183,98 @@ def test_isolated_sam3_reviewer_reports_complete_bounded_failure() -> None:
     assert [failure["attempt"] for failure in error.value.failures] == [1, 2]
 
 
+def test_isolated_sam3_reviewer_recovers_backend_failure_payload_type() -> None:
+    attempts = 0
+
+    def fail(_request: PlannerBackendRequest) -> PlannerBackendResult:
+        nonlocal attempts
+        attempts += 1
+        return PlannerBackendResult(
+            payload={
+                "kind": "response",
+                "name": "ask_human",
+                "parameters": {
+                    "message": "Planner provider request failed.",
+                    "error_type": "TimeoutError",
+                    "provider_attempts": 1,
+                },
+                "reasoning": "Planner provider request failed: timed out",
+            },
+            provider="fixture-provider",
+            model="fixture-vlm",
+            details={
+                "error_type": "TimeoutError",
+                "error": "timed out",
+                "provider_attempts": 1,
+                "provider_role": "primary",
+            },
+        )
+
+    reviewer = BackendSam3SelectionReviewer(
+        CallablePlannerBackend(fail),
+        max_attempts=2,
+    )
+
+    with pytest.raises(Sam3SelectionReviewError) as error:
+        reviewer.review(
+            {
+                "result_id": "sam3-result-provider-timeout",
+                "semantic_role": "grasp_target",
+                "target_prompt": "red block",
+                "candidates": [{"id": "detection_000"}],
+                "selection_bundle": {
+                    "original_image_ref": "/tmp/original.png",
+                    "contact_sheet_ref": "/tmp/contact-sheet.png",
+                },
+            }
+        )
+
+    assert attempts == 2
+    assert [failure["error_type"] for failure in error.value.failures] == [
+        "TimeoutError",
+        "TimeoutError",
+    ]
+    assert error.value.failures[0]["provider_details"] == {
+        "provider_attempts": 1,
+        "provider_role": "primary",
+    }
+
+
+def test_isolated_sam3_reviewer_defaults_missing_confidence_without_retry() -> None:
+    attempts = 0
+
+    def decide(_request: PlannerBackendRequest):
+        nonlocal attempts
+        attempts += 1
+        return {
+            "decision": "select",
+            "detection_id": "detection_000",
+            "reason": "The only tile covers the complete target.",
+            "target_geometry_family": "boxed_item",
+        }
+
+    review = BackendSam3SelectionReviewer(
+        CallablePlannerBackend(decide),
+        max_attempts=2,
+    ).review(
+        {
+            "result_id": "sam3-result-missing-confidence",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red block",
+            "candidates": [{"id": "detection_000"}],
+            "selection_bundle": {
+                "original_image_ref": "/tmp/original.png",
+                "contact_sheet_ref": "/tmp/contact-sheet.png",
+            },
+        }
+    )
+
+    assert attempts == 1
+    assert review["confidence"] == 0.0
+    assert review["confidence_source"] == "default_missing"
+    assert review["review_attempt_count"] == 1
+
+
 def test_exhausted_embedded_review_does_not_start_second_retry_layer() -> None:
     reviewer_calls = 0
 

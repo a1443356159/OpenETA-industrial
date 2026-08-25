@@ -72,6 +72,15 @@ class Sam3SelectionReviewError(RuntimeError):
         )
 
 
+class _Sam3SelectionProviderError(RuntimeError):
+    """Preserve a backend's structured provider failure as an exception."""
+
+    def __init__(self, *, failure_type: str, message: str, details: JsonDict) -> None:
+        self.failure_type = failure_type
+        self.provider_details = dict(details)
+        super().__init__(message)
+
+
 class BackendSam3SelectionReviewer:
     """Use the configured main-model provider with a clean two-image context."""
 
@@ -87,13 +96,15 @@ class BackendSam3SelectionReviewer:
                 result = self._review_once(request)
             except Exception as exc:  # noqa: BLE001 - bounded provider/schema retry.
                 last_exception = exc
-                failures.append(
-                    {
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
-                        "message": str(exc),
-                    }
-                )
+                failure: JsonDict = {
+                    "attempt": attempt,
+                    "error_type": getattr(exc, "failure_type", type(exc).__name__),
+                    "message": str(exc),
+                }
+                provider_details = getattr(exc, "provider_details", None)
+                if isinstance(provider_details, Mapping):
+                    failure["provider_details"] = dict(provider_details)
+                failures.append(failure)
                 continue
             result["review_attempt_count"] = attempt
             result["infrastructure_retry_count"] = attempt - 1
@@ -158,6 +169,26 @@ class BackendSam3SelectionReviewer:
         )
         elapsed_s = time.monotonic() - started
         payload = _json_object(result.payload)
+        provider_error_type = str(result.details.get("error_type") or "").strip()
+        if provider_error_type:
+            provider_error = str(result.details.get("error") or "").strip()
+            parameters = payload.get("parameters")
+            parameters = dict(parameters) if isinstance(parameters, Mapping) else {}
+            message = provider_error or str(parameters.get("message") or "").strip()
+            raise _Sam3SelectionProviderError(
+                failure_type=provider_error_type,
+                message=message or "SAM3 selection provider request failed",
+                details={
+                    key: result.details[key]
+                    for key in (
+                        "provider_attempts",
+                        "provider_role",
+                        "provider_failover",
+                        "provider_switch_count",
+                    )
+                    if key in result.details
+                },
+            )
         decision = str(payload.get("decision") or "").strip().lower()
         action_name = str(payload.get("name") or "").strip()
         action_parameters = payload.get("parameters")
@@ -171,9 +202,9 @@ class BackendSam3SelectionReviewer:
             decision = "reject"
             payload = {**payload, **action_parameters}
         reason = str(payload.get("reason") or "").strip()
-        confidence = _finite_confidence(
-            payload.get("confidence", payload.get("selection_confidence"))
-        )
+        confidence_value = payload.get("confidence", payload.get("selection_confidence"))
+        confidence_defaulted = confidence_value is None
+        confidence = 0.0 if confidence_defaulted else _finite_confidence(confidence_value)
         detection_id = str(payload.get("detection_id") or "").strip()
         geometry_family = str(
             payload.get("target_geometry_family") or "unknown"
@@ -196,6 +227,9 @@ class BackendSam3SelectionReviewer:
             "decision": decision,
             "detection_id": detection_id or None,
             "confidence": confidence,
+            "confidence_source": (
+                "default_missing" if confidence_defaulted else "provider"
+            ),
             "reason": reason,
             "target_geometry_family": geometry_family,
             "selection_source": "isolated_main_vlm",
