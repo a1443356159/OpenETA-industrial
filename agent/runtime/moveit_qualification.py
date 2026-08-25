@@ -471,9 +471,26 @@ class MoveItCandidateQualifier:
                     "fast_ik_timeout_s": self.fast_ik_timeout_s,
                     "recovery_ik_timeout_s": self.recovery_ik_timeout_s,
                     "capability_map_id": self.capability_map_id,
-                    "l5_pass_target": 2 if purpose == "grasp" else 1,
+                    "l5_pass_target": (
+                        full_plan_limit
+                        if qualification_mode == "pregrasp_joint"
+                        else 2
+                        if purpose == "grasp"
+                        else 1
+                    ),
                 }
             )
+            if qualification_mode == "pregrasp_joint":
+                # The measured attachment can differ slightly from the virtual
+                # pregrasp attachment.  Preserve every PASS allowed by the
+                # existing two-plan budget so post-attach qualification has a
+                # frozen alternate before it spends another AnyPlace inference.
+                funnel_config.update(
+                    {
+                        "qualification_mode": "pregrasp_joint",
+                        "l5_submission_limit": full_plan_limit,
+                    }
+                )
             if self.qualification_profile == "shadow":
                 shadow_legacy_candidates = diversify_compiled_candidates(
                     [
@@ -1952,6 +1969,21 @@ class MoveItQualificationEngine:
         stop_reason = "candidate_pool_exhausted"
         first_l5_pass_elapsed_s: float | None = None
         target = int(funnel.get("l5_pass_target", 2 if purpose == "grasp" else 1))
+        qualification_mode = str(funnel.get("qualification_mode") or "")
+        raw_submission_limit = funnel.get("l5_submission_limit")
+        submission_limit = (
+            int(raw_submission_limit)
+            if isinstance(raw_submission_limit, int)
+            and not isinstance(raw_submission_limit, bool)
+            and raw_submission_limit > 0
+            else None
+        )
+
+        def submission_limit_reached() -> bool:
+            return (
+                submission_limit is not None
+                and len(l5_attempts) >= submission_limit
+            )
 
         def target_reached() -> bool:
             if purpose == "placement":
@@ -2067,6 +2099,9 @@ class MoveItQualificationEngine:
                     key=candidate_physical_quality_key,
                 )
                 for screened in ranked:
+                    if submission_limit_reached():
+                        stop_reason = "l5_submission_limit_reached"
+                        break
                     candidate_id = str(screened.get("candidate_id") or "")
                     descriptor = descriptor_by_id[candidate_id]
                     planned_ids.add(candidate_id)
@@ -2121,14 +2156,22 @@ class MoveItQualificationEngine:
                     "elapsed_s": time.monotonic() - wave_started,
                 }
             )
-            return bool(infrastructure_error or target_reached())
+            return bool(
+                infrastructure_error
+                or target_reached()
+                or submission_limit_reached()
+            )
 
         if not infrastructure_error:
             for wave in waves:
                 if run_wave(wave, recovery=False):
                     break
 
-        if not infrastructure_error and not target_reached():
+        if (
+            not infrastructure_error
+            and not target_reached()
+            and not submission_limit_reached()
+        ):
             # Only after the complete fast pool fails do the fixed remaining
             # six seeds become eligible.  Preserve the same waves and barriers.
             recovery_waves: list[CandidateWave] = []
@@ -2180,6 +2223,8 @@ class MoveItQualificationEngine:
             stop_reason = "infrastructure_error"
         elif target_reached():
             stop_reason = "complete_l5_pass_found"
+        elif submission_limit_reached():
+            stop_reason = "l5_submission_limit_exhausted"
         elif purpose == "grasp" and len(l5_passes) >= target:
             # No two independent symmetry families / SE(3) clusters survived.
             # The contract then falls back to the joint-farthest pair only
@@ -2196,7 +2241,12 @@ class MoveItQualificationEngine:
             )
         else:
             selected_ids = (
-                [str(l5_passes[0].get("candidate_id") or "")]
+                [
+                    str(item.get("candidate_id") or "")
+                    for item in l5_passes
+                ]
+                if qualification_mode == "pregrasp_joint"
+                else [str(l5_passes[0].get("candidate_id") or "")]
                 if l5_passes
                 else []
             )

@@ -128,7 +128,7 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
             for index, item in enumerate(request["candidates"])
         ]
         return {
-            "schema_version": QUALIFICATION_SCHEMA,
+            "schema_version": request["schema_version"],
             "planning_scene_revision": request["planning_scene_revision"],
             "execution_started": False,
             "results": [
@@ -188,6 +188,8 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
                 }
             ]
         },
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
     )
     grasps = [{"id": f"g{index}"} for index in range(4)]
     proofs: dict[str, dict[str, Any]] = {}
@@ -254,6 +256,9 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
         "progressive_until_full_plan_capacity"
     )
     assert captured["funnel"]["endpoint_pass_target"] == 2
+    assert captured["funnel"]["l5_pass_target"] == 2
+    assert captured["funnel"]["l5_submission_limit"] == 2
+    assert captured["funnel"]["qualification_mode"] == "pregrasp_joint"
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0", "g2"]
     assert cache.resolve(purpose="grasp", candidate_id="g1") is None
     retained_cache = cache.resolve(purpose="grasp", candidate_id="g0")

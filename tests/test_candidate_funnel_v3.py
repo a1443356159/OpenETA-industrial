@@ -106,6 +106,37 @@ def _engine(**overrides):
     return MoveItQualificationEngine(**callbacks)
 
 
+def test_pregrasp_joint_retains_two_l5_passes_within_submission_budget():
+    calls = 0
+
+    def plan_only(target, start, timeout, attempts):
+        nonlocal calls
+        calls += 1
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [0.2]}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    request = _request(
+        [_candidate(0), _candidate(1), _candidate(2)],
+        overrides={
+            "qualification_mode": "pregrasp_joint",
+            "l5_pass_target": 2,
+            "l5_submission_limit": 2,
+        },
+    )
+
+    response = _engine(plan_only=plan_only).qualify(request)
+
+    assert calls == 2
+    assert response["metrics"]["l5_attempt_count"] == 2
+    assert response["metrics"]["l5_pass_count"] == 2
+    assert response["selected_candidate_ids"] == ["c0", "c1"]
+    assert response["results"][2]["verdict"] == "NOT_EVALUATED"
+
+
 def _placement_scene():
     return {
         "revision": 4,
