@@ -256,6 +256,56 @@ def test_frozen_grasp_frontier_expansion_bypasses_provider_inference() -> None:
     assert qualifier_calls[0]["l5_min_pass_target"] == 2
 
 
+def test_qualification_infrastructure_error_is_not_reported_as_unreachable() -> None:
+    class Qualifier:
+        qualification_profile = "fast_v3"
+
+        def qualify_result(self, result, **_kwargs):
+            result.details.update(
+                {
+                    "grasp_candidates": [],
+                    "qualification_stop_reason": "infrastructure_error",
+                    "qualification_evidence": {
+                        "infrastructure_error": True,
+                        "stop_reason": "infrastructure_error",
+                    },
+                    "rejection_reason_counts": {"qualification_rpc_error": 2},
+                }
+            )
+            return result
+
+    wrapped = _qualifying_handler(
+        lambda _context: ToolResult(
+            True,
+            "provider output",
+            {"grasp_candidates": [{"id": "g0"}]},
+        ),
+        Qualifier(),
+        purpose="grasp",
+    )
+    context = ToolExecutionContext(
+        name="grasp_pose_estimate",
+        spec=build_default_tool_registry().get("grasp_pose_estimate"),
+        parameters={},
+        observation=EnvObservation(
+            task="pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"planning_scene_revision": 7},
+        ),
+        metadata={"supervision_context": {"memory": {"scene_epoch": 3}}},
+    )
+
+    result = wrapped(context)
+
+    assert result.success is False
+    assert result.details["reason"] == "qualification_infrastructure_error"
+    assert result.details["infrastructure_error"] is True
+    assert result.details["qualification_infrastructure_reason"] == (
+        "qualification_rpc_error"
+    )
+
+
 def test_tui_and_batch_profiles_share_runtime_contracts(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "agent.runtime.runtime_assembly.load_configured_object_memory_bank",

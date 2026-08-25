@@ -46,6 +46,7 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
         f"environment_id={m6.ENV_ID}; environment_task=normal_pick_and_place"
         in prompt
     )
+    assert "qualification_profile=fast_v3" in prompt
     assert "grasp_pose_estimate" in prompt and "AnyPlace" in prompt
     assert "精确 EEF contact" in prompt
     assert "一次规划到精确 contact" in prompt
@@ -106,6 +107,7 @@ def test_pick_place_prepare_can_strictly_select_graspgenx(
     assert "GraspGenX" in paths.instructions.read_text(encoding="utf-8")
     receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
     assert receipt["grasp_backend_mode"] == "graspgenx"
+    assert receipt["qualification_profile"] == "fast_v3"
 
 
 def test_pick_place_prepare_smoke_normal_is_explicitly_no_vlm(
@@ -138,9 +140,44 @@ def test_pick_place_prepare_smoke_normal_is_explicitly_no_vlm(
     assert receipt["execution_profile"] == "smoke_normal"
     assert receipt["planner_mode"] == "host_macro"
     assert receipt["planner_provider_expected"] is False
+    assert receipt["qualification_profile"] == "fast_v3"
     assert receipt["acceptance_scope"] == (
         "control_only_no_vlm_smoke_normal_not_agentic_acceptance"
     )
+
+
+def test_pick_place_acceptance_can_explicitly_roll_back_to_legacy(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = m6.base.Allocation(81, "openeta-legacy-normal", 18765, "run-id")
+    monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        m6.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    paths = m6.prepare_case(
+        tmp_path,
+        tmp_path / "run",
+        allocation,
+        dict(m6.DEFAULT_SERVICES),
+        qualification_profile="legacy",
+    )
+
+    prompt = paths.instructions.read_text(encoding="utf-8")
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert "qualification_profile=legacy" in prompt
+    assert receipt["qualification_profile"] == "legacy"
+
+
+def test_pick_place_acceptance_parser_defaults_to_fast_v3() -> None:
+    args = m6._parser().parse_args([])
+
+    assert args.qualification_profile == "fast_v3"
 
 
 def test_smoke_normal_planner_evidence_requires_host_only_and_zero_tokens() -> None:
@@ -436,6 +473,28 @@ def test_m6_qualification_blocks_include_frozen_pair_proof(tmp_path) -> None:
     }
 
     assert m6._qualification_blocks(call, artifact_root=tmp_path) == [proof]
+
+
+def test_m6_qualification_blocks_include_internal_frontier_proofs(tmp_path) -> None:
+    proofs = [
+        {"purpose": purpose, "results": [{"candidate_id": candidate_id}]}
+        for purpose, candidate_id in (("grasp", "g2"), ("placement", "pair-g2-p0"))
+    ]
+    artifacts = []
+    for index, proof in enumerate(proofs):
+        path = tmp_path / f"frontier-{index}.json"
+        path.write_text(json.dumps(proof), encoding="utf-8")
+        artifacts.append({"kind": "json", "path": path.name})
+
+    call = {
+        "frozen_grasp_frontier_qualification_artifacts": [artifacts[0]],
+        "frozen_pair_qualification_artifacts": [artifacts[1]],
+    }
+
+    assert m6._qualification_blocks(call, artifact_root=tmp_path) == [
+        proofs[1],
+        proofs[0],
+    ]
 
 
 def test_m6_accepts_complete_v3_grasp_pool_with_two_l5_branches(tmp_path) -> None:

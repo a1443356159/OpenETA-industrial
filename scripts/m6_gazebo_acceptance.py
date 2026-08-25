@@ -14,6 +14,7 @@ import urllib.request
 
 from scripts import tui_gazebo_acceptance as base
 from agent.runtime.calibration_registry import RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE
+from tools.candidate_config import QUALIFICATION_PROFILES
 
 
 SCHEMA_VERSION = "openeta.gazebo_pick_place_acceptance.v1"
@@ -52,6 +53,10 @@ REQUIRED_REAL_M6_TOOLS = REQUIRED_REAL_PICK_PLACE_TOOLS
 SCENARIOS = ("normal", "reject-first")
 EXECUTION_PROFILES = ("agentic_normal", "smoke_normal")
 DEFAULT_EXECUTION_PROFILE = "agentic_normal"
+# Acceptance rolls the already-shadowable v3 funnel forward explicitly while
+# the general runtime keeps its conservative `legacy` default and instant
+# environment-variable rollback.
+DEFAULT_QUALIFICATION_PROFILE = "fast_v3"
 GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
 EXECUTION_PROFILE_PLANNER_MODES = {
@@ -137,10 +142,19 @@ def _validated_execution_profile(value: str) -> str:
     return profile
 
 
+def _validated_qualification_profile(value: str) -> str:
+    profile = str(value).strip().lower()
+    if profile not in QUALIFICATION_PROFILES:
+        choices = ", ".join(QUALIFICATION_PROFILES)
+        raise ValueError(f"qualification profile must be one of: {choices}")
+    return profile
+
+
 def _instructions_for_backend(
     grasp_backend: str,
     *,
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
+    qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
 ) -> str:
     instructions = (
         GRASPGENX_INSTRUCTIONS
@@ -148,6 +162,12 @@ def _instructions_for_backend(
         else INSTRUCTIONS
     )
     profile = _validated_execution_profile(execution_profile)
+    funnel_profile = _validated_qualification_profile(qualification_profile)
+    instructions = instructions.replace(
+        "] 在隔离 Gazebo",
+        f"; qualification_profile={funnel_profile}] 在隔离 Gazebo",
+        1,
+    )
     if profile != "smoke_normal":
         return instructions
     instructions = instructions.replace(
@@ -343,11 +363,13 @@ def prepare_case(
     scenario: str = "normal",
     grasp_backend: str = DEFAULT_GRASP_BACKEND,
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
+    qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
 ) -> base.CasePaths:
     if scenario not in SCENARIOS:
         raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
     backend = _validated_grasp_backend(grasp_backend)
     profile = _validated_execution_profile(execution_profile)
+    funnel_profile = _validated_qualification_profile(qualification_profile)
     if profile == "smoke_normal" and scenario != "normal":
         raise ValueError("smoke_normal execution profile requires scenario=normal")
     configured_grasp_services = set(services).intersection(GRASP_SERVICE_NAMES.values())
@@ -369,7 +391,11 @@ def prepare_case(
         },
     )
     paths.instructions.write_text(
-        _instructions_for_backend(backend, execution_profile=profile)
+        _instructions_for_backend(
+            backend,
+            execution_profile=profile,
+            qualification_profile=funnel_profile,
+        )
         + "\n验收场景："
         + scenario
         + "。"
@@ -386,6 +412,7 @@ def prepare_case(
     receipt["acceptance_scenario"] = scenario
     receipt["grasp_backend_mode"] = backend
     receipt["execution_profile"] = profile
+    receipt["qualification_profile"] = funnel_profile
     receipt["planner_mode"] = EXECUTION_PROFILE_PLANNER_MODES[profile]
     receipt["acceptance_scope"] = EXECUTION_PROFILE_SCOPES[profile]
     receipt["planner_provider_expected"] = profile == "agentic_normal"
@@ -657,27 +684,33 @@ def _qualification_blocks(
     for field in (
         "qualification_artifact",
         "frozen_pair_qualification_artifact",
+        "frozen_pair_qualification_artifacts",
+        "frozen_grasp_frontier_qualification_artifacts",
     ):
-        for artifact in base._values(call, field):
-            if not isinstance(artifact, Mapping):
-                continue
-            path_value = artifact.get("path")
-            if not isinstance(path_value, str) or not path_value.endswith(".json"):
-                continue
-            if path_value in seen_paths:
-                continue
-            seen_paths.add(path_value)
-            try:
-                path = Path(path_value)
-                if not path.is_absolute():
-                    path = artifact_root / path
-                if not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+        for value in base._values(call, field):
+            artifacts = value if isinstance(value, list) else [value]
+            for artifact in artifacts:
+                if not isinstance(artifact, Mapping):
                     continue
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(payload, Mapping) and isinstance(payload.get("results"), list):
-                blocks.append(payload)
+                path_value = artifact.get("path")
+                if not isinstance(path_value, str) or not path_value.endswith(".json"):
+                    continue
+                if path_value in seen_paths:
+                    continue
+                seen_paths.add(path_value)
+                try:
+                    path = Path(path_value)
+                    if not path.is_absolute():
+                        path = artifact_root / path
+                    if not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+                        continue
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, Mapping) and isinstance(
+                    payload.get("results"), list
+                ):
+                    blocks.append(payload)
     return blocks
 
 
@@ -796,9 +829,11 @@ def verify_case(
     scenario: str = "normal",
     grasp_backend: str = DEFAULT_GRASP_BACKEND,
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
+    qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
 ) -> dict[str, Any]:
     backend = _validated_grasp_backend(grasp_backend)
     profile = _validated_execution_profile(execution_profile)
+    funnel_profile = _validated_qualification_profile(qualification_profile)
     backend_label = "GraspGenX" if backend == "graspgenx" else "AnyGrasp"
     errors: list[str] = []
     try:
@@ -934,6 +969,20 @@ def verify_case(
             errors.append(
                 "normal flow requires one model AnyPlace call and at least one "
                 "frozen-pool requalification"
+            )
+        qualification_outputs = [
+            _call_outputs(call)
+            for call in [*grasp_calls, *anyplace_calls[1:]]
+        ]
+        observed_profiles = {
+            str(outputs.get("qualification_profile") or "")
+            for outputs in qualification_outputs
+            if str(outputs.get("qualification_profile") or "")
+        }
+        if observed_profiles != {funnel_profile}:
+            errors.append(
+                "qualification profile evidence mismatch: expected "
+                f"{funnel_profile}, observed {sorted(observed_profiles)}"
             )
         for requalification_index, requalification in enumerate(
             anyplace_calls[1:], start=1
@@ -1131,6 +1180,7 @@ def verify_case(
             "tool_call_count": len(calls),
             "planner_evidence": planner_evidence,
             "execution_profile": profile,
+            "qualification_profile": funnel_profile,
             "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
             "planner_provider_invoked": bool(
                 planner_evidence["closed_loop_action_count"]
@@ -1148,6 +1198,7 @@ def verify_case(
             "tool_call_count": 0,
             "planner_evidence": {},
             "execution_profile": profile,
+            "qualification_profile": funnel_profile,
             "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
             "planner_provider_invoked": None,
             "scenario": scenario,
@@ -1170,6 +1221,15 @@ def _parser() -> argparse.ArgumentParser:
             "agentic_normal requires planner/VLM decisions; smoke_normal exercises "
             "the same normal model/control chain through deterministic host obligations "
             "and forbids planner/VLM invocation."
+        ),
+    )
+    parser.add_argument(
+        "--qualification-profile",
+        choices=QUALIFICATION_PROFILES,
+        default=DEFAULT_QUALIFICATION_PROFILE,
+        help=(
+            "MoveIt candidate funnel used by this acceptance. The repository-wide "
+            "runtime default remains legacy for immediate rollback."
         ),
     )
     parser.add_argument(
@@ -1199,6 +1259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             scenario=args.scenario,
             grasp_backend=args.grasp_backend,
             execution_profile=args.execution_profile,
+            qualification_profile=args.qualification_profile,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "passed" else 1
@@ -1244,6 +1305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scenario=args.scenario,
         grasp_backend=args.grasp_backend,
         execution_profile=args.execution_profile,
+        qualification_profile=args.qualification_profile,
     )
     if args.prepare_only:
         print(run_root)
@@ -1260,6 +1322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else "10000000"
             ),
             "OPENETA_GRASP_BACKEND": args.grasp_backend,
+            "OPENETA_QUALIFICATION_PROFILE": args.qualification_profile,
             # Cold software-rendered Gazebo launches occasionally need more
             # than the deployment default before the documented world-control
             # service is discoverable.  This affects startup only; motion,
@@ -1281,6 +1344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scenario=args.scenario,
         grasp_backend=args.grasp_backend,
         execution_profile=args.execution_profile,
+        qualification_profile=args.qualification_profile,
     )
     report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})
     base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)

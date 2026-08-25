@@ -335,6 +335,180 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     ) is None
 
 
+def test_fast_pair_search_deepens_frozen_grasp_frontier_inside_one_tool_call(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def pass_stage(*, contact: bool = False) -> dict[str, Any]:
+        stage = _pass_stage()
+        if contact:
+            stage.update(
+                {
+                    "name": "contact",
+                    "target_pose": {
+                        "xyz": [0.3, 0.0, 0.45],
+                        "rotation_matrix": [
+                            [1.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0],
+                            [0.0, 0.0, 1.0],
+                        ],
+                    },
+                }
+            )
+        return stage
+
+    def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        calls.append(request)
+        purpose = request["purpose"]
+        passing_ids: list[str] = []
+        results: list[dict[str, Any]] = []
+        for item in request["candidates"]:
+            candidate = item["candidate"]
+            candidate_id = item["candidate_id"]
+            source_grasp_id = str(candidate.get("source_grasp_id") or "")
+            passed = (
+                candidate_id == "g2"
+                if purpose == "grasp"
+                else source_grasp_id in {"g0", "g2"}
+            )
+            if passed:
+                passing_ids.append(candidate_id)
+            result = {
+                "candidate_id": candidate_id,
+                "candidate_pose_sha256": item["candidate_pose_sha256"],
+                "qualification_binding_sha256": request[
+                    "qualification_binding_sha256"
+                ],
+                "execution_started": False,
+                "verdict": "PASS" if passed else "FAIL",
+                "reason": "qualified" if passed else "no_pair_solution",
+                "stages": [pass_stage(contact=purpose == "grasp")] if passed else [],
+                "endpoint_pass": passed,
+                "full_plan_submitted": passed,
+            }
+            if purpose == "placement" and passed:
+                result["goal_legality"] = {
+                    "verdict": "PASS",
+                    "checks": {
+                        "object_frame_binding": {
+                            "collision_goal_pose": {
+                                "convention": "T_world_collision_object_goal",
+                                "frame": "world",
+                                "translation_xyz": [0.48, 0.0, 0.43],
+                                "rotation_matrix": [
+                                    [1.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0],
+                                    [0.0, 0.0, 1.0],
+                                ],
+                            }
+                        }
+                    },
+                }
+            results.append(result)
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "qualification_profile": "fast_v3",
+            "stop_reason": (
+                "complete_l5_pass_found" if passing_ids else "candidate_pool_exhausted"
+            ),
+            "selected_candidate_ids": passing_ids,
+            "results": results,
+        }
+
+    cache = QualificationCache()
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        cache=cache,
+        artifact_root=tmp_path,
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "contact",
+                    "xyz": [0.3, 0.0, 0.45],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            ]
+        },
+    )
+    initial_grasps = [{"id": "g0", "score": 0.9}, {"id": "g1", "score": 0.8}]
+    cache.replace(
+        purpose="grasp",
+        candidates=initial_grasps,
+        proofs={
+            grasp["id"]: {
+                "verdict": "PASS",
+                "stages": [pass_stage(contact=True)],
+            }
+            for grasp in initial_grasps
+        },
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+    coordinator = _FrozenGoalPairCoordinator(qualifier)
+    coordinator.object_current_pose = {
+        "frame": "world",
+        "translation_xyz": [0.3, 0.0, 0.43],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    coordinator.object_goals = [
+        {
+            "id": "p0",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, 0.0, 0.43],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            },
+        }
+    ]
+    coordinator.scene_epoch = 3
+    coordinator.planning_scene_revision = 7
+    coordinator.grasp_frontier_candidates = [{"id": "g2", "score": 0.7}]
+    coordinator.grasp_frontier_template = {
+        "backend": "graspgenx_mcp",
+        "model_raw_candidate_count": 3,
+    }
+    coordinator.grasp_frontier_scene_epoch = 3
+    coordinator.grasp_frontier_planning_scene_revision = 7
+    coordinator.grasp_frontier_generation = 1
+
+    result = coordinator.filter_grasps(
+        ToolResult(True, "qualified", {"grasp_candidates": initial_grasps}),
+        scene_epoch=3,
+        planning_scene_revision=7,
+        source={},
+    )
+
+    assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == [
+        "g0",
+        "g2",
+    ]
+    assert result.details["frozen_pair_backup_ready"] is True
+    assert result.details["frozen_pair_frontier_expansion_count"] == 1
+    assert result.details["frozen_grasp_frontier_remaining_count"] == 0
+    assert result.details["frozen_grasp_frontier_model_inference_invoked"] is False
+    assert len(result.details["frozen_pair_qualification_artifacts"]) == 2
+    assert len(result.details["frozen_grasp_frontier_qualification_artifacts"]) == 1
+    assert [
+        call["funnel"]["l5_pass_target"]
+        for call in calls
+        if call["purpose"] == "placement"
+    ] == [2, 1]
+    assert [
+        call["funnel"]["l5_pass_target"]
+        for call in calls
+        if call["purpose"] == "grasp"
+    ] == [1]
+
+
 def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:
     qualifier = MoveItCandidateQualifier(lambda *_args: {})
     coordinator = _FrozenGoalPairCoordinator(

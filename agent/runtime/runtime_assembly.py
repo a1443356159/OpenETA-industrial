@@ -1274,6 +1274,43 @@ def _qualification_pose(name: str, pose: object) -> JsonDict:
     return result
 
 
+def _qualification_infrastructure_reason(result: ToolResult) -> str:
+    """Return a private qualification infrastructure failure, if present."""
+
+    details = result.details
+    stop_reason = str(details.get("qualification_stop_reason") or "")
+    evidence = details.get("qualification_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    if stop_reason == "infrastructure_error" or evidence.get(
+        "infrastructure_error"
+    ) is True:
+        counts = details.get("rejection_reason_counts")
+        if isinstance(counts, Mapping) and counts.get("qualification_rpc_error"):
+            return "qualification_rpc_error"
+        return str(evidence.get("stop_reason") or stop_reason or "infrastructure_error")
+    return ""
+
+
+def _qualification_infrastructure_failure(result: ToolResult) -> ToolResult:
+    """Fail the tool without relabelling an infrastructure fault as unreachable."""
+
+    reason = _qualification_infrastructure_reason(result) or "infrastructure_error"
+    details = json.loads(json.dumps(result.details))
+    details.update(
+        {
+            "reason": "qualification_infrastructure_error",
+            "infrastructure_error": True,
+            "qualification_infrastructure_reason": reason,
+            "execution_started": False,
+        }
+    )
+    return ToolResult(
+        False,
+        f"MoveIt qualification infrastructure failed: {reason}",
+        details,
+    )
+
+
 @dataclass(slots=True)
 class _FrozenGoalPairCoordinator:
     """Host-private bounded look-ahead used only to rank executable grasps."""
@@ -1668,6 +1705,238 @@ class _FrozenGoalPairCoordinator:
         planning_scene_revision: int,
         source: Mapping[str, object],
     ) -> ToolResult:
+        """Deepen the frozen grasp frontier until a real backup is available.
+
+        Grasp inference is immutable by this point.  ``fast_v3`` may stop its
+        first grasp wave after two diverse L5 passes, yet attachment-aware
+        grasp/place qualification can still reject one of those two branches.
+        Continue from the unvisited provider tail inside the same tool call so
+        that this deterministic low-level recovery neither reruns a model nor
+        consumes another planner/TUI turn.
+        """
+
+        valid_goal_pool = (
+            self.object_goals
+            and isinstance(self.object_current_pose, Mapping)
+            and self.scene_epoch == scene_epoch
+            and self.planning_scene_revision == planning_scene_revision
+        )
+        fast_frontier = (
+            getattr(self.qualifier, "qualification_profile", "legacy") == "fast_v3"
+        )
+        target = min(2, self.grasp_branch_limit)
+        if not fast_frontier or target <= 1 or not valid_goal_pool:
+            return self._filter_grasp_batch(
+                result,
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+                source=source,
+            )
+
+        aggregate = result
+        current = result
+        retained: dict[str, JsonDict] = {}
+        retained_cache: dict[str, JsonDict] = {}
+        retained_proofs: dict[str, Mapping[str, object]] = {}
+        retained_goals: dict[str, list[JsonDict]] = {}
+        pair_artifacts: list[JsonDict] = []
+        grasp_artifacts: list[JsonDict] = []
+        expansion_count = 0
+        pair_totals = {
+            "frozen_pair_count": 0,
+            "frozen_pair_lookahead_grasp_count": 0,
+            "frozen_pair_workspace_pass_count": 0,
+            "frozen_pair_endpoint_evaluated_count": 0,
+            "frozen_pair_endpoint_not_evaluated_count": 0,
+            "frozen_pair_endpoint_pass_count": 0,
+            "frozen_pair_full_plan_submitted_count": 0,
+            "frozen_pair_full_plan_pass_count": 0,
+        }
+        reserve_activated = False
+
+        while True:
+            needed = max(1, target - len(retained))
+            filtered = self._filter_grasp_batch(
+                current,
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+                source=source,
+                l5_pass_target=needed,
+            )
+            if not filtered.success:
+                return filtered
+            for key in pair_totals:
+                value = filtered.details.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    pair_totals[key] += value
+            reserve_activated = reserve_activated or (
+                filtered.details.get("frozen_pair_reserve_activated") is True
+            )
+            pair_artifact = filtered.details.get(
+                "frozen_pair_qualification_artifact"
+            )
+            if isinstance(pair_artifact, Mapping):
+                pair_artifacts.append(json.loads(json.dumps(pair_artifact)))
+
+            batch_goals = self.qualified_goals_by_grasp
+            batch_grasps = filtered.details.get("grasp_candidates")
+            batch_grasps = batch_grasps if isinstance(batch_grasps, list) else []
+            for grasp in batch_grasps:
+                if not isinstance(grasp, Mapping):
+                    continue
+                grasp_id = str(grasp.get("id") or "")
+                if not grasp_id or grasp_id in retained:
+                    continue
+                entry = self.qualifier.cache.resolve(
+                    purpose="grasp",
+                    candidate_id=grasp_id,
+                    scene_epoch=scene_epoch,
+                    planning_scene_revision=planning_scene_revision,
+                )
+                if not isinstance(entry, Mapping):
+                    continue
+                retained[grasp_id] = json.loads(json.dumps(grasp))
+                cached_candidate = entry.get("candidate")
+                if isinstance(cached_candidate, Mapping):
+                    retained_cache[grasp_id] = json.loads(
+                        json.dumps(cached_candidate)
+                    )
+                proof = entry.get("proof")
+                if isinstance(proof, Mapping):
+                    retained_proofs[grasp_id] = json.loads(json.dumps(proof))
+                goals = batch_goals.get(grasp_id)
+                if isinstance(goals, list):
+                    retained_goals[grasp_id] = json.loads(json.dumps(goals))
+
+            if len(retained) >= target or not self.grasp_frontier_candidates:
+                break
+
+            previous_frontier_ids = tuple(
+                str(candidate.get("id") or "")
+                for candidate in self.grasp_frontier_candidates
+                if isinstance(candidate, Mapping)
+            )
+            expansion = self.prepare_grasp_frontier_expansion(
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+            )
+            if not expansion.success:
+                return expansion
+            provider_snapshot = ToolResult(
+                True,
+                expansion.content,
+                json.loads(json.dumps(expansion.details)),
+            )
+            needed = max(1, target - len(retained))
+            current = self.qualifier.qualify_result(
+                expansion,
+                purpose="grasp",
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+                source=source,
+                l5_pass_target=needed,
+                l5_min_pass_target=needed,
+            )
+            if _qualification_infrastructure_reason(current):
+                return _qualification_infrastructure_failure(current)
+            grasp_artifact = current.details.get("qualification_artifact")
+            if isinstance(grasp_artifact, Mapping):
+                grasp_artifacts.append(json.loads(json.dumps(grasp_artifact)))
+            self.update_grasp_frontier(
+                provider_snapshot,
+                current,
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+            )
+            expansion_count += 1
+            next_frontier_ids = tuple(
+                str(candidate.get("id") or "")
+                for candidate in self.grasp_frontier_candidates
+                if isinstance(candidate, Mapping)
+            )
+            if previous_frontier_ids == next_frontier_ids:
+                return ToolResult(
+                    False,
+                    "Frozen grasp frontier made no deterministic progress.",
+                    {
+                        "reason": "frozen_grasp_frontier_no_progress",
+                        "model_inference_invoked": False,
+                        "execution_started": False,
+                    },
+                )
+
+        final_grasps = list(retained.values())[:target]
+        final_ids = [str(grasp.get("id") or "") for grasp in final_grasps]
+        self.qualified_goals_by_grasp = {
+            grasp_id: retained_goals[grasp_id]
+            for grasp_id in final_ids
+            if grasp_id in retained_goals
+        }
+        details = aggregate.details
+        details.update(pair_totals)
+        details.update(
+            {
+                "frozen_pair_grasp_branch_limit": self.grasp_branch_limit,
+                "frozen_pair_primary_grasp_count": min(target, len(final_grasps)),
+                "frozen_pair_reserve_grasp_count": max(
+                    0, pair_totals["frozen_pair_lookahead_grasp_count"] - target
+                ),
+                "frozen_pair_reserve_activated": reserve_activated,
+                "frozen_pair_backup_target": target,
+                "frozen_pair_backup_ready": len(final_grasps) >= target,
+                "frozen_pair_frontier_expansion_count": expansion_count,
+                "frozen_grasp_frontier_remaining_count": len(
+                    self.grasp_frontier_candidates
+                ),
+                "frozen_grasp_frontier_generation": self.grasp_frontier_generation,
+                "frozen_grasp_frontier_model_inference_invoked": False,
+            }
+        )
+        if pair_artifacts:
+            details["frozen_pair_qualification_artifact"] = pair_artifacts[0]
+            details["frozen_pair_qualification_artifacts"] = pair_artifacts
+        if grasp_artifacts:
+            details["frozen_grasp_frontier_qualification_artifacts"] = (
+                grasp_artifacts
+            )
+        artifacts = details.setdefault("artifacts", [])
+        if isinstance(artifacts, list):
+            known_paths = {
+                str(item.get("path") or "")
+                for item in artifacts
+                if isinstance(item, Mapping)
+            }
+            for artifact in [*grasp_artifacts, *pair_artifacts]:
+                path = str(artifact.get("path") or "")
+                if path and path not in known_paths:
+                    artifacts.append(artifact)
+                    known_paths.add(path)
+        return self._replace_grasps(
+            aggregate,
+            final_grasps,
+            {
+                grasp_id: retained_proofs[grasp_id]
+                for grasp_id in final_ids
+                if grasp_id in retained_proofs
+            },
+            scene_epoch,
+            planning_scene_revision,
+            cache_grasps=[
+                retained_cache[grasp_id]
+                for grasp_id in final_ids
+                if grasp_id in retained_cache
+            ],
+        )
+
+    def _filter_grasp_batch(
+        self,
+        result: ToolResult,
+        *,
+        scene_epoch: int,
+        planning_scene_revision: int,
+        source: Mapping[str, object],
+        l5_pass_target: int | None = None,
+    ) -> ToolResult:
         grasps = result.details.get("grasp_candidates")
         if not isinstance(grasps, list) or not grasps:
             return result
@@ -1774,7 +2043,11 @@ class _FrozenGoalPairCoordinator:
             source=source,
             cache_result=False,
             qualification_mode="frozen_pair",
+            l5_pass_target=l5_pass_target,
+            l5_min_pass_target=l5_pass_target,
         )
+        if _qualification_infrastructure_reason(joint):
+            return _qualification_infrastructure_failure(joint)
         passed_pairs = joint.details.get("placement_candidates")
         passed_pairs = passed_pairs if isinstance(passed_pairs, list) else []
         goal_legality_summary = self._cache_goal_legality_frontier(
@@ -2501,6 +2774,8 @@ def _qualifying_handler(
             l5_pass_target=grasp_lookahead_target,
             l5_min_pass_target=grasp_minimum_target,
         )
+        if _qualification_infrastructure_reason(qualified_result):
+            return _qualification_infrastructure_failure(qualified_result)
         if (
             purpose == "placement"
             and frozen_goal_requalification
