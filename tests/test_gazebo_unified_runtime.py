@@ -483,6 +483,7 @@ def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit
     assert config.ros_domain_id == 23
     assert config.gz_partition == "locked"
     assert config.launch_arguments == ("rviz:=false",)
+    assert config.startup_timeout_s == 45.0
     assert config.process_environment["ROS2CLI_NO_DAEMON"] == "1"
 
 

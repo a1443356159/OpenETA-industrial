@@ -93,7 +93,7 @@ class GazeboDeploymentConfig:
     camera_extrinsics: Mapping[str, Any] = field(default_factory=dict)
     launch_arguments: tuple[str, ...] = ()
     world_override: str | None = None
-    startup_timeout_s: float = 30.0
+    startup_timeout_s: float = 45.0
     observation_timeout_s: float = 30.0
     process_environment: Mapping[str, str] = field(default_factory=dict)
 
@@ -139,7 +139,7 @@ class GazeboDeploymentConfig:
             camera_extrinsics=extrinsics,
             launch_arguments=tuple(launch_arguments),
             world_override=snapshot.get("OPENETA_GAZEBO_WORLD") or None,
-            startup_timeout_s=float(snapshot.get("OPENETA_GAZEBO_STARTUP_TIMEOUT_S", "30")),
+            startup_timeout_s=float(snapshot.get("OPENETA_GAZEBO_STARTUP_TIMEOUT_S", "45")),
             observation_timeout_s=float(snapshot.get("OPENETA_GAZEBO_OBSERVATION_TIMEOUT_S", "30")),
             process_environment=child_env,
         )

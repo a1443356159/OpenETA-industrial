@@ -577,6 +577,81 @@ def test_create_simulator_env_requires_env_id() -> None:
     assert transport.calls == []
 
 
+def test_create_simulator_env_rolls_back_failed_reset_before_next_create(
+    tmp_path: Path,
+) -> None:
+    transport = SequencedSimulatorMcpTransport(
+        [
+            {
+                "success": True,
+                "handle": "env-failed-reset",
+                "session_id": "session-failed-reset",
+            },
+            {
+                "success": False,
+                "error": "Reset failed: controller readiness timeout",
+                "fatal": True,
+            },
+            {"ok": True},
+            {
+                "success": True,
+                "handle": "env-retry",
+                "session_id": "session-retry",
+            },
+            {"success": True, "cameras": [], "robot": {}},
+        ]
+    )
+    config = SimulatorMcpToolProxyConfig(
+        image_output_root=tmp_path / "images",
+        response_output_root=tmp_path / "responses",
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=config,
+        tool_names=("create_simulator_env",),
+    )
+
+    failed = tools.call(
+        "create_simulator_env",
+        {"env_id": "openeta/demo-v0", "seed": 0},
+    )
+
+    assert failed.success is False
+    assert [call["name"] for call in transport.calls] == [
+        "create_env",
+        "reset_env",
+        "close_env",
+    ]
+    assert failed.details["outputs"]["reset_failure_cleanup"] == {
+        "attempted": True,
+        "success": True,
+        "handle": "env-failed-reset",
+        "response": {"ok": True},
+    }
+    assert failed.details["state_delta"]["simulator_environment"]["status"] == (
+        "closed_after_reset_failure"
+    )
+    assert failed.details["environment_receipt"]["environment_closed"] is True
+    assert config.handle == ""
+    assert config.session_id == ""
+
+    retried = tools.call(
+        "create_simulator_env",
+        {"env_id": "openeta/demo-v0", "seed": 0},
+    )
+
+    assert retried.success is True
+    assert [call["name"] for call in transport.calls] == [
+        "create_env",
+        "reset_env",
+        "close_env",
+        "create_env",
+        "reset_env",
+    ]
+    assert config.handle == "env-retry"
+
+
 def test_close_simulator_env_closes_and_clears_bound_handle() -> None:
     transport = FakeSimulatorMcpTransport({"ok": True})
     config = SimulatorMcpToolProxyConfig(

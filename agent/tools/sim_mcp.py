@@ -1028,6 +1028,26 @@ class SimulatorEnvironmentCreator:
         reset_ref = reset_normalized["outputs"]["response"]
         self._notify("reset_env", reset_args, reset_ref)
         success = _response_success(reset_response)
+        reset_failure_cleanup: JsonDict | None = None
+        if not success:
+            # A failed reset is terminal for this freshly created handle. Roll
+            # it back inside the host tool so the planner does not spend extra
+            # turns trying observe/create against a half-started environment.
+            with self.config.lifecycle_lock:
+                owns_handle = self.config.handle == handle
+                if owns_handle:
+                    self.config.handle = ""
+            if owns_handle:
+                cleanup_response = self._close_abandoned_environment(
+                    handle=handle,
+                    session_id=session_id,
+                )
+                reset_failure_cleanup = {
+                    "attempted": True,
+                    "success": _response_success(cleanup_response),
+                    "handle": handle,
+                    "response": cleanup_response,
+                }
         assigned_task = _response_assigned_task(reset_ref)
         server_url = mcp_server_url_from_transport(self.transport)
         dashboard_url = mcp_dashboard_url(server_url, session_id)
@@ -1065,6 +1085,8 @@ class SimulatorEnvironmentCreator:
             "create_response": create_ref,
             "initial_observation": reset_ref,
         }
+        if reset_failure_cleanup is not None:
+            outputs["reset_failure_cleanup"] = reset_failure_cleanup
         if assigned_task:
             outputs["assigned_task"] = assigned_task
         for key in ("observation_summary",):
@@ -1093,14 +1115,41 @@ class SimulatorEnvironmentCreator:
                 ],
                 state_delta={
                     **reset_normalized["state_delta"],
-                    "simulator_environment": environment,
+                    "simulator_environment": (
+                        {
+                            "handle": "",
+                            "session_id": "",
+                            "status": "closed_after_reset_failure",
+                        }
+                        if reset_failure_cleanup
+                        and reset_failure_cleanup["success"] is True
+                        else environment
+                    ),
                 },
                 environment_receipt={
                     **reset_normalized["environment_receipt"],
                     "simulator_session_id": session_id,
                     "handle": handle,
+                    "environment_closed": bool(
+                        reset_failure_cleanup
+                        and reset_failure_cleanup["success"] is True
+                    ),
                 },
-                diagnostics=[] if success else _response_diagnostics(reset_response),
+                diagnostics=(
+                    []
+                    if success
+                    else [
+                        *_response_diagnostics(reset_response),
+                        {
+                            "code": "simulator_reset_failure_cleanup",
+                            "attempted": reset_failure_cleanup is not None,
+                            "success": bool(
+                                reset_failure_cleanup
+                                and reset_failure_cleanup["success"] is True
+                            ),
+                        },
+                    ]
+                ),
             ),
         )
 
@@ -1143,7 +1192,9 @@ class SimulatorEnvironmentCreator:
         if self.response_callback is not None:
             self.response_callback(name, arguments, response)
 
-    def _close_abandoned_environment(self, *, handle: str, session_id: str) -> None:
+    def _close_abandoned_environment(
+        self, *, handle: str, session_id: str
+    ) -> JsonDict:
         result = close_simulator_mcp_env(
             self.transport,
             handle=handle,
@@ -1151,11 +1202,17 @@ class SimulatorEnvironmentCreator:
             timeout_s=min(self.config.timeout_s, 30.0),
         )
         if _response_success(result):
-            return
+            with self.config.lifecycle_lock:
+                if not self.config.handle:
+                    self.config.session_id = ""
+                    self.config.image_bundle_id = ""
+            return result
         with self.config.lifecycle_lock:
             if not self.config.handle:
                 self.config.handle = handle
                 self.config.session_id = session_id
+                self.config.image_bundle_id = session_id or handle
+        return result
 
     def _transport_failure(
         self,
