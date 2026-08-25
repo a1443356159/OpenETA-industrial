@@ -34,6 +34,7 @@ from agent.runtime.moveit_qualification import (
     PRIVATE_RPC_NAME,
     private_qualification_rpc,
 )
+from agent.runtime.qualification_v3 import grasp_symmetry_family_id
 from agent.runtime.memory_store import JsonMemoryStore
 from agent.runtime.pipeline import ActionPipeline
 from agent.runtime.planner import PlannerContextConfig, ToolCallingPlanner
@@ -304,27 +305,6 @@ class RuntimeMcpEndpoints:
     molmopoint_url: str = ""
 
 
-GRASP_BACKEND_ENV_VAR = "OPENETA_GRASP_BACKEND"
-GRASP_BACKEND_MODES = ("auto", "anygrasp", "graspgenx")
-
-
-def runtime_grasp_backend_order_from_env() -> tuple[str, ...]:
-    """Resolve the host-owned grasp backend policy for one runtime.
-
-    ``auto`` preserves the configured fallback order.  A concrete backend is
-    strict: the facade will not silently execute a different configured
-    backend when the requested one is unavailable or fails.
-    """
-
-    mode = os.environ.get(GRASP_BACKEND_ENV_VAR, "auto").strip().lower() or "auto"
-    if mode == "auto":
-        return tuple(DEFAULT_GRASP_POSE_BACKEND_ORDER)
-    if mode in GRASP_BACKEND_MODES:
-        return (mode,)
-    choices = ", ".join(GRASP_BACKEND_MODES)
-    raise ValueError(f"{GRASP_BACKEND_ENV_VAR} must be one of: {choices}")
-
-
 @dataclass(frozen=True, slots=True)
 class RuntimeCandidateCounts:
     """Host registration values that must match remote service metadata."""
@@ -340,6 +320,18 @@ class RuntimeCandidateCounts:
     pregrasp_joint_full_plan_limit: int = 2
     moveit_ik_seed_count: int = 8
     anyplace_max_qualification_rounds: int = 2
+    qualification_profile: str = "legacy"
+    solver_profile: str = "auto"
+    fast_beam_width: int = 2
+    grasp_waves: tuple[int, ...] | str = (16, 32, 64)
+    placement_waves: tuple[int, ...] | str = (12, 24, 48, 96)
+    max_ik_concurrency: int = 8
+    max_state_validity_concurrency: int = 8
+    fast_ik_seed_count: int = 2
+    recovery_ik_seed_count: int = 6
+    fast_ik_timeout_ms: int = 50
+    recovery_ik_timeout_ms: int = 200
+    capability_map_id: str = ""
 
     def __post_init__(self) -> None:
         validated = CandidateFunnelConfig(
@@ -354,6 +346,18 @@ class RuntimeCandidateCounts:
             pregrasp_joint_full_plan_limit=self.pregrasp_joint_full_plan_limit,
             moveit_ik_seed_count=self.moveit_ik_seed_count,
             anyplace_max_qualification_rounds=self.anyplace_max_qualification_rounds,
+            qualification_profile=self.qualification_profile,
+            solver_profile=self.solver_profile,
+            fast_beam_width=self.fast_beam_width,
+            grasp_waves=self.grasp_waves,
+            placement_waves=self.placement_waves,
+            max_ik_concurrency=self.max_ik_concurrency,
+            max_state_validity_concurrency=self.max_state_validity_concurrency,
+            fast_ik_seed_count=self.fast_ik_seed_count,
+            recovery_ik_seed_count=self.recovery_ik_seed_count,
+            fast_ik_timeout_ms=self.fast_ik_timeout_ms,
+            recovery_ik_timeout_ms=self.recovery_ik_timeout_ms,
+            capability_map_id=self.capability_map_id,
         )
         for name in (
             "graspgenx_raw_pool_size", "anygrasp_raw_pool_size", "anyplace_raw_pool_size",
@@ -361,6 +365,11 @@ class RuntimeCandidateCounts:
             "grasp_full_plan_limit", "anyplace_full_plan_limit", "moveit_ik_seed_count",
             "pregrasp_joint_grasp_branch_limit", "pregrasp_joint_full_plan_limit",
             "anyplace_max_qualification_rounds",
+            "qualification_profile", "solver_profile", "fast_beam_width",
+            "grasp_waves", "placement_waves", "max_ik_concurrency",
+            "max_state_validity_concurrency", "fast_ik_seed_count",
+            "recovery_ik_seed_count", "fast_ik_timeout_ms",
+            "recovery_ik_timeout_ms", "capability_map_id",
         ):
             object.__setattr__(self, name, getattr(validated, name))
 
@@ -382,6 +391,24 @@ def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
         ),
         moveit_ik_seed_count=os.environ.get("OPENETA_MOVEIT_IK_SEED_COUNT", 8),
         anyplace_max_qualification_rounds=os.environ.get("OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
+        qualification_profile=os.environ.get("OPENETA_QUALIFICATION_PROFILE", "legacy"),
+        solver_profile=os.environ.get("OPENETA_QUALIFICATION_SOLVER_PROFILE", "auto"),
+        fast_beam_width=os.environ.get("OPENETA_QUALIFICATION_BEAM_WIDTH", 2),
+        grasp_waves=os.environ.get("OPENETA_QUALIFICATION_GRASP_WAVES", "16,32,64"),
+        placement_waves=os.environ.get(
+            "OPENETA_QUALIFICATION_PLACEMENT_WAVES", "12,24,48,96"
+        ),
+        max_ik_concurrency=os.environ.get("OPENETA_QUALIFICATION_MAX_IK_CONCURRENCY", 8),
+        max_state_validity_concurrency=os.environ.get(
+            "OPENETA_QUALIFICATION_MAX_STATE_VALIDITY_CONCURRENCY", 8
+        ),
+        fast_ik_seed_count=os.environ.get("OPENETA_QUALIFICATION_FAST_SEEDS", 2),
+        recovery_ik_seed_count=os.environ.get("OPENETA_QUALIFICATION_RECOVERY_SEEDS", 6),
+        fast_ik_timeout_ms=os.environ.get("OPENETA_QUALIFICATION_FAST_IK_TIMEOUT_MS", 50),
+        recovery_ik_timeout_ms=os.environ.get(
+            "OPENETA_QUALIFICATION_RECOVERY_IK_TIMEOUT_MS", 200
+        ),
+        capability_map_id=os.environ.get("OPENETA_CAPABILITY_MAP_ID", ""),
     )
 
 
@@ -396,9 +423,6 @@ class RuntimeAssemblyConfig:
     endpoints: RuntimeMcpEndpoints = field(default_factory=RuntimeMcpEndpoints)
     candidate_counts: RuntimeCandidateCounts = field(
         default_factory=runtime_candidate_counts_from_env
-    )
-    grasp_backend_order: tuple[str, ...] = field(
-        default_factory=runtime_grasp_backend_order_from_env
     )
     simulator_transport: SimulatorMcpTransport | None = None
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None
@@ -605,7 +629,6 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         simulator_proxy_config=simulator_proxy_config,
         candidate_qualifier=qualifier,
         candidate_counts=config.candidate_counts,
-        grasp_backend_order=config.grasp_backend_order,
         internal_candidate_compilers=internal_candidate_compilers,
     )
 
@@ -707,14 +730,17 @@ def bind_runtime_perception_tools(
     simulator_proxy_config: SimulatorMcpToolProxyConfig | None = None,
     candidate_qualifier: MoveItCandidateQualifier | None = None,
     candidate_counts: RuntimeCandidateCounts | None = None,
-    grasp_backend_order: tuple[str, ...] = DEFAULT_GRASP_POSE_BACKEND_ORDER,
     internal_candidate_compilers: Mapping[str, ToolHandler] | None = None,
 ) -> DepthPriorPrefetchCoordinator | None:
     counts = candidate_counts or runtime_candidate_counts_from_env()
     pregrasp_coordinator = (
         _PregraspGraspPlaceCoordinator(
             candidate_qualifier,
-            grasp_branch_limit=counts.pregrasp_joint_grasp_branch_limit,
+            grasp_branch_limit=(
+                2
+                if counts.qualification_profile in {"fast_v3", "shadow"}
+                else counts.pregrasp_joint_grasp_branch_limit
+            ),
         )
         if candidate_qualifier is not None
         else None
@@ -897,7 +923,7 @@ def bind_runtime_perception_tools(
     if grasp_backends:
         grasp_handler = build_grasp_pose_estimate_handler(
             grasp_backends,
-            backend_order=grasp_backend_order,
+            backend_order=DEFAULT_GRASP_POSE_BACKEND_ORDER,
             graspgenx_gripper_name="robotiq_2f_85",
         )
         if candidate_qualifier is not None:
@@ -958,6 +984,18 @@ def _runtime_candidate_qualifier(
         pregrasp_joint_full_plan_limit=counts.pregrasp_joint_full_plan_limit,
         ik_seed_count=counts.moveit_ik_seed_count,
         placement_max_rounds=counts.anyplace_max_qualification_rounds,
+        qualification_profile=counts.qualification_profile,
+        solver_profile=counts.solver_profile,
+        beam_width=counts.fast_beam_width,
+        grasp_waves=counts.grasp_waves,
+        placement_waves=counts.placement_waves,
+        max_ik_concurrency=counts.max_ik_concurrency,
+        max_state_validity_concurrency=counts.max_state_validity_concurrency,
+        fast_seed_count=counts.fast_ik_seed_count,
+        recovery_seed_count=counts.recovery_ik_seed_count,
+        fast_ik_timeout_s=counts.fast_ik_timeout_ms / 1000.0,
+        recovery_ik_timeout_s=counts.recovery_ik_timeout_ms / 1000.0,
+        capability_map_id=counts.capability_map_id,
     )
 
 
@@ -980,6 +1018,10 @@ def _candidate_qualification_compiler(
         strategies: list[JsonDict],
     ) -> JsonDict:
         if purpose == "placement":
+            world_object_goal = (
+                candidate.get("world_object_goal_pose")
+                or candidate.get("object_goal_pose")
+            )
             pregrasp_contact = candidate.get("pregrasp_contact_pose")
             if isinstance(pregrasp_contact, Mapping):
                 eef_goal = pregrasp_eef_goal_from_object_motion(
@@ -987,6 +1029,10 @@ def _candidate_qualification_compiler(
                     placement_candidate=candidate,
                 )
                 compiled_candidate = dict(candidate)
+                if isinstance(world_object_goal, Mapping):
+                    compiled_candidate["world_object_goal_pose"] = dict(
+                        world_object_goal
+                    )
                 compiled_candidate["object_goal_pose"] = eef_goal
                 attachment_transform: object = {
                     "schema_version": "openeta.pregrasp_eef_identity.v1",
@@ -1001,6 +1047,10 @@ def _candidate_qualification_compiler(
                 }
             else:
                 compiled_candidate = dict(candidate)
+                if isinstance(world_object_goal, Mapping):
+                    compiled_candidate["world_object_goal_pose"] = dict(
+                        world_object_goal
+                    )
                 attachment_transform = source.get("attachment_transform")
             if not isinstance(attachment_transform, dict):
                 raise ValueError("measured attachment transform unavailable")
@@ -1254,6 +1304,10 @@ class _PregraspGraspPlaceCoordinator:
                 for candidate in candidates
                 if isinstance(candidate, Mapping)
             ]
+            for goal in goals:
+                object_goal = goal.get("object_goal_pose")
+                if isinstance(object_goal, Mapping):
+                    goal["world_object_goal_pose"] = dict(object_goal)
         except Exception as exc:  # noqa: BLE001 - fail closed at frame boundary.
             return ToolResult(
                 False,
@@ -1356,12 +1410,17 @@ class _PregraspGraspPlaceCoordinator:
             if not isinstance(contact, Mapping) or not isinstance(lift_state, Mapping):
                 continue
             retained_entries[grasp_id] = dict(entry)
+            grasp_equivalence_id = grasp_symmetry_family_id(grasp)
             pairs: list[JsonDict] = []
             for goal in current_goals:
                 pair = dict(goal)
                 goal_id = str(goal.get("id") or "goal")
                 pair["id"] = f"pregrasp_pair_{grasp_id}_{goal_id}"
                 pair["source_grasp_id"] = grasp_id
+                pair["source_grasp_equivalence_id"] = grasp_equivalence_id
+                pair["source_grasp_symmetry_equivalent"] = bool(
+                    grasp.get("symmetry_parent_id")
+                )
                 pair["source_object_goal_id"] = goal_id
                 pair["pregrasp_contact_pose"] = dict(contact)
                 pair["qualification_start_joint_state"] = dict(lift_state)
@@ -1402,6 +1461,12 @@ class _PregraspGraspPlaceCoordinator:
         passed_pairs = passed_pairs if isinstance(passed_pairs, list) else []
         pass_count: dict[str, int] = {}
         goal_ids: dict[str, list[str]] = {}
+        goal_lookup = {
+            str(goal.get("id") or ""): goal
+            for goal in self.object_goals
+            if isinstance(goal, Mapping) and str(goal.get("id") or "")
+        }
+        qualified_goals: dict[str, list[JsonDict]] = {}
         for pair in passed_pairs:
             if not isinstance(pair, Mapping):
                 continue
@@ -1409,22 +1474,31 @@ class _PregraspGraspPlaceCoordinator:
             if not grasp_id:
                 continue
             pass_count[grasp_id] = pass_count.get(grasp_id, 0) + 1
-            goal_ids.setdefault(grasp_id, []).append(
-                str(pair.get("source_object_goal_id") or "")
+            goal_id = str(pair.get("source_object_goal_id") or "")
+            goal_ids.setdefault(grasp_id, []).append(goal_id)
+            original = goal_lookup.get(goal_id)
+            if not isinstance(original, Mapping):
+                continue
+            frozen_goal = json.loads(json.dumps(original))
+            physical_goal = pair.get(
+                "qualified_world_collision_object_goal_pose"
             )
-        goal_lookup = {
-            str(goal.get("id") or ""): goal
-            for goal in self.object_goals
-            if isinstance(goal, Mapping) and str(goal.get("id") or "")
-        }
-        self.qualified_goals_by_grasp = {
-            grasp_id: [
-                json.loads(json.dumps(goal_lookup[goal_id]))
-                for goal_id in ids
-                if goal_id in goal_lookup
-            ]
-            for grasp_id, ids in goal_ids.items()
-        }
+            if isinstance(physical_goal, Mapping):
+                model_goal = frozen_goal.get("world_object_goal_pose") or frozen_goal.get(
+                    "object_goal_pose"
+                )
+                if isinstance(model_goal, Mapping):
+                    frozen_goal["model_pointcloud_object_goal_pose"] = dict(model_goal)
+                frozen_goal["world_object_goal_pose"] = dict(physical_goal)
+                frozen_goal["object_goal_pose"] = dict(physical_goal)
+                frozen_goal["frozen_goal_frame_binding"] = {
+                    "schema_version": "openeta.frozen_physical_object_goal.v1",
+                    "source": "pregrasp_goal_legality",
+                    "source_object_goal_id": goal_id,
+                    "physical_collision_goal": True,
+                }
+            qualified_goals.setdefault(grasp_id, []).append(frozen_goal)
+        self.qualified_goals_by_grasp = qualified_goals
         retained: list[JsonDict] = []
         cache_grasps: list[JsonDict] = []
         proofs: dict[str, Mapping[str, object]] = {}
@@ -1821,6 +1895,23 @@ def _qualifying_handler(
             revision_value = scene_epoch
         source = result.details.get("source")
         source = dict(source) if isinstance(source, dict) else {}
+        source.setdefault(
+            "provider",
+            str(
+                result.details.get("provider")
+                or result.details.get("backend")
+                or context.name
+            ),
+        )
+        source.setdefault(
+            "provider_version",
+            str(
+                result.details.get("provider_version")
+                or result.details.get("model_version")
+                or result.details.get("checkpoint_sha256")
+                or "unknown"
+            ),
+        )
         if context.observation is not None:
             source["start_joint_state"] = context.observation.robot.to_dict()
             frame_id = str(source.get("camera_frame_id") or result.details.get("camera_frame_id") or "")

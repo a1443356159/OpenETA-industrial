@@ -72,6 +72,7 @@ ROS_PACKAGES=(
   ros-jazzy-controller-manager ros-jazzy-joint-state-broadcaster
   ros-jazzy-joint-trajectory-controller ros-jazzy-parallel-gripper-controller
   ros-jazzy-moveit ros-jazzy-moveit-ros-move-group ros-jazzy-moveit-configs-utils
+  ros-jazzy-trac-ik-kinematics-plugin ros-jazzy-pick-ik
   ros-jazzy-xacro ros-jazzy-robot-state-publisher ros-jazzy-tf2-ros
   ros-jazzy-control-msgs ros-jazzy-geometry-msgs ros-jazzy-sensor-msgs
 )

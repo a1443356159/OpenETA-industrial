@@ -770,23 +770,68 @@ def _terminate_owned_residual_groups(
     return evidence
 
 
-def _partition_cleanup(partition: str) -> dict[str, Any]:
+def _partition_cleanup(
+    partition: str,
+    *,
+    timeout_s: float = 20.0,
+    poll_interval_s: float = 0.5,
+) -> dict[str, Any]:
+    """Wait for Gazebo transport discovery to forget exited participants.
+
+    ``gz topic -l`` can retain a GUI or server's advertised topics for several
+    seconds after every owning process has exited.  Treat that bounded discovery
+    lease as settling, while remaining fail-closed when topics are still present
+    at the deadline or the probe itself is inconclusive.
+    """
+
     env = os.environ.copy()
     env["GZ_PARTITION"] = partition
-    try:
-        result = subprocess.run(
-            ["gz", "topic", "-l"], env=env, capture_output=True, text=True,
-            timeout=8, check=False,
+    started = time.monotonic()
+    deadline = started + max(0.0, float(timeout_s))
+    attempts = 0
+    observed_topic_sets: list[list[str]] = []
+    while True:
+        attempts += 1
+        try:
+            result = subprocess.run(
+                ["gz", "topic", "-l"], env=env, capture_output=True, text=True,
+                timeout=8, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {
+                "state": "INCONCLUSIVE",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "settle_attempts": attempts,
+            }
+        topics = sorted(
+            line.strip() for line in result.stdout.splitlines() if line.strip()
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"state": "INCONCLUSIVE", "reason": f"{type(exc).__name__}: {exc}"}
-    topics = sorted(line.strip() for line in result.stdout.splitlines() if line.strip())
-    if result.returncode:
-        return {
-            "state": "INCONCLUSIVE", "returncode": result.returncode,
-            "stderr": result.stderr[:500],
-        }
-    return {"state": "PASSED" if not topics else "FAILED", "topics": topics}
+        if result.returncode:
+            return {
+                "state": "INCONCLUSIVE", "returncode": result.returncode,
+                "stderr": result.stderr[:500], "settle_attempts": attempts,
+            }
+        if not observed_topic_sets or observed_topic_sets[-1] != topics:
+            observed_topic_sets.append(topics)
+        elapsed_s = round(time.monotonic() - started, 3)
+        if not topics:
+            return {
+                "state": "PASSED",
+                "topics": [],
+                "settle_attempts": attempts,
+                "settle_duration_s": elapsed_s,
+                "observed_topic_sets": observed_topic_sets,
+            }
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            return {
+                "state": "FAILED",
+                "topics": topics,
+                "settle_attempts": attempts,
+                "settle_duration_s": elapsed_s,
+                "observed_topic_sets": observed_topic_sets,
+            }
+        time.sleep(min(max(0.0, poll_interval_s), remaining_s))
 
 
 def scripted_tui_input(paths: CasePaths) -> str:

@@ -15,6 +15,30 @@ from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
 
 
+_KINEMATICS_FILES = {
+    "kdl_legacy": "config/kinematics.kdl_legacy.yaml",
+    "kdl_fast": "config/kinematics.kdl_fast.yaml",
+    "trac_ik_speed": "config/kinematics.trac_ik_speed.yaml",
+    "trac_ik_distance": "config/kinematics.trac_ik_distance.yaml",
+    "pick_ik_local": "config/kinematics.pick_ik_local.yaml",
+}
+
+
+def _kinematics_selection():
+    qualification_profile = os.environ.get("OPENETA_QUALIFICATION_PROFILE", "legacy")
+    solver_profile = os.environ.get("OPENETA_QUALIFICATION_SOLVER_PROFILE", "auto")
+    if solver_profile == "auto":
+        solver_profile = "kdl_fast" if qualification_profile == "fast_v3" else "kdl_legacy"
+    try:
+        return solver_profile, _KINEMATICS_FILES[solver_profile]
+    except KeyError as exc:
+        supported = ", ".join(["auto", *_KINEMATICS_FILES])
+        raise RuntimeError(
+            f"unsupported OPENETA_QUALIFICATION_SOLVER_PROFILE={solver_profile!r}; "
+            f"expected one of {supported}"
+        ) from exc
+
+
 def _after_success(target, actions, label):
     """Start dependent actions only when the preceding process succeeded."""
     def on_exit(event, _context):
@@ -34,13 +58,14 @@ def generate_launch_description():
     xacro_file = share / "urdf/rm75_robotiq2f85.urdf.xacro"
     robot_description_command = Command([FindExecutable(name="xacro"), " ", str(xacro_file)])
     robot_description = ParameterValue(robot_description_command, value_type=str)
+    solver_profile, kinematics_file = _kinematics_selection()
     moveit = (
         MoveItConfigsBuilder(
             "rm75_robotiq_2f85_sim_v1", package_name="openeta_rm75_robotiq2f85_sim"
         )
         .robot_description(file_path="urdf/rm75_robotiq2f85.urdf.xacro")
         .robot_description_semantic(file_path="config/rm75_robotiq2f85.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
+        .robot_description_kinematics(file_path=kinematics_file)
         .joint_limits(file_path="config/joint_limits.yaml")
         .trajectory_execution(file_path="config/moveit_controllers.yaml")
         .planning_pipelines(pipelines=["ompl"], default_planning_pipeline="ompl")
@@ -109,6 +134,7 @@ def generate_launch_description():
             default_value=default_world,
             description="Absolute SDF world path; production defaults to the motion-control world",
         ),
+        LogInfo(msg=f"OpenETA qualification solver profile: {solver_profile}"),
         SetEnvironmentVariable(
             "GZ_SIM_RESOURCE_PATH",
             os.pathsep.join(

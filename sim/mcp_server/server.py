@@ -11,8 +11,9 @@ The heavy lifting is delegated to sibling modules:
 from __future__ import annotations
 
 import functools
+import math
 import os
-import sys
+import statistics
 import threading
 import uuid
 
@@ -30,11 +31,13 @@ from sim.mcp_server.session import (
     _session_envs,
     _session_last_obs,
     _session_last_obs_lock,
+    _session_qualification,
+    _session_qualification_latencies,
+    _session_qualification_lock,
     _sse_sessions,
     _touch_session,
     _detach_sse_session,
     _stale_session_sweeper,
-    _session_last_activity,
 )
 from sim.mcp_server.worker_mgr import (
     _forget_obs_dirty,
@@ -58,6 +61,7 @@ from sim.mcp_server.rest_api import (
     session_envs,
     session_stream,
     session_env_stream,
+    session_qualification,
 )
 
 # ── FastMCP server ────────────────────────────────────────────────────
@@ -570,6 +574,93 @@ def _quat_angular_distance(a: list[float], b: list[float]) -> float:
     return 2.0 * _math.acos(dot)
 
 
+def _record_qualification_dashboard(
+    sid: str,
+    handle: str,
+    response: dict,
+) -> None:
+    """Publish metrics after the qualification RPC, off its critical executor."""
+
+    dashboard_response = response
+    shadow = response.get("shadow_fast_v3")
+    if isinstance(shadow, dict):
+        dashboard_response = shadow
+    summary = {
+        key: response.get(key)
+        for key in (
+            "schema_version",
+            "qualification_profile",
+            "solver_profile",
+            "solver_configuration_id",
+            "stop_reason",
+            "waves",
+            "metrics",
+            "infrastructure_error",
+        )
+        if response.get(key) is not None
+    }
+    if dashboard_response is not response:
+        summary.update(
+            {
+                "qualification_profile": "shadow (legacy authoritative)",
+                "solver_profile": dashboard_response.get("solver_profile"),
+                "solver_configuration_id": dashboard_response.get(
+                    "solver_configuration_id"
+                ),
+                "stop_reason": dashboard_response.get("stop_reason"),
+                "waves": dashboard_response.get("waves"),
+                "metrics": dashboard_response.get("metrics"),
+                "infrastructure_error": dashboard_response.get(
+                    "infrastructure_error"
+                ),
+            }
+        )
+    reasons: dict[str, int] = {}
+    dashboard_results = dashboard_response.get("results")
+    dashboard_results = dashboard_results if isinstance(dashboard_results, list) else []
+    for item in dashboard_results:
+        if not isinstance(item, dict) or item.get("verdict") == "PASS":
+            continue
+        reason = str(item.get("reason") or item.get("verdict") or "unknown")
+        reasons[reason] = reasons.get(reason, 0) + 1
+    summary["failure_reasons"] = dict(sorted(reasons.items()))
+    with _session_qualification_lock:
+        if handle not in _session_envs.get(sid, {}):
+            return
+        metrics = dict(summary.get("metrics") or {})
+        first_pass = dashboard_response.get("first_l5_pass_s")
+        if not isinstance(first_pass, (int, float)) or isinstance(first_pass, bool):
+            first_pass = metrics.get("first_l5_pass_s")
+        configuration = str(
+            dashboard_response.get("solver_configuration_id")
+            or dashboard_response.get("solver_profile")
+            or "unknown"
+        )
+        history = (
+            _session_qualification_latencies.setdefault(sid, {})
+            .setdefault(handle, {})
+            .setdefault(configuration, [])
+        )
+        if (
+            isinstance(first_pass, (int, float))
+            and not isinstance(first_pass, bool)
+            and math.isfinite(float(first_pass))
+            and float(first_pass) >= 0.0
+        ):
+            history.append(float(first_pass))
+            del history[:-512]
+        if history:
+            ordered = sorted(history)
+            p95_index = max(0, math.ceil(0.95 * len(ordered)) - 1)
+            metrics["first_l5_pass_latency"] = {
+                "count": len(ordered),
+                "p50_s": statistics.median(ordered),
+                "p95_s": ordered[p95_index],
+            }
+        summary["metrics"] = metrics
+        _session_qualification.setdefault(sid, {})[handle] = summary
+
+
 @_blocking_tool
 @_serialized_env_control
 def qualify_motion_candidates(
@@ -613,11 +704,18 @@ def qualify_motion_candidates(
         num_steps=1,
         render=False,
     )
-    return {
+    response = {
         key: value
         for key, value in result.items()
         if key not in {"observation", "reward", "terminated", "truncated", "info"}
     }
+    threading.Thread(
+        target=_record_qualification_dashboard,
+        args=(sid, handle, response),
+        name="openeta-qualification-dashboard",
+        daemon=True,
+    ).start()
+    return response
 
 
 @_blocking_tool
@@ -1563,6 +1661,11 @@ def _build_dashboard_app() -> Starlette:
         Route("/session/{sid}/envs", session_envs, methods=["GET"]),
         Route("/session/{sid}/stream", session_stream, methods=["GET"]),
         Route("/session/{sid}/stream/{handle}", session_env_stream, methods=["GET"]),
+        Route(
+            "/session/{sid}/qualification",
+            session_qualification,
+            methods=["GET"],
+        ),
     ])
 
 

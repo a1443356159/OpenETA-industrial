@@ -346,11 +346,12 @@ def _qualified_placement_handler_fixture(*, joint_positions=None, attachment_x=0
     class Cache:
         def __init__(self):
             self.calls = []
+            self.candidate = deepcopy(candidate)
 
         def resolve(self, **kwargs):
             self.calls.append(kwargs)
             return {
-                "candidate": candidate,
+                "candidate": self.candidate,
                 "proof": {"compile_parameters": parameters},
                 "scene_epoch": 4,
                 "planning_scene_revision": 2,
@@ -422,6 +423,20 @@ def test_compile_placement_handler_uses_retained_runtime_epoch_not_reset_epoch()
             "planning_scene_revision": 2,
         }
     ]
+
+
+def test_compile_placement_handler_ignores_evidence_only_cache_annotations() -> None:
+    handler, context, cache = _qualified_placement_handler_fixture()
+    cache.candidate["qualified_world_collision_object_goal_pose"] = {
+        "frame": "world",
+        "convention": "T_world_collision_object_goal",
+        "translation_xyz": [0.48, -0.1, 0.43],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+
+    result = handler(context)
+
+    assert result.success is True
 
 
 def test_normalized_opencv_and_legacy_opengl_extrinsics_are_equivalent() -> None:

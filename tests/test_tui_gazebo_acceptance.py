@@ -764,6 +764,48 @@ def test_cleanup_port_probe_rejects_an_active_loopback_listener() -> None:
     assert tui_acceptance._port_is_free(port) is True
 
 
+def test_partition_cleanup_waits_for_an_expired_transport_lease(monkeypatch) -> None:
+    """Exited Gazebo participants may remain discoverable for a short lease."""
+
+    outputs = iter(("/gui/camera/pose\n/world/test/stats\n", ""))
+    calls = []
+
+    def probe(*_args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr(tui_acceptance.subprocess, "run", probe)
+    monkeypatch.setattr(tui_acceptance.time, "sleep", lambda _seconds: None)
+
+    result = tui_acceptance._partition_cleanup(
+        "unit-partition", timeout_s=1.0, poll_interval_s=0.0
+    )
+
+    assert result["state"] == "PASSED"
+    assert result["settle_attempts"] == 2
+    assert result["observed_topic_sets"] == [
+        ["/gui/camera/pose", "/world/test/stats"],
+        [],
+    ]
+    assert calls[0]["env"]["GZ_PARTITION"] == "unit-partition"
+
+
+def test_partition_cleanup_remains_fail_closed_after_its_deadline(monkeypatch) -> None:
+    monkeypatch.setattr(
+        tui_acceptance.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="/gui/camera/pose\n", stderr=""
+        ),
+    )
+
+    result = tui_acceptance._partition_cleanup("unit-partition", timeout_s=0.0)
+
+    assert result["state"] == "FAILED"
+    assert result["topics"] == ["/gui/camera/pose"]
+    assert result["settle_attempts"] == 1
+
+
 def test_tui_runner_sets_a_case_local_worker_log_directory(tmp_path: Path, monkeypatch) -> None:
     """Gazebo launch diagnostics must survive in the formal case directory."""
 

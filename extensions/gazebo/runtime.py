@@ -91,7 +91,11 @@ class GazeboRuntime:
             raise GazeboProcessError("ROS_NOT_READY") from exc
         context = rclpy.Context()
         rclpy.init(args=None, context=context)
-        executor = MultiThreadedExecutor(num_threads=4, context=context)
+        # Qualification uses up to eight IK and eight state-validity requests
+        # across independent candidates. Twelve executor threads keep those
+        # reentrant clients responsive while preserving room for state/camera
+        # callbacks; request-specific semaphores enforce the actual limits.
+        executor = MultiThreadedExecutor(num_threads=12, context=context)
         thread = threading.Thread(
             target=executor.spin, name="openeta-gazebo-ros", daemon=True
         )

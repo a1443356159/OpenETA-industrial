@@ -43,6 +43,11 @@ START_STATE_BOUNDS_TOLERANCE_RAD = 1e-6
 START_STATE_RECOVERY_INSET_RAD = 1e-3
 START_STATE_RECOVERY_TRAJECTORY_S = 1.0
 START_STATE_RECOVERY_TIMEOUT_S = 5.0
+# A placement release may finish slightly above its requested support pose
+# under the attached load.  Natural settling is already required and verified
+# after detach, so permit a small one-way (upward only) Z residual without
+# relaxing XY accuracy or allowing downward penetration.
+PLACEMENT_RELEASE_UPWARD_RESIDUAL_M = 0.01
 # These targets are relative to the first fresh mount pose after a reset, not
 # absolute world coordinates.  They are the small, validated neutral motions
 # available in the empty motion-control profile.  Publishing the relation in the existing
@@ -501,6 +506,7 @@ def make_move_group_goal(
                 "purpose",
                 "placement_candidate_id",
                 "compiled_placement_id",
+                "placement_stage",
                 "scene_revision",
             )
             if key in target_pose
@@ -646,7 +652,50 @@ class GazeboController:
             if kind == "qualify_motion_candidates":
                 if self.candidate_qualifier is None:
                     return GazeboControlResult(False, "MOVE_GROUP_UNAVAILABLE")
-                result = dict(self.candidate_qualifier(action))
+                try:
+                    result = dict(self.candidate_qualifier(action))
+                except Exception as exc:  # noqa: BLE001 - private qualification boundary.
+                    # This RPC is host-only.  Preserve candidate identities so
+                    # the caller can validate the evidence, but never collapse
+                    # an engine/service defect into INVALID_CONTROL_ACTION (or
+                    # worse, an unreachable candidate).
+                    binding = str(action.get("qualification_binding_sha256") or "")
+                    candidates = action.get("candidates")
+                    candidates = candidates if isinstance(candidates, list) else []
+                    funnel = action.get("funnel")
+                    funnel = funnel if isinstance(funnel, Mapping) else {}
+                    detail = f"{type(exc).__name__}: {exc}"[:500]
+                    result = {
+                        "schema_version": action.get("schema_version"),
+                        "planning_scene_revision": action.get(
+                            "planning_scene_revision"
+                        ),
+                        "execution_started": False,
+                        "qualification_profile": str(
+                            funnel.get("qualification_profile") or "legacy"
+                        ),
+                        "stop_reason": "infrastructure_error",
+                        "infrastructure_error": True,
+                        "results": [
+                            {
+                                "candidate_id": str(
+                                    candidate.get("candidate_id") or ""
+                                ),
+                                "candidate_pose_sha256": str(
+                                    candidate.get("candidate_pose_sha256") or ""
+                                ),
+                                "qualification_binding_sha256": binding,
+                                "execution_started": False,
+                                "verdict": "UNKNOWN",
+                                "reason": "qualification_infrastructure_error",
+                                "infrastructure_error": True,
+                                "infrastructure_error_detail": detail,
+                                "stages": [],
+                            }
+                            for candidate in candidates
+                            if isinstance(candidate, Mapping)
+                        ],
+                    }
                 return GazeboControlResult(True, payload=result)
             if kind == "move_to":
                 if self.move_action is None:
@@ -902,8 +951,35 @@ class GazeboController:
                 orientation_verification_tolerance_rad = max(
                     0.005, 2.0 * float(goal["orientation_tolerance_rad"])
                 )
+                placement_release = (
+                    goal.get("purpose") == "placement"
+                    and goal.get("placement_stage") in {"descend", "release"}
+                )
+                actual_xyz = tuple(
+                    float(value) for value in end.end_effector_pose["xyz"]
+                )
+                target_xyz = tuple(
+                    float(value) for value in goal["requested_tool_pose"]["xyz"]
+                )
+                horizontal_error_m = math.dist(actual_xyz[:2], target_xyz[:2])
+                vertical_error_m = actual_xyz[2] - target_xyz[2]
+                if placement_release:
+                    translation_verified = (
+                        horizontal_error_m <= position_verification_tolerance_m
+                        and -position_verification_tolerance_m
+                        <= vertical_error_m
+                        <= PLACEMENT_RELEASE_UPWARD_RESIDUAL_M
+                    )
+                    position_verification_policy = (
+                        "placement_release_one_way_vertical_settling"
+                    )
+                else:
+                    translation_verified = (
+                        position_error_m <= position_verification_tolerance_m
+                    )
+                    position_verification_policy = "euclidean"
                 target_verified = (
-                    position_error_m <= position_verification_tolerance_m
+                    translation_verified
                     and orientation_error_rad <= orientation_verification_tolerance_rad
                 )
                 if ok and not bool(result.get("plan_only", False)) and not target_verified:
@@ -934,6 +1010,11 @@ class GazeboController:
                             )
                         ),
                         "position_error_m": position_error_m,
+                        "horizontal_error_m": horizontal_error_m,
+                        "vertical_error_m": vertical_error_m,
+                        "position_verification_policy": (
+                            position_verification_policy
+                        ),
                         "orientation_error_rad": orientation_error_rad,
                         "position_verification_tolerance_m": (
                             position_verification_tolerance_m

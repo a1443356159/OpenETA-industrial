@@ -28,6 +28,11 @@ This is an accounting and module-boundary design record. Runtime changes are
 implemented and verified separately; motion safety and execution gates remain
 unchanged.
 
+The opt-in Beam-2/concurrent-wave implementation is specified by
+[qualification funnel v3](openeta-qualification-funnel-v3.md). The `legacy`
+profile retains the scheduling semantics below; v3 changes scheduling and
+evidence detail without weakening any L1-L6 PASS requirement.
+
 ## Core model
 
 The authoritative accounting unit is an immutable **candidate batch**, not a

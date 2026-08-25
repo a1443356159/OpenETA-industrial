@@ -1701,13 +1701,52 @@ class AgentMemory:
             source_image = outputs.get("source_image") or parameters.get("image")
             target_prompt = outputs.get("prompt") or parameters.get("prompt")
             previous_no_detection = self.sam3_no_detection()
+            generic_point_prompt = str(target_prompt or "").strip().lower() in {
+                "",
+                "point_prompt",
+            }
+            previous_prompt = (
+                previous_no_detection.get("target_prompt")
+                if isinstance(previous_no_detection, dict)
+                else None
+            )
+            same_scene = (
+                isinstance(previous_no_detection, dict)
+                and _optional_int(previous_no_detection.get("scene_epoch"), default=-1)
+                == self.scene_epoch()
+            )
+            continuing_missing_placement_role = (
+                generic_point_prompt
+                and same_scene
+                and isinstance(previous_prompt, str)
+                and (
+                    (
+                        _placement_region_prompt(previous_prompt)
+                        and isinstance(self.placement_object_detection(), dict)
+                        and not isinstance(self.placement_region_detection(), dict)
+                    )
+                    or (
+                        not _placement_region_prompt(previous_prompt)
+                        and not isinstance(self.placement_object_detection(), dict)
+                    )
+                )
+            )
             if (
-                not target_prompt
+                generic_point_prompt
                 and isinstance(previous_no_detection, dict)
-                and str(previous_no_detection.get("source_image") or "")
-                == str(source_image or "")
+                and (
+                    str(previous_no_detection.get("source_image") or "")
+                    == str(source_image or "")
+                    or continuing_missing_placement_role
+                )
             ):
-                target_prompt = previous_no_detection.get("target_prompt")
+                # Point-SAM has no text channel of its own.  Preserve the
+                # semantic target of the immediately preceding text failure,
+                # including the normal top->wrist->top fallback sequence used
+                # for the placement marker.  Otherwise the literal backend
+                # label ``point_prompt`` is misclassified as the object mask
+                # and the host can never build the AnyPlace obligation.
+                target_prompt = previous_prompt
             source_camera_role = str(
                 outputs.get("source_camera_role")
                 or details.get("source_camera_role")
@@ -7416,6 +7455,8 @@ def _qualification_artifact_evidence(
         not isinstance(payload, dict)
         or payload.get("schema_version")
         not in {
+            "openeta.moveit_candidate_funnel.v3",
+            "openeta.moveit_candidate_qualification.v3",
             "openeta.moveit_candidate_funnel.v2",
             "openeta.moveit_candidate_qualification.v1",
         }

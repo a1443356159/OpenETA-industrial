@@ -538,6 +538,84 @@ def _record_pending_sam3_selection(
     )
 
 
+def test_cross_camera_point_fallback_preserves_placement_region_semantics() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block and place it in the green marker")
+    memory.save_fact(
+        "placement_object_detection",
+        {
+            "id": "red-object",
+            "mask_ref": "tmp/red-mask.png",
+            "source_image": "tmp/top.rgb.png",
+            "source_frame_id": "top",
+            "target_prompt": "red rectangular block",
+        },
+        source="test",
+    )
+    # Text attempts may end on wrist while the visual point selected by the
+    # main VLM is on the clearer top view.
+    memory.save_fact(
+        "sam3_no_detection",
+        {
+            "result_id": "empty-wrist-region",
+            "source_image": "tmp/wrist.rgb.png",
+            "target_prompt": "placement_zone_marker",
+            "scene_epoch": memory.scene_epoch(),
+        },
+        source="sam3",
+    )
+    parameters = {
+        "mode": "points",
+        "image": "tmp/top.rgb.png",
+        "points": [{"x": 382, "y": 160, "label": 1}],
+    }
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {"name": "sam3", "parameters": parameters},
+                "tool_calls": [
+                    {
+                        "name": "sam3",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "parameters": parameters,
+                                "outputs": {
+                                    "result_id": "point-region",
+                                    "source_image": "tmp/top.rgb.png",
+                                    "frame_id": "top",
+                                    "prompt": "point_prompt",
+                                    "segmentation_mode": "point_prompt",
+                                    "detections": [
+                                        {
+                                            "id": "detection_000",
+                                            "mask_ref": "tmp/green-mask.png",
+                                            "score": 0.99,
+                                        }
+                                    ],
+                                    "selection_required": True,
+                                },
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    pending = memory.pending_sam3_selection()
+    assert pending["target_prompt"] == "placement_zone_marker"
+    memory.resolve_sam3_selection(
+        result_id="point-region",
+        detection_id="detection_000",
+        selection_source="main_agent_vlm",
+    )
+    assert memory.placement_region_detection()["id"] == "detection_000"
+    assert memory.placement_object_detection()["id"] == "red-object"
+
+
 def _record_anygrasp_candidate_policy(
     memory: AgentMemory,
     *,

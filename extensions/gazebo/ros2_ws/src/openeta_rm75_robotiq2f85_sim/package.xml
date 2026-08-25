@@ -22,6 +22,8 @@
   <exec_depend>shape_msgs</exec_depend>
   <exec_depend>moveit_ros_move_group</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>
+  <exec_depend>pick_ik</exec_depend>
+  <exec_depend>trac_ik_kinematics_plugin</exec_depend>
   <exec_depend>openeta_rm75_v_description</exec_depend>
   <exec_depend>rosgraph_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

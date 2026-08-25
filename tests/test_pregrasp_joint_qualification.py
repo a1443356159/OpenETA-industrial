@@ -143,6 +143,31 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
                     "reason": "qualified" if submitted[index] else "not_submitted",
                     "stages": [_pass_stage()] if submitted[index] else [],
                     "full_plan_submitted": submitted[index],
+                    "goal_legality": (
+                        {
+                            "verdict": "PASS",
+                            "checks": {
+                                "object_frame_binding": {
+                                    "collision_goal_pose": {
+                                        "convention": "T_world_collision_object_goal",
+                                        "frame": "world",
+                                        "translation_xyz": [
+                                            0.48 + index * 0.001,
+                                            0.0,
+                                            0.43,
+                                        ],
+                                        "rotation_matrix": [
+                                            [1.0, 0.0, 0.0],
+                                            [0.0, 1.0, 0.0],
+                                            [0.0, 0.0, 1.0],
+                                        ],
+                                    }
+                                }
+                            },
+                        }
+                        if submitted[index]
+                        else None
+                    ),
                 }
                 for index, item in enumerate(request["candidates"])
             ],
@@ -260,6 +285,18 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
     assert [item["id"] for item in postattach.details["placement_candidates"]] == [
         "p0"
     ]
+    frozen_goal = postattach.details["placement_candidates"][0]
+    assert frozen_goal["world_object_goal_pose"]["translation_xyz"] == [
+        0.48,
+        0.0,
+        0.43,
+    ]
+    assert frozen_goal["model_pointcloud_object_goal_pose"]["translation_xyz"] == [
+        0.45,
+        0.0,
+        0.43,
+    ]
+    assert frozen_goal["frozen_goal_frame_binding"]["physical_collision_goal"] is True
     assert postattach.details["frozen_pregrasp_goal_requalification"] is True
     assert postattach.details["discarded_postattach_model_candidate_count"] == 0
     assert postattach.details["model_raw_candidate_count"] == 96

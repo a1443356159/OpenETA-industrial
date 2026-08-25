@@ -20,6 +20,8 @@ from sim.mcp_server.session import (
     _session_stream_tasks,
     _session_streams,
     _session_stream_interval,
+    _session_qualification,
+    _session_qualification_lock,
 )
 from sim.mcp_server.worker_mgr import (
     _live_stream_loop,
@@ -43,6 +45,18 @@ async def session_envs(request):
             "backend": meta.get("backend", "unknown"),
         })
     return JSONResponse({"session_id": sid, "count": len(entries), "envs": entries})
+
+
+async def session_qualification(request):
+    """Return metrics-only qualification state; never exact proof/joint data."""
+
+    sid = request.path_params.get("sid", "")
+    with _session_qualification_lock:
+        summaries = {
+            handle: dict(value)
+            for handle, value in _session_qualification.get(sid, {}).items()
+        }
+    return JSONResponse({"session_id": sid, "qualification": summaries})
 
 
 # ══════════════════════════════════════════════════════════════════════

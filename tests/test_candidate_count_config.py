@@ -133,3 +133,5 @@ def test_pregrasp_joint_limits_are_validated() -> None:
             pregrasp_joint_grasp_branch_limit=1,
             pregrasp_joint_full_plan_limit=11,
         )
+    with pytest.raises(ValueError, match="capability_map_id"):
+        CandidateFunnelConfig(capability_map_id="../outside")

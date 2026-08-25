@@ -189,6 +189,48 @@ def test_controller_routes_actions_and_unknown_outcome():
     assert ctl.execute({"action_type": "other"}).error_code == "INVALID_CONTROL_ACTION"
 
 
+def test_qualification_exception_is_reported_as_validated_infrastructure_error() -> None:
+    def fail(_request):
+        raise ValueError("bad real qualification payload")
+
+    receipt = GazeboController(
+        state_provider=_state,
+        candidate_qualifier=fail,
+    ).execute(
+        {
+            "action_type": "qualify_motion_candidates",
+            "schema_version": "openeta.moveit_candidate_funnel.v3",
+            "planning_scene_revision": 4,
+            "qualification_binding_sha256": "binding",
+            "funnel": {"qualification_profile": "fast_v3"},
+            "candidates": [
+                {
+                    "candidate_id": "c0",
+                    "candidate_pose_sha256": "pose",
+                }
+            ],
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is True
+    assert receipt["stop_reason"] == "infrastructure_error"
+    assert receipt["infrastructure_error"] is True
+    assert receipt["qualification_profile"] == "fast_v3"
+    assert receipt["results"] == [
+        {
+            "candidate_id": "c0",
+            "candidate_pose_sha256": "pose",
+            "qualification_binding_sha256": "binding",
+            "execution_started": False,
+            "verdict": "UNKNOWN",
+            "reason": "qualification_infrastructure_error",
+            "infrastructure_error": True,
+            "infrastructure_error_detail": "ValueError: bad real qualification payload",
+            "stages": [],
+        }
+    ]
+
+
 def test_controller_rejects_moveit_success_when_fresh_pose_misses_goal() -> None:
     start, end = _state(), _state()
     end.end_effector_pose["xyz"] = [0.02, 0.0, 0.5]
@@ -216,6 +258,75 @@ def test_controller_rejects_moveit_success_when_fresh_pose_misses_goal() -> None
     assert receipt["error_code"] == "MOTION_TARGET_NOT_REACHED"
     assert receipt["motion_outcome"] == "failed"
     assert receipt["position_error_m"] == pytest.approx(0.02)
+
+
+def test_controller_allows_small_upward_release_residual_for_natural_settling() -> None:
+    start, end = _state(), _state()
+    end.end_effector_pose["xyz"] = [0.002, -0.001, 0.507]
+    states = iter((start, end))
+    controller = GazeboController(
+        state_provider=lambda: next(states),
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "motion_outcome": "completed",
+        },
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "purpose": "placement",
+                "placement_stage": "descend",
+            },
+            "tolerance": 0.002,
+            "ori_tolerance": 0.05,
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is True
+    assert receipt["reached_target"] is True
+    assert receipt["position_error_m"] > receipt["position_verification_tolerance_m"]
+    assert receipt["horizontal_error_m"] < receipt["position_verification_tolerance_m"]
+    assert receipt["vertical_error_m"] == pytest.approx(0.007)
+    assert receipt["position_verification_policy"] == (
+        "placement_release_one_way_vertical_settling"
+    )
+
+
+@pytest.mark.parametrize("xyz", ([0.007, 0.0, 0.5], [0.0, 0.0, 0.493]))
+def test_controller_keeps_release_xy_and_downward_residual_strict(xyz) -> None:
+    start, end = _state(), _state()
+    end.end_effector_pose["xyz"] = list(xyz)
+    states = iter((start, end))
+    controller = GazeboController(
+        state_provider=lambda: next(states),
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "motion_outcome": "completed",
+        },
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "purpose": "placement",
+                "placement_stage": "release",
+            },
+            "tolerance": 0.002,
+            "ori_tolerance": 0.05,
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is False
+    assert receipt["error_code"] == "MOTION_TARGET_NOT_REACHED"
 
 
 @pytest.mark.parametrize(

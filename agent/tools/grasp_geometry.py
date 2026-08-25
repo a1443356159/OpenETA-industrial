@@ -337,8 +337,22 @@ def build_compile_placement_seed_handler(
             if not isinstance(proof_parameters, Mapping):
                 raise GraspGeometryError("qualified placement compile parameters are missing")
             parameters = dict(proof_parameters)
+            qualified_candidate = parameters.get("placement_candidate")
+            if not isinstance(qualified_candidate, Mapping):
+                raise GraspGeometryError(
+                    "qualified placement candidate geometry is missing"
+                )
+            qualified_candidate_id = str(qualified_candidate.get("id") or "")
+            if qualified_candidate_id and qualified_candidate_id != candidate_id:
+                raise GraspGeometryError(
+                    "qualified placement candidate id does not match its proof"
+                )
             parameters["placement_candidate_id"] = candidate_id
-            parameters["placement_candidate"] = dict(entry["candidate"])
+            # Compile the exact immutable geometry that produced the MoveIt
+            # proof.  The public/cache candidate may carry later evidence-only
+            # annotations (for example the physical collision-body goal); such
+            # annotations must not perturb the compiled-placement hash.
+            parameters["placement_candidate"] = dict(qualified_candidate)
             if host_binding:
                 parameters["selection_source"] = "host_qualified_queue"
             if parameters.get("qualification_profile_sha256") != profile_sha256:
@@ -404,6 +418,13 @@ def build_compile_placement_seed_handler(
                 success=False,
                 content=f"placement seed compilation failed: {exc}",
                 outputs={"reason": "placement_seed_compile_failed"},
+                diagnostics=[
+                    {
+                        "code": "placement_seed_compile_failed",
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                ],
             )
         return make_tool_result(
             context,

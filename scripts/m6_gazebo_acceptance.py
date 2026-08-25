@@ -55,8 +55,9 @@ GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
 INSTRUCTIONS = """
 [automation=scripted_tui] 在隔离 Gazebo pick-place 环境中完成一次真实约束放置验收。
-创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 并用该抓取观察供 SAM3
-分割红色方块 target_object，并让宿主通过统一 grasp_pose_estimate 调用真实 AnyGrasp；create 返回的
+创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe，并用该抓取观察以固定文本提示
+`red rectangular block` 供 SAM3 分割红色方块 target_object，
+并让宿主通过统一 grasp_pose_estimate 调用真实 AnyGrasp；create 返回的
 initial observation 不计作这次显式 observe。禁止 Oracle、
 fake candidate、直接调用后端工具、固定抓法、固定腕姿、IK preview 或新增运动工具。不得调用 python_exec
 读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
@@ -426,6 +427,115 @@ def _qualification_blocks(
     return blocks
 
 
+def _has_v3_grasp_diversity_evidence(
+    call: Mapping[str, Any], *, artifact_root: Path
+) -> bool:
+    """Accept a full v3 grasp pool only when its two L5 branches are proven."""
+
+    reported_counts = {
+        int(value)
+        for value in base._values(call, "diversity_selected_count")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+    for block in _qualification_blocks(call, artifact_root=artifact_root):
+        if (
+            block.get("schema_version") != "openeta.moveit_candidate_funnel.v3"
+            or block.get("artifact_schema_version")
+            != "openeta.moveit_candidate_qualification.v3"
+            or block.get("purpose") != "grasp"
+            or block.get("stop_reason") != "complete_l5_pass_found"
+        ):
+            continue
+        results = block.get("results")
+        metrics = block.get("metrics")
+        selected_ids = block.get("selected_candidate_ids")
+        l5_attempts = block.get("l5_attempts")
+        if not (
+            isinstance(results, list)
+            and isinstance(metrics, Mapping)
+            and isinstance(selected_ids, list)
+            and isinstance(l5_attempts, list)
+        ):
+            continue
+        generated_count = metrics.get("generated_count")
+        l5_pass_count = metrics.get("l5_pass_count")
+        if not (
+            isinstance(generated_count, int)
+            and not isinstance(generated_count, bool)
+            and generated_count >= 10
+            and generated_count == len(results)
+            and generated_count in reported_counts
+            and isinstance(l5_pass_count, int)
+            and not isinstance(l5_pass_count, bool)
+            and l5_pass_count >= 2
+            and len(selected_ids) == 2
+            and len(set(selected_ids)) == 2
+        ):
+            continue
+        result_by_id = {
+            row.get("candidate_id"): row
+            for row in results
+            if isinstance(row, Mapping) and isinstance(row.get("candidate_id"), str)
+        }
+        selected_rows = [result_by_id.get(candidate_id) for candidate_id in selected_ids]
+        if not all(
+            isinstance(row, Mapping)
+            and row.get("verdict") == "PASS"
+            and row.get("endpoint_pass") is True
+            for row in selected_rows
+        ):
+            continue
+        l5_pass_ids = {
+            row.get("candidate_id")
+            for row in l5_attempts
+            if isinstance(row, Mapping) and row.get("verdict") == "PASS"
+        }
+        if not set(selected_ids).issubset(l5_pass_ids):
+            continue
+        qualified_clusters = {
+            row.get("se3_cluster_id")
+            for row in results
+            if isinstance(row, Mapping)
+            and row.get("endpoint_pass") is True
+            and isinstance(row.get("se3_cluster_id"), str)
+            and row.get("se3_cluster_id")
+        }
+        selected_clusters = {
+            row.get("se3_cluster_id")
+            for row in selected_rows
+            if isinstance(row, Mapping)
+            and isinstance(row.get("se3_cluster_id"), str)
+            and row.get("se3_cluster_id")
+        }
+        if not qualified_clusters or len(selected_clusters) != min(
+            2, len(qualified_clusters)
+        ):
+            continue
+        return True
+    return False
+
+
+def _has_bounded_grasp_l5_evidence(
+    call: Mapping[str, Any], *, artifact_root: Path
+) -> bool:
+    """Accept the legacy submit cap or the stricter v3 two-branch proof.
+
+    V3 may need more than two L5 attempts to obtain two PASS branches from
+    distinct SE(3) clusters.  Its artifact binds the final queue to exactly two
+    distinct PASS candidates, so the old raw submission-count cap is no longer
+    the relevant bound.
+    """
+
+    legacy_bound = any(
+        1 <= value <= 2
+        for value in base._values(call, "full_plan_submitted_count")
+        if isinstance(value, int) and not isinstance(value, bool)
+    )
+    return legacy_bound or _has_v3_grasp_diversity_evidence(
+        call, artifact_root=artifact_root
+    )
+
+
 def verify_case(
     paths: base.CasePaths,
     *,
@@ -465,8 +575,12 @@ def verify_case(
             errors.append("fake candidate evidence is forbidden")
         if any(
             base._contains(event, "plan_only", True)
-            and not base._contains(
-                event, "schema_version", "openeta.moveit_candidate_funnel.v2"
+            and not any(
+                base._contains(event, "schema_version", schema)
+                for schema in (
+                    "openeta.moveit_candidate_funnel.v2",
+                    "openeta.moveit_candidate_funnel.v3",
+                )
             )
             for event in events
         ):
@@ -497,13 +611,18 @@ def verify_case(
         ]
         if not raw_grasp_counts or raw_grasp_counts[-1] < 10:
             errors.append(f"{backend_label} raw candidate count evidence is missing")
-        if not any(
+        has_legacy_diversity_pool = any(
             1 <= value <= 64
             for value in base._values(final_grasp, "diversity_selected_count")
             if isinstance(value, int) and not isinstance(value, bool)
+        )
+        if not has_legacy_diversity_pool and not _has_v3_grasp_diversity_evidence(
+            final_grasp, artifact_root=paths.root
         ):
             errors.append(f"{backend_label} diversity pool evidence is missing")
-        if not any(1 <= value <= 2 for value in base._values(final_grasp, "full_plan_submitted_count") if isinstance(value, int)):
+        if not _has_bounded_grasp_l5_evidence(
+            final_grasp, artifact_root=paths.root
+        ):
             errors.append(f"{backend_label} full-plan submission bound is missing")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
@@ -540,8 +659,12 @@ def verify_case(
         for legacy_key in ("selected_grasp", "source_grasp_id", "place_grasp_pose"):
             if base._contains(anyplace, legacy_key):
                 errors.append(f"AnyPlace leaked forbidden grasp-coupled field: {legacy_key}")
-        if not base._contains(
-            anyplace, "schema_version", "openeta.moveit_candidate_funnel.v2"
+        if not any(
+            base._contains(anyplace, "schema_version", schema)
+            for schema in (
+                "openeta.moveit_candidate_funnel.v2",
+                "openeta.moveit_candidate_funnel.v3",
+            )
         ):
             errors.append("AnyPlace qualification evidence is missing")
         if not base._contains(anyplace, "type", "placement_candidate_image"):
