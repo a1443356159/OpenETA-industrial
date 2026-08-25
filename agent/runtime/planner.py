@@ -911,7 +911,7 @@ def _host_obligation_decision(
         stage = str(execution.get("stage") or "")
         required = execution.get("required_action")
         if (
-            stage in {"hover", "align_move", "precontact"}
+            stage in {"hover", "align_move", "precontact", "descend"}
             and isinstance(required, dict)
             and required.get("name") == "move_to"
             and isinstance(required.get("parameters"), dict)
@@ -923,7 +923,8 @@ def _host_obligation_decision(
                 parameters=dict(required["parameters"]),
                 reasoning=(
                     f"Grasp stage {stage} has one host-generated safe pose; dispatch "
-                    "it after semantic mask selection and before stale visual recovery."
+                    "it after semantic mask selection and before stale visual recovery. "
+                    "The independent action reviewer and runtime motion checks still apply."
                 ),
                 metadata={
                     "host_obligation": {
@@ -1110,7 +1111,7 @@ def _host_obligation_decision(
                 },
             )
         if (
-            stage in {"hover", "align_move", "precontact"}
+            stage in {"hover", "align_move", "precontact", "descend"}
             and isinstance(required, dict)
             and required.get("name") == "move_to"
             and isinstance(required.get("parameters"), dict)
@@ -1122,7 +1123,8 @@ def _host_obligation_decision(
                 parameters=dict(required["parameters"]),
                 reasoning=(
                     f"Grasp stage {stage} has one host-generated safe pose; dispatch "
-                    "it directly while retaining reviewer and controller checks."
+                    "it directly while retaining the independent reviewer and runtime "
+                    "motion checks."
                 ),
                 metadata={
                     "host_obligation": {

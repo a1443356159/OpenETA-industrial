@@ -5622,8 +5622,19 @@ def test_host_generated_safe_grasp_motion_uses_host_dispatch(stage: str) -> None
     assert decision.metadata["host_obligation"]["stage"] == stage
 
 
-def test_adjustable_contact_descend_remains_model_planned() -> None:
+def test_frozen_contact_descend_uses_host_dispatch() -> None:
     memory = AgentMemory()
+    required = {
+        "target_pose": {
+            "frame": "world",
+            "xyz": [0.1, 0.2, 0.3],
+            "rotation_matrix": [
+                [0.0, -1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        }
+    }
     memory.save_fact(
         "grasp_execution",
         {
@@ -5633,7 +5644,7 @@ def test_adjustable_contact_descend_remains_model_planned() -> None:
             "candidate_id": "grasp_003",
             "required_action": {
                 "name": "move_to",
-                "parameters": {"target_pose": {"frame": "world", "xyz": [0.1, 0.2, 0.3]}},
+                "parameters": required,
             },
         },
         source="test",
@@ -5649,8 +5660,10 @@ def test_adjustable_contact_descend_remains_model_planned() -> None:
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "observe"
-    assert decision.metadata["execution_model"] == "closed_loop_tool_calling"
+    assert decision.action == "move_to"
+    assert decision.parameters == required
+    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
+    assert decision.metadata["host_obligation"]["stage"] == "descend"
 
 
 @pytest.mark.parametrize("failure_reason", ["empty_target_mask"])
