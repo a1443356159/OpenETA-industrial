@@ -104,6 +104,11 @@ _SCRIPTED_ENVIRONMENT_TASK_RE = re.compile(
     r"(?:^|;)\s*environment_task=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
 )
+_SCRIPTED_SEMANTIC_FIELD_RE = re.compile(
+    r"(?:^|;)\s*(?P<role>grasp_target|placement_object|placement_region)="
+    r"(?P<value>[A-Za-z0-9_-]+)\s*(?=;|$)",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -5635,7 +5640,18 @@ def _semantic_perception_obligation(
     roles = roles if isinstance(roles, dict) else {}
     role_state = roles.get(semantic_role) if isinstance(roles, dict) else None
     role_state = role_state if isinstance(role_state, dict) else {}
-    prompt = str(role_state.get("canonical_prompt") or "").strip()
+    scripted_prompts = _scripted_semantic_prompts(
+        str(
+            memory_context.get("current_user_request")
+            or memory_context.get("task")
+            or ""
+        )
+    )
+    prompt = str(
+        role_state.get("canonical_prompt")
+        or scripted_prompts.get(semantic_role)
+        or ""
+    ).strip()
     if not prompt and semantic_role in {"grasp_target", "placement_object"}:
         policy_target = (
             grasp_policy.get("target_detection")
@@ -5933,6 +5949,21 @@ def _scripted_environment_start_obligation(
         "environment_id": environment_id,
         "source": "scripted_task_marker",
     }
+
+
+def _scripted_semantic_prompts(task: str) -> dict[str, str]:
+    """Read opt-in fixed visual phrases from the scripted acceptance marker."""
+
+    marker = _SCRIPTED_AUTOMATION_MARKER_RE.search(task)
+    if marker is None:
+        return {}
+    prompts: dict[str, str] = {}
+    for match in _SCRIPTED_SEMANTIC_FIELD_RE.finditer(marker.group("body")):
+        role = match.group("role").lower()
+        value = match.group("value").replace("_", " ").strip()
+        if value:
+            prompts[role] = value
+    return prompts
 
 
 def _attached_object_image_projection(

@@ -18,6 +18,7 @@ from agent.runtime.planner import (
     _model_request_context,
     _sam3_request_identity,
     _semantic_perception_obligation,
+    _scripted_semantic_prompts,
 )
 from agent.runtime.runtime import OpenEtaAgentRuntime
 from agent.runtime.sam3_selection import (
@@ -1017,6 +1018,49 @@ def test_explicit_post_create_observe_precedes_semantic_perception() -> None:
     assert obligation["required_parameters"] == {
         "reason": "explicit_post_create_observation_required"
     }
+
+
+def test_scripted_fixed_semantics_dispatch_sam3_without_model_routing_turn() -> None:
+    scripted_request = (
+        "[automation=scripted_tui; environment_id=openeta/test-v0; "
+        "environment_task=normal_pick_and_place; "
+        "grasp_target=red_rectangular_block; "
+        "placement_object=red_rectangular_block; "
+        "placement_region=green_placement_zone_marker] run acceptance"
+    )
+    assert _scripted_semantic_prompts(scripted_request) == {
+        "grasp_target": "red rectangular block",
+        "placement_object": "red rectangular block",
+        "placement_region": "green placement zone marker",
+    }
+    obligation = _semantic_perception_obligation(
+        observation=EnvObservation(
+            task="normal pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"step_idx": 2},
+        ),
+        camera_artifacts=[
+            {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/top.png"},
+            {"kind": "rgb", "frame_id": "wrist", "path": "/tmp/wrist.png"},
+        ],
+        memory_context={
+            "scene_epoch": 1,
+            "current_user_request": scripted_request,
+            "latest_environment_receipt": {
+                "info": {"previous_action": {"request_name": "observe"}}
+            },
+            "sam3_semantic_state": {"roles": {}, "attempts": []},
+        },
+    )
+
+    assert obligation is not None
+    assert obligation["status"] == "required"
+    assert obligation["required_tool"] == "sam3"
+    assert obligation["semantic_role"] == "grasp_target"
+    assert obligation["semantic_target"] == "red rectangular block"
+    assert obligation["required_parameters"]["prompt"] == "red rectangular block"
+    assert obligation["required_parameters"]["image"] == "/tmp/top.png"
 
 
 def _grasp_target_retry_obligation(
