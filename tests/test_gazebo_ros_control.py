@@ -1,20 +1,92 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 import time
 
 import pytest
 
 from extensions.gazebo.robot_control import JOINT_NAMES, GazeboControlConfig, robot_state_from_sources
+from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.ros_control import (
-    RosGazeboController,
     RosGazeboStateSource,
     _RosRuntime,
+    _configured_qualification_solver_profile,
+    _qualification_ik_response_timeout_s,
     _moveit_scene_frame,
     _merged_allowed_collision_rows,
+    _load_qualification_capability_map,
     _populate_recovery_trajectory_goal,
     _populate_state_validity_request,
+    _qualification_robot_model_sha256,
 )
+from agent.runtime.capability_map import generate_sparse_capability_map, robot_model_hash
+
+
+def test_qualification_solver_auto_matches_launch_profile(monkeypatch) -> None:
+    monkeypatch.setenv("OPENETA_QUALIFICATION_SOLVER_PROFILE", "auto")
+    monkeypatch.setenv("OPENETA_QUALIFICATION_PROFILE", "legacy")
+    assert _configured_qualification_solver_profile() == "kdl_legacy"
+    monkeypatch.setenv("OPENETA_QUALIFICATION_PROFILE", "fast_v3")
+    assert _configured_qualification_solver_profile() == "kdl_fast"
+    monkeypatch.setenv("OPENETA_QUALIFICATION_SOLVER_PROFILE", "trac_ik_speed")
+    assert _configured_qualification_solver_profile() == "trac_ik_speed"
+
+
+def test_fast_ik_solver_budget_does_not_shorten_ros_response_deadline() -> None:
+    # Eight short IK requests may queue behind one MoveGroup service callback.
+    # The IK request still carries 50 ms, while its transport may wait for the
+    # bounded queue to drain without classifying a reachable pose as infra loss.
+    assert _qualification_ik_response_timeout_s(0.05) == pytest.approx(2.0)
+    assert _qualification_ik_response_timeout_s(0.05) > 8 * 0.05
+
+
+def test_runtime_capability_hash_matches_offline_generator_contract() -> None:
+    config = GazeboControlConfig()
+    package = config.ros_workspace / "src" / "openeta_rm75_robotiq2f85_sim"
+
+    expected = robot_model_hash(
+        urdf=(package / "urdf" / "rm75_robotiq2f85.urdf.xacro").read_bytes(),
+        srdf=(package / "config" / "rm75_robotiq2f85.srdf").read_bytes(),
+        planning_group=config.move_group,
+        tcp=config.arm_tip,
+        gripper="robotiq_2f85",
+    )
+
+    assert _qualification_robot_model_sha256(config) == expected
+
+
+def test_pickplace_capability_hash_uses_its_distinct_urdf_and_srdf() -> None:
+    assert _qualification_robot_model_sha256(
+        NativePickPlaceConfig()
+    ) != _qualification_robot_model_sha256(GazeboControlConfig())
+
+
+def test_ros_loads_content_addressed_capability_map_from_explicit_path(
+    monkeypatch, tmp_path
+) -> None:
+    payload = generate_sparse_capability_map(
+        robot_model_sha256="robot",
+        joint_lower=[-1.0],
+        joint_upper=[1.0],
+        forward_kinematics=lambda _joints: (
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        jacobian=lambda _joints: [[1.0]],
+        sample_count=0,
+    )
+    path = tmp_path / "map.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("OPENETA_CAPABILITY_MAP_PATH", str(path))
+
+    loaded = _load_qualification_capability_map(
+        GazeboControlConfig(),
+        map_id=payload["map_id"],
+        robot_model_sha256="robot",
+    )
+
+    assert loaded["map_id"] == payload["map_id"]
 
 
 def test_allowed_collision_merge_preserves_srdf_rows_and_adds_target_links() -> None:

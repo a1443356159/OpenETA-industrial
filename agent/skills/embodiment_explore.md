@@ -24,7 +24,6 @@ allowed_tools:
   - grasp_pose_estimate
   - anyplace
   - camera_pose_to_world
-  - compute_wrist_alignment
   - move_to
   - follow_eef_trajectory
   - gripper_control
@@ -68,8 +67,8 @@ may differ.
    - gripper command direction, usable width, and contact behavior;
    - controller response, tolerance, and bounded step size;
    - camera alignment and wrist-servo gain;
-   - approach/contact/lift offsets;
-   - carry, rim, release, and retreat clearances;
+   - provider-to-TCP representation transforms;
+   - exact-contact and exact-release tolerances;
    - timeout reconciliation and settling time.
 5. Probe with the smallest observable atomic transition. Observe before and
    after every mutation. Never infer success from tool-call success alone.

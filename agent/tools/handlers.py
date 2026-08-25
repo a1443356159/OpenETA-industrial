@@ -19,9 +19,6 @@ from uuid import uuid4
 from adapter.protocol import JsonDict
 from agent.runtime.artifact_paths import artifact_session_id, artifact_session_root
 from agent.tools.attachment_probe import build_prepare_attachment_probe_handler
-from agent.tools.grasp_geometry import (
-    build_wrist_alignment_handler,
-)
 from agent.tools.registry import (
     ToolExecutionContext,
     ToolHandler,
@@ -147,7 +144,6 @@ def bind_dummy_tool_handlers(
         "anygrasp": _anygrasp_handler,
         "camera_pose_to_world": _camera_pose_to_world_handler,
         "prepare_attachment_probe": build_prepare_attachment_probe_handler(),
-        "compute_wrist_alignment": build_wrist_alignment_handler(),
         "hand_pose_database": _hand_pose_handler,
         "move_to": _approval_control_handler(approve_world_mutating),
         "follow_eef_trajectory": _approval_control_handler(approve_world_mutating),
@@ -1762,6 +1758,23 @@ def build_anyplace_handler(
             return _anyplace_failure(
                 "invalid_scene_revision",
                 "AnyPlace placement prediction failed: planning-scene revision is missing.",
+            )
+        if (
+            context.parameters.get("reuse_frozen_goal_pool") is True
+            and pre_inference is not None
+        ):
+            prepared = pre_inference(
+                context,
+                {
+                    "reuse_frozen_goal_pool": True,
+                    "scene_revision": scene_revision,
+                },
+            )
+            if prepared is not None:
+                return prepared
+            return _anyplace_failure(
+                "frozen_goal_pool_unavailable",
+                "AnyPlace frozen goal reuse failed: no matching cached pool is available.",
             )
         try:
             object_packet = _normalise_anyplace_observation(

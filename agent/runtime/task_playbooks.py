@@ -168,7 +168,7 @@ def select_task_playbook(
             "official_reward_count": len(selected["evidence"]["official_rewards"]),
         },
         "usage_contract": (
-            "Treat this as a localization and strategy prior. Re-observe and verify the "
+            "Treat this as an identity and subgoal-order prior. Re-observe and verify the "
             "current scene; never replay stored coordinates or bypass safety, attachment, "
             "placement, or official-reward checks."
         ),
@@ -226,7 +226,6 @@ def extract_task_playbook_candidate(
             signature: JsonDict = {
                 "geometry_family": compiled.get("target_geometry_family")
                 or compiled.get("target_class"),
-                "strategy_id": compiled.get("strategy_id"),
                 "gripper_width_m": compiled.get("gripper_width_m")
                 or camera_pose.get("width"),
                 "backend": compiled.get("source_backend")
@@ -275,7 +274,8 @@ def extract_task_playbook_candidate(
             "successful_stage_sequence": stage_sequence,
             "rules": [
                 "Use object identity and geometry hints only after fresh visual verification.",
-                "Treat estimator poses as seeds and keep attachment and reward gates active.",
+                "Keep model terminal poses unchanged; MoveIt owns the complete path.",
+                "Keep native attachment and task-result gates active.",
             ],
         },
         "evidence": {

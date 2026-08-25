@@ -11,35 +11,56 @@ import hashlib
 import json
 import math
 import random
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from adapter.protocol import JsonDict
 from agent.tools.registry import ToolResult
+from agent.runtime.capability_map import SparseCapabilityMap, target_pose
+from agent.runtime.qualification_legality import (
+    evaluate_grasp_placement_pair_legality,
+    evaluate_placement_goal_legality,
+)
+from agent.runtime.qualification_v3 import (
+    FAST_ARTIFACT_SCHEMA,
+    FAST_QUALIFICATION_SCHEMA,
+    CandidateWave,
+    candidate_physical_quality_key,
+    deduplicate_beam_solutions,
+    fixed_recovery_seeds,
+    generator_score,
+    grasp_symmetry_family_id,
+    joint_limit_margin,
+    latency_summary,
+    normalized_joint_distance,
+    schedule_candidate_waves,
+    select_grasp_branches,
+)
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE,
     DEFAULT_ANYPLACE_FULL_PLAN_LIMIT,
     DEFAULT_GRASP_DIVERSITY_POOL_SIZE,
     DEFAULT_GRASP_FULL_PLAN_LIMIT,
     DEFAULT_MOVEIT_IK_SEED_COUNT,
-    DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT,
+    DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
 )
 
 
 QUALIFICATION_SCHEMA = "openeta.moveit_candidate_funnel.v2"
+QUALIFICATION_SCHEMA_V3 = FAST_QUALIFICATION_SCHEMA
+SUPPORTED_QUALIFICATION_SCHEMAS = (QUALIFICATION_SCHEMA, QUALIFICATION_SCHEMA_V3)
 PRIVATE_RPC_NAME = "qualify_motion_candidates"
 PLANNING_TIME_S = 30.0
 PLANNING_ATTEMPTS = 3
 KINEMATIC_IK_TIMEOUT_S = 2.0
 STATE_VALIDITY_TIMEOUT_S = 2.0
 QUALIFICATION_RPC_GRACE_S = 30.0
-PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA = (
-    "openeta.parallel_gripper_target_closing_alignment.v1"
-)
 PROGRESSIVE_SCREENING_MODE = "progressive_until_full_plan_capacity"
 PROGRESSIVE_NOT_EVALUATED_REASON = "progressive_endpoint_capacity_reached"
 
@@ -69,6 +90,54 @@ def _unique_joint_state_seeds(
         if len(seeds) >= max(1, limit):
             break
     return seeds
+
+
+def _valid_joint_state(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    names, positions = value.get("names"), value.get("positions")
+    if (
+        not isinstance(names, Sequence)
+        or isinstance(names, (str, bytes, bytearray))
+        or not isinstance(positions, Sequence)
+        or isinstance(positions, (str, bytes, bytearray))
+        or not names
+        or len(names) != len(positions)
+        or len({str(name) for name in names}) != len(names)
+    ):
+        return False
+    try:
+        parsed = [float(position) for position in positions]
+    except (TypeError, ValueError):
+        return False
+    return all(math.isfinite(position) for position in parsed)
+
+
+class _QualificationInfrastructureError(RuntimeError):
+    """Repeated ROS/service failure that must not be called unreachable."""
+
+
+@dataclass(slots=True)
+class _ServiceConcurrencyGate:
+    limit: int
+    _semaphore: threading.BoundedSemaphore = field(init=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    active: int = 0
+    maximum_active: int = 0
+
+    def __post_init__(self) -> None:
+        self._semaphore = threading.BoundedSemaphore(max(1, self.limit))
+
+    def call(self, callback: Callable[[], Mapping[str, Any]]) -> Mapping[str, Any]:
+        with self._semaphore:
+            with self._lock:
+                self.active += 1
+                self.maximum_active = max(self.maximum_active, self.active)
+            try:
+                return callback()
+            finally:
+                with self._lock:
+                    self.active -= 1
 
 
 @dataclass(slots=True)
@@ -143,9 +212,21 @@ class MoveItCandidateQualifier:
         placement_diversity_limit: int = DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE,
         grasp_full_plan_limit: int = DEFAULT_GRASP_FULL_PLAN_LIMIT,
         placement_full_plan_limit: int = DEFAULT_ANYPLACE_FULL_PLAN_LIMIT,
-        pregrasp_joint_full_plan_limit: int = DEFAULT_PREGRASP_JOINT_FULL_PLAN_LIMIT,
+        frozen_pair_full_plan_limit: int = DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
         ik_seed_count: int = DEFAULT_MOVEIT_IK_SEED_COUNT,
         placement_max_rounds: int = 2,
+        qualification_profile: str = "legacy",
+        solver_profile: str = "auto",
+        beam_width: int = 2,
+        grasp_waves: Sequence[int] = (16, 32, 64),
+        placement_waves: Sequence[int] = (12, 24, 48, 96),
+        max_ik_concurrency: int = 8,
+        max_state_validity_concurrency: int = 8,
+        fast_seed_count: int = 2,
+        recovery_seed_count: int = 6,
+        fast_ik_timeout_s: float = 0.05,
+        recovery_ik_timeout_s: float = 0.2,
+        capability_map_id: str = "",
     ) -> None:
         self.rpc = rpc
         self.cache = cache or QualificationCache()
@@ -159,9 +240,21 @@ class MoveItCandidateQualifier:
             "grasp": int(grasp_full_plan_limit),
             "placement": int(placement_full_plan_limit),
         }
-        self.pregrasp_joint_full_plan_limit = int(pregrasp_joint_full_plan_limit)
+        self.frozen_pair_full_plan_limit = int(frozen_pair_full_plan_limit)
         self.ik_seed_count = int(ik_seed_count)
         self.placement_max_rounds = int(placement_max_rounds)
+        self.qualification_profile = str(qualification_profile)
+        self.solver_profile = str(solver_profile)
+        self.beam_width = int(beam_width)
+        self.grasp_waves = tuple(int(value) for value in grasp_waves)
+        self.placement_waves = tuple(int(value) for value in placement_waves)
+        self.max_ik_concurrency = int(max_ik_concurrency)
+        self.max_state_validity_concurrency = int(max_state_validity_concurrency)
+        self.fast_seed_count = int(fast_seed_count)
+        self.recovery_seed_count = int(recovery_seed_count)
+        self.fast_ik_timeout_s = float(fast_ik_timeout_s)
+        self.recovery_ik_timeout_s = float(recovery_ik_timeout_s)
+        self.capability_map_id = str(capability_map_id)
         self._placement_rounds: dict[str, int] = {}
 
     def qualify_result(
@@ -182,45 +275,14 @@ class MoveItCandidateQualifier:
         raw = details.get(key)
         if not isinstance(raw, list) or not raw:
             return result
+        fast_profile = self.qualification_profile in {"fast_v3", "shadow"}
+        shadow_legacy_input_ids: set[str] | None = None
         if purpose == "grasp":
-            augmented_candidates: list[JsonDict] = []
-            for candidate in raw:
-                if not isinstance(candidate, Mapping):
-                    continue
-                gripper_name = str(candidate.get("gripper_name") or "").lower()
-                parallel_gripper = (
-                    "robotiq" in gripper_name or "parallel" in gripper_name
-                )
-                base_candidate = dict(candidate)
-                if parallel_gripper:
-                    try:
-                        base_candidate = parallel_gripper_centering_variant(candidate)
-                    except ValueError:
-                        # Sensor evidence is optional.  With no valid aligned
-                        # mask/depth correction, retain the unmodified model
-                        # pose and let the existing funnel fail closed.
-                        pass
-                augmented_candidates.append(base_candidate)
-                if parallel_gripper:
-                    try:
-                        augmented_candidates.append(
-                            parallel_gripper_symmetry_variant(base_candidate)
-                        )
-                    except ValueError:
-                        pass
-                    try:
-                        reversal = parallel_gripper_approach_reversal_variant(
-                            base_candidate
-                        )
-                        augmented_candidates.extend(
-                            [
-                                reversal,
-                                parallel_gripper_symmetry_variant(reversal),
-                            ]
-                        )
-                    except ValueError:
-                        pass
-            raw = augmented_candidates
+            # Grasp providers own terminal pose generation.  Keep each model
+            # result byte-for-byte through scheduling; the host may rank or
+            # reject an invalid pose, but must not translate, rotate, mirror,
+            # or reverse it into a new candidate.
+            raw = [dict(candidate) for candidate in raw if isinstance(candidate, Mapping)]
             details[key] = raw
         qualification_round = 1
         if purpose == "placement" and qualification_mode == "standard":
@@ -233,19 +295,32 @@ class MoveItCandidateQualifier:
             )
             qualification_round = self._placement_rounds.get(pool_key, 0) + 1
             self._placement_rounds[pool_key] = qualification_round
-            augmented = (
-                poisson_disk_placement_augment(raw, seed_key=pool_key)
-                if qualification_round > 1
-                else []
-            )
-            # Each inference round is an independent qualification pool.  Keep
-            # the frozen observation/attachment binding for round accounting,
-            # but do not spend a later round requalifying candidates from an
-            # earlier zero-PASS round.
-            raw = _deduplicate_se3_candidates(
-                [*raw, *augmented],
-                round_index=qualification_round,
-            )
+            # Each model inference round is an independent qualification pool.
+            # Do not synthesize placement translations between rounds: AnyPlace
+            # owns terminal object-goal generation and all 96 results remain
+            # available to the deterministic waves.
+            combined = list(raw)
+            if fast_profile:
+                if self.qualification_profile == "shadow":
+                    shadow_legacy_input_ids = {
+                        str(candidate.get("id") or "")
+                        for candidate in _deduplicate_se3_candidates(
+                            combined,
+                            round_index=qualification_round,
+                        )
+                    }
+                # Every AnyPlace result remains an independent scheduling
+                # unit in v3. Exact-pose duplicates share a cluster, but are
+                # never deleted; only missing/duplicate IDs are repaired.
+                raw = _preserve_candidate_pool(
+                    combined,
+                    round_index=qualification_round,
+                )
+            else:
+                raw = _deduplicate_se3_candidates(
+                    combined,
+                    round_index=qualification_round,
+                )
             details[key] = raw
         generated = len(raw)
         compiled_descriptors = []
@@ -311,14 +386,19 @@ class MoveItCandidateQualifier:
                     "candidate": rpc_candidate,
                 }
             )
-        if qualification_mode == "pregrasp_joint":
+        if qualification_mode == "frozen_pair":
             # Every constructed grasp/object-goal pair reaches compilation and
             # the conservative structural precheck.  The private helper then
             # traverses L3/L4 in stable round-robin order only until it fills
             # the complete L5 submission capacity.  Unvisited pairs remain
             # explicitly NOT_EVALUATED; they are never relabelled as failures.
             request_candidates = compiled_descriptors
-            full_plan_limit = self.pregrasp_joint_full_plan_limit
+            full_plan_limit = self.frozen_pair_full_plan_limit
+        elif fast_profile:
+            # fast_v3 must eventually expose every structurally valid model
+            # result. Capability and empirical scores affect wave ordering only.
+            request_candidates = compiled_descriptors
+            full_plan_limit = self.full_plan_limits[purpose]
         else:
             request_candidates = diversify_compiled_candidates(
                 compiled_descriptors,
@@ -326,8 +406,53 @@ class MoveItCandidateQualifier:
                 limit=self.diversity_limits[purpose],
             )
             full_plan_limit = self.full_plan_limits[purpose]
+        funnel_config: JsonDict = {
+            "ik_seed_count": self.ik_seed_count,
+            "full_plan_limit": full_plan_limit,
+            "screening_mode": PROGRESSIVE_SCREENING_MODE,
+            # This is derived from L5 capacity.  L1/L2 still cover the
+            # complete submitted batch; only candidates with no remaining
+            # chance to reach L5 skip the expensive L3/L4 tail.
+            "endpoint_pass_target": full_plan_limit,
+        }
+        if fast_profile:
+            funnel_config.update(
+                {
+                    "qualification_profile": self.qualification_profile,
+                    "solver_profile": self.solver_profile,
+                    "beam_width": self.beam_width,
+                    "grasp_waves": list(self.grasp_waves),
+                    "placement_waves": list(self.placement_waves),
+                    "max_ik_concurrency": self.max_ik_concurrency,
+                    "max_state_validity_concurrency": self.max_state_validity_concurrency,
+                    "fast_seed_count": self.fast_seed_count,
+                    "recovery_seed_count": self.recovery_seed_count,
+                    "fast_ik_timeout_s": self.fast_ik_timeout_s,
+                    "recovery_ik_timeout_s": self.recovery_ik_timeout_s,
+                    "capability_map_id": self.capability_map_id,
+                    "l5_pass_target": 2 if purpose == "grasp" else 1,
+                }
+            )
+            if self.qualification_profile == "shadow":
+                shadow_legacy_candidates = diversify_compiled_candidates(
+                    [
+                        descriptor
+                        for descriptor in compiled_descriptors
+                        if shadow_legacy_input_ids is None
+                        or str(descriptor.get("candidate_id") or "")
+                        in shadow_legacy_input_ids
+                    ],
+                    purpose=purpose,
+                    limit=self.diversity_limits[purpose],
+                )
+                funnel_config["shadow_legacy_candidate_ids"] = [
+                    str(item.get("candidate_id") or "")
+                    for item in shadow_legacy_candidates
+                ]
         request: JsonDict = {
-            "schema_version": QUALIFICATION_SCHEMA,
+            "schema_version": (
+                QUALIFICATION_SCHEMA_V3 if fast_profile else QUALIFICATION_SCHEMA
+            ),
             "purpose": purpose,
             "scene_epoch": scene_epoch,
             "planning_scene_revision": planning_scene_revision,
@@ -338,18 +463,33 @@ class MoveItCandidateQualifier:
                 "kinematic_ik_timeout_s": KINEMATIC_IK_TIMEOUT_S,
                 "state_validity_timeout_s": STATE_VALIDITY_TIMEOUT_S,
             },
-            "funnel": {
-                "ik_seed_count": self.ik_seed_count,
-                "full_plan_limit": full_plan_limit,
-                "screening_mode": PROGRESSIVE_SCREENING_MODE,
-                # This is derived from L5 capacity.  L1/L2 still cover the
-                # complete submitted batch; only candidates with no remaining
-                # chance to reach L5 skip the expensive L3/L4 tail.
-                "endpoint_pass_target": full_plan_limit,
-            },
+            "funnel": funnel_config,
             "source": dict(source or {}),
             "candidates": request_candidates,
         }
+        request["qualification_case_sha256"] = str(
+            (source or {}).get("case_id")
+            or (source or {}).get("scenario_id")
+            or _hash(
+                {
+                    "purpose": purpose,
+                    "scene_epoch": scene_epoch,
+                    "planning_scene_revision": planning_scene_revision,
+                    "provider": (source or {}).get("provider"),
+                    "provider_version": (source or {}).get("provider_version"),
+                    "candidate_pool": [
+                        {
+                            "candidate_id": item["candidate_id"],
+                            "candidate_pose_sha256": item[
+                                "candidate_pose_sha256"
+                            ],
+                            "compiled_candidate_sha256": _hash(item["candidate"]),
+                        }
+                        for item in compiled_descriptors
+                    ],
+                }
+            )
+        )
         request["qualification_binding_sha256"] = _hash(
             {
                 "purpose": purpose,
@@ -366,20 +506,36 @@ class MoveItCandidateQualifier:
                 ],
             }
         )
-        try:
-            response = self.rpc(
-                PRIVATE_RPC_NAME,
-                request,
-                _qualification_rpc_timeout_s(
-                    request_candidates,
-                    full_plan_limit=full_plan_limit,
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001 - private transport boundary.
+        rpc_attempts = 2 if fast_profile else 1
+        response: JsonDict | None = None
+        rpc_error: Exception | None = None
+        for _attempt in range(rpc_attempts):
+            try:
+                response = self.rpc(
+                    PRIVATE_RPC_NAME,
+                    request,
+                    _qualification_rpc_timeout_s(
+                        request_candidates,
+                        full_plan_limit=full_plan_limit,
+                        qualification_profile=self.qualification_profile,
+                        fast_seed_count=self.fast_seed_count,
+                        recovery_seed_count=self.recovery_seed_count,
+                        fast_ik_timeout_s=self.fast_ik_timeout_s,
+                        recovery_ik_timeout_s=self.recovery_ik_timeout_s,
+                    ),
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - private transport boundary.
+                rpc_error = exc
+        if response is None:
+            exc = rpc_error or RuntimeError("qualification RPC failed")
             response = {
-                "schema_version": QUALIFICATION_SCHEMA,
+                "schema_version": request["schema_version"],
                 "planning_scene_revision": planning_scene_revision,
                 "execution_started": False,
+                "stop_reason": "infrastructure_error",
+                "infrastructure_error": True,
+                "rpc_attempt_count": rpc_attempts,
                 "results": [
                     {
                         "candidate_id": item["candidate_id"],
@@ -402,12 +558,48 @@ class MoveItCandidateQualifier:
             ]
             evidence["results"].append(item)
         proofs = {item["candidate_id"]: item for item in evidence["results"]}
+        selected_candidate_ids = evidence.get("selected_candidate_ids")
+        selected_candidate_ids = (
+            {str(value) for value in selected_candidate_ids}
+            if isinstance(selected_candidate_ids, list)
+            else None
+        )
         passed = [
             dict(candidate)
             for candidate in raw
             if isinstance(candidate, Mapping)
             and proofs.get(str(candidate.get("id") or ""), {}).get("verdict") == "PASS"
+            and (
+                selected_candidate_ids is None
+                or str(candidate.get("id") or "") in selected_candidate_ids
+            )
         ]
+        for candidate in passed:
+            proof = proofs.get(str(candidate.get("id") or ""), {})
+            goal_legality = proof.get("goal_legality")
+            checks = (
+                goal_legality.get("checks")
+                if isinstance(goal_legality, Mapping)
+                else None
+            )
+            binding = (
+                checks.get("object_frame_binding")
+                if isinstance(checks, Mapping)
+                else None
+            )
+            collision_goal = (
+                binding.get("collision_goal_pose")
+                if isinstance(binding, Mapping)
+                else None
+            )
+            if isinstance(collision_goal, Mapping):
+                # Carry the exact PlanningScene collision-body goal across the
+                # private qualification boundary.  AnyPlace's visible point
+                # centroid remains provenance, but must not become the frozen
+                # physical object pose after attachment.
+                candidate["qualified_world_collision_object_goal_pose"] = dict(
+                    collision_goal
+                )
         pass_proofs = {
             str(candidate["id"]): proofs[str(candidate["id"])] for candidate in passed
         }
@@ -468,6 +660,11 @@ class MoveItCandidateQualifier:
                 "submitted_candidate_count": stage_counts["submitted"],
                 "rejection_reason_counts": dict(sorted(counts.items())),
                 "qualification_evidence": public_evidence,
+                "qualification_profile": self.qualification_profile,
+                "solver_profile": self.solver_profile,
+                "qualification_stop_reason": evidence.get("stop_reason"),
+                "qualification_waves": list(evidence.get("waves") or []),
+                "qualification_metrics": dict(evidence.get("metrics") or {}),
             }
         )
         if artifact is not None:
@@ -481,7 +678,7 @@ class MoveItCandidateQualifier:
         raw_results = response.get("results") if isinstance(response, Mapping) else None
         revision_ok = (
             isinstance(response, Mapping)
-            and response.get("schema_version") == QUALIFICATION_SCHEMA
+            and response.get("schema_version") == request["schema_version"]
             and response.get("planning_scene_revision")
             == request["planning_scene_revision"]
             and response.get("execution_started") is False
@@ -536,8 +733,8 @@ class MoveItCandidateQualifier:
             else:
                 record.pop("compile_parameters", None)
             normalized.append(record)
-        return {
-            "schema_version": QUALIFICATION_SCHEMA,
+        evidence: JsonDict = {
+            "schema_version": request["schema_version"],
             "purpose": request["purpose"],
             "scene_epoch": request["scene_epoch"],
             "planning_scene_revision": request["planning_scene_revision"],
@@ -546,21 +743,62 @@ class MoveItCandidateQualifier:
             "qualification_binding_sha256": request[
                 "qualification_binding_sha256"
             ],
+            "qualification_case_sha256": request[
+                "qualification_case_sha256"
+            ],
             "execution_started": False,
             "results": normalized,
         }
+        if isinstance(response, Mapping):
+            for key in (
+                "qualification_profile",
+                "solver_profile",
+                "requested_solver_profile",
+                "solver_configuration_id",
+                "provider",
+                "provider_version",
+                "solver_version",
+                "robot_model_sha256",
+                "scene_sha256",
+                "capability_map_id",
+                "waves",
+                "l5_attempts",
+                "selected_candidate_ids",
+                "stop_reason",
+                "metrics",
+                "legality_screening",
+                "infrastructure_error",
+                "rpc_attempt_count",
+                "shadow_fast_v3",
+                "artifact_schema_version",
+                "qualification_case_sha256",
+                "case_id",
+            ):
+                value = response.get(key)
+                if value is not None:
+                    evidence[key] = value
+        return evidence
 
     def _write_artifact(self, evidence: JsonDict) -> JsonDict | None:
         if self.artifact_root is None:
             return None
         self.artifact_root.mkdir(parents=True, exist_ok=True)
-        path = self.artifact_root / f"qualification-{_hash(evidence)[:16]}.json"
-        path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+        artifact_evidence = dict(evidence)
+        if evidence.get("schema_version") == QUALIFICATION_SCHEMA_V3:
+            artifact_evidence["artifact_schema_version"] = FAST_ARTIFACT_SCHEMA
+        path = self.artifact_root / f"qualification-{_hash(artifact_evidence)[:16]}.json"
+        path.write_text(
+            json.dumps(artifact_evidence, indent=2, sort_keys=True), encoding="utf-8"
+        )
         return {
             "type": "moveit_candidate_qualification",
             "kind": "json",
+            "schema_version": evidence.get("schema_version"),
+            "artifact_schema_version": artifact_evidence.get(
+                "artifact_schema_version", evidence.get("schema_version")
+            ),
             "path": str(path),
-            "sha256": _hash(evidence),
+            "sha256": _hash(artifact_evidence),
         }
 
 
@@ -587,10 +825,22 @@ def _public_qualification_summary(evidence: Mapping[str, Any]) -> JsonDict:
         "qualification_binding_sha256": evidence.get(
             "qualification_binding_sha256"
         ),
+        "qualification_case_sha256": evidence.get(
+            "qualification_case_sha256"
+        ),
         "execution_started": False,
         "result_count": len(results),
         "verdict_counts": dict(sorted(verdict_counts.items())),
         "rejection_reason_counts": dict(sorted(reason_counts.items())),
+        "qualification_profile": evidence.get("qualification_profile", "legacy"),
+        "solver_profile": evidence.get("solver_profile"),
+        "solver_configuration_id": evidence.get("solver_configuration_id"),
+        "robot_model_sha256": evidence.get("robot_model_sha256"),
+        "scene_sha256": evidence.get("scene_sha256"),
+        "capability_map_id": evidence.get("capability_map_id"),
+        "stop_reason": evidence.get("stop_reason"),
+        "waves": list(evidence.get("waves") or []),
+        "metrics": dict(evidence.get("metrics") or {}),
         "proof_storage": "qualification_artifact",
     }
 
@@ -658,6 +908,11 @@ def _qualification_rpc_timeout_s(
     candidates: Sequence[Mapping[str, Any]],
     *,
     full_plan_limit: int,
+    qualification_profile: str = "legacy",
+    fast_seed_count: int = 2,
+    recovery_seed_count: int = 6,
+    fast_ik_timeout_s: float = 0.05,
+    recovery_ik_timeout_s: float = 0.2,
 ) -> float:
     """Cover screening plus the bounded full-plan tail at the transport layer.
 
@@ -676,12 +931,32 @@ def _qualification_rpc_timeout_s(
         )
         stage_counts.append(len(stages) if isinstance(stages, list) and stages else 1)
     max_stage_count = max(stage_counts, default=1)
-    screening_budget_s = len(candidates) * 2.0 * (
-        KINEMATIC_IK_TIMEOUT_S + STATE_VALIDITY_TIMEOUT_S
-    )
-    planning_budget_s = (
-        max(0, int(full_plan_limit)) * max_stage_count * PLANNING_TIME_S
-    )
+    if qualification_profile in {"fast_v3", "shadow"}:
+        # Sixty seconds is a performance objective, never a transport cutoff.
+        # Cover pure IK + possible collision rescue + validity for both the
+        # fast and recovery seed budgets without assuming any concurrency.
+        per_stage_screening_s = 2.0 * (
+            max(0, fast_seed_count)
+            * (max(0.0, fast_ik_timeout_s) + STATE_VALIDITY_TIMEOUT_S)
+            + max(0, recovery_seed_count)
+            * (max(0.0, recovery_ik_timeout_s) + STATE_VALIDITY_TIMEOUT_S)
+        )
+        screening_budget_s = (
+            len(candidates) * max_stage_count * per_stage_screening_s
+        )
+        # Every L4 candidate may fail L5 once in the fast layer and again on
+        # a different recovery branch. Shadow's bounded legacy tail fits
+        # inside this same conservative envelope.
+        planning_budget_s = (
+            len(candidates) * 2 * max_stage_count * PLANNING_TIME_S
+        )
+    else:
+        screening_budget_s = len(candidates) * 2.0 * (
+            KINEMATIC_IK_TIMEOUT_S + STATE_VALIDITY_TIMEOUT_S
+        )
+        planning_budget_s = (
+            max(0, int(full_plan_limit)) * max_stage_count * PLANNING_TIME_S
+        )
     return screening_budget_s + planning_budget_s + QUALIFICATION_RPC_GRACE_S
 
 
@@ -716,6 +991,28 @@ def _deduplicate_se3_candidates(
         ids.add(candidate_id)
         merged.append(candidate)
     return merged
+
+
+def _preserve_candidate_pool(
+    candidates: Sequence[Mapping[str, Any]],
+    *,
+    round_index: int,
+) -> list[JsonDict]:
+    """Preserve every model result while assigning deterministic unique IDs."""
+
+    preserved: list[JsonDict] = []
+    ids: set[str] = set()
+    for index, value in enumerate(candidates):
+        candidate = dict(value)
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id or candidate_id in ids:
+            candidate_id = f"anyplace_r{round_index}_{index:03d}"
+            candidate["id"] = candidate_id
+            candidate["inference_round"] = round_index
+            candidate["provenance"] = "complete_inference_round"
+        ids.add(candidate_id)
+        preserved.append(candidate)
+    return preserved
 
 
 def _rounded_transform(value: object) -> object:
@@ -762,328 +1059,6 @@ def _pose_with_quaternion(pose: Mapping[str, Any]) -> JsonDict:
             quat = [(m[0][2] + m[2][0]) / scale, (m[1][2] + m[2][1]) / scale, 0.25 * scale, (m[1][0] - m[0][1]) / scale]
     result["quat_xyzw"] = quat
     return result
-
-
-def parallel_gripper_centering_variant(candidate: Mapping[str, Any]) -> JsonDict:
-    """Translate a parallel-jaw grasp onto its measured target midplane.
-
-    Only translation along GraspNet local +Y (the jaw closing axis) is
-    permitted.  The estimator's approach, wrist rotation, insertion depth and
-    opening width are preserved.  The correction must come from the selected
-    target's aligned mask/depth evidence and remains auditable on the derived
-    candidate.
-    """
-
-    variant = json.loads(json.dumps(dict(candidate)))
-    evidence = variant.get("target_closing_alignment")
-    rotation = variant.get("rotation_matrix")
-    translation = variant.get("translation_xyz")
-    tip = variant.get("gripper_tip_position_xyz")
-    if not (
-        isinstance(evidence, Mapping)
-        and evidence.get("schema_version")
-        == PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA
-        and evidence.get("source") == "aligned_selected_mask_depth"
-        and evidence.get("depth_provenance")
-        in {"sensor_depth", "sensor_safety_depth"}
-        and evidence.get("closing_axis") == "graspnet_local_y"
-        and isinstance(rotation, list)
-        and len(rotation) == 3
-        and all(isinstance(row, list) and len(row) == 3 for row in rotation)
-        and isinstance(translation, list)
-        and len(translation) == 3
-        and isinstance(tip, list)
-        and len(tip) == 3
-    ):
-        raise ValueError("parallel-gripper centering requires aligned target evidence")
-    try:
-        rotation_values = [[float(value) for value in row] for row in rotation]
-        translation_values = [float(value) for value in translation]
-        tip_values = [float(value) for value in tip]
-        correction = float(evidence["correction_m"])
-        correction_vector = [
-            float(value) for value in evidence["correction_camera_xyz"]
-        ]
-        target_span = float(evidence["target_span_m"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("parallel-gripper centering evidence is malformed") from exc
-    expected_vector = [correction * row[1] for row in rotation_values]
-    if not (
-        all(
-            math.isfinite(value)
-            for value in (
-                correction,
-                target_span,
-                *translation_values,
-                *tip_values,
-                *correction_vector,
-                *(value for row in rotation_values for value in row),
-            )
-        )
-        and target_span > 0.0
-        and len(correction_vector) == 3
-        and all(
-            math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9)
-            for actual, expected in zip(correction_vector, expected_vector)
-        )
-    ):
-        raise ValueError("parallel-gripper centering evidence is inconsistent")
-
-    centered_translation = [
-        value + correction_vector[index]
-        for index, value in enumerate(translation_values)
-    ]
-    centered_tip = [
-        value + correction_vector[index] for index, value in enumerate(tip_values)
-    ]
-    variant["translation_xyz"] = centered_translation
-    variant["gripper_tip_position_xyz"] = centered_tip
-    transform = variant.get("transform_matrix")
-    if transform is not None:
-        if not (
-            isinstance(transform, list)
-            and len(transform) == 4
-            and all(isinstance(row, list) and len(row) == 4 for row in transform)
-        ):
-            raise ValueError("parallel-gripper centering transform is malformed")
-        for row_index in range(3):
-            if not math.isclose(
-                float(transform[row_index][3]),
-                translation_values[row_index],
-                rel_tol=0.0,
-                abs_tol=1e-6,
-            ):
-                raise ValueError("parallel-gripper centering transform is inconsistent")
-            transform[row_index][3] = centered_translation[row_index]
-    variant.pop("model_native_grasp_pose", None)
-    variant["id"] = f"{candidate.get('id', 'grasp')}_closing_centered"
-    variant["centering_parent_id"] = str(candidate.get("id") or "")
-    variant["centering_parent_provenance"] = str(
-        candidate.get("provenance") or candidate.get("source_model") or ""
-    )
-    variant["centering_transform"] = "target_mask_depth_closing_midplane"
-    variant["centering_offset_m"] = correction
-    variant["target_closing_span_m"] = target_span
-    variant["provenance"] = "host_parallel_gripper_closing_centering"
-    return variant
-
-
-def parallel_gripper_symmetry_variant(candidate: Mapping[str, Any]) -> JsonDict:
-    """Return the provenance-marked 180° local approach-axis grasp symmetry."""
-
-    variant = json.loads(json.dumps(dict(candidate)))
-    rotation = variant.get("rotation_matrix")
-    if not (
-        isinstance(rotation, list)
-        and len(rotation) == 3
-        and all(isinstance(row, list) and len(row) == 3 for row in rotation)
-    ):
-        raise ValueError("parallel-gripper symmetry requires a 3x3 rotation_matrix")
-    # GraspNet's approach vector is local +X (the compiler reads matrix column
-    # zero). Right multiplication by Rx(pi) therefore preserves approach and
-    # flips the complete closing/binormal frame. This is a true SO(3) wrist
-    # roll variant, not an Euler rewrite or a reversed approach.
-    variant["rotation_matrix"] = [
-        [float(row[0]), -float(row[1]), -float(row[2])] for row in rotation
-    ]
-    transform = variant.get("transform_matrix")
-    if (
-        isinstance(transform, list)
-        and len(transform) == 4
-        and all(isinstance(row, list) and len(row) == 4 for row in transform)
-    ):
-        for row_index in range(3):
-            transform[row_index][:3] = list(
-                variant["rotation_matrix"][row_index]
-            )
-    variant["id"] = f"{candidate.get('id', 'grasp')}_sym180"
-    variant["symmetry_parent_id"] = str(candidate.get("id") or "")
-    variant["symmetry_parent_provenance"] = str(candidate.get("provenance") or "")
-    variant["symmetry_transform"] = "graspnet_local_x_approach_axis_180deg"
-    variant["provenance"] = "host_parallel_gripper_symmetry"
-    return variant
-
-
-def parallel_gripper_approach_reversal_variant(
-    candidate: Mapping[str, Any],
-) -> JsonDict:
-    """Reverse approach about the same fingertip center and closing axis.
-
-    GraspNet local +X points from the grasp origin to the fingertip center and
-    local +Y is the parallel-jaw closing axis. Right multiplication by Ry(pi)
-    reverses approach while preserving that closing axis. Translating the new
-    origin from the unchanged fingertip center keeps the antipodal contact
-    location fixed; all collision and reachability claims remain delegated to
-    the host MoveIt funnel.
-    """
-
-    variant = json.loads(json.dumps(dict(candidate)))
-    rotation = variant.get("rotation_matrix")
-    tip = variant.get("gripper_tip_position_xyz")
-    depth = variant.get("depth")
-    if not (
-        isinstance(rotation, list)
-        and len(rotation) == 3
-        and all(isinstance(row, list) and len(row) == 3 for row in rotation)
-        and isinstance(tip, list)
-        and len(tip) == 3
-        and isinstance(depth, (int, float))
-        and not isinstance(depth, bool)
-        and math.isfinite(float(depth))
-        and float(depth) > 0.0
-    ):
-        raise ValueError("parallel-gripper approach reversal requires rotation, tip, and depth")
-    reversed_rotation = [
-        [-float(row[0]), float(row[1]), -float(row[2])] for row in rotation
-    ]
-    reversed_translation = [
-        float(tip[index]) - float(depth) * reversed_rotation[index][0]
-        for index in range(3)
-    ]
-    variant["rotation_matrix"] = reversed_rotation
-    variant["translation_xyz"] = reversed_translation
-    transform = variant.get("transform_matrix")
-    if (
-        isinstance(transform, list)
-        and len(transform) == 4
-        and all(isinstance(row, list) and len(row) == 4 for row in transform)
-    ):
-        for row_index in range(3):
-            transform[row_index][:3] = list(reversed_rotation[row_index])
-            transform[row_index][3] = reversed_translation[row_index]
-    variant.pop("model_native_grasp_pose", None)
-    variant["id"] = f"{candidate.get('id', 'grasp')}_approach180"
-    variant["approach_reversal_parent_id"] = str(candidate.get("id") or "")
-    variant["approach_reversal_transform"] = "graspnet_local_y_closing_axis_180deg"
-    variant["provenance"] = "host_parallel_gripper_approach_reversal"
-    return variant
-
-
-def poisson_disk_placement_augment(
-    candidates: Sequence[Mapping[str, Any]],
-    *,
-    seed_key: str,
-    minimum_spacing_m: float = 0.025,
-    max_samples: int = 32,
-) -> list[JsonDict]:
-    """Sample stable poses only inside explicitly supplied eroded footprints."""
-
-    rng = random.Random(int(_hash({"placement_poisson": seed_key})[:16], 16))
-    samples: list[JsonDict] = []
-    xy_points: list[tuple[float, float]] = []
-    stable = [
-        item
-        for item in candidates
-        if item.get("stable_pose") is True
-        and isinstance(item.get("footprint_erosion_bounds"), Mapping)
-    ]
-    attempts = max_samples * 30
-    for attempt in range(attempts):
-        if not stable or len(samples) >= max_samples:
-            break
-        parent = stable[attempt % len(stable)]
-        bounds = parent["footprint_erosion_bounds"]
-        try:
-            xmin, xmax = float(bounds["xmin"]), float(bounds["xmax"])
-            ymin, ymax = float(bounds["ymin"]), float(bounds["ymax"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not xmin <= xmax or not ymin <= ymax:
-            continue
-        xy = (rng.uniform(xmin, xmax), rng.uniform(ymin, ymax))
-        if any(math.hypot(xy[0] - x, xy[1] - y) < minimum_spacing_m for x, y in xy_points):
-            continue
-        transform = (
-            parent.get("object_goal_world")
-            or parent.get("object_goal_pose")
-            or parent.get("object_placement_transform")
-        )
-        if not isinstance(transform, Mapping):
-            continue
-        clone = json.loads(json.dumps(dict(parent)))
-        clone_transform = (
-            clone.get("object_goal_world")
-            or clone.get("object_goal_pose")
-            or clone.get("object_placement_transform")
-        )
-        translation = (
-            clone_transform.get("translation_xyz")
-            if isinstance(clone_transform, dict)
-            else None
-        )
-        matrix = (
-            clone_transform.get("transform_matrix")
-            if isinstance(clone_transform, dict)
-            else None
-        )
-        if isinstance(translation, list) and len(translation) == 3:
-            translation[0], translation[1] = xy
-        elif isinstance(matrix, list) and len(matrix) == 4:
-            matrix[0][3], matrix[1][3] = xy
-        else:
-            continue
-        clone["id"] = f"placement_poisson_{len(samples):03d}"
-        clone["provenance"] = "host_footprint_eroded_poisson_disk"
-        clone["poisson_seed_key_sha256"] = _hash(seed_key)
-        xy_points.append(xy)
-        samples.append(clone)
-    return samples
-
-
-def declared_object_symmetry_variants(
-    candidate: Mapping[str, Any],
-    symmetry_group: Sequence[Sequence[Sequence[float]]] | None,
-) -> list[JsonDict]:
-    """Generate object-goal variants only from an explicitly declared group."""
-
-    if not symmetry_group:
-        return []
-    transform = (
-        candidate.get("object_goal_world")
-        or candidate.get("object_goal_pose")
-        or candidate.get("object_placement_transform")
-    )
-    matrix = transform.get("transform_matrix") if isinstance(transform, Mapping) else None
-    pose_form = False
-    if not (isinstance(matrix, list) and len(matrix) == 4):
-        rotation = transform.get("rotation_matrix") if isinstance(transform, Mapping) else None
-        translation = transform.get("translation_xyz") if isinstance(transform, Mapping) else None
-        if not (
-            isinstance(rotation, list)
-            and len(rotation) == 3
-            and isinstance(translation, list)
-            and len(translation) == 3
-        ):
-            raise ValueError("object symmetry requires a complete object-goal transform")
-        matrix = [
-            [*map(float, rotation[row]), float(translation[row])]
-            for row in range(3)
-        ] + [[0.0, 0.0, 0.0, 1.0]]
-        pose_form = True
-    variants: list[JsonDict] = []
-    for index, symmetry in enumerate(symmetry_group):
-        if not (
-            len(symmetry) == 4
-            and all(len(row) == 4 for row in symmetry)
-        ):
-            raise ValueError("declared object symmetry must contain 4x4 transforms")
-        composed = [
-            [sum(float(matrix[i][k]) * float(symmetry[k][j]) for k in range(4)) for j in range(4)]
-            for i in range(4)
-        ]
-        clone = json.loads(json.dumps(dict(candidate)))
-        clone_transform = clone.get("object_goal_world") or clone.get("object_placement_transform")
-        if pose_form:
-            clone_transform = clone.get("object_goal_pose")
-            clone_transform["rotation_matrix"] = [row[:3] for row in composed[:3]]
-            clone_transform["translation_xyz"] = [row[3] for row in composed[:3]]
-        else:
-            clone_transform["transform_matrix"] = composed
-        clone["id"] = f"{candidate.get('id', 'placement')}_sym{index:02d}"
-        clone["symmetry_parent_id"] = str(candidate.get("id") or "")
-        clone["provenance"] = "declared_object_symmetry_group"
-        variants.append(clone)
-    return variants
 
 
 def _descriptor_distance(a: Mapping[str, Any], b: Mapping[str, Any], purpose: str) -> float:
@@ -1162,11 +1137,103 @@ class MoveItQualificationEngine:
     clone_scene: Callable[[], Any] | None = None
     apply_scene_transition: Callable[[Any, str, Mapping[str, Any]], Mapping[str, Any]] | None = None
 
+    service_health_check: Callable[[], bool] | None = None
+    set_solver_mode: Callable[[str], Mapping[str, Any]] | None = None
+
     def qualify(self, request: Mapping[str, Any]) -> JsonDict:
+        funnel = request.get("funnel")
+        funnel = funnel if isinstance(funnel, Mapping) else {}
+        profile = str(funnel.get("qualification_profile") or "legacy")
+        if profile == "legacy":
+            return self._qualify_legacy(request)
+        if profile == "fast_v3":
+            return self._qualify_fast_v3(request)
+        if profile == "shadow":
+            # Legacy remains authoritative during rollout.  Both paths consume
+            # only plan-only services and the fast evidence remains private.
+            legacy_request = dict(request)
+            shadow_ids = funnel.get("shadow_legacy_candidate_ids")
+            shadow_ids = (
+                {str(value) for value in shadow_ids}
+                if isinstance(shadow_ids, list)
+                else None
+            )
+            all_candidates = request.get("candidates")
+            all_candidates = all_candidates if isinstance(all_candidates, list) else []
+            if shadow_ids is not None:
+                legacy_request["candidates"] = [
+                    item
+                    for item in all_candidates
+                    if isinstance(item, Mapping)
+                    and str(item.get("candidate_id") or "") in shadow_ids
+                ]
+            legacy = self._qualify_legacy(legacy_request)
+            legacy_by_id = {
+                str(item.get("candidate_id") or ""): item
+                for item in legacy.get("results", [])
+                if isinstance(item, Mapping)
+            }
+            binding = str(request.get("qualification_binding_sha256") or "")
+            legacy["results"] = [
+                legacy_by_id.get(
+                    str(item.get("candidate_id") or ""),
+                    {
+                        "candidate_id": str(item.get("candidate_id") or ""),
+                        "candidate_pose_sha256": str(
+                            item.get("candidate_pose_sha256") or ""
+                        ),
+                        "qualification_binding_sha256": binding,
+                        "execution_started": False,
+                        "verdict": "NOT_EVALUATED",
+                        "reason": "shadow_legacy_diversity_not_selected",
+                        "endpoint_evaluated": False,
+                        "full_plan_submitted": False,
+                        "stages": [],
+                    },
+                )
+                for item in all_candidates
+                if isinstance(item, Mapping)
+            ]
+            fast_request = dict(request)
+            fast_funnel = dict(funnel)
+            fast_funnel["qualification_profile"] = "fast_v3"
+            fast_request["funnel"] = fast_funnel
+            fast = self._qualify_fast_v3(fast_request)
+            legacy["qualification_profile"] = "shadow"
+            legacy["shadow_fast_v3"] = {
+                key: fast.get(key)
+                for key in (
+                    "qualification_profile",
+                    "solver_profile",
+                    "requested_solver_profile",
+                    "solver_configuration_id",
+                    "provider",
+                    "provider_version",
+                    "solver_version",
+                    "robot_model_sha256",
+                    "scene_sha256",
+                    "capability_map_id",
+                    "artifact_schema_version",
+                    "qualification_case_sha256",
+                    "case_id",
+                    "selected_candidate_ids",
+                    "stop_reason",
+                    "waves",
+                    "l5_attempts",
+                    "metrics",
+                    "first_l5_pass_s",
+                    "infrastructure_error",
+                    "results",
+                )
+            }
+            return legacy
+        raise ValueError("invalid qualification profile")
+
+    def _qualify_legacy(self, request: Mapping[str, Any]) -> JsonDict:
         revision = request.get("planning_scene_revision")
         candidates = request.get("candidates")
         if (
-            request.get("schema_version") != QUALIFICATION_SCHEMA
+            request.get("schema_version") not in SUPPORTED_QUALIFICATION_SCHEMAS
             or isinstance(revision, bool)
             or not isinstance(revision, int)
             or not isinstance(candidates, list)
@@ -1273,11 +1340,1299 @@ class MoveItQualificationEngine:
         for result in results:
             result["qualification_binding_sha256"] = binding
         return {
-            "schema_version": QUALIFICATION_SCHEMA,
+            "schema_version": request["schema_version"],
             "planning_scene_revision": revision,
             "execution_started": False,
+            "qualification_profile": "legacy",
+            "solver_profile": str(
+                source.get("solver_profile")
+                or funnel.get("solver_profile")
+                or "kdl_legacy"
+            ),
+            "solver_version": str(source.get("solver_version") or "unknown"),
+            "solver_configuration_id": str(
+                source.get("solver_profile")
+                or funnel.get("solver_profile")
+                or "kdl_legacy"
+            ),
+            "robot_model_sha256": str(source.get("robot_model_sha256") or ""),
+            "scene_sha256": str(source.get("scene_sha256") or ""),
+            "qualification_case_sha256": str(
+                request.get("qualification_case_sha256") or ""
+            ),
+            "case_id": str(request.get("qualification_case_sha256") or ""),
             "results": results,
         }
+
+    def _qualify_fast_v3(self, request: Mapping[str, Any]) -> JsonDict:
+        """Run deterministic concurrent waves and a serial plan-only tail."""
+
+        revision = request.get("planning_scene_revision")
+        candidates = request.get("candidates")
+        if (
+            request.get("schema_version") not in SUPPORTED_QUALIFICATION_SCHEMAS
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or not isinstance(candidates, list)
+        ):
+            raise ValueError("invalid fast_v3 qualification request")
+        funnel = request.get("funnel")
+        funnel = funnel if isinstance(funnel, Mapping) else {}
+        purpose = str(request.get("purpose") or "grasp")
+        if purpose not in {"grasp", "placement"}:
+            raise ValueError("invalid fast_v3 qualification purpose")
+        beam_width = int(funnel.get("beam_width", 2))
+        fast_seed_count = int(funnel.get("fast_seed_count", 2))
+        recovery_seed_count = int(funnel.get("recovery_seed_count", 6))
+        if (
+            beam_width < 1
+            or beam_width > fast_seed_count
+            or fast_seed_count + recovery_seed_count
+            != int(funnel.get("ik_seed_count", DEFAULT_MOVEIT_IK_SEED_COUNT))
+        ):
+            raise ValueError("invalid fast_v3 Beam/seed budget")
+        grasp_waves = self._integer_waves(funnel.get("grasp_waves"), (16, 32, 64))
+        placement_waves = self._integer_waves(
+            funnel.get("placement_waves"), (12, 24, 48, 96)
+        )
+        max_ik = max(1, int(funnel.get("max_ik_concurrency", 8)))
+        max_validity = max(
+            1, int(funnel.get("max_state_validity_concurrency", 8))
+        )
+        fast_timeout_s = float(funnel.get("fast_ik_timeout_s", 0.05))
+        recovery_timeout_s = float(funnel.get("recovery_ik_timeout_s", 0.2))
+        if not 0.0 < fast_timeout_s <= recovery_timeout_s:
+            raise ValueError("invalid fast_v3 IK timeouts")
+        source = request.get("source")
+        source = dict(source) if isinstance(source, Mapping) else {}
+        start_time = time.monotonic()
+        try:
+            current_state, _, _ = self._call_fast_service(
+                lambda: self.current_joint_state(), required_boolean=None
+            )
+        except _QualificationInfrastructureError as exc:
+            return self._fast_infrastructure_response(
+                request, candidates, revision, reason=str(exc)
+            )
+        requested_solver_profile = str(funnel.get("solver_profile") or "auto")
+        solver_profile = str(
+            current_state.get("solver_profile") or requested_solver_profile
+        )
+        if (
+            requested_solver_profile != "auto"
+            and solver_profile != requested_solver_profile
+        ):
+            return self._fast_configuration_response(
+                request,
+                candidates,
+                revision,
+                reason="solver_profile_mismatch",
+                error=(
+                    f"requested {requested_solver_profile}, ROS configured "
+                    f"{solver_profile}"
+                ),
+                robot_hash=str(current_state.get("robot_model_sha256") or ""),
+                scene_hash=str(current_state.get("scene_sha256") or ""),
+            )
+        if solver_profile == "pick_ik_local":
+            if self.set_solver_mode is None:
+                return self._fast_infrastructure_response(
+                    request,
+                    candidates,
+                    revision,
+                    reason="pick_ik_mode_switch_unavailable",
+                )
+            try:
+                self._call_fast_service(
+                    lambda: self.set_solver_mode("local"),
+                    required_boolean="ok",
+                )
+            except _QualificationInfrastructureError as exc:
+                return self._fast_infrastructure_response(
+                    request, candidates, revision, reason=str(exc)
+                )
+        robot_hash = str(
+            source.get("robot_model_sha256")
+            or current_state.get("robot_model_sha256")
+            or _hash(
+                {
+                    "names": current_state.get("names"),
+                    "joint_limits": source.get("joint_limits")
+                    or current_state.get("joint_limits"),
+                    "planning_group": source.get("planning_group"),
+                    "tcp": source.get("tcp"),
+                    "gripper": source.get("gripper"),
+                }
+            )
+        )
+        scene_hash = str(
+            source.get("scene_sha256")
+            or current_state.get("scene_sha256")
+            or _hash(
+                {
+                    "planning_scene_revision": revision,
+                    "scene_identity": source.get("scene_identity"),
+                }
+            )
+        )
+        if current_state.get("jacobian_quality_available") is False:
+            return self._fast_configuration_response(
+                request,
+                candidates,
+                revision,
+                reason="jacobian_quality_unavailable",
+                error=str(
+                    current_state.get("jacobian_quality_error")
+                    or "expanded-URDF Jacobian evaluator is unavailable"
+                ),
+                robot_hash=robot_hash,
+                scene_hash=scene_hash,
+            )
+        requested_map_id = str(funnel.get("capability_map_id") or "")
+        capability_map: SparseCapabilityMap | None = None
+        capability_map_status = "not_configured"
+        map_load_error = source.get("capability_map_load_error")
+        if requested_map_id and map_load_error:
+            return self._fast_configuration_response(
+                request,
+                candidates,
+                revision,
+                reason="capability_map_unavailable",
+                error=str(map_load_error),
+                robot_hash=robot_hash,
+                scene_hash=scene_hash,
+            )
+        map_payload = source.get("capability_map")
+        if isinstance(map_payload, Mapping):
+            try:
+                capability_map = SparseCapabilityMap.from_dict(
+                    map_payload,
+                    expected_map_id=requested_map_id,
+                    expected_robot_model_sha256=robot_hash,
+                )
+            except ValueError as exc:
+                return self._fast_configuration_response(
+                    request,
+                    candidates,
+                    revision,
+                    reason="capability_map_invalid",
+                    error=str(exc),
+                    robot_hash=robot_hash,
+                    scene_hash=scene_hash,
+                )
+            capability_map_status = "loaded"
+        elif requested_map_id:
+            return self._fast_configuration_response(
+                request,
+                candidates,
+                revision,
+                reason="capability_map_unavailable",
+                error="configured capability map payload was not loaded by ROS",
+                robot_hash=robot_hash,
+                scene_hash=scene_hash,
+            )
+
+        try:
+            descriptors, prechecks, schedulable, legality_metrics = (
+                self._fast_legality_prechecks(
+                    candidates,
+                    purpose=purpose,
+                    revision=revision,
+                )
+            )
+        except _QualificationInfrastructureError as exc:
+            return self._fast_infrastructure_response(
+                request, candidates, revision, reason=str(exc)
+            )
+        descriptor_by_id: dict[str, JsonDict] = {}
+        for descriptor in descriptors:
+            candidate_id = str(descriptor.get("candidate_id") or "")
+            descriptor_by_id[candidate_id] = descriptor
+        waves = schedule_candidate_waves(
+            schedulable,
+            purpose=purpose,
+            grasp_waves=grasp_waves,
+            placement_waves=placement_waves,
+            capability_map=capability_map,
+        )
+        for wave in waves:
+            for descriptor in wave.candidates:
+                candidate_id = str(descriptor.get("candidate_id") or "")
+                descriptor_by_id[candidate_id] = dict(descriptor)
+                prechecks[candidate_id]["se3_cluster_id"] = descriptor.get(
+                    "se3_cluster_id"
+                )
+                prechecks[candidate_id]["grasp_symmetry_family_id"] = descriptor.get(
+                    "grasp_symmetry_family_id"
+                )
+                prechecks[candidate_id]["capability_score"] = dict(
+                    descriptor.get("capability_score") or {}
+                )
+
+        ik_gate = _ServiceConcurrencyGate(max_ik)
+        validity_gate = _ServiceConcurrencyGate(max_validity)
+        latest: dict[str, JsonDict] = dict(prechecks)
+        screening_history: dict[str, list[JsonDict]] = {}
+        batch_cache: list[JsonDict] = []
+        l5_passes: list[JsonDict] = []
+        planned_ids: set[str] = set()
+        l5_attempts: list[JsonDict] = []
+        wave_evidence: list[JsonDict] = []
+        infrastructure_error = next(
+            (
+                str(precheck.get("reason") or "legality_precheck_error")
+                for precheck in prechecks.values()
+                if precheck.get("infrastructure_error") is True
+            ),
+            "",
+        )
+        stop_reason = "candidate_pool_exhausted"
+        first_l5_pass_elapsed_s: float | None = None
+        target = int(funnel.get("l5_pass_target", 2 if purpose == "grasp" else 1))
+
+        def target_reached() -> bool:
+            if purpose == "placement":
+                return len(l5_passes) >= target
+            clusters = {
+                str(item.get("se3_cluster_id") or "") for item in l5_passes
+            }
+            families = {
+                str(item.get("grasp_symmetry_family_id") or "")
+                for item in l5_passes
+            }
+            return (
+                len(l5_passes) >= target
+                and len(clusters) >= target
+                and len(families) >= target
+            )
+
+        def run_wave(wave: CandidateWave, *, recovery: bool) -> bool:
+            nonlocal infrastructure_error, stop_reason, first_l5_pass_elapsed_s
+            wave_started = time.monotonic()
+            completed: list[JsonDict] = []
+            workers = max(1, min(len(wave.candidates), max(max_ik, max_validity)))
+            with ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="openeta-qualification-v3",
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        self._screen_fast_candidate,
+                        descriptor,
+                        revision,
+                        legality_precheck=prechecks[
+                            str(descriptor.get("candidate_id") or "")
+                        ],
+                        source=source,
+                        current_state=current_state,
+                        batch_cache=tuple(batch_cache),
+                        beam_width=beam_width,
+                        seed_count=(recovery_seed_count if recovery else fast_seed_count),
+                        timeout_s=(recovery_timeout_s if recovery else fast_timeout_s),
+                        recovery=recovery,
+                        solver_profile=(
+                            "pick_ik_global"
+                            if recovery and solver_profile == "pick_ik_local"
+                            else solver_profile
+                        ),
+                        ik_gate=ik_gate,
+                        validity_gate=validity_gate,
+                    ): descriptor
+                    for descriptor in wave.candidates
+                }
+                for future in as_completed(futures):
+                    descriptor = futures[future]
+                    try:
+                        screened = future.result()
+                    except Exception as exc:  # noqa: BLE001 - worker boundary.
+                        screened = {
+                            **prechecks[str(descriptor.get("candidate_id") or "")],
+                            "verdict": "UNKNOWN",
+                            "reason": "qualification_worker_error",
+                            "infrastructure_error": True,
+                            "error_type": type(exc).__name__,
+                        }
+                    completed.append(screened)
+            completed.sort(key=lambda item: int(item.get("fixed_candidate_index", 0)))
+            for screened in completed:
+                candidate_id = str(screened.get("candidate_id") or "")
+                screened["wave_index"] = wave.wave_index
+                screened["recovery_layer"] = recovery
+                latest[candidate_id] = screened
+                screening_history.setdefault(candidate_id, []).append(dict(screened))
+                if screened.get("infrastructure_error") is True and not infrastructure_error:
+                    infrastructure_error = str(screened.get("reason") or "infrastructure_error")
+            # The cache is isolated within one qualification run and updated
+            # only after the completion barrier in fixed candidate order.
+            for screened in completed:
+                if screened.get("endpoint_pass") is not True:
+                    continue
+                stages = screened.get("stages")
+                if not isinstance(stages, list) or not stages:
+                    continue
+                for stage in stages:
+                    solutions = (
+                        stage.get("beam_solutions")
+                        if isinstance(stage, Mapping)
+                        else None
+                    )
+                    for solution in (
+                        solutions if isinstance(solutions, list) else []
+                    ):
+                        state = (
+                            solution.get("joint_state")
+                            if isinstance(solution, Mapping)
+                            else None
+                        )
+                        if isinstance(state, Mapping):
+                            cached = dict(state)
+                            cached["seed_source"] = "batch_cache"
+                            batch_cache.append(cached)
+            submitted_this_wave = 0
+            passed_this_wave = 0
+            if not infrastructure_error:
+                ranked = sorted(
+                    (
+                        item
+                        for item in completed
+                        if item.get("endpoint_pass") is True
+                        and (
+                            recovery
+                            or str(item.get("candidate_id") or "") not in planned_ids
+                        )
+                    ),
+                    key=candidate_physical_quality_key,
+                )
+                for screened in ranked:
+                    candidate_id = str(screened.get("candidate_id") or "")
+                    descriptor = descriptor_by_id[candidate_id]
+                    planned_ids.add(candidate_id)
+                    submitted_this_wave += 1
+                    l5_started = time.monotonic()
+                    planned, retry_count = self._plan_fast_candidate(
+                        descriptor, revision, screen=screened
+                    )
+                    l5_elapsed_s = time.monotonic() - l5_started
+                    planned["wave_index"] = wave.wave_index
+                    planned["recovery_layer"] = recovery
+                    latest[candidate_id] = planned
+                    l5_attempts.append(
+                        {
+                            "attempt_index": len(l5_attempts),
+                            "candidate_id": candidate_id,
+                            "fixed_candidate_index": planned.get(
+                                "fixed_candidate_index"
+                            ),
+                            "wave_index": wave.wave_index,
+                            "recovery_layer": recovery,
+                            "retry_count": retry_count,
+                            "elapsed_s": l5_elapsed_s,
+                            "verdict": planned.get("verdict"),
+                            "reason": planned.get("reason"),
+                        }
+                    )
+                    if planned.get("infrastructure_error") is True:
+                        infrastructure_error = str(
+                            planned.get("reason") or "plan_only_service_error"
+                        )
+                        break
+                    if planned.get("verdict") == "PASS":
+                        if first_l5_pass_elapsed_s is None:
+                            first_l5_pass_elapsed_s = time.monotonic() - start_time
+                        passed_this_wave += 1
+                        l5_passes.append(planned)
+                        if target_reached():
+                            stop_reason = "complete_l5_pass_found"
+                            break
+            wave_evidence.append(
+                {
+                    "wave_index": wave.wave_index,
+                    "recovery_layer": recovery,
+                    "cumulative_per_branch": wave.cumulative_per_branch,
+                    "candidate_count": len(wave.candidates),
+                    "endpoint_pass_count": sum(
+                        item.get("endpoint_pass") is True for item in completed
+                    ),
+                    "l5_submitted_count": submitted_this_wave,
+                    "l5_pass_count": passed_this_wave,
+                    "elapsed_s": time.monotonic() - wave_started,
+                }
+            )
+            return bool(infrastructure_error or target_reached())
+
+        if not infrastructure_error:
+            for wave in waves:
+                if run_wave(wave, recovery=False):
+                    break
+
+        if not infrastructure_error and not target_reached():
+            # Only after the complete fast pool fails do the fixed remaining
+            # six seeds become eligible.  Preserve the same waves and barriers.
+            recovery_waves: list[CandidateWave] = []
+            l5_pass_ids = {
+                str(item.get("candidate_id") or "") for item in l5_passes
+            }
+            for wave in waves:
+                retry = tuple(
+                    descriptor
+                    for descriptor in wave.candidates
+                    if str(descriptor.get("candidate_id") or "") not in l5_pass_ids
+                )
+                if retry:
+                    recovery_waves.append(
+                        CandidateWave(
+                            wave_index=len(wave_evidence),
+                            cumulative_per_branch=wave.cumulative_per_branch,
+                            candidates=retry,
+                            recovery=True,
+                        )
+                    )
+            recovery_solver_mode_switched = False
+            if solver_profile == "pick_ik_local":
+                if self.set_solver_mode is None:
+                    infrastructure_error = "pick_ik_mode_switch_unavailable"
+                else:
+                    try:
+                        self._call_fast_service(
+                            lambda: self.set_solver_mode("global"),
+                            required_boolean="ok",
+                        )
+                        recovery_solver_mode_switched = True
+                    except _QualificationInfrastructureError as exc:
+                        infrastructure_error = str(exc)
+            if not infrastructure_error:
+                for wave in recovery_waves:
+                    if run_wave(wave, recovery=True):
+                        break
+            if recovery_solver_mode_switched:
+                try:
+                    self._call_fast_service(
+                        lambda: self.set_solver_mode("local"),
+                        required_boolean="ok",
+                    )
+                except _QualificationInfrastructureError as exc:
+                    infrastructure_error = str(exc)
+
+        if infrastructure_error:
+            stop_reason = "infrastructure_error"
+        elif target_reached():
+            stop_reason = "complete_l5_pass_found"
+        elif purpose == "grasp" and len(l5_passes) >= target:
+            # No two independent symmetry families / SE(3) clusters survived.
+            # The contract then falls back to the joint-farthest pair only
+            # after exhaustive coverage.
+            stop_reason = "complete_l5_pass_found_joint_space_fallback"
+        else:
+            stop_reason = "candidate_and_recovery_exhausted"
+
+        if purpose == "grasp":
+            selected_ids = (
+                select_grasp_branches(l5_passes, source=source, limit=target)
+                if len(l5_passes) >= target
+                else []
+            )
+        else:
+            selected_ids = (
+                [str(l5_passes[0].get("candidate_id") or "")]
+                if l5_passes
+                else []
+            )
+        binding = str(request.get("qualification_binding_sha256") or "")
+        results: list[JsonDict] = []
+        for fixed_index, raw_descriptor in enumerate(candidates):
+            descriptor = raw_descriptor if isinstance(raw_descriptor, Mapping) else {}
+            candidate_id = str(descriptor.get("candidate_id") or "")
+            result = dict(latest.get(candidate_id) or prechecks.get(candidate_id) or {})
+            if (
+                result.get("workspace_pass") is True
+                and not result.get("stages")
+                and result.get("verdict") == "PASS"
+            ):
+                result.update(
+                    {
+                        "verdict": "NOT_EVALUATED",
+                        "reason": (
+                            "infrastructure_abort"
+                            if infrastructure_error
+                            else "complete_l5_pass_found"
+                        ),
+                        "endpoint_evaluated": False,
+                    }
+                )
+            elif (
+                result.get("endpoint_pass") is True
+                and candidate_id not in planned_ids
+            ):
+                result.update(
+                    {
+                        "verdict": "NOT_EVALUATED",
+                        "reason": "l5_not_submitted_after_success",
+                        "full_plan_submitted": False,
+                    }
+                )
+            result["fixed_candidate_index"] = fixed_index
+            result["qualification_binding_sha256"] = binding
+            result["screening_attempts"] = list(
+                screening_history.get(candidate_id, [])
+            )
+            results.append(result)
+
+        screening_records = [
+            attempt
+            for attempts in screening_history.values()
+            for attempt in attempts
+        ]
+        attempt_latencies = [
+            float(attempt.get("elapsed_s", 0.0))
+            for record in screening_records
+            for stage in record.get("stages", [])
+            if isinstance(stage, Mapping)
+            for attempt in stage.get("pure_ik_attempts", [])
+            if isinstance(attempt, Mapping)
+        ]
+        cache_hits = sum(
+            str(seed.get("seed_source") or "") == "batch_cache"
+            for record in screening_records
+            for stage in record.get("stages", [])
+            if isinstance(stage, Mapping)
+            for seed in stage.get("ik_seeds", [])
+            if isinstance(seed, Mapping)
+        )
+        rescues = sum(
+            len(stage.get("collision_ik_attempts", []))
+            for record in screening_records
+            for stage in record.get("stages", [])
+            if isinstance(stage, Mapping)
+        )
+        metrics = {
+            "generated_count": len(candidates),
+            "workspace_pass_count": sum(
+                result.get("workspace_pass") is True for result in results
+            ),
+            "pure_ik_pass_count": sum(
+                any(
+                    attempt.get("pure_ik_pass") is True
+                    for attempt in screening_history.get(
+                        str(result.get("candidate_id") or ""), []
+                    )
+                )
+                for result in results
+            ),
+            "collision_ik_pass_count": sum(
+                any(
+                    attempt.get("collision_ik_pass") is True
+                    for attempt in screening_history.get(
+                        str(result.get("candidate_id") or ""), []
+                    )
+                )
+                for result in results
+            ),
+            "endpoint_evaluated_count": sum(
+                result.get("endpoint_evaluated") is True for result in results
+            ),
+            "endpoint_pass_count": sum(
+                any(
+                    attempt.get("endpoint_pass") is True
+                    for attempt in screening_history.get(
+                        str(result.get("candidate_id") or ""), []
+                    )
+                )
+                for result in results
+            ),
+            "l5_attempt_count": len(l5_attempts),
+            "l5_pass_count": len(l5_passes),
+            "screening_attempt_count": len(screening_records),
+            "cache_hit_count": cache_hits,
+            "collision_rescue_count": rescues,
+            "max_ik_concurrency": ik_gate.maximum_active,
+            "max_state_validity_concurrency": validity_gate.maximum_active,
+            "ik_latency": latency_summary(attempt_latencies),
+            "first_l5_pass_s": first_l5_pass_elapsed_s,
+            "total_elapsed_s": time.monotonic() - start_time,
+            "capability_map_status": capability_map_status,
+            **legality_metrics,
+        }
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": revision,
+            "execution_started": False,
+            "qualification_profile": "fast_v3",
+            "artifact_schema_version": FAST_ARTIFACT_SCHEMA,
+            "solver_profile": solver_profile,
+            "requested_solver_profile": requested_solver_profile,
+            "solver_configuration_id": (
+                f"{solver_profile}@{round(fast_timeout_s * 1000)}ms/c{max_ik}"
+            ),
+            "provider": str(source.get("provider") or "unknown"),
+            "provider_version": str(source.get("provider_version") or "unknown"),
+            "solver_version": str(
+                source.get("solver_version")
+                or current_state.get("solver_version")
+                or "unknown"
+            ),
+            "robot_model_sha256": robot_hash,
+            "scene_sha256": scene_hash,
+            "capability_map_id": capability_map.map_id if capability_map else requested_map_id,
+            "legality_screening": {
+                key: value
+                for key, value in legality_metrics.items()
+                if key.startswith("goal_legality_") or key.startswith("pair_legality_")
+            },
+            "waves": wave_evidence,
+            "l5_attempts": l5_attempts,
+            "selected_candidate_ids": selected_ids,
+            "stop_reason": stop_reason,
+            "infrastructure_error": bool(infrastructure_error),
+            "metrics": metrics,
+            "first_l5_pass_s": first_l5_pass_elapsed_s,
+            "qualification_case_sha256": str(
+                request.get("qualification_case_sha256") or ""
+            ),
+            "case_id": str(request.get("qualification_case_sha256") or ""),
+            "results": results,
+        }
+
+    @staticmethod
+    def _integer_waves(value: object, default: Sequence[int]) -> tuple[int, ...]:
+        raw = value if isinstance(value, list) else default
+        waves = tuple(int(item) for item in raw)
+        if not waves or any(item <= 0 for item in waves) or any(
+            right <= left for left, right in zip(waves, waves[1:])
+        ):
+            raise ValueError("qualification waves must be positive and increasing")
+        return waves
+
+    def _call_fast_service(
+        self,
+        callback: Callable[[], Mapping[str, Any]],
+        *,
+        gate: _ServiceConcurrencyGate | None = None,
+        required_boolean: str | None,
+    ) -> tuple[JsonDict, int, float]:
+        """Retry one infrastructure failure, then raise a run-level error."""
+
+        started = time.monotonic()
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                raw = gate.call(callback) if gate is not None else callback()
+                if not isinstance(raw, Mapping):
+                    raise _QualificationInfrastructureError(
+                        "qualification service returned non-object evidence"
+                    )
+                result = dict(raw)
+                if result.get("infrastructure_error") is True:
+                    raise _QualificationInfrastructureError(
+                        str(result.get("reason") or "qualification service error")
+                    )
+                if required_boolean is not None and not isinstance(
+                    result.get(required_boolean), bool
+                ):
+                    raise _QualificationInfrastructureError(
+                        f"qualification service omitted {required_boolean}"
+                    )
+                return result, attempt, time.monotonic() - started
+            except (TimeoutError, _QualificationInfrastructureError) as exc:
+                last_error = exc
+            except Exception as exc:  # noqa: BLE001 - ROS/service boundary.
+                last_error = exc
+            if attempt == 0 and self.service_health_check is not None:
+                try:
+                    self.service_health_check()
+                except Exception:  # noqa: BLE001 - retry still proceeds.
+                    pass
+        raise _QualificationInfrastructureError(
+            f"qualification infrastructure failed twice: {type(last_error).__name__}"
+        ) from last_error
+
+    def _screen_fast_candidate(
+        self,
+        descriptor: Mapping[str, Any],
+        revision: int,
+        *,
+        legality_precheck: Mapping[str, Any],
+        source: Mapping[str, Any],
+        current_state: Mapping[str, Any],
+        batch_cache: Sequence[Mapping[str, Any]],
+        beam_width: int,
+        seed_count: int,
+        timeout_s: float,
+        recovery: bool,
+        solver_profile: str,
+        ik_gate: _ServiceConcurrencyGate,
+        validity_gate: _ServiceConcurrencyGate,
+    ) -> JsonDict:
+        candidate = descriptor.get("candidate")
+        candidate = candidate if isinstance(candidate, Mapping) else {}
+        stages = candidate.get("qualification_stages")
+        base = json.loads(json.dumps(dict(legality_precheck)))
+        base.update(
+            {
+                "fixed_candidate_index": int(
+                    descriptor.get("fixed_candidate_index", 0)
+                ),
+                "se3_cluster_id": descriptor.get("se3_cluster_id"),
+                "grasp_symmetry_family_id": descriptor.get(
+                    "grasp_symmetry_family_id"
+                ),
+                "capability_score": dict(descriptor.get("capability_score") or {}),
+                "generator_score": generator_score(candidate),
+                "endpoint_evaluated": True,
+                "stages": [],
+            }
+        )
+        if base.get("workspace_pass") is not True:
+            return base
+        if not isinstance(stages, list) or not stages:
+            return {**base, "verdict": "UNKNOWN", "reason": "compiled_stages_missing"}
+        candidate_start = candidate.get("qualification_start_joint_state")
+        start = dict(
+            candidate_start if isinstance(candidate_start, Mapping) else current_state
+        )
+        if "joint_limits" not in source and isinstance(
+            current_state.get("joint_limits"), Mapping
+        ):
+            source = {**dict(source), "joint_limits": current_state["joint_limits"]}
+        active_scene_diff: Mapping[str, Any] | None = None
+        scene: Any = None
+        initial_transition = candidate.get("initial_scene_transition")
+        staged_transition = any(
+            isinstance(stage, Mapping) and bool(stage.get("scene_transition"))
+            for stage in stages
+        )
+        if initial_transition or staged_transition:
+            if self.clone_scene is None or self.apply_scene_transition is None:
+                return {
+                    **base,
+                    "verdict": "UNKNOWN",
+                    "reason": "virtual_scene_transition_unavailable",
+                    "infrastructure_error": True,
+                }
+            try:
+                scene = self.clone_scene()
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    **base,
+                    "verdict": "UNKNOWN",
+                    "reason": "virtual_scene_transition_error",
+                    "error_type": type(exc).__name__,
+                    "infrastructure_error": True,
+                }
+        if initial_transition:
+            try:
+                transition_pose = candidate.get("initial_scene_transition_pose")
+                transition_target = dict(
+                    transition_pose
+                    if isinstance(transition_pose, Mapping)
+                    else stages[0]
+                )
+                predicted_attachment = candidate.get("predicted_attachment_transform")
+                if isinstance(predicted_attachment, Mapping):
+                    transition_target["attachment_transform"] = dict(
+                        predicted_attachment
+                    )
+                transition = self.apply_scene_transition(
+                    scene, str(initial_transition), transition_target
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    **base,
+                    "verdict": "UNKNOWN",
+                    "reason": "virtual_scene_transition_error",
+                    "error_type": type(exc).__name__,
+                    "infrastructure_error": True,
+                }
+            if transition.get("ok") is not True:
+                return {
+                    **base,
+                    "verdict": "FAIL",
+                    "reason": "virtual_scene_transition_failed",
+                }
+            if isinstance(transition.get("planning_scene_diff"), Mapping):
+                active_scene_diff = dict(transition["planning_scene_diff"])
+
+        previous_beam: list[JsonDict] = []
+        for stage_index, raw_target in enumerate(stages):
+            if self.scene_revision() != revision:
+                return {
+                    **base,
+                    "verdict": "UNKNOWN",
+                    "reason": "planning_scene_revision_drift",
+                    "infrastructure_error": True,
+                }
+            if not isinstance(raw_target, Mapping):
+                return {**base, "verdict": "UNKNOWN", "reason": "compiled_stage_invalid"}
+            target = dict(raw_target)
+            if active_scene_diff is not None:
+                target["qualification_scene_diff"] = dict(active_scene_diff)
+            seeds = self._fast_stage_seeds(
+                start,
+                previous_beam=previous_beam,
+                batch_cache=batch_cache,
+                current_state=current_state,
+                source=source,
+                # Recovery expands only the first stage to its six fixed
+                # seeds. Every dependent stage propagates the surviving
+                # Beam-2 parents under the same bounded branching contract as
+                # the fast layer.
+                count=seed_count if stage_index == 0 else beam_width,
+                recovery=recovery and stage_index == 0,
+                initial_seed_source=(
+                    "candidate_start_state"
+                    if isinstance(candidate_start, Mapping)
+                    else "current_robot_state"
+                ),
+            )
+            evidence: JsonDict = {
+                "stage_index": stage_index,
+                "name": str(target.get("name") or f"stage_{stage_index}"),
+                "target_pose": dict(target),
+                "start_joint_state_sha256": _hash(start),
+                "execution_started": False,
+                "ik_seeds": [self._public_seed(seed) for seed in seeds],
+                "pure_ik_attempts": [],
+                "collision_ik_attempts": [],
+            }
+            solutions: list[JsonDict] = []
+            saw_pure_solution = False
+            saw_collision = False
+            stage_started = time.monotonic()
+            try:
+                for seed_index, seed in enumerate(seeds):
+                    seeded_target = dict(target)
+                    seeded_target["ik_seed_timeout_s"] = timeout_s
+                    seeded_target["solver_profile"] = solver_profile
+                    pure, retry_count, elapsed = self._call_fast_service(
+                        lambda seeded_target=seeded_target, seed=seed: self.compute_ik(
+                            seeded_target, seed, False
+                        ),
+                        gate=ik_gate,
+                        required_boolean="ok",
+                    )
+                    pure_attempt: JsonDict = {
+                        "seed_index": seed_index,
+                        "seed_source": seed.get("seed_source"),
+                        "seed_sha256": _hash(self._public_seed(seed)),
+                        "ok": pure.get("ok") is True,
+                        "retry_count": retry_count,
+                        "moveit_error_code": pure.get("moveit_error_code"),
+                        "solver": pure.get("solver") or solver_profile,
+                        "solver_version": pure.get("solver_version"),
+                        "elapsed_s": elapsed,
+                    }
+                    evidence["pure_ik_attempts"].append(pure_attempt)
+                    if pure.get("ok") is not True:
+                        continue
+                    saw_pure_solution = True
+                    pure_state = pure.get("joint_state")
+                    if not _valid_joint_state(pure_state):
+                        raise _QualificationInfrastructureError(
+                            "IK success returned an invalid joint state"
+                        )
+                    validity_state = dict(pure_state)
+                    if active_scene_diff is not None:
+                        validity_state["qualification_scene_diff"] = dict(
+                            active_scene_diff
+                        )
+                    validity, validity_retry, validity_elapsed = self._call_fast_service(
+                        lambda validity_state=validity_state: self.check_state_validity(
+                            validity_state
+                        ),
+                        gate=validity_gate,
+                        required_boolean="valid",
+                    )
+                    pure_attempt.update(
+                        {
+                            "state_valid": validity.get("valid") is True,
+                            "state_validity_retry_count": validity_retry,
+                            "state_validity_elapsed_s": validity_elapsed,
+                            "collision_pairs": list(
+                                validity.get("collision_pairs") or []
+                            ),
+                        }
+                    )
+                    solution_state: Mapping[str, Any] | None = None
+                    solution_result = pure
+                    rescue_count = int(seed.get("_parent_rescues", 0))
+                    if validity.get("valid") is True:
+                        solution_state = pure_state
+                    else:
+                        saw_collision = True
+                        rescue_target = dict(target)
+                        rescue_target["ik_seed_timeout_s"] = timeout_s
+                        rescue_target["solver_profile"] = solver_profile
+                        rescue, rescue_retry, rescue_elapsed = self._call_fast_service(
+                            lambda rescue_target=rescue_target, pure_state=pure_state: self.compute_ik(
+                                rescue_target, pure_state, True
+                            ),
+                            gate=ik_gate,
+                            required_boolean="ok",
+                        )
+                        rescue_attempt: JsonDict = {
+                            "seed_index": seed_index,
+                            "seed_source": seed.get("seed_source"),
+                            "seed_sha256": _hash(pure_state),
+                            "ok": rescue.get("ok") is True,
+                            "retry_count": rescue_retry,
+                            "moveit_error_code": rescue.get("moveit_error_code"),
+                            "solver": rescue.get("solver") or solver_profile,
+                            "elapsed_s": rescue_elapsed,
+                        }
+                        evidence["collision_ik_attempts"].append(rescue_attempt)
+                        if rescue.get("ok") is not True:
+                            continue
+                        rescued_state = rescue.get("joint_state")
+                        if not _valid_joint_state(rescued_state):
+                            raise _QualificationInfrastructureError(
+                                "collision rescue returned an invalid joint state"
+                            )
+                        rescued_validity_state = dict(rescued_state)
+                        if active_scene_diff is not None:
+                            rescued_validity_state["qualification_scene_diff"] = dict(
+                                active_scene_diff
+                            )
+                        rescued_validity, rescued_retry, rescued_elapsed = (
+                            self._call_fast_service(
+                                lambda rescued_validity_state=rescued_validity_state: self.check_state_validity(
+                                    rescued_validity_state
+                                ),
+                                gate=validity_gate,
+                                required_boolean="valid",
+                            )
+                        )
+                        rescue_attempt.update(
+                            {
+                                "state_valid": rescued_validity.get("valid") is True,
+                                "state_validity_retry_count": rescued_retry,
+                                "state_validity_elapsed_s": rescued_elapsed,
+                                "collision_pairs": list(
+                                    rescued_validity.get("collision_pairs") or []
+                                ),
+                            }
+                        )
+                        if rescued_validity.get("valid") is not True:
+                            continue
+                        solution_state = rescued_state
+                        solution_result = rescue
+                        rescue_count += 1
+                    parent_state = seed.get("_chain_parent_state")
+                    parent_state = (
+                        parent_state if isinstance(parent_state, Mapping) else start
+                    )
+                    joint_travel = normalized_joint_distance(
+                        parent_state, solution_state, source=source
+                    )
+                    raw_singular = (
+                        solution_result.get("min_singular_value")
+                        if solution_result.get("min_singular_value") is not None
+                        else solution_result.get("jacobian_min_singular_value", 0.0)
+                    )
+                    try:
+                        minimum_singular = float(raw_singular)
+                    except (TypeError, ValueError) as exc:
+                        raise _QualificationInfrastructureError(
+                            "IK returned malformed Jacobian quality"
+                        ) from exc
+                    if not math.isfinite(minimum_singular) or minimum_singular < 0.0:
+                        raise _QualificationInfrastructureError(
+                            "IK returned invalid Jacobian quality"
+                        )
+                    solutions.append(
+                        {
+                            "joint_state": dict(solution_state),
+                            "state_valid": True,
+                            "joint_margin": joint_limit_margin(
+                                solution_state, source=source
+                            ),
+                            "min_singular_value": minimum_singular,
+                            "joint_travel": joint_travel,
+                            "cumulative_joint_travel": float(
+                                seed.get("_parent_cumulative_joint_travel", 0.0)
+                            )
+                            + joint_travel,
+                            "collision_rescues": rescue_count,
+                            "generator_score": generator_score(candidate),
+                            "fixed_candidate_index": descriptor.get(
+                                "fixed_candidate_index", 0
+                            ),
+                            "seed_index": seed_index,
+                            "seed_source": seed.get("seed_source"),
+                        }
+                    )
+            except _QualificationInfrastructureError as exc:
+                evidence["elapsed_s"] = time.monotonic() - stage_started
+                base["stages"].append(evidence)
+                return {
+                    **base,
+                    "verdict": "UNKNOWN",
+                    "reason": "qualification_service_error",
+                    "infrastructure_error": True,
+                    "infrastructure_error_detail": str(exc),
+                }
+            selected = deduplicate_beam_solutions(
+                solutions, source=source, limit=beam_width
+            )
+            evidence["kinematic_ik"] = saw_pure_solution
+            evidence["pure_state_valid"] = any(
+                attempt.get("state_valid") is True
+                for attempt in evidence["pure_ik_attempts"]
+            )
+            evidence["collision_ik_called"] = saw_collision
+            evidence["collision_ik"] = bool(selected)
+            evidence["state_valid"] = bool(selected)
+            evidence["beam_solutions"] = selected
+            evidence["beam_width"] = len(selected)
+            evidence["elapsed_s"] = time.monotonic() - stage_started
+            if not selected:
+                base["stages"].append(evidence)
+                return {
+                    **base,
+                    "verdict": "FAIL",
+                    "reason": (
+                        "collision_state_invalid"
+                        if saw_pure_solution
+                        else "kinematic_ik_failed"
+                    ),
+                }
+            best = selected[0]
+            evidence.update(
+                {
+                    "end_joint_state": dict(best["joint_state"]),
+                    "joint_margin": best["joint_margin"],
+                    "min_singular_value": best["min_singular_value"],
+                    "joint_travel": best["joint_travel"],
+                    "cumulative_joint_travel": best[
+                        "cumulative_joint_travel"
+                    ],
+                    "collision_rescues": best["collision_rescues"],
+                    "collision_pairs": [],
+                }
+            )
+            base["stages"].append(evidence)
+            previous_beam = selected
+            start = dict(best["joint_state"])
+            transition_name = target.get("scene_transition")
+            if transition_name:
+                if self.apply_scene_transition is None:
+                    return {
+                        **base,
+                        "verdict": "UNKNOWN",
+                        "reason": "virtual_scene_transition_unavailable",
+                        "infrastructure_error": True,
+                    }
+                try:
+                    transition = self.apply_scene_transition(
+                        scene, str(transition_name), target
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return {
+                        **base,
+                        "verdict": "UNKNOWN",
+                        "reason": "virtual_scene_transition_error",
+                        "error_type": type(exc).__name__,
+                        "infrastructure_error": True,
+                    }
+                evidence["scene_transition"] = dict(transition)
+                if transition.get("ok") is not True:
+                    return {
+                        **base,
+                        "verdict": "FAIL",
+                        "reason": "virtual_scene_transition_failed",
+                    }
+                if isinstance(transition.get("planning_scene_diff"), Mapping):
+                    active_scene_diff = dict(transition["planning_scene_diff"])
+        base.update(
+            {
+                "pure_ik_pass": True,
+                "collision_ik_pass": True,
+                "endpoint_pass": True,
+                "verdict": "PASS",
+                "reason": "endpoint_qualified",
+            }
+        )
+        return base
+
+    def _fast_stage_seeds(
+        self,
+        start: Mapping[str, Any],
+        *,
+        previous_beam: Sequence[Mapping[str, Any]],
+        batch_cache: Sequence[Mapping[str, Any]],
+        current_state: Mapping[str, Any],
+        source: Mapping[str, Any],
+        count: int,
+        recovery: bool,
+        initial_seed_source: str,
+    ) -> list[JsonDict]:
+        if recovery:
+            seeds = fixed_recovery_seeds(start, source=source, count=count)
+            for seed in seeds:
+                seed["_chain_parent_state"] = dict(start)
+            return seeds
+        seeds: list[JsonDict] = []
+        if previous_beam:
+            for index, solution in enumerate(previous_beam[:count]):
+                state = solution.get("joint_state")
+                if not isinstance(state, Mapping):
+                    continue
+                seed = dict(state)
+                seed["seed_source"] = f"parent_beam_{index}"
+                seed["_chain_parent_state"] = dict(state)
+                seed["_parent_cumulative_joint_travel"] = float(
+                    solution.get("cumulative_joint_travel", 0.0)
+                )
+                seed["_parent_rescues"] = int(
+                    solution.get("collision_rescues", 0)
+                )
+                seeds.append(seed)
+        else:
+            seed = dict(start)
+            seed["seed_source"] = initial_seed_source
+            seed["_chain_parent_state"] = dict(start)
+            seeds.append(seed)
+        if len(seeds) < count:
+            ordered_supplements: list[tuple[Mapping[str, Any], str]] = [
+                (value, "batch_cache")
+                for value in sorted(
+                    batch_cache,
+                    key=lambda value: (
+                        normalized_joint_distance(start, value, source=source),
+                        _hash(
+                            {
+                                "names": value.get("names"),
+                                "positions": value.get("positions"),
+                            }
+                        ),
+                    ),
+                )
+            ]
+            home = source.get("home_joint_state") or current_state.get(
+                "home_joint_state"
+            )
+            if isinstance(home, Mapping):
+                ordered_supplements.append((home, "named_home"))
+            for supplement_state, supplement_source in ordered_supplements:
+                supplement = dict(supplement_state)
+                supplement["seed_source"] = supplement_source
+                supplement["_chain_parent_state"] = dict(start)
+                if previous_beam:
+                    supplement["_parent_cumulative_joint_travel"] = float(
+                        previous_beam[0].get("cumulative_joint_travel", 0.0)
+                    )
+                    supplement["_parent_rescues"] = int(
+                        previous_beam[0].get("collision_rescues", 0)
+                    )
+                expanded = _unique_joint_state_seeds(
+                    [*seeds, supplement], limit=count
+                )
+                if len(expanded) > len(seeds):
+                    seeds = expanded
+                if len(seeds) >= count:
+                    break
+        return _unique_joint_state_seeds(seeds, limit=count)[:count]
+
+    @staticmethod
+    def _public_seed(seed: Mapping[str, Any]) -> JsonDict:
+        return {
+            "names": list(seed.get("names") or []),
+            "positions": list(seed.get("positions") or []),
+            "seed_source": seed.get("seed_source"),
+        }
+
+    def _plan_fast_candidate(
+        self,
+        descriptor: Mapping[str, Any],
+        revision: int,
+        *,
+        screen: Mapping[str, Any],
+    ) -> tuple[JsonDict, int]:
+        infrastructure_reasons = {
+            "plan_only_timeout",
+            "plan_only_service_error",
+            "plan_only_execution_evidence_missing",
+            "plan_only_empty_trajectory",
+            "plan_only_end_state_missing",
+            "planning_context_unavailable",
+            "planning_scene_revision_drift",
+            "virtual_scene_transition_error",
+            "virtual_scene_transition_unavailable",
+        }
+        first = self._plan_candidate(descriptor, revision, screen=screen)
+        if first.get("reason") not in infrastructure_reasons:
+            return first, 0
+        if self.service_health_check is not None:
+            try:
+                self.service_health_check()
+            except Exception:  # noqa: BLE001
+                pass
+        second = self._plan_candidate(descriptor, revision, screen=screen)
+        if second.get("reason") in infrastructure_reasons:
+            second["infrastructure_error"] = True
+        return second, 1
+
+    @staticmethod
+    def _fast_infrastructure_response(
+        request: Mapping[str, Any],
+        candidates: Sequence[object],
+        revision: int,
+        *,
+        reason: str,
+    ) -> JsonDict:
+        binding = str(request.get("qualification_binding_sha256") or "")
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": revision,
+            "execution_started": False,
+            "qualification_profile": "fast_v3",
+            "stop_reason": "infrastructure_error",
+            "infrastructure_error": True,
+            "metrics": {"generated_count": len(candidates)},
+            "results": [
+                {
+                    "candidate_id": str(item.get("candidate_id") or "")
+                    if isinstance(item, Mapping)
+                    else "",
+                    "candidate_pose_sha256": str(
+                        item.get("candidate_pose_sha256") or ""
+                    )
+                    if isinstance(item, Mapping)
+                    else "",
+                    "qualification_binding_sha256": binding,
+                    "verdict": "UNKNOWN",
+                    "reason": "qualification_infrastructure_error",
+                    "infrastructure_error": True,
+                    "infrastructure_error_detail": reason,
+                    "execution_started": False,
+                    "stages": [],
+                }
+                for item in candidates
+            ],
+        }
+
+    @staticmethod
+    def _fast_configuration_response(
+        request: Mapping[str, Any],
+        candidates: Sequence[object],
+        revision: int,
+        *,
+        reason: str,
+        error: str,
+        robot_hash: str,
+        scene_hash: str,
+    ) -> JsonDict:
+        response = MoveItQualificationEngine._fast_infrastructure_response(
+            request, candidates, revision, reason=error
+        )
+        response.update(
+            {
+                "stop_reason": "configuration_error",
+                "robot_model_sha256": robot_hash,
+                "scene_sha256": scene_hash,
+            }
+        )
+        for item in response["results"]:
+            item["reason"] = reason
+        return response
 
     def _screen_candidate(
         self,
@@ -1544,6 +2899,262 @@ class MoveItQualificationEngine:
         base["workspace_pass"] = True
         return {**base, "verdict": "PASS", "reason": "workspace_qualified"}
 
+    def _fast_legality_prechecks(
+        self,
+        candidates: Sequence[object],
+        *,
+        purpose: str,
+        revision: int,
+    ) -> tuple[list[JsonDict], dict[str, JsonDict], list[JsonDict], JsonDict]:
+        """Run the goal barrier, then the grasp/goal-pair barrier, before IK."""
+
+        descriptors: list[JsonDict] = []
+        for fixed_index, raw_descriptor in enumerate(candidates):
+            descriptor = (
+                dict(raw_descriptor) if isinstance(raw_descriptor, Mapping) else {}
+            )
+            descriptor["fixed_candidate_index"] = fixed_index
+            descriptors.append(descriptor)
+
+        scene: object = {}
+        placement_geometry_present = purpose == "placement" and any(
+            isinstance(descriptor.get("candidate"), Mapping)
+            and any(
+                isinstance(descriptor["candidate"].get(key), Mapping)
+                for key in (
+                    "world_object_goal_pose",
+                    "object_goal_pose",
+                    "object_goal_world",
+                )
+            )
+            for descriptor in descriptors
+        )
+        if placement_geometry_present and self.clone_scene is not None:
+            try:
+                scene = self.clone_scene()
+            except Exception as exc:  # noqa: BLE001 - PlanningScene boundary.
+                raise _QualificationInfrastructureError(
+                    f"placement legality scene clone failed: {type(exc).__name__}"
+                ) from exc
+            if not isinstance(scene, Mapping):
+                raise _QualificationInfrastructureError(
+                    "placement legality scene clone returned non-object evidence"
+                )
+            scene_revision = scene.get("revision")
+            if (
+                isinstance(scene_revision, int)
+                and not isinstance(scene_revision, bool)
+                and scene_revision != revision
+            ):
+                raise _QualificationInfrastructureError(
+                    "placement legality scene revision drift"
+                )
+
+        goal_started = time.monotonic()
+        goal_by_id: dict[str, JsonDict] = {}
+        if purpose == "placement":
+            # This complete barrier is intentional: each AnyPlace object goal
+            # is evaluated once before any grasp/goal pair is considered.
+            for descriptor in descriptors:
+                candidate = descriptor.get("candidate")
+                candidate = candidate if isinstance(candidate, Mapping) else {}
+                goal_id = str(
+                    candidate.get("source_object_goal_id")
+                    or candidate.get("id")
+                    or descriptor.get("candidate_id")
+                    or ""
+                )
+                if goal_id not in goal_by_id:
+                    goal_by_id[goal_id] = evaluate_placement_goal_legality(
+                        descriptor,
+                        scene=scene,
+                    )
+        goal_elapsed_s = time.monotonic() - goal_started
+
+        pair_started = time.monotonic()
+        pair_cache: dict[tuple[str, str], tuple[str, JsonDict]] = {}
+        prechecks: dict[str, JsonDict] = {}
+        schedulable: list[JsonDict] = []
+        pair_evaluation_count = 0
+        pair_shared_count = 0
+        for descriptor in descriptors:
+            candidate_id = str(descriptor.get("candidate_id") or "")
+            candidate = descriptor.get("candidate")
+            candidate = candidate if isinstance(candidate, Mapping) else {}
+            precheck = self._fast_workspace_precheck(descriptor)
+            precheck["fixed_candidate_index"] = int(
+                descriptor.get("fixed_candidate_index", 0)
+            )
+            if purpose == "placement":
+                goal_id = str(
+                    candidate.get("source_object_goal_id")
+                    or candidate.get("id")
+                    or candidate_id
+                )
+                goal_evidence = json.loads(json.dumps(goal_by_id[goal_id]))
+                precheck["goal_legality"] = goal_evidence
+                precheck["goal_legality_pass"] = (
+                    goal_evidence.get("verdict") == "PASS"
+                )
+                if goal_evidence.get("verdict") != "PASS":
+                    precheck.update(
+                        {
+                            "workspace_pass": False,
+                            "pair_legality_pass": False,
+                            "legality_pass": False,
+                            "verdict": str(goal_evidence.get("verdict") or "UNKNOWN"),
+                            "reason": str(
+                                goal_evidence.get("reason")
+                                or "goal_legality_rejected"
+                            ),
+                            "infrastructure_error": bool(
+                                goal_evidence.get("infrastructure_error")
+                            ),
+                            "pair_legality": {
+                                "verdict": "NOT_EVALUATED",
+                                "reason": "goal_legality_rejected",
+                                "execution_started": False,
+                            },
+                        }
+                    )
+                elif precheck.get("verdict") == "PASS":
+                    explicit_family = str(
+                        candidate.get("source_grasp_equivalence_id") or ""
+                    )
+                    family = explicit_family or str(
+                        candidate.get("source_grasp_id")
+                        or candidate.get("id")
+                        or candidate_id
+                    )
+                    # Reuse is enabled only by the host's explicit equivalence
+                    # marker. Merely sharing a textual grasp ID is insufficient.
+                    cache_key = (
+                        (goal_id, family)
+                        if explicit_family
+                        else (candidate_id, candidate_id)
+                    )
+                    cached = pair_cache.get(cache_key)
+                    if cached is None:
+                        pair_evidence = evaluate_grasp_placement_pair_legality(
+                            descriptor,
+                            scene=scene,
+                            workspace_filter=self.workspace_filter,
+                        )
+                        pair_evidence["screening_reused"] = False
+                        pair_evidence["symmetry_equivalence_id"] = family
+                        pair_cache[cache_key] = (candidate_id, pair_evidence)
+                        pair_evaluation_count += 1
+                    else:
+                        shared_from, shared_evidence = cached
+                        pair_evidence = json.loads(json.dumps(shared_evidence))
+                        pair_evidence.update(
+                            {
+                                "candidate_id": candidate_id,
+                                "source_grasp_id": str(
+                                    candidate.get("source_grasp_id") or ""
+                                ),
+                                "source_object_goal_id": goal_id,
+                                "screening_reused": True,
+                                "shared_from_candidate_id": shared_from,
+                                "symmetry_equivalent": True,
+                            }
+                        )
+                        pair_shared_count += 1
+                    precheck["pair_legality"] = pair_evidence
+                    precheck["pair_legality_pass"] = (
+                        pair_evidence.get("verdict") == "PASS"
+                    )
+                    precheck["legality_pass"] = (
+                        pair_evidence.get("verdict") == "PASS"
+                    )
+                    if pair_evidence.get("verdict") != "PASS":
+                        precheck.update(
+                            {
+                                "workspace_pass": False,
+                                "verdict": str(
+                                    pair_evidence.get("verdict") or "UNKNOWN"
+                                ),
+                                "reason": str(
+                                    pair_evidence.get("reason")
+                                    or "pair_legality_rejected"
+                                ),
+                                "infrastructure_error": bool(
+                                    pair_evidence.get("infrastructure_error")
+                                ),
+                            }
+                        )
+                else:
+                    precheck["pair_legality"] = {
+                        "verdict": "NOT_EVALUATED",
+                        "reason": "structural_workspace_rejected",
+                        "execution_started": False,
+                    }
+                    precheck["pair_legality_pass"] = False
+                    precheck["legality_pass"] = False
+            else:
+                family = grasp_symmetry_family_id(candidate)
+                descriptor["grasp_symmetry_family_id"] = family
+                precheck["grasp_symmetry_family_id"] = family
+                precheck["legality_pass"] = precheck.get("verdict") == "PASS"
+            prechecks[candidate_id] = precheck
+            if precheck.get("verdict") == "PASS":
+                schedulable.append(descriptor)
+
+        pair_elapsed_s = time.monotonic() - pair_started
+        goal_values = list(goal_by_id.values())
+        return (
+            descriptors,
+            prechecks,
+            schedulable,
+            {
+                "goal_legality_unique_count": len(goal_values),
+                "goal_legality_pass_count": sum(
+                    evidence.get("verdict") == "PASS" for evidence in goal_values
+                ),
+                "goal_legality_reject_count": sum(
+                    evidence.get("verdict") == "FAIL" for evidence in goal_values
+                ),
+                "goal_legality_elapsed_s": goal_elapsed_s,
+                "pair_legality_candidate_count": (
+                    len(descriptors) if purpose == "placement" else 0
+                ),
+                "pair_legality_evaluation_count": pair_evaluation_count,
+                "pair_legality_shared_count": pair_shared_count,
+                "pair_legality_pass_count": sum(
+                    precheck.get("pair_legality_pass") is True
+                    for precheck in prechecks.values()
+                ),
+                "pair_legality_reject_count": sum(
+                    isinstance(precheck.get("pair_legality"), Mapping)
+                    and precheck["pair_legality"].get("verdict") == "FAIL"
+                    for precheck in prechecks.values()
+                ),
+                "pair_legality_elapsed_s": pair_elapsed_s,
+            },
+        )
+
+    def _fast_workspace_precheck(self, descriptor: object) -> JsonDict:
+        """Add only mathematical/structural hard rejects to the legacy L2 gate."""
+
+        precheck = self._workspace_precheck(descriptor)
+        if precheck.get("verdict") != "PASS":
+            return precheck
+        item = descriptor if isinstance(descriptor, Mapping) else {}
+        candidate = item.get("candidate")
+        candidate = candidate if isinstance(candidate, Mapping) else {}
+        stages = candidate.get("qualification_stages")
+        if not isinstance(stages, list) or any(
+            not isinstance(stage, Mapping) or target_pose(stage) is None
+            for stage in stages
+        ):
+            return {
+                **precheck,
+                "workspace_pass": False,
+                "verdict": "FAIL",
+                "reason": "invalid_target_transform",
+            }
+        return precheck
+
     def _plan_candidate(
         self,
         descriptor: object,
@@ -1609,8 +3220,17 @@ class MoveItQualificationEngine:
         for index, target in enumerate(stages if isinstance(stages, list) else []):
             evidence = dict(screen.get("stages", [])[index])
             evidence["start_joint_state_sha256"] = _hash(start)
+            planning_started = time.monotonic()
             try:
                 planning_target = dict(target)
+                selected_ik_state = evidence.get("end_joint_state")
+                if isinstance(selected_ik_state, Mapping):
+                    planning_target["qualification_goal_joint_state"] = dict(
+                        selected_ik_state
+                    )
+                    evidence["selected_ik_end_joint_state_sha256"] = _hash(
+                        selected_ik_state
+                    )
                 if active_scene_diff is not None:
                     planning_target["qualification_scene_diff"] = dict(
                         active_scene_diff
@@ -1624,13 +3244,29 @@ class MoveItQualificationEngine:
                     )
                 )
             except TimeoutError:
+                evidence["elapsed_s"] = time.monotonic() - planning_started
                 return self._unknown(base, evidence, "plan_only_timeout")
             except Exception as exc:  # noqa: BLE001
+                evidence["elapsed_s"] = time.monotonic() - planning_started
                 return self._unknown(base, evidence, "plan_only_service_error", exc)
             evidence["moveit_error_code"] = planned.get("moveit_error_code")
             evidence["solver"] = planned.get("solver")
-            evidence["elapsed_s"] = planned.get("elapsed_s")
-            evidence["joint_margin"] = planned.get("joint_margin")
+            reported_elapsed = planned.get("elapsed_s")
+            evidence["elapsed_s"] = (
+                float(reported_elapsed)
+                if isinstance(reported_elapsed, (int, float))
+                and not isinstance(reported_elapsed, bool)
+                and math.isfinite(float(reported_elapsed))
+                and float(reported_elapsed) >= 0.0
+                else time.monotonic() - planning_started
+            )
+            planned_margin = planned.get("joint_margin")
+            if (
+                isinstance(planned_margin, (int, float))
+                and not isinstance(planned_margin, bool)
+                and math.isfinite(float(planned_margin))
+            ):
+                evidence["joint_margin"] = float(planned_margin)
             points = planned.get("trajectory_points")
             if planned.get("execution_started") is not False:
                 return self._unknown(base, evidence, "plan_only_execution_evidence_missing")

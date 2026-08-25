@@ -296,14 +296,14 @@ over-width, recovery ends explicitly instead of re-entering validation retries.
 Candidates are normalized in score-descending order and memory exposes
 `grasp_candidate_policy` with one active candidate. A later successful
 inference replaces the active policy while older results remain in history.
-Rank 0 is tried first. The candidate ID survives
-`camera_pose_to_world` and must be preserved in the complete world pose passed
-to safety and motion tools. A safety rejection or motion failure linked to that
-ID records the rejection and activates the next rank. Input, calibration,
-transport, and unrelated tool failures do not consume a candidate. Exhaustion
-requires fresh observation or grasp generation. A successful candidate-linked
-`move_to` marks the queue accepted and ends its gate scope, preventing stale
-grasp state from constraining later place or retreat motions.
+Rank 0 is tried first. The candidate ID survives the host's frame/TCP
+representation conversion; its complete model contact pose is passed unchanged
+to safety and motion. A candidate-linked safety rejection or motion failure
+activates the next frozen rank. Input, calibration, transport, and unrelated
+tool failures do not consume a candidate. Fresh observation or model inference
+is required only after the frozen pool is exhausted. A successful
+candidate-linked `move_to` marks the contact terminal accepted; placement then
+uses the independently frozen AnyPlace pool and measured attachment transform.
 
 The independent agent-facing `graspgenx` ToolSpec is bound only when the
 `openeta-graspgenx` (or `graspgenx`) MCP URL is configured. It requires local

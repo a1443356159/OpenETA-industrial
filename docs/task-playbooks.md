@@ -5,7 +5,6 @@ benchmark trajectory into a general robot skill. They complement, rather than
 replace, these layers:
 
 - `agent/calibrations/`: embodiment and frame calibration.
-- `agent/strategies/grasp/`: geometry-family grasp constraints.
 - `agent/skills/`: reusable task workflows and safety rules.
 - `agent/task_playbooks/`: exact environment, suite, task index, and normalized
   task-text experience.
@@ -36,11 +35,7 @@ This propagation does not publish to the shared registry and does not change
 `status` from `candidate`. Shared publication requires repeated canaries and
 held-out validation; only then may a reviewed record move to `validated/`.
 
-## Bowl Grasp Candidate
-
-The Panda bowl strategy remains a candidate. It filters estimator seeds whose
-native approach is not sufficiently downward, preserves useful yaw while
-compiling a top-down EEF orientation, aligns against a shallow visible rim
-surface instead of the cavity centroid, and inserts a host-generated
-precontact waypoint before contact. These constraints require objective lift
-and held-out task evidence before validation.
+Task playbooks may retain identity, semantic-query, width, and subgoal-order
+experience. They must not retain or propose terminal pose edits, approach
+directions, intermediate waypoints, grasp strategies, lift tests, or release
+offsets. Provider contact poses and AnyPlace object goals remain authoritative.

@@ -38,7 +38,7 @@ ModelScope checkpoint 的固定版本、SHA-256、离线 cache 布局和服务�
 → 恰好一个候选
 → select_sam3_detection（host-only scripted_single_candidate）
 → 严格 RGB-D → m5_object_summary
-→ 原有 M3 close / attach / lift / open / detach
+→ M3 exact contact / close / native attach proof / open / detach
 ```
 
 它不调用 Planner Provider、LLM 或 PTY/TUI。成功报告的 scope 固定为
@@ -70,9 +70,10 @@ M5 没有 LLM 选择。SAM3 必须返回恰好一个候选，仍通过既有
 这是显式 host-only 选择，不是按 score 自动选择。
 
 零候选、多候选、response 结构错误、Oracle、contractual fake candidate、帧或
-artifact 不匹配都会在进入 M3 motion 前停止。通过感知门后，M3 的规则未变：
-必须有双垫 native contact、attached ACK、至少 80 mm child-link lift、最多 10 mm
-capture-relative translation 和 detached ACK。
+artifact 不匹配都会在进入 M3 motion 前停止。通过感知门后，M3 必须执行冻结的
+exact contact terminal，并以双垫 native contact 与 attached ACK 直接证明抓取；
+随后原地 open 并取得 detached ACK。M5 不生成或验收 lift waypoint，也没有最小
+位移门槛。
 
 ## 证据与状态
 

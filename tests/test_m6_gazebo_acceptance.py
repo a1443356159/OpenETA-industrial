@@ -37,26 +37,28 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
         "openeta-anyplace",
     }
     prompt = paths.instructions.read_text(encoding="utf-8")
-    assert "AnyGrasp" in prompt and "AnyPlace" in prompt
-    assert "execution_started=false" in prompt
-    assert "最终\n0.5 s 判断稳定" in prompt
-    assert "禁止 Oracle" in prompt
+    assert "grasp_pose_estimate" in prompt and "AnyPlace" in prompt
+    assert "精确 EEF contact" in prompt
+    assert "一次规划到精确 contact" in prompt
+    assert "最终窗口 >=0.5 s" in prompt
+    assert "不得" in prompt and "Oracle" in prompt
     assert "initial observation 不计作这次显式 observe" in prompt
     assert "覆盖完整目标轮廓" in prompt
-    assert "红色方块 target_object" in prompt
+    assert "红色方块对应场景中的 target_object" in prompt
+    assert "`red rectangular block`" in prompt
     assert "独立 placement RGB-D" in prompt
-    assert "host_candidate_compilation" in prompt
+    assert "冻结目标池" in prompt
     assert "compile_placement_seed" not in prompt
-    assert "source_grasp_id" in prompt
+    assert "实测 T_eef_object" in prompt
     assert "不得固定 detection id" in prompt
     assert "不得调用 python_exec" in prompt
 
 
-def test_m6_order_helper_rejects_anyplace_before_lift() -> None:
-    valid = ["observe", "anygrasp", "gripper_control", "move_to", "anyplace"]
-    invalid = ["observe", "anygrasp", "anyplace", "gripper_control", "move_to"]
+def test_m6_order_helper_requires_frozen_anyplace_pool_before_grasp() -> None:
+    valid = ["observe", "anyplace", "grasp_pose_estimate", "move_to", "gripper_control"]
+    invalid = ["observe", "grasp_pose_estimate", "move_to", "gripper_control", "anyplace"]
 
-    required = ("observe", "anygrasp", "gripper_control", "move_to", "anyplace")
+    required = ("observe", "anyplace", "grasp_pose_estimate", "move_to", "gripper_control")
     assert m6._ordered(valid, required)
     assert not m6._ordered(invalid, required)
 
@@ -72,8 +74,8 @@ def test_m6_canonicalizes_public_grasp_tool_only_with_real_anygrasp_backend() ->
 
 
 def test_m6_requires_only_executable_public_grasp_tools() -> None:
-    assert "anygrasp" in m6.REQUIRED_REAL_M6_TOOLS
-    assert "grasp_pose_estimate" not in m6.REQUIRED_REAL_M6_TOOLS
+    assert "grasp_pose_estimate" in m6.REQUIRED_REAL_M6_TOOLS
+    assert "anygrasp" not in m6.REQUIRED_REAL_M6_TOOLS
 
 
 def test_m6_health_url_preserves_service_root() -> None:
@@ -140,7 +142,7 @@ def test_m6_verifier_uses_model_raw_count_for_frozen_goal_requalification() -> N
                 "outputs": {
                     "model_raw_candidate_count": 96,
                     "raw_candidate_count": 4,
-                    "frozen_pregrasp_goal_count": 4,
+                    "frozen_goal_count": 4,
                 }
             }
         }
@@ -244,7 +246,7 @@ def test_m6_qualification_blocks_resolve_relative_to_case_root(tmp_path) -> None
     assert m6._qualification_blocks(call, artifact_root=tmp_path) == [proof]
 
 
-def test_m6_qualification_blocks_include_pregrasp_joint_proof(tmp_path) -> None:
+def test_m6_qualification_blocks_include_frozen_pair_proof(tmp_path) -> None:
     artifact = (
         tmp_path
         / ".openeta_memory"
@@ -252,14 +254,14 @@ def test_m6_qualification_blocks_include_pregrasp_joint_proof(tmp_path) -> None:
         / "session-a"
         / "artifacts"
         / "moveit_qualification"
-        / "pregrasp-joint.json"
+        / "frozen-pair.json"
     )
     artifact.parent.mkdir(parents=True)
     proof = {
         "purpose": "placement",
         "results": [
             {
-                "candidate_id": "pregrasp_pair_grasp_000_placement_000",
+                "candidate_id": "frozen_pair_grasp_000_placement_000",
                 "verdict": "FAIL",
                 "reason": "plan_only_failed",
                 "execution_started": False,
@@ -269,13 +271,52 @@ def test_m6_qualification_blocks_include_pregrasp_joint_proof(tmp_path) -> None:
     }
     artifact.write_text(json.dumps(proof), encoding="utf-8")
     call = {
-        "pregrasp_joint_qualification_artifact": {
+        "frozen_pair_qualification_artifact": {
             "kind": "json",
             "path": str(artifact.relative_to(tmp_path)),
         }
     }
 
     assert m6._qualification_blocks(call, artifact_root=tmp_path) == [proof]
+
+
+def test_m6_accepts_complete_v3_grasp_pool_with_two_l5_branches(tmp_path) -> None:
+    artifact = tmp_path / "qualification-v3.json"
+    results = [
+        {
+            "candidate_id": f"grasp_{index:03d}",
+            "endpoint_pass": index < 2,
+            "se3_cluster_id": f"se3_{index:04d}",
+            "verdict": "PASS" if index < 2 else "FAIL",
+        }
+        for index in range(65)
+    ]
+    proof = {
+        "schema_version": "openeta.moveit_candidate_funnel.v3",
+        "artifact_schema_version": "openeta.moveit_candidate_qualification.v3",
+        "purpose": "grasp",
+        "stop_reason": "complete_l5_pass_found",
+        "selected_candidate_ids": ["grasp_000", "grasp_001"],
+        "metrics": {"generated_count": 65, "l5_pass_count": 2},
+        "l5_attempts": [
+            {"candidate_id": "grasp_000", "verdict": "PASS"},
+            {"candidate_id": "grasp_001", "verdict": "PASS"},
+        ],
+        "results": results,
+    }
+    artifact.write_text(json.dumps(proof), encoding="utf-8")
+    call = {
+        "diversity_selected_count": 65,
+        "qualification_artifact": {"kind": "json", "path": artifact.name},
+    }
+
+    assert m6._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert m6._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
+
+    proof["selected_candidate_ids"] = ["grasp_000"]
+    artifact.write_text(json.dumps(proof), encoding="utf-8")
+    assert not m6._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert not m6._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
 
 def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkeypatch) -> None:

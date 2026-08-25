@@ -402,8 +402,8 @@ class GazeboDetachableJointControl:
     """Request and prove native-grasp's stock ``DetachableJoint`` without fallback.
 
     The state topic is an ACK boundary only.  ``child_link_proof`` separately
-    reads the native world ``pose/info`` stream and is the only source for the
-    80 mm lift / 10 mm capture-relative proof.
+    reads the native world ``pose/info`` stream to revalidate relative-pose
+    retention during whatever MoveIt transport the task actually requires.
     """
 
     def __init__(
@@ -639,7 +639,7 @@ class GazeboDetachableJointControl:
 
     @staticmethod
     def _pose_blocks(text: str) -> dict[str, tuple[float, float, float]]:
-        """Compatibility projection used by lift proof: retain position only."""
+        """Compatibility projection of native poses: retain position only."""
 
         return {
             name: pose.xyz
@@ -784,7 +784,7 @@ class GazeboDetachableJointControl:
             time.sleep(min(interval_s, max(0.0, duration_s - elapsed_s)))
 
     def child_link_proof(self):
-        """Return the approved child-link lift proof, or fail closed."""
+        """Return native relative-pose retention evidence, or fail closed."""
 
         if self._baseline is None:
             raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")

@@ -6,10 +6,10 @@ visual inference. The optional fake grasp candidate is likewise a
 contract-shaped input fixture, not a predicted grasp.
 
 M4 may route its candidate through M3 only. It must still obtain the real
-dual native-contact gate, official DetachableJoint ACK, and child-link lift
-proof; neither Oracle output nor a fake candidate can create a joint or prove
-a grasp. Reports must state both the Oracle provenance and the fake-candidate
-boundary.
+dual native-contact gate and official DetachableJoint attach ACK at the exact
+contact terminal; neither Oracle output nor a fake candidate can create a
+joint or prove a grasp. Reports must state both the Oracle provenance and the
+fake-candidate boundary. No lift waypoint or displacement threshold is used.
 
 The repository contains implementation and offline contracts, not a claim
 that the M4 remote formal acceptance has passed.

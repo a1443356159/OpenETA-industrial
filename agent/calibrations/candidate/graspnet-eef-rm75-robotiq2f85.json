@@ -9,8 +9,6 @@
   "length_unit": "m",
   "rotation_convention": "active_column_vectors",
   "max_gripper_width_m": 0.085,
-  "minimum_pregrasp_distance_m": 0.07,
-  "wrist_alignment_policy": "optional_if_fresh_segmentation_empty",
   "compatibility": {
     "environment_families": ["openeta_gazebo_rm75"],
     "controllers": ["MoveIt2"],
@@ -30,7 +28,6 @@
     "task": "Gazebo RM75 Robotiq 2F-85 constraint-correct placement",
     "method": "Official GraspGenX Robotiq native +Z approach/+X closing frame mapped rigidly to the RM75 mount +Z approach/+X closing frame",
     "grasp_origin_note": "The normalized GraspNet +X/+Y/+Z axes are approach/closing/binormal. The official pose origin is the Robotiq base, 6 mm forward of gripper_mount_link; gripper_tip_position_xyz remains separate contact evidence.",
-    "pregrasp_note": "A 70 mm additional approach-axis standoff leaves the official 136 mm fingertips 70 mm clear of the contact point and matches the validated fixture clearance envelope.",
     "orientation_policy": "Preserve every candidate rotation; no fixed wrist orientation or pose preview is permitted."
   },
   "candidate_status": {

@@ -1340,7 +1340,7 @@ def test_m2_ab_targets_use_the_submitted_pose_not_controller_orientation_normali
 
 
 def test_m3_control_uses_fixed_world_fixture_poses_not_a_geometry_gate() -> None:
-    """The preflight path may command a pose, but never infer contact from it."""
+    """The fixture has one contact terminal and no artificial waypoint."""
 
     calls: list[tuple[str, dict]] = []
 
@@ -1352,27 +1352,17 @@ def test_m3_control_uses_fixed_world_fixture_poses_not_a_geometry_gate() -> None
 
     assert [name for name, _ in calls] == [
         "move_to",
-        "move_to",
         "gripper_control",
-        "move_to",
         "gripper_control",
     ]
-    approach, capture, _, lift, _ = [parameters for _, parameters in calls]
-    assert approach["target_pose"] == {
+    contact = calls[0][1]
+    assert contact["target_pose"] == {
         "frame": "world",
         "euler_xyz_deg": [115.0, 0.0, 90.0],
-        "xyz": [0.1552, -0.1, 0.5686],
+        "xyz": [0.1552, -0.1, 0.4976],
     }
-    assert capture["target_pose"]["xyz"] == [0.1552, -0.1, 0.4976]
-    assert lift["target_pose"] == {
-        "frame": "world",
-        "euler_xyz_deg": [115.0, 0.0, 90.0],
-        "xyz": [0.1552, -0.1, 0.5976],
-    }
-    assert lift["target_pose"]["xyz"][2] - capture["target_pose"]["xyz"][2] >= 0.1 - 1e-9
-    for parameters in (approach, capture, lift):
-        assert parameters["tolerance"] == 0.0002
-        assert parameters["ori_tolerance"] == 0.002
+    assert contact["tolerance"] == 0.0002
+    assert contact["ori_tolerance"] == 0.002
     for _, parameters in calls:
         assert not {"distance", "contact_gate", "tf_lookup", "geometry"} & set(parameters)
 
@@ -1918,45 +1908,43 @@ def test_scripted_tui_physical_grasp_prompt_explains_attach_proof_phase(
 
     assert "native_contact_gate.accepted=true" in instructions
     assert "detachable_joint.state=attached" in instructions
-    assert "NATIVE_GRASP_ATTACH_ACKED_UNPROVEN" in instructions
-    assert "grasp_confirmed=false" in instructions
-    assert "必须立即执行 validated lift [0.1552,-0.1000,0.5976]" in instructions
+    assert "NATIVE_GRASP_ATTACHMENT_CONFIRMED" in instructions
+    assert "grasp_confirmed=true" in instructions
+    assert "verdict=PASS" in instructions
+    assert "不得要求固定距离或方向" in instructions or "禁止人工 approach/lift/retreat" in instructions
 
 
-def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path: Path) -> None:
+
+
+def test_m3_verifier_accepts_direct_native_contact_attachment_proof(tmp_path: Path) -> None:
     paths = _prepare_evidence(tmp_path, "m3", DETERMINISTIC)
     paths.mcp_log.write_text("OpenETA MCP server started\n", encoding="utf-8")
 
     close = {
         "native_contact_gate": {
             "accepted": True,
+            "reason_code": "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED",
             "left_sample_count": 3,
             "right_sample_count": 3,
             "left_span_s": 0.100,
             "right_span_s": 0.101,
-            "evidence": {"target_id": "target_object"},
+            "evidence": {"source": "gazebo_native_contacts", "target_id": "target_object"},
         },
         "detachable_joint": {"state": "attached"},
         "physical_verification": {
             "schema_version": "openeta.gazebo.native_grasp.v1",
-            "reason_code": "NATIVE_GRASP_ATTACH_ACKED_UNPROVEN",
-            "grasp_confirmed": False,
-        },
-    }
-    lift = {
-        "child_link_proof": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
-        "physical_verification": {
-            "schema_version": "openeta.gazebo.native_grasp.v1",
-            "reason_code": "NATIVE_GRASP_TARGET_HELD",
+            "verdict": "PASS",
+            "reason_code": "NATIVE_GRASP_ATTACHMENT_CONFIRMED",
+            "target_id": "target_object",
             "grasp_confirmed": True,
-            "evidence": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
         },
     }
     opened = {
         "detachable_joint": {"state": "detached"},
         "physical_verification": {
             "schema_version": "openeta.gazebo.native_grasp.v1",
-            "reason_code": "READY",
+            "verdict": "PASS",
+            "reason_code": "NATIVE_GRASP_DETACHED",
             "grasp_confirmed": False,
         },
     }
@@ -1972,13 +1960,6 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
         paths.root,
         "gripper_control",
         [("gripper_close", close)],
-        handle="m3-handle",
-        session_id="m3-session",
-    )
-    lift_outputs, lift_receipt = _mcp_outputs(
-        paths.root,
-        "move_to",
-        [("move_to", lift)],
         handle="m3-handle",
         session_id="m3-session",
     )
@@ -2003,21 +1984,8 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
             outputs=create_outputs,
             receipt=create_receipt,
         ),
-        _tool(
-            "gripper_control",
-            outputs=close_outputs,
-            receipt=close_receipt,
-        ),
-        _tool(
-            "move_to",
-            outputs=lift_outputs,
-            receipt=lift_receipt,
-        ),
-        _tool(
-            "gripper_control",
-            outputs=open_outputs,
-            receipt=open_receipt,
-        ),
+        _tool("gripper_control", outputs=close_outputs, receipt=close_receipt),
+        _tool("gripper_control", outputs=open_outputs, receipt=open_receipt),
         _tool(
             "close_simulator_env",
             outputs=environment_close_outputs,
@@ -2030,12 +1998,12 @@ def test_m3_verifier_correlates_tui_mcp_responses_ack_and_numeric_proof(tmp_path
 
     assert verify_case(paths, "m3", DETERMINISTIC)["status"] == "passed"
 
-    lift["physical_verification"]["evidence"]["lift_m"] = 0.079
-    lift_path = Path(lift_outputs["response"]["response_path"])
-    _write_json(lift_path, lift)
+    close["physical_verification"]["grasp_confirmed"] = False
+    close_path = Path(close_outputs["response"]["response_path"])
+    _write_json(close_path, close)
     failed = verify_case(paths, "m3", DETERMINISTIC)
     assert failed["status"] == "failed"
-    assert "numeric child-link" in " ".join(failed["errors"])
+    assert "attach-ACK grasp proof" in " ".join(failed["errors"])
 
 
 def test_formal_tui_rejects_missing_or_mismatched_mcp_chain(tmp_path: Path) -> None:
@@ -2079,16 +2047,16 @@ def test_m4_requires_actual_oracle_output_and_truthful_fake_candidate(tmp_path: 
         "native_contact_gate": {
             "accepted": True, "left_sample_count": 3, "right_sample_count": 3,
             "left_span_s": 0.101, "right_span_s": 0.101,
-            "evidence": {"target_id": "target_object"},
+            "evidence": {"source": "gazebo_native_contacts", "target_id": "target_object"},
         },
         "detachable_joint": {"state": "attached"},
-    }
-    held = {
         "physical_verification": {
             "schema_version": "openeta.gazebo.native_grasp.v1",
-            "reason_code": "NATIVE_GRASP_TARGET_HELD", "grasp_confirmed": True,
-            "evidence": {"lift_m": 0.080, "capture_relative_translation_m": 0.010},
-        }
+            "verdict": "PASS",
+            "reason_code": "NATIVE_GRASP_ATTACHMENT_CONFIRMED",
+            "target_id": "target_object",
+            "grasp_confirmed": True,
+        },
     }
     detached = {"detachable_joint": {"state": "detached"}}
     create_outputs, create_receipt = _mcp_outputs(
@@ -2099,9 +2067,6 @@ def test_m4_requires_actual_oracle_output_and_truthful_fake_candidate(tmp_path: 
     gripper_close, close_receipt = _mcp_outputs(
         paths.root, "gripper_control", [("gripper_close", attached)],
         handle="m4-handle", session_id="m4-session",
-    )
-    move, move_receipt = _mcp_outputs(
-        paths.root, "move_to", [("move_to", held)], handle="m4-handle", session_id="m4-session"
     )
     gripper_open, open_receipt = _mcp_outputs(
         paths.root, "gripper_control", [("gripper_open", detached)],
@@ -2131,9 +2096,8 @@ def test_m4_requires_actual_oracle_output_and_truthful_fake_candidate(tmp_path: 
     )
     events = [
         _tool("create_simulator_env", parameters={"env_id": ENV_IDS["m4"]}, outputs=create_outputs, receipt=create_receipt, profile=SCRIPTED_TUI),
-        _tool("gripper_control", outputs=gripper_close, receipt=close_receipt, profile=SCRIPTED_TUI),
-        _tool("move_to", outputs=move, receipt=move_receipt, profile=SCRIPTED_TUI),
         _tool("oracle_perceive", outputs=oracle_outputs, receipt=oracle_receipt, profile=SCRIPTED_TUI),
+        _tool("gripper_control", outputs=gripper_close, receipt=close_receipt, profile=SCRIPTED_TUI),
         _tool("gripper_control", outputs=gripper_open, receipt=open_receipt, profile=SCRIPTED_TUI),
         _tool("close_simulator_env", outputs=env_close, receipt=env_close_receipt, profile=SCRIPTED_TUI),
     ]

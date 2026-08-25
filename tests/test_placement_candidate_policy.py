@@ -216,41 +216,6 @@ def test_repeated_failure_fingerprint_stops_fail_closed() -> None:
     assert policy["rejected_candidates"] == []
 
 
-def test_detached_retreat_uses_release_scene_revision() -> None:
-    memory = AgentMemory()
-    policy = _policy(["placement_000"])
-    policy["scene_revision"] = 2
-    policy["planning_scene_revision"] = 2
-    memory.save_fact("placement_candidate_policy", policy, source="test")
-    memory.save_fact(
-        "placement_release",
-        {
-            "schema_version": "openeta.placement_release.v1",
-            "status": "released",
-            "candidate_id": "placement_000",
-            "planning_scene_revision": 3,
-        },
-        source="test",
-    )
-    retreat = {
-        "purpose": "placement",
-        "placement_stage": "retreat",
-        "placement_candidate_id": "placement_000",
-        "scene_revision": 3,
-        "compiled_eef_pose": True,
-        "xyz": [0.4, 0.0, 0.6],
-    }
-
-    memory.add_action(
-        _successful_call(
-            "move_to",
-            {"target_pose": retreat},
-            {"planning_scene_revision": 3},
-        )
-    )
-
-    assert memory.placement_candidate_policy()["status"] == "active"
-    assert memory.placement_release()["status"] == "retreated"
 
 
 def test_exhausted_recovery_reobserves_placement_and_preserves_attachment() -> None:

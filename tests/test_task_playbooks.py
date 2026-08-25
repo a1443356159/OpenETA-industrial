@@ -149,7 +149,7 @@ def test_success_rollout_extracts_non_executable_candidate(tmp_path: Path) -> No
             "event": {
                 "phase": "start",
                 "name": "move_to",
-                "parameters": {"target_pose": {"grasp_stage": "full_lift", "xyz": [1, 2, 3]}},
+                "parameters": {"target_pose": {"grasp_stage": "contact", "xyz": [1, 2, 3]}},
             }
         },
     ]
@@ -187,13 +187,13 @@ def test_success_rollout_extracts_non_executable_candidate(tmp_path: Path) -> No
 
     assert candidate["scope"]["task_text_sha256"] == task_text_sha256("pick up test can")
     assert candidate["guidance"]["observed_object_queries"] == ["test can"]
-    assert candidate["guidance"]["successful_stage_sequence"] == ["full_lift"]
+    assert candidate["guidance"]["successful_stage_sequence"] == ["contact"]
     assert candidate["guidance"]["successful_grasp_signatures"] == [
         {
             "geometry_family": "upright_can",
-            "strategy_id": "top-down",
             "gripper_width_m": 0.06,
             "backend": "anygrasp",
         }
     ]
+    assert "strategy_id" not in json.dumps(candidate["guidance"])
     assert "xyz" not in json.dumps(candidate["guidance"])

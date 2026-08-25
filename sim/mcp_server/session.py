@@ -45,6 +45,16 @@ _session_last_obs: dict[str, dict[tuple[str, str], dict]] = {}
 # calls in the anyio thread pool; without this lock their read-modify-write on
 # the same session dict races and cross-contaminates entries.
 _session_last_obs_lock = threading.Lock()
+# Read-only qualification summaries for the dashboard. The private proof and
+# exact joint states stay in the host artifact; this cache contains metrics
+# only and is never read by the qualification executor.
+_session_qualification: dict[str, dict[str, dict]] = {}
+# Successful first-L5 latency history is partitioned by the concrete solver
+# configuration so dashboard P50/P95 never mixes bake-off profiles.
+_session_qualification_latencies: dict[
+    str, dict[str, dict[str, list[float]]]
+] = {}
+_session_qualification_lock = threading.Lock()
 
 
 def _obs_key(meta: dict) -> tuple[str, str]:
@@ -152,6 +162,9 @@ def _cleanup_session(sid: str) -> None:
             remove_checker(handle)
     with _session_last_obs_lock:
         _session_last_obs.pop(sid, None)
+    with _session_qualification_lock:
+        _session_qualification.pop(sid, None)
+        _session_qualification_latencies.pop(sid, None)
     _session_stream_interval.pop(sid, None)
     _session_last_activity.pop(sid, None)
     _sse_sessions.discard(sid)

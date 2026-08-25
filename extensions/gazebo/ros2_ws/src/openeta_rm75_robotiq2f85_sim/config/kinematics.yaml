@@ -4,3 +4,4 @@ rm_group:
   # WSL2 CPU contention let the 50 ms window expire mid-solve, surfacing as
   # intermittent "unable to sample any valid states for goal tree" (99999).
   kinematics_solver_timeout: 0.2
+  kinematics_solver_attempts: 1

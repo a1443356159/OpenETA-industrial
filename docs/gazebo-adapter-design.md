@@ -16,13 +16,14 @@ Every reset repeats pause → reset → detached ACK → object restore → unpa
 real command. Attach is issued only when each stream has at least three fresh,
 post-close samples covering 100 ms and every sample identifies only
 `target_object`. Unknown, mixed, stale, single-sided, or distractor contacts fail
-closed. An attach ACK permits transport but is not a grasp verdict. The grasp passes
-only after native Gazebo child-link state proves at least 80 mm target lift
-and no more than 10 mm capture-relative translation.
+closed. An attach ACK alone is not a grasp verdict. Bilateral target contact
+plus that ACK directly proves the grasp and freezes the measured attachment
+transform. No artificial lift, hover, or displacement threshold is part of
+the grasp verdict.
 
 There is no force injection, compliance, gravity compensation, kinematic
 following, geometric/TF/distance admission, or alternate physics path. A
-missing state ACK or unreadable DART child-link state reports an explicit native-grasp
+missing state ACK or invalid attachment state reports an explicit native-grasp
 error and stops the chain.
 
 ## Oracle boundary

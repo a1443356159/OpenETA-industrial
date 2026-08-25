@@ -1,28 +1,28 @@
-# M3 native-contact DetachableJoint verification
+# Gazebo M3 native-contact verification
 
-M3 uses one stock Gazebo Sim 8 fixed `DetachableJoint`: parent
-`gripper_mount_link`, child `m3_target/target_link`, with
-`/m3/detachable_joint/target/{attach,detach,state}`.
+M3 verifies a grasp at the model-generated contact terminal. MoveIt plans the
+entire route from the current robot state to that exact terminal; OpenETA does
+not synthesize a pregrasp, hover, approach, lift, or retreat waypoint.
 
-Gazebo initializes this plugin attached. The M3 launch intentionally omits
-`-r`; runtime holds the world paused, sends `detach`, listens for
-`data: "detached"`, and only then resumes. Reset repeats the same ACK gate.
-Attach and release similarly subscribe before publishing and require
-`data: "attached"` or `data: "detached"`. `gripper_open` completes before a
-release detach request.
+The fixture uses Gazebo Sim's stock `DetachableJoint` between
+`gripper_mount_link` and `m3_target/target_link`, with
+`/m3/detachable_joint/target/{attach,detach,state}`. Runtime starts from a
+confirmed detached state, then executes only:
 
-Before a real close, M3 arms `/m3/contacts/left_pad` and
-`/m3/contacts/right_pad`, both native `gz.msgs.Contacts` streams. Attach is
-permitted only if each stream supplies three samples after close completion,
-spanning at least 100 ms, all fresh, all unambiguously naming `m3_target`.
-Unknown, mixed, stale, distractor, or one-sided evidence is rejection.
+1. `move_to(exact model contact EEF pose)`;
+2. `gripper_control(position=0)`;
+3. `gripper_control(position=1)` for cleanup.
 
-An ACK proves plugin state only. The M3 lift proof reads Gazebo's native
-`/world/rm75_robotiq2f85_pickplace/pose/info` link state for
-`target_link` and `gripper_mount_link`: target child-link lift must be at
-least 80 mm and capture-relative translation at most 10 mm. DART/state
-incompatibility reports `M3_DART_UNSUPPORTED` or a child-link/ACK error; it
-does not select another mechanism.
+Before close, M3 arms the native left- and right-pad contact streams. The close
+is a PASS only when both pads provide fresh, unambiguous target contact and the
+detachable joint returns an attached ACK. The verifier records the measured
+`T_eef_object_attached` transform and reports
+`NATIVE_GRASP_ATTACHMENT_CONFIRMED`. An ACK without bilateral contact, stale or
+mixed contact evidence, a different target, or an invalid transform fails
+closed.
 
-Historical reports for removed experiments are diagnostic only. This document
-does not claim a remote formal acceptance result.
+There is deliberately no displacement or minimum-lift threshold. Such a test
+would measure an artificial post-grasp waypoint rather than the validity of the
+model terminal. Opening must complete before detach and requires a detached ACK.
+Plugin/transport failures are infrastructure errors, not candidate
+unreachability.

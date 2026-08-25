@@ -342,8 +342,8 @@ class RobotiqGripperActionAdapter(Node):
                             # target.  Snapping the stressed four-bar linkage
                             # back to the nominal mimic vector (or keeping the
                             # unreachable full-stroke target) ejects a held
-                            # object; a pure freeze can be too weak to survive
-                            # the lift, so the offset stays tunable.
+                            # object; a pure freeze can be too weak to retain
+                            # contact during MoveIt transport, so the offset stays tunable.
                             side_holds[side] = {
                                 name: positions[name]
                                 + max(

@@ -15,6 +15,7 @@ from agent.runtime.moveit_qualification import (
     MoveItCandidateQualifier,
     MoveItQualificationEngine,
     QualificationCache,
+    _qualification_rpc_timeout_s,
 )
 from agent.tools.registry import ToolResult
 
@@ -117,6 +118,44 @@ def test_qualification_request_binds_short_service_timeouts():
     }
 
 
+def test_case_hash_is_stable_across_solver_profiles_while_binding_changes():
+    requests = []
+
+    def rpc(name, request, timeout):
+        requests.append(request)
+        return _engine().qualify(request)
+
+    compiler = lambda *args: {  # noqa: E731 - compact immutable test fixture.
+        "qualification_stages": [
+            {
+                "name": "goal",
+                "xyz": [0.4, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+        ]
+    }
+    for profile, solver in (("legacy", "kdl_legacy"), ("fast_v3", "kdl_fast")):
+        MoveItCandidateQualifier(
+            rpc,
+            compile_candidate=compiler,
+            qualification_profile=profile,
+            solver_profile=solver,
+        ).qualify_result(
+            ToolResult(True, "ok", {"placement_candidates": [{"id": "p0"}]}),
+            purpose="placement",
+            scene_epoch=1,
+            planning_scene_revision=4,
+            source={"provider": "anyplace", "provider_version": "frozen"},
+        )
+
+    assert requests[0]["qualification_case_sha256"] == requests[1][
+        "qualification_case_sha256"
+    ]
+    assert requests[0]["qualification_binding_sha256"] != requests[1][
+        "qualification_binding_sha256"
+    ]
+
+
 def test_qualifier_prepares_candidate_compiler_once_per_batch():
     class BatchCompiler:
         def __init__(self):
@@ -193,6 +232,21 @@ def test_qualification_rpc_deadline_covers_screening_pool_and_plan_tail():
 
     assert captured["timeout"] > PLANNING_TIME_S * 4 + 10.0
     assert captured["timeout"] == pytest.approx(1158.0)
+
+
+def test_fast_rpc_deadline_covers_exhaustive_l5_and_recovery_without_60s_cutoff():
+    candidates = [
+        {"candidate": {"qualification_stages": [{}, {}, {}]}}
+        for _ in range(192)
+    ]
+
+    timeout = _qualification_rpc_timeout_s(
+        candidates,
+        full_plan_limit=2,
+        qualification_profile="fast_v3",
+    )
+
+    assert timeout > 192 * 2 * 3 * PLANNING_TIME_S
 
 
 def test_qualification_rpc_error_reason_is_preserved():

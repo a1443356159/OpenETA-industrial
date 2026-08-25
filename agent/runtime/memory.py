@@ -40,7 +40,6 @@ SAM3_NO_DETECTION_KEY = "sam3_no_detection"
 GRASP_CANDIDATE_POLICY_KEY = "grasp_candidate_policy"
 LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY = "anygrasp_candidate_policy"
 GRASP_REESTIMATION_KEY = "grasp_reestimation"
-GRASP_LIFT_PROBE_KEY = "grasp_lift_probe"
 ARTICULATED_ATTACHMENT_PROBE_KEY = "articulated_attachment_probe"
 GRASP_EXECUTION_KEY = "grasp_execution"
 GRASP_RECOVERY_KEY = "grasp_recovery"
@@ -52,26 +51,18 @@ TASK_COMPLETION_EVIDENCE_KEY = "task_completion_evidence"
 PLACEMENT_CANDIDATE_POLICY_KEY = "placement_candidate_policy"
 PLACEMENT_OBJECT_DETECTION_KEY = "placement_object_detection"
 PLACEMENT_REGION_DETECTION_KEY = "placement_region_detection"
-PREGRASP_PLACEMENT_POOL_KEY = "pregrasp_placement_goal_pool"
+FROZEN_PLACEMENT_POOL_KEY = "frozen_placement_goal_pool"
 COMPLETED_PLACEMENT_SUBGOALS_KEY = "completed_placement_subgoals"
 MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
 TRANSITION_LEDGER_KEY = "transition_ledger"
 ACTIVE_ENVIRONMENT_TASK_KEY = "active_environment_task"
-# Command enough clearance for compliant grasp dynamics while retaining the
-# independent 80 mm measured child-link threshold.  An 80 mm EEF command can
-# truthfully yield less than 80 mm object travel and must not be credited.
-GRASP_LIFT_PROBE_DISTANCE_M = 0.10
 NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
-NATIVE_GRASP_MINIMUM_LIFT_M = 0.08
 NATIVE_GRASP_MAXIMUM_DRIFT_M = 0.01
-GRASP_RECOVERY_RETREAT_DISTANCE_M = 0.12
 GRASP_CANDIDATE_MAX_ATTEMPTS = 3
 GRASP_ZERO_PASS_REESTIMATION_LIMIT = 3
 ANYPLACE_MAX_QUALIFICATION_ROUNDS = 2
 ARTICULATED_HANDLE_APPROACH_MODES = ("top_down", "front", "side")
-GRASP_REFERENCE_POSITION_TOLERANCE_M = 0.05
-GRASP_REFERENCE_ORIENTATION_TOLERANCE_DEG = 20.0
 TRANSITION_LEDGER_LIMIT = 32
 GRASP_GEOMETRY_FAMILIES = {
     "upright_can",
@@ -330,11 +321,7 @@ class AgentMemory:
         self._capture_grasp_reestimation_observation(observation)
         reconciliation_updated = self._reconcile_unknown_motion(observation)
         attachment_updated = self._capture_attachment_observation_verdict(observation)
-        if (
-            self._capture_grasp_lift_probe_obligation(observation)
-            or reconciliation_updated
-            or attachment_updated
-        ):
+        if reconciliation_updated or attachment_updated:
             self._save_working_memory()
 
     def _capture_grasp_reestimation_observation(
@@ -373,7 +360,6 @@ class AgentMemory:
             SELECTED_SAM3_DETECTION_KEY,
             GRASP_CANDIDATE_POLICY_KEY,
             LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
-            GRASP_LIFT_PROBE_KEY,
             ARTICULATED_ATTACHMENT_PROBE_KEY,
             GRASP_EXECUTION_KEY,
             ATTACHMENT_GATE_KEY,
@@ -408,7 +394,6 @@ class AgentMemory:
             compilation_updated = (
                 self._activate_host_compiled_grasp_for_active_candidate()
             )
-        self._capture_wrist_alignment(action)
         captured_artifacts = _extract_action_artifacts(action)
         for artifact in captured_artifacts:
             key = _artifact_memory_key(artifact, fallback_index=len(self.artifacts))
@@ -421,20 +406,17 @@ class AgentMemory:
         gripper_state_updated = self._capture_gripper_command_state(action)
         placement_release_denied = self._capture_placement_release_denial(action)
         placement_release_updated = self._capture_placement_release(action)
-        attachment_updated = self._capture_attachment_verdict(action)
         articulated_assessment_updated = self._capture_articulated_attachment_assessment(
             action
         )
         articulated_probe_prepared = self._capture_articulated_attachment_probe(action)
         articulated_probe_updated = self._capture_articulated_attachment_probe_result(action)
-        lift_probe_updated = self._capture_grasp_lift_probe_result(action)
         execution_updated = self._advance_grasp_execution(action)
         reconciliation_updated = self._capture_motion_reconciliation(action)
         planning_scene_stopped = self._capture_planning_scene_control_failure(action)
         placement_candidate_advanced = self._advance_placement_candidate_after_motion(action)
         placement_recovery_updated = self._advance_placement_recovery(action)
         recovery_updated = self._advance_grasp_recovery(action)
-        estimation_recovery_updated = self._advance_grasp_estimation_recovery(action)
         candidate_advanced = (
             False
             if planning_scene_stopped
@@ -449,7 +431,6 @@ class AgentMemory:
             False if candidate_advanced else self._accept_anygrasp_candidate_after_motion(action)
         )
         if candidate_advanced:
-            self.facts.pop(GRASP_LIFT_PROBE_KEY, None)
             self.facts.pop(ARTICULATED_ATTACHMENT_PROBE_KEY, None)
             self.facts.pop(GRASP_EXECUTION_KEY, None)
             self.facts.pop(ATTACHMENT_GATE_KEY, None)
@@ -478,17 +459,14 @@ class AgentMemory:
             or placement_release_updated
             or placement_candidates_updated
             or compilation_updated
-            or lift_probe_updated
             or articulated_probe_prepared
             or articulated_probe_updated
             or execution_updated
-            or attachment_updated
             or articulated_assessment_updated
             or reconciliation_updated
             or placement_candidate_advanced
             or placement_recovery_updated
             or recovery_updated
-            or estimation_recovery_updated
             or gripper_state_updated
             or candidate_advanced
             or candidate_accepted
@@ -929,7 +907,6 @@ class AgentMemory:
             source="final_refinable_grasp_fallback",
         )
         self.facts.pop(GRASP_EXECUTION_KEY, None)
-        self.facts.pop(GRASP_LIFT_PROBE_KEY, None)
         self.facts.pop(ARTICULATED_ATTACHMENT_PROBE_KEY, None)
         self.facts.pop(ATTACHMENT_GATE_KEY, None)
         self.record(
@@ -964,9 +941,6 @@ class AgentMemory:
         )
         return load_grasp_calibration_capabilities(str(profile_path))
 
-    def grasp_lift_probe(self) -> JsonDict | None:
-        return _memory_fact_value(self.facts.get(GRASP_LIFT_PROBE_KEY))
-
     def articulated_attachment_probe(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(ARTICULATED_ATTACHMENT_PROBE_KEY))
 
@@ -997,8 +971,8 @@ class AgentMemory:
     def placement_region_detection(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(PLACEMENT_REGION_DETECTION_KEY))
 
-    def pregrasp_placement_goal_pool(self) -> JsonDict | None:
-        return _memory_fact_value(self.facts.get(PREGRASP_PLACEMENT_POOL_KEY))
+    def frozen_placement_goal_pool(self) -> JsonDict | None:
+        return _memory_fact_value(self.facts.get(FROZEN_PLACEMENT_POOL_KEY))
 
     def _save_placement_detection(
         self,
@@ -1073,7 +1047,7 @@ class AgentMemory:
             completion_recorded = False
             if (
                 isinstance(release, dict)
-                and release.get("status") == "retreated"
+                and release.get("status") == "released"
                 and isinstance(verification, dict)
                 and verification.get("placement_confirmed") is True
                 and verification.get("verdict") == "PASS"
@@ -1186,13 +1160,6 @@ class AgentMemory:
             and parameters == recovery_action.get("parameters")
         ):
             return None
-        estimation_recovery = self.grasp_estimation_recovery()
-        if _is_grasp_estimation_recovery_action(
-            tool_name,
-            parameters,
-            recovery=estimation_recovery,
-        ):
-            return None
         status = str(policy.get("status") or "")
         if status == "accepted":
             return None
@@ -1282,19 +1249,6 @@ class AgentMemory:
         stage = str(execution.get("stage") or "")
         if tool_name == "observe":
             return None
-        if stage == "align":
-            if tool_name in {
-                "sam3",
-                "select_sam3_detection",
-                "retrieve_asset_reference",
-                "molmopoint",
-                "compute_wrist_alignment",
-            }:
-                return None
-            return (
-                "The grasp is at safe hover and requires fresh wrist alignment. "
-                "Observe/segment the wrist view, then call compute_wrist_alignment."
-            )
         if stage == "prepare_probe":
             if tool_name == "prepare_attachment_probe":
                 return None
@@ -1337,8 +1291,9 @@ class AgentMemory:
             return (
                 "Attachment evidence is pending. Keep the gripper closed and use only "
                 "the host-owned action for the current verdict. Articulated UNKNOWN "
-                "permits one fresh observation; portable-object PASS uses full lift, "
-                "and structured FAIL permits the exact recovery open."
+                "permits one fresh observation; a portable object proceeds only after "
+                "native bilateral contact and attach ACK, and structured FAIL permits "
+                "the exact recovery open."
             )
         if stage == "probe":
             articulated_probe = self.articulated_attachment_probe()
@@ -1352,17 +1307,6 @@ class AgentMemory:
                 and articulated_probe.get("status") == "required"
                 and tool_name == articulated_required.get("name")
                 and parameters == articulated_required.get("parameters")
-            ):
-                return None
-            probe = self.grasp_lift_probe()
-            required_parameters = (
-                probe.get("required_parameters") if isinstance(probe, dict) else None
-            )
-            if (
-                isinstance(required_parameters, dict)
-                and probe.get("status") == "required"
-                and tool_name == "move_to"
-                and parameters == required_parameters
             ):
                 return None
             return (
@@ -1701,13 +1645,52 @@ class AgentMemory:
             source_image = outputs.get("source_image") or parameters.get("image")
             target_prompt = outputs.get("prompt") or parameters.get("prompt")
             previous_no_detection = self.sam3_no_detection()
+            generic_point_prompt = str(target_prompt or "").strip().lower() in {
+                "",
+                "point_prompt",
+            }
+            previous_prompt = (
+                previous_no_detection.get("target_prompt")
+                if isinstance(previous_no_detection, dict)
+                else None
+            )
+            same_scene = (
+                isinstance(previous_no_detection, dict)
+                and _optional_int(previous_no_detection.get("scene_epoch"), default=-1)
+                == self.scene_epoch()
+            )
+            continuing_missing_placement_role = (
+                generic_point_prompt
+                and same_scene
+                and isinstance(previous_prompt, str)
+                and (
+                    (
+                        _placement_region_prompt(previous_prompt)
+                        and isinstance(self.placement_object_detection(), dict)
+                        and not isinstance(self.placement_region_detection(), dict)
+                    )
+                    or (
+                        not _placement_region_prompt(previous_prompt)
+                        and not isinstance(self.placement_object_detection(), dict)
+                    )
+                )
+            )
             if (
-                not target_prompt
+                generic_point_prompt
                 and isinstance(previous_no_detection, dict)
-                and str(previous_no_detection.get("source_image") or "")
-                == str(source_image or "")
+                and (
+                    str(previous_no_detection.get("source_image") or "")
+                    == str(source_image or "")
+                    or continuing_missing_placement_role
+                )
             ):
-                target_prompt = previous_no_detection.get("target_prompt")
+                # Point-SAM has no text channel of its own.  Preserve the
+                # semantic target of the immediately preceding text failure,
+                # including the normal top->wrist->top fallback sequence used
+                # for the placement marker.  Otherwise the literal backend
+                # label ``point_prompt`` is misclassified as the object mask
+                # and the host can never build the AnyPlace obligation.
+                target_prompt = previous_prompt
             source_camera_role = str(
                 outputs.get("source_camera_role")
                 or details.get("source_camera_role")
@@ -2314,7 +2297,7 @@ class AgentMemory:
                     self.record("grasp_candidates_moveit_rejected", dict(policy))
                     selected_target = (
                         self.placement_object_detection()
-                        if self.pregrasp_placement_goal_pool() is not None
+                        if self.frozen_placement_goal_pool() is not None
                         else self.selected_sam3_detection()
                     )
                     source = outputs.get("source")
@@ -2374,7 +2357,6 @@ class AgentMemory:
                             )
                     else:
                         self._schedule_grasp_recovery(
-                            xyz=None,
                             rejection={
                                 "source": "moveit_qualification_rejected",
                                 "reason": "no_moveit_qualified_candidates",
@@ -2410,7 +2392,7 @@ class AgentMemory:
                 result_id = f"{source_tool}-{int(time.time() * 1000)}"
             selected_target = (
                 self.placement_object_detection()
-                if self.pregrasp_placement_goal_pool() is not None
+                if self.frozen_placement_goal_pool() is not None
                 else self.selected_sam3_detection()
             )
             source = outputs.get("source")
@@ -2599,7 +2581,7 @@ class AgentMemory:
             previous_release = self.placement_release()
             if isinstance(previous_release, dict) and str(
                 previous_release.get("status") or ""
-            ) in {"retreated", "failed", "invalidated"}:
+            ) in {"released", "failed", "invalidated"}:
                 self.facts.pop(PLACEMENT_RELEASE_KEY, None)
                 self.record(
                     "placement_release_cleared_for_new_grasp",
@@ -2784,17 +2766,11 @@ class AgentMemory:
         if not isinstance(active, dict):
             return False
         active_candidate_id = str(active.get("id") or "")
-        rejection = _wrist_reference_localization_rejection(
+        rejection = _host_stage_motion_review_rejection(
             action,
             active_candidate_id=active_candidate_id,
             execution=self.grasp_execution(),
         )
-        if rejection is None:
-            rejection = _host_stage_precontact_review_rejection(
-                action,
-                active_candidate_id=active_candidate_id,
-                execution=self.grasp_execution(),
-            )
         if rejection is None:
             rejection = _host_stage_close_rejection(
                 action,
@@ -2806,7 +2782,6 @@ class AgentMemory:
                 rejection = _candidate_linked_grasp_outcome_rejection(
                     action,
                     active_candidate_id=active_candidate_id,
-                    lift_probe=self.grasp_lift_probe(),
                     articulated_probe=self.articulated_attachment_probe(),
                     attachment_gate=self.attachment_gate(),
                     execution=self.grasp_execution(),
@@ -2831,15 +2806,23 @@ class AgentMemory:
             active=active,
             rejection=rejection,
         )
-        # Retained ranked candidates are already in the same perception packet;
-        # switch directly to the next candidate. Only an exhausted queue needs a
-        # fresh observation and alternate-view re-estimation.
-        if advanced and isinstance(policy.get("reestimate_required"), dict):
+        # Retained candidates are already qualified from the same model result.
+        # A failed close needs one exact reopen; otherwise switch immediately.
+        # Only an exhausted queue is allowed to request fresh perception/model
+        # inference.
+        next_candidate_available = (
+            str(policy.get("status") or "") == "active"
+            and isinstance(policy.get("active_candidate"), dict)
+        )
+        reestimate_required = isinstance(policy.get("reestimate_required"), dict)
+        if advanced and (
+            str(rejection.get("grasp_stage") or "") == "close"
+            or reestimate_required
+        ):
             self._schedule_grasp_recovery(
-                xyz=self._action_end_effector_xyz(action),
                 rejection=rejection,
                 candidate_id=active_candidate_id,
-                execution=execution,
+                observe_after_reopen=reestimate_required and not next_candidate_available,
             )
             recovery_class = _grasp_estimation_recovery_class(rejection)
             if (
@@ -2886,10 +2869,9 @@ class AgentMemory:
     def _schedule_grasp_recovery(
         self,
         *,
-        xyz: object,
         rejection: JsonDict,
         candidate_id: str,
-        execution: JsonDict | None = None,
+        observe_after_reopen: bool = True,
     ) -> bool:
         if str(rejection.get("source") or "") not in {
             "candidate_motion_rejected",
@@ -2897,10 +2879,8 @@ class AgentMemory:
             "reconciled_candidate_motion_rejected",
             "safety_check_rejected",
             "grasp_seed_geometry_rejected",
-            "independent_precontact_review_rejected",
             "independent_host_stage_review_rejected",
             "host_gripper_close_failed",
-            "wrist_reference_localization_rejected",
             "articulated_attachment_assessment_failed",
             "moveit_qualification_rejected",
         }:
@@ -2908,17 +2888,7 @@ class AgentMemory:
         target_detection = (self.grasp_candidate_policy() or {}).get("target_detection")
         target_detection = target_detection if isinstance(target_detection, dict) else {}
         previous_view = str(target_detection.get("frame_id") or "agentview")
-        source_return_pose = _grasp_recovery_source_return_pose(execution)
         failed_stage = str(rejection.get("grasp_stage") or "")
-        # A failed approach after hover leaves the arm in a known but camera-
-        # occluding pose.  Return to the recorded pre-grasp EEF pose through a
-        # fresh MoveIt request before collecting the next perception packet.
-        # This deliberately does not apply to zero-qualified candidates: that
-        # path never moved the robot and must remain observation-only.
-        needs_source_return = (
-            failed_stage in {"align_move", "precontact", "descend", "close"}
-            and isinstance(source_return_pose, dict)
-        )
         reopen_required = failed_stage == "close"
         recovery_id = f"grasp-recovery-{uuid4()}"
         recovery = {
@@ -2940,28 +2910,11 @@ class AgentMemory:
             "previous_view": previous_view,
             "observation_views": ["agentview", "wrist", "render"],
             "scene_epoch": self.scene_epoch(),
-            "stage": (
-                "source_return"
-                if needs_source_return
-                else "reopen"
-                if reopen_required
-                else "observe"
-            ),
+            "stage": "reopen" if reopen_required else "observe",
             "reopen_required": reopen_required,
+            "observe_after_reopen": observe_after_reopen,
             "required_action": (
-                {
-                    "name": "move_to",
-                    "parameters": {
-                        "target_pose": {
-                            **source_return_pose,
-                            "grasp_recovery_id": recovery_id,
-                            "grasp_recovery_stage": "source_return",
-                            "source_grasp_id": candidate_id,
-                        }
-                    },
-                }
-                if needs_source_return
-                else {"name": "gripper_control", "parameters": {"position": 1}}
+                {"name": "gripper_control", "parameters": {"position": 1}}
                 if reopen_required
                 else {"name": "observe", "parameters": {}}
             ),
@@ -2986,40 +2939,6 @@ class AgentMemory:
         if not isinstance(call, dict):
             return False
         completed = _call_result_success(call) and not _motion_call_rejects_candidate(call)
-        if recovery.get("stage") == "source_return":
-            if not completed:
-                receipt = _environment_receipt(call)
-                recovery.update(
-                    {
-                        "status": "stopped_requires_human",
-                        "required_action": None,
-                        "stop_reason": "source_return_motion_not_completed",
-                        "receipt": receipt,
-                        "completed_at_s": time.time(),
-                    }
-                )
-                self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
-                    recovery, source="candidate_source_return_stopped"
-                )
-                self.record("grasp_source_return_stopped", dict(recovery))
-                return True
-            reopen_required = recovery.get("reopen_required") is True
-            recovery.update(
-                {
-                    "stage": "reopen" if reopen_required else "observe",
-                    "required_action": (
-                        {"name": "gripper_control", "parameters": {"position": 1}}
-                        if reopen_required
-                        else {"name": "observe", "parameters": {}}
-                    ),
-                    "source_return_completed_at_s": time.time(),
-                }
-            )
-            self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
-                recovery, source="candidate_source_return_completed"
-            )
-            self.record("grasp_source_return_completed", dict(recovery))
-            return True
         if recovery.get("stage") == "reopen":
             if not completed:
                 recovery.update(
@@ -3035,11 +2954,18 @@ class AgentMemory:
                 )
                 self.record("grasp_recovery_gripper_reopen_stopped", dict(recovery))
                 return True
+            observe_after_reopen = recovery.get("observe_after_reopen") is True
             recovery.update(
                 {
-                    "stage": "observe",
-                    "required_action": {"name": "observe", "parameters": {}},
+                    "status": "required" if observe_after_reopen else "completed",
+                    "stage": "observe" if observe_after_reopen else "completed",
+                    "required_action": (
+                        {"name": "observe", "parameters": {}}
+                        if observe_after_reopen
+                        else None
+                    ),
                     "gripper_reopened_at_s": time.time(),
+                    **({"completed_at_s": time.time()} if not observe_after_reopen else {}),
                 }
             )
             self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
@@ -3162,94 +3088,11 @@ class AgentMemory:
         }
         _append_refinable_fallback_candidate(fallback_candidates, candidate_entry)
         recovery["fallback_candidates"] = fallback_candidates
-        if (
-            same_target
-            and isinstance(existing, dict)
-            and existing.get("hover_completed_scene_epoch") is not None
-        ):
-            for key in (
-                "collision_check_passed",
-                "hover_completed_scene_epoch",
-                "hover_target_pose",
-                "last_failure",
-            ):
-                if key in existing:
-                    recovery[key] = existing[key]
-        if (
-            str(rejection.get("source") or "") == "wrist_reference_localization_rejected"
-            or str(rejection.get("grasp_stage") or "") == "align"
-        ):
-            recovery["hover_completed_scene_epoch"] = self.scene_epoch()
         self.facts[GRASP_ESTIMATION_RECOVERY_KEY] = _memory_fact_entry(
             recovery,
             source="structured_grasp_estimation_rejection",
         )
         self.record("grasp_estimation_recovery_required", dict(recovery))
-        return True
-
-    def _advance_grasp_estimation_recovery(self, action: EnvAction) -> bool:
-        recovery = self.grasp_estimation_recovery()
-        if not isinstance(recovery, dict) or recovery.get("status") != "required":
-            return False
-        command = action.command if isinstance(action.command, dict) else {}
-        request = command.get("request")
-        if not isinstance(request, dict):
-            return False
-        name = str(request.get("name") or "")
-        parameters = request.get("parameters")
-        if not isinstance(parameters, dict) or not _is_grasp_estimation_recovery_action(
-            name,
-            parameters,
-            recovery=recovery,
-        ):
-            return False
-        call = _tool_call(action, name)
-        if not isinstance(call, dict):
-            return False
-        outputs = _tool_call_outputs(call)
-        success = _call_result_success(call)
-        if name == "obstacle_avoidance":
-            passed = success and outputs.get("clear") is True
-            recovery["collision_check_passed"] = passed
-        elif name == "move_to":
-            passed = success and not _motion_call_rejects_candidate(call)
-            if passed:
-                recovery["hover_completed_scene_epoch"] = self.scene_epoch()
-        else:
-            return False
-        if not passed:
-            recovery.update(
-                {
-                    "status": "blocked",
-                    "last_failure": {
-                        "tool": name,
-                        "reason": _call_failure_reason(call),
-                        "hard_rejection": (
-                            "collision_or_unsafe_path"
-                            if name == "obstacle_avoidance"
-                            else "refinement_hover_motion_failed"
-                        ),
-                    },
-                    "completed_at_s": time.time(),
-                }
-            )
-        self.facts[GRASP_ESTIMATION_RECOVERY_KEY] = _memory_fact_entry(
-            recovery,
-            source="grasp_estimation_recovery_check",
-        )
-        self.record(
-            (
-                "grasp_estimation_recovery_blocked"
-                if recovery.get("status") == "blocked"
-                else "grasp_estimation_recovery_advanced"
-            ),
-            {
-                "recovery_id": recovery.get("recovery_id"),
-                "tool": name,
-                "passed": passed,
-                "scene_epoch": self.scene_epoch(),
-            },
-        )
         return True
 
     def _action_end_effector_xyz(self, action: EnvAction) -> object:
@@ -3641,7 +3484,6 @@ class AgentMemory:
                     "compile_hints": {
                         "target_geometry_family": "articulated_handle",
                         "approach_mode": next_mode,
-                        "strategy_id": _articulated_handle_strategy_id(next_mode),
                     },
                 }
             )
@@ -3701,7 +3543,6 @@ class AgentMemory:
                     "compile_hints": {
                         "target_geometry_family": "articulated_handle",
                         "approach_mode": fallback_mode,
-                        "strategy_id": _articulated_handle_strategy_id(fallback_mode),
                         "candidate_fallback": True,
                         "fallback_reason": "all_approach_modes_failed",
                     },
@@ -3773,7 +3614,7 @@ class AgentMemory:
         placement_call = _successful_tool_call(action, "compile_placement_seed")
         if placement_call is not None:
             outputs = _tool_call_outputs(placement_call)
-            if outputs.get("schema_version") == "openeta.compiled_placement_seed.v2":
+            if outputs.get("schema_version") == "openeta.compiled_placement_seed.v3":
                 return self._capture_compiled_placement(
                     outputs, source="legacy_compile_tool"
                 )
@@ -3792,7 +3633,7 @@ class AgentMemory:
             compilation_source = "host_qualified_queue"
         if not isinstance(outputs, dict):
             return False
-        if outputs.get("schema_version") != "openeta.compiled_grasp_seed.v1":
+        if outputs.get("schema_version") != "openeta.compiled_grasp_seed.v2":
             return False
         policy = self.anygrasp_candidate_policy() or {}
         active = policy.get("active_candidate")
@@ -3841,8 +3682,6 @@ class AgentMemory:
             field: outputs.get(field)
             for field in (
                 "target_geometry_family",
-                "strategy_id",
-                "pregrasp_distance_m",
                 "approach_mode",
                 "fallback_reason",
             )
@@ -3857,7 +3696,7 @@ class AgentMemory:
                 policy,
                 source=compilation_source,
             )
-        hover = outputs.get("hover_pose")
+        contact = outputs.get("contact_pose")
         gripper_state = self.gripper_command_state() or {}
         last_rejection = policy.get("last_rejection")
         failed_close_requires_open = (
@@ -3865,11 +3704,11 @@ class AgentMemory:
             and last_rejection.get("source") == "host_gripper_close_failed"
         )
         already_open = gripper_state.get("position") == 1 and not failed_close_requires_open
-        if already_open and isinstance(hover, dict):
-            initial_stage = "hover"
+        if already_open and isinstance(contact, dict):
+            initial_stage = "contact"
             required_action = {
                 "name": "move_to",
-                "parameters": {"target_pose": _pose_for_epoch(hover, self.scene_epoch())},
+                "parameters": {"target_pose": _pose_for_epoch(contact, self.scene_epoch())},
             }
         else:
             initial_stage = "open"
@@ -3878,7 +3717,7 @@ class AgentMemory:
                 "parameters": {"position": 1},
             }
         execution = {
-            "schema_version": "openeta.grasp_execution.v1",
+            "schema_version": "openeta.grasp_execution.v2",
             "status": "required",
             "stage": initial_stage,
             "candidate_id": candidate_id,
@@ -3888,9 +3727,9 @@ class AgentMemory:
             "source_eef_pose": self._latest_observed_end_effector_pose(),
             "required_action": required_action,
             "transition_conditions": {
-                "hover": (
-                    "reach the host pose offset at least 0.15 m opposite "
-                    "approach_world_xyz before wrist alignment"
+                "contact": (
+                    "MoveIt plans the complete collision-aware path from the current "
+                    "joint state to the unmodified model terminal contact pose"
                 ),
                 "close": (
                     "acknowledge binary gripper position=0; this confirms only the "
@@ -3904,7 +3743,6 @@ class AgentMemory:
             source=compilation_source,
         )
         self.facts.pop(ATTACHMENT_GATE_KEY, None)
-        self.facts.pop(GRASP_LIFT_PROBE_KEY, None)
         self.facts.pop(ARTICULATED_ATTACHMENT_PROBE_KEY, None)
         self.record(
             "grasp_execution_started",
@@ -3944,21 +3782,21 @@ class AgentMemory:
         if call is None:
             return False
         outputs = _tool_call_outputs(call)
-        if outputs.get("pregrasp_goal_pool_ready") is True:
+        if outputs.get("frozen_goal_pool_ready") is True:
             pool = {
-                "schema_version": "openeta.pregrasp_placement_goal_pool.v1",
+                "schema_version": "openeta.frozen_placement_goal_pool.v1",
                 "status": "ready",
                 "goal_count": _optional_int(
-                    outputs.get("pregrasp_goal_pool_count"), default=0
+                    outputs.get("frozen_goal_pool_count"), default=0
                 ),
                 "scene_epoch": self.scene_epoch(),
                 "execution_started": False,
                 "visibility": "host_private",
             }
-            self.facts[PREGRASP_PLACEMENT_POOL_KEY] = _memory_fact_entry(
+            self.facts[FROZEN_PLACEMENT_POOL_KEY] = _memory_fact_entry(
                 pool, source="anyplace"
             )
-            self.record("pregrasp_placement_goal_pool_ready", dict(pool))
+            self.record("frozen_placement_goal_pool_ready", dict(pool))
             return True
         private_qualification = _qualification_artifact_evidence(
             outputs, artifact_key="qualification_artifact"
@@ -4056,17 +3894,17 @@ class AgentMemory:
             or str(attachment.get("verdict") or "").upper() != "PASS"
         ):
             return False
-        full_proof = attachment.get("full_lift_proof")
+        attachment_proof = attachment.get("attachment_proof")
         attachment_transform = (
-            full_proof.get("attachment_transform")
-            if isinstance(full_proof, dict)
+            attachment_proof.get("attachment_transform")
+            if isinstance(attachment_proof, dict)
             else None
         )
         if not _valid_attachment_transform(attachment_transform):
             return False
         native_revision = (
             attachment.get("evidence_source")
-            == "gazebo_native_attachment_proof"
+            == "gazebo_native_contact_attach_ack"
         )
         if native_revision and not isinstance(
             attachment.get("planning_scene_revision"), int
@@ -4238,19 +4076,6 @@ class AgentMemory:
             )
             return True
         expected_revision = _optional_int(policy.get("scene_revision"), default=-1)
-        # A successful gripper-open is a real virtual detach and advances the
-        # planning-scene revision.  The subsequent retreat is therefore bound
-        # to the release receipt's revision, not the attach-time revision that
-        # qualified hover/release.
-        if target.get("placement_stage") == "retreat":
-            release = self.placement_release()
-            if isinstance(release, dict) and release.get("status") in {
-                "released",
-                "retreated",
-            }:
-                expected_revision = _optional_int(
-                    release.get("planning_scene_revision"), default=expected_revision
-                )
         requested_revision = _optional_int(target.get("scene_revision"), default=-2)
         receipt_revision = _optional_int(
             receipt.get("planning_scene_revision"), default=-3
@@ -4548,58 +4373,6 @@ class AgentMemory:
             self._advance_articulated_probe_to_attachment(execution)
         return True
 
-    def _capture_wrist_alignment(self, action: EnvAction) -> bool:
-        execution = self.grasp_execution()
-        if not isinstance(execution, dict) or execution.get("stage") != "align":
-            return False
-        call = _successful_tool_call(action, "compute_wrist_alignment")
-        if call is None:
-            return False
-        outputs = _tool_call_outputs(call)
-        if outputs.get("schema_version") != "openeta.wrist_alignment.v1":
-            return False
-        if outputs.get("compiled_grasp_id") != execution.get("compiled_grasp_id"):
-            return False
-        if _optional_int(outputs.get("scene_epoch"), default=-1) != self.scene_epoch():
-            return False
-        aligned_pose = outputs.get("aligned_hover_pose")
-        adjusted_contact = outputs.get("adjusted_contact_pose")
-        adjusted_precontact = outputs.get("adjusted_precontact_pose")
-        if not isinstance(aligned_pose, dict) or not isinstance(adjusted_contact, dict):
-            return False
-        execution.update(
-            {
-                "stage": "align_move",
-                "scene_epoch": self.scene_epoch(),
-                "alignment": dict(outputs),
-                "adjusted_contact_pose": dict(adjusted_contact),
-                "adjusted_precontact_pose": (
-                    dict(adjusted_precontact)
-                    if isinstance(adjusted_precontact, dict)
-                    else None
-                ),
-                "required_action": {
-                    "name": "move_to",
-                    "parameters": {
-                        "target_pose": _pose_for_epoch(aligned_pose, self.scene_epoch())
-                    },
-                },
-            }
-        )
-        self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
-            execution,
-            source="compute_wrist_alignment",
-        )
-        self.record(
-            "grasp_wrist_alignment_ready",
-            {
-                "candidate_id": execution.get("candidate_id"),
-                "alignment_id": outputs.get("alignment_id"),
-                "correction_world_xyz": outputs.get("correction_world_xyz"),
-            },
-        )
-        return True
-
     def _record_successful_world_mutation(self, action: EnvAction) -> bool:
         command = action.command if isinstance(action.command, dict) else {}
         request = command.get("request")
@@ -4674,13 +4447,6 @@ class AgentMemory:
             expected_revision = _optional_int(
                 policy.get("scene_revision"), default=-1
             )
-            if placement_stage == "retreat":
-                release_state = self.placement_release()
-                if isinstance(release_state, dict):
-                    expected_revision = _optional_int(
-                        release_state.get("planning_scene_revision"),
-                        default=expected_revision,
-                    )
             if policy.get("revision_provenance") == "native_attachment_gate" and (
                 _optional_int(target_pose.get("scene_revision"), default=-2)
                 != expected_revision
@@ -4690,53 +4456,19 @@ class AgentMemory:
                 != expected_revision
             ):
                 return False
-            adaptive_release_pose = (
-                _near_receptacle_release_pose(call, target_pose=target_pose)
-                if placement_stage == "descend"
-                else None
-            )
-            if _motion_call_rejects_candidate(call) and adaptive_release_pose is None:
+            if _motion_call_rejects_candidate(call):
                 return False
-            if placement_stage == "retreat":
-                release = self.placement_release()
-                if (
-                    not isinstance(release, dict)
-                    or release.get("status") != "released"
-                    or str(target_pose.get("placement_candidate_id") or "")
-                    != str(release.get("candidate_id") or "")
-                ):
-                    return False
-                release.update(
-                    {
-                        "status": "retreated",
-                        "scene_epoch": self.scene_epoch(),
-                        "retreat_pose": dict(target_pose),
-                        "retreated_at_s": time.time(),
-                    }
-                )
-                self.facts[PLACEMENT_RELEASE_KEY] = _memory_fact_entry(
-                    release,
-                    source="placement_retreat_completed",
-                )
-                self.record("placement_retreated", dict(release))
-                return True
-            if placement_stage not in {"descend", "release"}:
+            if placement_stage != "release":
                 return False
-            release_pose = dict(adaptive_release_pose or target_pose)
-            release_pose["placement_stage"] = "release"
             release = {
                 "schema_version": "openeta.placement_release.v1",
                 "status": "ready",
                 "candidate_id": target_pose.get("placement_candidate_id"),
                 "placement_pose_id": target_pose.get("placement_pose_id"),
-                "release_pose": release_pose,
+                "release_pose": dict(target_pose),
                 "scene_epoch": self.scene_epoch(),
                 "ready_at_s": time.time(),
-                "arrival_stage": (
-                    "descend_near_receptacle"
-                    if adaptive_release_pose is not None
-                    else placement_stage
-                ),
+                "arrival_stage": "release",
             }
             self.facts[PLACEMENT_RELEASE_KEY] = _memory_fact_entry(
                 release,
@@ -4749,28 +4481,6 @@ class AgentMemory:
         if _binary_gripper_position(parameters.get("position")) != 1:
             return False
         release = self.placement_release()
-        host_obligation = _action_host_obligation(action)
-        if (
-            not isinstance(release, dict)
-            and host_obligation.get("stage") == "placement_drop_detected"
-        ):
-            release = {
-                "schema_version": "openeta.placement_release.v1",
-                "status": "retreated",
-                "candidate_id": host_obligation.get("candidate_id"),
-                "placement_pose_id": host_obligation.get("placement_pose_id"),
-                "scene_epoch": self.scene_epoch(),
-                "release_mode": "detached_over_receptacle",
-                "released_at_s": time.time(),
-                "retreated_at_s": time.time(),
-            }
-            self.facts[PLACEMENT_RELEASE_KEY] = _memory_fact_entry(
-                release,
-                source="placement_drop_detected",
-            )
-            self._finalize_placement_subgoal(release)
-            self.record("placement_drop_completed", dict(release))
-            return True
         if not isinstance(release, dict) or release.get("status") != "ready":
             return False
         call = _successful_tool_call(action, name)
@@ -4816,7 +4526,7 @@ class AgentMemory:
 
     def _capture_placement_release_denial(self, action: EnvAction) -> bool:
         obligation = _action_host_obligation(action)
-        if obligation.get("stage") not in {"release", "placement_drop_detected"}:
+        if obligation.get("stage") != "release":
             return False
         call = _tool_call(action, "gripper_control")
         if not isinstance(call, dict) or not _call_has_diagnostic(
@@ -4852,7 +4562,6 @@ class AgentMemory:
             SAM3_NO_DETECTION_KEY,
             GRASP_CANDIDATE_POLICY_KEY,
             LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
-            GRASP_LIFT_PROBE_KEY,
             ARTICULATED_ATTACHMENT_PROBE_KEY,
             GRASP_EXECUTION_KEY,
             GRASP_ESTIMATION_RECOVERY_KEY,
@@ -4901,7 +4610,6 @@ class AgentMemory:
             SAM3_NO_DETECTION_KEY,
             GRASP_CANDIDATE_POLICY_KEY,
             LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
-            GRASP_LIFT_PROBE_KEY,
             ARTICULATED_ATTACHMENT_PROBE_KEY,
             GRASP_EXECUTION_KEY,
             GRASP_ESTIMATION_RECOVERY_KEY,
@@ -4920,151 +4628,41 @@ class AgentMemory:
             return False
         stage = str(execution.get("stage") or "")
         required = execution.get("required_action")
-        if stage == "align":
-            return self._advance_empty_wrist_alignment_fallback(execution, action)
         if stage == "probe":
             articulated_probe = self.articulated_attachment_probe()
             if isinstance(articulated_probe, dict):
                 if articulated_probe.get("status") == "completed":
                     return self._advance_articulated_probe_to_attachment(execution)
                 return False
-            return self._advance_probe_to_attachment(execution)
+            return False
         if stage == "attachment":
+            if execution.get("attachment_mode") != "articulated_handle":
+                return False
             gate = self.attachment_gate() or {}
             verdict = str(gate.get("verdict") or "UNKNOWN").upper()
-            if execution.get("attachment_mode") == "articulated_handle":
-                actions = execution.get("attachment_actions")
-                fail_action = actions.get("fail") if isinstance(actions, dict) else None
-                if verdict == "PASS":
-                    self._complete_attachment_execution(
-                        execution,
-                        source="runtime_articulated_attachment_pass",
-                    )
-                    self.record(
-                        "articulated_attachment_confirmed",
-                        {
-                            "candidate_id": execution.get("candidate_id"),
-                            "scene_epoch": self.scene_epoch(),
-                        },
-                    )
-                    return True
-                if (
-                    verdict == "FAIL"
-                    and isinstance(fail_action, dict)
-                    and _action_matches(action, fail_action)
-                    and _successful_tool_call(action, str(fail_action.get("name") or ""))
-                    is not None
-                ):
-                    return False
-                return False
             actions = execution.get("attachment_actions")
-            pass_action = actions.get("pass") if isinstance(actions, dict) else None
-            successful_pass_call = (
-                _successful_tool_call(action, str(pass_action.get("name") or ""))
-                if isinstance(pass_action, dict)
-                else None
-            )
-            attempted_pass_call = (
-                _tool_call(action, str(pass_action.get("name") or ""))
-                if isinstance(pass_action, dict) and _action_matches(action, pass_action)
-                else None
-            )
-            if isinstance(attempted_pass_call, dict) and successful_pass_call is None:
-                receipt = _environment_receipt(attempted_pass_call)
-                gate.update(
-                    {
-                        "status": "stopped_requires_human",
-                        "verdict": "UNKNOWN",
-                        "stop_reason": (
-                            "full_lift_motion_outcome_unknown"
-                            if receipt.get("error_code") == "MOTION_OUTCOME_UNKNOWN"
-                            or receipt.get("motion_outcome") == "unknown"
-                            else "full_lift_motion_not_completed"
-                        ),
-                        "pass_action_attempt_count": int(
-                            gate.get("pass_action_attempt_count") or 0
-                        )
-                        + 1,
-                        "pass_action_completed": False,
-                    }
-                )
-                self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
-                    gate, source="runtime_attachment_full_lift_stopped"
-                )
-                self.record("attachment_full_lift_stopped", dict(gate))
-                return True
-            if (
-                isinstance(pass_action, dict)
-                and _action_matches(action, pass_action)
-                and successful_pass_call is not None
-                and not _motion_call_rejects_candidate(successful_pass_call)
-            ):
-                if gate.get("evidence_source") == "gazebo_native_attachment_proof":
-                    receipt = _environment_receipt(successful_pass_call)
-                    proof_ok, proof_reason, proof = _trusted_native_attachment_proof(
-                        receipt,
-                        candidate_id=str(execution.get("candidate_id") or ""),
-                        compiled_grasp_id=str(
-                            execution.get("compiled_grasp_id") or ""
-                        ),
-                        scene_epoch=self.scene_epoch(),
-                        planning_scene_revision=_optional_int(
-                            gate.get("planning_scene_revision"), default=-1
-                        ),
-                        require_lift=True,
-                        request_parameters=pass_action.get("parameters"),
-                    )
-                else:
-                    proof_ok, proof_reason, proof = (
-                        True,
-                        "legacy_non_native_attachment_gate",
-                        {},
-                    )
-                gate.update(
-                    {
-                        "pass_action_attempt_count": int(
-                            gate.get("pass_action_attempt_count") or 0
-                        )
-                        + 1,
-                        "pass_action_completed": True,
-                        "pass_action_completed_at_s": time.time(),
-                        "full_lift_proof": proof,
-                    }
-                )
-                if not proof_ok:
-                    gate.update(
-                        {
-                            "status": "stopped_requires_human",
-                            "verdict": "UNKNOWN",
-                            "stop_reason": proof_reason,
-                        }
-                    )
-                self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
-                    gate,
-                    source="runtime_attachment_full_lift",
-                )
-                self.record(
-                    "attachment_full_lift_completed",
-                    {
-                        "candidate_id": execution.get("candidate_id"),
-                        "verdict": verdict,
-                        "attempt_count": gate["pass_action_attempt_count"],
-                        "proof_trusted": proof_ok,
-                    },
-                )
-                if not proof_ok:
-                    return True
-            selected = actions.get(verdict.lower()) if isinstance(actions, dict) else None
-            if not isinstance(selected, dict) or not _action_matches(action, selected):
-                return bool(gate.get("pass_action_completed"))
-            if _successful_tool_call(action, str(selected.get("name") or "")) is None:
-                return False
             if verdict == "PASS":
                 self._complete_attachment_execution(
                     execution,
-                    source="runtime_attachment_pass",
+                    source="runtime_articulated_attachment_pass",
+                )
+                self.record(
+                    "articulated_attachment_confirmed",
+                    {
+                        "candidate_id": execution.get("candidate_id"),
+                        "scene_epoch": self.scene_epoch(),
+                    },
                 )
                 return True
+            fail_action = actions.get("fail") if isinstance(actions, dict) else None
+            if (
+                verdict == "FAIL"
+                and isinstance(fail_action, dict)
+                and _action_matches(action, fail_action)
+                and _successful_tool_call(action, str(fail_action.get("name") or ""))
+                is not None
+            ):
+                return False
             return False
         if not isinstance(required, dict) or not _grasp_stage_action_matches(
             action,
@@ -5084,58 +4682,12 @@ class AgentMemory:
         compiled = execution.get("compiled_grasp")
         compiled = compiled if isinstance(compiled, dict) else {}
         if stage == "open":
-            hover = compiled.get("hover_pose")
-            if not isinstance(hover, dict):
-                return False
-            execution.update(
-                {
-                    "stage": "hover",
-                    "scene_epoch": self.scene_epoch(),
-                    "required_action": {
-                        "name": "move_to",
-                        "parameters": {"target_pose": _pose_for_epoch(hover, self.scene_epoch())},
-                    },
-                }
-            )
-        elif stage == "hover":
-            execution.update(
-                {
-                    "stage": "align",
-                    "scene_epoch": self.scene_epoch(),
-                    "required_action": None,
-                    "required_tool": "compute_wrist_alignment",
-                }
-            )
-        elif stage == "align_move":
-            contact = execution.get("adjusted_contact_pose")
-            if not isinstance(contact, dict):
-                return False
-            precontact = execution.get("adjusted_precontact_pose")
-            if isinstance(precontact, dict):
-                next_stage = "precontact"
-                next_pose = precontact
-            else:
-                next_stage = "descend"
-                next_pose = contact
-            execution.update(
-                {
-                    "stage": next_stage,
-                    "scene_epoch": self.scene_epoch(),
-                    "required_action": {
-                        "name": "move_to",
-                        "parameters": {
-                            "target_pose": _pose_for_epoch(next_pose, self.scene_epoch())
-                        },
-                    },
-                }
-            )
-        elif stage == "precontact":
-            contact = execution.get("adjusted_contact_pose")
+            contact = compiled.get("contact_pose")
             if not isinstance(contact, dict):
                 return False
             execution.update(
                 {
-                    "stage": "descend",
+                    "stage": "contact",
                     "scene_epoch": self.scene_epoch(),
                     "required_action": {
                         "name": "move_to",
@@ -5145,7 +4697,7 @@ class AgentMemory:
                     },
                 }
             )
-        elif stage == "descend":
+        elif stage == "contact":
             self._mark_active_candidate_accepted(source="compiled_contact_reached")
             execution.update(
                 {
@@ -5163,34 +4715,62 @@ class AgentMemory:
             close_receipt = _environment_receipt(successful_call)
             close_revision = close_receipt.get("planning_scene_revision")
             attached = close_receipt.get("detachable_joint")
-            execution.update(
-                {
-                    "stage": "prepare_probe" if articulated else "probe",
+            if articulated:
+                execution.update(
+                    {
+                        "stage": "prepare_probe",
+                        "scene_epoch": self.scene_epoch(),
+                        "required_action": None,
+                        "probe_kind": "articulated_attachment",
+                    }
+                )
+            else:
+                proof_ok, proof_reason, proof = _trusted_native_attachment_proof(
+                    close_receipt,
+                    planning_scene_revision=(
+                        int(close_revision)
+                        if isinstance(close_revision, int)
+                        and not isinstance(close_revision, bool)
+                        else -1
+                    ),
+                )
+                gate = {
+                    "schema_version": "openeta.attachment_gate.v2",
+                    "status": "resolved" if proof_ok else "stopped_requires_human",
+                    "verdict": "PASS" if proof_ok else "UNKNOWN",
+                    "candidate_id": execution.get("candidate_id"),
+                    "compiled_grasp_id": execution.get("compiled_grasp_id"),
                     "scene_epoch": self.scene_epoch(),
-                    "required_action": None,
-                    "probe_kind": (
-                        "articulated_attachment" if articulated else "grasp_lift"
-                    ),
-                    **(
-                        {
-                            "planning_scene_revision": close_revision,
-                            "attach_ack": dict(attached),
-                        }
-                        if (
-                            not articulated
-                            and isinstance(close_revision, int)
-                            and isinstance(attached, dict)
-                            and attached.get("state") == "attached"
-                        )
-                        else {}
-                    ),
+                    "planning_scene_revision": close_revision,
+                    "evidence_source": "gazebo_native_contact_attach_ack",
+                    "attachment_proof": proof,
+                    **({"stop_reason": proof_reason} if not proof_ok else {}),
                 }
-            )
+                self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
+                    gate, source="runtime_native_contact_attach_ack"
+                )
+                execution.update(
+                    {
+                        "planning_scene_revision": close_revision,
+                        "attach_ack": dict(attached) if isinstance(attached, dict) else {},
+                    }
+                )
+                if proof_ok:
+                    self._complete_attachment_execution(
+                        execution,
+                        source="runtime_native_contact_attach_ack",
+                    )
+                    return True
+                execution.update(
+                    {
+                        "status": "stopped_requires_human",
+                        "stage": "attachment_unknown",
+                        "required_action": None,
+                    }
+                )
         else:
             return False
         execution.pop("required_tool", None)
-        if execution.get("stage") == "align":
-            execution["required_tool"] = "compute_wrist_alignment"
         self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
             execution,
             source="runtime_grasp_transition",
@@ -5204,157 +4784,6 @@ class AgentMemory:
                 "scene_epoch": self.scene_epoch(),
             },
         )
-        return True
-
-    def _advance_empty_wrist_alignment_fallback(
-        self,
-        execution: JsonDict,
-        action: EnvAction,
-    ) -> bool:
-        """Preserve a calibrated grasp when its safe-hover wrist view is empty."""
-
-        compiled = execution.get("compiled_grasp")
-        if not isinstance(compiled, dict) or compiled.get("wrist_alignment_policy") != (
-            "optional_if_fresh_segmentation_empty"
-        ):
-            return False
-        obligation = _action_host_obligation(action)
-        call = _successful_tool_call(action, "sam3")
-        if call is None:
-            return False
-        outputs = _tool_call_outputs(call)
-        detections = outputs.get("detections")
-        if not isinstance(detections, list) or detections:
-            return False
-        is_host_wrist_segmentation = (
-            obligation.get("schema_version")
-            == "openeta.wrist_segmentation_obligation.v1"
-            and obligation.get("tool") == "sam3"
-            and obligation.get("stage") == "wrist_segmentation"
-        )
-        parameters = (
-            call.get("result", {}).get("details", {}).get("parameters", {})
-            if isinstance(call.get("result"), dict)
-            else {}
-        )
-        source_camera_role = str(
-            outputs.get("source_camera_role") or outputs.get("camera_role") or ""
-        ).strip().lower()
-        is_fresh_wrist_empty = (
-            source_camera_role == "wrist"
-            and isinstance(outputs.get("source_image"), str)
-            and outputs.get("source_image") == parameters.get("image")
-        )
-        if not (is_host_wrist_segmentation or is_fresh_wrist_empty):
-            return False
-        contact = compiled.get("contact_pose")
-        if not isinstance(contact, dict):
-            return False
-        precontact = compiled.get("precontact_pose")
-        next_stage = "precontact" if isinstance(precontact, dict) else "descend"
-        next_pose = precontact if isinstance(precontact, dict) else contact
-        result_id = str(outputs.get("result_id") or "")
-        source_image = str(outputs.get("source_image") or "")
-        execution.update(
-            {
-                "stage": next_stage,
-                "scene_epoch": self.scene_epoch(),
-                "adjusted_contact_pose": dict(contact),
-                "adjusted_precontact_pose": (
-                    dict(precontact) if isinstance(precontact, dict) else None
-                ),
-                "wrist_alignment_policy": compiled["wrist_alignment_policy"],
-                "wrist_alignment_skipped_reason": "fresh_wrist_segmentation_empty",
-                "wrist_alignment_skip_evidence": {
-                    "schema_version": obligation.get("schema_version"),
-                    "result_id": result_id,
-                    "source_image": source_image,
-                    "scene_epoch": self.scene_epoch(),
-                },
-                "required_action": {
-                    "name": "move_to",
-                    "parameters": {
-                        "target_pose": _pose_for_epoch(next_pose, self.scene_epoch())
-                    },
-                },
-            }
-        )
-        execution.pop("required_tool", None)
-        self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
-            execution,
-            source="runtime_empty_wrist_alignment_fallback",
-        )
-        self.record(
-            "grasp_wrist_alignment_skipped",
-            {
-                "candidate_id": execution.get("candidate_id"),
-                "compiled_grasp_id": execution.get("compiled_grasp_id"),
-                "reason": execution["wrist_alignment_skipped_reason"],
-                "result_id": result_id,
-                "next_stage": next_stage,
-                "scene_epoch": self.scene_epoch(),
-            },
-        )
-        return True
-
-    def _advance_probe_to_attachment(self, execution: JsonDict) -> bool:
-        probe = self.grasp_lift_probe()
-        if not isinstance(probe, dict) or probe.get("status") != "completed":
-            return False
-        proof_ok = probe.get("proof_verdict") == "PASS"
-        gate = {
-            "status": "resolved" if proof_ok else "stopped_requires_human",
-            "verdict": "PASS" if proof_ok else "UNKNOWN",
-            "candidate_id": execution.get("candidate_id"),
-            "compiled_grasp_id": execution.get("compiled_grasp_id"),
-            "scene_epoch": self.scene_epoch(),
-            "planning_scene_revision": execution.get("planning_scene_revision"),
-            "evidence_source": "gazebo_native_attachment_proof",
-            "probe_proof": probe.get("proof"),
-        }
-        if proof_ok:
-            gate.update(
-                {
-                    "pass_action_attempt_count": 0,
-                    "pass_action_completed": True,
-                    "pass_action_completed_at_s": time.time(),
-                    "full_lift_proof": probe.get("proof"),
-                    "full_lift_satisfied_by_probe": True,
-                }
-            )
-        if not proof_ok:
-            gate["stop_reason"] = probe.get("proof_reason") or "native_attachment_proof_unknown"
-        execution.update(
-            {
-                "stage": "attachment",
-                "scene_epoch": self.scene_epoch(),
-                "required_action": None,
-                "attachment_actions": (
-                    {"fail": {"name": "gripper_control", "parameters": {"position": 1}}}
-                    if proof_ok
-                    else {}
-                ),
-            }
-        )
-        self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
-            execution,
-            source="runtime_attachment_gate",
-        )
-        self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
-            gate, source="runtime_attachment_gate"
-        )
-        self.record(
-            "attachment_gate_required",
-            {
-                "candidate_id": execution.get("candidate_id"),
-                "scene_epoch": self.scene_epoch(),
-            },
-        )
-        if proof_ok:
-            self._complete_attachment_execution(
-                execution,
-                source="runtime_native_lift_probe_pass",
-            )
         return True
 
     def _advance_articulated_probe_to_attachment(self, execution: JsonDict) -> bool:
@@ -5428,42 +4857,6 @@ class AgentMemory:
         )
         return True
 
-    def _capture_attachment_verdict(self, action: EnvAction) -> bool:
-        execution = self.grasp_execution()
-        if not isinstance(execution, dict) or execution.get("stage") != "attachment":
-            return False
-        if execution.get("attachment_mode") == "articulated_handle":
-            return False
-        outcome = _action_grasp_outcome(action)
-        if outcome not in {"pass", "fail", "unknown"}:
-            return False
-        candidate_id = str(execution.get("candidate_id") or "")
-        existing = self.attachment_gate() or {}
-        if existing.get("evidence_source") == "gazebo_native_attachment_proof":
-            return False
-        existing_verdict = str(existing.get("verdict") or "UNKNOWN").upper()
-        if (
-            outcome == "unknown"
-            and existing.get("status") == "resolved"
-            and existing_verdict in {"PASS", "FAIL"}
-        ):
-            return False
-        gate = {
-            **existing,
-            "status": "resolved" if outcome in {"pass", "fail"} else "pending",
-            "verdict": outcome.upper(),
-            "candidate_id": candidate_id,
-            "scene_epoch": self.scene_epoch(),
-            "evidence_source": "independent_action_reviewer",
-            "updated_at_s": time.time(),
-        }
-        self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
-            gate,
-            source="independent_action_reviewer",
-        )
-        self.record("attachment_gate_verdict", dict(gate))
-        return True
-
     def _capture_attachment_observation_verdict(
         self,
         observation: EnvObservation,
@@ -5478,67 +4871,39 @@ class AgentMemory:
         gate = self.attachment_gate()
         if not isinstance(gate, dict):
             return False
-        if gate.get("evidence_source") == "gazebo_native_attachment_proof":
+        if execution.get("attachment_mode") != "articulated_handle":
             return False
-        if execution.get("attachment_mode") == "articulated_handle":
-            command = self._latest_action_command()
-            request = command.get("request") if isinstance(command, dict) else None
-            if (
-                str(gate.get("verdict") or "UNKNOWN").upper() != "UNKNOWN"
-                or not isinstance(request, dict)
-                or request.get("name") != "observe"
-                or gate.get("refresh_required") is not True
-                or gate.get("unknown_refresh_completed") is True
-            ):
-                return False
-            gate.update(
-                {
-                    "unknown_refresh_completed": True,
-                    "refresh_required": False,
-                    "last_observed_scene_epoch": self.scene_epoch(),
-                    "last_observed_at_s": time.time(),
-                }
-            )
-            self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
-                gate,
-                source="articulated_attachment_observation",
-            )
-            self.record(
-                "articulated_attachment_probe_verdict",
-                {
-                    "candidate_id": execution.get("candidate_id"),
-                    "verdict": "UNKNOWN",
-                    "refresh_completed": True,
-                    "scene_epoch": self.scene_epoch(),
-                },
-            )
-            return True
-        verdict, evidence = _gripper_attachment_evidence(
-            observation.robot.gripper_state,
-            command_state=self.gripper_command_state(),
-        )
-        if verdict not in {"PASS", "FAIL"}:
+        command = self._latest_action_command()
+        request = command.get("request") if isinstance(command, dict) else None
+        if (
+            str(gate.get("verdict") or "UNKNOWN").upper() != "UNKNOWN"
+            or not isinstance(request, dict)
+            or request.get("name") != "observe"
+            or gate.get("refresh_required") is not True
+            or gate.get("unknown_refresh_completed") is True
+        ):
             return False
         gate.update(
             {
-                "status": "resolved",
-                "verdict": verdict,
-                "scene_epoch": self.scene_epoch(),
-                "evidence_source": "gripper_observation",
-                "evidence": evidence,
-                "updated_at_s": time.time(),
+                "unknown_refresh_completed": True,
+                "refresh_required": False,
+                "last_observed_scene_epoch": self.scene_epoch(),
+                "last_observed_at_s": time.time(),
             }
         )
         self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
             gate,
-            source="gripper_observation",
+            source="articulated_attachment_observation",
         )
-        self.record("attachment_gate_verdict", dict(gate))
-        if verdict == "PASS" and gate.get("pass_action_completed") is True:
-            self._complete_attachment_execution(
-                execution,
-                source="runtime_attachment_observation",
-            )
+        self.record(
+            "articulated_attachment_probe_verdict",
+            {
+                "candidate_id": execution.get("candidate_id"),
+                "verdict": "UNKNOWN",
+                "refresh_completed": True,
+                "scene_epoch": self.scene_epoch(),
+            },
+        )
         return True
 
     def _capture_articulated_attachment_assessment(self, action: EnvAction) -> bool:
@@ -5818,7 +5183,6 @@ class AgentMemory:
         )
         if advanced:
             self._schedule_grasp_recovery(
-                xyz=reconciliation.get("measured_eef_xyz"),
                 rejection={
                     "source": "reconciled_candidate_motion_rejected",
                     "target_tool": reconciliation.get("tool"),
@@ -5826,7 +5190,6 @@ class AgentMemory:
                 },
                 candidate_id=candidate_id,
             )
-            self.facts.pop(GRASP_LIFT_PROBE_KEY, None)
             self.facts.pop(ARTICULATED_ATTACHMENT_PROBE_KEY, None)
             self.facts.pop(GRASP_EXECUTION_KEY, None)
             self.facts.pop(ATTACHMENT_GATE_KEY, None)
@@ -5835,79 +5198,55 @@ class AgentMemory:
         execution = self.grasp_execution()
         if not isinstance(execution, dict) or execution.get("stage") != stage:
             return
-        # Reconciliation commits only the already-generated deterministic edge.
-        if stage == "hover":
-            execution.update(
-                {
-                    "stage": "align",
-                    "required_action": None,
-                    "required_tool": "compute_wrist_alignment",
-                }
+        if stage == "open":
+            compiled = execution.get("compiled_grasp")
+            contact = compiled.get("contact_pose") if isinstance(compiled, dict) else None
+            if isinstance(contact, dict):
+                execution.update(
+                    {
+                        "stage": "contact",
+                        "required_action": {
+                            "name": "move_to",
+                            "parameters": {
+                                "target_pose": _pose_for_epoch(
+                                    contact, self.scene_epoch()
+                                )
+                            },
+                        },
+                    }
+                )
+        elif stage == "contact":
+            self._mark_active_candidate_accepted(
+                source="reconciled_model_contact_reached"
             )
-        elif stage == "align_move":
-            contact = execution.get("adjusted_contact_pose")
-            if isinstance(contact, dict):
-                precontact = execution.get("adjusted_precontact_pose")
-                next_stage = "precontact" if isinstance(precontact, dict) else "descend"
-                next_pose = precontact if isinstance(precontact, dict) else contact
-                execution.update(
-                    {
-                        "stage": next_stage,
-                        "required_action": {
-                            "name": "move_to",
-                            "parameters": {
-                                "target_pose": _pose_for_epoch(next_pose, self.scene_epoch())
-                            },
-                        },
-                    }
-                )
-        elif stage == "precontact":
-            contact = execution.get("adjusted_contact_pose")
-            if isinstance(contact, dict):
-                execution.update(
-                    {
-                        "stage": "descend",
-                        "required_action": {
-                            "name": "move_to",
-                            "parameters": {
-                                "target_pose": _pose_for_epoch(contact, self.scene_epoch())
-                            },
-                        },
-                    }
-                )
-        elif stage == "descend":
-            self._mark_active_candidate_accepted(source="reconciled_contact_reached")
             execution.update(
                 {
                     "stage": "close",
-                    "required_action": {"name": "gripper_control", "parameters": {"position": 0}},
+                    "required_action": {
+                        "name": "gripper_control",
+                        "parameters": {"position": 0},
+                    },
                 }
             )
-        elif stage == "open":
-            compiled = execution.get("compiled_grasp")
-            hover = compiled.get("hover_pose") if isinstance(compiled, dict) else None
-            if isinstance(hover, dict):
-                execution.update(
-                    {
-                        "stage": "hover",
-                        "required_action": {
-                            "name": "move_to",
-                            "parameters": {
-                                "target_pose": _pose_for_epoch(hover, self.scene_epoch())
-                            },
-                        },
-                    }
-                )
         elif stage == "close":
-            policy = self.grasp_candidate_policy() or {}
-            articulated = policy.get("interaction_family") == "articulated_handle"
+            gate = {
+                "schema_version": "openeta.attachment_gate.v2",
+                "status": "stopped_requires_human",
+                "verdict": "UNKNOWN",
+                "candidate_id": execution.get("candidate_id"),
+                "compiled_grasp_id": execution.get("compiled_grasp_id"),
+                "scene_epoch": self.scene_epoch(),
+                "assessment_reason": "native_contact_attach_receipt_unavailable",
+            }
+            self.facts[ATTACHMENT_GATE_KEY] = _memory_fact_entry(
+                gate, source="motion_reconciliation"
+            )
             execution.update(
                 {
-                    "stage": "prepare_probe" if articulated else "probe",
+                    "status": "stopped_requires_human",
+                    "stage": "attachment_unknown",
                     "required_action": None,
-                    "probe_kind": (
-                        "articulated_attachment" if articulated else "grasp_lift"
-                    ),
+                    "stop_reason": "native_contact_attach_receipt_unavailable",
                 }
             )
         elif stage == "probe":
@@ -5921,35 +5260,13 @@ class AgentMemory:
                     }
                 )
                 self.facts[ARTICULATED_ATTACHMENT_PROBE_KEY] = _memory_fact_entry(
-                    articulated_probe,
-                    source="motion_reconciliation",
-                )
-                self.record(
-                    "articulated_attachment_probe_completed",
-                    dict(articulated_probe),
+                    articulated_probe, source="motion_reconciliation"
                 )
                 self._advance_articulated_probe_to_attachment(execution)
                 return
-            probe = self.grasp_lift_probe()
-            if isinstance(probe, dict):
-                probe.update(
-                    {
-                        "status": "completed",
-                        "completed_at_s": time.time(),
-                        "last_attempt_status": "reconciled",
-                    }
-                )
-                self.facts[GRASP_LIFT_PROBE_KEY] = _memory_fact_entry(
-                    probe,
-                    source="motion_reconciliation",
-                )
-                self.record("grasp_lift_probe_reconciled", dict(probe))
-                self._advance_probe_to_attachment(execution)
-                return
         execution["scene_epoch"] = self.scene_epoch()
         self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
-            execution,
-            source="motion_reconciliation",
+            execution, source="motion_reconciliation"
         )
 
     def _append_transition_ledger(self, action: EnvAction) -> None:
@@ -6019,168 +5336,6 @@ class AgentMemory:
             source="runtime_transition_ledger",
         )
         self._save_working_memory()
-
-    def _capture_grasp_lift_probe_obligation(
-        self,
-        observation: EnvObservation,
-    ) -> bool:
-        policy = self.anygrasp_candidate_policy()
-        if not isinstance(policy, dict) or str(policy.get("status") or "") != "accepted":
-            return False
-        if policy.get("interaction_family") == "articulated_handle":
-            return False
-        active = policy.get("active_candidate")
-        if not isinstance(active, dict):
-            return False
-        candidate_id = str(active.get("id") or "")
-        if not candidate_id:
-            return False
-        existing = self.grasp_lift_probe()
-        if isinstance(existing, dict) and str(existing.get("candidate_id") or "") == candidate_id:
-            return False
-        command = self._latest_action_command()
-        if not _successful_gripper_close_command(command):
-            return False
-        pose = observation.robot.end_effector_pose
-        xyz = pose.get("xyz") if isinstance(pose, dict) else None
-        if not _finite_xyz(xyz):
-            return False
-        start_xyz = [float(value) for value in xyz[:3]]
-        target_xyz = [start_xyz[0], start_xyz[1], start_xyz[2] + GRASP_LIFT_PROBE_DISTANCE_M]
-        execution = self.grasp_execution()
-        probe = {
-            "status": "required",
-            "candidate_id": candidate_id,
-            "compiled_grasp_id": (
-                execution.get("compiled_grasp_id")
-                if isinstance(execution, dict)
-                else None
-            ),
-            "scene_epoch": self.scene_epoch(),
-            "planning_scene_revision": (
-                execution.get("planning_scene_revision")
-                if isinstance(execution, dict)
-                else None
-            ),
-            "distance_m": GRASP_LIFT_PROBE_DISTANCE_M,
-            "start_eef_xyz": start_xyz,
-            "required_parameters": {
-                "target_pose": {
-                    "frame": "world",
-                    "xyz": target_xyz,
-                    "probe_type": "grasp_lift",
-                    "source_grasp_id": candidate_id,
-                    "compiled_grasp_id": (
-                        execution.get("compiled_grasp_id")
-                        if isinstance(execution, dict)
-                        else None
-                    ),
-                    "scene_epoch": self.scene_epoch(),
-                    "scene_revision": (
-                        execution.get("planning_scene_revision")
-                        if isinstance(execution, dict)
-                        else None
-                    ),
-                }
-            },
-            "created_at_s": time.time(),
-        }
-        self.facts[GRASP_LIFT_PROBE_KEY] = _memory_fact_entry(
-            probe,
-            source="runtime_grasp_lift_probe",
-        )
-        self.record("grasp_lift_probe_required", dict(probe))
-        return True
-
-    def _capture_grasp_lift_probe_result(self, action: EnvAction) -> bool:
-        probe = self.grasp_lift_probe()
-        if not isinstance(probe, dict) or str(probe.get("status") or "") != "required":
-            return False
-        command = action.command if isinstance(action.command, dict) else {}
-        request = command.get("request")
-        if not isinstance(request, dict) or str(request.get("name") or "") != "move_to":
-            return False
-        parameters = request.get("parameters")
-        required = probe.get("required_parameters")
-        if not isinstance(parameters, dict) or parameters != required:
-            return False
-        move_call = next(
-            (
-                call
-                for call in command.get("tool_calls", []) or []
-                if isinstance(call, dict) and str(call.get("name") or "") == "move_to"
-            ),
-            None,
-        )
-        probe["attempt_count"] = int(probe.get("attempt_count") or 0) + 1
-        if (
-            not isinstance(move_call, dict)
-            or not _call_result_success(move_call)
-            or _motion_call_rejects_candidate(move_call)
-        ):
-            receipt = _environment_receipt(move_call) if isinstance(move_call, dict) else {}
-            probe.update(
-                {
-                    "status": "completed",
-                    "completed_at_s": time.time(),
-                    "last_attempt_status": "failed",
-                    "proof_verdict": "UNKNOWN",
-                    "proof_reason": (
-                        "lift_probe_motion_outcome_unknown"
-                        if receipt.get("error_code") == "MOTION_OUTCOME_UNKNOWN"
-                        or receipt.get("motion_outcome") == "unknown"
-                        else "lift_probe_motion_not_completed"
-                    ),
-                    "proof": {
-                        "receipt": receipt,
-                        "candidate_id": probe.get("candidate_id"),
-                        "compiled_grasp_id": probe.get("compiled_grasp_id"),
-                        "planning_scene_revision": probe.get(
-                            "planning_scene_revision"
-                        ),
-                    },
-                }
-            )
-            self.facts[GRASP_LIFT_PROBE_KEY] = _memory_fact_entry(
-                probe,
-                source="runtime_grasp_lift_probe",
-            )
-            self.record(
-                "grasp_lift_probe_failed",
-                {
-                    "candidate_id": probe.get("candidate_id"),
-                    "attempt_count": probe["attempt_count"],
-                },
-            )
-            return True
-        receipt = _environment_receipt(move_call)
-        proof_ok, proof_reason, proof = _trusted_native_attachment_proof(
-            receipt,
-            candidate_id=str(probe.get("candidate_id") or ""),
-            compiled_grasp_id=str(probe.get("compiled_grasp_id") or ""),
-            scene_epoch=_optional_int(probe.get("scene_epoch"), default=-1),
-            planning_scene_revision=_optional_int(
-                probe.get("planning_scene_revision"), default=-1
-            ),
-            require_lift=True,
-            request_parameters=required,
-        )
-        probe.update(
-            {
-                "status": "completed",
-                "completed_at_s": time.time(),
-                "last_attempt_status": "executed",
-                "proof_verdict": "PASS" if proof_ok else "UNKNOWN",
-                "proof_reason": proof_reason,
-                "proof": proof,
-            }
-        )
-        self.facts[GRASP_LIFT_PROBE_KEY] = _memory_fact_entry(
-            probe,
-            source="runtime_grasp_lift_probe",
-        )
-        self.record("grasp_lift_probe_completed", dict(probe))
-        return True
 
     def _latest_action_command(self) -> JsonDict:
         for event in reversed(self.events[:-1]):
@@ -6340,7 +5495,6 @@ class AgentMemory:
             "sam3_no_detection": self.sam3_no_detection(),
             "grasp_candidate_policy": self.anygrasp_candidate_policy(),
             "retained_targeted_grasp": self.retained_targeted_grasp(),
-            "grasp_lift_probe": self.grasp_lift_probe(),
             "articulated_attachment_probe": self.articulated_attachment_probe(),
             "grasp_execution": self.grasp_execution(),
             "grasp_recovery": self.grasp_recovery(),
@@ -6351,7 +5505,7 @@ class AgentMemory:
             "placement_candidate_policy": self.placement_candidate_policy(),
             "placement_object_detection": self.placement_object_detection(),
             "placement_region_detection": self.placement_region_detection(),
-            "pregrasp_placement_goal_pool": self.pregrasp_placement_goal_pool(),
+            "frozen_placement_goal_pool": self.frozen_placement_goal_pool(),
             "motion_reconciliation": self.motion_reconciliation(),
             "scene_epoch": self.scene_epoch(),
             "transition_ledger": self.transition_ledger()[-12:],
@@ -6372,7 +5526,6 @@ class AgentMemory:
                         SAM3_NO_DETECTION_KEY,
                         GRASP_CANDIDATE_POLICY_KEY,
                         LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
-                        GRASP_LIFT_PROBE_KEY,
                         ARTICULATED_ATTACHMENT_PROBE_KEY,
                         GRASP_EXECUTION_KEY,
                         GRASP_RECOVERY_KEY,
@@ -6580,7 +5733,6 @@ def _articulated_handle_candidate_policy(
         "compile_hints": {
             "target_geometry_family": "articulated_handle",
             "approach_mode": active_mode,
-            "strategy_id": _articulated_handle_strategy_id(active_mode),
         },
         "approach_classification": {
             "camera_frame_id": camera_frame_id,
@@ -6681,14 +5833,6 @@ def _same_local_file(left: str, right: str) -> bool:
         return left_path.read_bytes() == right_path.read_bytes()
     except OSError:
         return False
-
-
-def _articulated_handle_strategy_id(approach_mode: str) -> str:
-    return {
-        "top_down": "top-down-drawer-handle-panda-p8",
-        "front": "native-front-articulated-handle-panda-p8",
-        "side": "native-side-articulated-handle-panda-p8",
-    }[approach_mode]
 
 
 def _highest_refinable_candidate(policy: JsonDict) -> JsonDict | None:
@@ -6814,42 +5958,6 @@ def _parameters_grasp_candidate_id(parameters: JsonDict) -> str:
     return ""
 
 
-def _grasp_recovery_source_return_pose(execution: JsonDict | None) -> JsonDict | None:
-    """Return a previously observed, finite EEF pose for post-failure recovery."""
-
-    if not isinstance(execution, dict):
-        return None
-    # Once hover has completed, a failed alignment/descent/close must recover
-    # to this candidate's exact compiled world-frame hover. Observing at or
-    # near contact occludes the object and poisons the following inference.
-    # Failures before hover completes retain the pre-grasp source EEF pose.
-    pose = None
-    if str(execution.get("stage") or "") in {
-        "align",
-        "align_move",
-        "precontact",
-        "descend",
-        "close",
-    }:
-        compiled = execution.get("compiled_grasp")
-        if isinstance(compiled, dict):
-            pose = compiled.get("hover_pose")
-    if not isinstance(pose, dict):
-        pose = execution.get("source_eef_pose")
-    if not isinstance(pose, dict):
-        return None
-    xyz = pose.get("xyz")
-    if not _finite_xyz(xyz):
-        return None
-    result = dict(pose)
-    # RobotState.end_effector_pose.frame names the represented EEF link, while
-    # its xyz/quaternion are expressed in the environment world frame. move_to
-    # consumes the expression frame, so recovery targets are always world.
-    result["frame"] = "world"
-    result["xyz"] = [float(value) for value in xyz[:3]]
-    return result
-
-
 def _candidate_linked_rejection(
     action: EnvAction,
     *,
@@ -6935,13 +6043,13 @@ def _candidate_linked_rejection(
             for call in command.get("tool_calls", []) or []
             if isinstance(call, dict)
             and str(call.get("name") or "") == request_name
-            and _independent_precontact_review_rejects_candidate(call)
+            and _independent_motion_review_rejects_candidate(call)
         ),
         None,
     )
     if isinstance(failed_review, dict):
         return {
-            "source": "independent_precontact_review_rejected",
+            "source": "independent_host_stage_review_rejected",
             "target_tool": request_name,
             "reason": _call_failure_reason(failed_review),
             **_independent_review_recovery_metadata(failed_review),
@@ -6993,7 +6101,7 @@ def _motion_rejection_fingerprint(call: JsonDict) -> JsonDict:
     return {}
 
 
-def _host_stage_precontact_review_rejection(
+def _host_stage_motion_review_rejection(
     action: EnvAction,
     *,
     active_candidate_id: str,
@@ -7003,8 +6111,7 @@ def _host_stage_precontact_review_rejection(
         not active_candidate_id
         or not isinstance(execution, dict)
         or str(execution.get("candidate_id") or "") != active_candidate_id
-        or str(execution.get("stage") or "")
-        not in {"open", "hover", "align_move", "precontact", "descend", "close"}
+        or str(execution.get("stage") or "") not in {"open", "contact", "close"}
     ):
         return None
     required = execution.get("required_action")
@@ -7023,7 +6130,7 @@ def _host_stage_precontact_review_rejection(
     ):
         return None
     call = _tool_call(action, request_name)
-    if not isinstance(call, dict) or not _independent_precontact_review_rejects_candidate(call):
+    if not isinstance(call, dict) or not _independent_motion_review_rejects_candidate(call):
         return None
     return {
         "source": "independent_host_stage_review_rejected",
@@ -7068,75 +6175,22 @@ def _host_stage_close_rejection(
     }
 
 
-def _wrist_reference_localization_rejection(
-    action: EnvAction,
-    *,
-    active_candidate_id: str,
-    execution: JsonDict | None,
-) -> JsonDict | None:
-    if (
-        not active_candidate_id
-        or not isinstance(execution, dict)
-        or str(execution.get("candidate_id") or "") != active_candidate_id
-        or str(execution.get("stage") or "") != "align"
-    ):
-        return None
-    command = action.command if isinstance(action.command, dict) else {}
-    request = command.get("request")
-    if (
-        not isinstance(request, dict)
-        or str(request.get("name") or "") != "retrieve_asset_reference"
-    ):
-        return None
-    call = _tool_call(action, "retrieve_asset_reference")
-    if not isinstance(call, dict) or _call_result_success(call):
-        return None
-    result = call.get("result")
-    details = result.get("details") if isinstance(result, dict) else None
-    outputs = details.get("outputs") if isinstance(details, dict) else None
-    diagnostics = details.get("diagnostics") if isinstance(details, dict) else None
-    reason = outputs.get("reason") if isinstance(outputs, dict) else None
-    diagnostic_codes = {
-        str(item.get("code") or "") for item in diagnostics or [] if isinstance(item, dict)
-    }
-    if (
-        str(reason or "") != "object_memory_localization_failed"
-        and "object_memory_localization_failed" not in diagnostic_codes
-    ):
-        return None
-    return {
-        "source": "wrist_reference_localization_rejected",
-        "target_tool": "retrieve_asset_reference",
-        "grasp_stage": "align",
-        "reason": (
-            "Target instance could not be localized in the current wrist view after "
-            "the reference localizer exhausted its provider retries."
-        ),
-    }
-
-
 def _candidate_linked_grasp_outcome_rejection(
     action: EnvAction,
     *,
     active_candidate_id: str,
-    lift_probe: JsonDict | None,
     articulated_probe: JsonDict | None = None,
     attachment_gate: JsonDict | None = None,
     execution: JsonDict | None = None,
 ) -> JsonDict | None:
     if not active_candidate_id:
         return None
-    completed_probe = next(
-        (
-            probe
-            for probe in (lift_probe, articulated_probe)
-            if isinstance(probe, dict)
-            and str(probe.get("status") or "") == "completed"
-            and str(probe.get("candidate_id") or "") == active_candidate_id
-        ),
-        None,
-    )
-    if completed_probe is None:
+    if (
+        not isinstance(articulated_probe, dict)
+        or str(articulated_probe.get("status") or "") != "completed"
+        or str(articulated_probe.get("candidate_id") or "")
+        != active_candidate_id
+    ):
         return None
     command = action.command if isinstance(action.command, dict) else {}
     request = command.get("request")
@@ -7146,8 +6200,7 @@ def _candidate_linked_grasp_outcome_rejection(
     if request_name not in {"gripper_control", "move_to", "follow_eef_trajectory"}:
         return None
     if (
-        completed_probe is articulated_probe
-        and isinstance(attachment_gate, dict)
+        isinstance(attachment_gate, dict)
         and str(attachment_gate.get("verdict") or "").upper() == "FAIL"
         and isinstance(execution, dict)
         and execution.get("attachment_mode") == "articulated_handle"
@@ -7416,6 +6469,8 @@ def _qualification_artifact_evidence(
         not isinstance(payload, dict)
         or payload.get("schema_version")
         not in {
+            "openeta.moveit_candidate_funnel.v3",
+            "openeta.moveit_candidate_qualification.v3",
             "openeta.moveit_candidate_funnel.v2",
             "openeta.moveit_candidate_qualification.v1",
         }
@@ -7445,24 +6500,19 @@ def _environment_receipt(call: JsonDict) -> JsonDict:
 def _trusted_native_attachment_proof(
     receipt: JsonDict,
     *,
-    candidate_id: str,
-    compiled_grasp_id: str,
-    scene_epoch: int,
     planning_scene_revision: int,
-    require_lift: bool,
-    request_parameters: object,
 ) -> tuple[bool, str, JsonDict]:
-    """Validate native attachment evidence without visual or pose-only fallback."""
+    """Validate the close-boundary native contact and attach acknowledgement.
+
+    This proof authorizes attached-object planning; it does not prescribe a
+    lift waypoint.  Every later MoveIt transport receipt revalidates native
+    attachment retention, and the final release has its own stability proof.
+    """
 
     proof = receipt.get("physical_verification")
-    child = receipt.get("child_link_proof")
     attached = receipt.get("detachable_joint")
     attachment_transform = receipt.get("attachment_transform")
-    request = request_parameters if isinstance(request_parameters, dict) else {}
-    target = request.get("target_pose")
-    target = target if isinstance(target, dict) else {}
-    evidence = proof.get("evidence") if isinstance(proof, dict) else None
-    evidence = evidence if isinstance(evidence, dict) else {}
+    contact_gate = receipt.get("native_contact_gate")
     reasons: list[str] = []
     if receipt.get("ok") is not True:
         reasons.append("native_motion_not_successful")
@@ -7472,7 +6522,7 @@ def _trusted_native_attachment_proof(
         reasons.append("native_proof_schema_mismatch")
     if isinstance(proof, dict) and (
         proof.get("verdict") != "PASS"
-        or proof.get("reason_code") != "NATIVE_GRASP_TARGET_HELD"
+        or proof.get("reason_code") != "NATIVE_GRASP_ATTACHMENT_CONFIRMED"
         or proof.get("grasp_confirmed") is not True
     ):
         reasons.append("native_proof_not_pass")
@@ -7480,6 +6530,14 @@ def _trusted_native_attachment_proof(
         reasons.append("native_proof_target_mismatch")
     if not isinstance(attached, dict) or attached.get("state") != "attached":
         reasons.append("native_attach_ack_missing")
+    if not (
+        isinstance(contact_gate, dict)
+        and contact_gate.get("accepted") is True
+        and contact_gate.get("reason_code") == "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED"
+        and isinstance(contact_gate.get("evidence"), dict)
+        and contact_gate["evidence"].get("source") == "gazebo_native_contacts"
+    ):
+        reasons.append("native_bilateral_contact_proof_missing")
     if not _valid_attachment_transform(attachment_transform):
         reasons.append("native_attachment_transform_missing")
     if (
@@ -7487,57 +6545,23 @@ def _trusted_native_attachment_proof(
         or receipt.get("planning_scene_revision") != planning_scene_revision
     ):
         reasons.append("native_planning_scene_revision_mismatch")
-    if (
-        not candidate_id
-        or str(target.get("source_grasp_id") or "") != candidate_id
-        or not compiled_grasp_id
-        or str(target.get("compiled_grasp_id") or "") != compiled_grasp_id
-    ):
-        reasons.append("native_grasp_identity_mismatch")
-    if (
-        scene_epoch < 0
-        or _optional_int(target.get("scene_epoch"), default=-1) != scene_epoch
-        or _optional_int(target.get("scene_revision"), default=-1)
-        != planning_scene_revision
-    ):
-        reasons.append("native_request_provenance_mismatch")
-    lift_m = evidence.get("lift_m")
-    drift_m = evidence.get("capture_relative_translation_m")
-    if not isinstance(child, dict) or child.get("lift_m") != lift_m or child.get(
-        "capture_relative_translation_m"
-    ) != drift_m:
-        reasons.append("native_child_link_proof_mismatch")
-    if (
-        require_lift
-        and (
-            not isinstance(lift_m, int | float)
-            or isinstance(lift_m, bool)
-            or not math.isfinite(float(lift_m))
-            or float(lift_m) < NATIVE_GRASP_MINIMUM_LIFT_M
-        )
-    ):
-        reasons.append("native_lift_below_threshold")
-    if (
-        not isinstance(drift_m, int | float)
-        or isinstance(drift_m, bool)
-        or not math.isfinite(float(drift_m))
-        or float(drift_m) > NATIVE_GRASP_MAXIMUM_DRIFT_M
-    ):
-        reasons.append("native_capture_drift_exceeded")
     retained = {
         "receipt": dict(receipt),
         "physical_verification": dict(proof) if isinstance(proof, dict) else {},
-        "child_link_proof": dict(child) if isinstance(child, dict) else {},
+        "native_contact_gate": (
+            dict(contact_gate) if isinstance(contact_gate, dict) else {}
+        ),
         "detachable_joint": dict(attached) if isinstance(attached, dict) else {},
         "attachment_transform": (
             dict(attachment_transform) if isinstance(attachment_transform, dict) else {}
         ),
         "planning_scene_revision": receipt.get("planning_scene_revision"),
-        "candidate_id": candidate_id,
-        "compiled_grasp_id": compiled_grasp_id,
-        "scene_epoch": scene_epoch,
     }
-    return not reasons, reasons[0] if reasons else "trusted_native_attachment_proof", retained
+    return (
+        not reasons,
+        reasons[0] if reasons else "trusted_native_contact_attach_ack",
+        retained,
+    )
 
 
 def _valid_attachment_transform(value: object) -> bool:
@@ -7649,63 +6673,24 @@ def grasp_reference_action_error(
     parameters: JsonDict,
     required_action: JsonDict,
 ) -> str | None:
-    """Validate one staged action against a reference pose safety envelope."""
+    """Require an execution stage to copy its host-qualified action exactly.
+
+    The grasp provider owns the contact terminal pose.  Once that pose has
+    passed the deterministic funnel, neither the VLM nor another host layer is
+    allowed to translate or rotate it.  MoveIt remains free to choose the
+    complete collision-aware joint path to the frozen terminal state.
+    """
 
     required_name = str(required_action.get("name") or "")
     required_parameters = required_action.get("parameters")
     if tool_name != required_name or not isinstance(required_parameters, dict):
         return f"Grasp stage {stage!r} requires tool {required_name!r}."
-    if required_name != "move_to":
-        if parameters == required_parameters:
-            return None
-        return (
-            f"Grasp stage {stage!r} requires the host-generated {required_name!r} "
-            "parameters unchanged."
-        )
-
-    reference_pose = required_parameters.get("target_pose")
-    target_pose = parameters.get("target_pose")
-    if not isinstance(reference_pose, dict) or not isinstance(target_pose, dict):
-        return f"Grasp stage {stage!r} requires a concrete move_to target_pose."
-    if str(target_pose.get("frame") or "") != "world":
-        return "Adjusted grasp poses must remain in the world frame."
-    reference_xyz = reference_pose.get("xyz")
-    target_xyz = target_pose.get("xyz")
-    if not _finite_xyz(reference_xyz) or not _finite_xyz(target_xyz):
-        return "Adjusted grasp poses require finite target_pose.xyz values."
-    distance = math.sqrt(
-        sum((float(target_xyz[index]) - float(reference_xyz[index])) ** 2 for index in range(3))
+    if parameters == required_parameters:
+        return None
+    return (
+        f"Grasp stage {stage!r} must copy the host-qualified {required_name!r} "
+        "parameters exactly; model terminal-pose offsets are forbidden."
     )
-    if distance > GRASP_REFERENCE_POSITION_TOLERANCE_M:
-        return (
-            f"Adjusted grasp pose is {distance:.4f} m from the reference, exceeding "
-            f"the {GRASP_REFERENCE_POSITION_TOLERANCE_M:.3f} m closed-loop envelope."
-        )
-
-    reference_rotation = reference_pose.get("rotation_matrix")
-    target_rotation = target_pose.get("rotation_matrix")
-    if reference_rotation is not None:
-        angle_deg = _rotation_delta_deg(reference_rotation, target_rotation)
-        if angle_deg is None:
-            return (
-                "Adjusted grasp poses must preserve a finite 3x3 rotation_matrix "
-                "when the reference pose provides one."
-            )
-        if angle_deg > GRASP_REFERENCE_ORIENTATION_TOLERANCE_DEG:
-            return (
-                f"Adjusted grasp orientation is {angle_deg:.2f} deg from the reference, "
-                "exceeding the "
-                f"{GRASP_REFERENCE_ORIENTATION_TOLERANCE_DEG:.1f} deg envelope."
-            )
-
-    reference_candidate = _parameters_grasp_candidate_id(required_parameters)
-    target_candidate = _parameters_grasp_candidate_id(parameters)
-    if target_candidate and reference_candidate and target_candidate != reference_candidate:
-        return (
-            f"Adjusted grasp pose references candidate {target_candidate!r}, but stage "
-            f"{stage!r} belongs to {reference_candidate!r}."
-        )
-    return None
 
 
 def _grasp_stage_action_matches(
@@ -7729,36 +6714,6 @@ def _grasp_stage_action_matches(
             required_action=required,
         )
         is None
-    )
-
-
-def _rotation_delta_deg(reference: object, target: object) -> float | None:
-    if not _finite_rotation_matrix(reference) or not _finite_rotation_matrix(target):
-        return None
-    reference_rows = reference
-    target_rows = target
-    trace = sum(
-        float(reference_rows[row][column]) * float(target_rows[row][column])
-        for row in range(3)
-        for column in range(3)
-    )
-    cosine = max(-1.0, min(1.0, (trace - 1.0) / 2.0))
-    return math.degrees(math.acos(cosine))
-
-
-def _finite_rotation_matrix(value: object) -> bool:
-    return (
-        isinstance(value, list | tuple)
-        and len(value) == 3
-        and all(
-            isinstance(row, list | tuple)
-            and len(row) == 3
-            and all(
-                isinstance(component, int | float) and math.isfinite(float(component))
-                for component in row
-            )
-            for row in value
-        )
     )
 
 
@@ -7794,8 +6749,9 @@ def _reconcile_gripper_position(position: object, state: JsonDict) -> str:
             return "completed"
     else:
         # A grasped object can stop the fingers well above the empty-close value.
-        # Any observed departure from fully open reconciles the binary close
-        # transition; attachment is adjudicated only after the lift probe.
+        # Any observed departure from fully open reconciles only the binary close
+        # transition. Native bilateral contact plus the attach ACK independently
+        # adjudicates whether the object is actually held.
         if is_open is False or isinstance(openness, (int, float)) and openness < 0.8:
             return "completed"
     return "unresolved"
@@ -7882,8 +6838,8 @@ def _safety_call_rejects_candidate(call: JsonDict) -> bool:
     return _failure_text_rejects_candidate(call)
 
 
-def _independent_precontact_review_rejects_candidate(call: JsonDict) -> bool:
-    """Treat any fail-closed pre-contact review as a candidate rejection.
+def _independent_motion_review_rejects_candidate(call: JsonDict) -> bool:
+    """Treat any fail-closed terminal-motion review as candidate rejection.
 
     The independent reviewer uses ``abstain`` when visual evidence is too
     ambiguous to approve a candidate-specific motion.  At this boundary an
@@ -7973,43 +6929,14 @@ def _grasp_estimation_recovery_class(rejection: JsonDict) -> str:
     if structured in {"perception_refinable", "uncertain_review"}:
         return structured
     source = str(rejection.get("source") or "")
-    if source in {
-        "physical_gripper_width_filter",
-        "wrist_reference_localization_rejected",
-    }:
+    if source == "physical_gripper_width_filter":
         return "perception_refinable"
     if source in {
         "uncertain_review",
-        "main_vlm_high_hover_uncertain",
+        "main_vlm_terminal_pose_uncertain",
     }:
         return "uncertain_review"
     return "none"
-
-
-def _is_grasp_estimation_recovery_action(
-    tool_name: str,
-    parameters: JsonDict,
-    *,
-    recovery: JsonDict | None,
-) -> bool:
-    if (
-        not isinstance(recovery, dict)
-        or recovery.get("status") != "required"
-        or tool_name not in {"obstacle_avoidance", "move_to"}
-    ):
-        return False
-    recovery_id = str(recovery.get("recovery_id") or "")
-    if not recovery_id:
-        return False
-    if tool_name == "obstacle_avoidance":
-        path = parameters.get("path")
-        return isinstance(path, dict) and str(path.get("recovery_id") or "") == recovery_id
-    target_pose = parameters.get("target_pose")
-    return (
-        isinstance(target_pose, dict)
-        and target_pose.get("grasp_stage") == "grasp_estimation_refinement_hover"
-        and str(target_pose.get("recovery_id") or "") == recovery_id
-    )
 
 
 def _camera_frame_for_source_image(policy: JsonDict, source_image: str) -> str:
@@ -8026,8 +6953,6 @@ def _motion_call_rejects_candidate(call: JsonDict) -> bool:
     if not isinstance(details, dict):
         return False
     if _structured_motion_reached_target(details) is False:
-        if _safe_precontact_pose_is_near_target(details):
-            return False
         return True
     if _call_result_success(call):
         return False
@@ -8059,78 +6984,6 @@ def _motion_call_rejects_candidate(call: JsonDict) -> bool:
             }:
                 return True
     return False
-
-
-def _safe_precontact_pose_is_near_target(details: JsonDict) -> bool:
-    parameters = details.get("parameters")
-    target_pose = parameters.get("target_pose") if isinstance(parameters, dict) else None
-    stage = str(target_pose.get("grasp_stage") or "") if isinstance(target_pose, dict) else ""
-    if stage not in {"hover", "align"}:
-        return False
-    outputs = details.get("outputs")
-    response = outputs.get("response") if isinstance(outputs, dict) else None
-    motion = response.get("motion_summary") if isinstance(response, dict) else None
-    if not isinstance(motion, dict):
-        motion = outputs.get("motion_summary") if isinstance(outputs, dict) else None
-    if not isinstance(motion, dict):
-        return False
-    collision = motion.get("collision")
-    if isinstance(collision, dict) and collision.get("detected") is True:
-        return False
-    end = motion.get("end")
-    target = motion.get("target")
-    end_xyz = end.get("xyz") if isinstance(end, dict) else None
-    if isinstance(target, dict):
-        target_xyz = target.get("xyz")
-        if not _finite_xyz(target_xyz):
-            target_xyz = [target.get("x"), target.get("y"), target.get("z")]
-    else:
-        target_xyz = None
-    if not _finite_xyz(end_xyz) or not _finite_xyz(target_xyz):
-        return False
-    position_error_m = math.sqrt(
-        sum((float(end_xyz[index]) - float(target_xyz[index])) ** 2 for index in range(3))
-    )
-    return position_error_m <= 0.04
-
-
-def _near_receptacle_release_pose(
-    call: JsonDict,
-    *,
-    target_pose: JsonDict,
-) -> JsonDict | None:
-    """Accept a collision-free descend that stalls slightly above a receptacle."""
-
-    outputs = _tool_call_outputs(call)
-    response = outputs.get("response") if isinstance(outputs, dict) else None
-    motion = response.get("motion_summary") if isinstance(response, dict) else None
-    if not isinstance(motion, dict):
-        motion = outputs.get("motion_summary") if isinstance(outputs, dict) else None
-    if not isinstance(motion, dict) or motion.get("reached_target") is not False:
-        return None
-    collision = motion.get("collision")
-    if isinstance(collision, dict) and collision.get("detected") is True:
-        return None
-    end = motion.get("end")
-    end_xyz = end.get("xyz") if isinstance(end, dict) else None
-    target_xyz = target_pose.get("xyz")
-    if not _finite_xyz(end_xyz) or not _finite_xyz(target_xyz):
-        return None
-    xy_error_m = math.hypot(
-        float(end_xyz[0]) - float(target_xyz[0]),
-        float(end_xyz[1]) - float(target_xyz[1]),
-    )
-    height_error_m = float(end_xyz[2]) - float(target_xyz[2])
-    if xy_error_m > 0.04 or not 0.0 <= height_error_m <= 0.06:
-        return None
-    release_pose = dict(target_pose)
-    release_pose["xyz"] = [float(value) for value in end_xyz[:3]]
-    release_pose["adaptive_release"] = {
-        "reason": "controller_stalled_safely_above_receptacle",
-        "xy_error_m": round(xy_error_m, 6),
-        "height_above_requested_m": round(height_error_m, 6),
-    }
-    return release_pose
 
 
 def _structured_motion_reached_target(details: JsonDict) -> bool | None:
@@ -8755,18 +7608,16 @@ def _extract_world_pose_artifacts(call: JsonDict, details: JsonDict) -> list[Jso
     translation = world_pose.get("translation_xyz") or outputs.get("translation_xyz")
     if not isinstance(translation, list) or len(translation) != 3:
         return []
-    is_placement_reference = str(world_pose.get("id") or "").startswith("place_grasp_") and str(
-        world_pose.get("source_grasp_id") or ""
-    ).startswith("grasp_")
+    is_placement_reference = str(world_pose.get("id") or "").startswith("place_grasp_")
     next_tool_hint = (
-        "Treat world_pose as the low AnyPlace release reference, not a one-step "
-        "carry target. Preserve the current EEF orientation, first move to a "
-        "pre-place hover at the same world X/Y and at least 0.10 m above its Z, "
-        "verify attachment from a fresh image, then descend vertically before release."
+        "This is the exact model object goal. Do not add hover, descent, clearance, "
+        "or orientation offsets. Let the host combine it with the measured attachment "
+        "transform and expose the exact qualified release EEF pose; MoveIt owns the "
+        "complete current-to-release path."
         if is_placement_reference
         else (
             "Pass the complete world_pose to move_to.target_pose without changing "
-            "its world-frame translation or orientation."
+            "its translation or rotation."
         )
     )
     return [

@@ -26,13 +26,12 @@
       }
     ],
     "grasp_hints": {
-      "strategy_id": "top-down-vertical-panda-p8",
       "successful_width_range_m": [0.06, 0.08],
-      "experience": "Two earlier contacts failed their lift probes; the eventual attachment used the same verified instance with a different grasp seed. Advance only after structured rejection."
+      "experience": "Preserve each provider contact pose exactly. If native contact or attach proof fails, consume only that candidate and advance through the frozen qualified queue."
     },
     "placement_hints": {
       "target": "basket",
-      "experience": "Keep the gripper closed through the lift and staged carry; use the freshly segmented basket interior and official reward as completion evidence."
+      "experience": "Reuse the frozen AnyPlace goals, derive exact release from the measured attachment, and require native stable in-zone placement evidence."
     }
   },
   "evidence": {

@@ -1389,27 +1389,6 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             batchable=False,
         ),
         ToolSpec(
-            name="compute_wrist_alignment",
-            category="geometry",
-            description=(
-                "Compute one bounded world-frame hover correction from a fresh wrist "
-                "mask, aligned depth and camera calibration. It does not move the robot."
-            ),
-            parameters={
-                "compiled_grasp": "complete host-generated compiled grasp seed",
-                "target_mask": "fresh full-frame wrist-camera target mask path",
-                "depth": "fresh aligned wrist depth PNG path",
-                "intrinsics": "matching wrist fx/fy/cx/cy/scale",
-                "camera_extrinsics": "matching wrist camera-to-world calibration",
-                "current_eef_pose": "current measured EEF pose containing xyz",
-                "scene_epoch": "current host-owned non-negative scene epoch",
-                "desired_pixel_xy": "optional gripper-corridor pixel; defaults to cx/cy",
-                "max_correction_m": "optional correction clamp in [0.005, 0.05] m",
-            },
-            effect=ToolEffect.READ_ONLY,
-            batchable=False,
-        ),
-        ToolSpec(
             name="prepare_attachment_probe",
             category="geometry",
             description=(

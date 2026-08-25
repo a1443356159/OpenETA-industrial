@@ -23,6 +23,20 @@ network:
   mcp_host: 127.0.0.1
   mcp_port: 8765
   ros_domain_id: 42
+qualification:
+  # Rollout stays reversible: replay and shadow must pass before changing this.
+  profile: legacy
+  solver_profile: auto
+  beam_width: 2
+  grasp_waves: [16, 32, 64]
+  placement_waves: [12, 24, 48, 96]
+  max_ik_concurrency: 8
+  max_state_validity_concurrency: 8
+  fast_seed_count: 2
+  recovery_seed_count: 6
+  fast_ik_timeout_ms: 50
+  recovery_ik_timeout_ms: 200
+  capability_map_id: ""
 ros_packages:
   # Exact installed Debian versions are captured by setup_openeta_gazebo.sh in
   # config/runtime/gazebo_rm75_robotiq2f85.versions.local.yaml; Jazzy apt updates are permitted.
@@ -41,6 +55,8 @@ ros_packages:
     - ros-jazzy-moveit
     - ros-jazzy-moveit-ros-move-group
     - ros-jazzy-moveit-configs-utils
+    - ros-jazzy-trac-ik-kinematics-plugin
+    - ros-jazzy-pick-ik
     - ros-jazzy-xacro
     - ros-jazzy-robot-state-publisher
     - ros-jazzy-tf2-ros

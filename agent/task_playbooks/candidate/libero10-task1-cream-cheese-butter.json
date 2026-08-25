@@ -31,13 +31,12 @@
       }
     ],
     "grasp_hints": {
-      "strategy_id": "top-down-vertical-panda-p8",
       "successful_width_range_m": [0.06, 0.075],
-      "experience": "Both objects succeeded with top-down compiled seeds, wrist alignment, binary close, fixed lift probe, and full lift before placement."
+      "experience": "For each object, preserve the selected provider contact pose and require native bilateral contact plus attach acknowledgement."
     },
     "placement_hints": {
       "target": "basket",
-      "experience": "Carry at safe height in bounded lateral steps, descend into the segmented basket interior, release, and retreat before starting the second object."
+      "experience": "For each object, execute one MoveIt path to its exact model-derived release pose, detach, and require stable in-zone verification before the next subgoal."
     }
   },
   "evidence": {

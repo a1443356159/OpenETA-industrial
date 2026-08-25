@@ -230,9 +230,11 @@
 
 - The invalid soft-adhesion experiment was removed. Current M3 uses the
   approved native-contact stock `DetachableJoint` implementation and fails
-  closed on missing contact, attach/detach ACK, DART child-link state, or lift
-  proof. Earlier soft-adhesion reports remain diagnostic evidence only and
-  cannot establish a milestone pass. See `docs/gazebo-m3-physical-verification.md`.
+  closed on missing bilateral target contact or attach/detach ACK. The close
+  boundary directly emits `NATIVE_GRASP_ATTACHMENT_CONFIRMED`; no fixed lift
+  waypoint or displacement threshold is part of grasp acceptance. Earlier
+  soft-adhesion reports remain diagnostic evidence only and cannot establish
+  a milestone pass. See `docs/gazebo-m3-physical-verification.md`.
 
 - 2026-08-10 update: **M2 formal acceptance PASSED** (report
   `m2-robotiq2f85-acceptance-20260810T194732Z-542318.json`, all gates including

@@ -132,10 +132,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anyplace-diversity-pool-size", type=int)
     parser.add_argument("--grasp-full-plan-limit", type=int)
     parser.add_argument("--anyplace-full-plan-limit", type=int)
-    parser.add_argument("--pregrasp-joint-grasp-branch-limit", type=int)
-    parser.add_argument("--pregrasp-joint-full-plan-limit", type=int)
+    parser.add_argument("--frozen-pair-grasp-branch-limit", type=int)
+    parser.add_argument("--frozen-pair-full-plan-limit", type=int)
     parser.add_argument("--moveit-ik-seed-count", type=int)
     parser.add_argument("--anyplace-max-qualification-rounds", type=int)
+    parser.add_argument(
+        "--qualification-profile", choices=("legacy", "fast_v3", "shadow")
+    )
+    parser.add_argument(
+        "--qualification-solver-profile",
+        choices=(
+            "auto",
+            "kdl_legacy",
+            "kdl_fast",
+            "trac_ik_speed",
+            "trac_ik_distance",
+            "pick_ik_local",
+        ),
+    )
+    parser.add_argument("--qualification-beam-width", type=int)
+    parser.add_argument("--qualification-grasp-waves")
+    parser.add_argument("--qualification-placement-waves")
+    parser.add_argument("--qualification-max-ik-concurrency", type=int)
+    parser.add_argument("--qualification-max-state-validity-concurrency", type=int)
+    parser.add_argument("--qualification-fast-seeds", type=int)
+    parser.add_argument("--qualification-recovery-seeds", type=int)
+    parser.add_argument("--qualification-fast-ik-timeout-ms", type=int)
+    parser.add_argument("--qualification-recovery-ik-timeout-ms", type=int)
+    parser.add_argument("--capability-map-id")
     parser.add_argument("--unidepth-v2-model-id")
     parser.add_argument("--unidepth-v2-device")
     parser.add_argument("--unidepth-v2-resolution-level", type=int)
@@ -493,7 +517,7 @@ def _build_config(
     )
 
 
-def _startup_value(args: argparse.Namespace, attribute: str, env_name: str, default: int) -> object:
+def _startup_value(args: argparse.Namespace, attribute: str, env_name: str, default: object) -> object:
     explicit = getattr(args, attribute, None)
     return explicit if explicit is not None else os.environ.get(env_name, default)
 
@@ -512,20 +536,80 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
             anyplace_diversity_pool_size=_startup_value(args, "anyplace_diversity_pool_size", "OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96),
             grasp_full_plan_limit=_startup_value(args, "grasp_full_plan_limit", "OPENETA_GRASP_FULL_PLAN_LIMIT", grasp_full_default),
             anyplace_full_plan_limit=_startup_value(args, "anyplace_full_plan_limit", "OPENETA_ANYPLACE_FULL_PLAN_LIMIT", anyplace_full_default),
-            pregrasp_joint_grasp_branch_limit=_startup_value(
+            frozen_pair_grasp_branch_limit=_startup_value(
                 args,
-                "pregrasp_joint_grasp_branch_limit",
-                "OPENETA_PREGRASP_JOINT_GRASP_BRANCH_LIMIT",
+                "frozen_pair_grasp_branch_limit",
+                "OPENETA_FROZEN_PAIR_GRASP_BRANCH_LIMIT",
                 4,
             ),
-            pregrasp_joint_full_plan_limit=_startup_value(
+            frozen_pair_full_plan_limit=_startup_value(
                 args,
-                "pregrasp_joint_full_plan_limit",
-                "OPENETA_PREGRASP_JOINT_FULL_PLAN_LIMIT",
+                "frozen_pair_full_plan_limit",
+                "OPENETA_FROZEN_PAIR_FULL_PLAN_LIMIT",
                 2,
             ),
             moveit_ik_seed_count=_startup_value(args, "moveit_ik_seed_count", "OPENETA_MOVEIT_IK_SEED_COUNT", 8),
             anyplace_max_qualification_rounds=_startup_value(args, "anyplace_max_qualification_rounds", "OPENETA_ANYPLACE_MAX_QUALIFICATION_ROUNDS", 2),
+            qualification_profile=_startup_value(
+                args, "qualification_profile", "OPENETA_QUALIFICATION_PROFILE", "legacy"
+            ),
+            solver_profile=_startup_value(
+                args,
+                "qualification_solver_profile",
+                "OPENETA_QUALIFICATION_SOLVER_PROFILE",
+                "auto",
+            ),
+            fast_beam_width=_startup_value(
+                args, "qualification_beam_width", "OPENETA_QUALIFICATION_BEAM_WIDTH", 2
+            ),
+            grasp_waves=_startup_value(
+                args,
+                "qualification_grasp_waves",
+                "OPENETA_QUALIFICATION_GRASP_WAVES",
+                "16,32,64",
+            ),
+            placement_waves=_startup_value(
+                args,
+                "qualification_placement_waves",
+                "OPENETA_QUALIFICATION_PLACEMENT_WAVES",
+                "12,24,48,96",
+            ),
+            max_ik_concurrency=_startup_value(
+                args,
+                "qualification_max_ik_concurrency",
+                "OPENETA_QUALIFICATION_MAX_IK_CONCURRENCY",
+                8,
+            ),
+            max_state_validity_concurrency=_startup_value(
+                args,
+                "qualification_max_state_validity_concurrency",
+                "OPENETA_QUALIFICATION_MAX_STATE_VALIDITY_CONCURRENCY",
+                8,
+            ),
+            fast_ik_seed_count=_startup_value(
+                args, "qualification_fast_seeds", "OPENETA_QUALIFICATION_FAST_SEEDS", 2
+            ),
+            recovery_ik_seed_count=_startup_value(
+                args,
+                "qualification_recovery_seeds",
+                "OPENETA_QUALIFICATION_RECOVERY_SEEDS",
+                6,
+            ),
+            fast_ik_timeout_ms=_startup_value(
+                args,
+                "qualification_fast_ik_timeout_ms",
+                "OPENETA_QUALIFICATION_FAST_IK_TIMEOUT_MS",
+                50,
+            ),
+            recovery_ik_timeout_ms=_startup_value(
+                args,
+                "qualification_recovery_ik_timeout_ms",
+                "OPENETA_QUALIFICATION_RECOVERY_IK_TIMEOUT_MS",
+                200,
+            ),
+            capability_map_id=_startup_value(
+                args, "capability_map_id", "OPENETA_CAPABILITY_MAP_ID", ""
+            ),
         )
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc

@@ -11,9 +11,6 @@ from agent.runtime.moveit_qualification import (
     QUALIFICATION_SCHEMA,
     MoveItCandidateQualifier,
     MoveItQualificationEngine,
-    parallel_gripper_approach_reversal_variant,
-    parallel_gripper_centering_variant,
-    parallel_gripper_symmetry_variant,
 )
 from agent.tools.registry import ToolResult
 from tools.candidate_config import CandidateFunnelConfig
@@ -303,203 +300,30 @@ def test_qualifier_reports_monotonic_funnel_counts_and_retains_every_pass():
     assert details["coordinate_tcp_pass_count"] >= details["workspace_pass_count"] >= details["pure_ik_pass_count"]
 
 
-def test_parallel_gripper_variant_preserves_approach_and_records_provenance():
-    candidate = {
-        "id": "g0",
-        "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-    }
-    variant = parallel_gripper_symmetry_variant(candidate)
-    assert variant["rotation_matrix"] == [[1.0, -0.0, -0.0], [0.0, -1.0, -0.0], [0.0, -0.0, -1.0]]
-    assert variant["symmetry_parent_id"] == "g0"
-    assert variant["provenance"] == "host_parallel_gripper_symmetry"
-
-
-def test_parallel_gripper_centering_changes_only_closing_axis_translation():
-    candidate = {
-        "id": "g0",
-        "score": 0.9,
-        "depth": 0.12,
-        "width": 0.06,
-        "translation_xyz": [0.1, 0.2, 0.3],
-        "gripper_tip_position_xyz": [0.22, 0.2, 0.3],
-        "rotation_matrix": [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-        "transform_matrix": [
-            [1.0, 0.0, 0.0, 0.1],
-            [0.0, 1.0, 0.0, 0.2],
-            [0.0, 0.0, 1.0, 0.3],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-        "target_closing_alignment": {
-            "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
-            "source": "aligned_selected_mask_depth",
-            "depth_provenance": "sensor_depth",
-            "closing_axis": "graspnet_local_y",
-            "target_span_m": 0.04,
-            "correction_m": 0.012,
-            "correction_camera_xyz": [0.0, 0.012, 0.0],
-        },
-    }
-
-    variant = parallel_gripper_centering_variant(candidate)
-
-    assert variant["translation_xyz"] == pytest.approx([0.1, 0.212, 0.3])
-    assert variant["gripper_tip_position_xyz"] == pytest.approx([0.22, 0.212, 0.3])
-    assert variant["rotation_matrix"] == candidate["rotation_matrix"]
-    assert variant["depth"] == candidate["depth"]
-    assert variant["width"] == candidate["width"]
-    assert variant["transform_matrix"][1][3] == pytest.approx(0.212)
-    assert variant["centering_parent_id"] == "g0"
-    assert variant["provenance"] == "host_parallel_gripper_closing_centering"
-
-
-def test_parallel_gripper_centering_rejects_inconsistent_axis_evidence():
-    candidate = {
-        "id": "g0",
-        "translation_xyz": [0.1, 0.2, 0.3],
-        "gripper_tip_position_xyz": [0.22, 0.2, 0.3],
-        "rotation_matrix": [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-        "target_closing_alignment": {
-            "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
-            "source": "aligned_selected_mask_depth",
-            "depth_provenance": "sensor_depth",
-            "closing_axis": "graspnet_local_y",
-            "target_span_m": 0.04,
-            "correction_m": 0.012,
-            "correction_camera_xyz": [0.012, 0.0, 0.0],
-        },
-    }
-
-    with pytest.raises(ValueError, match="inconsistent"):
-        parallel_gripper_centering_variant(candidate)
-
-
-def test_parallel_gripper_approach_reversal_preserves_tip_and_closing_axis():
-    candidate = {
-        "id": "g0",
-        "depth": 0.12,
-        "translation_xyz": [0.1, 0.2, 0.3],
-        "gripper_tip_position_xyz": [0.22, 0.2, 0.3],
-        "rotation_matrix": [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-        "transform_matrix": [
-            [1.0, 0.0, 0.0, 0.1],
-            [0.0, 1.0, 0.0, 0.2],
-            [0.0, 0.0, 1.0, 0.3],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-    }
-
-    variant = parallel_gripper_approach_reversal_variant(candidate)
-
-    assert variant["rotation_matrix"] == [
-        [-1.0, 0.0, -0.0],
-        [-0.0, 1.0, -0.0],
-        [-0.0, 0.0, -1.0],
-    ]
-    assert variant["translation_xyz"] == pytest.approx([0.34, 0.2, 0.3])
-    reconstructed_tip = [
-        variant["translation_xyz"][index]
-        + variant["depth"] * variant["rotation_matrix"][index][0]
-        for index in range(3)
-    ]
-    assert reconstructed_tip == pytest.approx(candidate["gripper_tip_position_xyz"])
-    assert variant["approach_reversal_parent_id"] == "g0"
-    assert variant["provenance"] == "host_parallel_gripper_approach_reversal"
-
-
-def test_robotiq_symmetry_variants_enter_the_real_grasp_funnel():
+def test_provider_candidates_enter_funnel_without_host_pose_variants():
     captured = {}
-
-    def rpc(name, request, timeout):
-        captured["candidates"] = request["candidates"]
-        return _engine().qualify(request)
-
-    result = MoveItCandidateQualifier(
-        rpc,
-        compile_candidate=lambda candidate, *args: {
-            "qualification_stages": [
-                {
-                    "name": "hover",
-                    "xyz": [0.1, 0.0, 0.5],
-                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
-                }
-            ]
-        },
-    ).qualify_result(
-        ToolResult(
-            True,
-            "ok",
-            {
-                "grasp_candidates": [
-                    {
-                        "id": "g0",
-                        "gripper_name": "robotiq_2f_85",
-                        "rotation_matrix": [
-                            [1.0, 0.0, 0.0],
-                            [0.0, 1.0, 0.0],
-                            [0.0, 0.0, 1.0],
-                        ],
-                    }
-                ],
-                "model_raw_candidate_count": 20,
-            },
-        ),
-        purpose="grasp",
-        scene_epoch=1,
-        planning_scene_revision=4,
-    )
-
-    ids = [item["candidate_id"] for item in captured["candidates"]]
-    assert ids == ["g0", "g0_sym180"]
-    assert result.details["raw_candidate_count"] == 2
-
-
-def test_robotiq_measured_centering_replaces_raw_pose_before_full_funnel():
-    captured = {}
-
-    def rpc(name, request, timeout):
-        captured["candidates"] = request["candidates"]
-        return _engine().qualify(request)
-
     candidate = {
         "id": "g0",
         "gripper_name": "robotiq_2f_85",
-        "depth": 0.1,
         "translation_xyz": [0.1, 0.2, 0.3],
-        "gripper_tip_position_xyz": [0.2, 0.2, 0.3],
         "rotation_matrix": [
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
         ],
-        "target_closing_alignment": {
-            "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
-            "source": "aligned_selected_mask_depth",
-            "depth_provenance": "sensor_depth",
-            "closing_axis": "graspnet_local_y",
-            "target_span_m": 0.04,
-            "correction_m": -0.01,
-            "correction_camera_xyz": [-0.0, -0.01, -0.0],
-        },
     }
+
+    def rpc(_name, request, _timeout):
+        captured["candidates"] = request["candidates"]
+        return _engine().qualify(request)
+
     result = MoveItCandidateQualifier(
         rpc,
-        compile_candidate=lambda candidate, *args: {
+        compile_candidate=lambda item, *_args: {
             "qualification_stages": [
                 {
-                    "name": "hover",
-                    "xyz": list(candidate["translation_xyz"]),
+                    "name": "contact",
+                    "xyz": list(item["translation_xyz"]),
                     "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
                 }
             ]
@@ -515,19 +339,10 @@ def test_robotiq_measured_centering_replaces_raw_pose_before_full_funnel():
         planning_scene_revision=4,
     )
 
-    ids = [item["candidate_id"] for item in captured["candidates"]]
-    assert "g0" not in ids
-    assert ids == [
-        "g0_closing_centered",
-        "g0_closing_centered_sym180",
-        "g0_closing_centered_approach180",
-        "g0_closing_centered_approach180_sym180",
-    ]
-    base = captured["candidates"][0]["candidate"]
-    assert base["translation_xyz"] == pytest.approx([0.1, 0.19, 0.3])
-    assert base["provenance"] == "host_parallel_gripper_closing_centering"
-    assert result.details["candidate_count"] == 2
-
+    assert [item["candidate_id"] for item in captured["candidates"]] == ["g0"]
+    assert captured["candidates"][0]["candidate"]["translation_xyz"] == [0.1, 0.2, 0.3]
+    assert result.details["raw_candidate_count"] == 1
+    assert result.details["candidate_count"] == 1
 
 def test_second_zero_pass_round_has_no_source_return_recovery():
     requested_candidate_ids = []
@@ -663,11 +478,11 @@ def test_default_anyplace_pool_structurally_screens_all_96_then_stops_endpoint_a
     }
 
 
-def test_pregrasp_joint_progressive_counts_distinguish_produced_and_evaluated():
+def test_frozen_pair_progressive_counts_distinguish_produced_and_evaluated():
     candidates = [
         {
             "id": f"pair_{index:03d}",
-            "qualification_stages": [{"name": f"hover_{index}"}],
+            "qualification_stages": [{"name": "release"}],
         }
         for index in range(12)
     ]
@@ -693,7 +508,7 @@ def test_pregrasp_joint_progressive_counts_distinguish_produced_and_evaluated():
         purpose="placement",
         scene_epoch=1,
         planning_scene_revision=4,
-        qualification_mode="pregrasp_joint",
+        qualification_mode="frozen_pair",
     )
 
     assert result.details["coordinate_tcp_pass_count"] == 12

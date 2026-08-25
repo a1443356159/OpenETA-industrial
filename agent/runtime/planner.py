@@ -42,7 +42,6 @@ from agent.runtime.task_playbooks import (
     select_task_playbook,
 )
 from agent.runtime.token_counting import DEFAULT_CONTEXT_WINDOW_TOKENS, estimate_json_tokens
-from agent.tools.grasp_geometry import GraspGeometryError, grasp_refinement_hover_pose
 from agent.tools.registry import ToolRegistry, ToolSpec
 
 
@@ -65,15 +64,7 @@ _SKILL_MATCH_STOPWORDS = {
     "target",
 }
 
-_PLACEMENT_HOVER_CLEARANCE_M = 0.10
-_PLACEMENT_DROP_RELEASE_CLEARANCE_M = 0.08
-_PLACEMENT_CARRY_MAX_STEP_M = 0.08
-_PLACEMENT_CARRY_ARRIVAL_TOLERANCE_M = 0.015
-_PLACEMENT_CARRY_HEIGHT_TOLERANCE_M = 0.02
 _PLACEMENT_EMPTY_GRIPPER_OPENNESS_MAX = 0.05
-_PLACEMENT_XY_TOLERANCE_M = 0.04
-_PLACEMENT_RELEASE_Z_TOLERANCE_M = 0.01
-_PLACEMENT_POST_RELEASE_RETREAT_M = 0.10
 _REFERENCE_VERIFIED_SAM3_MIN_SCORE = 0.90
 _REFERENCE_VERIFIED_SAM3_MIN_MARGIN = 0.20
 _GRASP_FALLBACK_BACKEND_ORDER = ("anygrasp", "contact_graspnet", "graspgenx")
@@ -303,13 +294,6 @@ class ToolCallingPlanner(BasePlanner):
                 )
             if not validation_errors:
                 validation_errors.extend(
-                    _validate_grasp_lift_probe_obligation(
-                        decision,
-                        tool_context=tool_context,
-                    )
-                )
-            if not validation_errors:
-                validation_errors.extend(
                     _validate_placement_motion_guidance(
                         decision,
                         tool_context=tool_context,
@@ -447,7 +431,7 @@ def _host_obligation_decision(
                 "summary": "The embodied task completed and its environment was closed.",
             },
             reasoning=(
-                "The host retained a PASS placement verification after retreat and a "
+                "The host retained a PASS stable in-zone release verification and a "
                 "successful environment close; no further tool action or human input "
                 "is required."
             ),
@@ -620,22 +604,18 @@ def _host_obligation_decision(
         required = recovery.get("required_action")
         if (
             isinstance(required, dict)
-            and required.get("name") in {"move_to", "gripper_control", "observe"}
+            and required.get("name") in {"gripper_control", "observe"}
             and isinstance(required.get("parameters"), dict)
             and tools.can_execute(str(required.get("name")))
         ):
             action = str(required["name"])
-            is_source_return = action == "move_to"
             is_reopen = action == "gripper_control"
             return PlannerDecision(
                 action_type="tool_call",
                 action=action,
                 parameters=dict(required["parameters"]),
                 reasoning=(
-                    "A failed approach left the arm at safe hover; use a fresh MoveIt "
-                    "plan to return to the recorded source pose before re-observing."
-                    if is_source_return
-                    else "The failed close left the detached gripper closed; reopen it "
+                    "The failed close left the detached gripper closed; reopen it "
                     "before acquiring the next grasp observation."
                     if is_reopen
                     else "The retained grasp candidates are exhausted; obtain a fresh "
@@ -646,9 +626,7 @@ def _host_obligation_decision(
                         "schema_version": recovery.get("schema_version"),
                         "tool": action,
                         "stage": (
-                            "candidate_source_return"
-                            if is_source_return
-                            else "candidate_gripper_reopen"
+                            "candidate_gripper_reopen"
                             if is_reopen
                             else "candidate_reestimate_observation"
                         ),
@@ -774,7 +752,7 @@ def _host_obligation_decision(
         stage = str(execution.get("stage") or "")
         required = execution.get("required_action")
         if (
-            stage in {"hover", "align_move", "precontact"}
+            stage == "contact"
             and isinstance(required, dict)
             and required.get("name") == "move_to"
             and isinstance(required.get("parameters"), dict)
@@ -973,7 +951,7 @@ def _host_obligation_decision(
                 },
             )
         if (
-            stage in {"hover", "align_move", "precontact"}
+            stage == "contact"
             and isinstance(required, dict)
             and required.get("name") == "move_to"
             and isinstance(required.get("parameters"), dict)
@@ -984,8 +962,9 @@ def _host_obligation_decision(
                 action="move_to",
                 parameters=dict(required["parameters"]),
                 reasoning=(
-                    f"Grasp stage {stage} has one host-generated safe pose; dispatch "
-                    "it directly while retaining reviewer and controller checks."
+                    "The grasp has one unmodified model terminal contact pose. Dispatch "
+                    "one MoveIt request; MoveIt owns the complete collision-aware path "
+                    "from the current joint state."
                 ),
                 metadata={
                     "host_obligation": {
@@ -997,28 +976,13 @@ def _host_obligation_decision(
             )
         attachment = tool_context.get("attachment_gate")
         attachment_actions = execution.get("attachment_actions")
-        full_lift = attachment_actions.get("pass") if isinstance(attachment_actions, dict) else None
         recovery_open = (
             attachment_actions.get("fail") if isinstance(attachment_actions, dict) else None
         )
-        observation = tool_context.get("observation")
-        robot = observation.get("robot") if isinstance(observation, dict) else None
-        gripper = robot.get("gripper_state") if isinstance(robot, dict) else None
-        openness = gripper.get("openness") if isinstance(gripper, dict) else None
-        try:
-            parsed_openness = float(openness)
-        except (TypeError, ValueError):
-            parsed_openness = None
         attachment_verdict = (
             str(attachment.get("verdict") or "UNKNOWN").upper()
             if stage == "attachment" and isinstance(attachment, dict)
             else ""
-        )
-        attachment_unknown = attachment_verdict == "UNKNOWN"
-        attachment_failed = attachment_verdict == "FAIL"
-        full_lift_completed = (
-            isinstance(attachment, dict)
-            and attachment.get("pass_action_completed") is True
         )
         articulated_attachment = execution.get("attachment_mode") == "articulated_handle"
         if articulated_attachment and stage == "attachment":
@@ -1127,109 +1091,6 @@ def _host_obligation_decision(
                     parameters={},
                     reasoning="Refresh after confirmed articulated attachment.",
                 )
-        if (
-            (
-                attachment_failed
-                or (
-                    attachment_unknown
-                    and parsed_openness is not None
-                    and parsed_openness <= _PLACEMENT_EMPTY_GRIPPER_OPENNESS_MAX
-                )
-            )
-            and isinstance(recovery_open, dict)
-            and recovery_open.get("name") == "gripper_control"
-            and isinstance(recovery_open.get("parameters"), dict)
-            and tools.can_execute("gripper_control")
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action="gripper_control",
-                parameters=dict(recovery_open["parameters"]),
-                reasoning=(
-                    "The completed probe left an empty closed gripper; dispatch the "
-                    "exact reviewed recovery open so this candidate can be rejected."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": execution.get("schema_version"),
-                        "tool": "gripper_control",
-                        "stage": "attachment_recovery",
-                    }
-                },
-            )
-        if (
-            attachment_verdict in {"PASS", "UNKNOWN"}
-            and not full_lift_completed
-            and isinstance(full_lift, dict)
-            and full_lift.get("name") == "move_to"
-            and isinstance(full_lift.get("parameters"), dict)
-            and tools.can_execute("move_to")
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action="move_to",
-                parameters=dict(full_lift["parameters"]),
-                reasoning=(
-                    "The completed probe has one immutable full-lift proposal; "
-                    "dispatch it to the independent reviewer for attachment adjudication."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": execution.get("schema_version"),
-                        "tool": "move_to",
-                        "stage": "attachment",
-                    }
-                },
-            )
-        if attachment_unknown and full_lift_completed:
-            return PlannerDecision(
-                action_type="response",
-                action="ask_human",
-                parameters={
-                    "question": (
-                        "The grasp full-lift completed, but the available gripper and "
-                        "review evidence could not confirm whether the object is still "
-                        "attached. Please confirm the grasp before further motion."
-                    ),
-                    "failure_code": "attachment_verification_unknown",
-                },
-                reasoning=(
-                    "The immutable full-lift was already executed once and attachment "
-                    "remains unknown; stop instead of replaying the same robot motion."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": execution.get("schema_version"),
-                        "stage": "attachment_verification",
-                        "candidate_id": execution.get("candidate_id"),
-                    }
-                },
-            )
-        probe = tool_context.get("grasp_lift_probe")
-        probe_parameters = probe.get("required_parameters") if isinstance(probe, dict) else None
-        if (
-            stage == "probe"
-            and isinstance(probe, dict)
-            and probe.get("status") == "required"
-            and isinstance(probe_parameters, dict)
-            and tools.can_execute("move_to")
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action="move_to",
-                parameters=dict(probe_parameters),
-                reasoning=(
-                    "The fixed lift probe is host-generated and immutable; dispatch "
-                    "the exact move while preserving independent attachment review."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": probe.get("schema_version"),
-                        "tool": "move_to",
-                        "stage": "probe",
-                    }
-                },
-            )
         articulated_probe = tool_context.get("articulated_attachment_probe")
         articulated_required = (
             articulated_probe.get("required_action")
@@ -1262,105 +1123,6 @@ def _host_obligation_decision(
                 },
             )
 
-    wrist_reference = tool_context.get("wrist_reference_obligation")
-    if isinstance(wrist_reference, dict):
-        tool_name = str(wrist_reference.get("required_tool") or "")
-        parameters = wrist_reference.get("required_parameters")
-        if (
-            tool_name == "retrieve_asset_reference"
-            and isinstance(parameters, dict)
-            and tools.can_execute(tool_name)
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action=tool_name,
-                parameters=parameters,
-                reasoning=(
-                    "Empty wrist segmentation at safe hover requires the canonical "
-                    "target reference; dispatch the uniquely determined retrieval input."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": wrist_reference.get("schema_version"),
-                        "tool": tool_name,
-                    }
-                },
-            )
-    reference = tool_context.get("reference_localization_obligation")
-    if isinstance(reference, dict) and reference.get("required_next_tool") == "sam3":
-        required_parameter = str(reference.get("required_parameter") or "")
-        scene_image = reference.get("scene_image")
-        positive_points = reference.get("positive_points")
-        if (
-            required_parameter == "positive_points"
-            and isinstance(scene_image, str)
-            and isinstance(positive_points, list)
-            and tools.can_execute("sam3")
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action="sam3",
-                parameters={
-                    "image": scene_image,
-                    "positive_points": positive_points,
-                },
-                reasoning=(
-                    "The isolated reference localizer produced one exact scene image "
-                    "and foreground point set; dispatch the determined SAM3 point prompt."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": "openeta.reference_localization_obligation.v1",
-                        "tool": "sam3",
-                    }
-                },
-            )
-    wrist_segmentation = tool_context.get("wrist_segmentation_obligation")
-    if isinstance(wrist_segmentation, dict):
-        tool_name = str(wrist_segmentation.get("required_tool") or "")
-        parameters = wrist_segmentation.get("required_parameters")
-        if tool_name == "sam3" and isinstance(parameters, dict) and tools.can_execute(tool_name):
-            return PlannerDecision(
-                action_type="tool_call",
-                action=tool_name,
-                parameters=parameters,
-                reasoning=(
-                    "The safe-hover wrist view changed after motion; dispatch SAM3 on "
-                    "the current wrist RGB before joining a mask to current depth."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": wrist_segmentation.get("schema_version"),
-                        "tool": tool_name,
-                        "stage": "wrist_segmentation",
-                    }
-                },
-            )
-    wrist_alignment = tool_context.get("wrist_alignment_obligation")
-    if isinstance(wrist_alignment, dict):
-        tool_name = str(wrist_alignment.get("required_tool") or "")
-        parameters = wrist_alignment.get("required_parameters")
-        if (
-            tool_name == "compute_wrist_alignment"
-            and isinstance(parameters, dict)
-            and tools.can_execute(tool_name)
-        ):
-            return PlannerDecision(
-                action_type="tool_call",
-                action=tool_name,
-                parameters=parameters,
-                reasoning=(
-                    "Host joined the selected wrist mask with current depth, camera "
-                    "calibration, EEF state, and compiled grasp; dispatch the unique "
-                    "bounded alignment calculation."
-                ),
-                metadata={
-                    "host_obligation": {
-                        "schema_version": wrist_alignment.get("schema_version"),
-                        "tool": tool_name,
-                    }
-                },
-            )
     targeted = tool_context.get("targeted_grasp_obligation")
     if isinstance(targeted, dict):
         tool_name = str(targeted.get("required_tool") or "")
@@ -1459,14 +1221,8 @@ def _host_obligation_decision(
                     "selection."
                     if stage == "release"
                     else (
-                        "The object was released over the receptacle; dispatch the "
-                        "fixed vertical retreat so physics can settle and the official "
-                        "reward can be read from the same episode."
-                        if stage == "retreat"
-                        else (
-                            "The stable placement and retreat are proven; close the "
-                            "simulator environment exactly once before completion."
-                        )
+                        "The exact release and native stability checks passed; close the "
+                        "simulator environment without inserting a retreat waypoint."
                     )
                 ),
                 metadata={
@@ -1479,27 +1235,16 @@ def _host_obligation_decision(
             )
     if (
         isinstance(placement_motion, dict)
-        and placement_motion.get("stage") in {
-            "attachment_lost",
-            "placement_drop_detected",
-        }
+        and placement_motion.get("stage") == "attachment_lost"
         and tools.can_execute("gripper_control")
     ):
-        placed_early = placement_motion.get("stage") == "placement_drop_detected"
         return PlannerDecision(
             action_type="tool_call",
             action="gripper_control",
             parameters={"position": 1},
             reasoning=(
-                "The object detached only after entering the receptacle XY region; "
-                "normalize the empty gripper to open and complete this placement subgoal."
-                if placed_early
-                else (
-                    "Post-lift telemetry shows an empty closed gripper; reopen through "
-                    "independent review so the ranked candidate can be rejected."
-                    if placement_motion.get("stage") == "attachment_lost"
-                    else "Attachment evidence is invalid; reopen before the next observation."
-                )
+                "Attachment evidence was lost before exact release proof; reopen through "
+                "independent review so the ranked grasp candidate can be rejected."
             ),
             metadata={
                 "host_obligation": {
@@ -1515,13 +1260,7 @@ def _host_obligation_decision(
         stage = str(placement_motion.get("stage") or "")
         parameters = placement_motion.get("required_parameters")
         if (
-            stage in {
-                "hover",
-                "descend",
-                "release",
-                "return_source_hover",
-                "return_source_capture",
-            }
+            stage == "release"
             and isinstance(parameters, dict)
             and tools.can_execute("move_to")
         ):
@@ -2903,10 +2642,7 @@ def _validate_grasp_execution_obligation(
     if decision.action == "observe":
         return []
     stage = str(execution.get("stage") or "")
-    probe = tool_context.get("grasp_lift_probe")
     articulated_probe = tool_context.get("articulated_attachment_probe")
-    if stage == "probe" and isinstance(probe, dict) and probe.get("status") == "required":
-        return []
     if (
         stage == "probe"
         and isinstance(articulated_probe, dict)
@@ -2928,77 +2664,6 @@ def _validate_grasp_execution_obligation(
         return [
             "The closed articulated handle requires prepare_attachment_probe before "
             "any further motion. Propose a bounded world direction or short arc."
-        ]
-    if stage == "align":
-        reference = tool_context.get("wrist_reference_obligation")
-        reference_parameters = (
-            reference.get("required_parameters") if isinstance(reference, dict) else None
-        )
-        if isinstance(reference_parameters, dict):
-            if (
-                decision.action == "retrieve_asset_reference"
-                and decision.parameters == reference_parameters
-            ):
-                return []
-            return [
-                "Empty wrist SAM3 requires the exact "
-                "wrist_reference_obligation retrieve_asset_reference call before "
-                "another segmentation attempt."
-            ]
-        alignment = tool_context.get("wrist_alignment_obligation")
-        required = alignment.get("required_parameters") if isinstance(alignment, dict) else None
-        if decision.action == "compute_wrist_alignment" and isinstance(required, dict):
-            if decision.parameters == required:
-                return []
-            return [
-                "compute_wrist_alignment must exactly copy "
-                "wrist_alignment_obligation.required_parameters."
-            ]
-        segmentation = tool_context.get("wrist_segmentation_obligation")
-        required = (
-            segmentation.get("required_parameters") if isinstance(segmentation, dict) else None
-        )
-        if isinstance(required, dict):
-            if decision.action == "sam3" and decision.parameters == required:
-                return []
-            return [
-                "The selected wrist mask predates the safe-hover motion. Call sam3 "
-                "with wrist_segmentation_obligation.required_parameters exactly."
-            ]
-        if (
-            decision.action == "sam3"
-            and not isinstance(tool_context.get("selection_obligation"), dict)
-        ):
-            current_wrist_rgb = next(
-                (
-                    artifact.get("path")
-                    for artifact in tool_context.get("current_camera_artifacts", [])
-                    if isinstance(artifact, dict)
-                    and artifact.get("kind") == "rgb"
-                    and _is_wrist_camera(artifact, primary_only=True)
-                ),
-                None,
-            )
-            if (
-                isinstance(current_wrist_rgb, str)
-                and decision.parameters.get("image") == current_wrist_rgb
-                and decision.parameters.get("mode") == "text"
-                and isinstance(decision.parameters.get("prompt"), str)
-                and str(decision.parameters["prompt"]).strip()
-                and set(decision.parameters) == {"image", "mode", "prompt"}
-            ):
-                return []
-        if decision.action in {
-            "select_sam3_detection",
-            "retrieve_asset_reference",
-            "molmopoint",
-        }:
-            return []
-        return [
-            "Safe hover has been reached. Use a fresh wrist image/mask and call "
-            "compute_wrist_alignment before descending. If no deterministic wrist "
-            "reference obligation is available after empty SAM3, molmopoint may localize "
-            "the target on the current wrist RGB; feed its exact point to SAM3 next."
         ]
     if stage == "attachment":
         if execution.get("attachment_mode") == "articulated_handle":
@@ -3048,7 +2713,7 @@ def _validate_grasp_execution_obligation(
             return []
         return [
             "Attachment gate accepts only its exact host-owned action. Portable-object "
-            "PASS uses full lift; articulated UNKNOWN uses assessment/one observe; "
+            "PASS uses native bilateral contact plus attach ACK; articulated UNKNOWN uses assessment/one observe; "
             "structured FAIL uses the exact recovery open."
         ]
     required = execution.get("required_action")
@@ -3089,7 +2754,7 @@ def _validate_official_reward_completion(
         return []
     return [
         "LIBERO batch completion requires an official positive reward from the same "
-        "episode. Continue with settle/retreat/observe instead of declaring task_complete."
+        "episode. Continue the task policy until official completion instead of declaring task_complete."
     ]
 
 
@@ -3127,22 +2792,22 @@ def _validate_pick_place_anyplace_obligation(
     )
     if (
         decision.action == "grasp_pose_estimate"
-        and not isinstance(tool_context.get("pregrasp_placement_goal_pool"), dict)
+        and not isinstance(tool_context.get("frozen_placement_goal_pool"), dict)
         and not attachment_passed
     ):
         return [
-            "Combined pick-place grasp estimation requires the host-private pregrasp "
-            "placement goal pool first. Segment/select the destination region and "
+            "Combined pick-place grasp estimation requires the host-private frozen "
+            "model placement goal pool first. Segment/select the destination region and "
             "follow placement_obligation."
         ]
     placement = tool_context.get("placement_obligation")
-    pregrasp_goal_pool = (
+    frozen_goal_pool = (
         isinstance(placement, dict)
-        and placement.get("phase") == "pregrasp_goal_pool"
+        and placement.get("phase") == "frozen_goal_pool"
     )
-    if decision.action == "anyplace" and not attachment_passed and not pregrasp_goal_pool:
+    if decision.action == "anyplace" and not attachment_passed and not frozen_goal_pool:
         return [
-            "AnyPlace requires either the host-built pregrasp goal-pool obligation or "
+            "AnyPlace requires either the host-built frozen goal-pool obligation or "
             "a verified attachment for executable placement qualification."
         ]
     if decision.action == "camera_pose_to_world" and _planner_is_anyplace_pose(
@@ -3158,8 +2823,8 @@ def _validate_pick_place_anyplace_obligation(
     )
     if decision.action == "anyplace" and not isinstance(required_placement, dict):
         return [
-            "AnyPlace requires independent post-attachment object and placement-region "
-            "segmentations before the host can build placement_obligation."
+            "AnyPlace requires the exact host-built placement_obligation. After attach, "
+            "the host reuses its frozen goal pool without fresh segmentation or inference."
         ]
     if (
         decision.action == "anyplace"
@@ -3168,7 +2833,7 @@ def _validate_pick_place_anyplace_obligation(
     ):
         return [
             "AnyPlace must exactly copy placement_obligation.required_parameters; "
-            "the host has already joined the two independently calibrated observations."
+            "the host has already bound either the calibrated observations or frozen pool."
         ]
     if (
         decision.action == "sam3"
@@ -3178,7 +2843,7 @@ def _validate_pick_place_anyplace_obligation(
     ):
         return [
             "Segment and select the target object before the placement region so the host "
-            "can retain both masks for bounded pregrasp goal qualification."
+            "can retain both masks for bounded frozen goal-pair qualification."
         ]
     return []
 
@@ -3200,26 +2865,20 @@ def _canonicalize_host_parameters(
             and artifact.get("kind") == "rgb"
             and isinstance(artifact.get("path"), str)
         ]
-        wrist = tool_context.get("wrist_reference_obligation")
-        wrist_parameters = wrist.get("required_parameters") if isinstance(wrist, dict) else None
-        required_image = (
-            wrist_parameters.get("scene_image") if isinstance(wrist_parameters, dict) else None
+        no_detection = tool_context.get("sam3_no_detection")
+        source_image = (
+            no_detection.get("source_image") if isinstance(no_detection, dict) else None
         )
-        if not isinstance(required_image, str):
-            no_detection = tool_context.get("sam3_no_detection")
-            source_image = (
-                no_detection.get("source_image") if isinstance(no_detection, dict) else None
-            )
-            source_name = Path(source_image).name if isinstance(source_image, str) else ""
-            matching = next(
-                (
-                    artifact["path"]
-                    for artifact in current_rgb
-                    if source_name and Path(artifact["path"]).name == source_name
-                ),
-                None,
-            )
-            required_image = matching or (current_rgb[0]["path"] if current_rgb else None)
+        source_name = Path(source_image).name if isinstance(source_image, str) else ""
+        matching = next(
+            (
+                artifact["path"]
+                for artifact in current_rgb
+                if source_name and Path(artifact["path"]).name == source_name
+            ),
+            None,
+        )
+        required_image = matching or (current_rgb[0]["path"] if current_rgb else None)
         supplied_image = decision.parameters.get("scene_image")
         if not isinstance(required_image, str) or _same_local_artifact(
             supplied_image, required_image
@@ -3269,50 +2928,6 @@ def _validate_closed_gripper_recovery(
     ]
 
 
-def _validate_grasp_lift_probe_obligation(
-    decision: PlannerDecision,
-    *,
-    tool_context: JsonDict,
-) -> list[str]:
-    articulated_probe = tool_context.get("articulated_attachment_probe")
-    if (
-        isinstance(articulated_probe, dict)
-        and str(articulated_probe.get("status") or "") == "required"
-    ):
-        required_action = articulated_probe.get("required_action")
-        if not isinstance(required_action, dict):
-            return ["The host-frozen articulated attachment probe is malformed."]
-        if (
-            decision.action_type.lower().strip() != "tool_call"
-            or decision.action != required_action.get("name")
-            or decision.parameters != required_action.get("parameters")
-        ):
-            return [
-                "The articulated attachment probe must execute its exact frozen "
-                "required_action before reopen, rejection, or any other motion."
-            ]
-        return []
-    probe = tool_context.get("grasp_lift_probe")
-    if not isinstance(probe, dict) or str(probe.get("status") or "") != "required":
-        return []
-    candidate_id = str(probe.get("candidate_id") or "")
-    required = probe.get("required_parameters")
-    if not isinstance(required, dict):
-        return ["The host-generated grasp lift probe is malformed; stop before recovery."]
-    if decision.action_type.lower().strip() != "tool_call" or decision.action != "move_to":
-        return [
-            f"Grasp candidate {candidate_id!r} requires the fixed lift probe before "
-            "any rejection, gripper reopen, or other action. Call move_to with "
-            "grasp_lift_probe.required_parameters unchanged."
-        ]
-    if decision.parameters != required:
-        return [
-            "The lift-probe move_to parameters must exactly match the host-generated "
-            "grasp_lift_probe.required_parameters; do not tune or omit the pose."
-        ]
-    return []
-
-
 def _validate_placement_motion_guidance(
     decision: PlannerDecision,
     *,
@@ -3322,7 +2937,7 @@ def _validate_placement_motion_guidance(
     if not isinstance(guidance, dict) or guidance.get("status") != "required":
         return []
     if decision.action_type.lower().strip() != "tool_call":
-        return ["A verified attachment is awaiting safe staged placement; do not end the task."]
+        return ["A verified attachment is awaiting its exact model-derived release target; do not end the task."]
     if decision.action == "observe":
         return []
     stage = str(guidance.get("stage") or "")
@@ -3330,26 +2945,19 @@ def _validate_placement_motion_guidance(
         if stage in {
             "release",
             "attachment_lost",
-            "placement_drop_detected",
             "recovery_open_detach",
         }:
             return []
         return [
-            "Keep the gripper closed during placement carry. Move to the high "
-            "pre-place hover and descend vertically before release."
+            "Keep the gripper closed until MoveIt reaches the exact model-derived "
+            "release pose. Do not insert a hover or descent waypoint."
         ]
     if decision.action != "move_to":
         return []
     target_xyz = _pose_xyz(decision.parameters.get("target_pose"))
     if target_xyz is None:
         return ["Placement move_to requires a finite world-frame target pose."]
-    if stage in {
-        "hover",
-        "descend",
-        "release",
-        "return_source_hover",
-        "return_source_capture",
-    }:
+    if stage == "release":
         required = guidance.get("required_parameters")
         if decision.parameters != required:
             return [
@@ -3552,9 +3160,9 @@ def _build_tool_context_payload(
         for skill in selected_skill_guidance
         if isinstance(skill, dict)
     }
-    pregrasp_pool_required = (
+    frozen_pool_required = (
         {"pick", "place"}.issubset(selected_skill_names)
-        and not isinstance(memory_context.get("pregrasp_placement_goal_pool"), dict)
+        and not isinstance(memory_context.get("frozen_placement_goal_pool"), dict)
         and not isinstance(execution, dict)
     )
     reestimate = memory.grasp_reestimation()
@@ -3565,7 +3173,7 @@ def _build_tool_context_payload(
         reestimate,
         current_rgbd_views=current_rgbd_views,
     )
-    if pregrasp_pool_required or reestimate_status in {
+    if frozen_pool_required or reestimate_status in {
         "pending_observation",
         "ready",
         "selection_pending",
@@ -3579,19 +3187,10 @@ def _build_tool_context_payload(
     else:
         grasp_target_selection = (
             memory_context.get("placement_object_detection")
-            if isinstance(memory_context.get("pregrasp_placement_goal_pool"), dict)
+            if isinstance(memory_context.get("frozen_placement_goal_pool"), dict)
             else memory_context.get("selected_sam3_detection")
         )
     grasp_visual_stage = _grasp_visual_stage_for_context(execution)
-    attached_placement_perception = (
-        isinstance(execution, dict)
-        and execution.get("status") == "completed"
-        and execution.get("stage") == "attached"
-        and (
-            not isinstance(memory_context.get("placement_object_detection"), dict)
-            or not isinstance(memory_context.get("placement_region_detection"), dict)
-        )
-    )
     initial_pick_perception = (
         "pick" in selected_skill_names
         and not isinstance(execution, dict)
@@ -3606,8 +3205,7 @@ def _build_tool_context_payload(
         ][:4]
     elif (
         grasp_visual_stage
-        or pregrasp_pool_required
-        or attached_placement_perception
+        or frozen_pool_required
         or initial_pick_perception
     ):
         vision_image_paths = [
@@ -3634,9 +3232,22 @@ def _build_tool_context_payload(
             ][:1]
     else:
         primary_rgb = next(
-            (artifact["path"] for artifact in camera_artifacts if artifact["kind"] == "rgb"),
+            (
+                artifact["path"]
+                for artifact in camera_artifacts
+                if artifact["kind"] == "rgb" and _is_primary_planner_camera(artifact)
+            ),
             None,
         )
+        if primary_rgb is None:
+            primary_rgb = next(
+                (
+                    artifact["path"]
+                    for artifact in camera_artifacts
+                    if artifact["kind"] == "rgb"
+                ),
+                None,
+            )
         vision_image_paths = [primary_rgb] if primary_rgb else []
     return {
         "schema_version": "openeta.planner_context.v1",
@@ -3664,8 +3275,8 @@ def _build_tool_context_payload(
         "selected_sam3_detection": memory_context.get("selected_sam3_detection"),
         "placement_object_detection": memory_context.get("placement_object_detection"),
         "placement_region_detection": memory_context.get("placement_region_detection"),
-        "pregrasp_placement_goal_pool": memory_context.get(
-            "pregrasp_placement_goal_pool"
+        "frozen_placement_goal_pool": memory_context.get(
+            "frozen_placement_goal_pool"
         ),
         "sam3_no_detection": memory_context.get("sam3_no_detection"),
         "grasp_view_selection_obligation": (
@@ -3764,37 +3375,12 @@ def _build_tool_context_payload(
             execution=memory_context.get("grasp_execution"),
             attachment=memory_context.get("attachment_gate"),
         ),
-        "wrist_alignment_obligation": _wrist_alignment_obligation(
-            observation,
-            camera_artifacts=camera_artifacts,
-            selected=memory_context.get("selected_sam3_detection"),
-            execution=memory_context.get("grasp_execution"),
-            scene_epoch=memory_context.get("scene_epoch"),
-        ),
-        "wrist_segmentation_obligation": _wrist_segmentation_obligation(
-            camera_artifacts=camera_artifacts,
-            selected=memory_context.get("selected_sam3_detection"),
-            execution=memory_context.get("grasp_execution"),
-            no_detection=memory_context.get("sam3_no_detection"),
-            pending_selection=memory_context.get("selection_obligation"),
-            pending_localization=memory_context.get("reference_localization_obligation"),
-        ),
-        "wrist_reference_obligation": _wrist_reference_obligation(
-            observation=observation,
-            camera_artifacts=camera_artifacts,
-            execution=memory_context.get("grasp_execution"),
-            no_detection=memory_context.get("sam3_no_detection"),
-            asset_reference=memory_context.get("target_asset_reference"),
-            pending_localization=memory_context.get("reference_localization_obligation"),
-            memory_context=memory_context,
-        ),
         "reference_localization_obligation": memory_context.get(
             "reference_localization_obligation"
         ),
         "grasp_candidate_policy": memory_context.get("grasp_candidate_policy"),
         "grasp_reestimation": memory.grasp_reestimation(),
         "retained_targeted_grasp": memory_context.get("retained_targeted_grasp"),
-        "grasp_lift_probe": memory_context.get("grasp_lift_probe"),
         "articulated_attachment_probe": memory_context.get(
             "articulated_attachment_probe"
         ),
@@ -3833,26 +3419,16 @@ def _build_tool_context_payload(
 
 
 def _grasp_visual_stage_for_context(execution: object) -> bool:
-    """Keep both current manipulation cameras in planner vision context."""
+    """Keep multiple views only for the separate articulated probe."""
 
     if not isinstance(execution, dict):
         return False
     stage = str(execution.get("stage") or "").strip().lower()
     status = str(execution.get("status") or "").strip().lower()
     return status in {"required", "completed"} and stage in {
-        "open",
-        "hover",
-        "align",
-        "align_move",
         "prepare_probe",
-        "precontact",
-        "descend",
-        "close",
         "probe",
         "attachment",
-        "attached",
-        "carry_raise",
-        "carry_hover",
     }
 
 
@@ -4408,69 +3984,6 @@ def _grasp_estimation_fallback_obligation(
             "recovery_id": recovery.get("recovery_id"),
         }
 
-    wrist_view = next(
-        (
-            view
-            for view in complete_views
-            if _is_wrist_camera(view, primary_only=True)
-        ),
-        None,
-    )
-    hover_epoch = recovery.get("hover_completed_scene_epoch")
-    if hover_epoch is None and isinstance(wrist_view, dict):
-        hover_target = _grasp_refinement_hover_target(
-            observation,
-            recovery=recovery,
-            scene_epoch=scene_epoch,
-        )
-        if isinstance(hover_target, dict):
-            path = {
-                "kind": "grasp_estimation_refinement_hover",
-                "recovery_id": recovery.get("recovery_id"),
-                "target_pose": hover_target,
-                "scene_epoch": scene_epoch,
-            }
-            if recovery.get("collision_check_passed") is not True:
-                return {
-                    "schema_version": "openeta.grasp_estimation_recovery.v1",
-                    "status": "required",
-                    "stage": "wrist_refinement_collision_check",
-                    "required_tool": "obstacle_avoidance",
-                    "required_parameters": {"path": path},
-                    "recovery_id": recovery.get("recovery_id"),
-                }
-            return {
-                "schema_version": "openeta.grasp_estimation_recovery.v1",
-                "status": "required",
-                "stage": "wrist_refinement_move",
-                "required_tool": "move_to",
-                "required_parameters": {
-                    "target_pose": hover_target,
-                    "enable_collision_check": True,
-                },
-                "recovery_id": recovery.get("recovery_id"),
-            }
-    elif isinstance(wrist_view, dict):
-        wrist_attempted = any(
-            _same_local_artifact(wrist_view["rgb"], attempt.get("source_rgb"))
-            for attempt in backend_attempts
-        )
-        if not wrist_attempted:
-            return {
-                "schema_version": "openeta.grasp_estimation_recovery.v1",
-                "status": "required",
-                "stage": "wrist_refinement_segmentation",
-                "required_tool": "sam3",
-                "required_parameters": {
-                    "mode": "text",
-                    "image": wrist_view["rgb"],
-                    "prompt": fallback_prompt,
-                },
-                "camera_frame_id": wrist_view["camera_frame_id"],
-                "fallback_target_prompt": fallback_prompt,
-                "recovery_id": recovery.get("recovery_id"),
-            }
-
     excluded_backends = [
         backend
         for backend in _GRASP_FALLBACK_BACKEND_ORDER
@@ -4565,40 +4078,6 @@ def _target_camera_frame(
         ),
         "",
     )
-
-
-def _grasp_refinement_hover_target(
-    observation: EnvObservation,
-    *,
-    recovery: JsonDict,
-    scene_epoch: object,
-) -> JsonDict | None:
-    seed_candidate = recovery.get("seed_candidate")
-    frame_id = str(recovery.get("source_camera_frame_id") or "")
-    camera = next(
-        (candidate for candidate in observation.cameras if candidate.frame_id == frame_id),
-        None,
-    )
-    if (
-        not isinstance(seed_candidate, dict)
-        or camera is None
-        or not isinstance(camera.extrinsics, dict)
-        or not camera.extrinsics
-    ):
-        return None
-    try:
-        epoch = int(scene_epoch)
-    except (TypeError, ValueError):
-        epoch = 0
-    try:
-        return grasp_refinement_hover_pose(
-            seed_candidate,
-            camera.extrinsics,
-            scene_epoch=max(0, epoch),
-            recovery_id=str(recovery.get("recovery_id") or ""),
-        )
-    except (GraspGeometryError, TypeError, ValueError):
-        return None
 
 
 def _complete_rgbd_views(
@@ -4886,10 +4365,8 @@ def _placement_obligation(
     camera_artifacts: list[JsonDict],
     memory_context: JsonDict,
 ) -> JsonDict | None:
-    """Build AnyPlace input for private pregrasp goals or attached placement."""
+    """Build AnyPlace input for frozen model goals or attached placement."""
 
-    if not isinstance(object_detection, dict) or not isinstance(region_detection, dict):
-        return None
     execution = memory_context.get("grasp_execution")
     attachment = memory_context.get("attachment_gate")
     attached = (
@@ -4903,8 +4380,30 @@ def _placement_obligation(
     )
     if isinstance(execution, dict) and not attached:
         return None
-    pregrasp_pool = memory_context.get("pregrasp_placement_goal_pool")
-    if not attached and isinstance(pregrasp_pool, dict):
+    frozen_pool = memory_context.get("frozen_placement_goal_pool")
+    if attached and isinstance(frozen_pool, dict):
+        if isinstance(memory_context.get("placement_candidate_policy"), dict):
+            return None
+        if _latest_anyplace_failure(memory_context) is not None:
+            return None
+        revision = attachment.get("planning_scene_revision")
+        if not isinstance(revision, int) or isinstance(revision, bool):
+            return None
+        return {
+            "schema_version": "openeta.placement_obligation.v3",
+            "required_tool": "anyplace",
+            "required_parameters": {
+                "reuse_frozen_goal_pool": True,
+                "scene_revision": revision,
+            },
+            "planning_scene_revision": revision,
+            "phase": "measured_attachment_requalification",
+            "model_inference_allowed": False,
+            "requires_fresh_segmentation": False,
+        }
+    if not attached and isinstance(frozen_pool, dict):
+        return None
+    if not isinstance(object_detection, dict) or not isinstance(region_detection, dict):
         return None
     def packet(detection: JsonDict, mask_name: str) -> JsonDict | None:
         source_image = detection.get("source_image")
@@ -4986,7 +4485,7 @@ def _placement_obligation(
             if attached and isinstance(attachment.get("planning_scene_revision"), int)
             else required["scene_revision"]
         ),
-        "phase": "post_attachment" if attached else "pregrasp_goal_pool",
+        "phase": "post_attachment" if attached else "frozen_goal_pool",
         "independent_from_grasp": attached,
     }
 
@@ -5027,7 +4526,7 @@ def _placement_motion_guidance(
     execution: object,
     attachment: object,
 ) -> JsonDict | None:
-    """Plan directly to compiled pre-place hover, then descend to release."""
+    """Plan once from the current attached state to the model-derived release."""
 
     if (
         not isinstance(execution, dict)
@@ -5059,32 +4558,21 @@ def _placement_motion_guidance(
     compiled = policy.get("compiled_placement") if isinstance(policy, dict) else None
     if not isinstance(compiled, dict) or policy.get("status") != "active":
         return None
-    hover_pose = compiled.get("hover_pose")
     release_pose = compiled.get("release_pose")
-    if not isinstance(hover_pose, dict) or not isinstance(release_pose, dict):
+    if not isinstance(release_pose, dict):
         return None
     current_pose = observation.robot.end_effector_pose
     current_xyz = _pose_xyz(current_pose)
-    hover_xyz = _pose_xyz(hover_pose)
     release_xyz = _pose_xyz(release_pose)
     if (
         not native_held
         and parsed_openness is not None
         and parsed_openness <= _PLACEMENT_EMPTY_GRIPPER_OPENNESS_MAX
     ):
-        near_receptacle = (
-            release_xyz is not None
-            and current_xyz is not None
-            and math.hypot(
-                current_xyz[0] - release_xyz[0],
-                current_xyz[1] - release_xyz[1],
-            )
-            <= _PLACEMENT_XY_TOLERANCE_M
-        )
         return {
             "schema_version": "openeta.placement_motion_guidance.v1",
             "status": "required",
-            "stage": "placement_drop_detected" if near_receptacle else "attachment_lost",
+            "stage": "attachment_lost",
             "candidate_id": execution.get("candidate_id"),
             "placement_pose_id": policy.get("active_candidate_id"),
             "required_action": {
@@ -5093,28 +4581,14 @@ def _placement_motion_guidance(
             },
             "gripper_openness": parsed_openness,
             "reason": (
-                "The gripper became empty inside the receptacle XY tolerance; normalize "
-                "it open and complete the current placement subgoal."
-                if near_receptacle
-                else (
-                    "The closed gripper collapsed to the empty-width threshold before "
-                    "the receptacle region; reopen and reject this grasp candidate."
-                )
+                "Native attachment evidence was lost before an exact release/open proof; "
+                "reopen and reject this grasp candidate. Proximity is not placement proof."
             ),
         }
-    if release_xyz is None or hover_xyz is None or current_xyz is None:
+    if release_xyz is None or current_xyz is None:
         return None
-    hover_error = math.dist(current_xyz, hover_xyz)
-    if hover_error <= _PLACEMENT_CARRY_ARRIVAL_TOLERANCE_M:
-        stage = (
-            "descend"
-            if math.dist(current_xyz, release_xyz) > _PLACEMENT_RELEASE_Z_TOLERANCE_M
-            else "release"
-        )
-        next_pose = dict(release_pose)
-    else:
-        stage = "hover"
-        next_pose = dict(hover_pose)
+    stage = "release"
+    next_pose = dict(release_pose)
     next_pose["placement_stage"] = stage
     motion_parameters = {
         "target_pose": next_pose,
@@ -5131,17 +4605,14 @@ def _placement_motion_guidance(
         "candidate_id": execution.get("candidate_id"),
         "placement_pose_id": policy.get("active_candidate_id"),
         "current_eef_pose": {"frame": "world", "xyz": current_xyz},
-        "safe_hover_pose": next_pose,
-        "final_hover_pose": dict(hover_pose),
         "release_pose": dict(release_pose),
         "required_parameters": motion_parameters,
-        "clearance_m": compiled.get("hover_clearance_m"),
-        "release_clearance_m": compiled.get("release_clearance_m"),
         "scene_revision": policy.get("scene_revision"),
         "rule": (
-            "MoveIt plans once from the current joint state directly to the compiled "
-            "pre-place hover with full wrist orientation; then descend to the compiled "
-            "release pose. No fixed wrist orientation or lateral waypoint chain is used."
+            "MoveIt owns one complete collision-aware plan from the current attached "
+            "joint state to the exact EEF release pose derived from the AnyPlace object "
+            "goal and measured attachment. No hover, lift, retreat, or host pose offset "
+            "may be inserted."
         ),
     }
 
@@ -5156,28 +4627,6 @@ def _placement_release_obligation(
     if not isinstance(release, dict):
         return None
     status = str(release.get("status") or "")
-    if status == "retreated":
-        verification = release.get("placement_verification")
-        if (
-            isinstance(verification, dict)
-            and verification.get("placement_confirmed") is True
-            and verification.get("verdict") == "PASS"
-        ):
-            return {
-                "schema_version": "openeta.placement_release_obligation.v1",
-                "status": "required",
-                "stage": "close",
-                "required_action": {
-                    "name": "close_simulator_env",
-                    "parameters": {},
-                },
-                "rule": (
-                    "The detached object passed native stability and in-zone checks "
-                    "and the open gripper retreated. Close this simulator environment "
-                    "exactly once before reporting completion."
-                ),
-            }
-        return None
     if status == "ready":
         return {
             "schema_version": "openeta.placement_release_obligation.v1",
@@ -5195,43 +4644,25 @@ def _placement_release_obligation(
         }
     if status != "released":
         return None
-    release_pose = release.get("release_pose")
-    release_xyz = _pose_xyz(release_pose)
-    current_xyz = _pose_xyz(observation.robot.end_effector_pose)
-    if release_xyz is None or current_xyz is None:
+    verification = release.get("placement_verification")
+    if not (
+        isinstance(verification, dict)
+        and verification.get("placement_confirmed") is True
+        and verification.get("verdict") == "PASS"
+    ):
         return None
-    retreat_pose = dict(release_pose)
-    retreat_pose.update(
-        {
-            "frame": "world",
-            "xyz": [
-                current_xyz[0],
-                current_xyz[1],
-                max(current_xyz[2], release_xyz[2])
-                + _PLACEMENT_POST_RELEASE_RETREAT_M,
-            ],
-            "compiled_eef_pose": True,
-            "placement_candidate_id": release.get("candidate_id"),
-            "placement_pose_id": release.get("placement_pose_id"),
-            "placement_stage": "retreat",
-            "purpose": "placement",
-        }
-    )
-    detach_revision = release.get("planning_scene_revision")
-    if isinstance(detach_revision, int) and not isinstance(detach_revision, bool):
-        retreat_pose["scene_revision"] = detach_revision
     return {
         "schema_version": "openeta.placement_release_obligation.v1",
         "status": "required",
-        "stage": "retreat",
+        "stage": "close",
         "required_action": {
-            "name": "move_to",
-            "parameters": {"target_pose": retreat_pose},
+            "name": "close_simulator_env",
+            "parameters": {},
         },
-        "retreat_distance_m": _PLACEMENT_POST_RELEASE_RETREAT_M,
         "rule": (
-            "Retreat vertically with the gripper open before judging placement. "
-            "Use the resulting same-episode environment receipt as official reward evidence."
+            "The exact release completed and native physics proved a stable in-zone "
+            "placement. Close this simulator environment exactly once; no post-release "
+            "retreat waypoint is part of the task contract."
         ),
     }
 
@@ -5257,147 +4688,6 @@ def _gripper_open_requested(parameters: JsonDict) -> bool:
         return float(position) == 1.0
     except (TypeError, ValueError):
         return False
-
-
-def _wrist_alignment_obligation(
-    observation: EnvObservation,
-    *,
-    camera_artifacts: list[JsonDict],
-    selected: object,
-    execution: object,
-    scene_epoch: object,
-) -> JsonDict | None:
-    """Join a selected wrist mask to its current RGB-D and robot geometry."""
-
-    if (
-        not isinstance(selected, dict)
-        or not isinstance(execution, dict)
-        or execution.get("stage") != "align"
-    ):
-        return None
-    source_image = selected.get("source_image")
-    mask_ref = selected.get("mask_ref")
-    compiled = execution.get("compiled_grasp")
-    if (
-        not isinstance(source_image, str)
-        or not isinstance(mask_ref, str)
-        or not isinstance(compiled, dict)
-    ):
-        return None
-    rgb = next(
-        (
-            artifact
-            for artifact in camera_artifacts
-            if artifact.get("kind") == "rgb"
-            and _is_wrist_camera(artifact, primary_only=True)
-            and _same_local_artifact(artifact.get("path"), source_image)
-        ),
-        None,
-    )
-    if not isinstance(rgb, dict):
-        return None
-    frame_id = _camera_item_frame_id(rgb)
-    depth = next(
-        (
-            artifact
-            for artifact in camera_artifacts
-            if artifact.get("kind") == "depth"
-            and _camera_item_frame_id(artifact) == frame_id
-        ),
-        None,
-    )
-    camera = next(
-        (camera for camera in observation.cameras if camera.frame_id == frame_id),
-        None,
-    )
-    intrinsics = dict(camera.intrinsics) if camera is not None else {}
-    extrinsics = dict(camera.extrinsics) if camera is not None else {}
-    current_eef_pose = dict(observation.robot.end_effector_pose)
-    if (
-        not isinstance(depth, dict)
-        or not intrinsics
-        or not extrinsics
-        or not current_eef_pose.get("xyz")
-    ):
-        return None
-    required = {
-        "compiled_grasp": dict(compiled),
-        "target_mask": mask_ref,
-        "depth": depth["path"],
-        "intrinsics": intrinsics,
-        "camera_extrinsics": extrinsics,
-        "current_eef_pose": current_eef_pose,
-        "scene_epoch": int(scene_epoch or 0),
-        "desired_pixel_xy": [intrinsics.get("cx"), intrinsics.get("cy")],
-        "max_correction_m": 0.03,
-    }
-    return {
-        "schema_version": "openeta.wrist_alignment_obligation.v1",
-        "required_tool": "compute_wrist_alignment",
-        "required_parameters": required,
-        "sam3_result_id": selected.get("result_id"),
-        "detection_id": selected.get("id"),
-        "source_rematerialized": rgb["path"] != source_image,
-    }
-
-
-def _wrist_segmentation_obligation(
-    *,
-    camera_artifacts: list[JsonDict],
-    selected: object,
-    execution: object,
-    no_detection: object,
-    pending_selection: object,
-    pending_localization: object,
-) -> JsonDict | None:
-    """Refresh a pre-hover mask against the current wrist camera packet."""
-
-    if (
-        not isinstance(execution, dict)
-        or execution.get("stage") != "align"
-        or not isinstance(selected, dict)
-        or isinstance(pending_selection, dict)
-        or isinstance(pending_localization, dict)
-    ):
-        return None
-    current_rgb = next(
-        (
-            artifact
-            for artifact in camera_artifacts
-            if artifact.get("kind") == "rgb"
-            and _is_wrist_camera(artifact, primary_only=True)
-        ),
-        None,
-    )
-    if not isinstance(current_rgb, dict):
-        return None
-    current_path = current_rgb.get("path")
-    source_image = selected.get("source_image")
-    target_prompt = selected.get("target_prompt")
-    if (
-        not isinstance(current_path, str)
-        or not isinstance(source_image, str)
-        or not isinstance(target_prompt, str)
-        or not target_prompt.strip()
-        or _same_local_artifact(current_path, source_image)
-    ):
-        return None
-    no_detection_source = (
-        no_detection.get("source_image") if isinstance(no_detection, dict) else None
-    )
-    if _same_local_artifact(current_path, no_detection_source):
-        return None
-    return {
-        "schema_version": "openeta.wrist_segmentation_obligation.v1",
-        "required_tool": "sam3",
-        "required_parameters": {
-            "image": current_path,
-            "prompt": target_prompt,
-        },
-        "stale_result_id": selected.get("result_id"),
-        "stale_detection_id": selected.get("id"),
-        "stale_source_image": source_image,
-    }
 
 
 def _target_reference_obligation(
@@ -5609,65 +4899,6 @@ def _observation_environment_id(observation: EnvObservation) -> str | None:
             if isinstance(value, str) and value:
                 return value
     return None
-
-
-def _wrist_reference_obligation(
-    *,
-    observation: EnvObservation,
-    camera_artifacts: list[JsonDict],
-    execution: object,
-    no_detection: object,
-    asset_reference: object,
-    pending_localization: object,
-    memory_context: JsonDict,
-) -> JsonDict | None:
-    """Require reference grounding after an empty SAM3 result at safe wrist hover."""
-
-    if (
-        not isinstance(execution, dict)
-        or execution.get("stage") != "align"
-        or not isinstance(no_detection, dict)
-        or isinstance(pending_localization, dict)
-    ):
-        return None
-    source_image = no_detection.get("source_image")
-    if not isinstance(source_image, str):
-        return None
-    current_wrist = next(
-        (
-            artifact.get("path")
-            for artifact in camera_artifacts
-            if artifact.get("kind") == "rgb"
-            and _is_wrist_camera(artifact, primary_only=True)
-            and _same_local_artifact(artifact.get("path"), source_image)
-        ),
-        None,
-    )
-    if not isinstance(current_wrist, str):
-        return None
-    reference = asset_reference if isinstance(asset_reference, dict) else {}
-    task = str(memory_context.get("task") or observation.task)
-    target_hint = no_detection.get("target_prompt") or reference.get("target_object")
-    target_object = _exact_task_target_object(
-        task,
-        hint=target_hint,
-        memory_context=memory_context,
-    ) or _asset_memory_target_object(
-        task
-    )
-    required = {
-        "environment": reference.get("environment") or _observation_environment_id(observation),
-        "target_object": target_object,
-        "scene_image": current_wrist,
-    }
-    if not all(isinstance(value, str) and value for value in required.values()):
-        return None
-    return {
-        "schema_version": "openeta.wrist_reference_obligation.v1",
-        "required_tool": "retrieve_asset_reference",
-        "required_parameters": required,
-        "empty_sam3_result_id": no_detection.get("result_id"),
-    }
 
 
 def _asset_memory_target_object(task: str) -> str | None:

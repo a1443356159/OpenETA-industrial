@@ -199,7 +199,7 @@ def test_zero_moveit_pass_reestimates_same_grasp_backend_with_fresh_observation(
     assert reestimate["attempt_count"] == 1
 
 
-def test_pregrasp_zero_pass_reestimates_object_not_placement_region() -> None:
+def test_zero_pass_reestimates_object_without_recomputing_frozen_place_goals() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick the red block and place it in the green zone")
     memory.add_observation(
@@ -221,7 +221,7 @@ def test_pregrasp_zero_pass_reestimates_object_not_placement_region() -> None:
         source="test",
     )
     memory.save_fact(
-        "pregrasp_placement_goal_pool",
+        "frozen_placement_goal_pool",
         {"status": "ready", "goal_count": 96},
         source="test",
     )
@@ -299,7 +299,7 @@ def test_zero_pass_reestimate_waits_for_a_new_complete_rgbd_packet(
         source="test",
     )
     memory.save_fact(
-        "pregrasp_placement_goal_pool",
+        "frozen_placement_goal_pool",
         {"status": "ready", "goal_count": 96},
         source="test",
     )
@@ -487,50 +487,22 @@ def test_single_placement_region_clears_object_detection_from_stale_image() -> N
     assert memory.placement_object_detection() is None
 
 
-def test_empty_wrist_fallback_accepts_sam3_source_camera_role() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick cube")
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "required",
-            "stage": "align",
-            "compiled_grasp": {
-                "wrist_alignment_policy": "optional_if_fresh_segmentation_empty",
-                "contact_pose": {"frame": "world", "xyz": [0.1, 0.2, 0.3]},
-            },
-        },
-        source="test",
-    )
-    memory.add_action(
-        _tool_action(
-            "sam3",
-            {"image": "tmp/wrist.png", "mode": "text", "prompt": "cube"},
-            outputs={
-                "result_id": "empty-wrist",
-                "detections": [],
-                "source_image": "tmp/wrist.png",
-                "source_camera_role": "wrist",
-            },
-        )
-    )
-
-    execution = memory.grasp_execution()
-    assert execution["stage"] == "descend"
-    assert execution["wrist_alignment_skipped_reason"] == "fresh_wrist_segmentation_empty"
 
 
 def _native_proof_receipt(*, revision: int = 2, target_id: str = "target_object") -> dict:
-    evidence = {
-        "source": "gazebo_pose_info_child_link",
-        "lift_m": 0.08945,
-        "capture_relative_translation_m": 0.00756,
-    }
     return {
         "ok": True,
         "motion_outcome": "completed",
         "planning_scene_revision": revision,
         "detachable_joint": {"state": "attached"},
+        "native_contact_gate": {
+            "accepted": True,
+            "reason_code": "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED",
+            "evidence": {
+                "source": "gazebo_native_contacts",
+                "target_id": target_id,
+            },
+        },
         "attachment_transform": {
             "schema_version": "openeta.attachment_transform.v1",
             "parent_frame": "eef",
@@ -539,53 +511,28 @@ def _native_proof_receipt(*, revision: int = 2, target_id: str = "target_object"
             "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
             "measurement_boundary": "native_attach_ack",
         },
-        "child_link_proof": dict(evidence),
         "physical_verification": {
             "schema_version": "openeta.gazebo.native_grasp.v1",
             "verdict": "PASS",
-            "reason_code": "NATIVE_GRASP_TARGET_HELD",
+            "reason_code": "NATIVE_GRASP_ATTACHMENT_CONFIRMED",
             "target_id": target_id,
             "grasp_confirmed": True,
-            "evidence": evidence,
         },
     }
 
 
 def test_native_attachment_proof_requires_exact_identity_and_revision() -> None:
-    parameters = {
-        "target_pose": {
-            "source_grasp_id": "grasp_000",
-            "compiled_grasp_id": "compiled-000",
-            "scene_epoch": 4,
-            "scene_revision": 2,
-        }
-    }
     trusted = memory_module._trusted_native_attachment_proof(
         _native_proof_receipt(),
-        candidate_id="grasp_000",
-        compiled_grasp_id="compiled-000",
-        scene_epoch=4,
         planning_scene_revision=2,
-        require_lift=True,
-        request_parameters=parameters,
     )
     wrong_revision = memory_module._trusted_native_attachment_proof(
         _native_proof_receipt(revision=3),
-        candidate_id="grasp_000",
-        compiled_grasp_id="compiled-000",
-        scene_epoch=4,
         planning_scene_revision=2,
-        require_lift=True,
-        request_parameters=parameters,
     )
     wrong_target = memory_module._trusted_native_attachment_proof(
         _native_proof_receipt(target_id="distractor_object"),
-        candidate_id="grasp_000",
-        compiled_grasp_id="compiled-000",
-        scene_epoch=4,
         planning_scene_revision=2,
-        require_lift=True,
-        request_parameters=parameters,
     )
 
     assert trusted[0] is True
@@ -662,7 +609,7 @@ def _memory_at_articulated_close() -> AgentMemory:
     return memory
 
 
-def test_articulated_close_routes_to_prepare_probe_not_lift() -> None:
+def test_articulated_close_routes_to_the_explicit_articulation_probe() -> None:
     memory = _memory_at_articulated_close()
 
     memory.add_action(_tool_action("gripper_control", {"position": 0}))
@@ -670,7 +617,6 @@ def test_articulated_close_routes_to_prepare_probe_not_lift() -> None:
     execution = memory.grasp_execution()
     assert execution["stage"] == "prepare_probe"
     assert execution["probe_kind"] == "articulated_attachment"
-    assert memory.grasp_lift_probe() is None
 
 
 def test_articulated_probe_pass_keeps_endpoint_and_completes_attachment() -> None:
@@ -985,72 +931,6 @@ def test_exhausted_motion_candidate_queue_requires_fresh_reestimation() -> None:
     assert memory.grasp_recovery()["status"] == "required"
 
 
-def test_failed_descend_returns_to_compiled_hover_before_reobservation() -> None:
-    memory = _memory_with_candidates()
-    policy = memory.grasp_candidate_policy()
-    policy["candidates"] = [policy["active_candidate"]]
-    policy["remaining_candidate_ids"] = []
-    policy["target_detection"] = {
-        "target_prompt": "black bowl",
-        "source_image": "/tmp/current.rgb.png",
-    }
-    memory.save_fact("grasp_candidate_policy", policy, source="test")
-    source_pose = {"frame": "world", "xyz": [0.42, -0.18, 0.61]}
-    memory.add_observation(
-        EnvObservation(
-            task="pick up alphabat soup and place it into basket",
-            cameras=[],
-            robot=RobotState(end_effector_pose=source_pose),
-        )
-    )
-    compiled = {**_compiled(memory), "scene_epoch": memory.scene_epoch()}
-    memory.add_action(
-        _tool_action(
-            "compile_grasp_seed",
-            {"scene_epoch": memory.scene_epoch()},
-            outputs=compiled,
-        )
-    )
-    execution = memory.grasp_execution()
-    execution.update(
-        {
-            "stage": "descend",
-            "required_action": {
-                "name": "move_to",
-                "parameters": {"target_pose": {"source_grasp_id": "grasp_000"}},
-            },
-        }
-    )
-    memory.save_fact("grasp_execution", execution, source="test")
-
-    memory.add_action(
-        _tool_action(
-            "move_to",
-            {"target_pose": {"source_grasp_id": "grasp_000"}},
-            success=False,
-            outputs={"motion_summary": {"reached_target": False}},
-            environment_receipt={"execution_started": False, "motion_outcome": "failed"},
-        )
-    )
-
-    recovery = memory.grasp_recovery()
-    assert recovery["status"] == "required"
-    assert recovery["stage"] == "source_return"
-    source_return = recovery["required_action"]
-    assert source_return["name"] == "move_to"
-    assert source_return["parameters"]["target_pose"]["xyz"] == compiled["hover_pose"]["xyz"]
-    assert source_return["parameters"]["target_pose"]["frame"] == "world"
-    assert memory.grasp_candidate_gate_error(
-        tool_name="move_to", parameters=source_return["parameters"]
-    ) is None
-
-    memory.add_action(_tool_action("move_to", source_return["parameters"]))
-    recovery = memory.grasp_recovery()
-    assert recovery["stage"] == "observe"
-    assert recovery["required_action"] == {"name": "observe", "parameters": {}}
-    memory.add_action(_tool_action("observe", {}))
-    assert memory.grasp_recovery()["status"] == "completed"
-    assert memory.grasp_reestimation()["status"] == "pending_observation"
 
 
 def test_candidate_attempt_limit_requires_fresh_reestimation() -> None:
@@ -1318,7 +1198,6 @@ def test_articulated_handle_uses_bounded_mode_queues_then_global_fallback() -> N
     assert policy["compile_hints"] == {
         "target_geometry_family": "articulated_handle",
         "approach_mode": "top_down",
-        "strategy_id": "top-down-drawer-handle-panda-p8",
     }
 
     _reject_active_candidate(memory)
@@ -1330,16 +1209,12 @@ def test_articulated_handle_uses_bounded_mode_queues_then_global_fallback() -> N
     assert "top-3" not in {
         item["candidate_id"] for item in policy["rejected_candidates"]
     }
-    assert policy["compile_hints"]["strategy_id"] == (
-        "native-front-articulated-handle-panda-p8"
-    )
+    assert policy["compile_hints"]["approach_mode"] == "front"
 
     _reject_active_candidate(memory)
     policy = memory.grasp_candidate_policy()
     assert policy["active_candidate"]["id"] == "side-0"
-    assert policy["compile_hints"]["strategy_id"] == (
-        "native-side-articulated-handle-panda-p8"
-    )
+    assert policy["compile_hints"]["approach_mode"] == "side"
     _reject_active_candidate(memory)
     policy = memory.grasp_candidate_policy()
     assert policy["candidate_fallback"] is True
@@ -1442,7 +1317,7 @@ def test_new_grasp_queue_clears_prior_release_but_keeps_completed_ledger() -> No
     memory.save_fact(
         "placement_release",
         {
-            "status": "retreated",
+            "status": "released",
             "candidate_id": "first-grasp",
             "placement_pose_id": "first-place",
         },
@@ -1549,20 +1424,18 @@ def test_denied_host_release_invalidates_dropped_grasp_instead_of_replaying() ->
     assert any(event.event_type == "placement_release_failed" for event in memory.events)
 
 
-def test_host_grasp_execution_accepts_bounded_pose_adjustment_at_contact() -> None:
+def test_host_grasp_execution_rejects_every_terminal_pose_adjustment() -> None:
     memory = _memory_with_candidates()
     compiled = _compiled(memory)
     memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
     assert memory.grasp_execution()["stage"] == "open"
     assert memory.grasp_candidate_policy()["compile_hints"] == {
         "target_geometry_family": "upright_can",
-        "strategy_id": "top-down-vertical-panda-p8",
-        "pregrasp_distance_m": 0.15,
     }
 
     required = memory.grasp_execution()["required_action"]
     memory.add_action(_tool_action(required["name"], required["parameters"]))
-    assert memory.grasp_execution()["stage"] == "hover"
+    assert memory.grasp_execution()["stage"] == "contact"
     required = memory.grasp_execution()["required_action"]
     reference_xyz = required["parameters"]["target_pose"]["xyz"]
     adjusted = {
@@ -1571,114 +1444,20 @@ def test_host_grasp_execution_accepts_bounded_pose_adjustment_at_contact() -> No
             "xyz": [reference_xyz[0] + 0.02, reference_xyz[1], reference_xyz[2]],
         }
     }
-    assert memory.grasp_execution_gate_error(tool_name="move_to", parameters=adjusted) is None
-    outside_envelope = {"target_pose": {**required["parameters"]["target_pose"], "xyz": [9, 9, 9]}}
-    assert "closed-loop envelope" in memory.grasp_execution_gate_error(
-        tool_name="move_to", parameters=outside_envelope
-    )
-    memory.add_action(_tool_action(required["name"], adjusted))
-    assert memory.grasp_execution()["stage"] == "align"
+    error = memory.grasp_execution_gate_error(tool_name="move_to", parameters=adjusted)
+    assert error is not None
+    assert "exactly" in error
 
-    compiled_id = compiled["compiled_grasp_id"]
-    alignment = {
-        "schema_version": "openeta.wrist_alignment.v1",
-        "alignment_id": "align-1",
-        "compiled_grasp_id": compiled_id,
-        "candidate_id": "grasp_000",
-        "scene_epoch": memory.scene_epoch(),
-        "aligned_hover_pose": {**compiled["hover_pose"], "xyz": [0.0, 0.0, 0.6]},
-        "adjusted_precontact_pose": {
-            **compiled["contact_pose"],
-            "xyz": [0.0, 0.0, 0.55],
-            "grasp_stage": "precontact",
-        },
-        "adjusted_contact_pose": {**compiled["contact_pose"], "xyz": [0.0, 0.0, 0.5]},
-    }
-    memory.add_action(_tool_action("compute_wrist_alignment", {}, outputs=alignment))
-    assert memory.grasp_execution()["stage"] == "align_move"
-    for expected_stage in ("precontact", "descend", "close"):
-        required = memory.grasp_execution()["required_action"]
-        memory.add_action(_tool_action(required["name"], required["parameters"]))
-        assert memory.grasp_execution()["stage"] == expected_stage
+    assert memory.grasp_execution_gate_error(
+        tool_name=required["name"], parameters=required["parameters"]
+    ) is None
+    memory.add_action(_tool_action(required["name"], required["parameters"]))
+    assert memory.grasp_execution()["stage"] == "close"
     assert memory.anygrasp_candidate_policy()["status"] == "accepted"
 
 
-def test_rm75_empty_fresh_wrist_segmentation_preserves_compiled_pose() -> None:
-    memory = _memory_with_candidates()
-    memory.save_fact(
-        "selected_sam3_detection",
-        {
-            "id": "detection_000",
-            "source_image": "/frozen/top.rgb.png",
-            "target_prompt": "blue cylinder",
-            "mask_ref": "/frozen/target.mask.png",
-        },
-        source="test",
-    )
-    compiled = _compiled(memory)
-    compiled["wrist_alignment_policy"] = "optional_if_fresh_segmentation_empty"
-    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
-    for expected_stage in ("hover", "align"):
-        required = memory.grasp_execution()["required_action"]
-        memory.add_action(_tool_action(required["name"], required["parameters"]))
-        assert memory.grasp_execution()["stage"] == expected_stage
-
-    memory.add_action(
-        _tool_action(
-            "sam3",
-            {"image": "/fresh/wrist.rgb.png", "prompt": "alphabet soup"},
-            outputs={
-                "result_id": "sam3-empty-wrist",
-                "source_image": "/fresh/wrist.rgb.png",
-                "detections": [],
-                "camera_role": "wrist",
-                "scene_epoch": memory.scene_epoch(),
-            },
-        )
-    )
-
-    execution = memory.grasp_execution()
-    expected_pose = compiled.get("precontact_pose") or compiled["contact_pose"]
-    assert execution["stage"] in {"precontact", "descend"}
-    assert execution["required_action"]["parameters"]["target_pose"][
-        "rotation_matrix"
-    ] == expected_pose["rotation_matrix"]
-    assert execution["adjusted_contact_pose"] == compiled["contact_pose"]
-    assert execution["wrist_alignment_skipped_reason"] == (
-        "fresh_wrist_segmentation_empty"
-    )
-    assert execution["wrist_alignment_skip_evidence"]["result_id"] == (
-        "sam3-empty-wrist"
-    )
-    # The current wrist result is intentionally a fresh empty result; the
-    # compiled grasp retains the frozen pre-hover geometry needed downstream.
-    assert memory.selected_sam3_detection() is None
 
 
-def test_required_wrist_alignment_does_not_accept_empty_segmentation() -> None:
-    memory = _memory_with_candidates()
-    compiled = _compiled(memory)
-    assert compiled["wrist_alignment_policy"] == "required"
-    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
-    for expected_stage in ("hover", "align"):
-        required = memory.grasp_execution()["required_action"]
-        memory.add_action(_tool_action(required["name"], required["parameters"]))
-        assert memory.grasp_execution()["stage"] == expected_stage
-    memory.add_action(
-        _tool_action(
-            "sam3",
-            {"image": "/fresh/wrist.rgb.png", "prompt": "alphabet soup"},
-            outputs={"result_id": "sam3-empty-wrist", "detections": []},
-            planner_metadata={
-                "host_obligation": {
-                    "schema_version": "openeta.wrist_segmentation_obligation.v1",
-                    "tool": "sam3",
-                    "stage": "wrist_segmentation",
-                }
-            },
-        )
-    )
-    assert memory.grasp_execution()["stage"] == "align"
 
 
 def test_point_segmentation_retains_same_frame_text_target_prompt() -> None:
@@ -1805,16 +1584,6 @@ def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None
         "moveit_qualification_scene_changed"
     )
     recovery = memory.grasp_recovery()
-    assert recovery["stage"] == "source_return"
-    assert recovery["required_action"]["name"] == "move_to"
-    target_pose = recovery["required_action"]["parameters"]["target_pose"]
-    assert target_pose["xyz"] == compiled["hover_pose"]["xyz"]
-    assert target_pose["rotation_matrix"] == compiled["hover_pose"]["rotation_matrix"]
-    assert target_pose["grasp_stage"] == "hover"
-    assert target_pose["grasp_recovery_stage"] == "source_return"
-
-    memory.add_action(_tool_action("move_to", recovery["required_action"]["parameters"]))
-    recovery = memory.grasp_recovery()
     assert recovery["stage"] == "reopen"
     assert recovery["required_action"] == {
         "name": "gripper_control",
@@ -1843,11 +1612,11 @@ def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open()
     )
 
     execution = memory.grasp_execution()
-    assert execution["stage"] == "hover"
+    assert execution["stage"] == "contact"
     assert execution["required_action"]["name"] == "move_to"
 
 
-def test_close_timeout_reconciliation_accepts_object_between_fingers() -> None:
+def test_close_timeout_visual_gap_cannot_replace_native_attachment_proof() -> None:
     memory = _memory_with_candidates()
     compiled = _compiled(memory)
     memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
@@ -1878,149 +1647,15 @@ def test_close_timeout_reconciliation_accepts_object_between_fingers() -> None:
 
     assert memory.motion_reconciliation()["status"] == "completed"
     assert memory.gripper_command_state()["position"] == 0
-    assert memory.grasp_execution()["stage"] == "probe"
-
-
-def test_lift_probe_pose_reconciliation_keeps_attachment_unknown() -> None:
-    memory = _memory_with_candidates()
-    compiled = _compiled(memory)
-    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
-    execution = memory.grasp_execution()
-    execution.update({"stage": "probe", "required_action": None})
-    memory.save_fact("grasp_execution", execution, source="test")
-    required = {
-        "target_pose": {
-            "frame": "world",
-            "probe_type": "grasp_lift",
-            "source_grasp_id": "grasp_000",
-            "xyz": [0.1, 0.2, 0.4],
-        }
-    }
-    memory.save_fact(
-        "grasp_lift_probe",
-        {
-            "status": "required",
-            "candidate_id": "grasp_000",
-            "required_parameters": required,
-        },
-        source="test",
-    )
-    memory.add_action(
-        _tool_action(
-            "move_to",
-            required,
-            success=False,
-            outputs={"motion_outcome": "unknown", "reconciliation_required": True},
-        )
-    )
-
-    memory.add_observation(
-        EnvObservation(
-            task="pick",
-            cameras=[],
-            robot=RobotState(end_effector_pose={"xyz": [0.102, 0.2, 0.399]}),
-        )
-    )
-
-    assert memory.motion_reconciliation()["status"] == "completed"
-    assert memory.grasp_lift_probe()["status"] == "completed"
-    assert memory.grasp_lift_probe()["last_attempt_status"] == "failed"
-    assert memory.grasp_execution()["stage"] == "attachment"
+    assert memory.grasp_execution()["stage"] == "attachment_unknown"
+    assert memory.grasp_execution()["status"] == "stopped_requires_human"
     assert memory.attachment_gate()["verdict"] == "UNKNOWN"
-    assert memory.attachment_gate()["status"] == "stopped_requires_human"
-    assert memory.grasp_execution()["attachment_actions"] == {}
 
 
-def test_failed_lift_probe_is_single_attempt_and_stops_without_replay() -> None:
-    memory = _memory_with_candidates()
-    compiled = _compiled(memory)
-    memory.add_action(
-        _tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled)
-    )
-    execution = memory.grasp_execution()
-    execution.update({"stage": "probe", "required_action": None})
-    memory.save_fact("grasp_execution", execution, source="test")
-    required = {
-        "target_pose": {
-            "frame": "world",
-            "probe_type": "grasp_lift",
-            "source_grasp_id": "grasp_000",
-            "compiled_grasp_id": execution["compiled_grasp_id"],
-            "scene_epoch": memory.scene_epoch(),
-            "scene_revision": 2,
-            "xyz": [0.1, 0.2, 0.4],
-        }
-    }
-    memory.save_fact(
-        "grasp_lift_probe",
-        {
-            "status": "required",
-            "candidate_id": "grasp_000",
-            "compiled_grasp_id": execution["compiled_grasp_id"],
-            "scene_epoch": memory.scene_epoch(),
-            "planning_scene_revision": 2,
-            "required_parameters": required,
-        },
-        source="test",
-    )
-
-    memory.add_action(
-        _tool_action(
-            "move_to",
-            required,
-            success=False,
-            outputs={"motion_outcome": "failed", "error_code": "MOTION_PLAN_FAILED"},
-        )
-    )
-
-    assert memory.grasp_lift_probe()["attempt_count"] == 1
-    assert memory.grasp_lift_probe()["status"] == "completed"
-    assert memory.attachment_gate()["status"] == "stopped_requires_human"
-    assert memory.grasp_execution()["attachment_actions"] == {}
-    assert memory.grasp_execution_gate_error(
-        tool_name="move_to", parameters=required
-    ) is not None
 
 
-def test_native_lift_probe_pass_completes_attachment_without_second_lift() -> None:
-    memory = _memory_with_candidates()
-    execution = {
-        "schema_version": "openeta.grasp_execution.v1",
-        "status": "required",
-        "stage": "probe",
-        "candidate_id": "grasp_000",
-        "compiled_grasp_id": "compiled-000",
-        "planning_scene_revision": 2,
-    }
-    proof = {
-        "physical_verification": {
-            "verdict": "PASS",
-            "evidence": {
-                "lift_m": 0.107,
-                "capture_relative_translation_m": 0.008,
-            },
-        }
-    }
-    memory.save_fact("grasp_execution", execution, source="test")
-    memory.save_fact(
-        "grasp_lift_probe",
-        {
-            "status": "completed",
-            "proof_verdict": "PASS",
-            "proof": proof,
-        },
-        source="test",
-    )
 
-    assert memory._advance_probe_to_attachment(execution) is True
 
-    assert memory.grasp_execution()["status"] == "completed"
-    assert memory.grasp_execution()["stage"] == "attached"
-    gate = memory.attachment_gate()
-    assert gate["verdict"] == "PASS"
-    assert gate["full_lift_satisfied_by_probe"] is True
-    assert gate["full_lift_proof"] == proof
-    assert "pass" not in memory.grasp_execution()["attachment_actions"]
 
 
 def test_planning_scene_unavailable_stops_grasp_without_candidate_replay() -> None:
@@ -2038,7 +1673,7 @@ def test_planning_scene_unavailable_stops_grasp_without_candidate_replay() -> No
         {
             "schema_version": "openeta.grasp_execution.v1",
             "status": "required",
-            "stage": "hover",
+            "stage": "contact",
             "candidate_id": "grasp_000",
             "compiled_grasp_id": "compiled-000",
             "required_action": {"name": "move_to", "parameters": required},
@@ -2071,204 +1706,12 @@ def test_planning_scene_unavailable_stops_grasp_without_candidate_replay() -> No
     ) is not None
 
 
-def test_robotiq_object_detection_resolves_attachment_and_completes_full_lift() -> None:
-    memory = AgentMemory()
-    full_lift = {
-        "name": "move_to",
-        "parameters": {
-            "target_pose": {
-                "frame": "world",
-                "xyz": [0.1, 0.2, 0.4],
-                "source_grasp_id": "grasp_000",
-                "grasp_stage": "full_lift",
-            }
-        },
-    }
-    memory.save_fact(
-        "gripper_command_state",
-        {"position": 0, "latch": "closed"},
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "required",
-            "stage": "attachment",
-            "candidate_id": "grasp_000",
-            "required_action": None,
-            "attachment_actions": {
-                "pass": full_lift,
-                "fail": {"name": "gripper_control", "parameters": {"position": 1}},
-            },
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {
-            "status": "pending",
-            "verdict": "UNKNOWN",
-            "candidate_id": "grasp_000",
-        },
-        source="test",
-    )
-
-    memory.add_observation(
-        EnvObservation(
-            task="pick",
-            cameras=[],
-            robot=RobotState(
-                gripper_state={
-                    "model": "robotiq",
-                    "object_detection": "object_detected_closing",
-                    "position": 159,
-                    "position_normalized": 0.6235,
-                    "requested_position": 255,
-                }
-            ),
-        )
-    )
-
-    assert memory.attachment_gate()["verdict"] == "PASS"
-    memory.add_action(
-        _tool_action(
-            full_lift["name"],
-            full_lift["parameters"],
-            grasp_outcome="unknown",
-        )
-    )
-
-    assert memory.attachment_gate()["verdict"] == "PASS"
-    assert memory.attachment_gate()["pass_action_completed"] is True
-    assert memory.grasp_execution()["status"] == "completed"
-    assert memory.grasp_execution()["stage"] == "attached"
 
 
-def test_attachment_full_lift_waits_for_observation_without_replaying() -> None:
-    memory = AgentMemory()
-    full_lift = {
-        "name": "move_to",
-        "parameters": {
-            "target_pose": {
-                "frame": "world",
-                "xyz": [0.1, 0.2, 0.4],
-                "source_grasp_id": "grasp_000",
-                "grasp_stage": "full_lift",
-            }
-        },
-    }
-    memory.save_fact(
-        "gripper_command_state",
-        {"position": 0, "latch": "closed"},
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "required",
-            "stage": "attachment",
-            "candidate_id": "grasp_000",
-            "required_action": None,
-            "attachment_actions": {
-                "pass": full_lift,
-                "fail": {"name": "gripper_control", "parameters": {"position": 1}},
-            },
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {
-            "status": "pending",
-            "verdict": "UNKNOWN",
-            "candidate_id": "grasp_000",
-        },
-        source="test",
-    )
-
-    memory.add_action(_tool_action(full_lift["name"], full_lift["parameters"]))
-
-    assert memory.grasp_execution()["status"] == "required"
-    assert memory.attachment_gate()["pass_action_completed"] is True
-    assert memory.attachment_gate()["pass_action_attempt_count"] == 1
-
-    memory.add_observation(
-        EnvObservation(
-            task="pick",
-            cameras=[],
-            robot=RobotState(
-                gripper_state={
-                    "object_detection": "object_detected_closing",
-                    "position": 159,
-                    "requested_position": 255,
-                }
-            ),
-        )
-    )
-
-    assert memory.attachment_gate()["verdict"] == "PASS"
-    assert memory.grasp_execution()["stage"] == "attached"
 
 
-def test_unreached_hover_rejects_candidate_without_advancing_execution_stage() -> None:
-    memory = _memory_with_candidates()
-    compiled = _compiled(memory)
-    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
-    open_action = memory.grasp_execution()["required_action"]
-    memory.add_action(_tool_action(open_action["name"], open_action["parameters"]))
-    hover_action = memory.grasp_execution()["required_action"]
-
-    memory.add_action(
-        _tool_action(
-            hover_action["name"],
-            hover_action["parameters"],
-            outputs={"motion_summary": {"reached_target": False}},
-        )
-    )
-
-    assert memory.grasp_execution() is None
-    assert memory.anygrasp_candidate_policy()["active_candidate"]["id"] == "grasp_001"
-    assert memory.scene_epoch() == 2
-    assert memory.transition_ledger()[-1]["verdict"] == "FAIL"
 
 
-def test_near_unreached_hover_advances_to_alignment_without_rejecting_candidate() -> None:
-    memory = _memory_with_candidates()
-    compiled = _compiled(memory)
-    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
-    open_action = memory.grasp_execution()["required_action"]
-    memory.add_action(_tool_action(open_action["name"], open_action["parameters"]))
-    hover_action = memory.grasp_execution()["required_action"]
-    target_xyz = hover_action["parameters"]["target_pose"]["xyz"]
-    end_xyz = [target_xyz[0] + 0.03, target_xyz[1], target_xyz[2]]
-
-    memory.add_action(
-        _tool_action(
-            hover_action["name"],
-            hover_action["parameters"],
-            outputs={
-                "motion_summary": {"reached_target": False},
-                "response": {
-                    "motion_summary": {
-                        "reached_target": False,
-                        "collision": {"detected": False},
-                        "end": {"xyz": end_xyz},
-                        "target": {
-                            "x": target_xyz[0],
-                            "y": target_xyz[1],
-                            "z": target_xyz[2],
-                        },
-                    }
-                },
-            },
-        )
-    )
-
-    assert memory.grasp_execution()["stage"] == "align"
-    assert memory.anygrasp_candidate_policy()["active_candidate"]["id"] == "grasp_000"
-    assert memory.transition_ledger()[-1]["verdict"] == "PASS"
 
 
 def test_transport_timeout_reconciles_gripper_and_partial_motion() -> None:
@@ -2294,18 +1737,18 @@ def test_transport_timeout_reconciles_gripper_and_partial_motion() -> None:
         )
     )
     assert memory.motion_reconciliation()["status"] == "completed"
-    assert memory.grasp_execution()["stage"] == "hover"
+    assert memory.grasp_execution()["stage"] == "contact"
 
-    hover = memory.grasp_execution()["required_action"]
+    contact = memory.grasp_execution()["required_action"]
     memory.add_action(
         _tool_action(
-            hover["name"],
-            hover["parameters"],
+            contact["name"],
+            contact["parameters"],
             success=False,
             outputs={"motion_outcome": "unknown", "reconciliation_required": True},
         )
     )
-    target = hover["parameters"]["target_pose"]["xyz"]
+    target = contact["parameters"]["target_pose"]["xyz"]
     memory.add_observation(
         EnvObservation(
             task="pick",
@@ -2315,7 +1758,9 @@ def test_transport_timeout_reconciles_gripper_and_partial_motion() -> None:
     )
     assert memory.motion_reconciliation()["status"] == "required"
     assert (
-        memory.grasp_execution_gate_error(tool_name=hover["name"], parameters=hover["parameters"])
+        memory.grasp_execution_gate_error(
+            tool_name=contact["name"], parameters=contact["parameters"]
+        )
         is not None
     )
     assert memory.grasp_execution_gate_error(tool_name="observe", parameters={}) is None
@@ -2349,16 +1794,16 @@ def test_transport_timeout_continues_reconciling_after_unresolved_observation() 
     memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
     open_action = memory.grasp_execution()["required_action"]
     memory.add_action(_tool_action(open_action["name"], open_action["parameters"]))
-    hover = memory.grasp_execution()["required_action"]
+    contact = memory.grasp_execution()["required_action"]
     memory.add_action(
         _tool_action(
-            hover["name"],
-            hover["parameters"],
+            contact["name"],
+            contact["parameters"],
             success=False,
             outputs={"motion_outcome": "unknown", "reconciliation_required": True},
         )
     )
-    target = hover["parameters"]["target_pose"]["xyz"]
+    target = contact["parameters"]["target_pose"]["xyz"]
     stable_far = EnvObservation(
         task="pick",
         cameras=[],
@@ -2373,34 +1818,3 @@ def test_transport_timeout_continues_reconciling_after_unresolved_observation() 
     assert memory.motion_reconciliation()["status"] == "failed"
     assert memory.grasp_execution() is None
     assert memory.anygrasp_candidate_policy()["active_candidate"]["id"] == "grasp_001"
-
-
-def test_probe_stage_allows_exact_host_generated_lift_only() -> None:
-    memory = _memory_with_candidates()
-    compiled = _compiled(memory)
-    memory.add_action(_tool_action("compile_grasp_seed", {"scene_epoch": 0}, outputs=compiled))
-    execution = memory.grasp_execution()
-    execution.update({"stage": "probe", "required_action": None})
-    memory.save_fact("grasp_execution", execution, source="test")
-    required = {
-        "target_pose": {
-            "frame": "world",
-            "probe_type": "grasp_lift",
-            "source_grasp_id": "grasp_000",
-            "xyz": [0.1, 0.2, 0.4],
-        }
-    }
-    memory.save_fact(
-        "grasp_lift_probe",
-        {"status": "required", "candidate_id": "grasp_000", "required_parameters": required},
-        source="test",
-    )
-
-    assert memory.grasp_execution_gate_error(tool_name="move_to", parameters=required) is None
-    assert (
-        memory.grasp_execution_gate_error(
-            tool_name="move_to",
-            parameters={"target_pose": {"xyz": [0.1, 0.2, 0.41]}},
-        )
-        is not None
-    )

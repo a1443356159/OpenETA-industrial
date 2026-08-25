@@ -47,10 +47,9 @@ class ReasonCode(StrEnum):
     CONTACT_TARGET_CONFIRMED = "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED"
     DETACH_ACK_MISSING = "NATIVE_GRASP_DETACH_ACK_MISSING"
     ATTACH_ACK_MISSING = "NATIVE_GRASP_ATTACH_ACK_MISSING"
-    ATTACH_ACKED_UNPROVEN = "NATIVE_GRASP_ATTACH_ACKED_UNPROVEN"
+    ATTACHMENT_CONFIRMED = "NATIVE_GRASP_ATTACHMENT_CONFIRMED"
     CHILD_LINK_STATE_UNAVAILABLE = "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
     DART_UNSUPPORTED = "NATIVE_GRASP_DART_UNSUPPORTED"
-    TARGET_NOT_LIFTED = "NATIVE_GRASP_TARGET_NOT_LIFTED"
     RELATIVE_POSE_DRIFT = "NATIVE_GRASP_CAPTURE_RELATIVE_TRANSLATION_EXCEEDED"
     TARGET_HELD = "NATIVE_GRASP_TARGET_HELD"
     RELEASE_ACK_MISSING = "NATIVE_GRASP_RELEASE_DETACH_ACK_MISSING"
@@ -116,7 +115,6 @@ class NativePickPlaceConfig(GazeboControlConfig):
     contact_samples_required: int = 3
     contact_span_s: float = 0.100
     contact_freshness_s: float = 2.0
-    minimum_lift_m: float = 0.080
     maximum_capture_relative_translation_m: float = 0.010
     table_size_m: tuple[float, float, float] = (0.70, 0.60, 0.04)
     table_pose_xyz: tuple[float, float, float] = (0.40, 0.0, 0.38)
@@ -142,13 +140,6 @@ class NativePickPlaceConfig(GazeboControlConfig):
     maximum_placement_terminal_drift_m: float = 0.005
     placement_center_height_m: float = 0.43
     placement_center_height_tolerance_m: float = 0.01
-    # Profile-owned, live-validated gripper-mount poses for this fixed
-    # fixture.  They are advertised through control_spec so an agent can use
-    # the stable controller contract instead of guessing from image depth.
-    approach_mount_xyz: tuple[float, float, float] = (0.1552, -0.1000, 0.5686)
-    capture_mount_xyz: tuple[float, float, float] = (0.1552, -0.1000, 0.4976)
-    lift_mount_xyz: tuple[float, float, float] = (0.1552, -0.1000, 0.5976)
-    mount_euler_xyz_deg: tuple[float, float, float] = (115.0, 0.0, 90.0)
 
     @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
@@ -273,38 +264,23 @@ def validated_pickplace_motion_guidance(
 
     cfg = config or NativePickPlaceConfig()
 
-    def pose(name: str, xyz: tuple[float, float, float]) -> dict[str, Any]:
-        return {
-            "name": name,
-            "target_pose": {
-                "frame": "world",
-                "xyz": list(xyz),
-                "euler_xyz_deg": list(cfg.mount_euler_xyz_deg),
-            },
-        }
-
     return {
-        "schema_version": "openeta.gazebo.validated_pickplace_motion.v1",
+        "schema_version": "openeta.gazebo.model_terminal_pickplace.v2",
         "pose_semantics": cfg.parent_link,
         "motion_parameters": {
             "velocity_scaling": 0.1,
             "acceleration_scaling": 0.1,
-            # The 40 mm fixture can be pushed out of the opposing pad before
-            # the second pad makes contact when MoveIt stops at the edge of a
-            # 1 mm / 0.01 rad goal window.  Keep the calibrated waypoint and
-            # require the controller to settle tightly enough for repeatable
-            # bilateral native-contact evidence.
             "tolerance": 0.0002,
             "ori_tolerance": 0.002,
         },
-        "poses": [
-            pose("approach", cfg.approach_mount_xyz),
-            pose("capture", cfg.capture_mount_xyz),
-            pose("lift", cfg.lift_mount_xyz),
-        ],
+        "terminal_poses": {
+            "grasp_contact": "grasp_provider_model_pose_after_calibrated_frame_transform",
+            "placement_release": "anyplace_object_goal_times_inverse_measured_attachment",
+            "path_owner": "moveit",
+            "host_pose_offsets_forbidden": True,
+        },
         "atomic_order": [
-            {"tool": "move_to", "pose": "approach"},
-            {"tool": "move_to", "pose": "capture"},
+            {"tool": "move_to", "pose": "grasp_contact", "path": "moveit_full_path"},
             {
                 "tool": "gripper_control",
                 "position": 0,
@@ -312,17 +288,18 @@ def validated_pickplace_motion_guidance(
             },
             {
                 "tool": "move_to",
-                "pose": "lift",
-                "requires_receipt": ["native_bilateral_contact", "attached_ack"],
+                "pose": "placement_release",
+                "path": "moveit_full_attached_object_path",
+                "requires_receipt": ["attached_ack", "retention_drift_bound"],
             },
             {
                 "tool": "gripper_control",
                 "position": 1,
-                "requires_receipt": ["child_link_lift_proof", "detached_ack"],
+                "requires_receipt": ["detached_ack", "stable_placement"],
             },
         ],
         "success_evidence": {
-            "minimum_child_link_lift_m": cfg.minimum_lift_m,
+            "grasp_admission": "bilateral_native_contact_and_attach_ack",
             "maximum_capture_relative_translation_m": (
                 cfg.maximum_capture_relative_translation_m
             ),
@@ -480,7 +457,9 @@ class ChildLinkProof:
             raise ValueError("relative translation cannot be negative")
 
     @property
-    def lift_m(self) -> float:
+    def vertical_displacement_m(self) -> float:
+        """Observed displacement telemetry; never an attachment threshold."""
+
         return self.target_z_m - self.baseline_target_z_m
 
 
@@ -532,45 +511,22 @@ class NativeGraspVerifier:
             self.phase = "attach_unacknowledged"
             self.attached = False
             return self._remember(self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False, gate=gate.to_dict()))
-        self.phase = "attach_acked_unproven"
+        self.phase = "attachment_confirmed"
         self.attached = True
-        return self._remember(self._record(Verdict.UNKNOWN, ReasonCode.ATTACH_ACKED_UNPROVEN, False, gate=gate.to_dict()))
-
-    def prove_lift(self, proof: ChildLinkProof | None, *, dart_supported: bool = True) -> VerificationRecord:
-        if not self.attached:
-            return self._remember(self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False))
-        if not dart_supported:
-            self.phase = "dart_unsupported"
-            return self._remember(self._record(Verdict.FAIL, ReasonCode.DART_UNSUPPORTED, False))
-        if proof is None:
-            self.phase = "child_link_unavailable"
-            return self._remember(self._record(Verdict.FAIL, ReasonCode.CHILD_LINK_STATE_UNAVAILABLE, False))
-        evidence = {
-            "source": "gazebo_pose_info_child_link",
-            "lift_m": proof.lift_m,
-            "capture_relative_translation_m": proof.capture_relative_translation_m,
-            "minimum_lift_m": self.config.minimum_lift_m,
-            "maximum_capture_relative_translation_m": self.config.maximum_capture_relative_translation_m,
-        }
-        if proof.lift_m < self.config.minimum_lift_m:
-            self.phase = "lift_failed"
-            return self._remember(self._record(Verdict.FAIL, ReasonCode.TARGET_NOT_LIFTED, False, **evidence))
-        if proof.capture_relative_translation_m > self.config.maximum_capture_relative_translation_m:
-            self.phase = "relative_translation_failed"
-            return self._remember(self._record(Verdict.FAIL, ReasonCode.RELATIVE_POSE_DRIFT, False, **evidence))
-        self.phase = "held_proven"
-        return self._remember(self._record(Verdict.PASS, ReasonCode.TARGET_HELD, True, **evidence))
+        return self._remember(
+            self._record(
+                Verdict.PASS,
+                ReasonCode.ATTACHMENT_CONFIRMED,
+                True,
+                gate=gate.to_dict(),
+                proof_boundary="bilateral_native_contact_and_attach_ack",
+            )
+        )
 
     def prove_retention(
         self, proof: ChildLinkProof | None, *, dart_supported: bool = True
     ) -> VerificationRecord:
-        """Revalidate an already-proven attachment during transport or lowering.
-
-        The 80 mm threshold is a one-time lift proof.  Applying it again while
-        descending for placement would incorrectly reject a still-attached
-        object, so subsequent reads require the native attached state (owned by
-        the caller) and the same capture-relative drift bound only.
-        """
+        """Revalidate a contact/attach-proven object during any MoveIt transport."""
 
         if not self.attached:
             return self._remember(
@@ -588,27 +544,15 @@ class NativeGraspVerifier:
                     Verdict.FAIL, ReasonCode.CHILD_LINK_STATE_UNAVAILABLE, False
                 )
             )
-        prior_lift_proven = self.phase in {"held_proven", "retained_proven"}
         evidence = {
             "source": "gazebo_pose_info_child_link",
-            "lift_m": proof.lift_m,
+            "vertical_displacement_m": proof.vertical_displacement_m,
             "capture_relative_translation_m": proof.capture_relative_translation_m,
-            "minimum_lift_required": False,
-            "prior_lift_proven": prior_lift_proven,
+            "prior_attachment_confirmed": True,
             "maximum_capture_relative_translation_m": (
                 self.config.maximum_capture_relative_translation_m
             ),
         }
-        if not prior_lift_proven:
-            self.phase = "lift_failed"
-            return self._remember(
-                self._record(
-                    Verdict.FAIL,
-                    ReasonCode.TARGET_NOT_LIFTED,
-                    False,
-                    **evidence,
-                )
-            )
         if proof.capture_relative_translation_m > (
             self.config.maximum_capture_relative_translation_m
         ):
@@ -635,8 +579,8 @@ class NativeGraspVerifier:
             False,
         ))
 
-    def pregrasp_open_result(self) -> VerificationRecord:
-        """Acknowledge an open command when no grasp has ever been attached."""
+    def detached_open_result(self) -> VerificationRecord:
+        """Acknowledge an open command when no grasp is attached."""
 
         self.phase = "ready"
         self.attached = False

@@ -7,10 +7,12 @@ OpenETA on a non-ROS test machine remains supported.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import threading
 import time
 from typing import Any, Mapping
@@ -35,29 +37,162 @@ from .planning_scene import (
 )
 
 
-def _urdf_reach_upper_bound_m(config: GazeboControlConfig) -> float:
-    """Sum declared joint-origin lengths across arm/TCP assets as an upper bound."""
+def _qualification_ik_response_timeout_s(seed_timeout_s: float) -> float:
+    """Keep a short solver budget without timing out behind concurrent RPCs."""
 
-    total = math.sqrt(sum(float(value) ** 2 for value in config.mount_xyz))
-    parsed = False
-    roots = (config.asset_root, config.gripper_asset_root)
+    from agent.runtime.moveit_qualification import KINEMATIC_IK_TIMEOUT_S
+
+    return max(KINEMATIC_IK_TIMEOUT_S, float(seed_timeout_s) + 0.1)
+
+
+def _urdf_reach_upper_bound_m(config: GazeboControlConfig) -> float:
+    """Return the unique base-to-tip chain bound, plus the fixed tool mount."""
+
     try:
-        for root in roots:
-            for path in root.rglob("*.xacro"):
-                tree = ElementTree.parse(path)
-                for joint in tree.getroot().iter("joint"):
-                    origin = joint.find("origin")
-                    if origin is None:
-                        continue
-                    xyz = str(origin.get("xyz") or "").split()
-                    if len(xyz) != 3 or any("${" in value for value in xyz):
-                        continue
-                    vector = [float(value) for value in xyz]
-                    total += math.sqrt(sum(value * value for value in vector))
-                    parsed = True
-    except (OSError, ElementTree.ParseError, ValueError):
+        chain = _qualification_serial_chain(config)
+        mount = math.sqrt(sum(float(value) ** 2 for value in config.mount_xyz))
+        total = chain.translation_upper_bound_m + mount
+    except (OSError, ValueError):
         return math.inf
-    return total if parsed and total > 0.0 else math.inf
+    return total if total > 0.0 and math.isfinite(total) else math.inf
+
+
+def _qualification_model_paths(config: GazeboControlConfig) -> tuple[Path, Path]:
+    package = config.ros_workspace / "src" / "openeta_rm75_robotiq2f85_sim"
+    pickplace = "pickplace" in config.model_id
+    urdf = package / "urdf" / (
+        "rm75_robotiq2f85_pickplace.urdf.xacro"
+        if pickplace
+        else "rm75_robotiq2f85.urdf.xacro"
+    )
+    srdf = package / "config" / (
+        "rm75_robotiq2f85_pickplace.srdf"
+        if pickplace
+        else "rm75_robotiq2f85.srdf"
+    )
+    return urdf, srdf
+
+
+@lru_cache(maxsize=8)
+def _expanded_qualification_urdf(config: GazeboControlConfig) -> bytes:
+    urdf, _ = _qualification_model_paths(config)
+    try:
+        import xacro
+
+        return xacro.process_file(str(urdf)).toxml().encode("utf-8")
+    except Exception as exc:  # noqa: BLE001 - non-ROS unit tests lack xacro.
+        if os.environ.get("ROS_DISTRO"):
+            raise RuntimeError("qualification URDF expansion failed") from exc
+        # Unit-test/non-ROS imports have no xacro package. The live Jazzy
+        # runtime expands successfully because the same file already fed the
+        # launch robot_description.
+        try:
+            return urdf.read_bytes()
+        except OSError:
+            return b"<missing-urdf>"
+
+
+@lru_cache(maxsize=8)
+def _qualification_serial_chain(config: GazeboControlConfig):
+    from agent.runtime.urdf_jacobian import UrdfSerialChain
+
+    return UrdfSerialChain.from_urdf(
+        _expanded_qualification_urdf(config),
+        base_link=config.base_link,
+        tip_link=config.arm_tip,
+    )
+
+
+def _qualification_robot_model_sha256(config: GazeboControlConfig) -> str:
+    """Hash URDF/SRDF/group/TCP/gripper inputs for capability-map binding."""
+
+    from agent.runtime.capability_map import robot_model_hash
+
+    _, srdf = _qualification_model_paths(config)
+    urdf_bytes = _expanded_qualification_urdf(config)
+    try:
+        srdf_bytes = srdf.read_bytes()
+    except OSError:
+        srdf_bytes = b"<missing-srdf>"
+    return robot_model_hash(
+        urdf=urdf_bytes,
+        srdf=srdf_bytes,
+        planning_group=config.move_group,
+        tcp=config.arm_tip,
+        gripper="robotiq_2f85",
+    )
+
+
+def _configured_qualification_solver_profile() -> str:
+    """Resolve ``auto`` exactly as the ROS launch file does."""
+
+    qualification_profile = os.environ.get("OPENETA_QUALIFICATION_PROFILE", "legacy")
+    solver_profile = os.environ.get("OPENETA_QUALIFICATION_SOLVER_PROFILE", "auto")
+    if solver_profile == "auto":
+        return "kdl_fast" if qualification_profile == "fast_v3" else "kdl_legacy"
+    return solver_profile
+
+
+@lru_cache(maxsize=8)
+def _qualification_solver_version(solver_profile: str) -> str:
+    """Read the installed ROS package version for artifact provenance."""
+
+    package = (
+        "trac_ik_kinematics_plugin"
+        if solver_profile.startswith("trac_ik")
+        else "pick_ik"
+        if solver_profile.startswith("pick_ik")
+        else "moveit_kinematics"
+        if solver_profile.startswith("kdl")
+        else ""
+    )
+    if not package:
+        return "unknown"
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        root = ElementTree.parse(
+            Path(get_package_share_directory(package)) / "package.xml"
+        ).getroot()
+        version = root.findtext("version")
+    except Exception:  # noqa: BLE001 - provenance must not block qualification.
+        return "unknown"
+    return str(version or "unknown")
+
+
+def _load_qualification_capability_map(
+    config: GazeboControlConfig,
+    *,
+    map_id: str,
+    robot_model_sha256: str,
+) -> Mapping[str, Any]:
+    """Load one content-addressed map without consulting user-home caches."""
+
+    from agent.runtime.capability_map import SparseCapabilityMap
+
+    if len(map_id) != 64 or any(
+        character not in "0123456789abcdef" for character in map_id
+    ):
+        raise ValueError("capability map ID must be a lowercase SHA-256 digest")
+    override = os.environ.get("OPENETA_CAPABILITY_MAP_PATH", "").strip()
+    repo_root = config.ros_workspace.parents[2]
+    path = (
+        Path(override)
+        if override
+        else repo_root / "config" / "capability_maps" / f"{map_id}.json"
+    )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot load capability map {path}: {type(exc).__name__}") from exc
+    if not isinstance(payload, Mapping):
+        raise ValueError("capability map root must be an object")
+    SparseCapabilityMap.from_dict(
+        payload,
+        expected_map_id=map_id,
+        expected_robot_model_sha256=robot_model_sha256,
+    )
+    return dict(payload)
 
 
 def _normalized_quaternion(
@@ -499,8 +634,10 @@ class RosGazeboControllerFactory:
                 PlanningScene,
                 PlanningSceneComponents,
             )
-            from rcl_interfaces.srv import GetParameters
+            from rcl_interfaces.msg import Parameter as InterfaceParameter, ParameterType
+            from rcl_interfaces.srv import GetParameters, SetParametersAtomically
             from rclpy.action import ActionClient
+            from rclpy.callback_groups import ReentrantCallbackGroup
             from rclpy.executors import MultiThreadedExecutor
             from sensor_msgs.msg import JointState
             from tf2_ros import Buffer, TransformListener
@@ -531,14 +668,26 @@ class RosGazeboControllerFactory:
         controller_parameter_client = node.create_client(
             GetParameters, "/controller_manager/get_parameters"
         )
+        qualification_callback_group = ReentrantCallbackGroup()
         state_validity_client = node.create_client(
-            GetStateValidity, "/check_state_validity"
+            GetStateValidity,
+            "/check_state_validity",
+            callback_group=qualification_callback_group,
         )
-        compute_ik_client = node.create_client(GetPositionIK, "/compute_ik")
+        compute_ik_client = node.create_client(
+            GetPositionIK,
+            "/compute_ik",
+            callback_group=qualification_callback_group,
+        )
+        move_group_parameter_client = node.create_client(
+            SetParametersAtomically,
+            "/move_group/set_parameters_atomically",
+            callback_group=qualification_callback_group,
+        )
         apply_scene_client = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
         get_scene_client = node.create_client(GetPlanningScene, "/get_planning_scene")
         shared_executor = executor is not None
-        executor = executor or MultiThreadedExecutor(num_threads=2, context=context)
+        executor = executor or MultiThreadedExecutor(num_threads=12, context=context)
         executor.add_node(node)
         runtime = _RosRuntime(
             rclpy=rclpy, node=node, executor=executor, state_source=source,
@@ -548,10 +697,14 @@ class RosGazeboControllerFactory:
             controller_parameter_client=controller_parameter_client,
             state_validity_client=state_validity_client,
             compute_ik_client=compute_ik_client,
+            move_group_parameter_client=move_group_parameter_client,
             controller_service_type=ListControllers,
             controller_parameter_service_type=GetParameters,
             state_validity_service_type=GetStateValidity,
             compute_ik_service_type=GetPositionIK,
+            set_parameters_service_type=SetParametersAtomically,
+            interface_parameter_type=InterfaceParameter,
+            parameter_type=ParameterType,
             follow_trajectory_action_type=FollowJointTrajectory,
             duration_type=Duration,
             trajectory_point_type=JointTrajectoryPoint,
@@ -593,6 +746,7 @@ class _RosRuntime:
         self._thread: threading.Thread | None = None
         self._pending: list[Any] = []
         self._lock = threading.Lock()
+        self._qualification_map_lock = threading.Lock()
         self._closed = False
 
     def current_state_validity(self, *, timeout_s: float) -> Mapping[str, Any]:
@@ -633,17 +787,170 @@ class _RosRuntime:
         state = self.state_source.wait_fresh(3.0)
         lower = [float(item[1]) for item in ARM_JOINT_BOUNDS]
         upper = [float(item[2]) for item in ARM_JOINT_BOUNDS]
+        positions = [
+            float(value) for value in state.joint_positions[: len(ARM_JOINTS)]
+        ]
+        jacobian_quality = self.qualification_joint_quality(
+            {"names": list(ARM_JOINTS), "positions": positions}
+        )
+        robot_hash = getattr(self, "_qualification_robot_model_hash", None)
+        if robot_hash is None:
+            robot_hash = _qualification_robot_model_sha256(self.config)
+            self._qualification_robot_model_hash = robot_hash
         return {
             "names": list(ARM_JOINTS),
-            "positions": [
-                float(value) for value in state.joint_positions[: len(ARM_JOINTS)]
-            ],
+            "positions": positions,
             "joint_limits": {"lower": lower, "upper": upper},
             "home_joint_state": {
                 "names": list(ARM_JOINTS),
                 "positions": [(lo + hi) / 2.0 for lo, hi in zip(lower, upper)],
             },
+            "robot_model_sha256": robot_hash,
+            "planning_group": self.config.move_group,
+            "tcp": self.config.arm_tip,
+            "gripper": "robotiq_2f85",
+            "solver_profile": _configured_qualification_solver_profile(),
+            "solver_version": _qualification_solver_version(
+                _configured_qualification_solver_profile()
+            ),
+            "scene_sha256": self.qualification_scene_sha256(),
+            "jacobian_quality_available": jacobian_quality.get("ok") is True,
+            "jacobian_quality_error": jacobian_quality.get("error"),
         }
+
+    def qualification_joint_quality(
+        self, joint_state: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        """Evaluate the concrete IK branch against the expanded runtime URDF."""
+
+        try:
+            value = _qualification_serial_chain(self.config).minimum_singular_value(
+                [str(name) for name in joint_state.get("names") or ARM_JOINTS],
+                [float(position) for position in joint_state.get("positions") or []],
+            )
+        except Exception as exc:  # noqa: BLE001 - converted to configuration evidence.
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        return {"ok": True, "min_singular_value": value}
+
+    def qualification_scene_sha256(self) -> str:
+        snapshot = self.qualification_clone_scene()
+        serializable = {
+            **snapshot,
+            "world_ids": sorted(snapshot.get("world_ids") or []),
+            "attached_ids": sorted(snapshot.get("attached_ids") or []),
+        }
+        return hashlib.sha256(
+            json.dumps(
+                serializable,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def qualification_services_healthy(self) -> bool:
+        clients = [self.compute_ik_client, self.state_validity_client]
+        if _configured_qualification_solver_profile() == "pick_ik_local":
+            clients.append(self.move_group_parameter_client)
+        return all(client.wait_for_service(timeout_sec=0.2) for client in clients)
+
+    def qualification_set_solver_mode(self, mode: str) -> Mapping[str, Any]:
+        """Switch pick_ik only at a completed qualification-wave barrier."""
+
+        if _configured_qualification_solver_profile() != "pick_ik_local":
+            return {
+                "ok": False,
+                "infrastructure_error": True,
+                "reason": "solver_mode_switch_requires_pick_ik_local",
+            }
+        if mode not in {"local", "global"}:
+            return {
+                "ok": False,
+                "infrastructure_error": True,
+                "reason": "invalid_pick_ik_mode",
+            }
+        if not self.move_group_parameter_client.wait_for_service(timeout_sec=0.2):
+            return {
+                "ok": False,
+                "infrastructure_error": True,
+                "reason": "move_group_parameter_service_unavailable",
+            }
+        request = self.set_parameters_service_type.Request()
+        mode_parameter = self.interface_parameter_type()
+        mode_parameter.name = (
+            f"robot_description_kinematics.{self.config.move_group}.mode"
+        )
+        mode_parameter.value.type = self.parameter_type.PARAMETER_STRING
+        mode_parameter.value.string_value = mode
+        displacement_parameter = self.interface_parameter_type()
+        displacement_parameter.name = (
+            "robot_description_kinematics."
+            f"{self.config.move_group}.minimal_displacement_weight"
+        )
+        displacement_parameter.value.type = self.parameter_type.PARAMETER_DOUBLE
+        displacement_parameter.value.double_value = 0.0 if mode == "global" else 0.001
+        request.parameters = [mode_parameter, displacement_parameter]
+        try:
+            response = self._await(
+                self.move_group_parameter_client.call_async(request), 1.0
+            )
+        except Exception as exc:  # noqa: BLE001 - ROS service boundary.
+            return {
+                "ok": False,
+                "infrastructure_error": True,
+                "reason": "pick_ik_mode_switch_service_error",
+                "error_type": type(exc).__name__,
+            }
+        result = response.result
+        ok = result.successful is True
+        if ok:
+            self._qualification_pick_ik_mode = mode
+        return {
+            "ok": ok,
+            "infrastructure_error": not ok,
+            "reason": "pick_ik_mode_switched" if ok else "pick_ik_mode_switch_rejected",
+            "mode": mode,
+            "detail": str(result.reason),
+        }
+
+    def qualification_capability_map(
+        self, *, map_id: str, robot_model_sha256: str
+    ) -> tuple[Mapping[str, Any] | None, str]:
+        """Load and validate one map once for this ROS runtime."""
+
+        key = (
+            map_id,
+            robot_model_sha256,
+            os.environ.get("OPENETA_CAPABILITY_MAP_PATH", "").strip(),
+        )
+        with self._qualification_map_lock:
+            if getattr(self, "_qualification_capability_map_key", None) == key:
+                return (
+                    getattr(self, "_qualification_capability_map_payload", None),
+                    str(
+                        getattr(
+                            self,
+                            "_qualification_capability_map_error",
+                            "",
+                        )
+                    ),
+                )
+            try:
+                payload = _load_qualification_capability_map(
+                    self.config,
+                    map_id=map_id,
+                    robot_model_sha256=robot_model_sha256,
+                )
+                error = ""
+            except ValueError as exc:
+                payload, error = None, str(exc)
+            self._qualification_capability_map_key = key
+            self._qualification_capability_map_payload = payload
+            self._qualification_capability_map_error = error
+            return payload, error
 
     def qualification_workspace_filter(self, target: Mapping[str, Any]) -> bool:
         """Reject only poses beyond a URDF-derived conservative reach envelope."""
@@ -677,6 +984,25 @@ class _RosRuntime:
         quat = goal["target_pose"].get("quat_xyzw")
         if not isinstance(xyz, list) or len(xyz) != 3 or not isinstance(quat, list) or len(quat) != 4:
             return {"ok": False}
+        configured_solver = _configured_qualification_solver_profile()
+        requested_solver = str(target.get("solver_profile") or "auto")
+        dynamic_pick_global = (
+            requested_solver == "pick_ik_global"
+            and configured_solver == "pick_ik_local"
+            and getattr(self, "_qualification_pick_ik_mode", "local") == "global"
+        )
+        if (
+            requested_solver != "auto"
+            and requested_solver != configured_solver
+            and not dynamic_pick_global
+        ):
+            return {
+                "ok": False,
+                "infrastructure_error": True,
+                "reason": "qualification_solver_profile_mismatch",
+                "requested_solver": requested_solver,
+                "configured_solver": configured_solver,
+            }
         request = self.compute_ik_service_type.Request()
         ik = request.ik_request
         ik.group_name = self.config.move_group
@@ -710,7 +1036,7 @@ class _RosRuntime:
         ik.pose_stamped = pose
         response = self._await(
             self.compute_ik_client.call_async(request),
-            seed_timeout_s + 0.1,
+            _qualification_ik_response_timeout_s(seed_timeout_s),
         )
         solution = response.solution.joint_state
         names = list(solution.name)
@@ -718,11 +1044,35 @@ class _RosRuntime:
         by_name = dict(zip(names, positions))
         ordered = [float(by_name[name]) for name in ARM_JOINTS if name in by_name]
         ok = int(response.error_code.val) == 1 and len(ordered) == len(ARM_JOINTS)
+        quality = (
+            self.qualification_joint_quality(
+                {"names": list(ARM_JOINTS), "positions": ordered}
+            )
+            if ok
+            else {}
+        )
         return {
             "ok": ok,
+            "infrastructure_error": ok and quality.get("ok") is not True,
+            "reason": (
+                "jacobian_quality_unavailable"
+                if ok and quality.get("ok") is not True
+                else None
+            ),
             "moveit_error_code": int(response.error_code.val),
+            "solver": "pick_ik_global" if dynamic_pick_global else configured_solver,
+            "solver_version": _qualification_solver_version(configured_solver),
+            "requested_solver": requested_solver,
+            "jacobian_quality_available": quality.get("ok") is True if ok else None,
+            "jacobian_quality_error": quality.get("error") if ok else None,
             **(
-                {"joint_state": {"names": list(ARM_JOINTS), "positions": ordered}}
+                {
+                    "joint_state": {
+                        "names": list(ARM_JOINTS),
+                        "positions": ordered,
+                    },
+                    "min_singular_value": quality.get("min_singular_value", 0.0),
+                }
                 if ok
                 else {}
             ),
@@ -773,6 +1123,13 @@ class _RosRuntime:
                 "num_planning_attempts": planning_attempts,
             }
         )
+        qualification_goal_joint_state = target.get(
+            "qualification_goal_joint_state"
+        )
+        if isinstance(qualification_goal_joint_state, Mapping):
+            goal["qualification_goal_joint_state"] = dict(
+                qualification_goal_joint_state
+            )
         scene_diff = target.get("qualification_scene_diff")
         if isinstance(scene_diff, Mapping):
             goal["qualification_scene_diff"] = dict(scene_diff)
@@ -810,7 +1167,11 @@ class _RosRuntime:
     def qualification_clone_scene(self) -> dict[str, Any]:
         """Clone only qualification-owned scene identity; never apply a diff."""
 
-        return {
+        reach = getattr(self, "_qualification_reach_upper_bound_m", None)
+        if reach is None:
+            reach = _urdf_reach_upper_bound_m(self.config)
+            self._qualification_reach_upper_bound_m = reach
+        snapshot = {
             "revision": int(self.planning_scene.revision),
             "world_ids": set(self.planning_scene.world_ids),
             "attached_ids": set(self.planning_scene.attached_ids),
@@ -823,8 +1184,57 @@ class _RosRuntime:
                 for key, value in self.planning_scene.attached_specs.items()
             },
             "target_id": self.planning_scene.target_id,
+            "workspace_envelope": {
+                "frame": self.config.base_link,
+                "base_xyz": [0.0, 0.0, 0.0],
+                "outer_radius_m": float(reach) if math.isfinite(reach) else None,
+                # This deliberately over-bounds every measured Robotiq/object
+                # attachment used by this profile.  It can prove impossible
+                # object goals without falsely rejecting a reachable EEF goal.
+                "maximum_attachment_offset_m": 0.25,
+            },
+            "gripper_collision_boxes": [
+                {
+                    "id": "gripper_mount_link_collision",
+                    "frame": self.config.mount_child,
+                    "shape": "box",
+                    "size_xyz": [0.08, 0.08, 0.012],
+                    "pose_xyz": [0.0, 0.0, 0.006],
+                    "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    "provenance": "exact_urdf_collision_primitive",
+                }
+            ],
             "transitions": [],
         }
+        destination_center = getattr(self.config, "destination_center_xy", None)
+        destination_size = getattr(self.config, "destination_size_xy_m", None)
+        support_z = getattr(self.config, "table_top_z_m", None)
+        if (
+            isinstance(destination_center, tuple)
+            and len(destination_center) == 2
+            and isinstance(destination_size, tuple)
+            and len(destination_size) == 2
+            and isinstance(support_z, (int, float))
+        ):
+            snapshot["placement_region"] = {
+                "schema_version": "openeta.placement_region_geometry.v1",
+                "frame": self.config.base_link,
+                "center_xy": [float(value) for value in destination_center],
+                "size_xy_m": [float(value) for value in destination_size],
+                "support_z_m": float(support_z),
+                "support_object_id": str(getattr(self.config, "table_id", "")),
+                "support_height_tolerance_m": float(
+                    getattr(self.config, "placement_center_height_tolerance_m", 0.01)
+                ),
+                # AnyPlace consumes RGB-D point geometry.  Treat a sub-5 mm
+                # support overlap as the calibrated contact uncertainty band,
+                # not a mathematical penetration proof.  Non-support static
+                # obstacles retain the tighter exact-box tolerance below.
+                "support_penetration_tolerance_m": 0.005,
+                "static_penetration_tolerance_m": 0.001,
+                "provenance": "acceptance_scene_contract",
+            }
+        return snapshot
 
     def qualification_scene_transition(
         self,
@@ -945,8 +1355,36 @@ class _RosRuntime:
             workspace_filter=self.qualification_workspace_filter,
             clone_scene=self.qualification_clone_scene,
             apply_scene_transition=self.qualification_scene_transition,
+            service_health_check=self.qualification_services_healthy,
+            set_solver_mode=self.qualification_set_solver_mode,
         )
-        return engine.qualify(request)
+        bound_request = dict(request)
+        funnel = request.get("funnel")
+        funnel = funnel if isinstance(funnel, Mapping) else {}
+        source = request.get("source")
+        source = dict(source) if isinstance(source, Mapping) else {}
+        configured_solver = _configured_qualification_solver_profile()
+        source.setdefault("solver_profile", configured_solver)
+        source.setdefault(
+            "solver_version", _qualification_solver_version(configured_solver)
+        )
+        source.setdefault(
+            "robot_model_sha256",
+            _qualification_robot_model_sha256(self.config),
+        )
+        source.setdefault("scene_sha256", self.qualification_scene_sha256())
+        map_id = str(funnel.get("capability_map_id") or "")
+        if map_id:
+            payload, error = self.qualification_capability_map(
+                map_id=map_id,
+                robot_model_sha256=_qualification_robot_model_sha256(self.config),
+            )
+            if payload is not None:
+                source["capability_map"] = payload
+            if error:
+                source["capability_map_load_error"] = error
+        bound_request["source"] = source
+        return engine.qualify(bound_request)
 
     def start(self) -> None:
         if self.shared_executor:
@@ -981,6 +1419,7 @@ class _RosRuntime:
                     self.controller_parameter_client,
                     self.state_validity_client,
                     getattr(self, "compute_ik_client", None),
+                    getattr(self, "move_group_parameter_client", None),
                 ) if client is not None)
                 if not all(
                     client.wait_for_service(timeout_sec=min(0.2, remaining))
@@ -1318,7 +1757,13 @@ class _RosRuntime:
     def move(self, goal: dict, timeout_s: float) -> Mapping[str, Any]:
         from geometry_msgs.msg import Pose
         from moveit_msgs.action import MoveGroup
-        from moveit_msgs.msg import Constraints, MoveItErrorCodes, OrientationConstraint, PositionConstraint
+        from moveit_msgs.msg import (
+            Constraints,
+            JointConstraint,
+            MoveItErrorCodes,
+            OrientationConstraint,
+            PositionConstraint,
+        )
         from shape_msgs.msg import SolidPrimitive
 
         action_started = self.ros_time_s()
@@ -1404,7 +1849,38 @@ class _RosRuntime:
         oc = OrientationConstraint()
         oc.header.frame_id, oc.link_name, oc.orientation, oc.weight = goal["base_frame"], goal["link_name"], pose.orientation, 1.0
         oc.absolute_x_axis_tolerance = oc.absolute_y_axis_tolerance = oc.absolute_z_axis_tolerance = goal["orientation_tolerance_rad"]
-        request.request.goal_constraints = [Constraints(position_constraints=[pc], orientation_constraints=[oc])]
+        qualification_goal = goal.get("qualification_goal_joint_state")
+        if isinstance(qualification_goal, Mapping) and not inject_rejection:
+            names = list(qualification_goal.get("names") or ARM_JOINTS)
+            positions = [float(value) for value in qualification_goal.get("positions") or []]
+            if len(names) != len(positions) or not positions:
+                return finish(
+                    {
+                        "ok": False,
+                        "error_code": "MOTION_PLAN_FAILED",
+                        "motion_outcome": "failed",
+                        "planned_point_count": 0,
+                        "execution_started": False,
+                    }
+                )
+            joint_constraints = []
+            for name, position in zip(names, positions, strict=True):
+                constraint = JointConstraint()
+                constraint.joint_name = str(name)
+                constraint.position = position
+                constraint.tolerance_above = 0.005
+                constraint.tolerance_below = 0.005
+                constraint.weight = 1.0
+                joint_constraints.append(constraint)
+            request.request.goal_constraints = [
+                Constraints(joint_constraints=joint_constraints)
+            ]
+        else:
+            request.request.goal_constraints = [
+                Constraints(
+                    position_constraints=[pc], orientation_constraints=[oc]
+                )
+            ]
         qualification_diff = goal.get("qualification_scene_diff")
         if isinstance(qualification_diff, Mapping):
             request.planning_options.planning_scene_diff = (

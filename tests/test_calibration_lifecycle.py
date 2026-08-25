@@ -42,9 +42,9 @@ def _fingerprint() -> dict:
     }
 
 
-def test_calibration_rejects_unknown_wrist_alignment_policy() -> None:
+def test_calibration_rejects_obsolete_waypoint_policy_fields() -> None:
     profile = _profile()
-    profile["wrist_alignment_policy"] = "always_skip"
+    profile["wrist_alignment_policy"] = "optional_if_fresh_segmentation_empty"
     try:
         validate_calibration_profile(
             profile,
@@ -52,9 +52,9 @@ def test_calibration_rejects_unknown_wrist_alignment_policy() -> None:
             validation_gates=[],
         )
     except ValueError as exc:
-        assert "wrist_alignment_policy" in str(exc)
+        assert "artificial waypoint calibration fields are forbidden" in str(exc)
     else:
-        raise AssertionError("unknown wrist alignment policy must fail closed")
+        raise AssertionError("obsolete waypoint calibration must fail closed")
 
 
 def _manager(

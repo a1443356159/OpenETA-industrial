@@ -16,7 +16,6 @@ allowed_tools:
   - select_sam3_detection
   - reject_sam3_detections
   - grasp_pose_estimate
-  - compute_wrist_alignment
   - prepare_attachment_probe
   - assess_attachment_probe
   - move_to

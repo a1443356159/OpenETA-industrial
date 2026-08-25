@@ -151,8 +151,9 @@ M0–M5 串行 control-only 运行。报告位于远端：
 报告为 `overall_status=passed`，scope 为
 `control_only_real_sam3_no_planner_not_formal_tui`；未调用 Planner Provider，
 `formal_tui_acceptance=not_run`。M5 使用文本 `red rectangular block`，SAM3 返回唯一
-候选（score `0.50390625`），随后完成选择、双垫原生接触、attach、99.85 mm lift、
-0.34 mm 相对漂移、open 和 detach。所有 M0–M5 case 均记录空 ROS graph、空 Gazebo
+候选（score `0.50390625`），随后完成当时的选择、双垫原生接触、attach、旧式
+lift 诊断、open 和 detach。该 lift 数值是历史遥测，不是当前抓取验收门槛。所有
+M0–M5 case 均记录空 ROS graph、空 Gazebo
 partition、释放端口和无 owned process residual。
 
 该结果证明真实 SAM3 MCP 感知到 Gazebo 原子控制的链路和回执，不是正式 PTY/TUI

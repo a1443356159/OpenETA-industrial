@@ -2,8 +2,9 @@
 
 M1 and M2 use the profile-driven runtime for launch, cameras, controller
 readiness, fresh observations and cleanup. M3 adds only the guarded stock
-DetachableJoint path: paused preflight detach ACK, reset detach ACK, native
-dual-pad contact admission, attach ACK and native child-link physical proof.
+DetachableJoint path: paused preflight detach ACK, reset detach ACK, exact
+contact terminal, native dual-pad contact admission, and attach ACK. Contact
+plus ACK directly proves the grasp; no post-close lift is generated.
 
 M3 is fail-closed on contact, state ACK, DART, or proof errors. It has no
 compatibility mechanism. M4 Oracle data is marked simulator truth and does
@@ -38,7 +39,9 @@ cleanup records report an empty candidate graph, empty partition, free port
 and no owned process residuals. Domain 83 was skipped because a pre-existing
 external ros2cli daemon occupied it.
 
-M2 completed its six gripper commands, four real A↔B MoveIt motions and a
+The following numbers describe an archived superseded lift-based diagnostic;
+they are not accepted by the current exact-terminal M3 contract. M2 completed
+its six gripper commands, four real A↔B MoveIt motions and a
 real unreachable `MOTION_PLAN_FAILED`. M3 recorded bilateral native contact,
 the stock `attached` and `detached` ACKs, a 96.5 mm native child-link lift and
 2.51 mm capture-relative translation. M4 ran the same physical sequence
@@ -55,9 +58,11 @@ and records `overall_status=passed`,
 `acceptance_scope=control_only_real_sam3_no_planner_not_formal_tui`,
 `planner_provider_invoked=false`, and `formal_tui_acceptance=not_run`.
 
-M0 through M5 used only the stable AgentTool → MCP/SSE → Gazebo boundary.
+The following M5 result is likewise archived control-layer evidence from the
+superseded diagnostic, not a current exact-terminal acceptance. M0 through M5
+used only the stable AgentTool → MCP/SSE → Gazebo boundary.
 M5 performed one real text-prompt SAM3 call, selected its sole candidate, and
-then passed the unchanged M3 native-contact chain. M3/M4/M5 respectively
+then passed the then-current M3 native-contact chain. M3/M4/M5 respectively
 recorded 99.93/100.14/99.85 mm child-link lift and
 0.25/0.35/0.34 mm capture-relative translation. Every case released its ROS
 graph, Gazebo partition, port and owned processes. Motion receipts were also

@@ -17,13 +17,19 @@ def test_m3_profile_constructs_without_starting_a_worker() -> None:
     try:
         assert environment.openeta_control_spec["native_grasp"] is True
         motion = environment.openeta_control_spec["validated_pickplace_motion"]
-        assert [item["name"] for item in motion["poses"]] == [
-            "approach",
-            "capture",
-            "lift",
-        ]
-        assert motion["poses"][1]["target_pose"]["xyz"] == [0.1552, -0.1, 0.4976]
-        assert motion["atomic_order"][2]["requires_receipt"] == [
+        assert "poses" not in motion
+        assert motion["terminal_poses"] == {
+            "grasp_contact": "grasp_provider_model_pose_after_calibrated_frame_transform",
+            "placement_release": "anyplace_object_goal_times_inverse_measured_attachment",
+            "path_owner": "moveit",
+            "host_pose_offsets_forbidden": True,
+        }
+        assert motion["atomic_order"][0] == {
+            "tool": "move_to",
+            "pose": "grasp_contact",
+            "path": "moveit_full_path",
+        }
+        assert motion["atomic_order"][1]["requires_receipt"] == [
             "native_bilateral_contact",
             "attached_ack",
         ]

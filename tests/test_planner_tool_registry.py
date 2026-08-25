@@ -33,7 +33,6 @@ from agent.runtime.planner import (
     _host_obligation_decision,
     _matching_depth_enhancement,
     _grasp_sensor_safety_obligation,
-    _wrist_alignment_obligation,
     build_tool_context,
 )
 from agent.runtime.promoted_memory import PromotedMemoryStore
@@ -159,7 +158,7 @@ def test_zero_pass_grasp_reestimate_dispatches_fresh_observation() -> None:
     assert decision.metadata["host_obligation"]["stage"] == "fresh_rgbd_observation"
 
 
-def test_pregrasp_reestimate_never_falls_back_to_stale_object_mask(
+def test_frozen_goal_reestimate_never_falls_back_to_stale_object_mask(
     tmp_path: Path,
 ) -> None:
     fresh_rgb = tmp_path / "fresh.rgb.png"
@@ -176,7 +175,7 @@ def test_pregrasp_reestimate_never_falls_back_to_stale_object_mask(
     memory = AgentMemory()
     memory.start_session(task="pick and place")
     memory.save_fact(
-        "pregrasp_placement_goal_pool",
+        "frozen_placement_goal_pool",
         {"status": "ready", "goal_count": 96},
         source="test",
     )
@@ -536,6 +535,84 @@ def _record_pending_sam3_selection(
             },
         )
     )
+
+
+def test_cross_camera_point_fallback_preserves_placement_region_semantics() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block and place it in the green marker")
+    memory.save_fact(
+        "placement_object_detection",
+        {
+            "id": "red-object",
+            "mask_ref": "tmp/red-mask.png",
+            "source_image": "tmp/top.rgb.png",
+            "source_frame_id": "top",
+            "target_prompt": "red rectangular block",
+        },
+        source="test",
+    )
+    # Text attempts may end on wrist while the visual point selected by the
+    # main VLM is on the clearer top view.
+    memory.save_fact(
+        "sam3_no_detection",
+        {
+            "result_id": "empty-wrist-region",
+            "source_image": "tmp/wrist.rgb.png",
+            "target_prompt": "placement_zone_marker",
+            "scene_epoch": memory.scene_epoch(),
+        },
+        source="sam3",
+    )
+    parameters = {
+        "mode": "points",
+        "image": "tmp/top.rgb.png",
+        "points": [{"x": 382, "y": 160, "label": 1}],
+    }
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {"name": "sam3", "parameters": parameters},
+                "tool_calls": [
+                    {
+                        "name": "sam3",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "parameters": parameters,
+                                "outputs": {
+                                    "result_id": "point-region",
+                                    "source_image": "tmp/top.rgb.png",
+                                    "frame_id": "top",
+                                    "prompt": "point_prompt",
+                                    "segmentation_mode": "point_prompt",
+                                    "detections": [
+                                        {
+                                            "id": "detection_000",
+                                            "mask_ref": "tmp/green-mask.png",
+                                            "score": 0.99,
+                                        }
+                                    ],
+                                    "selection_required": True,
+                                },
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    pending = memory.pending_sam3_selection()
+    assert pending["target_prompt"] == "placement_zone_marker"
+    memory.resolve_sam3_selection(
+        result_id="point-region",
+        detection_id="detection_000",
+        selection_source="main_agent_vlm",
+    )
+    assert memory.placement_region_detection()["id"] == "detection_000"
+    assert memory.placement_object_detection()["id"] == "red-object"
 
 
 def _record_anygrasp_candidate_policy(
@@ -1677,7 +1754,7 @@ def test_skill_references_are_text_guidance_not_required_tool_macros() -> None:
     assert context["schema_version"] == "openeta.planner_context.v1"
     assert "content" not in pick
     assert "content" in selected_pick
-    assert "Recommended Tool Sequence" in selected_pick["content"]
+    assert "## Normal flow" in selected_pick["content"]
     assert "allowed_tools" in pick
     assert "required_tools" not in pick
     assert "safety_checks" not in pick
@@ -1743,12 +1820,12 @@ def test_planner_context_attaches_primary_current_rgb_artifact() -> None:
     assert context["current_camera_artifacts"][1]["path"].endswith("cameras.0.agentview.depth.png")
 
 
-def test_planner_context_uses_additive_camera_roles_for_non_libero_frames() -> None:
+def test_exact_contact_context_uses_one_primary_scene_image() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube")
     memory.save_fact(
         "grasp_execution",
-        {"status": "required", "stage": "align"},
+        {"status": "required", "stage": "contact"},
         source="test",
     )
     observation = EnvObservation(
@@ -1808,10 +1885,7 @@ def test_planner_context_uses_additive_camera_roles_for_non_libero_frames() -> N
         skills=build_default_skill_registry(),
     )
 
-    assert context["vision_image_paths"] == [
-        "/exact/session/zed.png",
-        "/exact/session/wrist-right.png",
-    ]
+    assert context["vision_image_paths"] == ["/exact/session/zed.png"]
     assert [
         (item["frame_id"], item.get("role"), item["kind"])
         for item in context["current_camera_artifacts"]
@@ -2286,21 +2360,12 @@ def test_pick_skill_is_loaded_from_markdown_guidance() -> None:
     pick = skills.get("pick")
 
     assert pick.source == "markdown:skills/pick.md"
-    assert "Call `observe`" in pick.content
-    assert "Extract the target phrase from the user task" in pick.content
-    assert "Call `sam3`" in pick.content
-    assert "把桌上的罐子抓起来" in pick.content
-    assert "can" in pick.content
-    assert "Do not pass a non-English user phrase directly to `sam3`" in pick.content
-    assert "Stop after `sam3` and inspect its result" in pick.content
-    assert "do not" in pick.content.lower()
-    assert "default to `detections[0]`" in pick.content
-    assert "static post-close image is not evidence" in pick.content.lower()
-    assert "exact target asset name from the task" in pick.content
-    assert "Do not add" in pick.content
-    assert "use the\n`embodiment_explore` skill" in pick.content
-    assert "does not silently recalibrate one" in pick.content
-    assert "grasp candidate list" in pick.content
+    assert "Observe once" in pick.content
+    assert "one concise English target phrase" in pick.content
+    assert "provider pose is the exact terminal EEF contact pose" in pick.content
+    assert "There is no pregrasp, hover, precontact" in pick.content
+    assert "native bilateral target contact" in pick.content
+    assert "Do not rerun SAM3 or grasp inference while that queue remains" in pick.content
     assert pick.allowed_tools[:7] == (
         "observe",
         "retrieve_asset_reference",
@@ -2323,8 +2388,8 @@ def test_builtin_task_skills_are_loaded_from_markdown_guidance() -> None:
         assert skill.version == "v1"
         assert skill.task_patterns
         assert skill.allowed_tools
-        assert "text guidance only" in skill.content
-        assert "executable" in skill.content
+        assert "guidance" in skill.content.lower()
+        assert "macro" in skill.content.lower()
 
 
 def test_planner_context_selects_gazebo_skill_from_environment_receipt_identity() -> None:
@@ -2360,7 +2425,7 @@ def test_planner_context_selects_gazebo_skill_from_environment_receipt_identity(
     assert "Never switch to Oracle merely because" in selected["gazebo"]["content"]
     assert "observation or structured receipt" in selected["gazebo"]["content"]
     assert "control_spec.validated_relative_motion" in selected["gazebo"]["content"]
-    assert "control_spec.validated_pickplace_motion" in selected["gazebo"]["content"]
+    assert "model-terminal version exactly" in selected["gazebo"]["content"]
     assert "unadvertised target" in selected["gazebo"]["content"]
     assert len(context["skill_usage"]["selected_skills"]) <= 3
     assert "will not auto-expand" in context["execution_rules"]["skills"]
@@ -2402,10 +2467,11 @@ def test_specialist_skills_hold_pick_and_place_pipeline_guidance() -> None:
 
     pick = skills.get("pick")
     place = skills.get("place")
-    assert "Do not pass a non-English user phrase directly to `sam3`" in pick.content
-    assert "static post-close image is not evidence" in pick.content.lower()
-    assert "Never run grasp estimation on the receptacle" in place.content
-    assert "Call `gripper_control`" in place.content
+    assert "one concise English target phrase" in pick.content
+    assert "provider pose is the exact terminal EEF contact pose" in pick.content
+    assert "AnyPlace predicts object" in place.content
+    assert "exact release EEF" in place.content
+    assert "`gripper_control position=1`" in place.content
 
 
 def test_skill_selection_smoke_includes_relevant_markdown_guidance() -> None:
@@ -2435,9 +2501,9 @@ def test_skill_selection_smoke_includes_relevant_markdown_guidance() -> None:
     selected = context["selected_skill_guidance"]
     place = next(skill for skill in selected if skill["name"] == "place")
     assert place["source"] == "markdown:skills/place.md"
-    assert "Recommended Tool Sequence" in place["content"]
-    assert "Never run grasp estimation on the receptacle" in place["content"]
-    assert "Call `gripper_control`" in place["content"]
+    assert "## Normal flow" in place["content"]
+    assert "AnyPlace predicts object" in place["content"]
+    assert "`gripper_control position=1`" in place["content"]
     assert "move_to" in place["allowed_tools"]
     assert "anyplace" in place["allowed_tools"]
     assert "content" not in next(
@@ -3458,7 +3524,7 @@ def test_candidate_compilers_are_not_agent_tools() -> None:
     assert registry.can_execute("compile_placement_seed") is False
 
 
-def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
+def test_anyplace_requires_the_host_frozen_goal_pool_obligation() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
     _record_anygrasp_candidate_policy(memory)
@@ -3489,7 +3555,7 @@ def test_anyplace_waits_for_successful_attachment_and_lift() -> None:
 
     assert decision.action == "observe"
     first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
-    assert any("host-built pregrasp goal-pool obligation" in error for error in first_errors)
+    assert any("host-built frozen goal-pool obligation" in error for error in first_errors)
 
 
 def test_combined_pick_place_keeps_independent_placement_rgb() -> None:
@@ -3766,7 +3832,7 @@ def test_targeted_grasp_obligation_joins_selected_mask_to_current_rgbd(
     )
     assert before_pool["targeted_grasp_obligation"] is None
     memory.save_fact(
-        "pregrasp_placement_goal_pool",
+        "frozen_placement_goal_pool",
         {"status": "ready", "goal_count": 96, "scene_epoch": 0},
         source="test",
     )
@@ -4040,237 +4106,8 @@ def test_overwidth_grasps_retry_same_target_on_alternate_camera(tmp_path: Path) 
     assert "excluded_backends" not in fallback["required_parameters"]["hints"]
 
 
-def test_passive_views_exhaust_before_active_wrist_refinement(tmp_path: Path) -> None:
-    paths = {
-        name: (tmp_path / f"{name}.rgb.png", tmp_path / f"{name}.depth.png")
-        for name in ("agentview", "waist", "wrist")
-    }
-    for index, (rgb, depth) in enumerate(paths.values()):
-        rgb.write_bytes(f"rgb-{index}".encode())
-        depth.write_bytes(f"depth-{index}".encode())
-    memory = AgentMemory()
-    _record_pending_sam3_selection(
-        memory,
-        original_image_ref=str(paths["agentview"][0]),
-    )
-    memory.resolve_sam3_selection(
-        result_id="sam3-run-selection",
-        detection_id="detection_000",
-        selection_source="main_agent_vlm",
-    )
-    _record_overwidth_grasp_policy(
-        memory,
-        backend="anygrasp",
-        source_rgb=str(paths["agentview"][0]),
-        camera_frame_id="agentview",
-    )
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "tool_calls": [
-                    {
-                        "name": "sam3",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {
-                                "parameters": {
-                                    "image": str(paths["waist"][0]),
-                                    "prompt": "alphabet soup",
-                                },
-                                "outputs": {
-                                    "result_id": "sam3-waist-empty",
-                                    "prompt": "alphabet soup",
-                                    "source_image": str(paths["waist"][0]),
-                                    "detections": [],
-                                },
-                            },
-                        },
-                    }
-                ]
-            },
-        )
-    )
-    observation = _rgbd_observation(
-        task="pick alphabet soup",
-        views=[(name, *view) for name, view in paths.items()],
-        with_extrinsics=True,
-    )
-    tools = _tools_with_handlers(
-        "sam3",
-        "grasp_pose_estimate",
-        "obstacle_avoidance",
-        "move_to",
-    )
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-
-    attempts = context["grasp_candidate_policy"]["fallback_attempts"]
-    assert attempts[-1]["outcome"] == "segmentation_no_detection"
-    fallback = context["grasp_estimation_fallback_obligation"]
-    assert fallback["stage"] == "wrist_refinement_collision_check"
-    hover_pose = fallback["required_parameters"]["path"]["target_pose"]
-    assert hover_pose["grasp_stage"] == "grasp_estimation_refinement_hover"
-    assert hover_pose["xyz"] == pytest.approx([0.1, -0.2, -0.1])
-    decision = ToolCallingPlanner(StaticPlannerBackend([])).plan(
-        observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "obstacle_avoidance"
-    assert decision.parameters == fallback["required_parameters"]
-
-    def record_call(name: str, parameters: dict[str, object], outputs: dict[str, object]) -> None:
-        memory.add_action(
-            EnvAction(
-                action_type="tool_call",
-                command={
-                    "request": {
-                        "kind": "tool_call",
-                        "name": name,
-                        "parameters": parameters,
-                    },
-                    "status": "executed",
-                    "tool_calls": [
-                        {
-                            "name": name,
-                            "status": "executed",
-                            "result": {
-                                "success": True,
-                                "details": {
-                                    "parameters": parameters,
-                                    "outputs": outputs,
-                                },
-                            },
-                        }
-                    ],
-                },
-            )
-        )
-
-    record_call("obstacle_avoidance", fallback["required_parameters"], {"clear": True})
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    fallback = context["grasp_estimation_fallback_obligation"]
-    assert fallback["stage"] == "wrist_refinement_move"
-    decision = ToolCallingPlanner(StaticPlannerBackend([])).plan(
-        observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "move_to"
-    assert decision.parameters == fallback["required_parameters"]
-    assert (
-        memory.grasp_candidate_gate_error(
-            tool_name="move_to",
-            parameters=fallback["required_parameters"],
-        )
-        is None
-    )
-
-    record_call(
-        "move_to",
-        fallback["required_parameters"],
-        {"motion_summary": {"reached_target": True}},
-    )
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    fallback = context["grasp_estimation_fallback_obligation"]
-    assert fallback["stage"] == "wrist_refinement_segmentation"
-    assert fallback["required_parameters"]["image"] == str(paths["wrist"][0])
 
 
-def test_wrist_refinement_stops_when_collision_check_rejects(tmp_path: Path) -> None:
-    rgb = tmp_path / "agentview.rgb.png"
-    depth = tmp_path / "agentview.depth.png"
-    wrist_rgb = tmp_path / "wrist.rgb.png"
-    wrist_depth = tmp_path / "wrist.depth.png"
-    for path in (rgb, depth, wrist_rgb, wrist_depth):
-        path.write_bytes(path.name.encode())
-    memory = AgentMemory()
-    _record_pending_sam3_selection(memory, original_image_ref=str(rgb))
-    memory.resolve_sam3_selection(
-        result_id="sam3-run-selection",
-        detection_id="detection_000",
-        selection_source="main_agent_vlm",
-    )
-    _record_overwidth_grasp_policy(
-        memory,
-        backend="anygrasp",
-        source_rgb=str(rgb),
-        camera_frame_id="agentview",
-    )
-    observation = _rgbd_observation(
-        task="pick alphabet soup",
-        views=[
-            ("agentview", rgb, depth),
-            ("wrist", wrist_rgb, wrist_depth),
-        ],
-        with_extrinsics=True,
-    )
-    tools = _tools_with_handlers(
-        "sam3",
-        "grasp_pose_estimate",
-        "obstacle_avoidance",
-        "move_to",
-    )
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    fallback = context["grasp_estimation_fallback_obligation"]
-    assert fallback["stage"] == "wrist_refinement_collision_check"
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "obstacle_avoidance",
-                    "parameters": fallback["required_parameters"],
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "obstacle_avoidance",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {"outputs": {"clear": False}},
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    recovery = memory.grasp_estimation_recovery()
-    assert recovery["status"] == "blocked"
-    assert recovery["last_failure"]["hard_rejection"] == "collision_or_unsafe_path"
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    assert context["grasp_estimation_fallback_obligation"]["status"] == "blocked"
 
 
 def test_overwidth_grasps_switch_backend_after_all_camera_views(tmp_path: Path) -> None:
@@ -5050,141 +4887,33 @@ def test_exact_gripper_grasp_stages_use_host_dispatch(stage: str, position: int)
     assert decision.metadata["host_obligation"]["stage"] == stage
 
 
-@pytest.mark.parametrize("stage", ["hover", "align_move"])
-def test_grasp_motion_obligation_precedes_stale_target_reference(stage: str) -> None:
-    required = {
-        "target_pose": {
-            "frame": "world",
-            "xyz": [0.1, 0.2, 0.3],
-            "grasp_stage": stage,
-        }
-    }
-    decision = _host_obligation_decision(
-        {
-            "grasp_execution": {
-                "schema_version": "openeta.grasp_execution.v1",
-                "status": "required",
-                "stage": stage,
-                "required_action": {"name": "move_to", "parameters": required},
-            },
-            "target_reference_obligation": {
-                "schema_version": "openeta.target_reference_obligation.v1",
-                "required_tool": "retrieve_asset_reference",
-                "required_parameters": {
-                    "environment": "libero",
-                    "target_object": "alphabet soup",
-                    "scene_image": "stale-wrist.png",
-                },
-            },
-        },
-        tools=_tools_with_handlers("move_to", "retrieve_asset_reference"),
-    )
-
-    assert decision is not None
-    assert decision.action == "move_to"
-    assert decision.parameters == required
-    assert decision.metadata["host_obligation"]["stage"] == stage
 
 
-def test_pending_semantic_selection_precedes_grasp_hover() -> None:
-    decision = _host_obligation_decision(
-        {
-            "selection_obligation": {
-                "result_id": "wrist-sam3",
-                "reference_verification": {
-                    "decision": "match",
-                    "grasp_geometry_family": "boxed_item",
-                },
-                "candidates": [
-                    {"id": "detection_000", "rank": 0, "score": 0.97},
-                    {"id": "detection_001", "rank": 1, "score": 0.40},
-                ],
-            },
-            "grasp_execution": {
-                "schema_version": "openeta.grasp_execution.v1",
-                "status": "required",
-                "stage": "hover",
-                "required_action": {
-                    "name": "move_to",
-                    "parameters": {
-                        "target_pose": {
-                            "frame": "world",
-                            "xyz": [0.1, 0.2, 0.3],
-                            "grasp_stage": "hover",
-                        }
-                    },
-                },
-            },
-        },
-        tools=_tools_with_handlers("select_sam3_detection", "move_to"),
-    )
-
-    assert decision is not None
-    assert decision.action == "select_sam3_detection"
-    assert decision.parameters["sam3_result_id"] == "wrist-sam3"
-    assert decision.parameters["target_geometry_family"] == "boxed_item"
 
 
-def test_ambiguous_semantic_selection_blocks_host_hover_dispatch() -> None:
-    decision = _host_obligation_decision(
-        {
-            "selection_obligation": {
-                "result_id": "ambiguous-wrist-sam3",
-                "candidates": [
-                    {"id": "detection_000", "rank": 0, "score": 0.81},
-                    {"id": "detection_001", "rank": 1, "score": 0.78},
-                ],
-            },
-            "grasp_execution": {
-                "schema_version": "openeta.grasp_execution.v1",
-                "status": "required",
-                "stage": "hover",
-                "required_action": {
-                    "name": "move_to",
-                    "parameters": {
-                        "target_pose": {
-                            "frame": "world",
-                            "xyz": [0.1, 0.2, 0.3],
-                            "grasp_stage": "hover",
-                        }
-                    },
-                },
-            },
-        },
-        tools=_tools_with_handlers("select_sam3_detection", "move_to"),
-    )
-
-    assert decision is None
 
 
-def test_fixed_lift_probe_uses_host_dispatch() -> None:
-    required = {
-        "target_pose": {
-            "frame": "world",
-            "xyz": [0.1, 0.2, 0.3],
-            "source_grasp_id": "grasp_003",
-            "grasp_stage": "lift_probe",
-        }
+def test_exact_model_contact_uses_host_dispatch_without_pose_editing() -> None:
+    contact_pose = {
+        "frame": "world",
+        "xyz": [0.21, -0.03, 0.47],
+        "rotation_matrix": [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]],
+        "source_grasp_id": "grasp_003",
+        "compiled_grasp_id": "compiled-003",
+        "grasp_stage": "contact",
     }
     memory = AgentMemory()
     memory.save_fact(
         "grasp_execution",
         {
-            "schema_version": "openeta.grasp_execution.v1",
+            "schema_version": "openeta.grasp_execution.v2",
             "status": "required",
-            "stage": "probe",
+            "stage": "contact",
             "candidate_id": "grasp_003",
-            "required_action": None,
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_lift_probe",
-        {
-            "schema_version": "openeta.grasp_lift_probe.v1",
-            "status": "required",
-            "candidate_id": "grasp_003",
-            "required_parameters": required,
+            "required_action": {
+                "name": "move_to",
+                "parameters": {"target_pose": contact_pose},
+            },
         },
         source="test",
     )
@@ -5202,9 +4931,9 @@ def test_fixed_lift_probe_uses_host_dispatch() -> None:
     )
 
     assert decision.action == "move_to"
-    assert decision.parameters == required
+    assert decision.parameters == {"target_pose": contact_pose}
     assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "probe"
+    assert decision.metadata["host_obligation"]["stage"] == "contact"
 
 
 def test_articulated_probe_and_assessment_budget_use_host_dispatch() -> None:
@@ -5355,117 +5084,6 @@ def test_articulated_assessment_fail_dispatches_exact_recovery_open() -> None:
     assert decision.metadata["host_obligation"]["stage"] == "attachment_recovery"
 
 
-def test_attachment_full_lift_uses_host_dispatch_for_independent_review() -> None:
-    required = {
-        "target_pose": {
-            "frame": "world",
-            "xyz": [0.1, 0.2, 0.4],
-            "source_grasp_id": "grasp_003",
-            "grasp_stage": "full_lift",
-        }
-    }
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "required",
-            "stage": "attachment",
-            "candidate_id": "grasp_003",
-            "required_action": None,
-            "attachment_actions": {
-                "pass": {"name": "move_to", "parameters": required},
-                "fail": {"name": "gripper_control", "parameters": {"position": 1}},
-            },
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {
-            "status": "pending",
-            "verdict": "UNKNOWN",
-            "candidate_id": "grasp_003",
-        },
-        source="test",
-    )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend({"kind": "tool_call", "name": "observe", "parameters": {}})
-    )
-
-    decision = planner.plan(
-        _observation(),
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "observe"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "move_to"
-    assert decision.parameters == required
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "attachment"
-
-    empty_observation = _observation()
-    empty_observation.robot.gripper_state = {"open": False, "openness": 0.02}
-    decision = planner.plan(
-        empty_observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "gripper_control"
-    assert decision.parameters == {"position": 1}
-    assert decision.metadata["host_obligation"]["stage"] == "attachment_recovery"
-
-    ambiguous_observation = _observation()
-    ambiguous_observation.robot.gripper_state = {"open": False, "openness": 0.06}
-    decision = planner.plan(
-        ambiguous_observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "move_to"
-    assert decision.parameters == required
-    assert decision.metadata["host_obligation"]["stage"] == "attachment"
-
-    memory.save_fact(
-        "attachment_gate",
-        {
-            "status": "resolved",
-            "verdict": "PASS",
-            "candidate_id": "grasp_003",
-        },
-        source="test",
-    )
-    decision = planner.plan(
-        ambiguous_observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "move_to"
-    assert decision.parameters == required
-
-    memory.save_fact(
-        "attachment_gate",
-        {
-            "status": "pending",
-            "verdict": "UNKNOWN",
-            "candidate_id": "grasp_003",
-            "pass_action_completed": True,
-        },
-        source="test",
-    )
-    decision = planner.plan(
-        ambiguous_observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "ask_human"
-    assert decision.parameters["failure_code"] == "attachment_verification_unknown"
-    assert decision.metadata["host_obligation"]["stage"] == "attachment_verification"
 
 
 def test_unknown_native_attachment_allows_immediate_human_stop() -> None:
@@ -5509,70 +5127,6 @@ def test_unknown_native_attachment_allows_immediate_human_stop() -> None:
     assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
 
 
-@pytest.mark.parametrize("stage", ["hover", "align_move"])
-def test_host_generated_safe_grasp_motion_uses_host_dispatch(stage: str) -> None:
-    memory = AgentMemory()
-    required = {"target_pose": {"frame": "world", "xyz": [0.1, 0.2, 0.3]}}
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "required",
-            "stage": stage,
-            "candidate_id": "grasp_003",
-            "required_action": {
-                "name": "move_to",
-                "parameters": required,
-            },
-        },
-        source="test",
-    )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend({"kind": "tool_call", "name": "observe", "parameters": {}})
-    )
-
-    decision = planner.plan(
-        _observation(),
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "observe"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "move_to"
-    assert decision.parameters == required
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == stage
-
-
-def test_adjustable_contact_descend_remains_model_planned() -> None:
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "required",
-            "stage": "descend",
-            "candidate_id": "grasp_003",
-            "required_action": {
-                "name": "move_to",
-                "parameters": {"target_pose": {"frame": "world", "xyz": [0.1, 0.2, 0.3]}},
-            },
-        },
-        source="test",
-    )
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend({"kind": "tool_call", "name": "observe", "parameters": {}})
-    )
-
-    decision = planner.plan(
-        _observation(),
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "observe"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "observe"
-    assert decision.metadata["execution_model"] == "closed_loop_tool_calling"
 
 
 @pytest.mark.parametrize("failure_reason", ["empty_target_mask"])
@@ -6059,91 +5613,6 @@ def test_sparse_point_mask_uses_selected_bbox_for_roi_retry(tmp_path: Path) -> N
     )
 
 
-def test_placement_obligation_joins_independent_post_attach_observations() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick cube and place it in basket")
-    memory.save_fact("placement_object_detection", {"id": "object-mask", "mask_ref": "tmp/object-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
-    memory.save_fact("placement_region_detection", {"id": "region-mask", "mask_ref": "tmp/region-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
-    observation = _rgbd_observation(
-        task="pick cube and place it in basket",
-        views=[("placement", Path("tmp/place-rgb.png"), Path("tmp/place-depth.png"))],
-        with_extrinsics=True,
-    )
-    pre_attachment_context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("anyplace"),
-        skills=build_default_skill_registry(),
-    )
-    assert pre_attachment_context["placement_obligation"]["phase"] == "pregrasp_goal_pool"
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "completed",
-            "stage": "attached",
-            "candidate_id": "grasp_000",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {
-            "status": "resolved",
-            "verdict": "PASS",
-            "candidate_id": "grasp_000",
-            "planning_scene_revision": 2,
-        },
-        source="test",
-    )
-
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("anyplace"),
-        skills=build_default_skill_registry(),
-    )
-
-    obligation = context["placement_obligation"]
-    assert obligation["required_tool"] == "anyplace"
-    required = obligation["required_parameters"]
-    assert required["object_observation"]["object_mask"]["mask_ref"] == "tmp/object-mask.png"
-    assert required["placement_observation"]["placement_region_mask"]["mask_ref"] == "tmp/region-mask.png"
-    assert required["scene_revision"] == 2
-    assert "selected_grasp" not in str(required)
-
-    execution = memory.grasp_execution()
-    execution["attachment_mode"] = "articulated_handle"
-    memory.save_fact("grasp_execution", execution, source="test")
-    articulated_context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("anyplace"),
-        skills=build_default_skill_registry(),
-    )
-    assert articulated_context["placement_obligation"] is None
-    assert "placement_transform_obligation" not in articulated_context
-    assert articulated_context["placement_motion_guidance"] is None
-    execution.pop("attachment_mode", None)
-    memory.save_fact("grasp_execution", execution, source="test")
-
-    exact = obligation["required_parameters"]
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
-        ),
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("anyplace"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "anyplace"
-    assert decision.parameters == exact
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["tool"] == "anyplace"
 
 
 def test_new_placement_selection_clears_other_detection_from_stale_image() -> None:
@@ -6252,771 +5721,16 @@ def test_placement_selection_is_not_a_public_planner_obligation() -> None:
     )
 
 
-def test_native_held_proof_overrides_zero_gripper_openness_during_placement() -> None:
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "completed",
-            "stage": "attached",
-            "candidate_id": "grasp_005",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {
-            "status": "resolved",
-            "verdict": "PASS",
-            "candidate_id": "grasp_005",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "placement_candidate_policy",
-        {
-            "status": "active",
-            "active_candidate_id": "placement_036",
-            "compiled_placement": {
-                "hover_pose": {"frame": "world", "xyz": [0.30, -0.10, 0.64]},
-                "release_pose": {"frame": "world", "xyz": [0.30, -0.10, 0.54]},
-            },
-        },
-        source="test",
-    )
-    observation = _observation()
-    observation.robot.end_effector_pose = {"frame": "world", "xyz": [0.11, -0.04, 0.56]}
-    observation.robot.gripper_state = {"open": False, "openness": 0.0}
-    observation.metadata["physical_verification"] = {
-        "grasp_confirmed": True,
-        "verdict": "PASS",
-        "phase": "held_proven",
-    }
-
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-
-    guidance = context["placement_motion_guidance"]
-    assert guidance["stage"] == "hover"
-    assert guidance["required_parameters"]["target_pose"]["placement_stage"] == "hover"
-    assert guidance["required_parameters"]["target_pose"]["xyz"] == [0.30, -0.10, 0.64]
 
 
-@pytest.mark.skip(reason="superseded by direct compiled-hover M6 contract")
-def test_placement_motion_requires_high_hover_before_vertical_descend() -> None:
-    release_pose = {
-        "id": "place_grasp_000",
-        "source_grasp_id": "grasp_003",
-        "frame": "world",
-        "translation_xyz": [0.07, 0.30, 0.13],
-        "rotation_matrix": [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-    }
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "completed",
-            "stage": "attached",
-            "candidate_id": "grasp_003",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {"status": "resolved", "verdict": "PASS", "candidate_id": "grasp_003"},
-        source="test",
-    )
-    memory.artifacts["camera_pose_to_world_world_pose_latest"] = {
-        "source": "tool_result",
-        "value": {
-            "tool": "camera_pose_to_world",
-            "type": "world_pose",
-            "source_grasp_id": "place_grasp_000",
-            "world_pose": release_pose,
-        },
-    }
-    observation = EnvObservation(
-        task="pick can and place it in basket",
-        cameras=[],
-        robot=RobotState(end_effector_pose={"xyz": [0.13, 0.04, 0.22]}),
-    )
-    final_hover_pose = {
-        "frame": "world",
-        "xyz": [0.07, 0.30, 0.23],
-        "source_grasp_id": "grasp_003",
-        "placement_pose_id": "place_grasp_000",
-        "placement_stage": "carry_hover_final",
-    }
-    carry_distance = math.hypot(0.07 - 0.13, 0.30 - 0.04)
-    carry_ratio = 0.08 / carry_distance
-    hover_pose = {
-        "frame": "world",
-        "xyz": [
-            0.13 + (0.07 - 0.13) * carry_ratio,
-            0.04 + (0.30 - 0.04) * carry_ratio,
-            0.23,
-        ],
-        "source_grasp_id": "grasp_003",
-        "placement_pose_id": "place_grasp_000",
-        "placement_stage": "carry_hover",
-    }
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            [
-                {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": release_pose},
-                },
-                {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": hover_pose},
-                },
-            ]
-        ),
-        max_validation_retries=1,
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "move_to"
-    assert decision.parameters == {"target_pose": hover_pose}
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "carry_hover"
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to"),
-        skills=build_default_skill_registry(),
-    )
-    assert context["placement_motion_guidance"]["stage"] == "carry_hover"
-    assert context["placement_motion_guidance"]["safe_hover_pose"] == hover_pose
-    assert context["placement_motion_guidance"]["final_hover_pose"] == final_hover_pose
-    assert context["placement_motion_guidance"]["carry_max_step_m"] == 0.08
-    assert context["placement_motion_guidance"]["release_pose"]["translation_xyz"] == [
-        0.07,
-        0.30,
-        0.13 + 0.08,
-    ]
-    assert context["placement_motion_guidance"]["anyplace_reference_pose"] == release_pose
-
-    observation.robot.end_effector_pose = {"xyz": [0.13, 0.04, 0.15]}
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to"),
-        skills=build_default_skill_registry(),
-    )
-    assert context["placement_motion_guidance"]["stage"] == "carry_raise"
-    assert context["placement_motion_guidance"]["safe_hover_pose"]["xyz"] == [
-        0.13,
-        0.04,
-        0.23,
-    ]
-
-    observation.robot.end_effector_pose = {"xyz": final_hover_pose["xyz"]}
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to"),
-        skills=build_default_skill_registry(),
-    )
-    assert context["placement_motion_guidance"]["stage"] == "descend"
-    assert context["placement_motion_guidance"]["safe_hover_pose"]["xyz"] == pytest.approx(
-        [0.07, 0.30, 0.21]
-    )
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "move_to"
-    assert decision.parameters["target_pose"]["xyz"] == pytest.approx([0.07, 0.30, 0.21])
-    assert decision.metadata["host_obligation"]["stage"] == "descend"
-
-    observation.robot.end_effector_pose = {"xyz": [0.07, 0.30, 0.13 + 0.08]}
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert context["placement_motion_guidance"]["stage"] == "release"
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "move_to"
-    assert decision.parameters["target_pose"]["xyz"] == pytest.approx([0.07, 0.30, 0.21])
-    assert decision.metadata["host_obligation"]["stage"] == "release"
-
-    observation.robot.gripper_state = {"open": False, "openness": 0.02}
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "gripper_control"
-    assert decision.parameters == {"position": 1}
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "placement_drop_detected"
 
 
-def test_successful_placement_descend_is_immediately_release_ready() -> None:
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "completed",
-            "stage": "attached",
-            "candidate_id": "grasp_003",
-        },
-        source="test",
-    )
-    descend_pose = {
-        "frame": "world",
-        "xyz": [0.07, 0.30, 0.21],
-        "source_grasp_id": "grasp_003",
-        "placement_pose_id": "place_grasp_000",
-        "placement_stage": "descend",
-    }
-
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": descend_pose},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "target reached"},
-                    }
-                ],
-            },
-        )
-    )
-
-    release = memory.placement_release()
-    assert release["status"] == "ready"
-    assert release["arrival_stage"] == "descend"
-    assert release["release_pose"]["placement_stage"] == "release"
 
 
-def test_collision_free_descend_stalled_above_receptacle_is_release_ready() -> None:
-    memory = AgentMemory()
-    descend_pose = {
-        "frame": "world",
-        "xyz": [-0.0727, 0.2470, 0.5786],
-        "source_grasp_id": "grasp_003",
-        "placement_pose_id": "place_grasp_000",
-        "placement_stage": "descend",
-    }
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": descend_pose},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {
-                                "outputs": {
-                                    "motion_summary": {
-                                        "reached_target": False,
-                                        "collision": {"detected": False},
-                                        "end": {"xyz": [-0.0562, 0.2611, 0.6201]},
-                                    }
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    release = memory.placement_release()
-    assert release["status"] == "ready"
-    assert release["arrival_stage"] == "descend_near_receptacle"
-    assert release["release_pose"]["xyz"] == [-0.0562, 0.2611, 0.6201]
-    assert release["release_pose"]["adaptive_release"] == {
-        "reason": "controller_stalled_safely_above_receptacle",
-        "xy_error_m": pytest.approx(0.021704, abs=1e-6),
-        "height_above_requested_m": pytest.approx(0.0415, abs=1e-6),
-    }
 
 
-def test_detachment_over_receptacle_completes_subgoal_without_candidate_fallback() -> None:
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_candidate_policy",
-        {
-            "status": "accepted",
-            "active_rank": 0,
-            "active_candidate": {"id": "grasp_003"},
-            "candidates": [{"id": "grasp_003"}, {"id": "grasp_004"}],
-            "target_detection": {
-                "id": "detection_000",
-                "label": "alphabet soup can",
-                "target_prompt": "alphabet soup",
-            },
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "selected_sam3_detection",
-        {"id": "detection_000", "target_prompt": "alphabet soup"},
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "completed",
-            "stage": "attached",
-            "candidate_id": "grasp_003",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {"status": "resolved", "verdict": "PASS", "candidate_id": "grasp_003"},
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_lift_probe",
-        {"status": "completed", "candidate_id": "grasp_003"},
-        source="test",
-    )
-    memory.artifacts["anyplace_placement_candidates_latest"] = {"value": {}}
-    memory.artifacts["camera_pose_to_world_world_pose_latest"] = {"value": {}}
-
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 1},
-                },
-                "metadata": {
-                    "planner_metadata": {
-                        "host_obligation": {
-                            "schema_version": "openeta.placement_motion_guidance.v1",
-                            "stage": "placement_drop_detected",
-                            "candidate_id": "grasp_003",
-                            "placement_pose_id": "place_grasp_000",
-                        }
-                    }
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "gripper_control",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "content": "empty gripper normalized open",
-                            "details": {
-                                "supervision": {
-                                    "allowed": True,
-                                    "reason": "The target detached in the basket.",
-                                    "details": {
-                                        "grasp_outcome": "fail",
-                                        "candidate_id": "grasp_003",
-                                    },
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    release = memory.placement_release()
-    assert release["status"] == "retreated"
-    assert release["release_mode"] == "detached_over_receptacle"
-    assert memory.grasp_candidate_policy() is None
-    assert memory.selected_sam3_detection() is None
-    assert memory.grasp_execution() is None
-    assert memory.attachment_gate() is None
-    completed = memory.facts["completed_placement_subgoals"]["value"]["items"]
-    assert completed[-1]["target_object"] == "alphabet soup"
-    assert completed[-1]["release_mode"] == "detached_over_receptacle"
-    assert "anyplace_placement_candidates_latest" not in memory.artifacts
-    assert "camera_pose_to_world_world_pose_latest" not in memory.artifacts
 
 
-def test_successful_placement_release_clears_stale_attachment_state() -> None:
-    memory = AgentMemory()
-    memory.save_fact(
-        "anygrasp_candidate_policy",
-        {
-            "status": "accepted",
-            "active_candidate": {"id": "grasp_003"},
-            "accepted_candidate": {"id": "grasp_003"},
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "completed",
-            "stage": "attached",
-            "candidate_id": "grasp_003",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "attachment_gate",
-        {"status": "resolved", "verdict": "PASS", "candidate_id": "grasp_003"},
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_lift_probe",
-        {"status": "completed", "candidate_id": "grasp_003"},
-        source="test",
-    )
-    memory.artifacts["anyplace_placement_candidates_latest"] = {"value": {}}
-    memory.artifacts["camera_pose_to_world_world_pose_latest"] = {"value": {}}
-    release_pose = {
-        "frame": "world",
-        "xyz": [0.07, 0.30, 0.21],
-        "placement_candidate_id": "placement_000",
-        "placement_pose_id": "place_grasp_000",
-        "placement_stage": "release",
-    }
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": release_pose},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "target reached"},
-                    }
-                ],
-            },
-        )
-    )
-
-    assert memory.placement_release()["status"] == "ready"
-    assert memory.attachment_gate()["verdict"] == "PASS"
-    ready_context = build_tool_context(
-        observation=EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": release_pose["xyz"]},
-                gripper_state={"open": False, "openness": 0.7},
-            ),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert ready_context["placement_release_obligation"] == {
-        "schema_version": "openeta.placement_release_obligation.v1",
-        "status": "required",
-        "stage": "release",
-        "required_action": {
-            "name": "gripper_control",
-            "parameters": {"position": 1},
-        },
-        "rule": (
-            "The retained grasp reached the derived release pose. Open the "
-            "gripper immediately; do not rerun target localization or insert "
-            "another placement motion."
-        ),
-    }
-    planner = ToolCallingPlanner(StaticPlannerBackend([]))
-    decision = planner.plan(
-        EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": release_pose["xyz"]},
-                gripper_state={"open": False, "openness": 0.7},
-            ),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "gripper_control"
-    assert decision.parameters == {"position": 1}
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "release"
-
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 1},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "gripper_control",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "content": "gripper opened",
-                            "details": {
-                                "environment_receipt": {
-                                    "placement_verification": {
-                                        "placement_confirmed": True,
-                                        "verdict": "PASS",
-                                        "evidence": {
-                                            "stable_duration_s": 0.5,
-                                            "terminal_drift_m": 0.0,
-                                        },
-                                    }
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    assert memory.placement_release()["status"] == "released"
-    assert memory.anygrasp_candidate_policy() is None
-    assert memory.grasp_lift_probe() is None
-    assert memory.grasp_execution() is None
-    assert memory.attachment_gate() is None
-    assert "anyplace_placement_candidates_latest" not in memory.artifacts
-    assert "camera_pose_to_world_world_pose_latest" not in memory.artifacts
-    context = build_tool_context(
-        observation=EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": release_pose["xyz"]},
-                gripper_state={"open": True, "openness": 1.0},
-            ),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-    assert context["placement_release"]["status"] == "released"
-    assert context["placement_motion_guidance"] is None
-    retreat_pose = {
-        **release_pose,
-        "xyz": [0.07, 0.30, 0.31],
-        "compiled_eef_pose": True,
-        "placement_stage": "retreat",
-        "purpose": "placement",
-    }
-    assert context["placement_release_obligation"] == {
-        "schema_version": "openeta.placement_release_obligation.v1",
-        "status": "required",
-        "stage": "retreat",
-        "required_action": {
-            "name": "move_to",
-            "parameters": {"target_pose": retreat_pose},
-        },
-        "retreat_distance_m": 0.10,
-        "rule": (
-            "Retreat vertically with the gripper open before judging placement. "
-            "Use the resulting same-episode environment receipt as official reward evidence."
-        ),
-    }
-    decision = planner.plan(
-        EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": release_pose["xyz"]},
-                gripper_state={"open": True, "openness": 1.0},
-            ),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "close_simulator_env"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "move_to"
-    assert decision.parameters == {"target_pose": retreat_pose}
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "retreat"
-
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": retreat_pose},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {
-                                "outputs": {
-                                    "motion_summary": {"reached_target": True},
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-    assert memory.placement_release()["status"] == "retreated"
-    context = build_tool_context(
-        observation=EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": retreat_pose["xyz"]},
-                gripper_state={"open": True, "openness": 1.0},
-            ),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers("move_to"),
-        skills=build_default_skill_registry(),
-    )
-    assert context["placement_release_obligation"] == {
-        "schema_version": "openeta.placement_release_obligation.v1",
-        "status": "required",
-        "stage": "close",
-        "required_action": {
-            "name": "close_simulator_env",
-            "parameters": {},
-        },
-        "rule": (
-            "The detached object passed native stability and in-zone checks and the "
-            "open gripper retreated. Close this simulator environment exactly once "
-            "before reporting completion."
-        ),
-    }
-    decision = planner.plan(
-        EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": retreat_pose["xyz"]},
-                gripper_state={"open": True, "openness": 1.0},
-            ),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers("close_simulator_env"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "close_simulator_env"
-    assert decision.parameters == {}
-    assert decision.metadata["host_obligation"]["stage"] == "close"
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "close_simulator_env",
-                    "parameters": {},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "close_simulator_env",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "content": "Simulator environment closed.",
-                        },
-                    }
-                ],
-            },
-        )
-    )
-    assert memory.placement_release() is None
-    completion = memory.task_completion_evidence()
-    assert completion is not None
-    assert completion["status"] == "proven"
-    assert completion["outcome"] == "success"
-    assert completion["environment_closed"] is True
-    assert completion["placement_verification"]["verdict"] == "PASS"
-
-    context = build_tool_context(
-        observation=EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers(),
-        skills=build_default_skill_registry(),
-    )
-    assert context["task_completion_evidence"] == completion
-    decision = planner.plan(
-        EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[],
-            robot=RobotState(),
-        ),
-        memory=memory,
-        tools=_tools_with_handlers(),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action_type == "response"
-    assert decision.action == "task_complete"
-    assert decision.parameters["success"] is True
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "task_complete"
 
 
 @pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])
@@ -7026,7 +5740,7 @@ def test_close_does_not_prove_task_completion_without_placement_pass(verdict: st
         "placement_release",
         {
             "schema_version": "openeta.placement_release.v1",
-            "status": "retreated",
+            "status": "released",
             "candidate_id": "placement_000",
             "placement_pose_id": "place_grasp_000",
             "placement_verification": {
@@ -7062,158 +5776,12 @@ def test_close_does_not_prove_task_completion_without_placement_pass(verdict: st
     assert memory.task_completion_evidence() is None
 
 
-def test_wrist_alignment_obligation_joins_current_geometry(tmp_path: Path) -> None:
-    selected_rgb = tmp_path / "selected" / "wrist.rgb.png"
-    current_rgb = tmp_path / "current" / "wrist.rgb.png"
-    current_depth = tmp_path / "current" / "wrist.depth.png"
-    selected_rgb.parent.mkdir()
-    current_rgb.parent.mkdir()
-    selected_rgb.write_bytes(b"same-wrist-scene")
-    current_rgb.write_bytes(b"same-wrist-scene")
-    current_depth.write_bytes(b"depth")
-    memory = AgentMemory()
-    _record_pending_sam3_selection(memory, original_image_ref=str(selected_rgb))
-    memory.resolve_sam3_selection(
-        result_id="sam3-run-selection",
-        detection_id="detection_000",
-        selection_source="main_agent_vlm",
-    )
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "required",
-            "stage": "align",
-            "compiled_grasp": {"schema_version": "openeta.compiled_grasp_seed.v1"},
-        },
-        source="test",
-    )
-    memory.save_fact("scene_epoch", {"epoch": 3}, source="test")
-    observation = EnvObservation(
-        task="pick alphabet soup",
-        cameras=[
-            CameraFrame(
-                frame_id="wrist",
-                rgb=[[[0, 0, 0]]],
-                depth=[[1.0]],
-                intrinsics={"fx": 100.0, "fy": 100.0, "cx": 0.5, "cy": 0.5, "scale": 1000},
-                extrinsics={
-                    "pos": [0.0, 0.0, 0.5],
-                    "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-                },
-            )
-        ],
-        robot=RobotState(end_effector_pose={"xyz": [0.1, 0.2, 0.3]}),
-        metadata={
-            "image_artifacts": [
-                {"kind": "rgb", "frame_id": "wrist", "path": str(current_rgb)},
-                {"kind": "depth", "frame_id": "wrist", "path": str(current_depth)},
-            ]
-        },
-    )
-
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("compute_wrist_alignment"),
-        skills=build_default_skill_registry(),
-    )
-
-    required = context["wrist_alignment_obligation"]["required_parameters"]
-    assert required["target_mask"] == "tmp/mask_000.png"
-    assert required["depth"] == str(current_depth)
-    assert required["scene_epoch"] == 3
-    assert required["desired_pixel_xy"] == [0.5, 0.5]
-    assert required["current_eef_pose"]["xyz"] == [0.1, 0.2, 0.3]
-
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
-        )
-    )
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("compute_wrist_alignment"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "compute_wrist_alignment"
-    assert decision.parameters == required
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-
-
-def test_wrist_alignment_accepts_role_tagged_behavior_camera(tmp_path: Path) -> None:
-    rgb = tmp_path / "wrist-right.png"
-    depth = tmp_path / "wrist-right-depth.png"
-    mask = tmp_path / "mask.png"
-    rgb.write_bytes(b"rgb")
-    depth.write_bytes(b"depth")
-    mask.write_bytes(b"mask")
-    observation = EnvObservation(
-        task="pick object",
-        cameras=[
-            CameraFrame(
-                frame_id="wrist_right",
-                role="wrist_primary",
-                rgb=[[[0, 0, 0]]],
-                depth=[[1.0]],
-                intrinsics={
-                    "fx": 100.0,
-                    "fy": 100.0,
-                    "cx": 0.5,
-                    "cy": 0.5,
-                    "scale": 1000,
-                },
-                extrinsics={
-                    "pos": [0.0, 0.0, 0.5],
-                    "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-                },
-            )
-        ],
-        robot=RobotState(end_effector_pose={"xyz": [0.1, 0.2, 0.3]}),
-        metadata={},
-    )
-    artifacts = [
-        {
-            "kind": "rgb",
-            "frame_id": "wrist_right",
-            "role": "wrist_primary",
-            "path": str(rgb),
-        },
-        {
-            "kind": "depth",
-            "frame_id": "wrist_right",
-            "role": "wrist_primary",
-            "path": str(depth),
-        },
-    ]
-
-    obligation = _wrist_alignment_obligation(
-        observation,
-        camera_artifacts=artifacts,
-        selected={
-            "source_image": str(rgb),
-            "mask_ref": str(mask),
-            "result_id": "sam-behavior",
-            "id": "detection-0",
-        },
-        execution={
-            "stage": "align",
-            "compiled_grasp": {"schema_version": "openeta.compiled_grasp_seed.v1"},
-        },
-        scene_epoch=2,
-    )
-
-    assert obligation is not None
-    assert obligation["required_parameters"]["depth"] == str(depth)
-    assert obligation["required_parameters"]["scene_epoch"] == 2
-
-
 def test_motion_reconciliation_preempts_pending_host_grasp_move() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick alphabet soup")
     target_pose = {
         "frame": "world",
-        "grasp_stage": "hover",
+        "grasp_stage": "contact",
         "source_grasp_id": "grasp_007",
         "xyz": [0.1, 0.2, 0.3],
     }
@@ -7222,7 +5790,7 @@ def test_motion_reconciliation_preempts_pending_host_grasp_move() -> None:
         {
             "schema_version": "openeta.grasp_execution.v1",
             "status": "required",
-            "stage": "hover",
+            "stage": "contact",
             "candidate_id": "grasp_007",
             "required_action": {
                 "name": "move_to",
@@ -7260,324 +5828,16 @@ def test_motion_reconciliation_preempts_pending_host_grasp_move() -> None:
     assert decision.metadata["host_obligation"]["unknown_tool"] == "move_to"
 
 
-def test_stale_prehover_wrist_mask_dispatches_current_wrist_sam3(tmp_path: Path) -> None:
-    stale_rgb = tmp_path / "prehover" / "wrist.rgb.png"
-    current_rgb = tmp_path / "hover" / "wrist.rgb.png"
-    stale_rgb.parent.mkdir()
-    current_rgb.parent.mkdir()
-    stale_rgb.write_bytes(b"prehover-wrist-scene")
-    current_rgb.write_bytes(b"current-hover-wrist-scene")
-    memory = AgentMemory()
-    _record_pending_sam3_selection(memory, original_image_ref=str(stale_rgb))
-    memory.resolve_sam3_selection(
-        result_id="sam3-run-selection",
-        detection_id="detection_000",
-        selection_source="main_agent_vlm",
-    )
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "required",
-            "stage": "align",
-            "compiled_grasp": {"schema_version": "openeta.compiled_grasp_seed.v1"},
-        },
-        source="test",
-    )
-    observation = _observation()
-    observation.metadata["image_artifacts"] = [
-        {
-            "kind": "rgb",
-            "frame_id": "wrist_camera_optical_frame",
-            "role": "wrist",
-            "path": str(current_rgb),
-        }
-    ]
-    tools = _tools_with_handlers("sam3", "compute_wrist_alignment")
-
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-
-    obligation = context["wrist_segmentation_obligation"]
-    assert obligation["required_parameters"] == {
-        "image": str(current_rgb),
-        "prompt": "alphabet soup",
-    }
-    assert context["wrist_alignment_obligation"] is None
-
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
-        )
-    )
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "sam3"
-    assert decision.parameters == obligation["required_parameters"]
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
-    assert decision.metadata["host_obligation"]["stage"] == "wrist_segmentation"
 
 
-def test_wrist_align_without_retained_selection_accepts_current_wrist_text_sam3(
-    tmp_path: Path,
-) -> None:
-    wrist = tmp_path / "current-wrist.png"
-    wrist.write_bytes(b"current-wrist-scene")
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "required",
-            "stage": "align",
-            "compiled_grasp": {"schema_version": "openeta.compiled_grasp_seed.v1"},
-        },
-        source="test",
-    )
-    observation = _observation()
-    observation.metadata["image_artifacts"] = [
-        {
-            "kind": "rgb",
-            "frame_id": "wrist_camera_optical_frame",
-            "role": "wrist",
-            "path": str(wrist),
-        }
-    ]
-    request = {
-        "image": str(wrist),
-        "mode": "text",
-        "prompt": "red block target object",
-    }
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "tool_call", "name": "sam3", "parameters": request}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("sam3", "compute_wrist_alignment"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "sam3"
-    assert decision.parameters == request
 
 
-def test_top_camera_selection_does_not_block_current_wrist_sam3(tmp_path: Path) -> None:
-    top_rgb = tmp_path / "prehover" / "top.rgb.png"
-    current_wrist_rgb = tmp_path / "hover" / "wrist.rgb.png"
-    top_rgb.parent.mkdir()
-    current_wrist_rgb.parent.mkdir()
-    top_rgb.write_bytes(b"top-camera-target")
-    current_wrist_rgb.write_bytes(b"current-wrist-scene")
-    memory = AgentMemory()
-    memory.save_fact(
-        "selected_sam3_detection",
-        {
-            "result_id": "top-camera-result",
-            "id": "detection_000",
-            "mask_ref": "top-mask.png",
-            "source_image": str(top_rgb),
-            # A point-prompt selection need not retain a reusable text prompt.
-            "segmentation_mode": "point_prompt",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "status": "required",
-            "stage": "align",
-            "compiled_grasp": {"schema_version": "openeta.compiled_grasp_seed.v1"},
-        },
-        source="test",
-    )
-    observation = _observation()
-    observation.metadata["image_artifacts"] = [
-        {
-            "kind": "rgb",
-            "frame_id": "wrist_camera_optical_frame",
-            "role": "wrist",
-            "path": str(current_wrist_rgb),
-        }
-    ]
-    request = {
-        "image": str(current_wrist_rgb),
-        "mode": "text",
-        "prompt": "red square target object",
-    }
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "tool_call", "name": "sam3", "parameters": request}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("sam3", "compute_wrist_alignment"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "sam3"
-    assert decision.parameters == request
-    assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
 
 
-def test_empty_wrist_sam3_requires_canonical_reference_fallback(tmp_path: Path) -> None:
-    previous_wrist = tmp_path / "previous" / "wrist.rgb.png"
-    current_wrist = tmp_path / "current" / "wrist.rgb.png"
-    previous_wrist.parent.mkdir()
-    current_wrist.parent.mkdir()
-    previous_wrist.write_bytes(b"same-wrist-scene")
-    current_wrist.write_bytes(b"same-wrist-scene")
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {"status": "required", "stage": "align"},
-        source="test",
-    )
-    memory.save_fact(
-        "target_asset_reference",
-        {"environment": "libero", "target_object": "alphabet_soup"},
-        source="test",
-    )
-    memory.save_fact(
-        "sam3_no_detection",
-        {"result_id": "empty-wrist", "source_image": str(previous_wrist)},
-        source="test",
-    )
-    observation = _observation()
-    observation.metadata["image_artifacts"] = [
-        {"kind": "rgb", "frame_id": "wrist", "path": str(current_wrist)}
-    ]
-    expected = {
-        "environment": "libero",
-        "target_object": "alphabet_soup",
-        "scene_image": str(current_wrist),
-    }
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("sam3", "retrieve_asset_reference"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "retrieve_asset_reference"
-    assert decision.parameters == expected
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
 
 
-def test_empty_wrist_sam3_derives_reference_without_prior_asset_lookup(
-    tmp_path: Path,
-) -> None:
-    wrist = tmp_path / "wrist.rgb.png"
-    wrist.write_bytes(b"current-wrist-scene")
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {"status": "required", "stage": "align"},
-        source="test",
-    )
-    memory.save_fact(
-        "sam3_no_detection",
-        {
-            "result_id": "empty-wrist",
-            "source_image": str(wrist),
-            "target_prompt": "salad dressing",
-        },
-        source="sam3",
-    )
-    observation = _observation()
-    observation.task = "pick up the salad dressing and place it in the basket"
-    observation.metadata = {
-        "env_id": "openeta/libero_libero_object_task2-v0",
-        "image_artifacts": [{"kind": "rgb", "frame_id": "wrist", "path": str(wrist)}],
-    }
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
-        )
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("sam3", "retrieve_asset_reference"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "retrieve_asset_reference"
-    assert decision.parameters == {
-        "environment": "openeta/libero_libero_object_task2-v0",
-        "target_object": "salad dressing",
-        "scene_image": str(wrist),
-    }
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
 
 
-def test_wrist_align_allows_molmopoint_when_reference_cannot_be_derived(
-    tmp_path: Path,
-) -> None:
-    wrist = tmp_path / "wrist.rgb.png"
-    wrist.write_bytes(b"current-wrist-scene")
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {"status": "required", "stage": "align"},
-        source="test",
-    )
-    memory.save_fact(
-        "sam3_no_detection",
-        {"result_id": "empty-wrist", "source_image": str(wrist)},
-        source="sam3",
-    )
-    observation = _observation()
-    observation.metadata = {
-        "image_artifacts": [{"kind": "rgb", "frame_id": "wrist", "path": str(wrist)}]
-    }
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {
-                "kind": "tool_call",
-                "name": "molmopoint",
-                "parameters": {
-                    "images": [str(wrist)],
-                    "prompt": "Point to the target object in Image 1.",
-                },
-            }
-        )
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("molmopoint", "sam3", "compute_wrist_alignment"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "molmopoint"
-    assert (
-        memory.grasp_execution_gate_error(
-            tool_name="molmopoint",
-            parameters=decision.parameters,
-        )
-        is None
-    )
 
 
 def test_empty_initial_sam3_requires_exact_task_reference_before_prompt_broadening(
@@ -8023,170 +6283,10 @@ def test_molmopoint_fallback_budget_uses_scene_epoch_not_render_path(
     assert failure["molmopoint_attempts"] == 1
 
 
-def test_pending_wrist_reference_localization_suppresses_duplicate_retrieve(
-    tmp_path: Path,
-) -> None:
-    wrist = tmp_path / "wrist.rgb.png"
-    wrist.write_bytes(b"wrist-scene")
-    points = [{"x": 12.0, "y": 18.0, "label": 1}]
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {"status": "required", "stage": "align"},
-        source="test",
-    )
-    memory.save_fact(
-        "target_asset_reference",
-        {"environment": "libero", "target_object": "alphabet_soup"},
-        source="test",
-    )
-    memory.save_fact(
-        "sam3_no_detection",
-        {"result_id": "empty-wrist", "source_image": str(wrist)},
-        source="test",
-    )
-    memory.save_fact(
-        "pending_reference_localization",
-        {
-            "scene_image": str(wrist),
-            "target_object": "alphabet_soup",
-            "positive_points": points,
-            "required_parameter": "positive_points",
-            "required_next_tool": "sam3",
-        },
-        source="retrieve_asset_reference",
-    )
-    observation = _observation()
-    observation.metadata["image_artifacts"] = [
-        {"kind": "rgb", "frame_id": "wrist", "path": str(wrist)}
-    ]
-
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("sam3", "retrieve_asset_reference"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert context["wrist_reference_obligation"] is None
-    assert context["reference_localization_obligation"]["positive_points"] == points
-
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
-        )
-    )
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("sam3", "retrieve_asset_reference"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "sam3"
-    assert decision.parameters == {"image": str(wrist), "positive_points": points}
-    assert decision.metadata["execution_model"] == "host_obligation_dispatch"
 
 
-def test_wrist_reference_uses_remaining_exact_multi_object_task_name(
-    tmp_path: Path,
-) -> None:
-    wrist = tmp_path / "wrist.rgb.png"
-    wrist.write_bytes(b"wrist-scene")
-    memory = AgentMemory()
-    memory.save_fact(
-        "grasp_execution",
-        {"status": "required", "stage": "align"},
-        source="test",
-    )
-    memory.save_fact(
-        "sam3_no_detection",
-        {
-            "result_id": "empty-wrist",
-            "source_image": str(wrist),
-            "target_prompt": "tomato sauce bottle",
-        },
-        source="test",
-    )
-    memory.save_fact(
-        "completed_placement_subgoals",
-        {"items": [{"target_object": "alphabet soup can"}]},
-        source="test",
-    )
-    observation = _observation()
-    observation.task = "put both the alphabet soup and the tomato sauce in the basket"
-    observation.metadata = {
-        "env_id": "openeta/libero_libero_10_task0-v0",
-        "image_artifacts": [{"kind": "rgb", "frame_id": "wrist", "path": str(wrist)}],
-    }
-
-    context = build_tool_context(
-        observation=observation,
-        memory=memory,
-        tools=_tools_with_handlers("retrieve_asset_reference"),
-        skills=build_default_skill_registry(),
-    )
-
-    obligation = context["wrist_reference_obligation"]
-    assert obligation["required_parameters"] == {
-        "environment": "openeta/libero_libero_10_task0-v0",
-        "target_object": "tomato sauce",
-        "scene_image": str(wrist),
-    }
 
 
-def test_failed_wrist_reference_localization_advances_anygrasp_candidate() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick alphabet soup")
-    _record_anygrasp_candidate_policy(memory)
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "required",
-            "stage": "align",
-            "candidate_id": "grasp_000",
-            "required_action": None,
-        },
-        source="test",
-    )
-
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "retrieve_asset_reference",
-                    "parameters": {
-                        "environment": "libero",
-                        "target_object": "alphabet soup",
-                        "scene_image": "/tmp/wrist.png",
-                    },
-                },
-                "status": "failed",
-                "tool_calls": [
-                    {
-                        "name": "retrieve_asset_reference",
-                        "status": "failed",
-                        "result": {
-                            "success": False,
-                            "content": "Object memory localization failed.",
-                            "details": {
-                                "outputs": {"reason": "object_memory_localization_failed"},
-                                "diagnostics": [{"code": "object_memory_localization_failed"}],
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    policy = memory.anygrasp_candidate_policy()
-    assert policy["active_candidate"]["id"] == "grasp_001"
-    assert policy["active_rank"] == 1
-    assert policy["rejected_candidates"][0]["source"] == ("wrist_reference_localization_rejected")
-    assert memory.grasp_execution() is None
 
 
 def test_anyplace_host_dispatches_exact_independent_observation_packet() -> None:
@@ -8570,7 +6670,7 @@ def test_failed_pre_safety_check_advances_anygrasp_candidate() -> None:
         {
             "schema_version": "openeta.grasp_execution.v1",
             "status": "required",
-            "stage": "hover",
+            "stage": "contact",
             "candidate_id": "grasp_000",
             "scene_epoch": 0,
             "required_action": {"name": "move_to", "parameters": required_parameters},
@@ -8588,64 +6688,6 @@ def test_failed_pre_safety_check_advances_anygrasp_candidate() -> None:
     assert policy["rejected_candidates"][0]["source"] == "safety_check_rejected"
 
 
-@pytest.mark.parametrize("review_decision", ["reject", "abstain"])
-def test_independent_precontact_review_denial_advances_anygrasp_candidate(
-    review_decision: str,
-) -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick alphabet soup")
-    _record_anygrasp_candidate_policy(memory)
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {
-                        "target_pose": {
-                            "frame": "world",
-                            "grasp_stage": "hover",
-                            "source_grasp_id": "grasp_000",
-                            "xyz": [0.1, 0.2, 0.3],
-                        }
-                    },
-                },
-                "status": "failed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "failed",
-                        "result": {
-                            "success": False,
-                            "content": "The hover targets the milk carton.",
-                            "details": {
-                                "outputs": {
-                                    "supervision": {
-                                        "allowed": False,
-                                        "source": "independent_reviewer",
-                                        "reason": "The hover targets the milk carton.",
-                                        "details": {
-                                            "decision": review_decision,
-                                            "grasp_outcome": "not_assessed",
-                                            "candidate_id": "",
-                                        },
-                                    }
-                                },
-                                "diagnostics": [{"code": "supervision_denied"}],
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    policy = memory.anygrasp_candidate_policy()
-    assert policy["active_candidate"]["id"] == "grasp_001"
-    assert policy["active_rank"] == 1
-    assert policy["rejected_candidates"][0]["source"] == ("independent_precontact_review_rejected")
-    assert policy["rejected_candidates"][0]["reason"] == ("The hover targets the milk carton.")
 
 
 def test_structured_uncertain_review_exhaustion_triggers_refinement() -> None:
@@ -8661,7 +6703,7 @@ def test_structured_uncertain_review_exhaustion_triggers_refinement() -> None:
         parameters = {
             "target_pose": {
                 "frame": "world",
-                "grasp_stage": "hover",
+                "grasp_stage": "contact",
                 "source_grasp_id": active["id"],
                 "xyz": [0.1, 0.2, 0.3],
             }
@@ -8715,94 +6757,6 @@ def test_structured_uncertain_review_exhaustion_triggers_refinement() -> None:
     assert recovery["trigger_class"] == "uncertain_review"
 
 
-def test_host_descend_review_abstention_advances_anygrasp_candidate() -> None:
-    """Regression for the Object0 pre-contact abstention deadlock."""
-
-    memory = AgentMemory()
-    memory.start_session(task="pick alphabet soup")
-    _record_anygrasp_candidate_policy(memory)
-    required_parameters = {
-        "target_pose": {
-            "frame": "world",
-            "grasp_stage": "contact",
-            "source_grasp_id": "grasp_000",
-            "xyz": [0.1, 0.2, 0.1],
-        }
-    }
-    memory.save_fact(
-        "grasp_execution",
-        {
-            "schema_version": "openeta.grasp_execution.v1",
-            "status": "required",
-            "stage": "descend",
-            "candidate_id": "grasp_000",
-            "required_action": {
-                "name": "move_to",
-                "parameters": required_parameters,
-            },
-        },
-        source="test",
-    )
-
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": required_parameters,
-                },
-                "status": "failed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "failed",
-                        "result": {
-                            "success": False,
-                            "content": (
-                                "The target appears laterally offset, so geometric "
-                                "support is ambiguous."
-                            ),
-                            "details": {
-                                "outputs": {
-                                    "supervision": {
-                                        "allowed": False,
-                                        "source": "independent_reviewer",
-                                        "reason": (
-                                            "The target appears laterally offset, so "
-                                            "geometric support is ambiguous."
-                                        ),
-                                        "details": {
-                                            "decision": "abstain",
-                                            "grasp_outcome": "not_assessed",
-                                            "candidate_id": "",
-                                        },
-                                    }
-                                },
-                                "diagnostics": [
-                                    {
-                                        "code": "supervision_denied",
-                                        "source": "independent_reviewer",
-                                    }
-                                ],
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    policy = memory.anygrasp_candidate_policy()
-    assert policy["candidate_attempt_count"] == 1
-    assert policy["active_candidate"]["id"] == "grasp_001"
-    assert policy["active_rank"] == 1
-    assert policy["rejected_candidates"][0]["source"] == (
-        "independent_host_stage_review_rejected"
-    )
-    assert policy["last_rejection"]["grasp_stage"] == "descend"
-    assert memory.grasp_execution() is None
 
 
 def test_host_close_review_rejection_is_attributed_to_active_candidate() -> None:
@@ -9138,7 +7092,7 @@ def test_motion_rejection_requires_fresh_observation_for_alternate_view_reestima
         {
             "schema_version": "openeta.grasp_execution.v1",
             "status": "required",
-            "stage": "descend",
+            "stage": "contact",
             "candidate_id": active["id"],
             "required_action": {
                 "name": "move_to",
@@ -9263,411 +7217,12 @@ def test_successful_motion_accepts_policy_and_releases_later_motion_gate() -> No
     )
 
 
-def test_independent_failed_grasp_outcome_advances_accepted_candidate() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick cube")
-    _record_anygrasp_candidate_policy(memory)
-    active = memory.anygrasp_candidate_policy()["active_candidate"]
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": active},
-                },
-                "status": "executed",
-                "safety_checks": [],
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "target reached"},
-                    }
-                ],
-            },
-        )
-    )
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 0},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "gripper_control",
-                        "status": "executed",
-                        "result": {"success": True, "content": "gripper closed"},
-                    }
-                ],
-            },
-        )
-    )
-    memory.add_observation(
-        EnvObservation(
-            task="pick cube",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": [0.18, 0.02, 0.06]},
-                gripper_state={"open": False, "openness": 0.2},
-            ),
-        )
-    )
-    probe = memory.grasp_lift_probe()
-    assert probe["status"] == "required"
-    assert probe["required_parameters"]["target_pose"]["xyz"] == pytest.approx([0.18, 0.02, 0.16])
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": probe["required_parameters"],
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "lift target reached"},
-                    }
-                ],
-            },
-        )
-    )
-    assert memory.grasp_lift_probe()["status"] == "completed"
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 1},
-                },
-                "status": "executed",
-                "safety_checks": [],
-                "tool_calls": [
-                    {
-                        "name": "gripper_control",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "content": "gripper opened",
-                            "details": {
-                                "supervision": {
-                                    "allowed": True,
-                                    "source": "independent_reviewer",
-                                    "reason": "The target stayed on the table.",
-                                    "details": {
-                                        "grasp_outcome": "failed",
-                                        "candidate_id": "grasp_000",
-                                    },
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    policy = memory.anygrasp_candidate_policy()
-    assert policy["status"] == "active"
-    assert policy["active_candidate"]["id"] == "grasp_001"
-    assert "accepted_candidate" not in policy
-    assert policy["rejected_candidates"][0]["source"] == ("independent_grasp_outcome_rejected")
 
 
-def test_denied_placement_motion_advances_candidate_after_failed_grasp_review() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick cube")
-    _record_anygrasp_candidate_policy(memory)
-    active = memory.anygrasp_candidate_policy()["active_candidate"]
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": active},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "target reached"},
-                    }
-                ],
-            },
-        )
-    )
-    memory.artifacts["anyplace_placement_candidates_latest"] = {"value": {}}
-    memory.artifacts["camera_pose_to_world_world_pose_latest"] = {"value": {}}
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 0},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "gripper_control",
-                        "status": "executed",
-                        "result": {"success": True, "content": "gripper closed"},
-                    }
-                ],
-            },
-        )
-    )
-    memory.add_observation(
-        EnvObservation(
-            task="pick cube",
-            cameras=[],
-            robot=RobotState(
-                end_effector_pose={"xyz": [0.18, 0.02, 0.06]},
-                gripper_state={"open": False, "openness": 0.2},
-            ),
-        )
-    )
-    probe = memory.grasp_lift_probe()
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": probe["required_parameters"],
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "lift target reached"},
-                    }
-                ],
-            },
-        )
-    )
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {
-                        "target_pose": {
-                            "frame": "world",
-                            "translation_xyz": [0.1, 0.1, 0.25],
-                        }
-                    },
-                },
-                "status": "failed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "failed",
-                        "result": {
-                            "success": False,
-                            "content": "The target stayed on the source surface.",
-                            "details": {
-                                "outputs": {
-                                    "supervision": {
-                                        "allowed": False,
-                                        "source": "independent_reviewer",
-                                        "reason": "The target stayed on the source surface.",
-                                        "details": {
-                                            "decision": "reject",
-                                            "grasp_outcome": "fail",
-                                            "candidate_id": "grasp_000",
-                                        },
-                                    }
-                                },
-                                "diagnostics": [{"code": "supervision_denied"}],
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    policy = memory.anygrasp_candidate_policy()
-    assert policy["status"] == "active"
-    assert policy["active_candidate"]["id"] == "grasp_001"
-    assert "accepted_candidate" not in policy
-    assert policy["rejected_candidates"][0]["source"] == ("independent_grasp_outcome_rejected")
-    assert policy["last_rejection"]["target_tool"] == "move_to"
-    assert memory.grasp_lift_probe() is None
-    assert memory.grasp_execution() is None
-    assert memory.grasp_recovery() is None
-    assert "anyplace_placement_candidates_latest" not in memory.artifacts
-    assert "camera_pose_to_world_world_pose_latest" not in memory.artifacts
 
 
-def test_failed_grasp_review_cannot_advance_candidate_before_lift_probe() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick cube")
-    _record_anygrasp_candidate_policy(memory)
-    active = memory.anygrasp_candidate_policy()["active_candidate"]
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": active},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "target reached"},
-                    }
-                ],
-            },
-        )
-    )
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 1},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "gripper_control",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {
-                                "supervision": {
-                                    "reason": "Static post-close image looked uncertain.",
-                                    "details": {
-                                        "grasp_outcome": "failed",
-                                        "candidate_id": "grasp_000",
-                                    },
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
-    policy = memory.anygrasp_candidate_policy()
-    assert policy["status"] == "accepted"
-    assert policy["active_candidate"]["id"] == "grasp_000"
-    assert policy["rejected_candidates"] == []
 
 
-def test_planner_retries_gripper_open_as_exact_required_lift_probe() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="pick cube")
-    _record_anygrasp_candidate_policy(memory)
-    active = memory.anygrasp_candidate_policy()["active_candidate"]
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": {"target_pose": active},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "move_to",
-                        "status": "executed",
-                        "result": {"success": True, "content": "target reached"},
-                    }
-                ],
-            },
-        )
-    )
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 0},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "gripper_control",
-                        "status": "executed",
-                        "result": {"success": True, "content": "gripper closed"},
-                    }
-                ],
-            },
-        )
-    )
-    observation = EnvObservation(
-        task="pick cube",
-        cameras=[],
-        robot=RobotState(
-            end_effector_pose={"xyz": [0.18, 0.02, 0.06]},
-            gripper_state={"open": False, "openness": 0.2},
-        ),
-    )
-    memory.add_observation(observation)
-    required = memory.grasp_lift_probe()["required_parameters"]
-    planner = ToolCallingPlanner(
-        StaticPlannerBackend(
-            [
-                {
-                    "kind": "tool_call",
-                    "name": "gripper_control",
-                    "parameters": {"position": 1},
-                },
-                {
-                    "kind": "tool_call",
-                    "name": "move_to",
-                    "parameters": required,
-                },
-            ]
-        ),
-        max_validation_retries=1,
-    )
-
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("move_to", "gripper_control"),
-        skills=build_default_skill_registry(),
-    )
-
-    assert decision.action == "move_to"
-    assert decision.parameters == required
-    first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
-    assert any("requires the fixed lift probe" in error for error in first_errors)
 
 
 def test_structured_target_not_reached_advances_candidate_despite_success_envelope() -> None:

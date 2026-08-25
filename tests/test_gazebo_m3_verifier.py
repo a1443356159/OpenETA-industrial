@@ -2,86 +2,36 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from adapter.protocol import EnvObservation, RobotState
+from extensions.gazebo.direct_env import GazeboDirectEnv
 from extensions.gazebo.native_grasp import (
     ChildLinkProof,
-    NativePickPlaceConfig,
-    NativeGraspVerifier,
     NativeContactSample,
+    NativeGraspVerifier,
+    NativePickPlaceConfig,
     ReasonCode,
     Verdict,
     confirm_native_bilateral_contact,
 )
-from extensions.gazebo.direct_env import GazeboDirectEnv
 from extensions.gazebo.profiles import STRUCTURED_RECEIPT
 
 
 def _sample(side: str, stamp: float) -> NativeContactSample:
     return NativeContactSample(
-        side=side, timestamp_s=stamp, received_monotonic_s=20.0,
-        collision_names=(f"rm75::robotiq_85_{side}_finger_tip_link", "target_object::target_link::target_collision"),
+        side=side,
+        timestamp_s=stamp,
+        received_monotonic_s=20.0,
+        collision_names=(
+            f"rm75::robotiq_85_{side}_finger_tip_link",
+            "target_object::target_link::target_collision",
+        ),
     )
 
 
-def test_m3_verifier_requires_native_bilateral_target_contact_and_child_link_proof() -> None:
-    gate = confirm_native_bilateral_contact(
-        [*(_sample("left", stamp) for stamp in (10.01, 10.07, 10.12)), *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13))],
-        close_completed_sim_time_s=10.0, now_monotonic_s=20.1,
-    )
-    assert gate.accepted and gate.reason_code is ReasonCode.CONTACT_TARGET_CONFIRMED
-    verifier = NativeGraspVerifier()
-    assert verifier.close_result(gate, attach_acked=True).reason_code is ReasonCode.ATTACH_ACKED_UNPROVEN
-    record = verifier.prove_lift(ChildLinkProof(0.43, 0.51, 0.009))
-    assert (record.verdict, record.reason_code, record.grasp_confirmed) == (Verdict.PASS, ReasonCode.TARGET_HELD, True)
-
-
-def test_m3_verifier_rejects_unknown_mixed_or_distractor_native_contact() -> None:
-    result = confirm_native_bilateral_contact(
-        [
-            NativeContactSample("left", 10.01, 20.0, ("left_tip", "distractor_object::distractor_link")),
-            *(_sample("left", stamp) for stamp in (10.07, 10.12)),
-            *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13)),
-        ], close_completed_sim_time_s=10.0, now_monotonic_s=20.1,
-    )
-    assert not result.accepted and result.reason_code is ReasonCode.CONTACT_DISTRACTOR
-
-
-def test_pregrasp_open_stays_ready_without_detach_ack() -> None:
-    verifier = NativeGraspVerifier()
-
-    record = verifier.pregrasp_open_result()
-
-    assert record.verdict is Verdict.UNKNOWN
-    assert record.reason_code is ReasonCode.READY
-    assert record.phase == "ready"
-    assert verifier.attached is False
-
-
-def test_m3_verifier_fails_closed_for_preclose_contact_missing_ack_and_bad_proof() -> None:
-    preclose = confirm_native_bilateral_contact(
-        [*(_sample("left", stamp) for stamp in (9.90, 10.01, 10.12)), *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13))],
-        close_completed_sim_time_s=10.0,
-        now_monotonic_s=20.1,
-    )
-    assert preclose.reason_code is ReasonCode.CONTACT_SAMPLE_BEFORE_CLOSE
-
-    verifier = NativeGraspVerifier()
-    assert verifier.close_result(preclose, attach_acked=False).reason_code is ReasonCode.CONTACT_SAMPLE_BEFORE_CLOSE
-    assert verifier.prove_lift(ChildLinkProof(0.43, 0.60, 0.0)).reason_code is ReasonCode.ATTACH_ACK_MISSING
-
-    gate = confirm_native_bilateral_contact(
-        [*(_sample("left", stamp) for stamp in (10.01, 10.07, 10.12)), *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13))],
-        close_completed_sim_time_s=10.0,
-        now_monotonic_s=20.1,
-    )
-    verifier.close_result(gate, attach_acked=True)
-    assert verifier.prove_lift(ChildLinkProof(0.43, 0.50, 0.0)).reason_code is ReasonCode.TARGET_NOT_LIFTED
-    verifier.close_result(gate, attach_acked=True)
-    assert verifier.prove_lift(ChildLinkProof(0.43, 0.52, 0.011)).reason_code is ReasonCode.RELATIVE_POSE_DRIFT
-
-
-def test_transport_retention_does_not_reapply_lift_height_threshold() -> None:
-    gate = confirm_native_bilateral_contact(
+def _accepted_gate():
+    return confirm_native_bilateral_contact(
         [
             *(_sample("left", stamp) for stamp in (10.01, 10.07, 10.12)),
             *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13)),
@@ -89,65 +39,82 @@ def test_transport_retention_does_not_reapply_lift_height_threshold() -> None:
         close_completed_sim_time_s=10.0,
         now_monotonic_s=20.1,
     )
-    verifier = NativeGraspVerifier()
-    verifier.close_result(gate, attach_acked=True)
-    assert verifier.prove_lift(ChildLinkProof(0.43, 0.52, 0.002)).verdict is Verdict.PASS
-
-    lowered = verifier.prove_retention(ChildLinkProof(0.43, 0.45, 0.003))
-
-    assert lowered.verdict is Verdict.PASS
-    assert lowered.evidence["minimum_lift_required"] is False
 
 
-def test_failed_close_allows_only_the_exact_compiled_hover_recovery() -> None:
-    env = object.__new__(GazeboDirectEnv)
-    env._native_grasp_verifier = NativeGraspVerifier()
-    rejected = confirm_native_bilateral_contact(
-        [], close_completed_sim_time_s=10.0, now_monotonic_s=20.0
+def test_native_contact_and_attach_ack_directly_prove_grasp() -> None:
+    gate = _accepted_gate()
+    assert gate.accepted
+    assert gate.reason_code is ReasonCode.CONTACT_TARGET_CONFIRMED
+
+    record = NativeGraspVerifier().close_result(gate, attach_acked=True)
+
+    assert record.verdict is Verdict.PASS
+    assert record.reason_code is ReasonCode.ATTACHMENT_CONFIRMED
+    assert record.grasp_confirmed is True
+    assert record.evidence["proof_boundary"] == (
+        "bilateral_native_contact_and_attach_ack"
     )
-    env._native_grasp_verifier.close_result(rejected, attach_acked=False)
-    env._native_grasp_recovery_hover = {
-        "grasp_stage": "hover",
-        "compiled_grasp_id": "grasp-7",
-        "xyz": [0.1, 0.2, 0.3],
-        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
-    }
-
-    assert env._is_failed_close_recovery_hover({
-        "action_type": "move_to",
-        "target_pose": dict(env._native_grasp_recovery_hover),
-    })
-    assert not env._is_failed_close_recovery_hover({
-        "action_type": "move_to",
-        "target_pose": {**env._native_grasp_recovery_hover, "xyz": [0.1, 0.2, 0.31]},
-    })
-    assert not env._is_failed_close_recovery_hover({
-        "action_type": "move_to",
-        "target_pose": {**env._native_grasp_recovery_hover, "compiled_grasp_id": "other"},
-    })
-
-    matrix_hover = {
-        "grasp_stage": "hover",
-        "compiled_grasp_id": "grasp-matrix",
-        "xyz": [0.1, 0.2, 0.3],
-        "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
-    }
-    env._native_grasp_recovery_hover = matrix_hover
-    assert env._is_failed_close_recovery_hover({
-        "action_type": "move_to", "target_pose": dict(matrix_hover),
-    })
-    assert env._is_failed_close_recovery_hover({
-        "action_type": "move_to",
-        "target_pose": {**matrix_hover, "scene_epoch": 999},
-    })
-    assert env._is_failed_close_recovery_hover({
-        "action_type": "move_to", "parameters": {"target_pose": dict(matrix_hover)},
-    })
 
 
-def _failed_close_recovery_env(*, sync_fails: bool = False):
+def test_native_contact_rejects_distractor_and_preclose_samples() -> None:
+    distractor = confirm_native_bilateral_contact(
+        [
+            NativeContactSample(
+                "left",
+                10.01,
+                20.0,
+                ("left_tip", "distractor_object::distractor_link"),
+            ),
+            *(_sample("left", stamp) for stamp in (10.07, 10.12)),
+            *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13)),
+        ],
+        close_completed_sim_time_s=10.0,
+        now_monotonic_s=20.1,
+    )
+    preclose = confirm_native_bilateral_contact(
+        [
+            *(_sample("left", stamp) for stamp in (9.90, 10.01, 10.12)),
+            *(_sample("right", stamp) for stamp in (10.02, 10.08, 10.13)),
+        ],
+        close_completed_sim_time_s=10.0,
+        now_monotonic_s=20.1,
+    )
+
+    assert distractor.reason_code is ReasonCode.CONTACT_DISTRACTOR
+    assert preclose.reason_code is ReasonCode.CONTACT_SAMPLE_BEFORE_CLOSE
+
+
+def test_transport_retention_has_no_direction_or_distance_threshold() -> None:
+    verifier = NativeGraspVerifier()
+    verifier.close_result(_accepted_gate(), attach_acked=True)
+
+    moved_down = verifier.prove_retention(ChildLinkProof(0.43, 0.39, 0.003))
+    excessive_drift = verifier.prove_retention(ChildLinkProof(0.43, 0.80, 0.011))
+
+    assert moved_down.verdict is Verdict.PASS
+    assert moved_down.reason_code is ReasonCode.TARGET_HELD
+    assert moved_down.evidence["vertical_displacement_m"] == pytest.approx(-0.04)
+    assert excessive_drift.verdict is Verdict.FAIL
+    assert excessive_drift.reason_code is ReasonCode.RELATIVE_POSE_DRIFT
+
+
+def test_retention_without_attach_ack_fails_closed() -> None:
+    record = NativeGraspVerifier().prove_retention(
+        ChildLinkProof(0.43, 0.43, 0.0)
+    )
+
+    assert record.verdict is Verdict.FAIL
+    assert record.reason_code is ReasonCode.ATTACH_ACK_MISSING
+
+
+def _failed_close_env():
     config = NativePickPlaceConfig()
-    synchronized = []
+    synchronized: list[tuple[object, object]] = []
+    observation = EnvObservation(
+        task="pick and place",
+        cameras=[],
+        robot=RobotState(),
+    )
 
     class Attachment:
         state = "detached"
@@ -160,7 +127,7 @@ def _failed_close_recovery_env(*, sync_fails: bool = False):
                     quat_xyzw=(0.0, 0.0, 0.0, 1.0),
                 ),
                 SimpleNamespace(
-                    xyz=(0.3, -0.08, 0.55),
+                    xyz=(0.30, -0.08, 0.55),
                     quat_xyzw=(0.0, 0.0, 0.0, 1.0),
                 ),
             )
@@ -169,26 +136,17 @@ def _failed_close_recovery_env(*, sync_fails: bool = False):
         planning_scene = SimpleNamespace(revision=7)
 
         def sync_planning_scene_target_pose(
-            self, supplied_config, *, target_xyz, target_quat_xyzw
+            self, _config, *, target_xyz, target_quat_xyzw
         ):
-            if sync_fails:
-                raise RuntimeError("readback mismatch")
-            synchronized.append(
-                (supplied_config, target_xyz, target_quat_xyzw)
-            )
+            synchronized.append((target_xyz, target_quat_xyzw))
             self.planning_scene.revision = 8
             return 8
 
-    controller = Controller()
-    observation = EnvObservation(
-        task="pick and place",
-        cameras=[],
-        robot=RobotState(),
-    )
     runtime = SimpleNamespace(
         attachment=Attachment(),
-        controller=controller,
+        controller=Controller(),
         scene_revision=7,
+        observe=lambda: observation,
         execute=lambda _action: (observation, {"ok": True}),
     )
     env = object.__new__(GazeboDirectEnv)
@@ -207,61 +165,29 @@ def _failed_close_recovery_env(*, sync_fails: bool = False):
         attach_acked=False,
     )
     env._native_grasp_transport_locked = True
-    env._native_grasp_lift_proof_pending = False
     env._attachment_transform = None
-    env._native_grasp_recovery_hover = {
-        "grasp_stage": "hover",
-        "compiled_grasp_id": "grasp-7",
-        "xyz": [0.1, 0.2, 0.3],
-        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
-    }
     return env, synchronized
 
 
-def test_failed_close_recovery_syncs_measured_target_before_unlocking() -> None:
-    env, synchronized = _failed_close_recovery_env()
-    action = {
-        "action_type": "move_to",
-        "target_pose": dict(env._native_grasp_recovery_hover),
-    }
+def test_failed_close_forbids_motion_and_requires_exact_reopen() -> None:
+    env, synchronized = _failed_close_env()
 
-    raw, _, _, _, info = env.step(action)
-    receipt = info["_openeta_receipt"]
-
-    assert receipt["ok"] is True
-    assert receipt["planning_scene_revision"] == 8
-    assert receipt["planning_scene_target_pose_sync"] == {
-        "status": "synchronized_from_native_world_pose",
-        "revision": 8,
-        "target_id": env._native_grasp_config.target_id,
-        "execution_started": False,
-    }
-    assert synchronized[0][1:] == (
-        (0.31, -0.08, 0.43),
-        (0.0, 0.0, 0.0, 1.0),
+    _, _, _, _, blocked = env.step(
+        {"action_type": "move_to", "target_pose": {"frame": "world", "xyz": [0, 0, 0]}}
     )
-    assert raw["metadata"]["planning_scene_revision"] == 8
+    raw, _, _, _, reopened = env.step({"action_type": "gripper_open"})
+
+    blocked_receipt = blocked["_openeta_receipt"]
+    reopen_receipt = reopened["_openeta_receipt"]
+    assert blocked_receipt["ok"] is False
+    assert blocked_receipt["error_code"] == ReasonCode.ATTACH_ACK_MISSING.value
+    assert blocked_receipt["native_grasp_recovery_diagnostic"][
+        "required_recovery"
+    ] == "gripper_open"
+    assert reopen_receipt["ok"] is True
+    assert reopen_receipt["planning_scene_revision"] == 8
+    assert synchronized == [
+        ((0.31, -0.08, 0.43), (0.0, 0.0, 0.0, 1.0))
+    ]
     assert env._native_grasp_transport_locked is False
-    assert env._native_grasp_verifier.phase == "ready"
-    assert env._native_grasp_recovery_hover is None
-
-
-def test_failed_close_recovery_stays_locked_when_scene_sync_fails() -> None:
-    env, _ = _failed_close_recovery_env(sync_fails=True)
-    action = {
-        "action_type": "move_to",
-        "target_pose": dict(env._native_grasp_recovery_hover),
-    }
-
-    _, _, _, _, info = env.step(action)
-    receipt = info["_openeta_receipt"]
-
-    assert receipt["ok"] is False
-    assert receipt["error_code"] == "PLANNING_SCENE_SYNC_FAILED"
-    assert receipt["planning_scene_target_pose_sync"] == {
-        "status": "failed",
-        "execution_started": False,
-    }
-    assert env._native_grasp_transport_locked is True
-    assert env._native_grasp_verifier.phase == "contact_rejected"
-    assert env._native_grasp_recovery_hover is not None
+    assert raw["metadata"]["planning_scene_revision"] == 8

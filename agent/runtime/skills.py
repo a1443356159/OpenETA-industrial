@@ -88,9 +88,9 @@ def build_default_skill_registry() -> SkillRegistry:
             ),
             content=(
                 "Use this skill as guidance only. Locate the receptacle or surface, "
-                "select a collision-free release pose, check reachability and path "
-                "safety, move to the release pose, open the gripper, retreat, and "
-                "observe to confirm the object is released at the intended place."
+                "use the exact model-derived release pose, let MoveIt check and "
+                "plan the complete path, open there without an added offset or "
+                "retreat waypoint, and confirm native stable placement."
             ),
         ),
         SkillSpec(
@@ -149,7 +149,7 @@ def build_default_skill_registry() -> SkillRegistry:
             content=(
                 "Use this skill as guidance only. Combine pick and place guidance, "
                 "but add stability checks before release and verify the stack after "
-                "the gripper retreats."
+                "opening at the exact model-derived release terminal."
             ),
         ),
     ]:

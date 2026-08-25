@@ -29,7 +29,7 @@ REQUIRED_REAL_M6_TOOLS = (
     "create_simulator_env",
     "observe",
     "sam3",
-    "anygrasp",
+    "grasp_pose_estimate",
     "gripper_control",
     "anyplace",
     "close_simulator_env",
@@ -39,34 +39,36 @@ GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
 
 INSTRUCTIONS = """
-[automation=scripted_tui] 在隔离 Gazebo pick-place 环境中完成一次真实约束放置验收。
-创建 openeta/gazebo_rm75_robotiq2f85_pickplace-v0 后，先 observe 并用该抓取观察供 SAM3
-分割红色方块 target_object，并让宿主通过统一 grasp_pose_estimate 调用真实 AnyGrasp；create 返回的
-initial observation 不计作这次显式 observe。禁止 Oracle、
-fake candidate、直接调用后端工具、固定抓法、固定腕姿、IK preview 或新增运动工具。不得调用 python_exec
-读取或处理感知 artifact。SAM3 点提示若返回嵌套候选，主 VLM 必须根据候选图选择覆盖完整目标轮廓的 mask，
-拒绝只覆盖单个表面或包含宽泛背景的 mask；不得固定 detection id。必须由主 VLM 选择
-目标 mask；运动前再分割绿色 placement_zone_marker 并按宿主 obligation 调用一次 AnyPlace，形成
-不向 VLM 暴露的 object-goal 池。宿主先完成普通 grasp 漏斗，再对最多 2 个 grasp PASS × 当前轮
-完整 96 个 object goal 做分层有限联查，全局最多 2 对进入 plan-only；仅保留至少有一个 place PASS
-的 grasp。宿主按稳定资格队列激活首个等价 PASS，并完成不可执行的内部
-host_candidate_compilation grasp event，
-随后主 VLM 执行真实接近、close，
-仅在双垫 native contact 与 attached ACK 后 lift；lift 必须 >=80 mm 且抓持相对漂移 <=10 mm。
-之后重新 observe 获取独立 placement RGB-D，分别用 SAM3 分割被抓物体和绿色
-placement_zone_marker，再把两个独立观察交给 AnyPlace。AnyPlace 只输出物体目标位姿，禁止接收
-selected_grasp/source_grasp_id 或输出 place_grasp_pose。模型 reserve pool 只进入宿主分层 MoveIt 漏斗；
-宿主先取抓前随实际执行 grasp 通过 plan-only 的冻结绝对 object goals，使用 attach ACK 实测的
-T_eef_object_attached 重新编译 EEF hover/release 并重跑完整资格漏斗；抓前轨迹不得作为执行证明。
-若这些冻结目标零 PASS，才用新 seed 的当前轮 AnyPlace pool，且不与失败目标合并。主 VLM 只能看到 PASS
-结果，不负责选择候选；宿主存储全部 PASS，按稳定队列激活首个等价 PASS，并生成内部
-host_candidate_compilation placement event。
-资格轨迹必须丢弃，真实
-动作重新规划。规划失败仅当 execution_started=false 时拒绝当前候选，
-不得重复失败 fingerprint；若 execution_started=true 或结果 unknown，立即停止并请求人工。
-成功释放必须有 detach ACK、planning-scene revision；允许自然落稳观测时域完成后，仍只按最终
-0.5 s 判断稳定且末段漂移 <=5 mm、中心高度
-0.43±0.01 m，且目标 XY 外接圆完全位于标记区域。完成后唯一一次 close_simulator_env。
+[automation=scripted_tui] 在隔离 Gazebo RM75/Robotiq 环境完成一次 normal 拾放。
+创建环境后只做一次显式 observe；create 返回的 initial observation 不计作这次显式 observe。
+用固定语义 `red rectangular block` 选择目标，
+用 `green placement zone marker` 选择放置区；允许主 VLM 检查 SAM3 候选图，但
+不得固定 detection id、使用 Oracle 或假候选，也不得调用 python_exec 或具体抓取后端。
+目标 mask 必须覆盖完整目标轮廓且不粘连邻物；放置区 mask 必须对应完整绿色标记区。
+红色方块对应场景中的 target_object；物体与放置区必须各自使用独立 placement RGB-D 证据包。
+
+在抓取前按宿主 obligation 调用一次 AnyPlace，保留全部 96 个模型 object goals。
+随后只按 unified grasp_pose_estimate obligation 调用配置的抓取 provider。Provider
+输出的位姿就是精确 EEF contact 终点；宿主只能做标定坐标系/TCP表示变换，禁止
+centering、镜像、180度变体、reverse、pregrasp、hover、precontact、approach offset
+和 fixed lift。MoveIt 从当前状态一次规划到精确 contact，闭合后必须由双垫 native
+target contact 与 attach ACK 直接证明抓取。
+
+漏斗先对 96 个 AnyPlace 目标各做一次目标合法性，再对两个抓取分支与目标配对做
+attached-object/夹爪/解析边界合法性；之后才进入 Beam-2 IK 和完整 MoveIt plan-only。
+候选以确定波次展开，经验分数只能排序。一个候选失败只切换同一模型池中下一合格
+候选；池未耗尽不得重跑 SAM3、抓取模型或 AnyPlace。
+
+attach 后宿主直接复用冻结目标池，以实测 T_eef_object 和当前 PlanningScene revision
+重新计算 exact release EEF，并通过一次 inference=false 的内部 AnyPlace 资格调用。
+不得重新分割物体/放置区。MoveIt 一次规划当前 attached 状态到 exact release；每个
+transport receipt 必须验证 attached ACK 和相对漂移 <=10 mm。到达后原地开爪；禁止
+carry lift、placement hover、descend offset、release clearance、adaptive near-target
+acceptance 和 post-release retreat。
+
+成功必须包含 detach ACK、稳定落区 PASS（最终窗口 >=0.5 s、漂移 <=5 mm、中心高度
+0.43±0.01 m、完整 footprint 在标记区）以及唯一一次 close_simulator_env。
+60 秒是性能目标而非硬截止；基础设施错误不得记为不可达，也不得重复失败 fingerprint。
 """.strip() + "\n"
 
 
@@ -320,7 +322,7 @@ def _qualification_blocks(
     seen_paths: set[str] = set()
     for field in (
         "qualification_artifact",
-        "pregrasp_joint_qualification_artifact",
+        "frozen_pair_qualification_artifact",
     ):
         for artifact in base._values(call, field):
             if not isinstance(artifact, Mapping):
@@ -345,6 +347,115 @@ def _qualification_blocks(
     return blocks
 
 
+def _has_v3_grasp_diversity_evidence(
+    call: Mapping[str, Any], *, artifact_root: Path
+) -> bool:
+    """Accept a full v3 grasp pool only when its two L5 branches are proven."""
+
+    reported_counts = {
+        int(value)
+        for value in base._values(call, "diversity_selected_count")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+    for block in _qualification_blocks(call, artifact_root=artifact_root):
+        if (
+            block.get("schema_version") != "openeta.moveit_candidate_funnel.v3"
+            or block.get("artifact_schema_version")
+            != "openeta.moveit_candidate_qualification.v3"
+            or block.get("purpose") != "grasp"
+            or block.get("stop_reason") != "complete_l5_pass_found"
+        ):
+            continue
+        results = block.get("results")
+        metrics = block.get("metrics")
+        selected_ids = block.get("selected_candidate_ids")
+        l5_attempts = block.get("l5_attempts")
+        if not (
+            isinstance(results, list)
+            and isinstance(metrics, Mapping)
+            and isinstance(selected_ids, list)
+            and isinstance(l5_attempts, list)
+        ):
+            continue
+        generated_count = metrics.get("generated_count")
+        l5_pass_count = metrics.get("l5_pass_count")
+        if not (
+            isinstance(generated_count, int)
+            and not isinstance(generated_count, bool)
+            and generated_count >= 10
+            and generated_count == len(results)
+            and generated_count in reported_counts
+            and isinstance(l5_pass_count, int)
+            and not isinstance(l5_pass_count, bool)
+            and l5_pass_count >= 2
+            and len(selected_ids) == 2
+            and len(set(selected_ids)) == 2
+        ):
+            continue
+        result_by_id = {
+            row.get("candidate_id"): row
+            for row in results
+            if isinstance(row, Mapping) and isinstance(row.get("candidate_id"), str)
+        }
+        selected_rows = [result_by_id.get(candidate_id) for candidate_id in selected_ids]
+        if not all(
+            isinstance(row, Mapping)
+            and row.get("verdict") == "PASS"
+            and row.get("endpoint_pass") is True
+            for row in selected_rows
+        ):
+            continue
+        l5_pass_ids = {
+            row.get("candidate_id")
+            for row in l5_attempts
+            if isinstance(row, Mapping) and row.get("verdict") == "PASS"
+        }
+        if not set(selected_ids).issubset(l5_pass_ids):
+            continue
+        qualified_clusters = {
+            row.get("se3_cluster_id")
+            for row in results
+            if isinstance(row, Mapping)
+            and row.get("endpoint_pass") is True
+            and isinstance(row.get("se3_cluster_id"), str)
+            and row.get("se3_cluster_id")
+        }
+        selected_clusters = {
+            row.get("se3_cluster_id")
+            for row in selected_rows
+            if isinstance(row, Mapping)
+            and isinstance(row.get("se3_cluster_id"), str)
+            and row.get("se3_cluster_id")
+        }
+        if not qualified_clusters or len(selected_clusters) != min(
+            2, len(qualified_clusters)
+        ):
+            continue
+        return True
+    return False
+
+
+def _has_bounded_grasp_l5_evidence(
+    call: Mapping[str, Any], *, artifact_root: Path
+) -> bool:
+    """Accept the legacy submit cap or the stricter v3 two-branch proof.
+
+    V3 may need more than two L5 attempts to obtain two PASS branches from
+    distinct SE(3) clusters.  Its artifact binds the final queue to exactly two
+    distinct PASS candidates, so the old raw submission-count cap is no longer
+    the relevant bound.
+    """
+
+    legacy_bound = any(
+        1 <= value <= 2
+        for value in base._values(call, "full_plan_submitted_count")
+        if isinstance(value, int) and not isinstance(value, bool)
+    )
+    return legacy_bound or _has_v3_grasp_diversity_evidence(
+        call, artifact_root=artifact_root
+    )
+
+
 def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str, Any]:
     errors: list[str] = []
     try:
@@ -357,28 +468,41 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         for required in REQUIRED_REAL_M6_TOOLS:
             if required not in names:
                 errors.append(f"required real M6 tool call missing: {required}")
-        if names.count("sam3") < 4:
-            errors.append("pregrasp and post-attachment object/region SAM3 calls are required")
+        if names.count("sam3") < 2:
+            errors.append("target-object and placement-region SAM3 calls are required")
+        grasp_call_names = {"grasp_pose_estimate", "anygrasp", "graspgenx"}
+        grasp_indices = [
+            index for index, name in enumerate(names) if name in grasp_call_names
+        ]
+        sam_indices = [index for index, name in enumerate(names) if name == "sam3"]
+        if grasp_indices and sam_indices and max(sam_indices) > min(grasp_indices):
+            errors.append("SAM3 was rerun after the cached grasp/placement funnel started")
         if not _ordered(
             names,
             (
                 "observe",
                 "anyplace",
-                "anygrasp",
-                "gripper_control",
+                "grasp_pose_estimate",
                 "move_to",
+                "gripper_control",
                 "anyplace",
+                "move_to",
+                "gripper_control",
             ),
         ):
-            errors.append("pregrasp look-ahead, grasp/lift, and executable placement order is invalid")
+            errors.append("model-contact, attach, frozen-goal release order is invalid")
         if any(base._contains(event, "perception_source", "gazebo_oracle") for event in events):
             errors.append("Oracle perception is forbidden")
         if any(base._contains(event, "fake_grasp_candidate") for event in events):
             errors.append("fake candidate evidence is forbidden")
         if any(
             base._contains(event, "plan_only", True)
-            and not base._contains(
-                event, "schema_version", "openeta.moveit_candidate_funnel.v2"
+            and not any(
+                base._contains(event, "schema_version", schema)
+                for schema in (
+                    "openeta.moveit_candidate_funnel.v2",
+                    "openeta.moveit_candidate_funnel.v3",
+                )
             )
             for event in events
         ):
@@ -400,7 +524,7 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             for event in events
         ):
             errors.append("host grasp candidate compilation evidence missing")
-        grasp_calls = [call for call in calls if _name(call) == "anygrasp"]
+        grasp_calls = [call for call in calls if _name(call) in grasp_call_names]
         final_grasp = grasp_calls[-1] if grasp_calls else {}
         raw_grasp_counts = [
             int(value)
@@ -408,18 +532,29 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
             if isinstance(value, int) and not isinstance(value, bool)
         ]
         if not raw_grasp_counts or raw_grasp_counts[-1] < 10:
-            errors.append("AnyGrasp raw candidate count evidence is missing")
-        if not any(
+            errors.append("grasp-provider raw candidate count evidence is missing")
+        has_legacy_diversity_pool = any(
             1 <= value <= 64
             for value in base._values(final_grasp, "diversity_selected_count")
             if isinstance(value, int) and not isinstance(value, bool)
+        )
+        if not has_legacy_diversity_pool and not _has_v3_grasp_diversity_evidence(
+            final_grasp, artifact_root=paths.root
         ):
-            errors.append("AnyGrasp diversity pool evidence is missing")
-        if not any(1 <= value <= 2 for value in base._values(final_grasp, "full_plan_submitted_count") if isinstance(value, int)):
-            errors.append("AnyGrasp full-plan submission bound is missing")
+            errors.append("grasp-provider diversity pool evidence is missing")
+        if not _has_bounded_grasp_l5_evidence(
+            final_grasp, artifact_root=paths.root
+        ):
+            errors.append("grasp-provider L5 diversity evidence is missing")
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}
+        if len(anyplace_calls) != 2:
+            errors.append("normal flow requires one model AnyPlace call and one frozen-pool requalification")
+        if anyplace_calls and not base._contains(
+            anyplace, "anyplace_model_inference_invoked", False
+        ):
+            errors.append("post-attach AnyPlace call did not prove frozen-pool inference bypass")
         candidate_ids = {
             str(value)
             for value in base._values(anyplace, "id")
@@ -427,8 +562,6 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         }
         if not _has_minimum_int_value(anyplace, "model_raw_candidate_count", 96):
             errors.append("AnyPlace model raw pool evidence is missing")
-        if not any(1 <= value <= 2 for value in base._values(anyplace, "full_plan_submitted_count") if isinstance(value, int)):
-            errors.append("AnyPlace full-plan submission bound is missing")
         candidate_counts = [
             int(value)
             for value in base._values(anyplace, "candidate_count")
@@ -452,8 +585,12 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         for legacy_key in ("selected_grasp", "source_grasp_id", "place_grasp_pose"):
             if base._contains(anyplace, legacy_key):
                 errors.append(f"AnyPlace leaked forbidden grasp-coupled field: {legacy_key}")
-        if not base._contains(
-            anyplace, "schema_version", "openeta.moveit_candidate_funnel.v2"
+        if not any(
+            base._contains(anyplace, "schema_version", schema)
+            for schema in (
+                "openeta.moveit_candidate_funnel.v2",
+                "openeta.moveit_candidate_funnel.v3",
+            )
         ):
             errors.append("AnyPlace qualification evidence is missing")
         if not base._contains(anyplace, "type", "placement_candidate_image"):
@@ -489,15 +626,46 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ):
             errors.append("measured T_eef_object_attached evidence missing")
         if not any(
-            any(float(value) >= 0.08 for value in base._values(payload, "lift_m") if isinstance(value, (int, float)))
+            base._contains(
+                payload,
+                "reason_code",
+                "NATIVE_GRASP_ATTACHMENT_CONFIRMED",
+            )
+            and base._contains(payload, "grasp_confirmed", True)
+            for payload in payloads
+        ):
+            errors.append("native bilateral-contact plus attach-ACK proof missing")
+        if not any(
+            base._contains(payload, "reason_code", "NATIVE_GRASP_TARGET_HELD")
             and any(
                 float(value) <= 0.01
-                for value in base._values(payload, "capture_relative_translation_m")
+                for value in base._values(
+                    payload, "capture_relative_translation_m"
+                )
                 if isinstance(value, (int, float))
             )
             for payload in payloads
         ):
-            errors.append("80 mm lift / 10 mm grasp-drift proof missing")
+            errors.append("attached transport drift proof missing")
+        forbidden_pose_stages = {
+            "hover",
+            "align",
+            "align_move",
+            "precontact",
+            "descend",
+            "lift",
+            "retreat",
+            "carry_raise",
+            "carry_hover",
+        }
+        if any(
+            str(value) in forbidden_pose_stages
+            for value in base._values(calls, "grasp_stage")
+        ) or any(
+            str(value) in forbidden_pose_stages
+            for value in base._values(calls, "placement_stage")
+        ):
+            errors.append("artificial grasp/place waypoint stage was executed")
         if not any(base._contains(payload, "state", "detached") for payload in payloads):
             errors.append("native detach ACK evidence missing")
         placements = [
@@ -527,14 +695,14 @@ def verify_case(paths: base.CasePaths, *, scenario: str = "normal") -> dict[str,
         ]
         if scenario == "normal" and placement_failures:
             errors.append("normal scenario unexpectedly injected a placement rejection")
-        pregrasp_qualification_blocks = [
+        frozen_pair_qualification_blocks = [
             block
             for block in _qualification_blocks(final_grasp, artifact_root=paths.root)
             if block.get("purpose") == "placement"
         ]
         qualification_results = [
             result
-            for block in pregrasp_qualification_blocks
+            for block in frozen_pair_qualification_blocks
             for result in block.get("results", [])
         ]
         first_full_plan_rejections = [

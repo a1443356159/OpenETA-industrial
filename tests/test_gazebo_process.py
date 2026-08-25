@@ -223,7 +223,7 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> Non
     )
     proof = control.child_link_proof()
 
-    assert proof.lift_m == pytest.approx(0.10)
+    assert proof.vertical_displacement_m == pytest.approx(0.10)
     assert proof.capture_relative_translation_m == pytest.approx(0.0)
 
 

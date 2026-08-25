@@ -1310,11 +1310,6 @@ class OpenEtaCli:
                     f"{request.get('calibration_id')} as "
                     f"{request.get('target_status')}?"
                 ),
-                strategy_approval=lambda request: self.confirm(
-                    "Publish grasp strategy "
-                    f"{request.get('strategy_id')} as "
-                    f"{request.get('target_status')}?"
-                ),
                 skill_approval=lambda name: self.confirm(
                     f"Approve skill registry change for {name}?"
                 ),

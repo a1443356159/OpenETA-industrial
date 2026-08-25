@@ -41,6 +41,54 @@ BEHAVIOR_META = {
 }
 
 
+def test_dashboard_qualification_latency_is_metrics_only_and_solver_partitioned():
+    sid, handle = "qualification-dashboard-test", "env-1"
+    session._session_envs[sid] = {handle: {}}
+    try:
+        for latency in (10.0, 20.0):
+            server._record_qualification_dashboard(
+                sid,
+                handle,
+                {
+                    "solver_profile": "kdl_fast",
+                    "solver_configuration_id": "kdl_fast@50ms/c8",
+                    "first_l5_pass_s": latency,
+                    "metrics": {"first_l5_pass_s": latency},
+                    "results": [
+                        {
+                            "candidate_id": "private",
+                            "verdict": "PASS",
+                            "stages": [{"end_joint_state": {"positions": [0.2]}}],
+                        }
+                    ],
+                },
+            )
+        summary = session._session_qualification[sid][handle]
+        latency = summary["metrics"]["first_l5_pass_latency"]
+        assert latency == {"count": 2, "p50_s": 15.0, "p95_s": 20.0}
+        assert "results" not in summary
+
+        server._record_qualification_dashboard(
+            sid,
+            handle,
+            {
+                "solver_profile": "trac_ik_speed",
+                "solver_configuration_id": "trac_ik_speed@50ms/c8",
+                "first_l5_pass_s": 5.0,
+                "metrics": {"first_l5_pass_s": 5.0},
+                "results": [],
+            },
+        )
+        assert session._session_qualification[sid][handle]["metrics"][
+            "first_l5_pass_latency"
+        ]["count"] == 1
+    finally:
+        session._session_envs.pop(sid, None)
+        with session._session_qualification_lock:
+            session._session_qualification.pop(sid, None)
+            session._session_qualification_latencies.pop(sid, None)
+
+
 def test_behavior_ik_config_and_runtime_layout_are_explicit() -> None:
     config = {"controller_config": {"arm_left": {}, "arm_right": {}}}
     _configure_agent_cartesian_control(config)

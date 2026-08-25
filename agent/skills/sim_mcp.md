@@ -20,7 +20,6 @@ allowed_tools:
   - close_simulator_env
   - python_exec
   - observe
-  - compute_wrist_alignment
   - camera_pose_to_world
   - move_to
   - gripper_control
@@ -113,18 +112,16 @@ object-class allowlist. Do not send a normalized grasp pose directly to
 Simulator control tools should accept world-frame targets. If a `move_to`
 argument carries `target_pose.frame`, it must be `world`.
 
-For normalized grasps, `grasp_execution` has two condition-bearing control states:
-hover at least 0.15 m opposite world-frame `approach_world_xyz` (not fixed world
-`+Z`), and binary latched close (`gripper_control position=0`). Alignment, contact,
-probe, and attachment verdict are ordered one-shot obligations/evidence gates.
-Portable objects use the fixed vertical lift probe and full lift. Host-classified
-articulated handles use `prepare_attachment_probe` to freeze a 5 cm linear or arc
-path, retain its endpoint on PASS, and never receive vertical full lift. Each edge
-remains one ordinary control call. Compiled/aligned poses are references;
-fresh visual feedback may justify a bounded world-frame pose adjustment accepted by
-the runtime envelope. Frozen attachment probes and gripper commands remain exact.
-A close acknowledgement or numeric openness cannot replace post-probe co-motion
-evidence. Close stays latched until binary `position=1`.
+For normalized grasps, the provider pose is the exact terminal EEF contact pose.
+The host applies only calibrated frame/TCP representation transforms; it may not
+add pregrasp, hover, approach, alignment, centering, symmetry, or lift offsets.
+MoveIt owns one complete collision-aware path from the current joint state to that
+exact contact. Portable attachment requires native bilateral contact plus attach
+ACK, and every attached transport receipt rechecks relative drift. AnyPlace object
+goals similarly produce one exact EEF release pose from the measured attachment;
+there is no carry hover, release offset, or retreat. Host-classified articulated
+handles alone retain their frozen 5 cm linear/arc attachment probe. Close remains
+latched until binary `position=1` at the exact release pose.
 A transport timeout requires observation on the same handle before retry.
 
 Classify failures before retrying:

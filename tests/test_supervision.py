@@ -68,20 +68,21 @@ def test_scripted_tui_world_action_is_explicitly_automated_not_human() -> None:
     assert decision.details == {"profile": "scripted_tui", "automation": True}
 
 
-def test_supervision_prompts_include_examples_for_every_output_label() -> None:
-    for label in ("approve:", "reject:", "abstain:"):
-        assert label in ACTION_REVIEW_SYSTEM_PROMPT
+def test_supervision_prompts_define_compact_machine_readable_outputs() -> None:
+    assert '"decision":"approve|reject|abstain"' in ACTION_REVIEW_SYSTEM_PROMPT
     for label in ("answer:", "abstain:"):
         assert label in GUIDANCE_SYSTEM_PROMPT
-    assert "empty object list alone is not evidence" in ACTION_REVIEW_SYSTEM_PROMPT
-    assert "synthetic highlight colors" in ACTION_REVIEW_SYSTEM_PROMPT
+    assert "empty observation.objects list alone is not evidence" in ACTION_REVIEW_SYSTEM_PROMPT
+    assert "overlay colors are synthetic" in ACTION_REVIEW_SYSTEM_PROMPT
     assert "position=0 closes" in ACTION_REVIEW_SYSTEM_PROMPT
-    assert "open-finger gap before that action is expected" in ACTION_REVIEW_SYSTEM_PROMPT
-    assert 'grasp_outcome="fail"' in ACTION_REVIEW_SYSTEM_PROMPT
+    assert "exact terminal EEF contact pose" in ACTION_REVIEW_SYSTEM_PROMPT
+    assert "must not invent intermediate waypoints" in ACTION_REVIEW_SYSTEM_PROMPT
     assert '"grasp_outcome":"pass|fail|unknown|not_assessed"' in (
         ACTION_REVIEW_SYSTEM_PROMPT
     )
-    assert "articulated_attachment_probe.status is required" in ACTION_REVIEW_SYSTEM_PROMPT
+    assert "Articulated handles retain their separate bounded attachment probe" in (
+        ACTION_REVIEW_SYSTEM_PROMPT
+    )
 
 
 def test_supervision_prefers_primary_scene_and_wrist_roles() -> None:
@@ -258,7 +259,7 @@ def test_action_reviewer_receives_grasp_candidate_policy_with_empty_object_list(
     ]
 
 
-def test_action_reviewer_keeps_agentview_and_wrist_during_attachment_review() -> None:
+def test_action_reviewer_keeps_two_current_views_only_for_articulated_probe() -> None:
     requests = []
 
     def decide(request):
@@ -276,7 +277,13 @@ def test_action_reviewer_keeps_agentview_and_wrist_during_attachment_review() ->
     context = ToolExecutionContext(
         name="move_to",
         spec=tools.get("move_to"),
-        parameters={"target_pose": {"frame": "world", "probe_type": "grasp_lift", "xyz": [0, 0, 1]}},
+            parameters={
+                "target_pose": {
+                    "frame": "world",
+                    "probe_type": "articulated_attachment",
+                    "xyz": [0, 0, 1],
+                }
+            },
         observation=EnvObservation(
             task="pick bowl",
             cameras=[CameraFrame(frame_id="agentview", rgb=[]), CameraFrame(frame_id="wrist", rgb=[])],
@@ -292,8 +299,16 @@ def test_action_reviewer_keeps_agentview_and_wrist_during_attachment_review() ->
         metadata={
             "supervision_context": {
                 "memory": {
-                    "grasp_execution": {"status": "required", "stage": "attachment", "candidate_id": "g"},
-                    "grasp_lift_probe": {"status": "required", "candidate_id": "g"},
+                        "grasp_execution": {
+                            "status": "required",
+                            "stage": "probe",
+                            "candidate_id": "g",
+                            "attachment_mode": "articulated_handle",
+                        },
+                        "articulated_attachment_probe": {
+                            "status": "required",
+                            "candidate_id": "g",
+                        },
                 }
             }
         },
@@ -303,12 +318,12 @@ def test_action_reviewer_keeps_agentview_and_wrist_during_attachment_review() ->
 
     assert decision.allowed is False
     assert requests[0].tool_context["vision_image_paths"] == [
-        "current-agentview.png",
         "current-wrist.png",
+        "current-agentview.png",
     ]
     assert requests[0].tool_context["vision_evidence"] == [
-        {"role": "current_scene", "path": "current-agentview.png"},
         {"role": "current_scene", "path": "current-wrist.png"},
+        {"role": "current_scene", "path": "current-agentview.png"},
     ]
 
 
@@ -350,7 +365,7 @@ def test_action_reviewer_receives_alternate_view_reestimate_obligation() -> None
 
     assert decision.allowed is True
     assert requests[0].tool_context["grasp_recovery"] == recovery
-    assert "alternate camera RGB-D packet" in requests[0].system_prompt
+    assert "new SAM/model inference" in requests[0].system_prompt
 
 
 def test_action_reviewer_prioritizes_exact_asset_reference_for_close_identity() -> None:
@@ -419,10 +434,6 @@ def test_action_reviewer_prioritizes_exact_asset_reference_for_close_identity() 
                         "status": "required",
                         "stage": "close",
                         "candidate_id": "grasp_002",
-                        "alignment": {
-                            "schema_version": "openeta.wrist_alignment.v1",
-                            "candidate_id": "grasp_002",
-                        },
                         "required_action": {
                             "name": "gripper_control",
                             "parameters": {"position": 0},
@@ -453,161 +464,13 @@ def test_action_reviewer_prioritizes_exact_asset_reference_for_close_identity() 
     override = decision.details["review_contract_override"]
     assert override["candidate_id"] == "grasp_002"
     assert override["original_review"]["decision"] == "reject"
-    assert override["reason"] == "attachment_must_be_assessed_after_fixed_lift_probe"
-
-
-def test_action_reviewer_prioritizes_wrist_geometry_for_contact_descend() -> None:
-    requests = []
-
-    def decide(request):
-        requests.append(request)
-        return PlannerBackendResult(
-            payload={
-                "decision": "approve",
-                "reason": "The wrist view supports the staged descend.",
-            }
-        )
-
-    tools = build_default_tool_registry()
-    context = ToolExecutionContext(
-        name="move_to",
-        spec=tools.get("move_to"),
-        parameters={
-            "target_pose": {
-                "frame": "world",
-                "grasp_stage": "contact",
-                "source_grasp_id": "grasp_005",
-            }
-        },
-        observation=EnvObservation(
-            task="pick alphabet soup",
-            cameras=[
-                CameraFrame(frame_id="agentview", rgb=[]),
-                CameraFrame(frame_id="wrist", rgb=[]),
-            ],
-            robot=RobotState(),
-            metadata={
-                "image_artifacts": [
-                    {
-                        "kind": "rgb",
-                        "frame_id": "agentview",
-                        "path": "current-agentview.png",
-                    },
-                    {
-                        "kind": "rgb",
-                        "frame_id": "wrist",
-                        "path": "current-wrist.png",
-                    },
-                ]
-            },
-        ),
-        metadata={
-            "supervision_context": {
-                "memory": {
-                    "target_asset_reference": {
-                        "reference_images": [
-                            "reference_front.png",
-                            "reference_side.png",
-                        ]
-                    },
-                    "grasp_execution": {
-                        "status": "required",
-                        "stage": "descend",
-                        "candidate_id": "grasp_005",
-                        "required_action": {
-                            "name": "move_to",
-                            "parameters": {
-                                "target_pose": {
-                                    "frame": "world",
-                                    "grasp_stage": "contact",
-                                    "source_grasp_id": "grasp_005",
-                                }
-                            },
-                        },
-                    },
-                }
-            }
-        },
+    assert override["reason"] == (
+        "native_contact_and_attach_ack_own_portable_attachment_proof"
     )
 
-    decision = BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-
-    assert decision.allowed is True
-    assert requests[0].tool_context["vision_image_paths"] == [
-        "current-wrist.png",
-        "current-agentview.png",
-    ]
-    assert requests[0].tool_context["vision_evidence"] == [
-        {"role": "current_scene", "path": "current-wrist.png"},
-        {"role": "current_scene", "path": "current-agentview.png"},
-    ]
 
 
-def test_action_reviewer_allows_exact_host_lift_probe_before_semantic_rejection() -> None:
-    def decide(_request):
-        return PlannerBackendResult(
-            payload={
-                "decision": "reject",
-                "reason": "The package category appears ambiguous.",
-                "grasp_outcome": "not_assessed",
-                "candidate_id": "",
-            }
-        )
 
-    parameters = {
-        "target_pose": {
-            "frame": "world",
-            "xyz": [0.1, 0.2, 0.6],
-            "probe_type": "grasp_lift",
-            "source_grasp_id": "grasp_002",
-        }
-    }
-    tools = build_default_tool_registry()
-    context = ToolExecutionContext(
-        name="move_to",
-        spec=tools.get("move_to"),
-        parameters=parameters,
-        observation=EnvObservation(
-            task="pick tomato sauce",
-            cameras=[CameraFrame(frame_id="agentview", rgb=[])],
-            robot=RobotState(),
-        ),
-        metadata={
-            "supervision_context": {
-                "memory": {
-                    "grasp_lift_probe": {
-                        "status": "required",
-                        "candidate_id": "grasp_002",
-                        "distance_m": 0.08,
-                        "required_parameters": parameters,
-                    },
-                    "grasp_execution": {
-                        "status": "required",
-                        "stage": "probe",
-                        "candidate_id": "grasp_002",
-                    },
-                }
-            }
-        },
-    )
-
-    decision = BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-
-    assert decision.allowed is True
-    assert decision.details["grasp_outcome"] == "not_assessed"
-    override = decision.details["review_contract_override"]
-    assert override["schema_version"] == "openeta.fixed_lift_probe_contract.v1"
-    assert override["candidate_id"] == "grasp_002"
-    assert override["original_review"]["decision"] == "reject"
-
-    context.parameters = {
-        "target_pose": {
-            **parameters["target_pose"],
-            "xyz": [0.1, 0.2, 0.7],
-        }
-    }
-    changed = BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-    assert changed.allowed is False
 
 
 def test_action_reviewer_prioritizes_current_observation_rgb() -> None:
@@ -659,121 +522,6 @@ def test_action_reviewer_prioritizes_current_observation_rgb() -> None:
     }
 
 
-def test_action_reviewer_marks_attachment_full_lift_as_host_review_stage() -> None:
-    requests = []
-
-    def decide(request):
-        requests.append(request)
-        return PlannerBackendResult(
-            payload={
-                "decision": "approve",
-                "reason": "The target moved with the gripper and left its source.",
-                "grasp_outcome": "pass",
-                "candidate_id": "grasp_003",
-            }
-        )
-
-    tools = build_default_tool_registry()
-    required = {
-        "target_pose": {
-            "frame": "world",
-            "xyz": [0.1, 0.2, 0.4],
-            "source_grasp_id": "grasp_003",
-            "grasp_stage": "full_lift",
-        }
-    }
-    context = ToolExecutionContext(
-        name="move_to",
-        spec=tools.get("move_to"),
-        parameters=required,
-        observation=EnvObservation(
-            task="pick soup can",
-            cameras=[CameraFrame(frame_id="agentview", rgb=[])],
-            robot=RobotState(gripper_state={"open": True, "openness": 0.55}),
-            metadata={
-                "image_artifacts": [
-                    {
-                        "kind": "rgb",
-                        "frame_id": "agentview",
-                        "path": "current-agentview.png",
-                    }
-                ]
-            },
-        ),
-        metadata={
-            "supervision_context": {
-                "memory": {
-                    "grasp_execution": {
-                        "status": "required",
-                        "stage": "attachment",
-                        "candidate_id": "grasp_003",
-                        "required_action": None,
-                        "attachment_actions": {
-                            "pass": {"name": "move_to", "parameters": required},
-                            "fail": {
-                                "name": "gripper_control",
-                                "parameters": {"position": 1},
-                            },
-                        },
-                    },
-                    "attachment_gate": {"status": "pending", "verdict": "UNKNOWN"},
-                    "grasp_candidate_policy": {
-                        "target_detection": {"source_image": "target-source.png"}
-                    },
-                }
-            }
-        },
-    )
-
-    decision = BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-
-    assert decision.allowed is True
-    assert requests[0].tool_context["host_action_stage"] == {
-        "schema_version": "openeta.host_action_stage.v1",
-        "candidate_id": "grasp_003",
-        "stage": "attachment",
-        "required_action": {"name": "move_to", "parameters": required},
-        "required_action_matches": True,
-        "phase": "attachment_full_lift_review",
-    }
-    assert requests[0].tool_context["vision_image_paths"] == [
-        "current-agentview.png",
-        "target-source.png",
-    ]
-    assert "openness threshold" in requests[0].system_prompt
-
-    recovery_requests = []
-
-    def recover(request):
-        recovery_requests.append(request)
-        return PlannerBackendResult(
-            payload={
-                "decision": "approve",
-                "reason": "The probe left an empty gripper; reopen for fallback.",
-                "grasp_outcome": "fail",
-                "candidate_id": "grasp_003",
-            }
-        )
-
-    context.name = "gripper_control"
-    context.spec = tools.get("gripper_control")
-    context.parameters = {"position": 1}
-    context.observation.robot.gripper_state = {"open": False, "openness": 0.02}
-    decision = BackendActionReviewer(CallablePlannerBackend(recover)).review(context)
-
-    assert decision.allowed is True
-    assert recovery_requests[0].tool_context["host_action_stage"] == {
-        "schema_version": "openeta.host_action_stage.v1",
-        "candidate_id": "grasp_003",
-        "stage": "attachment",
-        "required_action": {
-            "name": "gripper_control",
-            "parameters": {"position": 1},
-        },
-        "required_action_matches": True,
-        "phase": "attachment_recovery_review",
-    }
-    assert "phase=attachment_recovery_review" in recovery_requests[0].system_prompt
 
 
 def test_reviewed_action_gate_uses_independent_reviewer() -> None:
@@ -899,148 +647,79 @@ def test_action_reviewer_marks_exact_fallback_candidate_restart_open() -> None:
     }
 
 
-def test_action_reviewer_receives_fresh_placement_release_stage() -> None:
+
+
+def test_action_reviewer_receives_only_exact_model_release_evidence() -> None:
     requests = []
 
     def decide(request):
         requests.append(request)
         return PlannerBackendResult(
             payload={
-                "decision": "reject",
-                "reason": "The target is visible away from the gripper; do not release.",
+                "decision": "approve",
+                "reason": "The exact host-qualified action matches.",
                 "grasp_outcome": "not_assessed",
                 "candidate_id": "",
             }
         )
 
     tools = build_default_tool_registry()
-    context = ToolExecutionContext(
-        name="gripper_control",
-        spec=tools.get("gripper_control"),
-        parameters={"position": 1},
-        observation=EnvObservation(
-            task="pick can and place it in basket",
-            cameras=[CameraFrame(frame_id="agentview", rgb=[[[0, 0, 0]]])],
-            robot=RobotState(
-                end_effector_pose={"xyz": [0.07, 0.30, 0.13]},
-                gripper_state={"open": True, "openness": 0.55},
-            ),
-        ),
-        metadata={
-            "supervision_context": {
-                "memory": {
-                    "grasp_execution": {
-                        "status": "completed",
-                        "stage": "attached",
-                        "candidate_id": "grasp_003",
-                    },
-                    "attachment_gate": {"status": "resolved", "verdict": "PASS"},
-                    "working_memory": {
-                        "artifacts": {
-                            "camera_pose_to_world_world_pose_latest": {
-                                "world_pose": {
-                                    "id": "place_grasp_000",
-                                    "source_grasp_id": "grasp_003",
-                                    "frame": "world",
-                                    "translation_xyz": [0.07, 0.30, 0.13],
-                                }
-                            }
-                        }
-                    },
-                }
-            }
+    release_pose = {
+        "frame": "world",
+        "xyz": [0.08, 0.29, 0.19],
+        "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "placement_stage": "release",
+    }
+    memory = {
+        "grasp_execution": {
+            "status": "completed",
+            "stage": "attached",
+            "candidate_id": "grasp_003",
         },
+        "attachment_gate": {"status": "resolved", "verdict": "PASS"},
+        "placement_candidate_policy": {
+            "status": "active",
+            "active_candidate_id": "place_007",
+            "compiled_placement": {"release_pose": release_pose},
+        },
+    }
+    context = ToolExecutionContext(
+        name="move_to",
+        spec=tools.get("move_to"),
+        parameters={"target_pose": dict(release_pose)},
+        observation=EnvObservation(task="pick and place", cameras=[], robot=RobotState()),
+        metadata={"supervision_context": {"memory": memory}},
     )
 
     decision = BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
 
-    assert decision.allowed is False
-    assert requests[0].tool_context["placement_action_stage"] == {
-        "schema_version": "openeta.placement_action_stage.v1",
-        "stage": "release",
+    assert decision.allowed is True
+    assert requests[-1].tool_context["placement_action_stage"] == {
+        "schema_version": "openeta.placement_action_stage.v2",
+        "stage": "attached_transport_to_exact_release",
         "candidate_id": "grasp_003",
-        "placement_pose_id": "place_grasp_000",
-        "current_eef_xyz": [0.07, 0.30, 0.13],
-        "release_xyz": [0.07, 0.30, 0.13 + 0.08],
-        "anyplace_reference_xyz": [0.07, 0.30, 0.13],
-        "safe_hover_xyz": [0.07, 0.30, 0.13 + 0.08],
-        "final_hover_xyz": [0.07, 0.30, 0.23],
-        "is_release_action": True,
-        "release_stage_matches": True,
-        "release_clearance_m": 0.08,
-        "gripper_evidence": {
-            "close_command_expected": True,
-            "reported_open_boolean": True,
-            "openness": 0.55,
-            "interpretation": "object_between_fingers",
-            "object_between_fingers_min": 0.08,
-            "empty_closed_gripper_max": 0.05,
-        },
+        "placement_pose_id": "place_007",
+        "exact_release_pose": release_pose,
+        "required_action_matches": True,
+        "path_owner": "moveit",
+        "host_pose_offsets_allowed": False,
     }
-    assert "earlier attachment PASS is stale" in requests[0].system_prompt
-    assert "corroborating telemetry" in requests[0].system_prompt
 
-    context.name = "move_to"
-    context.spec = tools.get("move_to")
-    context.observation.robot.end_effector_pose = {"xyz": [0.13, 0.04, 0.22]}
-    context.parameters = {
-        "target_pose": {"frame": "world", "xyz": [0.112, 0.118, 0.23]}
+    memory["placement_release"] = {
+        "status": "ready",
+        "placement_pose_id": "place_007",
+        "release_pose": release_pose,
     }
-    BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-    carry = requests[-1].tool_context["placement_action_stage"]
-    assert carry["stage"] == "carry_hover"
-    assert math.hypot(
-        carry["safe_hover_xyz"][0] - carry["current_eef_xyz"][0],
-        carry["safe_hover_xyz"][1] - carry["current_eef_xyz"][1],
-    ) == pytest.approx(0.08)
-
     context.name = "gripper_control"
     context.spec = tools.get("gripper_control")
     context.parameters = {"position": 1}
-    context.observation.robot.gripper_state = {"open": False, "openness": 0.02}
     BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-    lost = requests[-1].tool_context["placement_action_stage"]
-    assert lost["stage"] == "attachment_lost"
-    assert lost["gripper_evidence"]["interpretation"] == "empty_closed_gripper"
-    assert "runtime can activate the next ranked grasp candidate" in (
-        requests[-1].system_prompt
-    )
-
-    context.observation.robot.gripper_state = {"open": False, "openness": 0.06}
-    BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-    ambiguous = requests[-1].tool_context["placement_action_stage"]
-    assert ambiguous["stage"] == "carry_hover"
-    assert ambiguous["gripper_evidence"]["interpretation"] == "ambiguous"
-
-    context.observation.robot.end_effector_pose = {"xyz": [0.07, 0.30, 0.23]}
-    context.observation.robot.gripper_state = {"open": False, "openness": 0.02}
-    decision = BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-    placed = requests[-1].tool_context["placement_action_stage"]
-    assert placed["stage"] == "placement_drop_detected"
-    assert placed["placement_xy_distance_m"] == pytest.approx(0.0)
-    assert decision.allowed is True
-    assert decision.details["grasp_outcome"] == "not_assessed"
-    override = decision.details["review_contract_override"]
-    assert override["schema_version"] == "openeta.placement_drop_open_contract.v1"
-    assert override["original_review"]["decision"] == "reject"
-
-    memory = context.metadata["supervision_context"]["memory"]
-    memory["placement_release"] = {
-        "status": "ready",
-        "release_pose": {
-            "frame": "world",
-            "xyz": [0.08, 0.29, 0.19],
-            "placement_stage": "release",
-        },
-    }
-    context.observation.robot.end_effector_pose = {"xyz": [0.08, 0.29, 0.19]}
-    context.observation.robot.gripper_state = {"open": False, "openness": 0.55}
-    decision = BackendActionReviewer(CallablePlannerBackend(decide)).review(context)
-    ready = requests[-1].tool_context["placement_action_stage"]
-    assert ready["stage"] == "release"
-    assert ready["release_xyz"] == [0.08, 0.29, 0.19]
-    assert ready["release_stage_matches"] is True
-    assert decision.allowed is False
+    release_stage = requests[-1].tool_context["placement_action_stage"]
+    assert release_stage["stage"] == "release"
+    assert release_stage["exact_release_pose"] == release_pose
+    assert release_stage["post_release_retreat_required"] is False
+    assert "safe_hover_xyz" not in release_stage
+    assert "release_clearance_m" not in release_stage
 
 
 def test_guidance_agent_resolves_ask_human_inline_without_human_provenance() -> None:

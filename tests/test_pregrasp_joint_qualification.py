@@ -12,7 +12,7 @@ from agent.runtime.moveit_qualification import (
     QualificationCache,
 )
 from agent.runtime.runtime_assembly import (
-    _PregraspGraspPlaceCoordinator,
+    _FrozenGoalPairCoordinator,
     _compile_qualified_queue,
     _prepare_postattachment_frozen_goals,
     _qualifying_handler,
@@ -52,7 +52,7 @@ def test_host_compiles_every_full_plan_pass_into_one_equal_status_queue() -> Non
             "compiled",
             {
                 "outputs": {
-                    "schema_version": "openeta.compiled_placement_seed.v2",
+                    "schema_version": "openeta.compiled_placement_seed.v3",
                     "placement_candidate_id": candidate_id,
                     "scene_epoch": 3,
                     "scene_revision": 7,
@@ -111,7 +111,7 @@ def test_host_compiles_every_full_plan_pass_into_one_equal_status_queue() -> Non
     )
 
 
-def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_grasps() -> None:
+def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasps() -> None:
     captured: dict[str, Any] = {}
 
     def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
@@ -143,6 +143,31 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
                     "reason": "qualified" if submitted[index] else "not_submitted",
                     "stages": [_pass_stage()] if submitted[index] else [],
                     "full_plan_submitted": submitted[index],
+                    "goal_legality": (
+                        {
+                            "verdict": "PASS",
+                            "checks": {
+                                "object_frame_binding": {
+                                    "collision_goal_pose": {
+                                        "convention": "T_world_collision_object_goal",
+                                        "frame": "world",
+                                        "translation_xyz": [
+                                            0.48 + index * 0.001,
+                                            0.0,
+                                            0.43,
+                                        ],
+                                        "rotation_matrix": [
+                                            [1.0, 0.0, 0.0],
+                                            [0.0, 1.0, 0.0],
+                                            [0.0, 0.0, 1.0],
+                                        ],
+                                    }
+                                }
+                            },
+                        }
+                        if submitted[index]
+                        else None
+                    ),
                 }
                 for index, item in enumerate(request["candidates"])
             ],
@@ -157,7 +182,7 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
         compile_candidate=lambda *_args: {
             "qualification_stages": [
                 {
-                    "name": "hover",
+                    "name": "release",
                     "xyz": [0.4, 0.0, 0.5],
                     "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
                 }
@@ -183,10 +208,6 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
                     },
                     "end_joint_state": {"joint_names": ["j1"], "positions": [0.0]},
                 },
-                {
-                    "name": "lift",
-                    "end_joint_state": {"joint_names": ["j1"], "positions": [0.1]},
-                },
             ],
         }
     cache.replace(
@@ -196,7 +217,7 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
         scene_epoch=3,
         planning_scene_revision=7,
     )
-    coordinator = _PregraspGraspPlaceCoordinator(qualifier)
+    coordinator = _FrozenGoalPairCoordinator(qualifier)
     coordinator.object_current_pose = {
         "frame": "world",
         "translation_xyz": [0.3, 0.0, 0.43],
@@ -235,13 +256,13 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
     assert retained_cache is not None
     assert "grasp_place_joint_qualified" not in retained_cache["candidate"]
     coordinator.source_model_raw_candidate_count = 96
-    coordinator.source_candidate_image_ref = "/pregrasp/candidates.png"
+    coordinator.source_candidate_image_ref = "/frozen-goals/candidates.png"
     coordinator.source_candidate_artifacts = [
         {
             "type": "placement_candidate_image",
             "kind": "image",
             "tool": "anyplace",
-            "path": "/pregrasp/candidates.png",
+            "path": "/frozen-goals/candidates.png",
         }
     ]
     attachment = {
@@ -260,14 +281,26 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
     assert [item["id"] for item in postattach.details["placement_candidates"]] == [
         "p0"
     ]
-    assert postattach.details["frozen_pregrasp_goal_requalification"] is True
+    frozen_goal = postattach.details["placement_candidates"][0]
+    assert frozen_goal["world_object_goal_pose"]["translation_xyz"] == [
+        0.48,
+        0.0,
+        0.43,
+    ]
+    assert frozen_goal["model_pointcloud_object_goal_pose"]["translation_xyz"] == [
+        0.45,
+        0.0,
+        0.43,
+    ]
+    assert frozen_goal["frozen_goal_frame_binding"]["physical_collision_goal"] is True
+    assert postattach.details["frozen_goal_requalification"] is True
     assert postattach.details["discarded_postattach_model_candidate_count"] == 0
     assert postattach.details["model_raw_candidate_count"] == 96
     assert postattach.details["raw_candidate_count"] == 1
     assert postattach.details["anyplace_model_inference_invoked"] is False
-    assert postattach.details["candidate_image_ref"] == "/pregrasp/candidates.png"
+    assert postattach.details["candidate_image_ref"] == "/frozen-goals/candidates.png"
     assert postattach.details["artifacts"][0]["provenance"] == (
-        "frozen_pregrasp_anyplace_pool"
+        "frozen_anyplace_goal_pool"
     )
     assert "source_grasp_id" not in postattach.details
 
@@ -279,9 +312,9 @@ def test_pregrasp_joint_search_materializes_full_pool_round_robin_and_filters_gr
     ) is None
 
 
-def test_pregrasp_joint_search_does_not_reuse_stale_goal_pool() -> None:
+def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:
     qualifier = MoveItCandidateQualifier(lambda *_args: {})
-    coordinator = _PregraspGraspPlaceCoordinator(
+    coordinator = _FrozenGoalPairCoordinator(
         qualifier,
         object_goals=[{"id": "p0"}],
         object_current_pose={"frame": "world"},
@@ -395,7 +428,7 @@ def _postattachment_memory(measured_attachment: dict[str, Any]) -> dict[str, Any
             "status": "resolved",
             "verdict": "PASS",
             "planning_scene_revision": 7,
-            "full_lift_proof": {"attachment_transform": measured_attachment},
+            "attachment_proof": {"attachment_transform": measured_attachment},
         },
         "grasp_execution": {
             "status": "completed",
@@ -439,7 +472,7 @@ def _postattachment_handler(
     tmp_path: Path,
     *,
     qualifier: MoveItCandidateQualifier,
-    coordinator: _PregraspGraspPlaceCoordinator,
+    coordinator: _FrozenGoalPairCoordinator,
     predictor,
 ):
     raw = build_anyplace_handler(
@@ -455,7 +488,7 @@ def _postattachment_handler(
         raw,
         qualifier,
         purpose="placement",
-        pregrasp_coordinator=coordinator,
+        frozen_pair_coordinator=coordinator,
     )
 
 
@@ -472,7 +505,7 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
         return {
             "qualification_stages": [
                 {
-                    "name": "hover",
+                    "name": "release",
                     "xyz": [0.4, 0.0, 0.5],
                     "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
                 }
@@ -508,7 +541,7 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
         placement_full_plan_limit=4,
         placement_diversity_limit=96,
     )
-    coordinator = _PregraspGraspPlaceCoordinator(
+    coordinator = _FrozenGoalPairCoordinator(
         qualifier,
         qualified_goals_by_grasp={
             "g-selected": [
@@ -523,15 +556,26 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
             ]
         },
         source_model_raw_candidate_count=96,
-        source_candidate_image_ref=str(tmp_path / "pregrasp-candidates.png"),
+        source_candidate_image_ref=str(tmp_path / "frozen-goal-candidates.png"),
         source_candidate_artifacts=[
             {
                 "type": "placement_candidate_image",
                 "kind": "image",
                 "tool": "anyplace",
-                "path": str(tmp_path / "pregrasp-candidates.png"),
+                "path": str(tmp_path / "frozen-goal-candidates.png"),
             }
         ],
+        source_binding={
+            "object_observation": {"frozen": True},
+            "placement_observation": {"frozen": True},
+            "object_camera_to_placement_camera": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+            "placement_camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+            "placement_camera_extrinsics": {
+                "frame": "world",
+                "translation_xyz": [0, 0, 0],
+                "quat_xyzw": [0, 0, 0, 1],
+            },
+        },
     )
     measured_attachment = {
         "parent_frame": "eef",
@@ -547,6 +591,7 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
     )
 
     context = _context(tmp_path, measured_attachment=measured_attachment)
+    context.parameters = {"reuse_frozen_goal_pool": True, "scene_revision": 7}
     result = handler(context)
     repeated = handler(context)
 
@@ -560,12 +605,12 @@ def test_postattach_frozen_goal_pass_skips_anyplace_model(
     assert result.details["raw_candidate_count"] == 1
     assert result.details["anyplace_model_inference_invoked"] is False
     assert result.details["artifacts"][0]["provenance"] == (
-        "frozen_pregrasp_anyplace_pool"
+        "frozen_anyplace_goal_pool"
     )
     assert "source_grasp_id" not in str(result.details["source"])
     assert captured_request["funnel"]["full_plan_limit"] == 4
     assert captured_source["attachment_transform"] == measured_attachment
-    assert captured_source["frozen_pregrasp_goal_requalification"] is True
+    assert captured_source["frozen_goal_requalification"] is True
     assert repeated.success is False
     assert repeated.details["reason"] == "placement_model_retry_not_authorized"
     assert predictor_calls == []
@@ -606,7 +651,7 @@ def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
         compile_candidate=lambda *_args: {
             "qualification_stages": [
                 {
-                    "name": "hover",
+                    "name": "release",
                     "xyz": [0.4, 0.0, 0.5],
                     "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
                 }
@@ -615,7 +660,7 @@ def test_frozen_zero_pass_then_calls_model_once_with_same_observation(
         placement_full_plan_limit=4,
         placement_diversity_limit=96,
     )
-    coordinator = _PregraspGraspPlaceCoordinator(
+    coordinator = _FrozenGoalPairCoordinator(
         qualifier,
         qualified_goals_by_grasp={
             "g-selected": [
@@ -726,9 +771,9 @@ def test_no_attachment_or_matching_frozen_pool_calls_model_normally(
             "execution_started": False,
             "results": [],
         },
-        compile_candidate=lambda *_args: {"qualification_stages": [{"name": "hover"}]},
+        compile_candidate=lambda *_args: {"qualification_stages": [{"name": "release"}]},
     )
-    coordinator = _PregraspGraspPlaceCoordinator(qualifier)
+    coordinator = _FrozenGoalPairCoordinator(qualifier)
     raw = build_anyplace_handler(
         lambda request: predictor_calls.append(request) or _model_response(),
         output_root=tmp_path / "anyplace-runs",
@@ -753,10 +798,10 @@ def test_no_attachment_or_matching_frozen_pool_calls_model_normally(
     assert unattached.success
     assert attached_without_matching_pool.success
     assert len(predictor_calls) == 2
-    assert unattached.details.get("frozen_pregrasp_goal_requalification") is not True
+    assert unattached.details.get("frozen_goal_requalification") is not True
     assert (
         attached_without_matching_pool.details.get(
-            "frozen_pregrasp_goal_requalification"
+            "frozen_goal_requalification"
         )
         is not True
     )

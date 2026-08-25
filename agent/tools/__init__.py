@@ -59,10 +59,7 @@ from agent.tools.handlers import (
     build_stdio_graspgenx_mcp_gripper_lister,
     build_stdio_graspgenx_mcp_predictor,
 )
-from agent.tools.grasp_geometry import (
-    DEFAULT_GRASP_PROFILE,
-    build_wrist_alignment_handler,
-)
+from agent.tools.grasp_geometry import DEFAULT_GRASP_PROFILE
 from agent.tools.attachment_probe import (
     ARTICULATED_ATTACHMENT_PROBE_SCHEMA,
     AttachmentProbeError,
@@ -110,7 +107,6 @@ __all__ = [
     "build_sse_sam3_mcp_segmenter",
     "build_web_fetch_handler",
     "build_web_search_handler",
-    "build_wrist_alignment_handler",
     "build_stdio_anyplace_mcp_placer",
     "build_stdio_contact_graspnet_mcp_predictor",
     "build_stdio_graspgenx_mcp_gripper_lister",

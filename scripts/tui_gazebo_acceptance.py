@@ -494,8 +494,8 @@ def instructions_for(milestone: str, mode: str) -> str:
         prompts = {
             "m1": "检查 Gazebo 现场，并基于传感器证据报告所见。完成后关闭环境。",
             "m2": "在碰撞安全的 A/B 位姿之间安全移动两次，并验证夹爪开合。完成后关闭环境。",
-            "m3": "完成真实 close、native-contact DetachableJoint attach ACK、80 mm lift 物理证明，然后 close。",
-            "m4": "使用 Oracle perception 和 contractual fake candidate；仍需通过 M3 的 contact、ACK 和 lift 证明，然后 close。",
+            "m3": "MoveIt 直接到达冻结 contact 终点，完成真实 close、native-contact DetachableJoint attach ACK、原地 open/detach，然后 close。",
+            "m4": "使用 Oracle perception 和 contractual fake candidate；仍需通过 M3 的 exact contact、native contact、attach/detach ACK，然后 close。",
         }
         return prompts.get(milestone, "M0 不运行 Planner 自主性 case。") + "\n"
     rows = {
@@ -515,13 +515,13 @@ def instructions_for(milestone: str, mode: str) -> str:
 """,
         "m3": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m3"]}`。
 禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
-创建后先接近，再执行一次真实 close。只有回执显示双垫 native contact 与 attached ACK 后才能执行第一段 lift；记录 child-link 的 >=80 mm lift 和 <=10 mm 相对位移；然后 open、detach ACK，最后唯一一次 close_simulator_env。
-close 回执中 native_contact_gate.accepted=true（source=gazebo_native_contacts）且 detachable_joint.state=attached 时，physical_verification.reason_code=NATIVE_GRASP_ATTACH_ACKED_UNPROVEN 是已通过双垫接触与 attach ACK、等待唯一一次 lift proof 的预期中间态。此时 grasp_confirmed=false 与 verdict=UNKNOWN 仅表示 lift proof 尚未执行，不是 attach 失败；不得用 observe 等待它自行变化，必须立即执行 validated lift [0.1552,-0.1000,0.5976]，再以 lift 回执判定 >=80 mm 与 <=10 mm 物理证明。
+创建后由 MoveIt 从当前状态一次规划到冻结的 fixture contact 终点，不得插入 approach、hover、precontact 或 lift。执行一次真实 close；只有双垫 native target contact 与 attached ACK 同时成立才算抓取 PASS。随后原地 open，要求 detach ACK，最后唯一一次 close_simulator_env。
+close 回执必须同时给出 native_contact_gate.accepted=true、detachable_joint.state=attached，以及 physical_verification.reason_code=NATIVE_GRASP_ATTACHMENT_CONFIRMED、grasp_confirmed=true、verdict=PASS；不得要求固定距离或方向的后续抬升来证明抓取。
 """,
         "m4": f"""第一步且唯一的环境创建必须是 AgentTool create_simulator_env，env_id 精确为 `{ENV_IDS["m4"]}`。
 禁止调用 python_exec；禁止以任何其他 env_id（包括 libero）创建环境，也不得用其他方式创建环境。
-创建后实际调用 oracle_perceive 并记录 perception_source=gazebo_oracle 与 contractual fake candidate；它不能替代 M3：随后执行真实 close、native contact、attached ACK 和 child-link lift 证明，然后 open、detach ACK，最后唯一一次 close_simulator_env。
-close 回执中 native_contact_gate.accepted=true（source=gazebo_native_contacts）且 detachable_joint.state=attached 时，physical_verification.reason_code=NATIVE_GRASP_ATTACH_ACKED_UNPROVEN 是已通过双垫接触与 attach ACK、等待唯一一次 lift proof 的预期中间态。此时 grasp_confirmed=false 与 verdict=UNKNOWN 仅表示 lift proof 尚未执行，不是 attach 失败；不得用 observe 等待它自行变化，必须立即执行 validated lift [0.1552,-0.1000,0.5976]，再以 lift 回执判定 >=80 mm 与 <=10 mm 物理证明。
+创建后实际调用 oracle_perceive 并记录 perception_source=gazebo_oracle 与 contractual fake candidate；它不能替代 M3：随后由 MoveIt 直接到冻结 contact，执行真实 close，并以 native bilateral target contact 与 attached ACK 直接证明抓取；原地 open 后要求 detach ACK，最后唯一一次 close_simulator_env。禁止人工 approach/lift/retreat 位姿。
+close 回执仍必须同时给出 native_contact_gate.accepted=true、detachable_joint.state=attached，以及 NATIVE_GRASP_ATTACHMENT_CONFIRMED、grasp_confirmed=true、verdict=PASS。
 """,
     }
     prefix = "[automation=scripted_tui; this is not human approval]\n" if mode == SCRIPTED_TUI else ""
@@ -1338,7 +1338,7 @@ def _m2_control_motion(runner: _ControlToolRunner) -> None:
 
 
 def _m3_motion(runner: _ControlToolRunner) -> list[Any]:
-    """Issue fixed fixture waypoints; native receipts alone prove a grasp.
+    """Issue the fixture contact terminal; MoveIt owns the complete path.
 
     These M3 control-preflight poses are static world-frame values for the
     repository-owned target block and RM75/2F-85 fixture.  They are neither a
@@ -1348,11 +1348,9 @@ def _m3_motion(runner: _ControlToolRunner) -> list[Any]:
     ``GazeboDirectEnv``.
     """
 
-    # The gripper's fixture-specific contact centre is offset from the block
-    # centre.  Specify the calibrated *mount* pose explicitly, including the
-    # horizontal closing-axis orientation, rather than aiming the mount at the
-    # target model origin.  All values are fixed scene configuration; contact
-    # admission remains exclusively the native two-pad Gazebo stream.
+    # This is a control-milestone fixture, not a model-driven normal task.  Its
+    # one frozen contact pose is part of the scene definition.  No additional
+    # spatial waypoint may be derived from it.
     common = {
         "target_pose": {
             "frame": "world",
@@ -1366,27 +1364,13 @@ def _m3_motion(runner: _ControlToolRunner) -> list[Any]:
         "tolerance": 0.0002,
         "ori_tolerance": 0.002,
     }
-    approach = {
-        **common,
-        "target_pose": {**common["target_pose"], "xyz": [0.1552, -0.1000, 0.5686]},
-    }
-    capture = {
+    contact = {
         **common,
         "target_pose": {**common["target_pose"], "xyz": [0.1552, -0.1000, 0.4976]},
     }
-    lift = {
-        **common,
-        # Keep the first post-attach motion 100 mm above capture.  The M3
-        # verifier requires a measured lift of at least 80 mm, so reusing the
-        # 71 mm approach clearance here could never satisfy the native
-        # child-link proof even if the stock joint held perfectly.
-        "target_pose": {**common["target_pose"], "xyz": [0.1552, -0.1000, 0.5976]},
-    }
     return [
-        runner.require_success("move_to", approach),
-        runner.require_success("move_to", capture),
+        runner.require_success("move_to", contact),
         runner.require_success("gripper_control", {"position": 0}),
-        runner.require_success("move_to", lift),
         runner.require_success("gripper_control", {"position": 1}),
     ]
 
@@ -1984,7 +1968,7 @@ def _run_m5_control(
     paths: CasePaths,
     sam3_url: str,
 ) -> None:
-    """Run real external SAM3 once, then the unchanged M3 physical sequence."""
+    """Run real external SAM3 once, then the exact-terminal M3 sequence."""
 
     from adapter.protocol import EnvAction
     from agent.runtime.planner import BasePlanner
@@ -3423,18 +3407,13 @@ def _verify_m3(
         if isinstance(item, Mapping)
         and item.get("schema_version") == "openeta.gazebo.native_grasp.v1"
     ]
-    if not any(item.get("reason_code") == "NATIVE_GRASP_TARGET_HELD" and item.get("grasp_confirmed") is True for item in records):
-        errors.append("M3 child-link held proof missing")
-    held = [item for item in records if item.get("reason_code") == "NATIVE_GRASP_TARGET_HELD"]
     if not any(
-        isinstance(item.get("evidence"), Mapping)
-        and isinstance(item["evidence"].get("lift_m"), (int, float))
-        and float(item["evidence"]["lift_m"]) >= 0.080
-        and isinstance(item["evidence"].get("capture_relative_translation_m"), (int, float))
-        and float(item["evidence"]["capture_relative_translation_m"]) <= 0.010
-        for item in held
+        item.get("reason_code") == "NATIVE_GRASP_ATTACHMENT_CONFIRMED"
+        and item.get("grasp_confirmed") is True
+        and item.get("verdict") == "PASS"
+        for item in records
     ):
-        errors.append("M3 numeric child-link lift/relative-translation proof missing")
+        errors.append("M3 native contact plus attach-ACK grasp proof missing")
     gates = [
         item for payload in payloads for item in _walk(payload)
         if isinstance(item, Mapping) and "left_sample_count" in item and "right_sample_count" in item

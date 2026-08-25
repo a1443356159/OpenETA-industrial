@@ -156,12 +156,9 @@ class SessionWorkspace:
             "sandbox_dir": str(self.sandbox_dir),
             "tools_dir": str(self.tools_dir),
             "calibrations_dir": str(self.calibrations_dir),
-            "strategies_dir": str(self.strategies_dir),
             "grasp_profile_path": str(self.grasp_profile_path),
             "grasp_profile_sha256": self.grasp_profile_sha256,
             "grasp_profile_id": self.grasp_profile_id,
-            "grasp_strategy_root": str(self.grasp_strategy_root),
-            "grasp_strategy_tree_sha256": self.grasp_strategy_tree_sha256,
             "task_playbook_root": str(self.task_playbooks_dir),
         }
 

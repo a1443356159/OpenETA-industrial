@@ -93,8 +93,8 @@ class PlanningSceneSynchronizer:
                 "allowed_collisions": {
                     # The target begins exactly supported by the table, so
                     # FCL reports their coincident surfaces as contact. This
-                    # is the one support-surface exception required for the
-                    # first attached lift and final release; all other world
+                    # is the one support-surface exception required for native
+                    # attachment and exact release; all other world
                     # objects and non-touch robot links remain collidable.
                     target.object_id: [*TARGET_TOUCH_LINKS, table.object_id],
                 },
