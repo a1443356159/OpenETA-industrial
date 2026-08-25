@@ -238,9 +238,28 @@ def test_known_terminal_miss_with_retained_attachment_resumes_frozen_frontier() 
             "capture_relative_translation_m": 0.0001,
             "maximum_capture_relative_translation_m": 0.01,
         },
-        "end_state": {
-            "end_effector_pose": {"frame": "world", "xyz": [0.4, 0.0, 0.5]},
-            "joint_positions": [0.1] * 7,
+        "observation_fresh": True,
+        "motion": {
+            "reached_target": False,
+            "end": {
+                "frame": "gripper_mount_link",
+                "xyz": [0.4, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        },
+        "observation_snapshot": {
+            "schema_version": "openeta.observation_snapshot.v1",
+            "observation": {
+                "metadata": {"planning_scene_revision": 7},
+                "robot": {
+                    "end_effector_pose": {
+                        "frame": "gripper_mount_link",
+                        "xyz": [0.4, 0.0, 0.5],
+                        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    },
+                    "joint_positions": [0.1] * 7,
+                },
+            },
         },
         "position_error_m": 0.008,
         "orientation_error_rad": 0.05,

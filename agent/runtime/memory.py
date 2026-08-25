@@ -7243,7 +7243,6 @@ def _trusted_retained_attachment_motion_failure(
     proof = receipt.get("physical_verification")
     attached = receipt.get("detachable_joint")
     child_proof = receipt.get("child_link_proof")
-    end_state = receipt.get("end_state")
     if not (
         receipt.get("error_code") == "MOTION_TARGET_NOT_REACHED"
         and receipt.get("execution_started") is True
@@ -7260,10 +7259,10 @@ def _trusted_retained_attachment_motion_failure(
         and _valid_attachment_transform(receipt.get("attachment_transform"))
         and isinstance(child_proof, Mapping)
         and child_proof.get("prior_attachment_confirmed") is True
-        and isinstance(end_state, Mapping)
-        and isinstance(end_state.get("end_effector_pose"), Mapping)
-        and isinstance(end_state.get("joint_positions"), list)
-        and end_state.get("joint_positions")
+        and _trusted_failed_motion_end_state(
+            receipt,
+            planning_scene_revision=planning_scene_revision,
+        )
     ):
         return False
     try:
@@ -7279,6 +7278,96 @@ def _trusted_retained_attachment_motion_failure(
     return math.isfinite(drift) and math.isfinite(maximum) and 0.0 <= drift <= min(
         maximum,
         NATIVE_GRASP_MAXIMUM_DRIFT_M,
+    )
+
+
+def _trusted_failed_motion_end_state(
+    receipt: Mapping[str, object],
+    *,
+    planning_scene_revision: int,
+) -> bool:
+    """Prove that a failed motion left the robot in a known restart state."""
+
+    snapshot = receipt.get("observation_snapshot")
+    if not (
+        receipt.get("observation_fresh") is True
+        and isinstance(snapshot, Mapping)
+        and snapshot.get("schema_version") == "openeta.observation_snapshot.v1"
+    ):
+        return False
+    observation = snapshot.get("observation")
+    if not isinstance(observation, Mapping):
+        return False
+    metadata = observation.get("metadata")
+    robot = observation.get("robot")
+    if not (
+        isinstance(metadata, Mapping)
+        and metadata.get("planning_scene_revision") == planning_scene_revision
+        and isinstance(robot, Mapping)
+        and _finite_robot_end_state(robot)
+    ):
+        return False
+    motion = receipt.get("motion")
+    motion_end = motion.get("end") if isinstance(motion, Mapping) else None
+    snapshot_end = robot.get("end_effector_pose")
+    return (
+        isinstance(motion, Mapping)
+        and motion.get("reached_target") is False
+        and isinstance(motion_end, Mapping)
+        and isinstance(snapshot_end, Mapping)
+        and _same_finite_eef_pose(motion_end, snapshot_end)
+    )
+
+
+def _finite_robot_end_state(value: Mapping[str, object]) -> bool:
+    pose = value.get("end_effector_pose")
+    joints = value.get("joint_positions")
+    return (
+        isinstance(pose, Mapping)
+        and _finite_eef_pose(pose)
+        and isinstance(joints, list)
+        and len(joints) >= 7
+        and all(_finite_number(joint) for joint in joints)
+    )
+
+
+def _finite_eef_pose(value: Mapping[str, object]) -> bool:
+    frame = value.get("frame")
+    xyz = value.get("xyz")
+    quat = value.get("quat_xyzw")
+    if not (
+        isinstance(frame, str)
+        and bool(frame.strip())
+        and isinstance(xyz, list | tuple)
+        and len(xyz) == 3
+        and _finite_xyz(xyz)
+        and isinstance(quat, list)
+        and len(quat) == 4
+        and all(_finite_number(component) for component in quat)
+    ):
+        return False
+    norm = math.sqrt(sum(float(component) ** 2 for component in quat))
+    return abs(norm - 1.0) <= 1e-5
+
+
+def _same_finite_eef_pose(
+    first: Mapping[str, object],
+    second: Mapping[str, object],
+) -> bool:
+    if not (_finite_eef_pose(first) and _finite_eef_pose(second)):
+        return False
+    if first.get("frame") != second.get("frame"):
+        return False
+    first_xyz = first["xyz"]
+    second_xyz = second["xyz"]
+    first_quat = first["quat_xyzw"]
+    second_quat = second["quat_xyzw"]
+    return all(
+        abs(float(left) - float(right)) <= 1e-9
+        for left, right in zip(first_xyz, second_xyz, strict=True)
+    ) and all(
+        abs(float(left) - float(right)) <= 1e-9
+        for left, right in zip(first_quat, second_quat, strict=True)
     )
 
 
