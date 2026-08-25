@@ -66,6 +66,16 @@ DEFAULT_SAM3_ROI_PADDING_RATIO = 0.12
 DEFAULT_SAM3_ROI_FALLBACK_PROMPT = "foreground object"
 SAM3_MAX_POINT_COUNT = 64
 DEFAULT_ANYPLACE_OUTPUT_ROOT = Path("tmp") / "tool_result" / "anyplace"
+ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA = (
+    "openeta.anyplace.object_mask_depth_cleanup.v1"
+)
+# This is intentionally a narrow observation repair, not a general point-cloud
+# filter. It only removes one tiny depth tail separated from the rest of a
+# SAM3 object mask by a physically large empty interval.
+ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M = 0.03
+ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION = 0.02
+ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS = 32
+ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS = 128
 DEFAULT_MOLMOPOINT_OUTPUT_ROOT = Path("tmp") / "tool_result" / "molmopoint"
 DEFAULT_GRASPGENX_OUTPUT_ROOT = Path("tmp") / "tool_result" / "graspgenx"
 DEFAULT_DEPTH_PRIOR_OUTPUT_ROOT = Path("tmp") / "tool_result" / "depth_prior"
@@ -2021,16 +2031,6 @@ def build_anyplace_handler(
             placement_camera_to_world = _camera_to_world_opencv_transform(
                 placement_packet["camera_extrinsics"]
             )
-            mcp_request = {
-                "object_observation": _encode_anyplace_observation(
-                    object_packet, mask_key="object_mask"
-                ),
-                "placement_observation": _encode_anyplace_observation(
-                    placement_packet, mask_key="placement_region_mask"
-                ),
-                "object_camera_to_placement_camera": transform,
-                "placement_camera_to_world": placement_camera_to_world,
-            }
         except (ValueError, FileNotFoundError, OSError) as exc:
             return _anyplace_failure(
                 "invalid_independent_observation",
@@ -2047,6 +2047,29 @@ def build_anyplace_handler(
             prepared = pre_inference(context, request)
             if prepared is not None:
                 return prepared
+        try:
+            object_packet = _clean_anyplace_object_mask_sparse_depth_tail(
+                object_packet,
+                artifact_root=(
+                    artifact_session_root(output_root, session_id) / "preprocessing"
+                ),
+            )
+            request["object_observation"] = object_packet
+            mcp_request = {
+                "object_observation": _encode_anyplace_observation(
+                    object_packet, mask_key="object_mask"
+                ),
+                "placement_observation": _encode_anyplace_observation(
+                    placement_packet, mask_key="placement_region_mask"
+                ),
+                "object_camera_to_placement_camera": transform,
+                "placement_camera_to_world": placement_camera_to_world,
+            }
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            return _anyplace_failure(
+                "invalid_independent_observation",
+                f"AnyPlace placement prediction failed: {exc}",
+            )
         try:
             response = predict_placement(mcp_request)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured.
@@ -5631,6 +5654,30 @@ def _normalise_anyplace_response(
         candidate["projection_summary"] = summary
     raw_output_ref = run_dir / "response.raw.json"
     _write_json(raw_output_ref, _scrub_anyplace_response(response))
+    object_preprocessing = _dict_or_empty(
+        request["object_observation"].get("object_mask_depth_cleanup")
+    )
+    artifacts: list[JsonDict] = [
+        {
+            "type": "placement_candidate_image",
+            "kind": "image",
+            "tool": "anyplace",
+            "path": candidate_image_ref,
+        }
+    ]
+    if object_preprocessing.get("applied") is True:
+        filtered_mask_ref = _string_param(
+            object_preprocessing.get("filtered_mask_ref")
+        )
+        if filtered_mask_ref:
+            artifacts.append(
+                {
+                    "type": "object_mask_depth_cleanup",
+                    "kind": "image",
+                    "tool": "anyplace",
+                    "path": filtered_mask_ref,
+                }
+            )
     result = ToolResult(
         True,
         content=_string_param(response.get("content"))
@@ -5663,14 +5710,12 @@ def _normalise_anyplace_response(
             "placement_candidates": candidates,
             "object_current_pose": dict(object_current_pose),
             "candidate_image_ref": candidate_image_ref,
-            "artifacts": [
-                {
-                    "type": "placement_candidate_image",
-                    "kind": "image",
-                    "tool": "anyplace",
-                    "path": candidate_image_ref,
-                }
-            ],
+            **(
+                {"object_mask_preprocessing": object_preprocessing}
+                if object_preprocessing
+                else {}
+            ),
+            "artifacts": artifacts,
             "metadata": _scrub_anyplace_response(_dict_or_empty(details.get("metadata"))),
         },
     )
@@ -6303,6 +6348,132 @@ def _normalise_anyplace_observation(value: Any, *, mask_key: str) -> JsonDict:
         "camera_extrinsics": dict(extrinsics),
         "camera_frame_id": _string_param(value.get("camera_frame_id")),
     }
+
+
+def _clean_anyplace_object_mask_sparse_depth_tail(
+    packet: Mapping[str, Any],
+    *,
+    artifact_root: Path,
+) -> JsonDict:
+    """Remove one unambiguous, tiny depth tail from an object mask.
+
+    A handful of support-surface pixels can expand a held object's point cloud
+    by many centimetres and make every otherwise valid AnyPlace target appear
+    unsupported. This bounded repair only applies when exactly one sorted
+    depth discontinuity isolates at most two percent (and at most 32 points)
+    at an outer tail. Ambiguous or larger clusters are preserved unchanged.
+    """
+
+    import numpy as np
+    from PIL import Image
+
+    normalized = dict(packet)
+    depth_path = Path(str(packet["depth"])).expanduser()
+    mask_path = Path(str(packet["mask"])).expanduser()
+    with Image.open(depth_path) as loaded_depth:
+        depth = np.asarray(loaded_depth, dtype=np.float64)
+    with Image.open(mask_path) as loaded_mask:
+        mask = np.asarray(loaded_mask.convert("L"), dtype=np.uint8) > 0
+    # The cleanup is an optional, narrow repair. Preserve the existing MCP
+    # contract for formats it cannot reason about and let the backend perform
+    # its normal input validation.
+    if depth.ndim != 2 or mask.shape != depth.shape:
+        return normalized
+
+    intrinsics = packet.get("intrinsics")
+    scale_value = intrinsics.get("scale") if isinstance(intrinsics, Mapping) else None
+    try:
+        scale = float(scale_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("object observation depth scale is invalid") from exc
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ValueError("object observation depth scale is invalid")
+
+    metric_depth = depth / scale
+    valid = mask & np.isfinite(metric_depth) & (metric_depth > 0.0)
+    values = np.sort(metric_depth[valid])
+    point_count = int(values.size)
+    if point_count <= ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS:
+        return normalized
+
+    gaps = np.diff(values)
+    qualifying: list[tuple[str, int, int, float, float]] = []
+    for index in np.flatnonzero(
+        gaps >= ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M
+    ).tolist():
+        lower_count = int(index) + 1
+        upper_count = point_count - lower_count
+        gap = float(gaps[index])
+        boundary = float((values[index] + values[index + 1]) / 2.0)
+        for side, sparse_count, retained_count in (
+            ("near", lower_count, upper_count),
+            ("far", upper_count, lower_count),
+        ):
+            if (
+                retained_count >= ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
+                and sparse_count <= ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS
+                and sparse_count / point_count
+                <= ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION
+            ):
+                qualifying.append((side, sparse_count, retained_count, gap, boundary))
+    if len(qualifying) != 1:
+        return normalized
+
+    side, sparse_count, retained_count, gap, boundary = qualifying[0]
+    sparse_pixels = valid & (
+        metric_depth < boundary if side == "near" else metric_depth > boundary
+    )
+    if int(np.count_nonzero(sparse_pixels)) != sparse_count:
+        return normalized
+
+    filtered_mask = mask.copy()
+    filtered_mask[sparse_pixels] = False
+    digest = hashlib.sha256()
+    digest.update(mask_path.resolve().as_posix().encode("utf-8"))
+    digest.update(mask_path.read_bytes())
+    digest.update(depth_path.resolve().as_posix().encode("utf-8"))
+    digest.update(depth_path.read_bytes())
+    digest.update(ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA.encode("ascii"))
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    filtered_ref = artifact_root / f"object-mask-depth-clean-{digest.hexdigest()[:16]}.png"
+    if not filtered_ref.is_file():
+        temporary_ref = filtered_ref.with_name(
+            f".{filtered_ref.name}.{uuid4().hex}.tmp.png"
+        )
+        Image.fromarray(filtered_mask.astype(np.uint8) * 255, mode="L").save(
+            temporary_ref
+        )
+        temporary_ref.replace(filtered_ref)
+
+    cleanup = {
+        "schema": ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA,
+        "applied": True,
+        "source_mask_ref": str(packet["mask"]),
+        "filtered_mask_ref": str(filtered_ref),
+        "valid_depth_points_before": point_count,
+        "valid_depth_points_after": retained_count,
+        "removed_depth_points": sparse_count,
+        "removed_tail": side,
+        "depth_gap_m": round(gap, 6),
+        "depth_boundary_m": round(boundary, 6),
+        "limits": {
+            "minimum_gap_m": ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M,
+            "maximum_sparse_fraction": (
+                ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION
+            ),
+            "maximum_sparse_points": ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS,
+            "minimum_retained_points": (
+                ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
+            ),
+        },
+    }
+    normalized["mask"] = str(filtered_ref)
+    normalized["mask_artifact"] = {
+        "mask_ref": str(filtered_ref),
+        "source_image": str(packet["rgb"]),
+    }
+    normalized["object_mask_depth_cleanup"] = cleanup
+    return normalized
 
 
 def _encode_anyplace_observation(

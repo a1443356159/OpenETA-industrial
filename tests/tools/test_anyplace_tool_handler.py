@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import base64
+import io
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from agent.tools.handlers import build_anyplace_handler
 from agent.tools.registry import ToolExecutionContext
+from agent.tools.registry import ToolResult
 from agent.tools.registry import build_default_tool_registry
 
 
@@ -46,6 +50,34 @@ def _parameters(tmp_path: Path) -> dict[str, Any]:
         "placement_observation": _packet(tmp_path, "placement", "placement_region_mask", 0.3),
         "scene_revision": 2,
     }
+
+
+def _object_depth_tail(
+    parameters: dict[str, Any],
+    *,
+    main_count: int = 400,
+    sparse_count: int = 5,
+) -> None:
+    packet = parameters["object_observation"]
+    depth = Image.new("I;16", (64, 64), 0)
+    mask = Image.new("L", (64, 64), 0)
+    main_pixels = [(index % 32, index // 32) for index in range(main_count)]
+    sparse_pixels = [(40 + index % 20, 40 + index // 20) for index in range(sparse_count)]
+    for pixel in main_pixels:
+        depth.putpixel(pixel, 750)
+        mask.putpixel(pixel, 255)
+    for pixel in sparse_pixels:
+        depth.putpixel(pixel, 900)
+        mask.putpixel(pixel, 255)
+    depth.save(packet["depth"])
+    mask.save(packet["object_mask"]["mask_ref"])
+
+
+def _mask_point_count(image: Image.Image | str) -> int:
+    if isinstance(image, str):
+        with Image.open(image) as loaded:
+            return int(np.count_nonzero(np.asarray(loaded.convert("L"))))
+    return int(np.count_nonzero(np.asarray(image.convert("L"))))
 
 
 def _response(count: int = 10) -> dict[str, Any]:
@@ -106,8 +138,108 @@ def test_handler_encodes_two_independent_observations(tmp_path: Path) -> None:
     assert "mask" not in calls[0]["placement_observation"]
     assert "selected_grasp" not in str(calls[0])
     assert result.details["candidate_count"] == 10
+    assert "object_mask_preprocessing" not in result.details
     assert all("place_grasp_pose" not in candidate for candidate in result.details["placement_candidates"])
     assert Path(result.details["candidate_image_ref"]).is_file()
+
+
+def test_handler_removes_one_tiny_isolated_object_depth_tail(tmp_path: Path) -> None:
+    parameters = _parameters(tmp_path)
+    _object_depth_tail(parameters)
+    source_mask = parameters["object_observation"]["object_mask"]["mask_ref"]
+    calls: list[dict[str, Any]] = []
+
+    result = build_anyplace_handler(
+        lambda request: calls.append(request) or _response(96),
+        output_root=tmp_path / "runs",
+    )(_context(parameters))
+
+    assert result.success is True
+    assert result.details["candidate_count"] == 96
+    cleanup = result.details["object_mask_preprocessing"]
+    assert cleanup == {
+        "schema": "openeta.anyplace.object_mask_depth_cleanup.v1",
+        "applied": True,
+        "source_mask_ref": source_mask,
+        "filtered_mask_ref": cleanup["filtered_mask_ref"],
+        "valid_depth_points_before": 405,
+        "valid_depth_points_after": 400,
+        "removed_depth_points": 5,
+        "removed_tail": "far",
+        "depth_gap_m": 0.15,
+        "depth_boundary_m": 0.825,
+        "limits": {
+            "minimum_gap_m": 0.03,
+            "maximum_sparse_fraction": 0.02,
+            "maximum_sparse_points": 32,
+            "minimum_retained_points": 128,
+        },
+    }
+    assert cleanup["filtered_mask_ref"] != source_mask
+    assert Path(cleanup["filtered_mask_ref"]).is_file()
+    assert _mask_point_count(source_mask) == 405
+    encoded_mask = calls[0]["object_observation"]["object_mask"]["base64"]
+    with Image.open(io.BytesIO(base64.b64decode(encoded_mask))) as filtered:
+        assert _mask_point_count(filtered) == 400
+    assert result.details["artifacts"][1]["type"] == "object_mask_depth_cleanup"
+
+
+def test_handler_preserves_non_tiny_object_depth_cluster(tmp_path: Path) -> None:
+    parameters = _parameters(tmp_path)
+    _object_depth_tail(parameters, sparse_count=20)
+    calls: list[dict[str, Any]] = []
+
+    result = build_anyplace_handler(
+        lambda request: calls.append(request) or _response(),
+        output_root=tmp_path / "runs",
+    )(_context(parameters))
+
+    assert result.success is True
+    assert "object_mask_preprocessing" not in result.details
+    encoded_mask = calls[0]["object_observation"]["object_mask"]["base64"]
+    with Image.open(io.BytesIO(base64.b64decode(encoded_mask))) as preserved:
+        assert _mask_point_count(preserved) == 420
+
+
+def test_handler_preserves_ambiguous_depth_tails(tmp_path: Path) -> None:
+    parameters = _parameters(tmp_path)
+    _object_depth_tail(parameters)
+    packet = parameters["object_observation"]
+    with Image.open(packet["depth"]) as source_depth:
+        depth = source_depth.copy()
+    with Image.open(packet["object_mask"]["mask_ref"]) as source_mask:
+        mask = source_mask.copy()
+    for index in range(5):
+        pixel = (50 + index, 20)
+        depth.putpixel(pixel, 600)
+        mask.putpixel(pixel, 255)
+    depth.save(packet["depth"])
+    mask.save(packet["object_mask"]["mask_ref"])
+
+    result = build_anyplace_handler(
+        lambda _: _response(),
+        output_root=tmp_path / "runs",
+    )(_context(parameters))
+
+    assert result.success is True
+    assert "object_mask_preprocessing" not in result.details
+
+
+def test_handler_does_not_preprocess_when_frozen_pool_short_circuits(
+    tmp_path: Path,
+) -> None:
+    parameters = _parameters(tmp_path)
+    _object_depth_tail(parameters)
+    sentinel = ToolResult(False, "frozen", {"reason": "frozen"})
+
+    result = build_anyplace_handler(
+        lambda _: pytest.fail("must not call MCP"),
+        output_root=tmp_path / "runs",
+        pre_inference=lambda _context, _request: sentinel,
+    )(_context(parameters))
+
+    assert result is sentinel
+    assert not (tmp_path / "runs" / "test" / "preprocessing").exists()
 
 
 def test_handler_allows_distinct_rgbd_packets(tmp_path: Path) -> None:
