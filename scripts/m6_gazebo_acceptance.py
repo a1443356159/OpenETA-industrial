@@ -357,6 +357,18 @@ def _has_minimum_int_value(payload: object, key: str, minimum: int) -> bool:
     )
 
 
+def _call_outputs(call: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the public tool-output object without descending into evidence."""
+
+    result = call.get("result")
+    result = result if isinstance(result, Mapping) else call
+    details = result.get("details")
+    if not isinstance(details, Mapping):
+        return {}
+    outputs = details.get("outputs")
+    return outputs if isinstance(outputs, Mapping) else {}
+
+
 def _parameters(call: Mapping[str, Any]) -> Mapping[str, Any]:
     value = call.get("parameters")
     return value if isinstance(value, Mapping) else {}
@@ -627,6 +639,7 @@ def verify_case(
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}
+        anyplace_outputs = _call_outputs(anyplace)
         candidate_ids = {
             str(value)
             for value in base._values(anyplace, "id")
@@ -636,22 +649,21 @@ def verify_case(
             errors.append("AnyPlace model raw pool evidence is missing")
         if not any(1 <= value <= 2 for value in base._values(anyplace, "full_plan_submitted_count") if isinstance(value, int)):
             errors.append("AnyPlace full-plan submission bound is missing")
-        candidate_counts = [
-            int(value)
-            for value in base._values(anyplace, "candidate_count")
-            if isinstance(value, int) and not isinstance(value, bool)
-        ]
-        full_plan_pass_counts = [
-            int(value)
-            for value in base._values(anyplace, "full_plan_pass_count")
-            if isinstance(value, int) and not isinstance(value, bool)
-        ]
-        if not candidate_counts or candidate_counts[-1] < 1:
+        candidate_count = anyplace_outputs.get("candidate_count")
+        full_plan_pass_count = anyplace_outputs.get("full_plan_pass_count")
+        candidate_count_valid = (
+            isinstance(candidate_count, int) and not isinstance(candidate_count, bool)
+        )
+        full_plan_pass_count_valid = (
+            isinstance(full_plan_pass_count, int)
+            and not isinstance(full_plan_pass_count, bool)
+        )
+        if not candidate_count_valid or candidate_count < 1:
             errors.append("final AnyPlace result stored no MoveIt PASS candidate")
         if (
-            not full_plan_pass_counts
-            or not candidate_counts
-            or full_plan_pass_counts[-1] != candidate_counts[-1]
+            not full_plan_pass_count_valid
+            or not candidate_count_valid
+            or full_plan_pass_count != candidate_count
         ):
             errors.append("AnyPlace candidate_count/full_plan_pass_count mismatch")
         if not candidate_ids:

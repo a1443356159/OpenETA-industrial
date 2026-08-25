@@ -201,6 +201,28 @@ def test_m6_verifier_uses_model_raw_count_for_frozen_goal_requalification() -> N
     assert not m6._has_minimum_int_value(call, "raw_candidate_count", 96)
 
 
+def test_m6_candidate_counts_ignore_nested_wave_cardinality() -> None:
+    call = {
+        "result": {
+            "details": {
+                "outputs": {
+                    "candidate_count": 1,
+                    "full_plan_pass_count": 1,
+                    "qualification_evidence": {
+                        "waves": [{"candidate_count": 2}]
+                    },
+                    "qualification_waves": [{"candidate_count": 2}],
+                }
+            }
+        }
+    }
+
+    outputs = m6._call_outputs(call)
+
+    assert outputs["candidate_count"] == 1
+    assert outputs["full_plan_pass_count"] == 1
+
+
 def test_m6_rejection_scenario_is_explicit_acceptance_only_fixture(
     tmp_path, monkeypatch
 ) -> None:
