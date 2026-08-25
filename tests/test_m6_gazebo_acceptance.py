@@ -50,6 +50,8 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
     assert "grasp_pose_estimate" in prompt and "AnyPlace" in prompt
     assert "精确 EEF contact" in prompt
     assert "一次规划到精确 contact" in prompt
+    assert "同一次工具调用内" in prompt
+    assert "不增加 TUI/VLM 回合" in prompt
     assert "最终窗口 >=0.5 s" in prompt
     assert "不得" in prompt and "Oracle" in prompt
     assert "initial observation 不计作这次显式 observe" in prompt

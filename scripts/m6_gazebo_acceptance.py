@@ -92,9 +92,11 @@ target contact 与 attach ACK 直接证明抓取。
 `4 → 8 → 16 → 32 → 剩余` 展开。候选进入当前波次后才连续执行配对合法性、
 Beam-2 链式 IK、MoveIt 状态有效性和 L5 plan-only；波次 barrier 后按固定编号归并。
 得到主方案和不同 SE(3)/物理族的备用抓取后立即进入执行，不为凑满第三或第四分支
-进入全池或恢复层。若当前物理方案失败，先切换同波次已通过备用，再由 Planner 显式
-请求 `model_inference=false` 的 frozen_frontier 扩展；只补做下一波次资格检查，不重跑
-SAM3、抓取模型或 AnyPlace。冻结池与恢复预算真正耗尽时才显式失败。
+进入全池或恢复层。若首批抓取经联合配对后不足两个来源，宿主漏斗在同一次工具调用内
+从 frozen_frontier 取下一最小波，只补资格检查，不增加 TUI/VLM 回合且不重跑模型。
+若当前物理方案失败，先切换已通过备用；备用耗尽后再由 Planner 显式请求
+`model_inference=false` 的 frozen_frontier 继续未访问尾部。不得重跑 SAM3、抓取模型或
+AnyPlace；冻结池与恢复预算真正耗尽时才显式失败。
 
 attach 后宿主直接复用冻结目标池，以实测 T_eef_object 和当前 PlanningScene revision
 重新计算 exact release EEF，并通过 inference=false 的内部 AnyPlace 资格波次调用。
