@@ -464,7 +464,7 @@ def robot_state_from_sources(
 
 
 def make_move_group_goal(
-    target_pose: Mapping[str, Sequence[float]],
+    target_pose: Mapping[str, Any],
     *,
     config: GazeboControlConfig | None = None,
     tolerances: Mapping[str, float] | None = None,
@@ -486,7 +486,7 @@ def make_move_group_goal(
     offset = _q_rotate(link_q, cfg.mount_xyz)
     link_xyz = [tool_xyz[i] - offset[i] for i in range(3)]
     tolerance_values = tolerances or {}
-    return {
+    goal = {
         "group_name": cfg.move_group,
         "base_frame": cfg.base_link,
         "link_name": cfg.arm_tip,
@@ -526,6 +526,78 @@ def make_move_group_goal(
         "max_acceleration_scaling_factor": float(
             (tolerances or {}).get("max_acceleration_scaling_factor", 0.3)
         ),
+    }
+    qualified_joint_goal = _validated_qualified_joint_goal(target_pose)
+    if qualified_joint_goal is not None:
+        goal.update(qualified_joint_goal)
+    return goal
+
+
+def _validated_qualified_joint_goal(
+    target_pose: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    state_field = "qualification_goal_joint_state"
+    hash_field = "qualification_goal_joint_state_sha256"
+    binding_field = "qualification_binding_sha256"
+    if not any(
+        field in target_pose for field in (state_field, hash_field, binding_field)
+    ):
+        return None
+    state = target_pose.get(state_field)
+    if not isinstance(state, Mapping):
+        raise ValueError("qualified joint goal state is missing")
+    names = state.get("names")
+    positions = state.get("positions")
+    if (
+        not isinstance(names, Sequence)
+        or isinstance(names, (str, bytes))
+        or list(names) != list(ARM_JOINTS)
+        or not isinstance(positions, Sequence)
+        or isinstance(positions, (str, bytes))
+        or len(positions) != len(ARM_JOINTS)
+    ):
+        raise ValueError(
+            "qualified joint goal must match the configured arm joints"
+        )
+    try:
+        normalized_positions = [float(value) for value in positions]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "qualified joint goal positions must be numeric"
+        ) from exc
+    if any(not math.isfinite(value) for value in normalized_positions):
+        raise ValueError("qualified joint goal positions must be finite")
+    for (joint_name, lower, upper), position in zip(
+        ARM_JOINT_BOUNDS, normalized_positions, strict=True
+    ):
+        if (
+            position < lower - START_STATE_BOUNDS_TOLERANCE_RAD
+            or position > upper + START_STATE_BOUNDS_TOLERANCE_RAD
+        ):
+            raise ValueError(
+                f"qualified joint goal exceeds {joint_name} bounds"
+            )
+    normalized_state = {
+        "names": list(ARM_JOINTS),
+        "positions": normalized_positions,
+    }
+    expected_hash = hashlib.sha256(
+        json.dumps(
+            normalized_state, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    supplied_hash = str(target_pose.get(hash_field) or "")
+    if supplied_hash != expected_hash:
+        raise ValueError("qualified joint goal hash does not match its state")
+    binding = str(target_pose.get(binding_field) or "")
+    if len(binding) != 64 or any(
+        char not in "0123456789abcdef" for char in binding
+    ):
+        raise ValueError("qualification binding hash is invalid")
+    return {
+        state_field: normalized_state,
+        hash_field: supplied_hash,
+        binding_field: binding,
     }
 
 

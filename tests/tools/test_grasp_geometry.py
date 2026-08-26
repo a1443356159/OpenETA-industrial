@@ -123,6 +123,24 @@ def _compiler_spec() -> ToolSpec:
     )
 
 
+def _qualified_proof(compile_parameters: dict) -> dict:
+    return {
+        "verdict": "PASS",
+        "qualification_binding_sha256": "a" * 64,
+        "compile_parameters": compile_parameters,
+        "stages": [
+            {
+                "plan_only": True,
+                "execution_started": False,
+                "end_joint_state": {
+                    "names": [f"joint_{index}" for index in range(1, 8)],
+                    "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+                },
+            }
+        ],
+    }
+
+
 def test_grasp_compiler_preserves_model_terminal_after_frame_and_tcp_transform() -> None:
     compiled = compile_grasp_seed(
         _grasp_parameters(),
@@ -217,7 +235,7 @@ def test_qualified_grasp_hash_binds_only_exact_contact() -> None:
             public_candidate["moveit_l5_qualified"] = True
             return {
                 "candidate": public_candidate,
-                "proof": {"compile_parameters": proof_parameters},
+                "proof": _qualified_proof(proof_parameters),
                 "scene_epoch": 0,
                 "planning_scene_revision": 0,
             }
@@ -239,7 +257,18 @@ def test_qualified_grasp_hash_binds_only_exact_contact() -> None:
     )
 
     assert result.success is True
-    assert result.details["outputs"]["contact_pose"] == compiled["contact_pose"]
+    contact_pose = result.details["outputs"]["contact_pose"]
+    assert contact_pose["xyz"] == compiled["contact_pose"]["xyz"]
+    assert (
+        contact_pose["rotation_matrix"]
+        == compiled["contact_pose"]["rotation_matrix"]
+    )
+    assert contact_pose["qualification_goal_joint_state"] == {
+        "names": [f"joint_{index}" for index in range(1, 8)],
+        "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+    }
+    assert len(contact_pose["qualification_goal_joint_state_sha256"]) == 64
+    assert contact_pose["qualification_binding_sha256"] == "a" * 64
 
 
 def _placement_candidate() -> dict:
@@ -333,7 +362,7 @@ def test_placement_handler_rejects_stale_attachment_and_accepts_frozen_proof() -
         def resolve(self, **_kwargs):
             return {
                 "candidate": _placement_candidate(),
-                "proof": {"compile_parameters": parameters},
+                "proof": _qualified_proof(parameters),
                 "scene_epoch": 4,
                 "planning_scene_revision": 7,
             }
@@ -379,6 +408,9 @@ def test_placement_handler_rejects_stale_attachment_and_accepts_frozen_proof() -
     rejected = handler(context(changed))
 
     assert accepted.success is True
+    assert accepted.details["outputs"]["release_pose"][
+        "qualification_goal_joint_state"
+    ]["positions"] == [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7]
     assert rejected.success is False
     assert "attachment transform is stale" in rejected.content
 

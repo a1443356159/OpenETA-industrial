@@ -1114,7 +1114,15 @@ class _RosRuntime:
         planning_time_s: float,
         planning_attempts: int,
     ) -> Mapping[str, Any]:
-        goal = make_move_group_goal(dict(target), config=self.config, tolerances=target)
+        # This private L5 call is generating the proof, so its branch cannot
+        # yet carry the proof hash required at the public execution boundary.
+        pose_target = dict(target)
+        qualification_goal_joint_state = pose_target.pop(
+            "qualification_goal_joint_state", None
+        )
+        goal = make_move_group_goal(
+            pose_target, config=self.config, tolerances=target
+        )
         goal.update(
             {
                 "plan_only": True,
@@ -1122,9 +1130,6 @@ class _RosRuntime:
                 "allowed_planning_time_s": planning_time_s,
                 "num_planning_attempts": planning_attempts,
             }
-        )
-        qualification_goal_joint_state = target.get(
-            "qualification_goal_joint_state"
         )
         if isinstance(qualification_goal_joint_state, Mapping):
             goal["qualification_goal_joint_state"] = dict(

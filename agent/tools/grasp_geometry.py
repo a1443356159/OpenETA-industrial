@@ -25,6 +25,8 @@ COMPILED_PLACEMENT_SCHEMA = "openeta.compiled_placement_seed.v3"
 DEFAULT_GRASP_PROFILE = DEFAULT_GRASP_CALIBRATION_PROFILE
 _OPENCV_TO_OPENGL = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
 _ARTICULATED_HANDLE_APPROACH_MODES = {"top_down", "front", "side"}
+_QUALIFIED_JOINT_STATE_FIELD = "qualification_goal_joint_state"
+_QUALIFIED_JOINT_STATE_HASH_FIELD = "qualification_goal_joint_state_sha256"
 
 
 class GraspGeometryError(ValueError):
@@ -58,6 +60,7 @@ def build_compile_grasp_seed_handler(
         try:
             profile, profile_sha256 = _load_profile(resolved_profile)
             parameters = dict(context.parameters)
+            qualification_proof: Mapping[str, Any] | None = None
             purpose = str(parameters.get("purpose") or "grasp").strip().lower()
             if purpose != "grasp":
                 raise GraspGeometryError("compile_grasp_seed only accepts grasp candidates")
@@ -126,7 +129,10 @@ def build_compile_grasp_seed_handler(
                         f"{purpose} candidate id has no current MoveIt PASS proof"
                     )
                 scene_epoch = int(entry["scene_epoch"])
-                proof_parameters = entry["proof"].get("compile_parameters")
+                qualification_proof = entry.get("proof")
+                if not isinstance(qualification_proof, Mapping):
+                    raise GraspGeometryError("qualified grasp proof is missing")
+                proof_parameters = qualification_proof.get("compile_parameters")
                 if not isinstance(proof_parameters, Mapping):
                     raise GraspGeometryError("qualified compile parameters are missing")
                 qualified_camera_pose = proof_parameters.get("camera_pose")
@@ -171,6 +177,10 @@ def build_compile_grasp_seed_handler(
                     raise GraspGeometryError(
                         "compiled grasp pose differs from MoveIt qualification proof"
                     )
+            if qualification_proof is not None:
+                _bind_qualified_joint_goal(
+                    outputs["contact_pose"], qualification_proof
+                )
         except (
             OSError,
             json.JSONDecodeError,
@@ -259,7 +269,10 @@ def build_compile_placement_seed_handler(
             )
             if entry is None:
                 raise GraspGeometryError("placement candidate id has no current MoveIt PASS proof")
-            proof_parameters = entry["proof"].get("compile_parameters")
+            qualification_proof = entry.get("proof")
+            if not isinstance(qualification_proof, Mapping):
+                raise GraspGeometryError("qualified placement proof is missing")
+            proof_parameters = qualification_proof.get("compile_parameters")
             if not isinstance(proof_parameters, Mapping):
                 raise GraspGeometryError("qualified placement compile parameters are missing")
             parameters = dict(proof_parameters)
@@ -342,6 +355,9 @@ def build_compile_placement_seed_handler(
             ).hexdigest()
             if pose_hash != parameters.get("qualified_compiled_pose_sha256"):
                 raise GraspGeometryError("compiled placement pose differs from MoveIt qualification proof")
+            _bind_qualified_joint_goal(
+                outputs["release_pose"], qualification_proof
+            )
         except (GraspGeometryError, OSError, ValueError) as exc:
             return make_tool_result(
                 context,
@@ -364,6 +380,81 @@ def build_compile_placement_seed_handler(
         )
 
     return handler
+
+
+def _bind_qualified_joint_goal(
+    terminal_pose: JsonDict,
+    proof: Mapping[str, Any],
+) -> None:
+    """Bind one immutable L5-certified joint branch to an executable pose.
+
+    The terminal Cartesian pose remains exactly model-derived and is hashed
+    before this evidence is attached. MoveIt still replans from the live
+    state; this binding only prevents a redundant arm from silently selecting
+    a different IK branch than the one exercised by L5 plan-only.
+    """
+
+    if str(proof.get("verdict") or "").upper() != "PASS":
+        raise GraspGeometryError(
+            "qualified terminal joint state requires a PASS proof"
+        )
+    binding = str(proof.get("qualification_binding_sha256") or "")
+    if len(binding) != 64 or any(
+        char not in "0123456789abcdef" for char in binding
+    ):
+        raise GraspGeometryError("qualification binding hash is invalid")
+    stages = proof.get("stages")
+    if not isinstance(stages, list) or not stages:
+        raise GraspGeometryError("qualified terminal joint state is missing")
+    final_stage = stages[-1]
+    if (
+        not isinstance(final_stage, Mapping)
+        or final_stage.get("plan_only") is not True
+        or final_stage.get("execution_started") is not False
+    ):
+        raise GraspGeometryError(
+            "qualified terminal stage is not an L5 plan-only proof"
+        )
+    raw_state = final_stage.get("end_joint_state")
+    if not isinstance(raw_state, Mapping):
+        raise GraspGeometryError("qualified terminal joint state is missing")
+    raw_names = raw_state.get("names", raw_state.get("joint_names"))
+    raw_positions = raw_state.get("positions")
+    if (
+        not isinstance(raw_names, Sequence)
+        or isinstance(raw_names, (str, bytes))
+        or not isinstance(raw_positions, Sequence)
+        or isinstance(raw_positions, (str, bytes))
+    ):
+        raise GraspGeometryError("qualified terminal joint state is malformed")
+    names = [str(value) for value in raw_names]
+    try:
+        positions = [float(value) for value in raw_positions]
+    except (TypeError, ValueError) as exc:
+        raise GraspGeometryError(
+            "qualified terminal joint positions must be numeric"
+        ) from exc
+    if (
+        not names
+        or len(names) != len(positions)
+        or any(not name for name in names)
+        or len(set(names)) != len(names)
+        or any(not math.isfinite(value) for value in positions)
+    ):
+        raise GraspGeometryError("qualified terminal joint state is malformed")
+    state: JsonDict = {"names": names, "positions": positions}
+    state_sha256 = hashlib.sha256(
+        json.dumps(
+            state, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    terminal_pose.update(
+        {
+            _QUALIFIED_JOINT_STATE_FIELD: state,
+            _QUALIFIED_JOINT_STATE_HASH_FIELD: state_sha256,
+            "qualification_binding_sha256": binding,
+        }
+    )
 
 
 def compile_grasp_seed(

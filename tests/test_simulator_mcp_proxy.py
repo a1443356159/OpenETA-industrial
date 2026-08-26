@@ -1012,6 +1012,12 @@ def test_move_to_proxy_preserves_compiled_grasp_contact_identity() -> None:
                 "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                 "compiled_grasp_id": "grasp-7",
                 "grasp_stage": "contact",
+                "qualification_goal_joint_state": {
+                    "names": [f"joint_{index}" for index in range(1, 8)],
+                    "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+                },
+                "qualification_goal_joint_state_sha256": "c" * 64,
+                "qualification_binding_sha256": "d" * 64,
             }
         },
     )
@@ -1019,6 +1025,18 @@ def test_move_to_proxy_preserves_compiled_grasp_contact_identity() -> None:
     assert result.success is True
     assert transport.calls[0]["arguments"]["motion_provenance"]["compiled_grasp_id"] == "grasp-7"
     assert transport.calls[0]["arguments"]["motion_provenance"]["grasp_stage"] == "contact"
+    provenance = transport.calls[0]["arguments"]["motion_provenance"]
+    assert provenance["qualification_goal_joint_state"]["positions"] == [
+        0.1,
+        -0.2,
+        0.3,
+        -0.4,
+        0.5,
+        -0.6,
+        0.7,
+    ]
+    assert provenance["qualification_goal_joint_state_sha256"] == "c" * 64
+    assert provenance["qualification_binding_sha256"] == "d" * 64
 
 
 def test_move_to_proxy_rejects_unsupported_speed_parameter() -> None:

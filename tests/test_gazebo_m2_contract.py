@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 
 import pytest
 
 from extensions.gazebo.robot_control import (
+    ARM_JOINTS,
     JOINT_NAMES,
     START_STATE_BOUNDS_TOLERANCE_RAD,
     GazeboControlConfig,
@@ -172,6 +175,58 @@ def test_move_goal_accepts_public_tool_tolerance_names() -> None:
 
     assert goal["position_tolerance_m"] == 0.0002
     assert goal["orientation_tolerance_rad"] == 0.002
+
+
+def test_move_goal_preserves_a_hash_bound_qualified_joint_branch() -> None:
+    state = {
+        "names": list(ARM_JOINTS),
+        "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+    }
+    state_hash = hashlib.sha256(
+        json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    goal = make_move_group_goal(
+        {
+            "xyz": [0, 0, 0.5],
+            "quat_xyzw": [0, 0, 0, 1],
+            "qualification_goal_joint_state": state,
+            "qualification_goal_joint_state_sha256": state_hash,
+            "qualification_binding_sha256": "b" * 64,
+        }
+    )
+
+    assert goal["qualification_goal_joint_state"] == state
+    assert goal["qualification_goal_joint_state_sha256"] == state_hash
+    assert goal["qualification_binding_sha256"] == "b" * 64
+
+
+@pytest.mark.parametrize("mutation", ["position", "hash", "binding", "names"])
+def test_move_goal_rejects_corrupted_qualified_joint_branch(mutation: str) -> None:
+    state = {
+        "names": list(ARM_JOINTS),
+        "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+    }
+    target = {
+        "xyz": [0, 0, 0.5],
+        "quat_xyzw": [0, 0, 0, 1],
+        "qualification_goal_joint_state": state,
+        "qualification_goal_joint_state_sha256": hashlib.sha256(
+            json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "qualification_binding_sha256": "b" * 64,
+    }
+    if mutation == "position":
+        state["positions"][0] = 3.2
+    elif mutation == "hash":
+        target["qualification_goal_joint_state_sha256"] = "0" * 64
+    elif mutation == "binding":
+        target["qualification_binding_sha256"] = "not-a-proof"
+    else:
+        state["names"] = list(reversed(ARM_JOINTS))
+
+    with pytest.raises(ValueError, match="qualified|qualification"):
+        make_move_group_goal(target)
 
 
 def test_controller_routes_actions_and_unknown_outcome():
