@@ -374,3 +374,32 @@ def test_malformed_success_falls_back_to_next_backend(tmp_path: Path) -> None:
     assert result.details["backend_attempts"][0]["reason"] == (
         "inconsistent_grasp_outputs"
     )
+
+
+def test_spent_malformed_backend_chain_opens_bounded_model_failure_circuit(
+    tmp_path: Path,
+) -> None:
+    result = build_grasp_pose_estimate_handler(
+        {"graspgenx": lambda _context: _failure("inconsistent_grasp_outputs")},
+        backend_order=("graspgenx",),
+    )(_context(_parameters(tmp_path)))
+
+    assert result.success is False
+    assert result.details["reason"] == "model_inference_failed"
+    assert result.details["retryable"] is True
+    assert result.details["backend_attempts"][0]["reason"] == (
+        "inconsistent_grasp_outputs"
+    )
+
+
+def test_spent_no_candidate_chain_requires_changed_recovery_stage(
+    tmp_path: Path,
+) -> None:
+    result = build_grasp_pose_estimate_handler(
+        {"graspgenx": lambda _context: _failure("no_grasp_candidates")},
+        backend_order=("graspgenx",),
+    )(_context(_parameters(tmp_path)))
+
+    assert result.success is False
+    assert result.details["reason"] == "no_grasp_candidates"
+    assert result.details["retryable"] is False

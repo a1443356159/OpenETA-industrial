@@ -554,12 +554,12 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
     assert result["success"] is True
     assert result["details"]["deterministic"] is True
     assert backend.calls == MODEL_INFERENCE_DRAWS
-    assert backend.fake_torch.seeds == list(range(MODEL_INFERENCE_DRAWS))
+    assert backend.fake_torch.seeds == list(range(4, 4 + MODEL_INFERENCE_DRAWS))
     assert backend.planners == ["graspmoe", "diffusion", "diffusion", "diffusion"]
     assert result["details"]["model_raw_candidate_count"] == 9
     assert result["details"]["metadata"]["model_inference_draw_count"] == (MODEL_INFERENCE_DRAWS)
     assert result["details"]["metadata"]["model_inference_draw_seeds"] == list(
-        range(MODEL_INFERENCE_DRAWS)
+        range(4, 4 + MODEL_INFERENCE_DRAWS)
     )
     assert result["details"]["metadata"]["graspmoe_draw_count"] == 1
     assert result["details"]["metadata"]["diffusion_only_draw_count"] == 3

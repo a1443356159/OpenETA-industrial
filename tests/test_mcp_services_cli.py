@@ -270,7 +270,7 @@ def test_start_all_dry_run_includes_seven_services(tmp_path: Path, capsys) -> No
     assert "--graspgenx-root /path/to/graspgenx" in output
     assert "--checkpoint-root /path/to/graspgenx-checkpoints" in output
     assert "--gripper-descriptions-root /path/to/gripper-descriptions" in output
-    assert "--inference-seed 0" in output
+    assert "--inference-seed 4" in output
     assert "--port 8778" in output
     assert "--model-id lpiccinelli/unidepth-v2-vitl14" in output
     assert "--port 8779" in output

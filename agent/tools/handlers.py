@@ -1496,15 +1496,11 @@ def build_grasp_pose_estimate_handler(
                     content=backend_result.content,
                 )
 
-        reason = (
-            "all_backends_failed"
-            if any(attempt["status"] == "failed" for attempt in attempts)
-            else "no_compatible_backend"
-        )
+        reason, retryable = _aggregate_grasp_backend_failure(attempts)
         return _grasp_pose_estimate_failure(
             reason,
             attempts=attempts,
-            retryable=reason == "all_backends_failed",
+            retryable=retryable,
         )
 
     return handler
@@ -4140,6 +4136,44 @@ def _grasp_backend_failure_reason(result: ToolResult) -> str:
         if reason:
             return reason
     return "unknown_error"
+
+
+def _aggregate_grasp_backend_failure(
+    attempts: list[JsonDict],
+) -> tuple[str, bool]:
+    """Classify a spent backend chain without enabling identical retries."""
+
+    failed_reasons = {
+        str(attempt.get("reason") or "unknown_error")
+        for attempt in attempts
+        if attempt.get("status") == "failed"
+    }
+    if not failed_reasons:
+        return "no_compatible_backend", False
+    candidate_absence = {
+        "all_grasps_colliding",
+        "empty_point_cloud",
+        "insufficient_object_points",
+        "no_grasp_candidates",
+    }
+    if failed_reasons & candidate_absence:
+        # A backend completed valid inference and proved that this frozen
+        # target packet yielded no candidates. Host recovery may change the
+        # bounded view/density stage, but must not repeat this fingerprint.
+        return "no_grasp_candidates", False
+    model_or_transport_failure = {
+        "backend_unavailable",
+        "inconsistent_grasp_outputs",
+        "mcp_call_failed",
+        "model_inference_failed",
+        "model_load_failed",
+        "unknown_error",
+    }
+    if failed_reasons.issubset(model_or_transport_failure):
+        # Memory owns a one-retry health circuit for this aggregate class;
+        # exact backend reasons remain in backend_attempts for diagnosis.
+        return "model_inference_failed", True
+    return "all_backends_failed", False
 
 
 def _grasp_backend_candidate_count(result: ToolResult) -> int:

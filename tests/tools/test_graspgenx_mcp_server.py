@@ -260,4 +260,4 @@ def test_main_builds_stdio_backend_from_explicit_offline_paths(
     assert graspgenx_mcp_server.main() == 0
     assert calls == ["stdio"]
     assert graspgenx_mcp_server._BACKEND is backend
-    assert backend_kwargs["inference_seed"] == 0
+    assert backend_kwargs["inference_seed"] == 4

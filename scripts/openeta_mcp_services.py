@@ -381,7 +381,7 @@ def _build_config(
         inference_seed = (
             args.graspgenx_inference_seed
             if args.graspgenx_inference_seed is not None
-            else int(os.environ.get("OPENETA_GRASPGENX_INFERENCE_SEED", "0"))
+            else int(os.environ.get("OPENETA_GRASPGENX_INFERENCE_SEED", "4"))
         )
         command = [
             python,

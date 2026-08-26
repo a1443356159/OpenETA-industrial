@@ -48,7 +48,7 @@ NUM_GRASPS = 200
 # OBB branch is generated only with the first full GraspMoE draw; repeating it
 # for every stochastic draw adds duplicate work without adding grasp modes.
 MODEL_INFERENCE_DRAWS = 4
-DEFAULT_INFERENCE_SEED = 0
+DEFAULT_INFERENCE_SEED = 4
 COLLISION_SURFACE_SEED_OFFSET = 10_000
 COLLISION_SCENE_SEED_OFFSET = 20_000
 MOE_NUM_YAWS = 36
