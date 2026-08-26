@@ -296,7 +296,10 @@ class GazeboControlConfig:
     closed_position_m: float = 0.0
     active_open_position_m: float = 0.0425
     maximum_aperture_m: float = 0.085
-    mount_xyz: tuple[float, float, float] = (0.0, 0.0, 0.025)
+    # The Robotiq mount frame is coincident with the RM75 terminal flange.
+    # Its vendor base frame remains 6 mm forward, as recorded by the grasp
+    # calibration; do not reintroduce a second adapter length here.
+    mount_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     mount_quat_xyzw: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
     asset_root_override: str | None = None
     calibration: "Robotiq2F85Calibration" = field(

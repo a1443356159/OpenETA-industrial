@@ -4,7 +4,7 @@
   <xacro:include filename="$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/rm75_robotiq2f85.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/urdf/ros2_control.xacro"/>
-  <xacro:rm75_robotiq2f85 parent="link_7"/>
+  <xacro:rm75_robotiq2f85 parent="link_7" mount_z="0.0"/>
   <xacro:openeta_robotiq_ros2_control controller_config="$(arg controller_config)"/>
 
   <xacro:macro name="gz_gripper_position_controller" params="joint topic">

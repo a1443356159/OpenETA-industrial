@@ -223,8 +223,38 @@ def test_v_description_is_shared_and_camera_is_fixed() -> None:
     arm = (ASSETS / "urdf/rm75_6fb_v.urdf.xacro").read_text(encoding="utf-8")
     assert 'name="camera_rojoint"\n    type="fixed"' in arm
     assert "openeta_wrist_rgbd" in arm
+    root = ET.fromstring(arm)
+    optical_joint = root.find("joint[@name='wrist_camera_optical_joint']")
+    assert optical_joint is not None
+    assert optical_joint.find("parent").attrib["link"] == "gripper_mount_link"
+    assert optical_joint.find("origin").attrib == {
+        "xyz": "0 0 0.105",
+        "rpy": "0 -1.57079632679 0",
+    }
+    assert root.findtext(
+        "gazebo[@reference='wrist_camera_optical_frame']/sensor/camera/clip/near"
+    ) == "0.02"
     assert "package://openeta_rm75_v_description/meshes/" in arm
     assert (DESCRIPTION_PACKAGE / "package.xml").is_file()
     for package in (PACKAGE, ROBOTIQ_PACKAGE):
         profile = next((package / "urdf").glob("rm75_*.urdf.xacro")).read_text(encoding="utf-8")
         assert "$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro" in profile
+
+
+def test_robotiq_mount_is_flange_flush_and_matches_runtime_transform() -> None:
+    fixture = ET.parse(
+        ROBOTIQ_ASSETS / "urdf/rm75_robotiq2f85.urdf.xacro"
+    ).getroot()
+    fixed_joint = fixture.find(".//joint[@name='rm75_to_gripper_mount']")
+
+    assert fixed_joint is not None
+    assert fixed_joint.find("origin").attrib["xyz"] == "0 0 ${mount_z}"
+    assert GazeboControlConfig().mount_xyz == (0.0, 0.0, 0.0)
+    for profile_name in (
+        "rm75_robotiq2f85.urdf.xacro",
+        "rm75_robotiq2f85_pickplace.urdf.xacro",
+    ):
+        profile = (ROBOTIQ_PACKAGE / "urdf" / profile_name).read_text(
+            encoding="utf-8"
+        )
+        assert 'parent="link_7" mount_z="0.0"' in profile
