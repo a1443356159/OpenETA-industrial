@@ -72,7 +72,9 @@ srun [--partition=...] [--account=...] --nodes=1 --ntasks=1 --cpus-per-task=4 \
 
 导入脚本自动选择 `apptainer` 或 `singularity`，在节点本地临时目录完成转换，验证
 `inspect` 后才原子地发布版本化 SIF 和 `current` 软链接。它拒绝可漂移的 OCI 引用、
-拒绝覆盖已有 SIF，也拒绝默认在登录节点执行。
+拒绝覆盖已有 SIF，也拒绝默认在登录节点执行。大镜像层下载若被 registry 瞬时中断，
+脚本默认在同一节点缓存中重试三次，并从第二次起使用 HTTP/1.1，避免重复丢弃已完成的
+layer；重试次数可通过 `OPENETA_IMAGE_IMPORT_ATTEMPTS` 调整。
 
 ## 固定模型资产
 
