@@ -125,6 +125,8 @@ def test_m3_narrow_pick_corridor_is_constrained_without_excluding_the_full_gripp
     # finger opening.  A 164 mm corridor still rejects oblique approaches but
     # preserves the model's physically useful side-contact family.
     assert 0.16 <= inner_gap <= 0.17
+    assert left["pose_xyz"][2] + left["size_xyz"][2] / 2.0 == pytest.approx(0.425)
+    assert right["pose_xyz"][2] + right["size_xyz"][2] / 2.0 == pytest.approx(0.425)
 
 
 @pytest.mark.parametrize(
