@@ -493,16 +493,39 @@ class AgentMemory:
         """Stop deterministic retries after a non-candidate compile failure."""
 
         call = _tool_call(action, "compile_grasp_seed")
+        blocked_tool = "compile_grasp_seed"
+        candidate_id = ""
         if not isinstance(call, dict) or _call_result_success(call):
-            return False
+            call = _tool_call(action, "grasp_pose_estimate")
+            if not isinstance(call, dict) or _call_result_success(call):
+                return False
+            outputs = _tool_call_outputs(call)
+            if outputs.get("reason") != "host_candidate_compilation_failed":
+                return False
+            blocked_tool = "host_candidate_compiler"
+            candidate_id = str(outputs.get("candidate_id") or "")
         policy = self.grasp_candidate_policy()
-        if not isinstance(policy, dict):
-            return False
+        policy = dict(policy) if isinstance(policy, dict) else {}
+        terminal_failure = _call_failure_reason(call)
+        outputs = _tool_call_outputs(call)
+        diagnostics = outputs.get("compilation_diagnostics")
+        if isinstance(diagnostics, list):
+            diagnostic_message = next(
+                (
+                    str(item.get("message") or "").strip()
+                    for item in diagnostics
+                    if isinstance(item, dict) and str(item.get("message") or "").strip()
+                ),
+                "",
+            )
+            terminal_failure = diagnostic_message or terminal_failure
         policy.update(
             {
                 "status": "blocked",
-                "blocked_tool": "compile_grasp_seed",
-                "terminal_failure": _call_failure_reason(call),
+                "blocked_tool": blocked_tool,
+                "terminal_failure": terminal_failure,
+                "failure_code": "HOST_GRASP_PROOF_COMPILATION_FAILED",
+                "model_inference_retry_allowed": False,
                 "blocked_at_s": time.time(),
             }
         )
@@ -515,11 +538,14 @@ class AgentMemory:
         request = request if isinstance(request, dict) else {}
         parameters = request.get("parameters")
         parameters = parameters if isinstance(parameters, dict) else {}
+        candidate_id = candidate_id or _parameters_grasp_candidate_id(parameters)
         self.record(
             "grasp_compile_terminal_failure",
             {
-                "candidate_id": _parameters_grasp_candidate_id(parameters),
+                "candidate_id": candidate_id,
                 "reason": policy["terminal_failure"],
+                "blocked_tool": blocked_tool,
+                "model_inference_retry_allowed": False,
             },
         )
         return True

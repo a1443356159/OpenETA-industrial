@@ -744,15 +744,15 @@ def _host_obligation_decision(
             action="ask_human",
             parameters={
                 "question": (
-                    "Grasp compilation failed deterministically; inspect the staged "
-                    "embodiment calibration before retrying."
+                    "Grasp proof compilation failed deterministically; inspect the "
+                    "host qualification binding or embodiment calibration before retrying."
                 ),
                 "failure_code": "grasp_compile_terminal_failure",
                 "reason": grasp_policy.get("terminal_failure"),
             },
             reasoning=(
                 "The same retained candidate cannot be recompiled after a terminal "
-                "host calibration failure; stop instead of repeating the request."
+                "host proof failure; stop instead of repeating model inference."
             ),
             metadata={
                 "host_obligation": {

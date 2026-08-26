@@ -212,8 +212,11 @@ def test_qualified_grasp_hash_binds_only_exact_contact() -> None:
 
     class Cache:
         def resolve(self, **_kwargs):
+            public_candidate = _candidate()
+            public_candidate["moveit_physical_quality_rank"] = 0
+            public_candidate["moveit_l5_qualified"] = True
             return {
-                "candidate": _candidate(),
+                "candidate": public_candidate,
                 "proof": {"compile_parameters": proof_parameters},
                 "scene_epoch": 0,
                 "planning_scene_revision": 0,

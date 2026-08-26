@@ -129,10 +129,24 @@ def build_compile_grasp_seed_handler(
                 proof_parameters = entry["proof"].get("compile_parameters")
                 if not isinstance(proof_parameters, Mapping):
                     raise GraspGeometryError("qualified compile parameters are missing")
+                qualified_camera_pose = proof_parameters.get("camera_pose")
+                if not isinstance(qualified_camera_pose, Mapping):
+                    raise GraspGeometryError("qualified grasp candidate geometry is missing")
+                qualified_candidate_id = str(qualified_camera_pose.get("id") or "")
+                if qualified_candidate_id and qualified_candidate_id != candidate_id:
+                    raise GraspGeometryError(
+                        "qualified grasp candidate id does not match its proof"
+                    )
                 parameters = dict(proof_parameters)
                 parameters["purpose"] = purpose
                 parameters["grasp_candidate_id"] = candidate_id
-                parameters["camera_pose"] = dict(entry["candidate"])
+                # Compile the exact immutable geometry that produced the
+                # MoveIt proof.  The public/cache candidate carries
+                # evidence-only annotations added after qualification (for
+                # example physical-quality rank); those annotations alter the
+                # compiled identity hash even though the terminal transform is
+                # unchanged.
+                parameters["camera_pose"] = dict(qualified_camera_pose)
                 parameters["scene_epoch"] = scene_epoch
                 if host_binding:
                     parameters["selection_source"] = "host_qualified_queue"

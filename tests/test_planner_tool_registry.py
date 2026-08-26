@@ -428,6 +428,23 @@ def test_frozen_goal_reestimate_never_falls_back_to_stale_object_mask(
     memory = AgentMemory()
     memory.start_session(task="pick and place")
     memory.save_fact(
+        "selected_sam3_detection",
+        {
+            "result_id": "old-result",
+            "id": "old-detection",
+            "target_prompt": "red block",
+            "source_image": str(old_rgb),
+            "mask_ref": str(old_mask),
+            "grasp_estimator_backend_failure": {
+                "reason": "model_inference_failed",
+                "attempt_count": 2,
+                "max_attempts": 2,
+                "status": "exhausted",
+            },
+        },
+        source="test",
+    )
+    memory.save_fact(
         "frozen_placement_goal_pool",
         {"status": "ready", "goal_count": 96},
         source="test",
@@ -7353,6 +7370,62 @@ def test_terminal_compile_failure_blocks_repeat_and_requests_human() -> None:
 
     policy = memory.grasp_candidate_policy()
     assert policy["status"] == "blocked"
+    decision = _host_obligation_decision(
+        {"grasp_candidate_policy": policy},
+        tools=build_default_tool_registry(),
+    )
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "grasp_compile_terminal_failure"
+
+
+def test_host_qualified_compile_failure_blocks_model_reinference() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cylinder")
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {
+                    "kind": "tool_call",
+                    "name": "grasp_pose_estimate",
+                    "parameters": {"mode": "targeted"},
+                },
+                "status": "failed",
+                "tool_calls": [
+                    {
+                        "name": "grasp_pose_estimate",
+                        "status": "failed",
+                        "result": {
+                            "success": False,
+                            "content": "host failed to compile a qualified candidate",
+                            "details": {
+                                "outputs": {
+                                    "reason": "host_candidate_compilation_failed",
+                                    "candidate_id": "grasp_004",
+                                    "compilation_diagnostics": [
+                                        {
+                                            "code": "grasp_seed_compile_failed",
+                                            "message": (
+                                                "compiled grasp pose differs from "
+                                                "MoveIt qualification proof"
+                                            ),
+                                        }
+                                    ],
+                                    "execution_started": False,
+                                }
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "blocked"
+    assert policy["blocked_tool"] == "host_candidate_compiler"
+    assert policy["model_inference_retry_allowed"] is False
+    assert policy["failure_code"] == "HOST_GRASP_PROOF_COMPILATION_FAILED"
     decision = _host_obligation_decision(
         {"grasp_candidate_policy": policy},
         tools=build_default_tool_registry(),
