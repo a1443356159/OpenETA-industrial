@@ -60,7 +60,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xauth \
     xvfb && \
     locale-gen en_US en_US.UTF-8 && \
-    update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+    update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
       -o /usr/share/keyrings/ros-archive-keyring.gpg && \
@@ -78,7 +80,9 @@ RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
       ros-jazzy-ros-gz \
       ros-jazzy-ros2-controllers \
       ros-jazzy-trac-ik-kinematics-plugin \
-      ros-jazzy-xacro
+      ros-jazzy-xacro && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install "uv==${UV_VERSION}" && \
     mkdir -p /opt/openeta/third_party /opt/openeta/venvs /opt/openeta/config
@@ -99,8 +103,11 @@ COPY tools/requirements-anyplace.txt /tmp/openeta-requirements/
 COPY tools/requirements-graspgenx.txt /tmp/openeta-requirements/
 COPY tools/requirements-sam3.txt /tmp/openeta-requirements/
 
-RUN uv python install 3.10.16 && \
+RUN unset PIP_CONSTRAINT && \
+    uv python install 3.10.16 && \
     uv venv --seed --python 3.10.16 /opt/openeta/venvs/anyplace && \
+    /opt/openeta/venvs/anyplace/bin/python -m pip install \
+      pip==25.2 setuptools==80.9.0 wheel==0.45.1 && \
     /opt/openeta/venvs/anyplace/bin/python -m pip install \
       torch==1.13.1+cu117 torchvision==0.14.1+cu117 \
       --extra-index-url https://download.pytorch.org/whl/cu117 && \
@@ -110,12 +117,13 @@ RUN uv python install 3.10.16 && \
     /opt/openeta/venvs/anyplace/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-anyplace-runtime.txt \
       -r /tmp/openeta-requirements/requirements-anyplace.txt && \
-    /opt/openeta/venvs/anyplace/bin/python -m pip install --no-deps \
+    /opt/openeta/venvs/anyplace/bin/python -m pip install \
+      --no-build-isolation --no-deps \
       -e /opt/openeta/third_party/anyplace
 
 RUN python3 -m venv --system-site-packages /opt/openeta/venvs/graspgenx && \
-    /opt/openeta/venvs/graspgenx/bin/python -m pip install --upgrade \
-      pip "setuptools>=45,<78" wheel && \
+    /opt/openeta/venvs/graspgenx/bin/python -m pip install \
+      pip==25.2 setuptools==77.0.3 wheel==0.45.1 && \
     /opt/openeta/venvs/graspgenx/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-graspgenx-runtime.txt \
       -r /tmp/openeta-requirements/requirements-graspgenx.txt && \
@@ -123,8 +131,8 @@ RUN python3 -m venv --system-site-packages /opt/openeta/venvs/graspgenx && \
       -e /opt/openeta/third_party/GraspGenX
 
 RUN python3 -m venv --system-site-packages /opt/openeta/venvs/sam3 && \
-    /opt/openeta/venvs/sam3/bin/python -m pip install --upgrade \
-      pip "setuptools>=68,<81" wheel && \
+    /opt/openeta/venvs/sam3/bin/python -m pip install \
+      pip==25.2 setuptools==80.9.0 wheel==0.45.1 && \
     /opt/openeta/venvs/sam3/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-sam3.txt && \
     /opt/openeta/venvs/sam3/bin/python -m pip install \
@@ -133,7 +141,8 @@ RUN python3 -m venv --system-site-packages /opt/openeta/venvs/sam3 && \
 COPY . /opt/openeta/src
 
 RUN python3 -m venv --system-site-packages /opt/openeta/venvs/openeta && \
-    /opt/openeta/venvs/openeta/bin/python -m pip install --upgrade pip wheel && \
+    /opt/openeta/venvs/openeta/bin/python -m pip install \
+      pip==25.2 setuptools==80.9.0 wheel==0.45.1 && \
     /opt/openeta/venvs/openeta/bin/python -m pip install -e "/opt/openeta/src[dev]" && \
     cp \
       /opt/openeta/third_party/anyplace/anyplace/config/full_eval_cfgs/anyplace_eval/stacking/anyplace_diffusion_molmocrop_multitask.yaml \
