@@ -713,7 +713,7 @@ def test_model_projection_bounds_context_without_deleting_host_evidence() -> Non
     assert len(messages) <= 5
     assert projected["controller"]["legal_tool_names"] == ["sam3"]
     assert [reference["name"] for reference in projected["tool_references"]] == ["sam3"]
-    assert projected["schema_version"] == "openeta.planner_model_context.v3"
+    assert projected["schema_version"] == "openeta.planner_model_context.v4"
     assert "semantic_perception_obligation" not in projected
     assert "grasp_candidate_policy" not in projected
     assert "current_camera_artifacts" not in projected
@@ -765,9 +765,73 @@ def test_model_projection_deduplicates_task_and_omits_images_for_typed_action() 
     assert messages == []
     assert projected["vision_image_paths"] == []
     assert projected["current_rgbd_views"] == []
-    assert projected["obligations"]["fresh_observation_obligation"][
-        "required_parameters"
-    ] == {"reason": "fresh_state"}
+    obligation = projected["obligations"]["fresh_observation_obligation"]
+    assert obligation["required_tool"] == "observe"
+    assert obligation["parameter_mode"] == "host_hydrated"
+    assert obligation["parameter_keys"] == ["reason"]
+    assert len(obligation["parameter_binding_sha256"]) == 64
+    assert "required_parameters" not in obligation
+
+
+def test_model_projection_hides_anyplace_paths_and_release_geometry() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    private_rgb = "/private/session/very-long-uuid/object.rgb.png"
+    private_depth = "/private/session/very-long-uuid/object.depth.png"
+    private_pose_marker = "PRIVATE_RELEASE_POSE_MARKER"
+    full_context = {
+        "task": "pick and place",
+        "planner_mode": "agentic_closed_loop",
+        "observation": {"task": "pick and place", "camera_ids": ["top"]},
+        "active_environment_task": {"status": "running"},
+        "tool_references": [
+            {"name": "anyplace", "description": "place", "parameters": {}},
+            {"name": "move_to", "description": "move", "parameters": {}},
+        ],
+        "placement_obligation": {
+            "schema_version": "openeta.placement_obligation.v2",
+            "required_tool": "anyplace",
+            "required_parameters": {
+                "object_observation": {
+                    "rgb": private_rgb,
+                    "depth": private_depth,
+                },
+                "scene_revision": 4,
+            },
+            "phase": "frozen_goal_pool",
+        },
+        "placement_motion_guidance": {
+            "schema_version": "openeta.placement_motion_guidance.v1",
+            "status": "required",
+            "stage": "release",
+            "release_pose": {"private_marker": private_pose_marker},
+            "required_parameters": {
+                "target_pose": {"private_marker": private_pose_marker},
+                "tolerance": 0.002,
+            },
+        },
+        "memory": {"metadata": {}},
+        "selected_skill_guidance": [],
+        "skill_usage": {},
+    }
+
+    projected, _messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    serialized = json.dumps(projected, sort_keys=True)
+    assert private_rgb not in serialized
+    assert private_depth not in serialized
+    assert private_pose_marker not in serialized
+    assert projected["obligations"]["placement_obligation"]["parameter_mode"] == (
+        "host_hydrated"
+    )
+    motion = projected["obligations"]["placement_motion_guidance"]
+    assert motion["required_tool"] == "move_to"
+    assert motion["parameter_mode"] == "host_hydrated"
+    assert "required_parameters" not in motion
 
 
 def test_attached_object_never_triggers_postattach_semantic_retry() -> None:

@@ -30,7 +30,9 @@ from agent.runtime.planner import (
     ToolCallingPlanner,
     _canonicalize_host_parameters,
     _default_tool_planner_system_prompt,
+    _host_parameter_binding_sha256,
     _host_obligation_decision,
+    _hydrate_host_bound_parameters,
     _matching_depth_enhancement,
     _grasp_sensor_safety_obligation,
     build_tool_context,
@@ -236,6 +238,153 @@ def test_agentic_acceptance_routes_exact_environment_choice_through_model() -> N
     assert decision.action == "create_simulator_env"
     assert decision.metadata["execution_model"] == "closed_loop_tool_calling"
     assert decision.metadata["planner_mode"] == "agentic_closed_loop"
+
+
+def test_agentic_anyplace_hydrates_frozen_parameters_in_one_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_root = "/private/session-uuid-that-the-model-must-not-copy"
+    intrinsics = {"fx": 100.0, "fy": 100.0, "cx": 50.0, "cy": 50.0, "scale": 1000}
+    extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
+    exact_parameters = {
+        "object_observation": {
+            "rgb": f"{private_root}/object.rgb.png",
+            "depth": f"{private_root}/object.depth.png",
+            "object_mask": {
+                "mask_ref": f"{private_root}/object.mask.png",
+                "source_image": f"{private_root}/object.rgb.png",
+            },
+            "intrinsics": intrinsics,
+            "camera_extrinsics": extrinsics,
+        },
+        "placement_observation": {
+            "rgb": f"{private_root}/place.rgb.png",
+            "depth": f"{private_root}/place.depth.png",
+            "placement_region_mask": {
+                "mask_ref": f"{private_root}/place.mask.png",
+                "source_image": f"{private_root}/place.rgb.png",
+            },
+            "intrinsics": intrinsics,
+            "camera_extrinsics": extrinsics,
+        },
+        "scene_revision": 7,
+    }
+    tool_context = {
+        "schema_version": "openeta.planner_context.v1",
+        "task": "pick the block and place it in the region",
+        "planner_mode": "agentic_closed_loop",
+        "active_environment_task": {"status": "running"},
+        "observation": {"task": "pick and place", "camera_ids": ["top"]},
+        "vision_image_paths": [],
+        "current_rgbd_views": [],
+        "placement_obligation": {
+            "schema_version": "openeta.placement_obligation.v2",
+            "required_tool": "anyplace",
+            "required_parameters": exact_parameters,
+            "phase": "frozen_goal_pool",
+        },
+        "selected_skill_guidance": [{"name": "pick"}, {"name": "place"}],
+        "skill_usage": {},
+        "memory": {"metadata": {}},
+        "tool_references": [
+            {
+                "name": "anyplace",
+                "category": "planning",
+                "description": "Generate placement goals.",
+                "parameters": {},
+                "effect": "planning",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "agent.runtime.planner.build_tool_context",
+        lambda **_kwargs: tool_context,
+    )
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        return {"kind": "tool_call", "name": "anyplace", "parameters": {}}
+
+    memory = AgentMemory()
+    memory.start_session(task=tool_context["task"])
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(decide),
+        max_validation_retries=2,
+    )
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("anyplace"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert len(requests) == 1
+    projected = requests[0].tool_context
+    assert private_root not in json.dumps(projected, sort_keys=True)
+    obligation = projected["obligations"]["placement_obligation"]
+    assert obligation["required_tool"] == "anyplace"
+    assert obligation["parameter_mode"] == "host_hydrated"
+    assert "required_parameters" not in obligation
+    assert decision.action == "anyplace"
+    assert decision.parameters == exact_parameters
+    assert decision.metadata["validation_attempts"] == 1
+    hydration = decision.metadata["host_parameter_hydrations"][0]
+    assert hydration["source"] == "placement_obligation"
+    assert hydration["hydration_mode"] == "empty_parameters"
+    assert hydration["parameter_binding_sha256"] == obligation[
+        "parameter_binding_sha256"
+    ]
+
+
+def test_host_parameter_hydration_rejects_altered_nonempty_payload() -> None:
+    exact = {"reuse_frozen_goal_pool": True, "scene_revision": 4}
+    supplied = {"reuse_frozen_goal_pool": True, "scene_revision": 5}
+    decision = PlannerDecision("tool_call", "anyplace", supplied)
+
+    hydrations = _hydrate_host_bound_parameters(
+        decision,
+        tool_context={
+            "placement_obligation": {
+                "status": "required",
+                "required_tool": "anyplace",
+                "required_parameters": exact,
+            }
+        },
+    )
+
+    assert hydrations == []
+    assert decision.parameters == supplied
+
+
+def test_host_parameter_ref_selects_one_of_two_moveit_bindings() -> None:
+    contact = {"target_pose": {"stage": "contact"}, "tolerance": 0.001}
+    release = {"target_pose": {"stage": "release"}, "tolerance": 0.002}
+    release_ref = _host_parameter_binding_sha256("move_to", release)
+    decision = PlannerDecision(
+        "tool_call",
+        "move_to",
+        {"obligation_ref": release_ref},
+    )
+
+    hydrations = _hydrate_host_bound_parameters(
+        decision,
+        tool_context={
+            "grasp_execution": {
+                "status": "required",
+                "required_action": {"name": "move_to", "parameters": contact},
+            },
+            "placement_motion_guidance": {
+                "status": "required",
+                "stage": "release",
+                "required_parameters": release,
+            },
+        },
+    )
+
+    assert decision.parameters == release
+    assert hydrations[0]["source"] == "placement_motion_guidance"
+    assert hydrations[0]["hydration_mode"] == "obligation_ref"
 
 
 def test_host_macro_profile_fails_closed_without_calling_model() -> None:

@@ -114,6 +114,20 @@ _SCRIPTED_SEMANTIC_FIELD_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+_HOST_PARAMETER_BINDING_SCHEMA_VERSION = "openeta.host_parameter_binding.v1"
+_HOST_HYDRATED_PARAMETER_MODE = "host_hydrated"
+_HOST_PARAMETER_TOOL_OVERRIDES = {
+    "molmopoint_fallback_obligation": "molmopoint",
+    "placement_motion_guidance": "move_to",
+}
+_HOST_PARAMETER_REDUNDANT_GEOMETRY_FIELDS = {
+    "compiled_placement",
+    "contact_pose",
+    "current_eef_pose",
+    "release_pose",
+    "target_pose",
+}
+
 
 @dataclass(slots=True)
 class PlannerDecision:
@@ -335,6 +349,7 @@ class ToolCallingPlanner(BasePlanner):
                 last_result,
                 tools=tools,
                 skills=skills,
+                tool_context=tool_context,
             )
             canonicalizations = _canonicalize_host_parameters(
                 decision,
@@ -1839,12 +1854,20 @@ def _decision_from_backend_result(
     *,
     tools: ToolRegistry,
     skills: SkillRegistry,
+    tool_context: JsonDict | None = None,
 ) -> tuple[PlannerDecision, list[str]]:
     payload, parse_errors = _parse_backend_payload(result.payload)
     if parse_errors:
         return _invalid_decision(parse_errors), parse_errors
 
     decision, build_errors = _build_planner_decision(payload)
+    if not build_errors and isinstance(tool_context, dict):
+        hydrations = _hydrate_host_bound_parameters(
+            decision,
+            tool_context=tool_context,
+        )
+        if hydrations:
+            decision.metadata["host_parameter_hydrations"] = hydrations
     validation_errors = [*build_errors, *_validate_planner_decision(decision, tools, skills)]
     if validation_errors:
         return decision, validation_errors
@@ -2607,7 +2630,11 @@ def _default_tool_planner_system_prompt() -> str:
         "tool_context.controller gives the current phase and legal tools. In "
         "planner_mode=agentic_closed_loop, tool_context.obligations are host safety and "
         "geometry constraints, not decisions: explicitly choose the next legal tool and "
-        "copy required_action or required_parameters exactly. tool_context.state is the "
+        "when parameter_mode=host_hydrated return parameters={} so the host can inject "
+        "the immutable payload bound by parameter_binding_sha256. If more than one "
+        "binding exists for the chosen tool, return only "
+        "parameters={\"obligation_ref\": \"<parameter_binding_sha256>\"}. Never invent "
+        "or reconstruct host-owned paths, poses, or calibration. tool_context.state is the "
         "single current state summary. Runtime-discovered catalogs, docstrings, schemas, "
         "receipts, and errors are authoritative over examples and skill text. Selected "
         "skills are editable text guidance, not executable macros; inspect "
@@ -3299,6 +3326,263 @@ def _validate_pick_place_anyplace_obligation(
     return []
 
 
+def _host_parameter_binding_sha256(tool_name: str, parameters: Mapping[str, object]) -> str:
+    payload = {
+        "schema_version": _HOST_PARAMETER_BINDING_SCHEMA_VERSION,
+        "tool": tool_name,
+        "parameters": dict(parameters),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def _host_parameter_binding_descriptor(
+    tool_name: str,
+    parameters: Mapping[str, object],
+) -> JsonDict:
+    return {
+        "parameter_mode": _HOST_HYDRATED_PARAMETER_MODE,
+        "parameter_binding_sha256": _host_parameter_binding_sha256(
+            tool_name,
+            parameters,
+        ),
+        "parameter_keys": sorted(str(key) for key in parameters),
+        "parameter_count": len(parameters),
+    }
+
+
+def _host_parameter_bindings(tool_context: Mapping[str, object]) -> list[JsonDict]:
+    """Return current top-level immutable action bindings without scanning memory history."""
+
+    inactive_statuses = {
+        "complete",
+        "completed",
+        "pass",
+        "passed",
+        "rejected",
+        "exhausted",
+        "not_required",
+    }
+    bindings: dict[tuple[str, str], JsonDict] = {}
+
+    def add_binding(
+        *,
+        source: str,
+        tool_name: object,
+        parameters: object,
+    ) -> None:
+        tool = str(tool_name or "").strip()
+        if not tool or not isinstance(parameters, Mapping):
+            return
+        exact = dict(parameters)
+        digest = _host_parameter_binding_sha256(tool, exact)
+        key = (tool, digest)
+        existing = bindings.get(key)
+        if existing is not None:
+            sources = existing.setdefault("sources", [])
+            if source not in sources:
+                sources.append(source)
+            return
+        bindings[key] = {
+            "schema_version": _HOST_PARAMETER_BINDING_SCHEMA_VERSION,
+            "source": source,
+            "sources": [source],
+            "tool": tool,
+            "parameters": exact,
+            "parameter_binding_sha256": digest,
+            "parameter_keys": sorted(str(name) for name in exact),
+        }
+
+    for source, raw_value in tool_context.items():
+        if not isinstance(raw_value, Mapping):
+            continue
+        status = str(raw_value.get("status") or "").strip().lower()
+        if status in inactive_statuses:
+            continue
+        required_tool = str(raw_value.get("required_tool") or "").strip()
+        required_parameters = raw_value.get("required_parameters")
+        if not required_tool:
+            required_tool = _HOST_PARAMETER_TOOL_OVERRIDES.get(source, "")
+        add_binding(
+            source=source,
+            tool_name=required_tool,
+            parameters=required_parameters,
+        )
+        required_action = raw_value.get("required_action")
+        if isinstance(required_action, Mapping):
+            add_binding(
+                source=source,
+                tool_name=required_action.get("name"),
+                parameters=required_action.get("parameters"),
+            )
+
+    for binding in bindings.values():
+        binding["sources"] = sorted(binding["sources"])
+    return sorted(
+        bindings.values(),
+        key=lambda item: (
+            str(item["tool"]),
+            str(item["parameter_binding_sha256"]),
+            str(item["source"]),
+        ),
+    )
+
+
+def _hydrate_host_bound_parameters(
+    decision: PlannerDecision,
+    *,
+    tool_context: Mapping[str, object],
+) -> list[JsonDict]:
+    """Inject one uniquely selected immutable host payload before schema validation.
+
+    The model continues to choose the tool.  Empty parameters select the sole active
+    binding for that tool; an ``obligation_ref`` selects by digest when more than one
+    binding exists.  Any other non-empty payload remains untouched and therefore must
+    pass the existing exact-value validators on its own.
+    """
+
+    if decision.action_type.lower().strip() != "tool_call":
+        return []
+    candidates = [
+        binding
+        for binding in _host_parameter_bindings(tool_context)
+        if binding["tool"] == decision.action
+    ]
+    if not candidates:
+        return []
+    if any(decision.parameters == binding["parameters"] for binding in candidates):
+        return []
+
+    supplied = decision.parameters
+    selected: JsonDict | None = None
+    hydration_mode = ""
+    if not supplied:
+        if len(candidates) == 1:
+            selected = candidates[0]
+            hydration_mode = "empty_parameters"
+    else:
+        marker_keys = {
+            "obligation_ref",
+            "parameter_binding_sha256",
+            "parameter_mode",
+        }
+        if set(supplied).issubset(marker_keys):
+            mode = str(supplied.get("parameter_mode") or _HOST_HYDRATED_PARAMETER_MODE)
+            refs = {
+                str(supplied.get(key) or "").strip()
+                for key in ("obligation_ref", "parameter_binding_sha256")
+                if str(supplied.get(key) or "").strip()
+            }
+            if mode == _HOST_HYDRATED_PARAMETER_MODE and len(refs) <= 1:
+                if refs:
+                    reference = next(iter(refs))
+                    matched = [
+                        binding
+                        for binding in candidates
+                        if binding["parameter_binding_sha256"] == reference
+                    ]
+                    if len(matched) == 1:
+                        selected = matched[0]
+                        hydration_mode = "obligation_ref"
+                elif len(candidates) == 1:
+                    selected = candidates[0]
+                    hydration_mode = "host_hydrated_marker"
+    if selected is None:
+        return []
+
+    decision.parameters = dict(selected["parameters"])
+    return [
+        {
+            "schema_version": _HOST_PARAMETER_BINDING_SCHEMA_VERSION,
+            "source": selected["source"],
+            "sources": list(selected["sources"]),
+            "tool": selected["tool"],
+            "parameter_binding_sha256": selected["parameter_binding_sha256"],
+            "parameter_keys": list(selected["parameter_keys"]),
+            "hydration_mode": hydration_mode,
+        }
+    ]
+
+
+def _project_host_bound_parameters(
+    value: object,
+    *,
+    source: str,
+    root: bool = True,
+) -> object:
+    """Replace private exact payloads with compact, verifiable model bindings."""
+
+    if isinstance(value, list):
+        return [
+            _project_host_bound_parameters(item, source=source, root=False)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return [
+            _project_host_bound_parameters(item, source=source, root=False)
+            for item in value
+        ]
+    if not isinstance(value, Mapping):
+        return value
+
+    projected: JsonDict = {}
+    inferred_tool = str(value.get("required_tool") or "").strip()
+    if not inferred_tool and root:
+        inferred_tool = _HOST_PARAMETER_TOOL_OVERRIDES.get(source, "")
+    required_parameters = value.get("required_parameters")
+    for key, item in value.items():
+        if key == "required_parameters" and inferred_tool and isinstance(item, Mapping):
+            continue
+        if (
+            root
+            and inferred_tool
+            and isinstance(required_parameters, Mapping)
+            and key in _HOST_PARAMETER_REDUNDANT_GEOMETRY_FIELDS
+        ):
+            continue
+        if key == "required_action" and isinstance(item, Mapping):
+            action_name = str(item.get("name") or "").strip()
+            action_parameters = item.get("parameters")
+            action_projection = {
+                str(action_key): _project_host_bound_parameters(
+                    action_value,
+                    source=source,
+                    root=False,
+                )
+                for action_key, action_value in item.items()
+                if action_key != "parameters"
+            }
+            if action_name and isinstance(action_parameters, Mapping):
+                action_projection.update(
+                    _host_parameter_binding_descriptor(action_name, action_parameters)
+                )
+            elif "parameters" in item:
+                action_projection["parameters"] = _project_host_bound_parameters(
+                    action_parameters,
+                    source=source,
+                    root=False,
+                )
+            projected[str(key)] = action_projection
+            continue
+        projected[str(key)] = _project_host_bound_parameters(
+            item,
+            source=source,
+            root=False,
+        )
+    if inferred_tool and isinstance(required_parameters, Mapping):
+        projected.setdefault("required_tool", inferred_tool)
+        projected.update(
+            _host_parameter_binding_descriptor(inferred_tool, required_parameters)
+        )
+    return projected
+
+
 def _canonicalize_host_parameters(
     decision: PlannerDecision,
     *,
@@ -3705,10 +3989,18 @@ def _model_request_context(
         if isinstance(reference, dict)
         and str(reference.get("name") or "") in legal_tool_names
     ]
-    obligations = {
-        key: _compact_model_value(value, depth=0)
+    obligation_keys = {
+        key
         for key, value in full_context.items()
-        if key.endswith("_obligation") and value is not None
+        if (key.endswith("_obligation") or key == "placement_motion_guidance")
+        and value is not None
+    }
+    obligations = {
+        key: _compact_model_value(
+            _project_host_bound_parameters(full_context[key], source=key),
+            depth=0,
+        )
+        for key in sorted(obligation_keys)
     }
     exact_obligation = _model_has_exact_obligation(obligations)
     state_keys = (
@@ -3734,7 +4026,10 @@ def _model_request_context(
         "motion_reconciliation",
     )
     state = {
-        key: _compact_model_value(full_context.get(key), depth=0)
+        key: _compact_model_value(
+            _project_host_bound_parameters(full_context.get(key), source=key),
+            depth=0,
+        )
         for key in state_keys
         if full_context.get(key) is not None
     }
@@ -3771,7 +4066,7 @@ def _model_request_context(
         obligations=obligations,
     )
     projected: JsonDict = {
-        "schema_version": "openeta.planner_model_context.v3",
+        "schema_version": "openeta.planner_model_context.v4",
         "task": full_context.get("task"),
         "planner_mode": planner_mode,
         "controller": {
@@ -3783,10 +4078,12 @@ def _model_request_context(
             "phase": phase,
             "legal_tool_names": legal_tool_names,
             "rule": (
-                "Choose the next tool or terminal response explicitly. When a typed "
-                "obligation supplies required_tool/required_action, use it and copy its "
-                "required parameters exactly. The host owns geometry, candidate joins, "
-                "bounded infrastructure retries, safety proofs, and execution details."
+                "Choose the next tool or terminal response explicitly. A typed "
+                "obligation with parameter_mode=host_hydrated requires parameters={}; "
+                "the host injects the immutable payload selected by its binding hash. "
+                "When the chosen tool has multiple bindings, send only obligation_ref. "
+                "The host owns geometry, candidate joins, bounded infrastructure retries, "
+                "safety proofs, and execution details."
                 if agentic_closed_loop
                 else "Choose only a listed legal tool. The host owns phase transitions, "
                 "candidate joins, retries, safety proofs, and exact execution parameters."
@@ -3896,7 +4193,7 @@ def _model_request_context(
     if int(budget["estimated_tokens"]) > config.model_context_hard_limit_tokens:
         projection_level = "minimal_hard_bound"
         projected = {
-            "schema_version": "openeta.planner_model_context.v3",
+            "schema_version": "openeta.planner_model_context.v4",
             "task": str(projected.get("task") or "")[:4_000],
             "planner_mode": planner_mode,
             "controller": projected["controller"],
@@ -4073,6 +4370,10 @@ def _model_phase_and_legal_tools(
         action = value.get("required_action")
         if isinstance(action, dict) and str(action.get("name") or ""):
             required.append(str(action["name"]))
+    for binding in _host_parameter_bindings(context):
+        tool_name = str(binding.get("tool") or "")
+        if tool_name and tool_name not in required:
+            required.append(tool_name)
     semantic = context.get("semantic_perception_obligation")
     execution = context.get("grasp_execution")
     active_environment = context.get("active_environment_task")
@@ -4266,6 +4567,10 @@ def _hard_model_obligation(value: object) -> object:
             "required_parameter",
             "required_parameters",
             "required_action",
+            "parameter_mode",
+            "parameter_binding_sha256",
+            "parameter_keys",
+            "parameter_count",
             "preferred_image",
             "allowed_images",
             "target_object",
