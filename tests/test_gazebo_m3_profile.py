@@ -186,6 +186,96 @@ def test_m3_complex_scene_renderer_adds_real_static_collision_geometry(
         rendered.unlink(missing_ok=True)
 
 
+@pytest.mark.parametrize(
+    ("scene_id", "seed", "shape_class", "target_prompt", "region_prompt"),
+    [
+        (
+            "fastener-bin-sort",
+            41,
+            "hex_bolt",
+            "large silver hex bolt",
+            "blue parts bin floor",
+        ),
+        (
+            "tool-bin-sort",
+            53,
+            "open_end_wrench",
+            "yellow open-end wrench",
+            "green tool bin floor",
+        ),
+    ],
+)
+def test_m3_industrial_scenes_bind_composite_target_to_one_of_two_bins(
+    scene_id: str,
+    seed: int,
+    shape_class: str,
+    target_prompt: str,
+    region_prompt: str,
+) -> None:
+    contract = load_acceptance_scene_contract(scene_id)
+    config = NativePickPlaceConfig(acceptance_scene_id=scene_id)
+
+    assert contract["seed"] == seed
+    assert contract["target_object"]["shape_class"] == shape_class
+    assert contract["task"]["target_prompt"] == target_prompt
+    assert contract["task"]["placement_region_prompt"] == region_prompt
+    assert len(contract["target_object"]["primitives"]) >= 2
+    assert len(contract["placement_regions"]) == 2
+    assert sum(region["selected"] for region in contract["placement_regions"]) == 1
+    assert config.replace_default_distractor is True
+    assert list(config.target_size_m) == contract["target_object"][
+        "bounding_box_xyz"
+    ]
+    assert list(config.target_initial_xyz) == contract["target_object"]["pose_xyz"]
+    assert list(config.destination_center_xy) == contract["destination_center_xy"]
+    assert list(config.destination_size_xy_m) == contract["destination_size_xy_m"]
+    assert config.placement_center_height_m == pytest.approx(
+        config.table_top_z_m + config.target_size_m[2] / 2.0
+    )
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "target_collision_count", "placement_ids"),
+    [
+        ("fastener-bin-sort", 2, ["blue_parts_bin", "orange_parts_bin"]),
+        ("tool-bin-sort", 3, ["purple_tool_bin", "green_tool_bin"]),
+    ],
+)
+def test_m3_industrial_renderer_materializes_real_parts_and_bin_floors(
+    scene_id: str,
+    target_collision_count: int,
+    placement_ids: list[str],
+) -> None:
+    config = NativePickPlaceConfig(acceptance_scene_id=scene_id)
+    package = config.ros_workspace / "src" / config.ros_package_name
+    rendered, selected = render_acceptance_world(
+        base_world=package / "worlds/rm75_robotiq2f85_pickplace.sdf",
+        catalog_path=package / "config/acceptance_scenes.json",
+        environment={"OPENETA_ACCEPTANCE_SCENE": scene_id},
+    )
+    try:
+        world = ET.parse(rendered).getroot().find("world")
+        assert world is not None and selected == scene_id
+        assert world.find("model[@name='distractor_object']") is None
+        target = world.find("model[@name='target_object']")
+        assert target is not None
+        assert len(target.findall("link/collision")) == target_collision_count
+        assert len(target.findall("link/visual")) == target_collision_count
+        for placement_id in placement_ids:
+            floor = world.find(f"model[@name='{placement_id}']")
+            assert floor is not None
+            assert floor.find("link/collision") is None
+            assert floor.find("link/visual/geometry/box/size") is not None
+        for obstacle in config.acceptance_scene_contract["static_obstacles"]:
+            model = world.find(f"model[@name='{obstacle['id']}']")
+            assert model is not None
+            expected_primitives = len(obstacle.get("primitives") or [obstacle])
+            assert len(model.findall("link/collision")) == expected_primitives
+            assert len(model.findall("link/visual")) == expected_primitives
+    finally:
+        rendered.unlink(missing_ok=True)
+
+
 def test_m3_normal_scene_renderer_reuses_the_canonical_world() -> None:
     config = NativePickPlaceConfig()
     package = config.ros_workspace / "src" / config.ros_package_name

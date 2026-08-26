@@ -485,6 +485,15 @@ class RosGazeboController(GazeboController):
         distractor_size = tuple(config.distractor_size_m)
         if len(distractor_size) == 2:
             distractor_size = (distractor_size[0], distractor_size[0], distractor_size[1])
+        distractor = (
+            None
+            if getattr(config, "replace_default_distractor", False)
+            else CollisionBox(
+                config.distractor_id,
+                distractor_size,
+                tuple(config.distractor_initial_xyz),
+            )
+        )
         obstacles = tuple(
             CollisionBox(
                 str(spec["id"]),
@@ -496,15 +505,12 @@ class RosGazeboController(GazeboController):
         )
         revision = self.planning_scene.reset(
             table=table,
-            distractor=CollisionBox(
-                config.distractor_id,
-                distractor_size,
-                tuple(config.distractor_initial_xyz),
-            ),
+            distractor=distractor,
             target=CollisionBox(
                 config.target_id,
                 tuple(config.target_size_m),
                 tuple(config.target_initial_xyz),
+                tuple(config.target_initial_quat_xyzw),
             ),
             obstacles=obstacles,
         )

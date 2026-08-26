@@ -241,6 +241,7 @@ def test_allocation_and_receipt_exclude_protected_domains() -> None:
     )
     assert verify_receipt(receipt) == []
     assert receipt["python_executable"] == str(Path(sys.executable).absolute())
+    assert receipt["run_id"] == allocation.run_id
     tampered = dict(receipt, ros_domain_id=42)
     assert verify_receipt(tampered)
 

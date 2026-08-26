@@ -49,7 +49,7 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(tmp_path, monk
     assert "不得" in prompt and "Oracle" in prompt
     assert "initial observation 不计" in prompt
     assert "mask 必须完整且不粘连" in prompt
-    assert "红色方块是" in prompt and "target_object" in prompt
+    assert "唯一 target_object" in prompt
     assert "`red rectangular block`" in prompt
     assert "各自的 RGB-D" in prompt
     assert "frozen_frontier" in prompt and "不重跑" in prompt
@@ -82,6 +82,37 @@ def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
     expectations = {
         "narrow-pick": (17, ["pick_guard_left", "pick_guard_right"]),
         "barrier-transfer": (29, ["transfer_barrier"]),
+        "fastener-bin-sort": (
+            41,
+            [
+                "yellow_open_end_wrench",
+                "blue_handle_pliers",
+                "blue_bin_wall_left",
+                "blue_bin_wall_right",
+                "blue_bin_wall_near",
+                "blue_bin_wall_far",
+                "orange_bin_wall_left",
+                "orange_bin_wall_right",
+                "orange_bin_wall_near",
+                "orange_bin_wall_far",
+            ],
+        ),
+        "tool-bin-sort": (
+            53,
+            [
+                "silver_hex_bolt",
+                "blue_handle_pliers_tool_scene",
+                "red_screwdriver",
+                "purple_bin_wall_left",
+                "purple_bin_wall_right",
+                "purple_bin_wall_near",
+                "purple_bin_wall_far",
+                "green_bin_wall_left",
+                "green_bin_wall_right",
+                "green_bin_wall_near",
+                "green_bin_wall_far",
+            ],
+        ),
     }
     for scenario, (seed, obstacle_ids) in expectations.items():
         paths = m6.prepare_case(
@@ -101,8 +132,14 @@ def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
         assert receipt["acceptance_scene"]["scene_id"] == scenario
         assert receipt["acceptance_scene"]["seed"] == seed
         assert receipt["acceptance_scene"]["static_obstacle_ids"] == obstacle_ids
-        assert receipt["acceptance_scene"]["destination_center_xy"] == (
-            [0.48, 0.10] if scenario == "barrier-transfer" else [0.48, -0.10]
+        expected_destination = {
+            "barrier-transfer": [0.48, 0.10],
+            "fastener-bin-sort": [0.55, -0.12],
+            "tool-bin-sort": [0.55, 0.12],
+        }.get(scenario, [0.48, -0.10])
+        assert receipt["acceptance_scene"]["destination_center_xy"] == expected_destination
+        assert receipt["acceptance_scene"]["schema_version"] == (
+            "openeta.gazebo_acceptance_scene_receipt.v2"
         )
         assert len(receipt["acceptance_scene"]["contract_sha256"]) == 64
 
@@ -114,10 +151,34 @@ def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
     assert m6._scenario_environment("barrier-transfer") == {
         "OPENETA_ACCEPTANCE_SCENE": "barrier-transfer"
     }
+    assert m6._scenario_environment("fastener-bin-sort") == {
+        "OPENETA_ACCEPTANCE_SCENE": "fastener-bin-sort"
+    }
+    assert m6._scenario_environment("tool-bin-sort") == {
+        "OPENETA_ACCEPTANCE_SCENE": "tool-bin-sort"
+    }
     assert m6._scenario_environment("reject-first") == {
         "OPENETA_ACCEPTANCE_SCENE": "normal",
         "OPENETA_ACCEPTANCE_PLACEMENT_FAULT": "reject-first",
     }
+
+
+def test_industrial_scene_prompts_bind_one_target_to_one_of_multiple_bins() -> None:
+    fastener = m6._instructions_for_backend(
+        "graspgenx", scenario="fastener-bin-sort"
+    )
+    tool = m6._instructions_for_backend("graspgenx", scenario="tool-bin-sort")
+
+    assert "grasp_target=large_silver_hex_bolt" in fastener
+    assert "placement_region=blue_parts_bin_floor" in fastener
+    assert "large silver hex bolt" in fastener and "blue parts bin floor" in fastener
+    assert "银色六角螺栓" in m6.SCENARIO_INSTRUCTIONS["fastener-bin-sort"]
+    assert "蓝色料箱" in m6.SCENARIO_INSTRUCTIONS["fastener-bin-sort"]
+    assert "grasp_target=yellow_open-end_wrench" in tool
+    assert "placement_region=green_tool_bin_floor" in tool
+    assert "yellow open-end wrench" in tool and "green tool bin floor" in tool
+    assert "黄色开口扳手" in m6.SCENARIO_INSTRUCTIONS["tool-bin-sort"]
+    assert "绿色料箱" in m6.SCENARIO_INSTRUCTIONS["tool-bin-sort"]
 
 
 def test_pick_place_prepare_can_strictly_select_graspgenx(tmp_path, monkeypatch) -> None:

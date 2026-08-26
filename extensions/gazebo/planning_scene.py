@@ -82,17 +82,24 @@ class PlanningSceneSynchronizer:
         self,
         *,
         table: CollisionBox,
-        distractor: CollisionBox,
+        distractor: CollisionBox | None = None,
+        distractors: Sequence[CollisionBox] = (),
         target: CollisionBox,
         obstacles: Sequence[CollisionBox] = (),
     ) -> int:
+        scene_distractors = [
+            *([distractor] if distractor is not None else []),
+            *distractors,
+        ]
         obstacle_ids = [obstacle.object_id for obstacle in obstacles]
-        if len(obstacle_ids) != len(set(obstacle_ids)) or any(
-            obstacle_id in {table.object_id, distractor.object_id, target.object_id}
-            for obstacle_id in obstacle_ids
+        distractor_ids = [item.object_id for item in scene_distractors]
+        all_non_target_ids = [table.object_id, *distractor_ids, *obstacle_ids]
+        if (
+            len(all_non_target_ids) != len(set(all_non_target_ids))
+            or target.object_id in set(all_non_target_ids)
         ):
             return self._fail("planning-scene obstacle identity is not unique")
-        world_objects = [table, distractor, target, *obstacles]
+        world_objects = [table, *scene_distractors, target, *obstacles]
         expected_world = {item.object_id for item in world_objects}
         revision = self._commit(
             {

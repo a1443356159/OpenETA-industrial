@@ -170,6 +170,7 @@ class GazeboDirectEnv(Env):
         raw_action = action if isinstance(action, Mapping) else {}
         action_type = str(raw_action.get("action_type") or "")
         contact_window: GazeboNativeContactWindow | None = None
+        release_before_open: dict[str, Any] | None = None
         if self._native_grasp_config is not None and action_type == "gripper_close":
             contact_window = GazeboNativeContactWindow(
                 gz_executable=self.deployment.gz_executable,
@@ -203,6 +204,85 @@ class GazeboDirectEnv(Env):
                 raw.setdefault("metadata", {})["physical_verification"] = self._native_grasp_verifier.last_record.to_dict() if self._native_grasp_verifier else {}
                 receipt["observation"] = raw
                 return raw, 0.0, False, False, {"_openeta_receipt": receipt}
+        if (
+            self._native_grasp_config is not None
+            and self._native_grasp_verifier is not None
+            and action_type == "gripper_open"
+        ):
+            attachment = getattr(self.runtime, "attachment", None)
+            attached_before_open = self._native_grasp_verifier.attached or (
+                attachment is not None
+                and getattr(attachment, "state", None) == "attached"
+            )
+            if attached_before_open:
+                release_sequence: list[dict[str, Any]] = []
+                detached_acked = False
+                try:
+                    if attachment is None:
+                        raise GazeboProcessError(
+                            "NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE"
+                        )
+                    target_pose, _ = attachment.native_target_mount_poses()
+                    attachment.ensure_detached(require_ack=True)
+                    detached_acked = True
+                    release_sequence.append(
+                        {
+                            "sequence": 1,
+                            "event": "native_detach_ack",
+                            "state": "detached",
+                        }
+                    )
+                    sync_detach = getattr(
+                        self.controller, "sync_planning_scene_detach", None
+                    )
+                    if not callable(sync_detach):
+                        raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                    scene_revision = sync_detach(
+                        self._native_grasp_config,
+                        target_xyz=target_pose.xyz,
+                        target_quat_xyzw=target_pose.quat_xyzw,
+                    )
+                    release_sequence.append(
+                        {
+                            "sequence": 2,
+                            "event": "planning_scene_detach_ack",
+                            "revision": int(scene_revision),
+                        }
+                    )
+                    record = self._native_grasp_verifier.release_result(
+                        detached_acked=True
+                    )
+                    self._native_grasp_transport_locked = False
+                    self._attachment_transform = None
+                    release_before_open = {
+                        "release_sequence": release_sequence,
+                        "target_pose": target_pose,
+                        "planning_scene_revision": int(scene_revision),
+                        "record": record,
+                    }
+                except Exception as exc:
+                    record = self._native_grasp_verifier.release_result(
+                        detached_acked=detached_acked
+                    )
+                    self._native_grasp_transport_locked = not detached_acked
+                    if detached_acked:
+                        self._attachment_transform = None
+                    observation = self.runtime.observe()
+                    raw = self._decorate_robot(self._as_unified(observation))
+                    receipt = {
+                        "ok": False,
+                        "error_code": str(exc),
+                        "gripper_open_executed": False,
+                        "release_sequence": release_sequence,
+                        "physical_verification": record.to_dict(),
+                        "observation": raw,
+                    }
+                    raw.setdefault("metadata", {})[
+                        "physical_verification"
+                    ] = record.to_dict()
+                    return raw, 0.0, False, False, {
+                        "_openeta_receipt": receipt
+                    }
         try:
             observation, receipt = self.runtime.execute(raw_action)
         except Exception:
@@ -331,40 +411,22 @@ class GazeboDirectEnv(Env):
                 raw.setdefault("metadata", {})["physical_verification"] = record.to_dict()
                 receipt["physical_verification"] = record.to_dict()
             elif action_type == "gripper_open":
-                attached_before_open = self._native_grasp_verifier.attached or (
-                    attachment is not None
-                    and getattr(attachment, "state", None) == "attached"
-                )
-                if not attached_before_open:
+                if release_before_open is not None:
                     try:
                         if receipt.get("ok") is not True:
                             raise GazeboProcessError(
                                 str(receipt.get("error_code") or "GRIPPER_FAILED")
                             )
-                        if self._native_grasp_verifier.phase == "contact_rejected":
-                            pose_sync = self._sync_failed_close_target_pose()
-                            receipt["planning_scene_revision"] = pose_sync["revision"]
-                            raw.setdefault("metadata", {})[
-                                "planning_scene_revision"
-                            ] = pose_sync["revision"]
-                            receipt["planning_scene_target_pose_sync"] = pose_sync
-                        record = self._native_grasp_verifier.detached_open_result()
-                        receipt["detachable_joint"] = {
-                            "state": "detached",
-                            "already_detached": True,
-                        }
-                        self._native_grasp_transport_locked = False
-                    except Exception as exc:
-                        record = self._native_grasp_verifier.last_record
-                        receipt.update({"ok": False, "error_code": str(exc)})
-                        self._native_grasp_transport_locked = True
-                else:
-                    try:
-                        if receipt.get("ok") is not True:
-                            raise GazeboProcessError(str(receipt.get("error_code") or "GRIPPER_FAILED"))
-                        if attachment is None:
-                            raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
-                        attachment.ensure_detached(require_ack=True)
+                        release_sequence = list(
+                            release_before_open["release_sequence"]
+                        )
+                        release_sequence.append(
+                            {
+                                "sequence": 3,
+                                "event": "gripper_open_completed",
+                                "ok": True,
+                            }
+                        )
                         receipt["detachable_joint"] = {
                             "state": "detached",
                             "detach_topic": self._native_grasp_config.detach_topic,
@@ -378,23 +440,72 @@ class GazeboDirectEnv(Env):
                             ),
                             interval_s=self._native_grasp_config.placement_sample_interval_s,
                         )
-                        placement = verify_stable_placement(samples, self._native_grasp_config)
+                        placement = verify_stable_placement(
+                            samples, self._native_grasp_config
+                        )
                         target_pose = samples[-1]
-                        sync_detach = getattr(self.controller, "sync_planning_scene_detach", None)
-                        if not callable(sync_detach):
+                        sync_target_pose = getattr(
+                            self.controller,
+                            "sync_planning_scene_target_pose",
+                            None,
+                        )
+                        if not callable(sync_target_pose):
                             raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
-                        scene_revision = sync_detach(
+                        scene_revision = sync_target_pose(
                             self._native_grasp_config,
                             target_xyz=target_pose.xyz,
                             target_quat_xyzw=target_pose.quat_xyzw,
                         )
-                        record = self._native_grasp_verifier.release_result(detached_acked=True)
+                        release_sequence.append(
+                            {
+                                "sequence": 4,
+                                "event": "released_target_pose_sync_ack",
+                                "revision": int(scene_revision),
+                            }
+                        )
+                        record = release_before_open["record"]
                         receipt["planning_scene_revision"] = scene_revision
                         receipt["placement_verification"] = placement.to_dict()
-                        self._native_grasp_transport_locked = False
-                        self._attachment_transform = None
+                        receipt["release_sequence"] = release_sequence
+                        receipt["gripper_open_executed"] = True
+                        raw.setdefault("metadata", {})[
+                            "planning_scene_revision"
+                        ] = scene_revision
                     except Exception as exc:
-                        record = self._native_grasp_verifier.release_result(detached_acked=False)
+                        record = release_before_open["record"]
+                        receipt.update(
+                            {
+                                "ok": False,
+                                "error_code": str(exc),
+                                "gripper_open_executed": bool(receipt.get("ok")),
+                                "release_sequence": list(
+                                    release_before_open["release_sequence"]
+                                ),
+                            }
+                        )
+                else:
+                    try:
+                        if receipt.get("ok") is not True:
+                            raise GazeboProcessError(
+                                str(receipt.get("error_code") or "GRIPPER_FAILED")
+                            )
+                        if self._native_grasp_verifier.phase == "contact_rejected":
+                            pose_sync = self._sync_failed_close_target_pose()
+                            receipt["planning_scene_revision"] = pose_sync[
+                                "revision"
+                            ]
+                            raw.setdefault("metadata", {})[
+                                "planning_scene_revision"
+                            ] = pose_sync["revision"]
+                            receipt["planning_scene_target_pose_sync"] = pose_sync
+                        record = self._native_grasp_verifier.detached_open_result()
+                        receipt["detachable_joint"] = {
+                            "state": "detached",
+                            "already_detached": True,
+                        }
+                        self._native_grasp_transport_locked = False
+                    except Exception as exc:
+                        record = self._native_grasp_verifier.last_record
                         receipt.update({"ok": False, "error_code": str(exc)})
                         self._native_grasp_transport_locked = True
                 raw.setdefault("metadata", {})["physical_verification"] = record.to_dict()

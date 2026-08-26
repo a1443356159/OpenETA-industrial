@@ -51,8 +51,20 @@ REQUIRED_REAL_PICK_PLACE_TOOLS = (
 )
 # Compatibility alias for tests and integrations importing the historical name.
 REQUIRED_REAL_M6_TOOLS = REQUIRED_REAL_PICK_PLACE_TOOLS
-SCENARIOS = ("normal", "reject-first", "narrow-pick", "barrier-transfer")
-COMPLEX_PHYSICAL_SCENARIOS = ("narrow-pick", "barrier-transfer")
+SCENARIOS = (
+    "normal",
+    "reject-first",
+    "narrow-pick",
+    "barrier-transfer",
+    "fastener-bin-sort",
+    "tool-bin-sort",
+)
+COMPLEX_PHYSICAL_SCENARIOS = (
+    "narrow-pick",
+    "barrier-transfer",
+    "fastener-bin-sort",
+    "tool-bin-sort",
+)
 EXECUTION_PROFILES = ("agentic_normal", "smoke_normal")
 DEFAULT_EXECUTION_PROFILE = "agentic_normal"
 # Acceptance rolls the already-shadowable v3 funnel forward explicitly while
@@ -83,19 +95,14 @@ SAM3 必须返回唯一合法候选；有语义歧义时立即阻断。
 """.strip()
 
 TASK_INSTRUCTIONS = """
-在隔离 Gazebo RM75/Robotiq 环境完成 normal 拾放。创建后显式 observe 一次（create 的
-initial observation 不计）。用 `red rectangular block` 选目标，用
-`green placement zone marker` 选放置区；mask 必须完整且不粘连。红色方块是
-target_object，物体与放置区使用各自的 RGB-D 证据。
-
 只运行一次 AnyPlace 和一次 unified grasp_pose_estimate，冻结全部模型候选。模型抓取
 位姿是 exact EEF contact，放置目标经实测 T_eef_object 转为 exact release；除标定/
 TCP 表示变换外不得修改。禁止 pregrasp、hover、lift、approach/descend offset、镜像或
 人工位姿变体。MoveIt 自当前状态直接规划到 contact/release。
 
 闭爪后要有双垫 target contact 与 attach ACK；transport 要有 attached ACK 且相对漂移
-<=10 mm；到 release 后原地开爪。成功需 detach ACK、稳定落区 PASS 与唯一一次
-close_simulator_env。
+<=10 mm；到 release 后由宿主先取得 native detach ACK 和 PlanningScene detach ACK，
+再原地开爪。成功需有序释放证明、稳定落区 PASS 与唯一一次 close_simulator_env。
 
 候选或物理执行失败时，先用已通过备用，再以 `model_inference=false` 从
 frozen_frontier 继续；不重跑 SAM3/抓取模型/AnyPlace。只有场景确已改变或冻结池耗尽，
@@ -120,6 +127,16 @@ SCENARIO_INSTRUCTIONS = {
         "MoveIt PlanningScene。仍只提交模型导出的 exact release，完整避障路径由 MoveIt "
         "生成，不得人工添加 lift/hover/retreat。"
     ),
+    "fastener-bin-sort": (
+        "工台同时存在大号银色六角螺栓、黄色开口扳手和蓝柄钳子，以及蓝色、橙色两个"
+        "带实体边墙的料箱。必须只抓取银色六角螺栓并放入蓝色料箱底部；选择错误物体或"
+        "错误料箱均为失败。"
+    ),
+    "tool-bin-sort": (
+        "工台同时存在黄色开口扳手、银色六角螺栓、蓝柄钳子和红色螺丝刀，以及紫色、"
+        "绿色两个带实体边墙的料箱。必须只抓取黄色开口扳手并放入绿色料箱底部；选择"
+        "错误物体或错误料箱均为失败。"
+    ),
 }
 
 
@@ -127,6 +144,75 @@ def _scene_contract(scenario: str) -> dict[str, Any]:
     if scenario not in SCENARIOS:
         raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
     return load_acceptance_scene_contract(scenario)
+
+
+def _scene_task(scene: Mapping[str, Any]) -> dict[str, str]:
+    raw = scene.get("task")
+    if isinstance(raw, Mapping):
+        return {
+            "target_prompt": str(raw["target_prompt"]),
+            "placement_object_prompt": str(raw["placement_object_prompt"]),
+            "placement_region_prompt": str(raw["placement_region_prompt"]),
+        }
+    return {
+        "target_prompt": "red rectangular block",
+        "placement_object_prompt": "red rectangular block",
+        "placement_region_prompt": "green placement zone marker",
+    }
+
+
+def _metadata_semantic(value: str) -> str:
+    return "_".join(str(value).strip().split())
+
+
+def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
+    task = _scene_task(scene)
+    target = scene.get("target_object")
+    target_evidence = {
+        "id": "target_object",
+        "shape_class": (
+            str(target["shape_class"])
+            if isinstance(target, Mapping)
+            else "rectangular_block"
+        ),
+        "bounding_box_xyz": [
+            float(value)
+            for value in (
+                target["bounding_box_xyz"]
+                if isinstance(target, Mapping)
+                else [0.04, 0.04, 0.06]
+            )
+        ],
+    }
+    regions = scene.get("placement_regions")
+    region_ids = (
+        [str(region["id"]) for region in regions]
+        if isinstance(regions, list)
+        else ["placement_zone_marker"]
+    )
+    return {
+        "schema_version": "openeta.gazebo_acceptance_scene_receipt.v2",
+        "scene_id": str(scene["world_scene"]),
+        "seed": int(scene["seed"]),
+        "contract_sha256": str(scene["contract_sha256"]),
+        "static_obstacle_ids": [
+            str(obstacle["id"]) for obstacle in scene["static_obstacles"]
+        ],
+        "destination_center_xy": [
+            float(value)
+            for value in scene.get("destination_center_xy", [0.48, -0.10])
+        ],
+        "destination_size_xy_m": [
+            float(value)
+            for value in scene.get("destination_size_xy_m", [0.12, 0.12])
+        ],
+        "task": task,
+        "target_object": target_evidence,
+        "placement_region_ids": region_ids,
+        "selected_placement_region_id": str(
+            scene.get("selected_placement_region_id") or region_ids[0]
+        ),
+    }
 
 
 def _scenario_environment(scenario: str) -> dict[str, str]:
@@ -174,6 +260,7 @@ def _instructions_for_backend(
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
+    task = _scene_task(scene)
     planner_mode = EXECUTION_PROFILE_PLANNER_MODES[profile]
     metadata = (
         f"[automation=scripted_tui; planner_mode={planner_mode}; "
@@ -181,9 +268,9 @@ def _instructions_for_backend(
         f"environment_id={ENV_ID}; environment_task=normal_pick_and_place; "
         f"environment_seed={int(scene['seed'])}; "
         f"acceptance_scene={str(scene['world_scene'])}; "
-        "grasp_target=red_rectangular_block; "
-        "placement_object=red_rectangular_block; "
-        "placement_region=green_placement_zone_marker]"
+        f"grasp_target={_metadata_semantic(task['target_prompt'])}; "
+        f"placement_object={_metadata_semantic(task['placement_object_prompt'])}; "
+        f"placement_region={_metadata_semantic(task['placement_region_prompt'])}]"
     )
     control = AGENTIC_CONTROL if profile == "agentic_normal" else SMOKE_CONTROL
     provider = (
@@ -191,7 +278,18 @@ def _instructions_for_backend(
         if backend == "graspgenx"
         else "宿主已配置 AnyGrasp。"
     )
-    return f"{metadata}\n{control}\n\n{provider}\n{TASK_INSTRUCTIONS}\n"
+    semantic_instructions = (
+        "在隔离 Gazebo RM75/Robotiq 环境完成 normal 拾放。创建后显式 observe 一次"
+        "（create 的 initial observation 不计）。用 "
+        f"`{task['target_prompt']}` 选择唯一 target_object，用 "
+        f"`{task['placement_region_prompt']}` 选择指定放置区；mask 必须完整且不粘连。"
+        "目标物体与放置区使用各自的 RGB-D 证据；场景中的其它物体和其它料箱都是"
+        "语义干扰项，抓错或放错均不得继续。"
+    )
+    return (
+        f"{metadata}\n{control}\n\n{provider}\n{semantic_instructions}\n\n"
+        f"{TASK_INSTRUCTIONS}\n"
+    )
 
 
 def _required_tools_for_backend(grasp_backend: str) -> tuple[str, ...]:
@@ -404,19 +502,7 @@ def prepare_case(
         before=base._process_snapshot(),
     )
     receipt["acceptance_scenario"] = scenario
-    receipt["acceptance_scene"] = {
-        "schema_version": "openeta.gazebo_acceptance_scene_receipt.v1",
-        "scene_id": str(scene["world_scene"]),
-        "seed": int(scene["seed"]),
-        "contract_sha256": str(scene["contract_sha256"]),
-        "static_obstacle_ids": [
-            str(obstacle["id"]) for obstacle in scene["static_obstacles"]
-        ],
-        "destination_center_xy": [
-            float(value)
-            for value in scene.get("destination_center_xy", [0.48, -0.10])
-        ],
-    }
+    receipt["acceptance_scene"] = _scene_receipt(scene)
     receipt["grasp_backend_mode"] = backend
     receipt["execution_profile"] = profile
     receipt["qualification_profile"] = funnel_profile
@@ -834,17 +920,9 @@ def verify_case(
         expected_obstacle_ids = [
             str(obstacle["id"]) for obstacle in scene["static_obstacles"]
         ]
-        if not isinstance(receipt_scene, Mapping) or receipt_scene != {
-            "schema_version": "openeta.gazebo_acceptance_scene_receipt.v1",
-            "scene_id": str(scene["world_scene"]),
-            "seed": int(scene["seed"]),
-            "contract_sha256": str(scene["contract_sha256"]),
-            "static_obstacle_ids": expected_obstacle_ids,
-            "destination_center_xy": [
-                float(value)
-                for value in scene.get("destination_center_xy", [0.48, -0.10])
-            ],
-        }:
+        if not isinstance(receipt_scene, Mapping) or receipt_scene != _scene_receipt(
+            scene
+        ):
             errors.append("acceptance scene receipt does not match the versioned contract")
         planner_evidence = _planner_evidence(
             events,
@@ -862,8 +940,21 @@ def verify_case(
         for required in _required_tools_for_backend(backend):
             if required not in names:
                 errors.append(f"required real pick-place tool call missing: {required}")
-        if names.count("sam3") < 2:
-            errors.append("target-object and placement-region SAM3 calls are required")
+        if names.count("sam3") != 2:
+            errors.append(
+                "exactly one target-object and one placement-region SAM3 call are required"
+            )
+        sam3_prompts = [
+            str(_parameters(call).get("prompt") or "")
+            for call in calls
+            if _name(call) == "sam3"
+        ]
+        expected_prompts = [
+            _scene_task(scene)["target_prompt"],
+            _scene_task(scene)["placement_region_prompt"],
+        ]
+        if sam3_prompts != expected_prompts:
+            errors.append("SAM3 semantic prompts do not match the selected scene task")
         grasp_indices = [index for index, name in enumerate(names) if name == backend]
         sam_indices = [index for index, name in enumerate(names) if name == "sam3"]
         if grasp_indices and sam_indices and max(sam_indices) > min(grasp_indices):
@@ -1094,6 +1185,33 @@ def verify_case(
             errors.append("artificial grasp/place waypoint stage was executed")
         if not any(base._contains(payload, "state", "detached") for payload in payloads):
             errors.append("native detach ACK evidence missing")
+        release_sequences = [
+            value
+            for payload in payloads
+            for value in base._values(payload, "release_sequence")
+            if isinstance(value, list)
+        ]
+        if not any(
+            [
+                str(item.get("event") or "")
+                for item in sequence
+                if isinstance(item, Mapping)
+            ][:3]
+            == [
+                "native_detach_ack",
+                "planning_scene_detach_ack",
+                "gripper_open_completed",
+            ]
+            and [
+                int(item.get("sequence"))
+                for item in sequence[:3]
+                if isinstance(item, Mapping)
+                and isinstance(item.get("sequence"), int)
+            ]
+            == [1, 2, 3]
+            for sequence in release_sequences
+        ):
+            errors.append("detach-before-open ordered release evidence missing")
         placements = [
             value
             for payload in payloads
@@ -1195,16 +1313,7 @@ def verify_case(
                 or planner_evidence["total_tokens"]
             ),
             "scenario": scenario,
-            "acceptance_scene": {
-                "scene_id": str(scene["world_scene"]),
-                "seed": int(scene["seed"]),
-                "contract_sha256": str(scene["contract_sha256"]),
-                "static_obstacle_ids": expected_obstacle_ids,
-                "destination_center_xy": [
-                    float(value)
-                    for value in scene.get("destination_center_xy", [0.48, -0.10])
-                ],
-            },
+            "acceptance_scene": _scene_receipt(scene),
             "grasp_backend": backend,
         }
     except Exception as exc:  # noqa: BLE001 - verifier must return a report.
@@ -1219,18 +1328,7 @@ def verify_case(
             "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
             "planner_provider_invoked": None,
             "scenario": scenario,
-            "acceptance_scene": {
-                "scene_id": str(scene["world_scene"]),
-                "seed": int(scene["seed"]),
-                "contract_sha256": str(scene["contract_sha256"]),
-                "static_obstacle_ids": [
-                    str(obstacle["id"]) for obstacle in scene["static_obstacles"]
-                ],
-                "destination_center_xy": [
-                    float(value)
-                    for value in scene.get("destination_center_xy", [0.48, -0.10])
-                ],
-            },
+            "acceptance_scene": _scene_receipt(scene),
             "grasp_backend": backend,
         }
 

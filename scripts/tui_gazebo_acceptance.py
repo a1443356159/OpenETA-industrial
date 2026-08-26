@@ -397,6 +397,11 @@ def environment_receipt(
         "captured_at": datetime.now(UTC).isoformat(),
         "ros_domain_id": allocation.ros_domain_id,
         "gz_partition": allocation.gz_partition,
+        # Public ownership token for optional operator-side processes (for
+        # example the GPU Gazebo GUI).  Processes that inherit this exact
+        # marker are folded into the same bounded cleanup proof as the MCP
+        # worker, so a visible GUI cannot race partition verification.
+        "run_id": allocation.run_id,
         "mcp_port": allocation.port,
         "rmw_implementation": os.environ.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         "ros_distro": os.environ.get("ROS_DISTRO", "jazzy"),

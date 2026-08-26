@@ -31,7 +31,7 @@ PLACEMENT_VERIFICATION_SCHEMA_VERSION = "openeta.gazebo.placement_verification.v
 # the configured boundary; it is not added to the configured safety gate.
 _POSE_BOUNDARY_ABS_TOL_M = 1e-6
 ACCEPTANCE_SCENE_ENV = "OPENETA_ACCEPTANCE_SCENE"
-ACCEPTANCE_SCENE_SCHEMA_VERSION = "openeta.gazebo_acceptance_scenes.v1"
+ACCEPTANCE_SCENE_SCHEMA_VERSION = "openeta.gazebo_acceptance_scenes.v2"
 
 
 def acceptance_scene_contract_path() -> Path:
@@ -68,6 +68,57 @@ def load_acceptance_scene_contract(
     obstacles = scene.get("static_obstacles")
     if not isinstance(obstacles, list):
         raise ValueError("acceptance scene obstacle list is invalid")
+    def vector(
+        owner: Mapping[str, Any],
+        key: str,
+        count: int,
+        *,
+        positive: bool = False,
+    ) -> list[float]:
+        values = owner.get(key)
+        if (
+            not isinstance(values, list)
+            or len(values) != count
+            or any(
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or (positive and float(value) <= 0.0)
+                for value in values
+            )
+        ):
+            raise ValueError(f"acceptance scene {key} is invalid")
+        return [float(value) for value in values]
+
+    def validate_primitives(owner: Mapping[str, Any]) -> None:
+        primitives = owner.get("primitives")
+        if primitives is None:
+            return
+        if not isinstance(primitives, list) or not primitives:
+            raise ValueError("acceptance scene primitives are invalid")
+        for primitive in primitives:
+            if not isinstance(primitive, Mapping):
+                raise ValueError("acceptance scene primitive is invalid")
+            shape = str(primitive.get("shape") or "")
+            if shape == "box":
+                vector(primitive, "size_xyz", 3, positive=True)
+            elif shape == "cylinder":
+                radius = primitive.get("radius")
+                length = primitive.get("length")
+                if any(
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not math.isfinite(float(value))
+                    or float(value) <= 0.0
+                    for value in (radius, length)
+                ):
+                    raise ValueError("acceptance scene cylinder is invalid")
+            else:
+                raise ValueError("acceptance scene primitive shape is invalid")
+            vector(primitive, "pose_xyz", 3)
+            vector(primitive, "pose_rpy", 3)
+            vector(primitive, "rgba", 4)
+
     seen: set[str] = set()
     for obstacle in obstacles:
         if not isinstance(obstacle, Mapping):
@@ -82,19 +133,72 @@ def load_acceptance_scene_contract(
             ("pose_rpy", 3, False),
             ("rgba", 4, False),
         ):
-            values = obstacle.get(key)
-            if (
-                not isinstance(values, list)
-                or len(values) != count
-                or any(
-                    not isinstance(value, (int, float))
-                    or isinstance(value, bool)
-                    or not math.isfinite(float(value))
-                    or (positive and float(value) <= 0.0)
-                    for value in values
-                )
-            ):
-                raise ValueError(f"acceptance scene obstacle {key} is invalid")
+            vector(obstacle, key, count, positive=positive)
+        validate_primitives(obstacle)
+    task = scene.get("task")
+    if task is not None:
+        if not isinstance(task, Mapping) or any(
+            not isinstance(task.get(key), str) or not str(task[key]).strip()
+            for key in (
+                "target_prompt",
+                "placement_object_prompt",
+                "placement_region_prompt",
+            )
+        ):
+            raise ValueError("acceptance scene task semantics are invalid")
+    target = scene.get("target_object")
+    if target is not None:
+        if (
+            not isinstance(target, Mapping)
+            or not isinstance(target.get("shape_class"), str)
+            or not str(target["shape_class"]).strip()
+        ):
+            raise ValueError("acceptance scene target object is invalid")
+        vector(target, "bounding_box_xyz", 3, positive=True)
+        vector(target, "pose_xyz", 3)
+        vector(target, "pose_rpy", 3)
+        mass = target.get("mass_kg")
+        if (
+            not isinstance(mass, (int, float))
+            or isinstance(mass, bool)
+            or not math.isfinite(float(mass))
+            or float(mass) <= 0.0
+        ):
+            raise ValueError("acceptance scene target mass is invalid")
+        validate_primitives(target)
+    placement_regions = scene.get("placement_regions")
+    if placement_regions is not None:
+        if not isinstance(placement_regions, list) or len(placement_regions) < 2:
+            raise ValueError("acceptance scene placement regions are invalid")
+        placement_ids: set[str] = set()
+        selected: list[Mapping[str, Any]] = []
+        for region in placement_regions:
+            if not isinstance(region, Mapping):
+                raise ValueError("acceptance scene placement region is invalid")
+            region_id = str(region.get("id") or "")
+            prompt = str(region.get("prompt") or "")
+            if not region_id or region_id in placement_ids or not prompt:
+                raise ValueError("acceptance scene placement region identity is invalid")
+            placement_ids.add(region_id)
+            vector(region, "center_xy", 2)
+            vector(region, "size_xy_m", 2, positive=True)
+            vector(region, "rgba", 4)
+            if region.get("selected") is True:
+                selected.append(region)
+            elif region.get("selected") is not False:
+                raise ValueError("acceptance scene placement selection is invalid")
+        if len(selected) != 1:
+            raise ValueError("acceptance scene needs exactly one selected placement region")
+        chosen = selected[0]
+        if task is None or task["placement_region_prompt"] != chosen["prompt"]:
+            raise ValueError("acceptance scene task/bin semantic binding is invalid")
+        scene["destination_center_xy"] = [
+            float(value) for value in chosen["center_xy"]
+        ]
+        scene["destination_size_xy_m"] = [
+            float(value) for value in chosen["size_xy_m"]
+        ]
+        scene["selected_placement_region_id"] = str(chosen["id"])
     destination = scene.get("destination_center_xy")
     if destination is not None and (
         not isinstance(destination, list)
@@ -234,6 +338,12 @@ class NativePickPlaceConfig(GazeboControlConfig):
     target_size_m: tuple[float, float, float] = (0.04, 0.04, 0.06)
     target_mass_kg: float = 0.10
     target_initial_xyz: tuple[float, float, float] = (0.28, -0.10, 0.43)
+    target_initial_quat_xyzw: tuple[float, float, float, float] = (
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
     distractor_size_m: tuple[float, float] = (0.05, 0.08)
     distractor_mass_kg: float = 0.12
     distractor_initial_xyz: tuple[float, float, float] = (0.28, 0.12, 0.44)
@@ -255,12 +365,40 @@ class NativePickPlaceConfig(GazeboControlConfig):
 
     def __post_init__(self) -> None:
         GazeboControlConfig.__post_init__(self)
-        destination = self.acceptance_scene_contract.get("destination_center_xy")
+        contract = self.acceptance_scene_contract
+        destination = contract.get("destination_center_xy")
         if destination is not None:
             object.__setattr__(
                 self,
                 "destination_center_xy",
                 tuple(float(value) for value in destination),
+            )
+        destination_size = contract.get("destination_size_xy_m")
+        if destination_size is not None:
+            object.__setattr__(
+                self,
+                "destination_size_xy_m",
+                tuple(float(value) for value in destination_size),
+            )
+        target = contract.get("target_object")
+        if isinstance(target, Mapping):
+            target_size = tuple(float(value) for value in target["bounding_box_xyz"])
+            object.__setattr__(self, "target_size_m", target_size)
+            object.__setattr__(self, "target_mass_kg", float(target["mass_kg"]))
+            object.__setattr__(
+                self,
+                "target_initial_xyz",
+                tuple(float(value) for value in target["pose_xyz"]),
+            )
+            object.__setattr__(
+                self,
+                "target_initial_quat_xyzw",
+                _quaternion_from_rpy(target["pose_rpy"]),
+            )
+            object.__setattr__(
+                self,
+                "placement_center_height_m",
+                self.table_top_z_m + target_size[2] / 2.0,
             )
 
     @property
@@ -285,7 +423,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
 
     def acceptance_scene_evidence(self) -> dict[str, Any]:
         contract = self.acceptance_scene_contract
-        return {
+        evidence = {
             "schema_version": ACCEPTANCE_SCENE_SCHEMA_VERSION,
             "scene_id": self.acceptance_scene_id,
             "world_scene": str(contract["world_scene"]),
@@ -296,14 +434,38 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 for obstacle in contract["static_obstacles"]
             ],
             "destination_center_xy": list(self.destination_center_xy),
+            "destination_size_xy_m": list(self.destination_size_xy_m),
         }
+        task = contract.get("task")
+        if isinstance(task, Mapping):
+            evidence["task"] = dict(task)
+        target = contract.get("target_object")
+        if isinstance(target, Mapping):
+            evidence["target_object"] = {
+                "id": self.target_id,
+                "shape_class": str(target["shape_class"]),
+                "bounding_box_xyz": list(self.target_size_m),
+            }
+        regions = contract.get("placement_regions")
+        if isinstance(regions, list):
+            evidence["placement_region_ids"] = [
+                str(region["id"]) for region in regions
+            ]
+            evidence["selected_placement_region_id"] = str(
+                contract["selected_placement_region_id"]
+            )
+        return evidence
+
+    @property
+    def replace_default_distractor(self) -> bool:
+        return self.acceptance_scene_contract.get("replace_default_distractor") is True
 
     @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
-        return {
-            self.target_id: self.target_initial_xyz,
-            self.distractor_id: self.distractor_initial_xyz,
-        }
+        poses = {self.target_id: self.target_initial_xyz}
+        if not self.replace_default_distractor:
+            poses[self.distractor_id] = self.distractor_initial_xyz
+        return poses
 
     @property
     def ros_package_name(self) -> str:

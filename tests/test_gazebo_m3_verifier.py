@@ -11,6 +11,7 @@ from extensions.gazebo.native_grasp import (
     NativeContactSample,
     NativeGraspVerifier,
     NativePickPlaceConfig,
+    PlacementPoseSample,
     ReasonCode,
     Verdict,
     confirm_native_bilateral_contact,
@@ -191,3 +192,146 @@ def test_failed_close_forbids_motion_and_requires_exact_reopen() -> None:
     ]
     assert env._native_grasp_transport_locked is False
     assert raw["metadata"]["planning_scene_revision"] == 8
+
+
+def _attached_release_env(*, detach_fails: bool = False):
+    config = NativePickPlaceConfig()
+    events: list[str] = []
+    observation = EnvObservation(
+        task="pick and place",
+        cameras=[],
+        robot=RobotState(),
+    )
+
+    class Attachment:
+        state = "attached"
+
+        @staticmethod
+        def native_target_mount_poses():
+            return (
+                SimpleNamespace(
+                    xyz=(0.48, -0.10, 0.43),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                SimpleNamespace(
+                    xyz=(0.48, -0.10, 0.55),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+            )
+
+        def ensure_detached(self, *, require_ack):
+            assert require_ack is True
+            events.append("native_detach_ack")
+            if detach_fails:
+                raise RuntimeError("detach ACK unavailable")
+            self.state = "detached"
+
+        @staticmethod
+        def sample_detached_target_poses(*, duration_s, interval_s):
+            assert duration_s >= 0.5
+            assert interval_s > 0.0
+            events.append("sample_released_target")
+            return [
+                PlacementPoseSample(
+                    monotonic_s=1.0,
+                    xyz=(0.48, -0.10, 0.43),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                PlacementPoseSample(
+                    monotonic_s=1.2,
+                    xyz=(0.48, -0.10, 0.43),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                PlacementPoseSample(
+                    monotonic_s=1.6,
+                    xyz=(0.48, -0.10, 0.43),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+            ]
+
+    class Controller:
+        planning_scene = SimpleNamespace(revision=7)
+
+        def sync_planning_scene_detach(
+            self, _config, *, target_xyz, target_quat_xyzw
+        ):
+            assert target_xyz == (0.48, -0.10, 0.43)
+            assert target_quat_xyzw == (0.0, 0.0, 0.0, 1.0)
+            events.append("planning_scene_detach_ack")
+            self.planning_scene.revision = 8
+            return 8
+
+        def sync_planning_scene_target_pose(
+            self, _config, *, target_xyz, target_quat_xyzw
+        ):
+            assert target_xyz == (0.48, -0.10, 0.43)
+            assert target_quat_xyzw == (0.0, 0.0, 0.0, 1.0)
+            events.append("planning_scene_pose_sync_ack")
+            self.planning_scene.revision = 9
+            return 9
+
+    attachment = Attachment()
+
+    def execute(action):
+        assert action == {"action_type": "gripper_open"}
+        events.append("gripper_open")
+        return observation, {"ok": True}
+
+    runtime = SimpleNamespace(
+        attachment=attachment,
+        controller=Controller(),
+        scene_revision=7,
+        observe=lambda: observation,
+        execute=execute,
+    )
+    env = object.__new__(GazeboDirectEnv)
+    env.runtime = runtime
+    env.profile = SimpleNamespace(
+        model_config=config,
+        cameras=(),
+        capabilities={STRUCTURED_RECEIPT},
+    )
+    env._native_grasp_config = config
+    env._native_grasp_verifier = NativeGraspVerifier(config)
+    env._native_grasp_verifier.close_result(_accepted_gate(), attach_acked=True)
+    env._native_grasp_transport_locked = False
+    env._attachment_transform = {
+        "schema_version": "openeta.attachment_transform.v1"
+    }
+    return env, events
+
+
+def test_release_detaches_both_bindings_before_opening_gripper() -> None:
+    env, events = _attached_release_env()
+
+    raw, _, _, _, result = env.step({"action_type": "gripper_open"})
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is True
+    assert events == [
+        "native_detach_ack",
+        "planning_scene_detach_ack",
+        "gripper_open",
+        "sample_released_target",
+        "planning_scene_pose_sync_ack",
+    ]
+    assert [item["event"] for item in receipt["release_sequence"]] == [
+        "native_detach_ack",
+        "planning_scene_detach_ack",
+        "gripper_open_completed",
+        "released_target_pose_sync_ack",
+    ]
+    assert receipt["gripper_open_executed"] is True
+    assert receipt["placement_verification"]["verdict"] == "PASS"
+    assert raw["metadata"]["planning_scene_revision"] == 9
+
+
+def test_release_detach_failure_forbids_gripper_open() -> None:
+    env, events = _attached_release_env(detach_fails=True)
+
+    _, _, _, _, result = env.step({"action_type": "gripper_open"})
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is False
+    assert receipt["gripper_open_executed"] is False
+    assert events == ["native_detach_ack"]

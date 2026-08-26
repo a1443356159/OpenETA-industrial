@@ -96,6 +96,36 @@ def test_planning_scene_preserves_acceptance_obstacles_across_attachment() -> No
     assert scene.world_ids == {"table", "distractor", "target", "pick_guard_left"}
 
 
+def test_planning_scene_can_replace_default_distractor_with_industrial_parts() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, _, target = _boxes()
+    wrench = CollisionBox(
+        "yellow_open_end_wrench",
+        (0.13, 0.055, 0.028),
+        (0.275, 0.115, 0.414),
+    )
+    pliers = CollisionBox(
+        "blue_handle_pliers",
+        (0.125, 0.060, 0.030),
+        (0.355, 0.015, 0.415),
+    )
+
+    scene.reset(
+        table=table,
+        target=target,
+        distractor=None,
+        obstacles=(wrench, pliers),
+    )
+
+    assert scene.world_ids == {
+        "table",
+        "target",
+        "yellow_open_end_wrench",
+        "blue_handle_pliers",
+    }
+    assert "distractor" not in scene.world_ids
+
+
 def test_planning_scene_rejects_duplicate_acceptance_obstacle_identity() -> None:
     scene = PlanningSceneSynchronizer()
     table, distractor, target = _boxes()
