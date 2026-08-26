@@ -166,8 +166,11 @@ RUN source /opt/ros/jazzy/setup.bash && \
     cd /opt/openeta/src/extensions/gazebo/ros2_ws && \
     colcon build --event-handlers console_direct+
 
-RUN /opt/openeta/venvs/openeta/bin/python -c \
+RUN anyplace_torch_lib="$(/opt/openeta/venvs/anyplace/bin/python -c \
+      "import sysconfig; from pathlib import Path; print(Path(sysconfig.get_paths()['purelib']) / 'torch/lib')")" && \
+    /opt/openeta/venvs/openeta/bin/python -c \
       "import gymnasium, mcp, numpy, prompt_toolkit, pytest, starlette, uvicorn" && \
+    LD_LIBRARY_PATH="${anyplace_torch_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     /opt/openeta/venvs/anyplace/bin/python -c \
       "import mcp, torch, torch_cluster, torch_scatter; from tools.anyplace_core import _install_legacy_import_shims; _install_legacy_import_shims(torch); from anyplace.model.transformer.policy import NSMTransformerImplicit; from anyplace.utils.anyplace.multistep_pose_regression_anyplace import policy_inference_methods_dict; assert torch.version.cuda == '11.7'" && \
     GRASPGENX_CHECKPOINT_DIR=/opt/openeta/build_probe/checkpoints \
