@@ -47,8 +47,9 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # Reuse established layers, but do not re-export the multi-GB
+          # ROS/CUDA cache after every immutable candidate publication.
           cache-from: type=gha
-          cache-to: type=gha,mode=max,ignore-error=true
           provenance: mode=max
           # The full ROS/CUDA SPDX attestation exceeds GitHub's 40 MiB
           # artifact limit. Reproducibility remains enforced by the OCI

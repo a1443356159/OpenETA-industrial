@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
 
 from deploy.hepo.prepare_assets import (
     ANYPLACE_RELEASE,
@@ -91,3 +93,69 @@ def test_hepo_workflow_keeps_digest_provenance_without_oversized_sbom() -> None:
     assert "provenance: mode=max" in workflow
     assert "sbom: false" in workflow
     assert "digest=${{ steps.build.outputs.digest }}" in workflow
+    assert "cache-from: type=gha" in workflow
+    assert "cache-to:" not in workflow
+
+
+def test_image_import_retries_in_place_with_http1_fallback(tmp_path: Path) -> None:
+    fake_runtime = tmp_path / "singularity"
+    attempt_file = tmp_path / "attempts"
+    godebug_file = tmp_path / "retry-godebug"
+    fake_runtime.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  build)
+    attempt=0
+    [[ ! -f "${ATTEMPT_FILE}" ]] || attempt="$(cat "${ATTEMPT_FILE}")"
+    attempt=$((attempt + 1))
+    printf '%s\n' "${attempt}" > "${ATTEMPT_FILE}"
+    if (( attempt == 1 )); then
+      exit 17
+    fi
+    printf '%s\n' "${GODEBUG:-}" > "${GODEBUG_FILE}"
+    : > "$2"
+    ;;
+  inspect)
+    printf '{}\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_runtime.chmod(0o755)
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    target = tmp_path / "images" / "openeta.sif"
+    current = tmp_path / "images" / "current.sif"
+    environment = os.environ | {
+        "ATTEMPT_FILE": str(attempt_file),
+        "GODEBUG_FILE": str(godebug_file),
+        "OPENETA_CONTAINER_RUNTIME": str(fake_runtime),
+        "OPENETA_IMAGE_IMPORT_RETRY_DELAY_SECONDS": "0",
+        "SLURM_JOB_ID": "1234",
+        "SLURM_TMPDIR": str(scratch),
+    }
+
+    subprocess.run(
+        [
+            "bash",
+            str(REPO_ROOT / "deploy/hepo/import_oci_image.sh"),
+            "ghcr.io/example/openeta@sha256:deadbeef",
+            str(target),
+            str(current),
+        ],
+        check=True,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert attempt_file.read_text(encoding="utf-8").strip() == "2"
+    assert "http2client=0" in godebug_file.read_text(encoding="utf-8")
+    assert target.is_file()
+    assert current.resolve() == target.resolve()
