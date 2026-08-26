@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from PIL import Image
 
 from adapter.protocol import EnvObservation, RobotState
@@ -14,6 +16,7 @@ from agent.runtime.moveit_qualification import (
 )
 from agent.runtime.runtime_assembly import (
     _FrozenGoalPairCoordinator,
+    _candidate_qualification_compiler,
     _compile_qualified_queue,
     _prepare_postattachment_frozen_goals,
     _qualifying_handler,
@@ -116,6 +119,70 @@ def test_host_compiles_every_full_plan_pass_into_one_equal_status_queue() -> Non
     assert all(
         call["binding"]["planning_scene_revision"] == 7 for call in calls
     )
+
+
+def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> None:
+    profile_path = (
+        Path(__file__).parents[1]
+        / "agent/calibrations/candidate/graspnet-eef-rm75-robotiq2f85.json"
+    )
+    compiler = _candidate_qualification_compiler(
+        SimpleNamespace(grasp_profile_path=profile_path)
+    ).prepare_batch(purpose="placement")
+    model_goal = {
+        "frame": "world",
+        "translation_xyz": [0.48, -0.1, 0.443],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    physical_goal = {
+        "frame": "world",
+        "translation_xyz": [0.475, -0.101, 0.431],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    attachment = {
+        "parent_frame": "eef",
+        "child_frame": "object",
+        "translation_xyz": [0.0, 0.0, 0.1],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    candidate = {
+        "id": "frozen-pair",
+        "object_goal_pose": physical_goal,
+        "world_object_goal_pose": physical_goal,
+        "model_pointcloud_object_goal_pose": model_goal,
+        "predicted_attachment_transform": attachment,
+        "qualification_start_joint_state": {"names": ["j1"], "positions": [0.0]},
+    }
+
+    predicted = compiler(candidate, "placement", {}, 2, 7)
+    measured_candidate = dict(candidate)
+    measured_candidate.pop("predicted_attachment_transform")
+    measured = compiler(
+        measured_candidate,
+        "placement",
+        {"attachment_transform": attachment},
+        2,
+        7,
+    )
+
+    assert predicted["qualification_stages"][0]["xyz"] == pytest.approx(
+        [0.48, -0.1, 0.343]
+    )
+    assert predicted["compile_parameters"]["placement_candidate"][
+        "object_goal_pose"
+    ] == model_goal
+    assert predicted["compile_parameters"]["placement_candidate"][
+        "qualification_object_goal_source"
+    ] == "model_pointcloud_goal_with_predicted_attachment"
+    assert measured["qualification_stages"][0]["xyz"] == pytest.approx(
+        [0.475, -0.101, 0.331]
+    )
+    assert measured["compile_parameters"]["placement_candidate"][
+        "object_goal_pose"
+    ] == physical_goal
+    assert measured["compile_parameters"]["placement_candidate"][
+        "qualification_object_goal_source"
+    ] == "physical_goal_with_measured_attachment"
 
 
 def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasps() -> None:

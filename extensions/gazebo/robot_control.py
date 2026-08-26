@@ -43,6 +43,8 @@ START_STATE_BOUNDS_TOLERANCE_RAD = 1e-6
 START_STATE_RECOVERY_INSET_RAD = 1e-3
 START_STATE_RECOVERY_TRAJECTORY_S = 1.0
 START_STATE_RECOVERY_TIMEOUT_S = 5.0
+MOTION_SETTLE_RECHECK_TIMEOUT_S = 1.0
+MOTION_SETTLE_RECHECK_INTERVAL_S = 0.1
 # These targets are relative to the first fresh mount pose after a reset, not
 # absolute world coordinates.  They are the small, validated neutral motions
 # available in the empty motion-control profile.  Publishing the relation in the existing
@@ -1005,9 +1007,6 @@ class GazeboController:
                     action_evidence["action_started_ros_time_s"] = recovery_started
                 action_evidence["scene_revision"] = scene_revision
                 action_evidence["request_fingerprint"] = request_fingerprint
-                position_error_m, orientation_error_rad = _pose_goal_errors(
-                    end.end_effector_pose, goal["requested_tool_pose"]
-                )
                 # The post-action TF is sampled after MoveIt's result boundary,
                 # so allow a small measurement/settling margin while still
                 # rejecting a trajectory result that stopped materially away
@@ -1018,22 +1017,112 @@ class GazeboController:
                 orientation_verification_tolerance_rad = max(
                     0.005, 2.0 * float(goal["orientation_tolerance_rad"])
                 )
-                actual_xyz = tuple(
-                    float(value) for value in end.end_effector_pose["xyz"]
-                )
                 target_xyz = tuple(
                     float(value) for value in goal["requested_tool_pose"]["xyz"]
                 )
-                horizontal_error_m = math.dist(actual_xyz[:2], target_xyz[:2])
-                vertical_error_m = actual_xyz[2] - target_xyz[2]
-                translation_verified = (
-                    position_error_m <= position_verification_tolerance_m
-                )
+
+                def verification_metrics(
+                    state: RobotState,
+                ) -> tuple[float, float, float, float, bool]:
+                    sample_position_error_m, sample_orientation_error_rad = (
+                        _pose_goal_errors(
+                            state.end_effector_pose,
+                            goal["requested_tool_pose"],
+                        )
+                    )
+                    sample_xyz = tuple(
+                        float(value) for value in state.end_effector_pose["xyz"]
+                    )
+                    sample_horizontal_error_m = math.dist(
+                        sample_xyz[:2], target_xyz[:2]
+                    )
+                    sample_vertical_error_m = sample_xyz[2] - target_xyz[2]
+                    sample_verified = (
+                        sample_position_error_m
+                        <= position_verification_tolerance_m
+                        and sample_orientation_error_rad
+                        <= orientation_verification_tolerance_rad
+                    )
+                    return (
+                        sample_position_error_m,
+                        sample_orientation_error_rad,
+                        sample_horizontal_error_m,
+                        sample_vertical_error_m,
+                        sample_verified,
+                    )
+
+                (
+                    position_error_m,
+                    orientation_error_rad,
+                    horizontal_error_m,
+                    vertical_error_m,
+                    target_verified,
+                ) = verification_metrics(end)
                 position_verification_policy = "exact_terminal_euclidean"
-                target_verified = (
-                    translation_verified
-                    and orientation_error_rad <= orientation_verification_tolerance_rad
-                )
+                settling_recheck: dict[str, Any] | None = None
+                if (
+                    ok
+                    and not bool(result.get("plan_only", False))
+                    and not target_verified
+                ):
+                    initial_position_error_m = position_error_m
+                    initial_orientation_error_rad = orientation_error_rad
+                    best_position_error_m = position_error_m
+                    best_orientation_error_rad = orientation_error_rad
+                    sample_count = 0
+                    recheck_started = time.monotonic()
+                    recheck_status = "timeout"
+                    recheck_error_type: str | None = None
+                    while True:
+                        remaining_s = (
+                            MOTION_SETTLE_RECHECK_TIMEOUT_S
+                            - (time.monotonic() - recheck_started)
+                        )
+                        if remaining_s <= 0.0:
+                            break
+                        time.sleep(
+                            min(MOTION_SETTLE_RECHECK_INTERVAL_S, remaining_s)
+                        )
+                        try:
+                            sample = self.state_provider()
+                        except Exception as exc:  # noqa: BLE001 - sensor boundary.
+                            recheck_status = "state_unavailable"
+                            recheck_error_type = type(exc).__name__
+                            break
+                        sample_count += 1
+                        end = sample
+                        (
+                            position_error_m,
+                            orientation_error_rad,
+                            horizontal_error_m,
+                            vertical_error_m,
+                            target_verified,
+                        ) = verification_metrics(sample)
+                        best_position_error_m = min(
+                            best_position_error_m, position_error_m
+                        )
+                        best_orientation_error_rad = min(
+                            best_orientation_error_rad, orientation_error_rad
+                        )
+                        if target_verified:
+                            recheck_status = "target_verified"
+                            break
+                    settling_recheck = {
+                        "attempted": True,
+                        "status": recheck_status,
+                        "sample_count": sample_count,
+                        "timeout_s": MOTION_SETTLE_RECHECK_TIMEOUT_S,
+                        "interval_s": MOTION_SETTLE_RECHECK_INTERVAL_S,
+                        "elapsed_s": time.monotonic() - recheck_started,
+                        "initial_position_error_m": initial_position_error_m,
+                        "initial_orientation_error_rad": (
+                            initial_orientation_error_rad
+                        ),
+                        "best_position_error_m": best_position_error_m,
+                        "best_orientation_error_rad": best_orientation_error_rad,
+                    }
+                    if recheck_error_type is not None:
+                        settling_recheck["error_type"] = recheck_error_type
                 if ok and not bool(result.get("plan_only", False)) and not target_verified:
                     ok = False
                     error = "MOTION_TARGET_NOT_REACHED"
@@ -1073,6 +1162,11 @@ class GazeboController:
                         ),
                         "orientation_verification_tolerance_rad": (
                             orientation_verification_tolerance_rad
+                        ),
+                        **(
+                            {"settling_recheck": settling_recheck}
+                            if settling_recheck is not None
+                            else {}
                         ),
                         "observation": {"robot": end.to_dict()},
                         **(

@@ -315,6 +315,43 @@ def test_controller_rejects_moveit_success_when_fresh_pose_misses_goal() -> None
     assert receipt["position_error_m"] == pytest.approx(0.02)
 
 
+def test_controller_accepts_only_a_fresh_settled_pose_within_same_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start, immediate, settled = _state(), _state(), _state()
+    immediate.end_effector_pose["xyz"] = [0.0049, 0.0, 0.5]
+    settled.end_effector_pose["xyz"] = [0.003, 0.0, 0.5]
+    states = iter((start, immediate, settled))
+    monkeypatch.setattr("extensions.gazebo.robot_control.time.sleep", lambda _s: None)
+    controller = GazeboController(
+        state_provider=lambda: next(states),
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "motion_outcome": "completed",
+        },
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
+            "tolerance": 0.002,
+            "ori_tolerance": 0.05,
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is True
+    assert receipt["reached_target"] is True
+    assert receipt["position_error_m"] == pytest.approx(0.003)
+    assert receipt["position_verification_tolerance_m"] == pytest.approx(0.004)
+    assert receipt["settling_recheck"]["status"] == "target_verified"
+    assert receipt["settling_recheck"]["sample_count"] == 1
+    assert receipt["settling_recheck"]["initial_position_error_m"] == pytest.approx(
+        0.0049
+    )
+
+
 def test_controller_rejects_upward_release_residual_outside_exact_terminal() -> None:
     start, end = _state(), _state()
     end.end_effector_pose["xyz"] = [0.002, -0.001, 0.507]

@@ -1087,23 +1087,43 @@ def _candidate_qualification_compiler(
         profile_sha256: str,
     ) -> JsonDict:
         if purpose == "placement":
-            world_object_goal = (
-                candidate.get("world_object_goal_pose")
-                or candidate.get("object_goal_pose")
-            )
             predicted_attachment = candidate.get("predicted_attachment_transform")
             if isinstance(predicted_attachment, Mapping):
+                # Before the gripper has closed, the attachment is derived
+                # from the model contact and the measured point-cloud object
+                # frame.  A frozen goal may also carry a scene-bound physical
+                # collision-body goal from an earlier legality pass.  Mixing
+                # that physical goal with the point-cloud attachment shifts
+                # the release terminal by the centroid/body-frame offset.
+                # Compile in the model frame here; the legality binder below
+                # applies the one scene-derived support correction to both the
+                # object motion and the release EEF terminal before IK/L5.
+                world_object_goal = (
+                    candidate.get("model_pointcloud_object_goal_pose")
+                    or candidate.get("world_object_goal_pose")
+                    or candidate.get("object_goal_pose")
+                )
                 compiled_candidate = dict(candidate)
                 if isinstance(world_object_goal, Mapping):
-                    compiled_candidate["world_object_goal_pose"] = dict(
-                        world_object_goal
+                    compiled_goal = dict(world_object_goal)
+                    compiled_candidate["world_object_goal_pose"] = compiled_goal
+                    compiled_candidate["object_goal_pose"] = dict(compiled_goal)
+                    compiled_candidate["qualification_object_goal_source"] = (
+                        "model_pointcloud_goal_with_predicted_attachment"
                     )
                 attachment_transform: object = dict(predicted_attachment)
             else:
+                world_object_goal = (
+                    candidate.get("world_object_goal_pose")
+                    or candidate.get("object_goal_pose")
+                )
                 compiled_candidate = dict(candidate)
                 if isinstance(world_object_goal, Mapping):
-                    compiled_candidate["world_object_goal_pose"] = dict(
-                        world_object_goal
+                    compiled_goal = dict(world_object_goal)
+                    compiled_candidate["world_object_goal_pose"] = compiled_goal
+                    compiled_candidate["object_goal_pose"] = dict(compiled_goal)
+                    compiled_candidate["qualification_object_goal_source"] = (
+                        "physical_goal_with_measured_attachment"
                     )
                 attachment_transform = source.get("attachment_transform")
             if not isinstance(attachment_transform, dict):
