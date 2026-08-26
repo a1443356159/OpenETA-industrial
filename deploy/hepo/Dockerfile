@@ -85,7 +85,12 @@ RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
     rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install "uv==${UV_VERSION}" && \
-    mkdir -p /opt/openeta/third_party /opt/openeta/venvs /opt/openeta/config
+    mkdir -p \
+      /opt/openeta/third_party \
+      /opt/openeta/venvs \
+      /opt/openeta/config \
+      /opt/openeta/build_probe/checkpoints \
+      /opt/openeta/build_probe/grippers
 
 RUN GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/ac-rad/anyplace.git \
       /opt/openeta/third_party/anyplace && \
@@ -121,26 +126,30 @@ RUN unset PIP_CONSTRAINT && \
       --no-build-isolation --no-deps \
       -e /opt/openeta/third_party/anyplace
 
-RUN python3 -m venv --system-site-packages /opt/openeta/venvs/graspgenx && \
+RUN unset PIP_CONSTRAINT && \
+    python3 -m venv --system-site-packages /opt/openeta/venvs/graspgenx && \
     /opt/openeta/venvs/graspgenx/bin/python -m pip install \
       pip==25.2 setuptools==77.0.3 wheel==0.45.1 && \
     /opt/openeta/venvs/graspgenx/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-graspgenx-runtime.txt \
       -r /tmp/openeta-requirements/requirements-graspgenx.txt && \
-    /opt/openeta/venvs/graspgenx/bin/python -m pip install --no-deps \
+    /opt/openeta/venvs/graspgenx/bin/python -m pip install \
+      --no-build-isolation --no-deps \
       -e /opt/openeta/third_party/GraspGenX
 
-RUN python3 -m venv --system-site-packages /opt/openeta/venvs/sam3 && \
+RUN unset PIP_CONSTRAINT && \
+    python3 -m venv --system-site-packages /opt/openeta/venvs/sam3 && \
     /opt/openeta/venvs/sam3/bin/python -m pip install \
       pip==25.2 setuptools==80.9.0 wheel==0.45.1 && \
     /opt/openeta/venvs/sam3/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-sam3.txt && \
-    /opt/openeta/venvs/sam3/bin/python -m pip install \
+    /opt/openeta/venvs/sam3/bin/python -m pip install --no-build-isolation \
       -e /opt/openeta/third_party/sam3
 
 COPY . /opt/openeta/src
 
-RUN python3 -m venv --system-site-packages /opt/openeta/venvs/openeta && \
+RUN unset PIP_CONSTRAINT && \
+    python3 -m venv --system-site-packages /opt/openeta/venvs/openeta && \
     /opt/openeta/venvs/openeta/bin/python -m pip install \
       pip==25.2 setuptools==80.9.0 wheel==0.45.1 && \
     /opt/openeta/venvs/openeta/bin/python -m pip install -e "/opt/openeta/src[dev]" && \
@@ -158,9 +167,11 @@ RUN source /opt/ros/jazzy/setup.bash && \
 RUN /opt/openeta/venvs/openeta/bin/python -c \
       "import gymnasium, mcp, numpy, prompt_toolkit, pytest, starlette, uvicorn" && \
     /opt/openeta/venvs/anyplace/bin/python -c \
-      "import mcp, torch, torch_cluster, torch_scatter; assert torch.version.cuda == '11.7'" && \
+      "import mcp, torch, torch_cluster, torch_scatter; from tools.anyplace_core import _install_legacy_import_shims; _install_legacy_import_shims(torch); from anyplace.model.transformer.policy import NSMTransformerImplicit; from anyplace.utils.anyplace.multistep_pose_regression_anyplace import policy_inference_methods_dict; assert torch.version.cuda == '11.7'" && \
+    GRASPGENX_CHECKPOINT_DIR=/opt/openeta/build_probe/checkpoints \
+    GRASPGENX_GRIPPER_CFG_DIR=/opt/openeta/build_probe/grippers \
     /opt/openeta/venvs/graspgenx/bin/python -c \
-      "from packaging.version import Version; import graspgenx, torch; assert Version(torch.__version__.split('+')[0]) < Version('2.7')" && \
+      "from packaging.version import Version; import torch; from graspgenx.grasp_server import GraspGenXSampler, load_grasp_gen_model; from graspgenx.samplers import run_planner_on_object; from graspgenx.utils.checkpoint_io import load_model_cfg; from graspgenx.utils.collision_filter import filter_colliding_grasps; assert Version(torch.__version__.split('+')[0]) < Version('2.7')" && \
     /opt/openeta/venvs/sam3/bin/python -c "import sam3, torch"
 
 WORKDIR /workspace/openeta
