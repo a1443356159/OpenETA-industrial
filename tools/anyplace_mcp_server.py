@@ -15,7 +15,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-from tools.anyplace_core import AnyPlaceBackend  # noqa: E402
+from tools.anyplace_core import (  # noqa: E402
+    DEFAULT_INFERENCE_SEED,
+    AnyPlaceBackend,
+)
 from tools.candidate_config import (  # noqa: E402
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     argparse_raw_pool_size,
@@ -99,6 +102,22 @@ def _release_cuda_cache() -> None:
         torch.cuda.empty_cache()
 
 
+def health_payload() -> dict[str, Any]:
+    backend = _BACKEND
+    return {
+        "ok": backend is not None,
+        "server": "anyplace",
+        "deterministic": True,
+        "inference_seed": (
+            DEFAULT_INFERENCE_SEED if backend is None else int(backend.seed)
+        ),
+        "raw_pool_size": 0 if backend is None else int(backend.raw_pool_size),
+        "returned_candidate_count": (
+            0 if backend is None else int(backend.last_returned_candidate_count)
+        ),
+    }
+
+
 def main() -> int:
     global _BACKEND
     parser = argparse.ArgumentParser(description="OpenETA AnyPlace MCP server")
@@ -107,6 +126,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8775)
     parser.add_argument("--anyplace-root", required=True)
     parser.add_argument("--config-path", required=True)
+    parser.add_argument(
+        "--inference-seed", type=int, default=DEFAULT_INFERENCE_SEED
+    )
     parser.add_argument(
         "--raw-pool-size",
         type=argparse_raw_pool_size(placement=True),
@@ -121,11 +143,15 @@ def main() -> int:
     if not config_path.exists():
         parser.error(f"--config-path does not exist: {config_path}")
 
-    _BACKEND = AnyPlaceBackend(
-        anyplace_root=anyplace_root,
-        config_path=config_path,
-        raw_pool_size=args.raw_pool_size,
-    )
+    try:
+        _BACKEND = AnyPlaceBackend(
+            anyplace_root=anyplace_root,
+            config_path=config_path,
+            seed=args.inference_seed,
+            raw_pool_size=args.raw_pool_size,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.transport == "stdio":
         mcp.run(transport="stdio")
@@ -138,14 +164,7 @@ def main() -> int:
     from starlette.routing import Route
 
     async def health(_request):
-        return JSONResponse(
-            {
-                "ok": True,
-                "server": "anyplace",
-                "raw_pool_size": _BACKEND.raw_pool_size,
-                "returned_candidate_count": _BACKEND.last_returned_candidate_count,
-            }
-        )
+        return JSONResponse(health_payload())
 
     health_app = Starlette(routes=[Route("/", health, methods=["GET"])])
     sse_transport = SseServerTransport("/sse/messages/")

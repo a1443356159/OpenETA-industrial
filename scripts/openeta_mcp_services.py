@@ -115,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anygrasp-checkpoint-path")
     parser.add_argument("--anyplace-root")
     parser.add_argument("--anyplace-config-path")
+    parser.add_argument("--anyplace-inference-seed", type=int)
     parser.add_argument("--contact-graspnet-root")
     parser.add_argument("--contact-graspnet-checkpoint-dir")
     parser.add_argument("--sam3-hf-home")
@@ -299,6 +300,11 @@ def _build_config(
         python = args.anyplace_python or os.environ.get("OPENETA_ANYPLACE_PYTHON") or sys.executable
         anyplace_root = args.anyplace_root or os.environ.get("OPENETA_ANYPLACE_ROOT")
         config_path = args.anyplace_config_path or os.environ.get("OPENETA_ANYPLACE_CONFIG_PATH")
+        inference_seed = (
+            args.anyplace_inference_seed
+            if args.anyplace_inference_seed is not None
+            else int(os.environ.get("OPENETA_ANYPLACE_INFERENCE_SEED", "0"))
+        )
         command = [
             python,
             str(REPO_ROOT / "tools" / "anyplace_mcp_server.py"),
@@ -310,6 +316,8 @@ def _build_config(
             str(args.anyplace_port),
             "--raw-pool-size",
             str(funnel.anyplace_raw_pool_size),
+            "--inference-seed",
+            str(inference_seed),
         ]
         if anyplace_root:
             command.extend(["--anyplace-root", anyplace_root])

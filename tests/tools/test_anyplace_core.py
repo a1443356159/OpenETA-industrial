@@ -19,6 +19,7 @@ from tools.anyplace_core import (
     normalise_placement_candidates,
     pad_pointcloud_for_model,
     _configure_cuda_extension_environment,
+    validate_inference_seed,
     validate_intrinsics,
     validate_pointcloud_array,
 )
@@ -65,6 +66,14 @@ def _reason(expected: str, function, *args, **kwargs) -> None:
 def test_validate_intrinsics() -> None:
     assert validate_intrinsics(_intrinsics()) == _intrinsics()
     _reason("missing_intrinsics", validate_intrinsics, None)
+
+
+def test_validate_inference_seed_rejects_implicit_or_unbounded_values() -> None:
+    assert validate_inference_seed(0) == 0
+    assert validate_inference_seed(123) == 123
+    for value in (True, -1, 2**31, 1.5, "4"):
+        with pytest.raises(ValueError, match="inference_seed"):
+            validate_inference_seed(value)
 
 
 def test_cuda_extension_environment_keeps_symlinked_venv_bin(
@@ -148,21 +157,27 @@ def test_normalise_candidates_accepts_nonempty_dynamic_count() -> None:
 
 
 def test_backend_uses_independent_observations_and_transform(tmp_path, monkeypatch) -> None:
-    backend = AnyPlaceBackend(anyplace_root=tmp_path, config_path=tmp_path / "config.yaml")
-    captured: dict[str, Any] = {}
+    backend = AnyPlaceBackend(
+        anyplace_root=tmp_path, config_path=tmp_path / "config.yaml", seed=7
+    )
+    captured: list[dict[str, Any]] = []
     monkeypatch.setattr(backend, "_get_loaded_backend", lambda: {})
     monkeypatch.setattr(
         backend,
         "_predict_with_loaded_backend",
-        lambda **kwargs: captured.update(kwargs) or np.tile(np.eye(4), (10, 1, 1)),
+        lambda **kwargs: captured.append(kwargs) or np.tile(np.eye(4), (10, 1, 1)),
     )
     request = _request()
     request["object_camera_to_placement_camera"][0][3] = 0.25
     result = backend.predict_placement(**request)
+    repeated = backend.predict_placement(**request)
     assert result["success"] is True
     assert result["details"]["frame"] == "placement_camera"
     assert result["details"]["candidate_count"] == 10
-    assert captured["object_pcd"][0, 0] == pytest.approx(0.25)
+    assert captured[0]["object_pcd"][0, 0] == pytest.approx(0.25)
+    assert [call["inference_seed"] for call in captured] == [7, 7]
+    assert result["details"]["metadata"]["deterministic"] is True
+    assert repeated["details"]["metadata"]["inference_seed"] == 7
     assert "selected_grasp" not in str(result)
 
 
@@ -223,3 +238,18 @@ def test_mcp_unconfigured_failure_has_no_candidates(monkeypatch) -> None:
     result = anyplace_mcp_server.predict_placement()
     assert result["success"] is False
     assert result["details"]["placement_candidates"] == []
+
+
+def test_mcp_health_reports_fixed_inference_seed(tmp_path, monkeypatch) -> None:
+    pytest.importorskip("mcp")
+    from tools import anyplace_mcp_server
+
+    backend = AnyPlaceBackend(
+        anyplace_root=tmp_path, config_path=tmp_path / "config.yaml", seed=19
+    )
+    monkeypatch.setattr(anyplace_mcp_server, "_BACKEND", backend)
+
+    health = anyplace_mcp_server.health_payload()
+
+    assert health["deterministic"] is True
+    assert health["inference_seed"] == 19

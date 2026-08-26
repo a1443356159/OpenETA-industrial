@@ -99,6 +99,8 @@ def test_anyplace_mcp_stdio_predicts_aligned_rgbd_sample() -> None:
     assert details["model_raw_candidate_count"] == 96
     assert details["raw_candidate_count"] == 96
     assert details["generated_candidate_count"] == 96
+    assert details["metadata"]["deterministic"] is True
+    assert details["metadata"]["inference_seed"] == 0
     assert len(details["placement_candidates"]) == 96
     for index, candidate in enumerate(details["placement_candidates"]):
         assert candidate["id"] == f"placement_{index:03d}"

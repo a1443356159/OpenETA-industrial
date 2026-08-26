@@ -92,6 +92,24 @@ def test_raw_pool_environment_precedes_default(monkeypatch, tmp_path):
     assert "--candidate-count" not in command
 
 
+def test_anyplace_inference_seed_cli_precedes_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENETA_ANYPLACE_INFERENCE_SEED", "11")
+    args = services.build_parser().parse_args(
+        [
+            "status",
+            "anyplace",
+            "--state-dir",
+            str(tmp_path),
+            "--anyplace-inference-seed",
+            "7",
+        ]
+    )
+
+    command = services._build_configs(args)[0].command
+
+    assert command[command.index("--inference-seed") + 1] == "7"
+
+
 def test_invalid_raw_pool_environment_fails_startup(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", "513")
     args = services.build_parser().parse_args(

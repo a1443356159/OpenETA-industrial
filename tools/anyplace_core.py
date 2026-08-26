@@ -25,6 +25,7 @@ CAMERA_FRAME = "opencv"
 POSE_CONVENTION = "p_placed = R @ p_current + t"
 MODEL_SAMPLE_COUNT = 1024
 DEFAULT_DEPTH_TRUNCATION = 1.0
+DEFAULT_INFERENCE_SEED = 0
 
 
 class AnyPlaceInputError(Exception):
@@ -83,18 +84,17 @@ class AnyPlaceBackend:
         *,
         anyplace_root: str | Path,
         config_path: str | Path,
-        seed: int = 0,
+        seed: int = DEFAULT_INFERENCE_SEED,
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
         raw_pool_size: int = DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     ) -> None:
         self.anyplace_root = Path(anyplace_root)
         self.config_path = Path(config_path)
-        self.seed = seed
+        self.seed = validate_inference_seed(seed)
         self.depth_truncation = depth_truncation
         self.raw_pool_size = validate_raw_pool_size(raw_pool_size, placement=True)
         self.last_returned_candidate_count = 0
         self._loaded: dict[str, Any] | None = None
-        self._prediction_count = 0
 
     def predict_placement(
         self,
@@ -108,9 +108,11 @@ class AnyPlaceBackend:
 
         start = time.perf_counter()
         metadata = _metadata_base()
-        inference_seed = self.seed + self._prediction_count
-        self._prediction_count += 1
-        metadata["inference_seed"] = inference_seed
+        # The same frozen observations must produce the same placement
+        # frontier even when this long-lived service has handled earlier
+        # requests. Request order is not part of the model input.
+        inference_seed = self.seed
+        metadata.update({"deterministic": True, "inference_seed": inference_seed})
         try:
             np, Image = _load_numeric_deps()
             object_packet = _observation_packet(object_observation, "object")
@@ -414,6 +416,7 @@ class AnyPlaceBackend:
             "raster_pts": raster_pts,
             "rot_grid": rot_grid,
             "infer_relation_policy": infer_relation_policy,
+            "np": np,
             "torch": torch,
         }
         return self._loaded
@@ -427,6 +430,7 @@ class AnyPlaceBackend:
     ) -> Any:
         args = backend["args"]
         infer_relation_policy = backend["infer_relation_policy"]
+        np = backend["np"]
         torch = backend["torch"]
         exp_args = args.experiment
         infer_kwargs: dict[str, Any] = {
@@ -452,8 +456,11 @@ class AnyPlaceBackend:
             "multi": True,
         }
 
-        torch.manual_seed(inference_seed)
         random.seed(inference_seed)
+        np.random.seed(inference_seed)
+        torch.manual_seed(inference_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(inference_seed)
         with torch.no_grad(), contextlib.redirect_stdout(sys.stderr):
             relative_trans_preds = infer_relation_policy(
                 _NoOpVisualizer(),
@@ -759,6 +766,14 @@ def _metadata_base() -> dict[str, Any]:
         "pose_convention": POSE_CONVENTION,
         "model_sample_count": MODEL_SAMPLE_COUNT,
     }
+
+
+def validate_inference_seed(seed: Any) -> int:
+    """Return a bounded AnyPlace seed suitable for Python, NumPy, and Torch."""
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**31:
+        raise ValueError("inference_seed must be an integer in [0, 2^31)")
+    return seed
 
 
 def _with_duration(metadata: dict[str, Any], start: float) -> dict[str, Any]:
