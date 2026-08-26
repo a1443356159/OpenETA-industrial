@@ -9,6 +9,7 @@ import os
 import random
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -336,6 +337,7 @@ class AnyPlaceBackend:
         _configure_cuda_extension_environment(torch)
 
         import numpy as np
+        import trimesh
         from anyplace.model.transformer.policy import NSMTransformerImplicit
         from anyplace.model.transformer.policy import NSMTransformerSingleTransformationRegression
         from anyplace.utils import config_util, util
@@ -356,6 +358,8 @@ class AnyPlaceBackend:
         torch.manual_seed(self.seed)
         random.seed(self.seed)
         np.random.seed(self.seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
         with contextlib.redirect_stdout(sys.stderr):
             pose_refine_ckpt = torch.load(
@@ -418,6 +422,7 @@ class AnyPlaceBackend:
             "infer_relation_policy": infer_relation_policy,
             "np": np,
             "torch": torch,
+            "trimesh": trimesh,
         }
         return self._loaded
     def _predict_with_loaded_backend(
@@ -432,6 +437,7 @@ class AnyPlaceBackend:
         infer_relation_policy = backend["infer_relation_policy"]
         np = backend["np"]
         torch = backend["torch"]
+        trimesh = backend["trimesh"]
         exp_args = args.experiment
         infer_kwargs: dict[str, Any] = {
             "gt_child_cent": None,
@@ -461,7 +467,11 @@ class AnyPlaceBackend:
         torch.manual_seed(inference_seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(inference_seed)
-        with torch.no_grad(), contextlib.redirect_stdout(sys.stderr):
+        with (
+            _fixed_trimesh_rng(trimesh=trimesh, np=np, seed=inference_seed),
+            torch.no_grad(),
+            contextlib.redirect_stdout(sys.stderr),
+        ):
             relative_trans_preds = infer_relation_policy(
                 _NoOpVisualizer(),
                 placement_region_pcd,
@@ -495,6 +505,32 @@ class AnyPlaceBackend:
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         return relative_trans_preds
+
+
+@contextlib.contextmanager
+def _fixed_trimesh_rng(*, trimesh: Any, np: Any, seed: int) -> Iterator[None]:
+    """Seed unqualified Trimesh sampling for one serialized model call.
+
+    AnyPlace's upstream policy calls ``Box.sample_volume`` without forwarding
+    a seed. Modern Trimesh routes that call through ``random_generator(None)``,
+    whose process-wide generator starts from OS entropy and advances between
+    requests. Temporarily provide one request-local generator while preserving
+    explicit seeds supplied by any other Trimesh operation.
+    """
+
+    original_random_generator = trimesh.util.random_generator
+    request_generator = np.random.default_rng(seed)
+
+    def random_generator(requested_seed: Any = None) -> Any:
+        if requested_seed is None:
+            return request_generator
+        return original_random_generator(requested_seed)
+
+    trimesh.util.random_generator = random_generator
+    try:
+        yield
+    finally:
+        trimesh.util.random_generator = original_random_generator
 
 
 def _configure_cuda_extension_environment(torch: Any) -> None:

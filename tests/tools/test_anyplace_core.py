@@ -4,6 +4,7 @@ import base64
 import io
 import os
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,7 @@ from tools.anyplace_core import (
     normalise_placement_candidates,
     pad_pointcloud_for_model,
     _configure_cuda_extension_environment,
+    _fixed_trimesh_rng,
     validate_inference_seed,
     validate_intrinsics,
     validate_pointcloud_array,
@@ -74,6 +76,27 @@ def test_validate_inference_seed_rejects_implicit_or_unbounded_values() -> None:
     for value in (True, -1, 2**31, 1.5, "4"):
         with pytest.raises(ValueError, match="inference_seed"):
             validate_inference_seed(value)
+
+
+def test_fixed_trimesh_rng_replays_unseeded_stream_and_restores_function() -> None:
+    def original_random_generator(seed=None):
+        return np.random.default_rng(seed)
+
+    trimesh = SimpleNamespace(
+        util=SimpleNamespace(random_generator=original_random_generator)
+    )
+
+    with _fixed_trimesh_rng(trimesh=trimesh, np=np, seed=7):
+        first = trimesh.util.random_generator().random(4)
+        explicitly_seeded = trimesh.util.random_generator(11).random(4)
+    with _fixed_trimesh_rng(trimesh=trimesh, np=np, seed=7):
+        repeated = trimesh.util.random_generator().random(4)
+
+    np.testing.assert_array_equal(first, repeated)
+    np.testing.assert_array_equal(
+        explicitly_seeded, np.random.default_rng(11).random(4)
+    )
+    assert trimesh.util.random_generator is original_random_generator
 
 
 def test_cuda_extension_environment_keeps_symlinked_venv_bin(
