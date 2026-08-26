@@ -218,6 +218,57 @@ def test_service_process_path_preserves_virtualenv_bin_for_symlinked_python(
     assert child_env["PATH"].split(":", 1)[0] == str(venv_bin)
 
 
+def test_anyplace_child_prefers_its_own_torch_native_libraries(tmp_path: Path) -> None:
+    venv_bin = tmp_path / "venv" / "bin"
+    torch_lib = tmp_path / "venv" / "lib/python3.10/site-packages/torch/lib"
+    venv_bin.mkdir(parents=True)
+    torch_lib.mkdir(parents=True)
+    python = venv_bin / "python"
+    python.symlink_to("/usr/bin/python3")
+    system_torch_lib = "/usr/local/lib/python3.12/dist-packages/torch/lib"
+    config = cli.ServiceConfig(
+        name="anyplace",
+        python=str(python),
+        host="127.0.0.1",
+        port=8775,
+        state_dir=tmp_path,
+        command=[str(python)],
+        env={"PATH": "/usr/bin", "LD_LIBRARY_PATH": system_torch_lib},
+    )
+
+    child_env = cli._service_process_env(config)
+
+    assert child_env["LD_LIBRARY_PATH"].split(":") == [
+        str(torch_lib),
+        system_torch_lib,
+    ]
+
+
+def test_anyplace_torch_library_prepend_is_idempotent(tmp_path: Path) -> None:
+    venv_bin = tmp_path / "venv" / "bin"
+    torch_lib = tmp_path / "venv" / "lib/python3.10/site-packages/torch/lib"
+    venv_bin.mkdir(parents=True)
+    torch_lib.mkdir(parents=True)
+    python = venv_bin / "python"
+    python.symlink_to("/usr/bin/python3")
+    config = cli.ServiceConfig(
+        name="anyplace",
+        python=str(python),
+        host="127.0.0.1",
+        port=8775,
+        state_dir=tmp_path,
+        command=[str(python)],
+        env={"LD_LIBRARY_PATH": f"{torch_lib}:/usr/local/cuda/lib64"},
+    )
+
+    child_env = cli._service_process_env(config)
+
+    assert child_env["LD_LIBRARY_PATH"].split(":") == [
+        str(torch_lib),
+        "/usr/local/cuda/lib64",
+    ]
+
+
 def test_start_all_dry_run_includes_seven_services(tmp_path: Path, capsys) -> None:
     assert (
         cli.main(

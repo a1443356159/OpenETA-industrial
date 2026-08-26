@@ -34,6 +34,7 @@ def test_hepo_container_keeps_model_services_in_separate_venvs() -> None:
     assert "unset PIP_CONSTRAINT" in dockerfile
     assert "pip==25.2" in dockerfile
     assert "torch-cluster==1.6.1+pt113cu117" in dockerfile
+    assert 'LD_LIBRARY_PATH="${anyplace_torch_lib}' in dockerfile
     assert "from graspgenx.grasp_server import" in dockerfile
     assert "from anyplace.model.transformer.policy import" in dockerfile
     assert "-e /opt/openeta/third_party" not in dockerfile

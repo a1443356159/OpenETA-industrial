@@ -624,6 +624,31 @@ def _service_process_env(config: ServiceConfig) -> dict[str, str]:
     python_bin = str(Path(os.path.abspath(os.path.expanduser(config.python))).parent)
     current_path = env.get("PATH", "")
     env["PATH"] = python_bin + (os.pathsep + current_path if current_path else "")
+    if config.name == "anyplace":
+        # NVIDIA framework images publish their system Torch directory through
+        # LD_LIBRARY_PATH.  AnyPlace intentionally runs an older, isolated
+        # Python/Torch ABI, so the dynamic linker must resolve libtorch from
+        # that venv before considering the framework image's copy.  Limit this
+        # adjustment to the AnyPlace child; SAM3 and GraspGenX use the base
+        # image's newer Torch build.
+        venv_root = Path(python_bin).parent
+        torch_libraries = sorted(
+            path
+            for path in (venv_root / "lib").glob(
+                "python*/site-packages/torch/lib"
+            )
+            if path.is_dir()
+        )
+        if torch_libraries:
+            torch_library = str(torch_libraries[0])
+            current_libraries = [
+                value
+                for value in env.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+                if value and value != torch_library
+            ]
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(
+                [torch_library, *current_libraries]
+            )
     return env
 
 
