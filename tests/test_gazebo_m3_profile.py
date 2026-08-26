@@ -45,6 +45,24 @@ def test_m3_top_camera_profile_matches_the_world_model_pose() -> None:
     assert profile_xyz == world_xyz
 
 
+def test_m3_world_has_no_light_entity_or_floor_model() -> None:
+    config = NativePickPlaceConfig()
+    world_path = (
+        config.ros_workspace
+        / "src"
+        / config.ros_package_name
+        / "worlds/rm75_robotiq2f85_pickplace.sdf"
+    )
+    world = ET.parse(world_path).getroot().find("world")
+
+    assert world is not None
+    assert world.findall("light") == []
+    assert world.find("model[@name='ground']") is None
+    assert world.findtext("scene/ambient") == "0.8 0.8 0.8 1"
+    assert world.findtext("scene/background") == "0.82 0.84 0.88 1"
+    assert world.findtext("scene/shadows") == "false"
+
+
 def test_m3_assets_are_required_before_manipulation_starts() -> None:
     config = NativePickPlaceConfig()
     config.validate_assets()
