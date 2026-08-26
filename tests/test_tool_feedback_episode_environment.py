@@ -285,6 +285,82 @@ def test_refresh_attempts_are_bounded() -> None:
     assert step.info["truncation_reason"] == "fresh_observation_unavailable"
 
 
+def test_successful_explicit_close_latches_episode_terminal_state(tmp_path: Path) -> None:
+    transport = SequencedSimulatorMcpTransport([{"ok": True}])
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="sim-session",
+            handle="env-1",
+            image_output_root=tmp_path / "images",
+            response_output_root=tmp_path / "responses",
+        ),
+        tool_names=("close_simulator_env",),
+    )
+    environment = ToolFeedbackEpisodeEnvironment()
+    environment.reset(
+        task="pick cube",
+        metadata={"execution_id": "episode-1", "agent_session_id": "agent-1"},
+    )
+    with tools.execution_scope(
+        {"execution_id": "episode-1", "session_id": "agent-1"}
+    ):
+        result = tools.call("close_simulator_env", {})
+
+    step = environment.step(_action("close_simulator_env", result))
+
+    assert step.terminated is True
+    assert step.truncated is False
+    assert step.info["environment_receipt_trusted"] is True
+    assert step.info["termination_source"] == "trusted_environment_receipt"
+    assert step.info["termination_reason"] == "simulator_environment_closed"
+
+
+def test_reset_failure_cleanup_does_not_latch_episode_terminal_state() -> None:
+    environment = ToolFeedbackEpisodeEnvironment()
+    environment.reset(
+        task="pick cube",
+        metadata={"execution_id": "episode-1", "agent_session_id": "agent-1"},
+    )
+    failed_create = EnvAction(
+        action_type="tool_call",
+        command={
+            "request": {
+                "kind": "tool_call",
+                "name": "create_simulator_env",
+                "parameters": {},
+            },
+            "tool_calls": [
+                {
+                    "name": "create_simulator_env",
+                    "result": {
+                        "success": False,
+                        "details": {
+                            "host_provenance": {"authority": "environment"},
+                            "environment_receipt": {
+                                "schema_version": "openeta.environment_receipt.v1",
+                                "execution_id": "episode-1",
+                                "agent_session_id": "agent-1",
+                                "simulator_session_id": "sim-session",
+                                "handle": "abandoned-env",
+                                "reward_present": False,
+                                "observation_fresh": False,
+                                "environment_closed": True,
+                            },
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    step = environment.step(failed_create)
+
+    assert step.terminated is False
+    assert step.truncated is False
+
+
 def test_libero_success_requires_same_execution_trusted_receipt(
     tmp_path: Path,
 ) -> None:

@@ -884,12 +884,21 @@ class ToolFeedbackEpisodeEnvironment:
         reward = _trusted_receipt_reward(receipt)
         receipt_terminated = _trusted_receipt_flag(receipt, "terminated")
         receipt_truncated = _trusted_receipt_flag(receipt, "truncated")
+        explicit_environment_close = (
+            _action_request_name(action) == "close_simulator_env"
+            and _trusted_receipt_flag(receipt, "environment_closed")
+        )
         max_steps_reached = self.max_steps is not None and self.step_idx >= self.max_steps
         refresh_exhausted = (
             observation.metadata.get("fresh_observation_required") is True
             and self.refresh_attempts >= MAX_AUTO_OBSERVE_ATTEMPTS
         )
-        terminated = receipt_terminated or max_steps_reached
+        # An explicit, host-authoritative close ends this episode even when the
+        # remote simulator's close response does not repeat Gym's ``terminated``
+        # flag.  Do not infer the same from a failed create/reset cleanup: that
+        # receipt may also say the abandoned handle was closed, but the planner
+        # must still be allowed to retry infrastructure startup.
+        terminated = receipt_terminated or explicit_environment_close or max_steps_reached
         truncated = receipt_truncated or refresh_exhausted
         info: JsonDict = {
             "step_idx": self.step_idx,
@@ -904,6 +913,13 @@ class ToolFeedbackEpisodeEnvironment:
             motion = receipt.get("motion")
             if isinstance(motion, dict):
                 info["motion"] = dict(motion)
+        if explicit_environment_close:
+            info.update(
+                {
+                    "termination_source": "trusted_environment_receipt",
+                    "termination_reason": "simulator_environment_closed",
+                }
+            )
         if rejected_receipts:
             info["rejected_environment_receipts"] = rejected_receipts
         if refresh_exhausted:
