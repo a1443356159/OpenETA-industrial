@@ -45,7 +45,7 @@ def test_m3_top_camera_profile_matches_the_world_model_pose() -> None:
     assert profile_xyz == world_xyz
 
 
-def test_m3_world_has_no_light_entity_or_floor_model() -> None:
+def test_m3_world_uses_soft_ambient_light_and_black_industrial_floor() -> None:
     config = NativePickPlaceConfig()
     world_path = (
         config.ros_workspace
@@ -56,10 +56,24 @@ def test_m3_world_has_no_light_entity_or_floor_model() -> None:
     world = ET.parse(world_path).getroot().find("world")
 
     assert world is not None
-    assert world.findall("light") == []
+    lights = world.findall("light")
+    assert [light.get("name") for light in lights] == ["soft_key_light"]
+    assert lights[0].findtext("cast_shadows") == "false"
+    assert lights[0].findtext("direction") == "-0.45 0.25 -0.86"
     assert world.find("model[@name='ground']") is None
-    assert world.findtext("scene/ambient") == "0.8 0.8 0.8 1"
-    assert world.findtext("scene/background") == "0.82 0.84 0.88 1"
+    floor = world.find("model[@name='industrial_floor']")
+    assert floor is not None
+    assert floor.findtext("pose") == "0 0 -0.01 0 0 0"
+    assert floor.findtext("link/collision/geometry/box/size") == "10 10 0.02"
+    assert floor.findtext("link/visual/pose") == "0 0 0.001 0 0 0"
+    assert floor.findtext("link/visual/geometry/box/size") == "10 10 0.02"
+    assert floor.findtext("link/visual/material/ambient") == "0.015 0.018 0.025 1"
+    assert floor.findtext("link/visual/material/specular") == "0.01 0.01 0.01 1"
+    table = world.find("model[@name='work_table']")
+    assert table is not None
+    assert table.findtext("link/visual/material/ambient") == "0.58 0.60 0.64 1"
+    assert world.findtext("scene/ambient") == "0.42 0.43 0.45 1"
+    assert world.findtext("scene/background") == "0.16 0.19 0.24 1"
     assert world.findtext("scene/shadows") == "false"
 
 

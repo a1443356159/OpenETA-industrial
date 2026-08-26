@@ -9,15 +9,39 @@
     <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
 
-    <!-- Keep perception evenly exposed without adding light entities or a
-         floor model to the operator's scene.  The work table is the only
-         support surface required by this fixed-base pick/place world. -->
+    <!-- A low-contrast key plus ambient fill preserves link curvature in the
+         operator view without casting distracting shadows into RGB-D input. -->
     <scene>
-      <ambient>0.8 0.8 0.8 1</ambient>
-      <background>0.82 0.84 0.88 1</background>
+      <ambient>0.42 0.43 0.45 1</ambient>
+      <background>0.16 0.19 0.24 1</background>
       <shadows>false</shadows>
     </scene>
-    <model name="work_table"><static>true</static><pose>0.40 0 0.38 0 0 0</pose><link name="table_link"><collision name="table_collision"><geometry><box><size>0.70 0.60 0.04</size></box></geometry></collision><visual name="table_visual"><geometry><box><size>0.70 0.60 0.04</size></box></geometry><material><ambient>0.35 0.35 0.38 1</ambient><diffuse>0.45 0.45 0.48 1</diffuse></material></visual></link></model>
+    <light name="soft_key_light" type="directional">
+      <pose>0 0 4 0 0 0</pose>
+      <cast_shadows>false</cast_shadows>
+      <diffuse>0.78 0.76 0.72 1</diffuse>
+      <specular>0.12 0.12 0.12 1</specular>
+      <direction>-0.45 0.25 -0.86</direction>
+    </light>
+    <model name="industrial_floor">
+      <static>true</static>
+      <pose>0 0 -0.01 0 0 0</pose>
+      <link name="floor_link">
+        <collision name="floor_collision"><geometry><box><size>10 10 0.02</size></box></geometry></collision>
+        <visual name="floor_visual">
+          <!-- Keep the collision surface at z=0 while rendering the black
+               surface 1 mm above Gazebo's client grid to avoid z-fighting. -->
+          <pose>0 0 0.001 0 0 0</pose>
+          <geometry><box><size>10 10 0.02</size></box></geometry>
+          <material>
+            <ambient>0.015 0.018 0.025 1</ambient>
+            <diffuse>0.025 0.030 0.040 1</diffuse>
+            <specular>0.01 0.01 0.01 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="work_table"><static>true</static><pose>0.40 0 0.38 0 0 0</pose><link name="table_link"><collision name="table_collision"><geometry><box><size>0.70 0.60 0.04</size></box></geometry></collision><visual name="table_visual"><geometry><box><size>0.70 0.60 0.04</size></box></geometry><material><ambient>0.58 0.60 0.64 1</ambient><diffuse>0.70 0.72 0.76 1</diffuse><specular>0.08 0.08 0.08 1</specular></material></visual></link></model>
     <model name="placement_zone_marker"><static>true</static><pose>0.48 -0.10 0.4005 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.12 0.12 0.001</size></box></geometry><material><ambient>0.05 0.55 0.10 0.8</ambient><diffuse>0.05 0.75 0.15 0.8</diffuse></material></visual></link></model>
 
     <model name="target_object">
