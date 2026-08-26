@@ -457,6 +457,28 @@ def test_frozen_goal_reestimate_never_falls_back_to_stale_object_mask(
     )
     assert context["targeted_grasp_obligation"] is None
 
+    # AnyPlace retains a geometry-only copy before grasp inference. The live
+    # retry circuit must still gate that copy or smoke_normal loops forever.
+    frozen_detection = dict(memory.selected_sam3_detection())
+    frozen_detection.pop("grasp_estimator_backend_failure")
+    memory.save_fact(
+        "placement_object_detection",
+        frozen_detection,
+        source="test_anyplace_frozen_copy",
+    )
+    memory.save_fact(
+        "frozen_placement_goal_pool",
+        {"status": "retained"},
+        source="test_anyplace_frozen_pool",
+    )
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+    assert context["targeted_grasp_obligation"] is None
+
     memory.save_fact(
         "selected_sam3_detection",
         {

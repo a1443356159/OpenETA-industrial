@@ -4769,12 +4769,13 @@ def _normalise_graspgenx_response(
                 _dict_or_empty(details.get("metadata"))
             ),
         )
+    deterministic = details.get("deterministic")
     if (
         details.get("tool") != "predict_grasps"
         or details.get("backend") != GRASPGENX_BACKEND
         or details.get("model") != GRASPGENX_MODEL
         or details.get("planner") != GRASPGENX_PLANNER
-        or details.get("deterministic") is not False
+        or not isinstance(deterministic, bool)
         or details.get("frame") != "camera"
         or details.get("camera_frame") != "opencv"
         or details.get("grasp_frame") != "graspnet"
@@ -4861,7 +4862,7 @@ def _normalise_graspgenx_response(
             "backend": GRASPGENX_BACKEND,
             "model": GRASPGENX_MODEL,
             "planner": GRASPGENX_PLANNER,
-            "deterministic": False,
+            "deterministic": deterministic,
             "mode": "targeted",
             "frame": "camera",
             "camera_frame": "opencv",

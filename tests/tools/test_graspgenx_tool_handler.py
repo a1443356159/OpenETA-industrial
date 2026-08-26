@@ -107,7 +107,7 @@ def _success_response() -> dict[str, Any]:
             "backend": "graspgenx_mcp",
             "model": "graspgenx",
             "planner": "graspmoe",
-            "deterministic": False,
+            "deterministic": True,
             "frame": "camera",
             "camera_frame": "opencv",
             "grasp_frame": "graspnet",
@@ -142,7 +142,21 @@ def test_graspgenx_handler_accepts_formal_se3_mmr_order(tmp_path: Path) -> None:
     result = handler(_context(_parameters(tmp_path)))
 
     assert result.success is True
+    assert result.details["deterministic"] is True
     assert result.details["ranking"] == "source_aware_se3_mmr_with_minimum_se3_separation"
+
+
+def test_graspgenx_handler_preserves_legacy_stochastic_marker(tmp_path: Path) -> None:
+    response = _success_response()
+    response["details"]["deterministic"] = False
+
+    result = build_graspgenx_handler(
+        lambda _request: response,
+        _listing_response,
+    )(_context(_parameters(tmp_path)))
+
+    assert result.success is True
+    assert result.details["deterministic"] is False
 
 
 def _listing_response() -> dict[str, Any]:
@@ -389,6 +403,7 @@ def test_handler_preserves_backend_failure_and_scrubs_raw_response(tmp_path: Pat
         lambda value: value["details"].update(raw_candidate_count=1),
         lambda value: value["details"].update(generated_candidate_count=3),
         lambda value: value["details"].update(camera_frame="opengl"),
+        lambda value: value["details"].update(deterministic="seeded"),
         lambda value: value["details"]["grasp_candidates"][1].update(
             id="graspgenx_000"
         ),
