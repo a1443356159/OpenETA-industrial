@@ -2478,6 +2478,56 @@ def _required_skill_inspection_error(required_name: str) -> str:
 
 def _validate_anyplace_parameters(parameters: JsonDict) -> list[str]:
     errors: list[str] = []
+    if parameters.get("reuse_frozen_goal_pool") is True:
+        scene_revision = parameters.get("scene_revision")
+        if (
+            not isinstance(scene_revision, int)
+            or isinstance(scene_revision, bool)
+            or scene_revision < 0
+        ):
+            errors.append(
+                "anyplace frozen-goal reuse requires `parameters.scene_revision` "
+                "as a non-negative integer."
+            )
+
+        resume_present = "resume_frozen_goal_frontier" in parameters
+        resume_frontier = parameters.get("resume_frozen_goal_frontier")
+        if resume_present and resume_frontier is not True:
+            errors.append(
+                "anyplace frozen-goal reuse requires "
+                "`parameters.resume_frozen_goal_frontier=true` when supplied."
+            )
+
+        exclusions_present = "excluded_frozen_goal_ids" in parameters
+        exclusions = parameters.get("excluded_frozen_goal_ids")
+        valid_exclusions = (
+            isinstance(exclusions, list)
+            and bool(exclusions)
+            and all(
+                isinstance(goal_id, str) and bool(goal_id.strip())
+                for goal_id in exclusions
+            )
+            and len(exclusions) == len(set(exclusions))
+        )
+        if resume_frontier is True and not valid_exclusions:
+            errors.append(
+                "anyplace frozen-frontier resume requires "
+                "`parameters.excluded_frozen_goal_ids` as a non-empty list of "
+                "unique candidate ids."
+            )
+        elif exclusions_present and resume_frontier is not True:
+            errors.append(
+                "anyplace frozen-goal exclusions require "
+                "`parameters.resume_frozen_goal_frontier=true`."
+            )
+
+        if "object_observation" in parameters or "placement_observation" in parameters:
+            errors.append(
+                "anyplace frozen-goal reuse must use the host-owned cached observation "
+                "instead of supplying observation packets."
+            )
+        return errors
+
     for packet_name, mask_name in (
         ("object_observation", "object_mask"),
         ("placement_observation", "placement_region_mask"),

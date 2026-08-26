@@ -33,6 +33,7 @@ from agent.runtime.planner import (
     _host_parameter_binding_sha256,
     _host_obligation_decision,
     _hydrate_host_bound_parameters,
+    _validate_anyplace_parameters,
     _matching_depth_enhancement,
     _grasp_sensor_safety_obligation,
     build_tool_context,
@@ -337,6 +338,85 @@ def test_agentic_anyplace_hydrates_frozen_parameters_in_one_model_call(
     ]
 
 
+def test_agentic_anyplace_hydrates_frozen_reuse_in_one_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact_parameters = {"reuse_frozen_goal_pool": True, "scene_revision": 2}
+    tool_context = {
+        "schema_version": "openeta.planner_context.v1",
+        "task": "pick the block and place it in the region",
+        "planner_mode": "agentic_closed_loop",
+        "active_environment_task": {"status": "running"},
+        "observation": {"task": "pick and place", "camera_ids": ["top"]},
+        "vision_image_paths": [],
+        "current_rgbd_views": [],
+        "grasp_execution": {
+            "status": "completed",
+            "stage": "attached",
+            "candidate_id": "grasp_000",
+        },
+        "attachment_gate": {
+            "status": "resolved",
+            "verdict": "PASS",
+            "planning_scene_revision": 2,
+        },
+        "frozen_placement_goal_pool": {
+            "schema_version": "openeta.frozen_placement_goal_pool.v1",
+            "status": "ready",
+            "goal_count": 96,
+        },
+        "placement_obligation": {
+            "schema_version": "openeta.placement_obligation.v3",
+            "required_tool": "anyplace",
+            "required_parameters": exact_parameters,
+            "phase": "measured_attachment_requalification",
+            "model_inference_allowed": False,
+        },
+        "selected_skill_guidance": [{"name": "pick"}, {"name": "place"}],
+        "skill_usage": {},
+        "memory": {"metadata": {}},
+        "tool_references": [
+            {
+                "name": "anyplace",
+                "category": "planning",
+                "description": "Requalify the frozen placement pool.",
+                "parameters": {},
+                "effect": "planning",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "agent.runtime.planner.build_tool_context",
+        lambda **_kwargs: tool_context,
+    )
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        return {"kind": "tool_call", "name": "anyplace", "parameters": {}}
+
+    memory = AgentMemory()
+    memory.start_session(task=tool_context["task"])
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(decide),
+        max_validation_retries=2,
+    )
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("anyplace"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert len(requests) == 1
+    assert decision.action == "anyplace"
+    assert decision.parameters == exact_parameters
+    assert decision.metadata["validation_attempts"] == 1
+    hydration = decision.metadata["host_parameter_hydrations"][0]
+    assert hydration["source"] == "placement_obligation"
+    assert hydration["hydration_mode"] == "empty_parameters"
+
+
 def test_host_parameter_hydration_rejects_altered_nonempty_payload() -> None:
     exact = {"reuse_frozen_goal_pool": True, "scene_revision": 4}
     supplied = {"reuse_frozen_goal_pool": True, "scene_revision": 5}
@@ -355,6 +435,76 @@ def test_host_parameter_hydration_rejects_altered_nonempty_payload() -> None:
 
     assert hydrations == []
     assert decision.parameters == supplied
+
+
+def test_anyplace_validator_accepts_host_bound_frozen_goal_reuse() -> None:
+    assert (
+        _validate_anyplace_parameters(
+            {"reuse_frozen_goal_pool": True, "scene_revision": 2}
+        )
+        == []
+    )
+    assert (
+        _validate_anyplace_parameters(
+            {
+                "reuse_frozen_goal_pool": True,
+                "scene_revision": 2,
+                "resume_frozen_goal_frontier": True,
+                "excluded_frozen_goal_ids": ["placement_006", "placement_014"],
+            }
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("scene_revision", [None, True, -1, 1.5, "2"])
+def test_anyplace_validator_rejects_invalid_frozen_goal_scene_revision(
+    scene_revision: object,
+) -> None:
+    errors = _validate_anyplace_parameters(
+        {"reuse_frozen_goal_pool": True, "scene_revision": scene_revision}
+    )
+
+    assert errors == [
+        "anyplace frozen-goal reuse requires `parameters.scene_revision` as a "
+        "non-negative integer."
+    ]
+
+
+def test_anyplace_validator_keeps_fresh_inference_packets_mandatory() -> None:
+    errors = _validate_anyplace_parameters({"scene_revision": 2})
+
+    assert errors == [
+        "anyplace requires `parameters.object_observation`.",
+        "anyplace requires `parameters.placement_observation`.",
+    ]
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {
+            "reuse_frozen_goal_pool": True,
+            "scene_revision": 2,
+            "resume_frozen_goal_frontier": True,
+        },
+        {
+            "reuse_frozen_goal_pool": True,
+            "scene_revision": 2,
+            "excluded_frozen_goal_ids": ["placement_006"],
+        },
+        {
+            "reuse_frozen_goal_pool": True,
+            "scene_revision": 2,
+            "resume_frozen_goal_frontier": True,
+            "excluded_frozen_goal_ids": ["placement_006", "placement_006"],
+        },
+    ],
+)
+def test_anyplace_validator_rejects_invalid_frozen_frontier_resume(
+    parameters: dict[str, object],
+) -> None:
+    assert _validate_anyplace_parameters(parameters)
 
 
 def test_host_parameter_ref_selects_one_of_two_moveit_bindings() -> None:
