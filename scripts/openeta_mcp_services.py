@@ -125,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--graspgenx-root")
     parser.add_argument("--graspgenx-checkpoint-root")
     parser.add_argument("--graspgenx-gripper-descriptions-root")
+    parser.add_argument("--graspgenx-inference-seed", type=int)
     parser.add_argument("--graspgenx-raw-pool-size", type=argparse_raw_pool_size())
     parser.add_argument("--anygrasp-raw-pool-size", type=argparse_raw_pool_size())
     parser.add_argument("--anyplace-raw-pool-size", type=argparse_raw_pool_size(placement=True))
@@ -135,9 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frozen-pair-grasp-branch-limit", type=int)
     parser.add_argument("--frozen-pair-full-plan-limit", type=int)
     parser.add_argument("--moveit-ik-seed-count", type=int)
-    parser.add_argument(
-        "--qualification-profile", choices=("legacy", "fast_v3", "shadow")
-    )
+    parser.add_argument("--qualification-profile", choices=("legacy", "fast_v3", "shadow"))
     parser.add_argument(
         "--qualification-solver-profile",
         choices=(
@@ -176,7 +175,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command in {"start", "restart"}:
             _validate_start_requirements(configs)
         if args.command == "start":
-            results = {config.name: _start_service(config, dry_run=args.dry_run) for config in configs}
+            results = {
+                config.name: _start_service(config, dry_run=args.dry_run) for config in configs
+            }
         elif args.command == "stop":
             results = {config.name: _stop_service(config, force=args.force) for config in configs}
         elif args.command == "restart":
@@ -263,9 +264,7 @@ def _build_config(
         )
 
     if name == "anygrasp":
-        python = (
-            args.anygrasp_python or os.environ.get("OPENETA_ANYGRASP_PYTHON") or sys.executable
-        )
+        python = args.anygrasp_python or os.environ.get("OPENETA_ANYGRASP_PYTHON") or sys.executable
         sdk_root = args.anygrasp_sdk_root or os.environ.get("OPENETA_ANYGRASP_SDK_ROOT")
         checkpoint_path = args.anygrasp_checkpoint_path or os.environ.get(
             "OPENETA_ANYGRASP_CHECKPOINT_PATH"
@@ -297,15 +296,9 @@ def _build_config(
         )
 
     if name == "anyplace":
-        python = (
-            args.anyplace_python
-            or os.environ.get("OPENETA_ANYPLACE_PYTHON")
-            or sys.executable
-        )
+        python = args.anyplace_python or os.environ.get("OPENETA_ANYPLACE_PYTHON") or sys.executable
         anyplace_root = args.anyplace_root or os.environ.get("OPENETA_ANYPLACE_ROOT")
-        config_path = args.anyplace_config_path or os.environ.get(
-            "OPENETA_ANYPLACE_CONFIG_PATH"
-        )
+        config_path = args.anyplace_config_path or os.environ.get("OPENETA_ANYPLACE_CONFIG_PATH")
         command = [
             python,
             str(REPO_ROOT / "tools" / "anyplace_mcp_server.py"),
@@ -334,9 +327,7 @@ def _build_config(
 
     if name == "molmopoint":
         python = (
-            args.molmopoint_python
-            or os.environ.get("OPENETA_MOLMOPOINT_PYTHON")
-            or sys.executable
+            args.molmopoint_python or os.environ.get("OPENETA_MOLMOPOINT_PYTHON") or sys.executable
         )
         hf_home = args.molmopoint_hf_home or os.environ.get("OPENETA_MOLMOPOINT_HF_HOME")
         model_id = (
@@ -378,19 +369,19 @@ def _build_config(
 
     if name == "graspgenx":
         python = (
-            args.graspgenx_python
-            or os.environ.get("OPENETA_GRASPGENX_PYTHON")
-            or sys.executable
+            args.graspgenx_python or os.environ.get("OPENETA_GRASPGENX_PYTHON") or sys.executable
         )
-        backend_root = args.graspgenx_root or os.environ.get(
-            "OPENETA_GRASPGENX_ROOT"
-        )
+        backend_root = args.graspgenx_root or os.environ.get("OPENETA_GRASPGENX_ROOT")
         checkpoint_root = args.graspgenx_checkpoint_root or os.environ.get(
             "OPENETA_GRASPGENX_CHECKPOINT_ROOT"
         )
-        gripper_root = (
-            args.graspgenx_gripper_descriptions_root
-            or os.environ.get("OPENETA_GRASPGENX_GRIPPER_DESCRIPTIONS_ROOT")
+        gripper_root = args.graspgenx_gripper_descriptions_root or os.environ.get(
+            "OPENETA_GRASPGENX_GRIPPER_DESCRIPTIONS_ROOT"
+        )
+        inference_seed = (
+            args.graspgenx_inference_seed
+            if args.graspgenx_inference_seed is not None
+            else int(os.environ.get("OPENETA_GRASPGENX_INFERENCE_SEED", "0"))
         )
         command = [
             python,
@@ -403,6 +394,8 @@ def _build_config(
             str(args.graspgenx_port),
             "--raw-pool-size",
             str(funnel.graspgenx_raw_pool_size),
+            "--inference-seed",
+            str(inference_seed),
         ]
         if backend_root:
             command.extend(["--graspgenx-root", backend_root])
@@ -418,9 +411,7 @@ def _build_config(
                 Path(checkpoint_root).expanduser().resolve().parent
             )
         if gripper_root:
-            env["GRASPGENX_GRIPPER_CFG_DIR"] = str(
-                Path(gripper_root).expanduser().resolve()
-            )
+            env["GRASPGENX_GRIPPER_CFG_DIR"] = str(Path(gripper_root).expanduser().resolve())
         return ServiceConfig(
             name=name,
             python=python,
@@ -443,11 +434,7 @@ def _build_config(
             or os.environ.get("OPENETA_UNIDEPTH_V2_MODEL_ID")
             or DEFAULT_UNIDEPTH_V2_MODEL_ID
         )
-        device = (
-            args.unidepth_v2_device
-            or os.environ.get("OPENETA_UNIDEPTH_V2_DEVICE")
-            or "auto"
-        )
+        device = args.unidepth_v2_device or os.environ.get("OPENETA_UNIDEPTH_V2_DEVICE") or "auto"
         resolution_level = (
             args.unidepth_v2_resolution_level
             if args.unidepth_v2_resolution_level is not None
@@ -485,9 +472,7 @@ def _build_config(
         or os.environ.get("OPENETA_CONTACT_GRASPNET_PYTHON")
         or sys.executable
     )
-    backend_root = args.contact_graspnet_root or os.environ.get(
-        "OPENETA_CONTACT_GRASPNET_ROOT"
-    )
+    backend_root = args.contact_graspnet_root or os.environ.get("OPENETA_CONTACT_GRASPNET_ROOT")
     checkpoint_dir = args.contact_graspnet_checkpoint_dir or os.environ.get(
         "OPENETA_CONTACT_GRASPNET_CHECKPOINT_DIR"
     )
@@ -516,7 +501,9 @@ def _build_config(
     )
 
 
-def _startup_value(args: argparse.Namespace, attribute: str, env_name: str, default: object) -> object:
+def _startup_value(
+    args: argparse.Namespace, attribute: str, env_name: str, default: object
+) -> object:
     explicit = getattr(args, attribute, None)
     return explicit if explicit is not None else os.environ.get(env_name, default)
 
@@ -528,13 +515,30 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
         grasp_full_default = 2
         anyplace_full_default = 2
         return CandidateFunnelConfig(
-            graspgenx_raw_pool_size=_startup_value(args, "graspgenx_raw_pool_size", "OPENETA_GRASPGENX_RAW_POOL_SIZE", 200),
-            anygrasp_raw_pool_size=_startup_value(args, "anygrasp_raw_pool_size", "OPENETA_ANYGRASP_RAW_POOL_SIZE", 200),
-            anyplace_raw_pool_size=_startup_value(args, "anyplace_raw_pool_size", "OPENETA_ANYPLACE_RAW_POOL_SIZE", 96),
-            grasp_diversity_pool_size=_startup_value(args, "grasp_diversity_pool_size", "OPENETA_GRASP_DIVERSITY_POOL_SIZE", 64),
-            anyplace_diversity_pool_size=_startup_value(args, "anyplace_diversity_pool_size", "OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96),
-            grasp_full_plan_limit=_startup_value(args, "grasp_full_plan_limit", "OPENETA_GRASP_FULL_PLAN_LIMIT", grasp_full_default),
-            anyplace_full_plan_limit=_startup_value(args, "anyplace_full_plan_limit", "OPENETA_ANYPLACE_FULL_PLAN_LIMIT", anyplace_full_default),
+            graspgenx_raw_pool_size=_startup_value(
+                args, "graspgenx_raw_pool_size", "OPENETA_GRASPGENX_RAW_POOL_SIZE", 200
+            ),
+            anygrasp_raw_pool_size=_startup_value(
+                args, "anygrasp_raw_pool_size", "OPENETA_ANYGRASP_RAW_POOL_SIZE", 200
+            ),
+            anyplace_raw_pool_size=_startup_value(
+                args, "anyplace_raw_pool_size", "OPENETA_ANYPLACE_RAW_POOL_SIZE", 96
+            ),
+            grasp_diversity_pool_size=_startup_value(
+                args, "grasp_diversity_pool_size", "OPENETA_GRASP_DIVERSITY_POOL_SIZE", 64
+            ),
+            anyplace_diversity_pool_size=_startup_value(
+                args, "anyplace_diversity_pool_size", "OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE", 96
+            ),
+            grasp_full_plan_limit=_startup_value(
+                args, "grasp_full_plan_limit", "OPENETA_GRASP_FULL_PLAN_LIMIT", grasp_full_default
+            ),
+            anyplace_full_plan_limit=_startup_value(
+                args,
+                "anyplace_full_plan_limit",
+                "OPENETA_ANYPLACE_FULL_PLAN_LIMIT",
+                anyplace_full_default,
+            ),
             frozen_pair_grasp_branch_limit=_startup_value(
                 args,
                 "frozen_pair_grasp_branch_limit",
@@ -547,7 +551,9 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
                 "OPENETA_FROZEN_PAIR_FULL_PLAN_LIMIT",
                 2,
             ),
-            moveit_ik_seed_count=_startup_value(args, "moveit_ik_seed_count", "OPENETA_MOVEIT_IK_SEED_COUNT", 8),
+            moveit_ik_seed_count=_startup_value(
+                args, "moveit_ik_seed_count", "OPENETA_MOVEIT_IK_SEED_COUNT", 8
+            ),
             qualification_profile=_startup_value(
                 args, "qualification_profile", "OPENETA_QUALIFICATION_PROFILE", "legacy"
             ),
@@ -643,8 +649,7 @@ def _validate_start_requirements(configs: Iterable[ServiceConfig]) -> None:
         if config.name == "anyplace":
             if "--anyplace-root" not in config.command:
                 raise ConfigError(
-                    "AnyPlace root is required: pass --anyplace-root or set "
-                    "OPENETA_ANYPLACE_ROOT."
+                    "AnyPlace root is required: pass --anyplace-root or set OPENETA_ANYPLACE_ROOT."
                 )
             if "--config-path" not in config.command:
                 raise ConfigError(

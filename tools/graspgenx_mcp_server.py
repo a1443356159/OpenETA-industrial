@@ -19,6 +19,7 @@ from mcp.server.fastmcp import FastMCP
 
 from tools.graspgenx_core import (
     CAMERA_FRAME,
+    DEFAULT_INFERENCE_SEED,
     FRAME,
     GRASP_FRAME,
     LIST_TOOL_NAME,
@@ -205,15 +206,9 @@ def health_payload() -> dict[str, Any]:
         "tools": [LIST_TOOL_NAME, TOOL_NAME],
         "model_loaded": bool(backend is not None and backend.model_loaded),
         "gripper_count": 0 if backend is None else len(backend.grippers),
-        "raw_pool_size": (
-            0
-            if backend is None
-            else int(getattr(backend, "raw_pool_size", 0))
-        ),
+        "raw_pool_size": (0 if backend is None else int(getattr(backend, "raw_pool_size", 0))),
         "returned_candidate_count": (
-            0
-            if backend is None
-            else int(getattr(backend, "last_returned_candidate_count", 0))
+            0 if backend is None else int(getattr(backend, "last_returned_candidate_count", 0))
         ),
     }
 
@@ -237,6 +232,7 @@ def main() -> int:
     parser.add_argument("--checkpoint-root", required=True)
     parser.add_argument("--gripper-descriptions-root", required=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--inference-seed", type=int, default=DEFAULT_INFERENCE_SEED)
     parser.add_argument(
         "--raw-pool-size",
         type=argparse_raw_pool_size(),
@@ -246,9 +242,7 @@ def main() -> int:
 
     source_root = Path(args.graspgenx_root).expanduser().resolve()
     if not (source_root / "graspgenx" / "__init__.py").is_file():
-        parser.error(
-            "--graspgenx-root must contain the graspgenx Python package"
-        )
+        parser.error("--graspgenx-root must contain the graspgenx Python package")
     try:
         backend = GraspGenXBackend(
             graspgenx_root=source_root,
@@ -256,6 +250,7 @@ def main() -> int:
             gripper_descriptions_root=args.gripper_descriptions_root,
             device=args.device,
             raw_pool_size=args.raw_pool_size,
+            inference_seed=args.inference_seed,
         )
     except (OSError, ValueError) as exc:
         parser.error(str(exc))

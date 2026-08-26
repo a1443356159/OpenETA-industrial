@@ -177,24 +177,21 @@ def test_build_mcp_uses_dynamic_gripper_enum_annotation(
         "franka_panda",
         "robotiq_2f_85",
     )
-    assert annotation_args[1].json_schema_extra == {
-        "enum": ["franka_panda", "robotiq_2f_85"]
-    }
+    assert annotation_args[1].json_schema_extra == {"enum": ["franka_panda", "robotiq_2f_85"]}
     assert set(registered) == {"predict_grasps", "list_grippers"}
 
 
 def test_real_fastmcp_schema_exposes_dynamic_gripper_enum() -> None:
-    mcp = graspgenx_mcp_server.build_mcp(
-        ["robotiq_2f_85", "franka_panda"]
-    )
+    mcp = graspgenx_mcp_server.build_mcp(["robotiq_2f_85", "franka_panda"])
 
     tools = asyncio.run(mcp.list_tools())
     by_name = {tool.name: tool for tool in tools}
 
     assert set(by_name) == {"predict_grasps", "list_grippers"}
-    assert by_name["predict_grasps"].inputSchema["properties"]["gripper_name"][
-        "enum"
-    ] == ["franka_panda", "robotiq_2f_85"]
+    assert by_name["predict_grasps"].inputSchema["properties"]["gripper_name"]["enum"] == [
+        "franka_panda",
+        "robotiq_2f_85",
+    ]
 
 
 def test_health_reports_transport_readiness_without_loading_model(
@@ -224,17 +221,18 @@ def test_main_builds_stdio_backend_from_explicit_offline_paths(
     (source / "graspgenx").mkdir(parents=True)
     (source / "graspgenx" / "__init__.py").write_text("", encoding="utf-8")
     calls: list[str] = []
+    backend_kwargs: dict[str, object] = {}
     backend = _Backend()
 
     class Runner:
         def run(self, *, transport: str) -> None:
             calls.append(transport)
 
-    monkeypatch.setattr(
-        graspgenx_mcp_server,
-        "GraspGenXBackend",
-        lambda **_kwargs: backend,
-    )
+    def build_backend(**kwargs):
+        backend_kwargs.update(kwargs)
+        return backend
+
+    monkeypatch.setattr(graspgenx_mcp_server, "GraspGenXBackend", build_backend)
     monkeypatch.setattr(
         graspgenx_mcp_server,
         "build_mcp",
@@ -262,3 +260,4 @@ def test_main_builds_stdio_backend_from_explicit_offline_paths(
     assert graspgenx_mcp_server.main() == 0
     assert calls == ["stdio"]
     assert graspgenx_mcp_server._BACKEND is backend
+    assert backend_kwargs["inference_seed"] == 0

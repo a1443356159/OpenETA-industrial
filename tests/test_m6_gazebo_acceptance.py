@@ -10,14 +10,10 @@ from scripts import m6_gazebo_acceptance as m6
 
 
 M6_RUNNER = Path(__file__).resolve().parents[1] / "scripts/run_m6_gazebo_acceptance.sh"
-PICK_PLACE_RUNNER = (
-    Path(__file__).resolve().parents[1] / "scripts/run_pick_place_acceptance.sh"
-)
+PICK_PLACE_RUNNER = Path(__file__).resolve().parents[1] / "scripts/run_pick_place_acceptance.sh"
 
 
-def test_m6_prepare_registers_real_services_and_constraint_prompt(
-    tmp_path, monkeypatch
-) -> None:
+def test_m6_prepare_registers_real_services_and_constraint_prompt(tmp_path, monkeypatch) -> None:
     allocation = m6.base.Allocation(81, "openeta-tui-m6-test", 18765, "run-id")
     monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
     monkeypatch.setattr(
@@ -41,37 +37,33 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(
         "openeta-anyplace",
     }
     prompt = paths.instructions.read_text(encoding="utf-8")
-    assert (
-        "planner_mode=agentic_closed_loop; "
-        f"environment_id={m6.ENV_ID}; environment_task=normal_pick_and_place"
-        in prompt
-    )
+    assert "planner_mode=agentic_closed_loop" in prompt
+    assert f"environment_id={m6.ENV_ID}" in prompt
+    assert "environment_task=normal_pick_and_place" in prompt
     assert "qualification_profile=fast_v3" in prompt
     assert "grasp_pose_estimate" in prompt and "AnyPlace" in prompt
-    assert "精确 EEF contact" in prompt
-    assert "一次规划到精确 contact" in prompt
-    assert "同一次工具调用内" in prompt
-    assert "不增加 TUI/VLM 回合" in prompt
-    assert "最终窗口 >=0.5 s" in prompt
+    assert "exact EEF contact" in prompt
+    assert "直接规划到 contact/release" in prompt
     assert "不得" in prompt and "Oracle" in prompt
-    assert "initial observation 不计作这次显式 observe" in prompt
-    assert "覆盖完整目标轮廓" in prompt
-    assert "红色方块对应场景中的 target_object" in prompt
+    assert "initial observation 不计" in prompt
+    assert "mask 必须完整且不粘连" in prompt
+    assert "红色方块是" in prompt and "target_object" in prompt
     assert "`red rectangular block`" in prompt
-    assert "独立 placement RGB-D" in prompt
-    assert "冻结目标池" in prompt
-    assert "Best-first 小波次" in prompt and "4 → 8 → 16 → 32 → 剩余" in prompt
+    assert "各自的 RGB-D" in prompt
     assert "frozen_frontier" in prompt and "不重跑" in prompt
-    assert "主 VLM 必须" in prompt and "不能" in prompt
+    assert "每回合只选择下一个" in prompt
     assert "compile_placement_seed" not in prompt
-    assert "实测 T_eef_object" in prompt
+    assert "T_eef_object" in prompt
     assert "不得固定 detection id" in prompt
     assert "不得调用 python_exec" in prompt
+    # Beam widths, wave sizes, barriers, and numerical acceptance thresholds
+    # are host contracts; repeating them in every Planner turn wastes context.
+    assert "Beam-2" not in prompt
+    assert "4 → 8" not in prompt
+    assert len(prompt) < 2_400
 
 
-def test_pick_place_prepare_can_strictly_select_graspgenx(
-    tmp_path, monkeypatch
-) -> None:
+def test_pick_place_prepare_can_strictly_select_graspgenx(tmp_path, monkeypatch) -> None:
     allocation = m6.base.Allocation(81, "openeta-pick-place-test", 18765, "run-id")
     monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
     monkeypatch.setattr(
@@ -112,9 +104,7 @@ def test_pick_place_prepare_can_strictly_select_graspgenx(
     assert receipt["qualification_profile"] == "fast_v3"
 
 
-def test_pick_place_prepare_smoke_normal_is_explicitly_no_vlm(
-    tmp_path, monkeypatch
-) -> None:
+def test_pick_place_prepare_smoke_normal_is_explicitly_no_vlm(tmp_path, monkeypatch) -> None:
     allocation = m6.base.Allocation(81, "openeta-smoke-normal", 18765, "run-id")
     monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
     monkeypatch.setattr(
@@ -137,7 +127,8 @@ def test_pick_place_prepare_smoke_normal_is_explicitly_no_vlm(
     prompt = paths.instructions.read_text(encoding="utf-8")
     assert "planner_mode=host_macro; execution_profile=smoke_normal" in prompt
     assert "禁止调用 Planner/VLM" in prompt
-    assert "主 VLM 必须" not in prompt
+    assert "你是 OpenETA 闭环 Planner" not in prompt
+    assert "再由 Planner" not in prompt
     receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
     assert receipt["execution_profile"] == "smoke_normal"
     assert receipt["planner_mode"] == "host_macro"
@@ -148,9 +139,7 @@ def test_pick_place_prepare_smoke_normal_is_explicitly_no_vlm(
     )
 
 
-def test_pick_place_acceptance_can_explicitly_roll_back_to_legacy(
-    tmp_path, monkeypatch
-) -> None:
+def test_pick_place_acceptance_can_explicitly_roll_back_to_legacy(tmp_path, monkeypatch) -> None:
     allocation = m6.base.Allocation(81, "openeta-legacy-normal", 18765, "run-id")
     monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
     monkeypatch.setattr(
@@ -193,9 +182,7 @@ def test_smoke_normal_planner_evidence_requires_host_only_and_zero_tokens() -> N
                         "planner_metadata": {
                             "execution_model": "host_obligation_dispatch",
                             "planner_mode": "host_macro",
-                            "host_obligation": {
-                                "schema_version": "openeta.fixture_obligation.v1"
-                            },
+                            "host_obligation": {"schema_version": "openeta.fixture_obligation.v1"},
                         }
                     },
                 }
@@ -211,10 +198,13 @@ def test_smoke_normal_planner_evidence_requires_host_only_and_zero_tokens() -> N
     )
     evidence = m6._planner_evidence(events, expected_planner_mode="host_macro")
 
-    assert m6._planner_evidence_errors(
-        evidence,
-        execution_profile="smoke_normal",
-    ) == []
+    assert (
+        m6._planner_evidence_errors(
+            evidence,
+            execution_profile="smoke_normal",
+        )
+        == []
+    )
     assert evidence["host_dispatch_count"] == 10
     assert evidence["closed_loop_action_count"] == 0
     assert evidence["total_tokens"] == 0
@@ -230,12 +220,15 @@ def test_m6_order_helper_requires_frozen_anyplace_pool_before_grasp() -> None:
 
 
 def test_m6_canonicalizes_public_grasp_tool_only_with_real_anygrasp_backend() -> None:
-    assert m6._name(
-        {
-            "name": "grasp_pose_estimate",
-            "result": {"details": {"backend": "anygrasp_mcp"}},
-        }
-    ) == "anygrasp"
+    assert (
+        m6._name(
+            {
+                "name": "grasp_pose_estimate",
+                "result": {"details": {"backend": "anygrasp_mcp"}},
+            }
+        )
+        == "anygrasp"
+    )
     assert m6._name({"name": "grasp_pose_estimate"}) == "grasp_pose_estimate"
 
 
@@ -252,9 +245,7 @@ def test_m6_health_url_preserves_service_root() -> None:
     assert m6._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
 
 
-def test_m6_runtime_preflight_accepts_the_selected_overlay(
-    tmp_path, monkeypatch
-) -> None:
+def test_m6_runtime_preflight_accepts_the_selected_overlay(tmp_path, monkeypatch) -> None:
     overlay = tmp_path / "external-overlay"
     package_prefix = overlay / m6.GAZEBO_SIM_PACKAGE
     monkeypatch.setenv("OPENETA_GAZEBO_OVERLAY", str(overlay))
@@ -279,9 +270,7 @@ def test_m6_runtime_preflight_rejects_an_overlay_from_another_checkout(
     monkeypatch.setattr(
         m6,
         "_gazebo_package_prefix",
-        lambda _package: (
-            tmp_path / "stale-checkout/install" / m6.GAZEBO_SIM_PACKAGE
-        ),
+        lambda _package: tmp_path / "stale-checkout/install" / m6.GAZEBO_SIM_PACKAGE,
     )
     monkeypatch.setattr(m6.shutil, "which", lambda name: f"/usr/bin/{name}")
 
@@ -289,9 +278,7 @@ def test_m6_runtime_preflight_rejects_an_overlay_from_another_checkout(
 
     assert result["status"] == "blocked"
     assert result["expected_overlay"] == str(expected.resolve())
-    assert result["reason_codes"] == [
-        "OPENETA_GAZEBO_OVERLAY_PACKAGE_MISMATCH"
-    ]
+    assert result["reason_codes"] == ["OPENETA_GAZEBO_OVERLAY_PACKAGE_MISMATCH"]
 
 
 def test_m6_canonical_runner_sources_ros_and_executes_m6() -> None:
@@ -333,9 +320,7 @@ def test_m6_candidate_counts_ignore_nested_wave_cardinality() -> None:
                 "outputs": {
                     "candidate_count": 1,
                     "full_plan_pass_count": 1,
-                    "qualification_evidence": {
-                        "waves": [{"candidate_count": 2}]
-                    },
+                    "qualification_evidence": {"waves": [{"candidate_count": 2}]},
                     "qualification_waves": [{"candidate_count": 2}],
                 }
             }
@@ -348,9 +333,7 @@ def test_m6_candidate_counts_ignore_nested_wave_cardinality() -> None:
     assert outputs["full_plan_pass_count"] == 1
 
 
-def test_m6_rejection_scenario_is_explicit_acceptance_only_fixture(
-    tmp_path, monkeypatch
-) -> None:
+def test_m6_rejection_scenario_is_explicit_acceptance_only_fixture(tmp_path, monkeypatch) -> None:
     allocation = m6.base.Allocation(81, "partition", 18765, "run-id")
     monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
     monkeypatch.setattr(
@@ -375,9 +358,12 @@ def test_m6_rejection_scenario_is_explicit_acceptance_only_fixture(
     assert receipt["grasp_backend_mode"] == m6.DEFAULT_GRASP_BACKEND
     unhashed = dict(receipt)
     supplied_hash = unhashed.pop("receipt_sha256")
-    assert supplied_hash == m6.base.hashlib.sha256(
-        json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    assert (
+        supplied_hash
+        == m6.base.hashlib.sha256(
+            json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
 
 
 def test_m6_failed_fingerprint_check_ignores_receipt_mirrors() -> None:
@@ -405,9 +391,7 @@ def test_m6_failed_fingerprint_check_ignores_receipt_mirrors() -> None:
     }
 
     assert not m6._repeated_failed_motion_fingerprints([event])
-    assert m6._repeated_failed_motion_fingerprints([event, event]) == {
-        "fingerprint-a"
-    }
+    assert m6._repeated_failed_motion_fingerprints([event, event]) == {"fingerprint-a"}
 
 
 def test_m6_qualification_blocks_resolve_relative_to_case_root(tmp_path) -> None:
@@ -557,8 +541,7 @@ def test_m6_rejects_obsolete_four_branch_lookahead(tmp_path) -> None:
         "selected_candidate_ids": [f"grasp_{index:03d}" for index in range(4)],
         "metrics": {"generated_count": 65, "l5_pass_count": 4},
         "l5_attempts": [
-            {"candidate_id": f"grasp_{index:03d}", "verdict": "PASS"}
-            for index in range(4)
+            {"candidate_id": f"grasp_{index:03d}", "verdict": "PASS"} for index in range(4)
         ],
         "results": results,
     }
@@ -665,8 +648,12 @@ def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkey
     process = Process()
     terminated = []
     monkeypatch.setattr(m6.base.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(m6.base, "_wait_for_scripted_tui_episode", lambda *args, **kwargs: "completed")
-    monkeypatch.setattr(m6.base, "_terminate_scripted_tui_process", lambda value: terminated.append(value))
+    monkeypatch.setattr(
+        m6.base, "_wait_for_scripted_tui_episode", lambda *args, **kwargs: "completed"
+    )
+    monkeypatch.setattr(
+        m6.base, "_terminate_scripted_tui_process", lambda value: terminated.append(value)
+    )
 
     assert m6.base._run_scripted_tui("tui", paths, {}) == 1
     assert terminated == [process]

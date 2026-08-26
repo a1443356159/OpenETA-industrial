@@ -9,9 +9,11 @@ import io
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +48,9 @@ NUM_GRASPS = 200
 # OBB branch is generated only with the first full GraspMoE draw; repeating it
 # for every stochastic draw adds duplicate work without adding grasp modes.
 MODEL_INFERENCE_DRAWS = 4
+DEFAULT_INFERENCE_SEED = 0
+COLLISION_SURFACE_SEED_OFFSET = 10_000
+COLLISION_SCENE_SEED_OFFSET = 20_000
 MOE_NUM_YAWS = 36
 MOE_Z_OFFSETS_CM = (-2.0, 0.0)
 MOE_OUTLIER_THRESHOLD = 0.014
@@ -74,8 +79,7 @@ FORMAL_MIN_APPROACH_SEPARATION_RAD = math.radians(20.0)
 FORMAL_MIN_WRIST_ROTATION_RAD = math.radians(30.0)
 
 _DEPTH_SCALE_GUIDANCE = (
-    "Depth in meters is raw_depth / intrinsics.scale; for uint16 millimeter "
-    "depth, use scale=1000."
+    "Depth in meters is raw_depth / intrinsics.scale; for uint16 millimeter depth, use scale=1000."
 )
 
 # Columns are the GraspNet basis vectors expressed in the GraspGenX basis:
@@ -152,8 +156,7 @@ def scan_gripper_descriptions(
     assets_root = root / "gripper_descriptions" / "assets" / "x_grippers"
     if not assets_root.is_dir():
         raise ValueError(
-            "gripper descriptions root must contain "
-            "gripper_descriptions/assets/x_grippers"
+            "gripper descriptions root must contain gripper_descriptions/assets/x_grippers"
         )
 
     valid: dict[str, GripperDescription] = {}
@@ -210,9 +213,7 @@ def _validate_collision_mesh_obj(path: Path) -> None:
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_number, line in enumerate(handle):
             stripped = line.lstrip()
-            if line_number == 0 and stripped.startswith(
-                "version https://git-lfs.github.com/spec/"
-            ):
+            if line_number == 0 and stripped.startswith("version https://git-lfs.github.com/spec/"):
                 raise ValueError("coll_mesh.obj is an unmaterialized Git LFS pointer")
             has_vertex = has_vertex or stripped.startswith("v ")
             has_face = has_face or stripped.startswith("f ")
@@ -248,9 +249,7 @@ def validate_checkpoint_layout(checkpoint_root: str | Path) -> tuple[Path, Path]
     for component in ("gen", "dis"):
         component_dir = root / component
         if not component_dir.is_dir() or not (component_dir / "config.yaml").is_file():
-            raise ValueError(
-                f"checkpoint root must contain {component}/config.yaml"
-            )
+            raise ValueError(f"checkpoint root must contain {component}/config.yaml")
         candidates = list(component_dir.glob("*.pth"))
         if not candidates:
             raise ValueError(f"checkpoint root must contain {component}/*.pth")
@@ -365,21 +364,13 @@ def build_targeted_point_clouds(
     raw_min = float(finite_values.min()) if finite_values.size else None
     raw_max = float(finite_values.max()) if finite_values.size else None
     metric_depth = depth_float / float(intrinsics["scale"])
-    valid = (
-        finite_raw
-        & (metric_depth > 0.0)
-        & (metric_depth < float(depth_truncation))
-    )
+    valid = finite_raw & (metric_depth > 0.0) & (metric_depth < float(depth_truncation))
     metadata = {
         "depth_dtype": str(depth.dtype),
         "depth_raw_min": raw_min,
         "depth_raw_max": raw_max,
-        "depth_metric_min": (
-            None if raw_min is None else raw_min / float(intrinsics["scale"])
-        ),
-        "depth_metric_max": (
-            None if raw_max is None else raw_max / float(intrinsics["scale"])
-        ),
+        "depth_metric_min": (None if raw_min is None else raw_min / float(intrinsics["scale"])),
+        "depth_metric_max": (None if raw_max is None else raw_max / float(intrinsics["scale"])),
         "depth_truncation": float(depth_truncation),
         "valid_point_count": int(valid.sum()),
     }
@@ -387,9 +378,7 @@ def build_targeted_point_clouds(
     if is_uint16 and raw_max is not None and raw_max > 10 and intrinsics["scale"] <= 1:
         raise GraspGenXInputError("depth_scale_mismatch", metadata=metadata)
     if metadata["valid_point_count"] == 0:
-        raise GraspGenXInputError(
-            "empty_point_cloud_after_depth_filter", metadata=metadata
-        )
+        raise GraspGenXInputError("empty_point_cloud_after_depth_filter", metadata=metadata)
 
     object_valid = valid & object_mask
     object_count = int(object_valid.sum())
@@ -497,9 +486,7 @@ def normalise_grasp_candidates(
     native_grasps = np.asarray(camera_native_grasps, dtype=np.float64)
     score_array = np.asarray(scores, dtype=np.float64)
     native_from_graspnet = np.eye(4, dtype=np.float64)
-    native_from_graspnet[:3, :3] = np.asarray(
-        _NATIVE_FROM_GRASPNET_ROTATION, dtype=np.float64
-    )
+    native_from_graspnet[:3, :3] = np.asarray(_NATIVE_FROM_GRASPNET_ROTATION, dtype=np.float64)
     tip_native = np.asarray(gripper.fingertip_xyz, dtype=np.float64)
 
     candidates: list[dict[str, Any]] = []
@@ -513,9 +500,7 @@ def normalise_grasp_candidates(
             "id": f"graspgenx_{rank:03d}",
             "source_model": MODEL_NAME,
             "gripper_name": gripper.name,
-            "candidate_source": (
-                "diffusion" if branch_tags[backend_index] == "diff" else "obb"
-            ),
+            "candidate_source": ("diffusion" if branch_tags[backend_index] == "diff" else "obb"),
             "frame": FRAME,
             "camera_frame": CAMERA_FRAME,
             "grasp_frame": GRASP_FRAME,
@@ -567,10 +552,12 @@ def _se3_mmr_order(
         if score_span <= 1e-12
         else (score_array - score_array.min()) / score_span
     )
+
     def similarity(left: int, right: int) -> float:
-        translation = float(
-            np.linalg.norm(pose_array[left, :3, 3] - pose_array[right, :3, 3])
-        ) / MMR_TRANSLATION_SCALE_M
+        translation = (
+            float(np.linalg.norm(pose_array[left, :3, 3] - pose_array[right, :3, 3]))
+            / MMR_TRANSLATION_SCALE_M
+        )
         # GraspGenX native +Z is the approach axis.  A parallel-jaw gripper's
         # yaw about that axis is a weaker diversity signal than a genuinely
         # different top/side/oblique approach direction.
@@ -582,12 +569,11 @@ def _se3_mmr_order(
             )
         )
         approach = math.acos(cosine) / MMR_ROTATION_SCALE_RAD
-        relative_trace = float(
-            np.trace(pose_array[left, :3, :3].T @ pose_array[right, :3, :3])
+        relative_trace = float(np.trace(pose_array[left, :3, :3].T @ pose_array[right, :3, :3]))
+        wrist_rotation = (
+            math.acos(float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0)))
+            / MMR_ROTATION_SCALE_RAD
         )
-        wrist_rotation = math.acos(
-            float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
-        ) / MMR_ROTATION_SCALE_RAD
         return math.exp(
             -(
                 translation
@@ -631,16 +617,13 @@ def _se3_mmr_order(
     remaining = set(ranked) - set(selected)
 
     max_similarity = {
-        index: max(similarity(index, chosen) for chosen in selected)
-        for index in remaining
+        index: max(similarity(index, chosen) for chosen in selected) for index in remaining
     }
     while remaining and len(selected) < selection_limit:
         best = max(
             remaining,
             key=lambda index: (
-                float(quality[index])
-                - MMR_SIMILARITY_PENALTY
-                * max_similarity[index],
+                float(quality[index]) - MMR_SIMILARITY_PENALTY * max_similarity[index],
                 float(score_array[index]),
                 -index,
             ),
@@ -649,9 +632,7 @@ def _se3_mmr_order(
         remaining.remove(best)
         max_similarity.pop(best)
         for index in remaining:
-            max_similarity[index] = max(
-                max_similarity[index], similarity(index, best)
-            )
+            max_similarity[index] = max(max_similarity[index], similarity(index, best))
     return [*selected, *(index for index in ranked if index in remaining)]
 
 
@@ -664,16 +645,10 @@ def _is_formally_novel_grasp(
     candidate = np.asarray(poses[candidate_index], dtype=np.float64)
     for selected_index in selected_indices:
         selected = np.asarray(poses[selected_index], dtype=np.float64)
-        translation = float(
-            np.linalg.norm(candidate[:3, 3] - selected[:3, 3])
-        )
-        cosine = float(
-            np.clip(np.dot(candidate[:3, 2], selected[:3, 2]), -1.0, 1.0)
-        )
+        translation = float(np.linalg.norm(candidate[:3, 3] - selected[:3, 3]))
+        cosine = float(np.clip(np.dot(candidate[:3, 2], selected[:3, 2]), -1.0, 1.0))
         approach_separation = math.acos(cosine)
-        relative_trace = float(
-            np.trace(candidate[:3, :3].T @ selected[:3, :3])
-        )
+        relative_trace = float(np.trace(candidate[:3, :3].T @ selected[:3, :3]))
         wrist_rotation_separation = math.acos(
             float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
         )
@@ -698,36 +673,36 @@ class GraspGenXBackend:
         device: str = "cuda:0",
         depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
         raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
+        inference_seed: int = DEFAULT_INFERENCE_SEED,
     ) -> None:
         self.graspgenx_root = Path(graspgenx_root).expanduser().resolve()
         self.checkpoint_root = Path(checkpoint_root).expanduser().resolve()
-        self.gripper_descriptions_root = (
-            Path(gripper_descriptions_root).expanduser().resolve()
-        )
+        self.gripper_descriptions_root = Path(gripper_descriptions_root).expanduser().resolve()
         self.device = validate_cuda_device_name(device)
         self.depth_truncation = float(depth_truncation)
         self.raw_pool_size = validate_raw_pool_size(raw_pool_size)
+        self.inference_seed = validate_inference_seed(inference_seed)
         self.last_returned_candidate_count = 0
-        self.generator_checkpoint, self.discriminator_checkpoint = (
-            validate_checkpoint_layout(self.checkpoint_root)
+        self.generator_checkpoint, self.discriminator_checkpoint = validate_checkpoint_layout(
+            self.checkpoint_root
         )
         self.grippers, self.invalid_grippers = scan_gripper_descriptions(
             self.gripper_descriptions_root
         )
-        self.assets_root = (
-            self.gripper_descriptions_root / "gripper_descriptions" / "assets"
-        )
+        self.assets_root = self.gripper_descriptions_root / "gripper_descriptions" / "assets"
         self._loaded: dict[str, Any] | None = None
         self._samplers: dict[str, dict[str, Any]] = {}
+        # Official GraspGenX consumes process-global Python, NumPy, and torch
+        # RNGs. Serialize seeded inference so concurrent MCP requests cannot
+        # interleave those states or contend for the same GPU model.
+        self._inference_lock = threading.RLock()
 
     @property
     def model_loaded(self) -> bool:
         return self._loaded is not None
 
     def list_grippers(self) -> dict[str, Any]:
-        descriptions = [
-            self.grippers[name].to_public_dict() for name in sorted(self.grippers)
-        ]
+        descriptions = [self.grippers[name].to_public_dict() for name in sorted(self.grippers)]
         return {
             "success": True,
             "content": "GraspGenX gripper listing completed.",
@@ -805,9 +780,7 @@ class GraspGenXBackend:
         except Exception as exc:  # noqa: BLE001 - third-party load boundary.
             return failure_result(
                 reason="model_load_failed",
-                metadata=_with_duration(
-                    {**metadata, "error_type": type(exc).__name__}, start
-                ),
+                metadata=_with_duration({**metadata, "error_type": type(exc).__name__}, start),
             )
 
         try:
@@ -815,22 +788,25 @@ class GraspGenXBackend:
             # Test/lightweight backends do not expose the real torch runtime
             # and retain their single-call contract.  A loaded production
             # backend unions independent diffusion draws.
-            inference_draw_count = (
-                MODEL_INFERENCE_DRAWS if loaded.get("torch") is not None else 1
-            )
+            inference_draw_count = MODEL_INFERENCE_DRAWS if loaded.get("torch") is not None else 1
             planners = [
                 PLANNER if draw_index == 0 else "diffusion"
                 for draw_index in range(inference_draw_count)
             ]
-            for planner in planners:
-                planner_outputs.append(
-                    self._run_planner(
-                        loaded=loaded,
-                        sampler_entry=sampler_entry,
-                        object_points_aligned=object_points_aligned,
-                        planner=planner,
+            draw_seeds = [
+                self.inference_seed + draw_index for draw_index in range(inference_draw_count)
+            ]
+            with self._inference_lock:
+                for planner, draw_seed in zip(planners, draw_seeds):
+                    self._seed_inference_rng(loaded=loaded, seed=draw_seed)
+                    planner_outputs.append(
+                        self._run_planner(
+                            loaded=loaded,
+                            sampler_entry=sampler_entry,
+                            object_points_aligned=object_points_aligned,
+                            planner=planner,
+                        )
                     )
-                )
             np, _Image = _load_image_dependencies()
             raw_grasps = np.concatenate(
                 [np.asarray(output[0]) for output in planner_outputs], axis=0
@@ -838,28 +814,23 @@ class GraspGenXBackend:
             raw_scores = np.concatenate(
                 [np.asarray(output[1]) for output in planner_outputs], axis=0
             )
-            raw_tags = [
-                str(tag) for output in planner_outputs for tag in output[2]
-            ]
+            raw_tags = [str(tag) for output in planner_outputs for tag in output[2]]
             metadata["model_inference_draw_count"] = inference_draw_count
+            metadata["model_inference_draw_seeds"] = draw_seeds
             metadata["graspmoe_draw_count"] = planners.count(PLANNER)
             metadata["diffusion_only_draw_count"] = planners.count("diffusion")
             metadata["deterministic_obb_reuse_policy"] = "single_full_draw"
         except Exception as exc:  # noqa: BLE001 - third-party inference boundary.
             return failure_result(
                 reason="model_inference_failed",
-                metadata=_with_duration(
-                    {**metadata, "error_type": type(exc).__name__}, start
-                ),
+                metadata=_with_duration({**metadata, "error_type": type(exc).__name__}, start),
             )
 
         try:
             grasps_aligned, scores, tags = validate_raw_grasp_outputs(
                 raw_grasps, raw_scores, raw_tags
             )
-            camera_native_grasps = transform_grasps_to_camera(
-                grasps_aligned, alignment
-            )
+            camera_native_grasps = transform_grasps_to_camera(grasps_aligned, alignment)
             metadata.update(
                 {
                     "raw_candidate_count": int(len(scores)),
@@ -867,15 +838,16 @@ class GraspGenXBackend:
                     "obb_candidate_count": tags.count("obb"),
                 }
             )
-            selected_indices, collision_metadata = self._select_collision_free(
-                loaded=loaded,
-                sampler_entry=sampler_entry,
-                scene_points=scene_points,
-                camera_native_grasps=camera_native_grasps,
-                scores=scores,
-                branch_tags=tags,
-                selection_limit=self.raw_pool_size,
-            )
+            with self._inference_lock:
+                selected_indices, collision_metadata = self._select_collision_free(
+                    loaded=loaded,
+                    sampler_entry=sampler_entry,
+                    scene_points=scene_points,
+                    camera_native_grasps=camera_native_grasps,
+                    scores=scores,
+                    branch_tags=tags,
+                    selection_limit=self.raw_pool_size,
+                )
             metadata.update(collision_metadata)
             candidates = normalise_grasp_candidates(
                 camera_native_grasps=camera_native_grasps,
@@ -897,9 +869,7 @@ class GraspGenXBackend:
         except Exception as exc:  # noqa: BLE001 - collision backend boundary.
             return failure_result(
                 reason="model_inference_failed",
-                metadata=_with_duration(
-                    {**metadata, "error_type": type(exc).__name__}, start
-                ),
+                metadata=_with_duration({**metadata, "error_type": type(exc).__name__}, start),
             )
 
         return {
@@ -910,7 +880,7 @@ class GraspGenXBackend:
                 "backend": BACKEND_NAME,
                 "model": MODEL_NAME,
                 "planner": PLANNER,
-                "deterministic": False,
+                "deterministic": True,
                 "frame": FRAME,
                 "camera_frame": CAMERA_FRAME,
                 "grasp_frame": GRASP_FRAME,
@@ -932,6 +902,10 @@ class GraspGenXBackend:
         return self.grippers[gripper_name]
 
     def _get_loaded_backend(self) -> dict[str, Any]:
+        with self._inference_lock:
+            return self._get_loaded_backend_locked()
+
+    def _get_loaded_backend_locked(self) -> dict[str, Any]:
         if self._loaded is not None:
             return self._loaded
         if not (self.graspgenx_root / "graspgenx" / "__init__.py").is_file():
@@ -940,9 +914,7 @@ class GraspGenXBackend:
         # These existing paths make the official package setup hook a no-op and
         # prevent its fallback auto-clone behavior during import.
         os.environ["GRASPGENX_CHECKPOINT_DIR"] = str(self.checkpoint_root.parent)
-        os.environ["GRASPGENX_GRIPPER_CFG_DIR"] = str(
-            self.gripper_descriptions_root
-        )
+        os.environ["GRASPGENX_GRIPPER_CFG_DIR"] = str(self.gripper_descriptions_root)
         if str(self.graspgenx_root) not in sys.path:
             sys.path.insert(0, str(self.graspgenx_root))
 
@@ -977,16 +949,16 @@ class GraspGenXBackend:
             "filter_collisions": filter_colliding_grasps,
             "backend_commit": _git_commit(self.graspgenx_root),
             "checkpoint_version": self.checkpoint_root.name,
-            "generator_checkpoint_sha256": _sha256_file(
-                self.generator_checkpoint
-            ),
-            "discriminator_checkpoint_sha256": _sha256_file(
-                self.discriminator_checkpoint
-            ),
+            "generator_checkpoint_sha256": _sha256_file(self.generator_checkpoint),
+            "discriminator_checkpoint_sha256": _sha256_file(self.discriminator_checkpoint),
         }
         return self._loaded
 
-    def _get_sampler_entry(
+    def _get_sampler_entry(self, loaded: dict[str, Any], gripper_name: str) -> dict[str, Any]:
+        with self._inference_lock:
+            return self._get_sampler_entry_locked(loaded, gripper_name)
+
+    def _get_sampler_entry_locked(
         self, loaded: dict[str, Any], gripper_name: str
     ) -> dict[str, Any]:
         cached = self._samplers.get(gripper_name)
@@ -994,9 +966,7 @@ class GraspGenXBackend:
             return cached
         np, _Image = _load_image_dependencies()
         torch = loaded["torch"]
-        with torch.cuda.device(loaded["device_index"]), contextlib.redirect_stdout(
-            sys.stderr
-        ):
+        with torch.cuda.device(loaded["device_index"]), contextlib.redirect_stdout(sys.stderr):
             sampler = loaded["sampler_class"](
                 loaded["config"],
                 gripper_name,
@@ -1006,9 +976,16 @@ class GraspGenXBackend:
         gripper_info = sampler.get_gripper_info()
         import trimesh
 
-        sampled, _faces = trimesh.sample.sample_surface(
-            gripper_info.collision_mesh, NUM_COLLISION_SAMPLES
-        )
+        # trimesh.sample_surface uses NumPy's legacy global RNG. Preserve the
+        # caller state while making the cached collision geometry repeatable.
+        numpy_state = np.random.get_state()
+        np.random.seed((self.inference_seed + COLLISION_SURFACE_SEED_OFFSET) % (2**32))
+        try:
+            sampled, _faces = trimesh.sample.sample_surface(
+                gripper_info.collision_mesh, NUM_COLLISION_SAMPLES
+            )
+        finally:
+            np.random.set_state(numpy_state)
         surface_points = np.ascontiguousarray(sampled, dtype=np.float32)
         if surface_points.shape != (NUM_COLLISION_SAMPLES, 3):
             raise RuntimeError("invalid gripper collision surface sample")
@@ -1019,6 +996,17 @@ class GraspGenXBackend:
         }
         self._samplers[gripper_name] = entry
         return entry
+
+    @staticmethod
+    def _seed_inference_rng(*, loaded: dict[str, Any], seed: int) -> None:
+        """Seed every RNG used by one official GraspGenX model draw."""
+
+        random.seed(seed)
+        np, _Image = _load_image_dependencies()
+        np.random.seed(seed % (2**32))
+        manual_seed = getattr(loaded.get("torch"), "manual_seed", None)
+        if callable(manual_seed):
+            manual_seed(seed)
 
     def _run_planner(
         self,
@@ -1111,9 +1099,9 @@ class GraspGenXBackend:
 
         collision_scene = np.asarray(scene_points, dtype=np.float32)
         if len(collision_scene) > MAX_COLLISION_SCENE_POINTS:
-            indices = np.random.default_rng().choice(
-                len(collision_scene), MAX_COLLISION_SCENE_POINTS, replace=False
-            )
+            indices = np.random.default_rng(
+                self.inference_seed + COLLISION_SCENE_SEED_OFFSET
+            ).choice(len(collision_scene), MAX_COLLISION_SCENE_POINTS, replace=False)
             collision_scene = np.ascontiguousarray(collision_scene[indices])
 
         selected: list[int] = []
@@ -1129,9 +1117,7 @@ class GraspGenXBackend:
                     scene_pc=collision_scene,
                     grasp_poses=batch_poses,
                     collision_threshold=COLLISION_THRESHOLD,
-                    gripper_surface_points=sampler_entry[
-                        "collision_surface_points"
-                    ],
+                    gripper_surface_points=sampler_entry["collision_surface_points"],
                     batch_size=COLLISION_BATCH_SIZE,
                     device=self.device,
                 )
@@ -1159,9 +1145,8 @@ class GraspGenXBackend:
                 MMR_MIN_SOURCE_COVERAGE,
                 max(1, limit // len(selected_by_source)),
             )
-            if (
-                len(selected) >= limit
-                and all(count >= required_source_coverage for count in selected_by_source.values())
+            if len(selected) >= limit and all(
+                count >= required_source_coverage for count in selected_by_source.values()
             ):
                 selected = selected[:limit]
                 break
@@ -1186,8 +1171,8 @@ class GraspGenXBackend:
             "candidate_selection": "source_aware_se3_mmr_with_minimum_se3_separation",
             "mmr_diversity_order_count": diversity_order_count,
             "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
-                "formal_min_approach_separation_rad": FORMAL_MIN_APPROACH_SEPARATION_RAD,
-                "formal_min_wrist_rotation_rad": FORMAL_MIN_WRIST_ROTATION_RAD,
+            "formal_min_approach_separation_rad": FORMAL_MIN_APPROACH_SEPARATION_RAD,
+            "formal_min_wrist_rotation_rad": FORMAL_MIN_WRIST_ROTATION_RAD,
             "formal_diversity_rejected_count": diversity_rejected,
         }
 
@@ -1198,7 +1183,9 @@ class GraspGenXBackend:
             "grasp_frame": GRASP_FRAME,
             "native_grasp_frame": NATIVE_GRASP_FRAME,
             "planner": PLANNER,
-            "deterministic": False,
+            "deterministic": True,
+            "determinism_scope": "same_hardware_software_model_and_input",
+            "inference_seed": self.inference_seed,
             "gripper_name": gripper_name,
             "depth_truncation": self.depth_truncation,
             "min_object_points": MIN_OBJECT_POINTS,
@@ -1219,6 +1206,8 @@ class GraspGenXBackend:
                 "collision_threshold": COLLISION_THRESHOLD,
                 "max_collision_scene_points": MAX_COLLISION_SCENE_POINTS,
                 "num_collision_samples": NUM_COLLISION_SAMPLES,
+                "inference_draw_count": MODEL_INFERENCE_DRAWS,
+                "inference_seed": self.inference_seed,
             },
             "backend_commit": None,
             "checkpoint_version": self.checkpoint_root.name,
@@ -1232,14 +1221,10 @@ class GraspGenXBackend:
             "backend": MODEL_NAME,
             "backend_commit": loaded["backend_commit"],
             "checkpoint_version": loaded["checkpoint_version"],
-            "generator_checkpoint_sha256": loaded[
-                "generator_checkpoint_sha256"
-            ],
-            "discriminator_checkpoint_sha256": loaded[
-                "discriminator_checkpoint_sha256"
-            ],
+            "generator_checkpoint_sha256": loaded["generator_checkpoint_sha256"],
+            "discriminator_checkpoint_sha256": loaded["discriminator_checkpoint_sha256"],
             "planner": PLANNER,
-            "deterministic": False,
+            "deterministic": True,
             "model_loaded": True,
         }
 
@@ -1248,6 +1233,12 @@ def validate_cuda_device_name(device: Any) -> str:
     if not isinstance(device, str) or not re.fullmatch(r"cuda(?::\d+)?", device):
         raise ValueError("device must be cuda or cuda:N")
     return "cuda:0" if device == "cuda" else device
+
+
+def validate_inference_seed(seed: Any) -> int:
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**31:
+        raise ValueError("inference_seed must be an integer in [0, 2^31)")
+    return seed
 
 
 def _resolve_cuda_device_index(torch: Any, device: str) -> int:
@@ -1259,9 +1250,7 @@ def _resolve_cuda_device_index(torch: Any, device: str) -> int:
     return index
 
 
-def failure_result(
-    *, reason: str, metadata: dict[str, Any] | None = None
-) -> dict[str, Any]:
+def failure_result(*, reason: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     content = f"GraspGenX grasp prediction failed: {reason}."
     if reason in {
         "invalid_depth_scale",

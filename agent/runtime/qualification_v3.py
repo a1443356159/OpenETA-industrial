@@ -61,17 +61,13 @@ def final_target(descriptor: Mapping[str, Any]) -> Mapping[str, Any]:
     return {}
 
 
-def _pose_distance(
-    left: Mapping[str, Any], right: Mapping[str, Any]
-) -> tuple[float, float] | None:
+def _pose_distance(left: Mapping[str, Any], right: Mapping[str, Any]) -> tuple[float, float] | None:
     left_pose, right_pose = target_pose(left), target_pose(right)
     if left_pose is None or right_pose is None:
         return None
     left_xyz, left_quat = left_pose
     right_xyz, right_quat = right_pose
-    translation = math.sqrt(
-        sum((a - b) ** 2 for a, b in zip(left_xyz, right_xyz))
-    )
+    translation = math.sqrt(sum((a - b) ** 2 for a, b in zip(left_xyz, right_xyz)))
     return translation, quaternion_angle_rad(left_quat, right_quat)
 
 
@@ -119,11 +115,7 @@ def _capability_score(
     if capability_map is None:
         return CapabilityScore(0.0, 0.0, 0.0, 0.0, 0, 0)
     candidate = descriptor.get("candidate")
-    stages = (
-        candidate.get("qualification_stages")
-        if isinstance(candidate, Mapping)
-        else None
-    )
+    stages = candidate.get("qualification_stages") if isinstance(candidate, Mapping) else None
     return capability_map.score_chain(
         [stage for stage in stages or [] if isinstance(stage, Mapping)]
     )
@@ -144,6 +136,67 @@ def _descriptor_priority(descriptor: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _descriptor_diversity_distance(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+    """Stable SE(3) distance used only to order, never reject, candidates."""
+
+    distance = _pose_distance(final_target(left), final_target(right))
+    if distance is None:
+        return 0.0
+    left_candidate = left.get("candidate")
+    left_candidate = left_candidate if isinstance(left_candidate, Mapping) else {}
+    right_candidate = right.get("candidate")
+    right_candidate = right_candidate if isinstance(right_candidate, Mapping) else {}
+
+    def source(candidate: Mapping[str, Any]) -> str:
+        return str(
+            candidate.get("candidate_source")
+            or candidate.get("source_model")
+            or candidate.get("source")
+            or candidate.get("source_branch")
+            or candidate.get("backend")
+            or ""
+        )
+
+    left_source, right_source = source(left_candidate), source(right_candidate)
+    source_bonus = 1.0 if left_source and right_source and left_source != right_source else 0.0
+    translation_m, rotation_rad = distance
+    return translation_m * 10.0 + rotation_rad + source_bonus
+
+
+def _quality_seeded_farthest_first(
+    descriptors: Sequence[Mapping[str, Any]],
+) -> list[JsonDict]:
+    """Start with the best head, then cover distinct pose modes early."""
+
+    remaining = sorted((dict(item) for item in descriptors), key=_descriptor_priority)
+    if not remaining:
+        return []
+    selected = [remaining.pop(0)]
+    while remaining:
+        # Alternate exploitation and exploration. A pure farthest-first walk
+        # can postpone the second-best reachable mode until a later wave;
+        # pure score ordering over-focuses near-duplicates. The 4-wide first
+        # wave therefore contains two quality heads and two coverage heads.
+        choose_farthest = len(selected) % 2 == 1
+        index = (
+            min(
+                range(len(remaining)),
+                key=lambda candidate_index: (
+                    -min(
+                        _descriptor_diversity_distance(remaining[candidate_index], prior)
+                        for prior in selected
+                    ),
+                    _descriptor_priority(remaining[candidate_index]),
+                    str(remaining[candidate_index].get("se3_cluster_id") or ""),
+                ),
+            )
+            if choose_farthest
+            else 0
+        )
+        selected.append(remaining.pop(index))
+    return selected
+
+
 def _cluster_round_robin(
     descriptors: Sequence[Mapping[str, Any]],
 ) -> list[JsonDict]:
@@ -153,13 +206,8 @@ def _cluster_round_robin(
         clusters.setdefault(cluster, deque()).append(dict(descriptor))
     for cluster in clusters:
         clusters[cluster] = deque(sorted(clusters[cluster], key=_descriptor_priority))
-    cluster_order = sorted(
-        clusters,
-        key=lambda cluster: (
-            _descriptor_priority(clusters[cluster][0]),
-            cluster,
-        ),
-    )
+    cluster_heads = _quality_seeded_farthest_first([clusters[cluster][0] for cluster in clusters])
+    cluster_order = [str(head.get("se3_cluster_id") or "") for head in cluster_heads]
     ordered: list[JsonDict] = []
     while any(clusters[cluster] for cluster in cluster_order):
         for cluster in cluster_order:
@@ -189,9 +237,7 @@ def schedule_candidate_waves(
 
     annotated = assign_se3_clusters(descriptors)
     for descriptor in annotated:
-        descriptor["capability_score"] = _capability_score(
-            descriptor, capability_map
-        ).to_dict()
+        descriptor["capability_score"] = _capability_score(descriptor, capability_map).to_dict()
     if purpose == "grasp":
         ordered = _cluster_round_robin(annotated)
         cumulative = sorted(
@@ -219,21 +265,15 @@ def schedule_candidate_waves(
             raw_batch = candidate.get("frozen_pair_batch_index", 0)
             branch_batch[branch] = (
                 raw_batch
-                if isinstance(raw_batch, int)
-                and not isinstance(raw_batch, bool)
-                and raw_batch >= 0
+                if isinstance(raw_batch, int) and not isinstance(raw_batch, bool) and raw_batch >= 0
                 else 0
             )
         branches[branch].append(descriptor)
-    ordered_branches = {
-        branch: _cluster_round_robin(branches[branch]) for branch in branch_order
-    }
+    ordered_branches = {branch: _cluster_round_robin(branches[branch]) for branch in branch_order}
     waves: list[CandidateWave] = []
     for batch_index in sorted(set(branch_batch.values())):
         current_branches = [
-            branch
-            for branch in branch_order
-            if branch_batch[branch] == batch_index
+            branch for branch in branch_order if branch_batch[branch] == batch_index
         ]
         maximum = max(
             (len(ordered_branches[branch]) for branch in current_branches),
@@ -302,9 +342,7 @@ def normalized_joint_distance(
     return math.sqrt(sum(value * value for value in distances))
 
 
-def joint_limit_margin(
-    state: Mapping[str, Any], *, source: Mapping[str, Any]
-) -> float:
+def joint_limit_margin(state: Mapping[str, Any], *, source: Mapping[str, Any]) -> float:
     positions = [float(value) for value in state.get("positions") or []]
     if not positions:
         return 0.0
@@ -420,10 +458,7 @@ def frozen_pair_l5_submission_order(
     deterministic within each tier; this function never deletes candidates.
     """
 
-    remaining = [
-        dict(item)
-        for item in sorted(candidates, key=candidate_physical_quality_key)
-    ]
+    remaining = [dict(item) for item in sorted(candidates, key=candidate_physical_quality_key)]
     anchors = [dict(item) for item in prior_attempts]
     ordered: list[JsonDict] = []
     while remaining:
@@ -447,13 +482,7 @@ def frozen_pair_l5_submission_order(
                 new_grasp = bool(grasp and grasp not in used_grasps)
                 new_cluster = bool(cluster and cluster not in used_clusters)
                 tier = (
-                    0
-                    if new_grasp and new_cluster
-                    else 1
-                    if new_grasp
-                    else 2
-                    if new_cluster
-                    else 3
+                    0 if new_grasp and new_cluster else 1 if new_grasp else 2 if new_cluster else 3
                 )
                 return (tier, *candidate_physical_quality_key(item))
 
@@ -481,19 +510,14 @@ def select_grasp_branches(
     primary_limit = min(2, limit)
     selected = [ordered[0]]
     for item in ordered[1:]:
-        if (
-            item.get("se3_cluster_id") != selected[0].get("se3_cluster_id")
-            and item.get("grasp_symmetry_family_id")
-            != selected[0].get("grasp_symmetry_family_id")
-        ):
+        if item.get("se3_cluster_id") != selected[0].get("se3_cluster_id") and item.get(
+            "grasp_symmetry_family_id"
+        ) != selected[0].get("grasp_symmetry_family_id"):
             selected.append(item)
             break
     if len(selected) < primary_limit:
         for item in ordered[1:]:
-            if (
-                item.get("grasp_symmetry_family_id")
-                != selected[0].get("grasp_symmetry_family_id")
-            ):
+            if item.get("grasp_symmetry_family_id") != selected[0].get("grasp_symmetry_family_id"):
                 selected.append(item)
                 break
     if len(selected) < primary_limit:
@@ -511,9 +535,7 @@ def select_grasp_branches(
                 right_state = _result_end_state(ordered[right_index])
                 if right_state is None:
                     continue
-                distance = normalized_joint_distance(
-                    left_state, right_state, source=source
-                )
+                distance = normalized_joint_distance(left_state, right_state, source=source)
                 key = (distance, -left_index, -right_index)
                 if best_pair is None or key > best_pair:
                     best_pair = key
@@ -522,37 +544,21 @@ def select_grasp_branches(
         else:
             selected = ordered[:limit]
     while len(selected) < limit:
-        selected_ids = {
-            str(item.get("candidate_id") or "") for item in selected
-        }
+        selected_ids = {str(item.get("candidate_id") or "") for item in selected}
         remaining = [
-            item
-            for item in ordered
-            if str(item.get("candidate_id") or "") not in selected_ids
+            item for item in ordered if str(item.get("candidate_id") or "") not in selected_ids
         ]
         if not remaining:
             break
-        used_clusters = {
-            str(item.get("se3_cluster_id") or "") for item in selected
-        }
-        used_families = {
-            str(item.get("grasp_symmetry_family_id") or "") for item in selected
-        }
+        used_clusters = {str(item.get("se3_cluster_id") or "") for item in selected}
+        used_families = {str(item.get("grasp_symmetry_family_id") or "") for item in selected}
 
         def expansion_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
             cluster = str(item.get("se3_cluster_id") or "")
             family = str(item.get("grasp_symmetry_family_id") or "")
             new_cluster = bool(cluster and cluster not in used_clusters)
             new_family = bool(family and family not in used_families)
-            tier = (
-                0
-                if new_cluster and new_family
-                else 1
-                if new_family
-                else 2
-                if new_cluster
-                else 3
-            )
+            tier = 0 if new_cluster and new_family else 1 if new_family else 2 if new_cluster else 3
             state = _result_end_state(item)
             distances: list[float] = []
             if state is not None:
@@ -560,9 +566,7 @@ def select_grasp_branches(
                     selected_state = _result_end_state(selected_item)
                     if selected_state is not None:
                         distances.append(
-                            normalized_joint_distance(
-                                state, selected_state, source=source
-                            )
+                            normalized_joint_distance(state, selected_state, source=source)
                         )
             min_distance = min(distances, default=0.0)
             return (

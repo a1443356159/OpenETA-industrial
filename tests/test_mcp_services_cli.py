@@ -68,23 +68,13 @@ def test_start_anygrasp_requires_sdk_and_checkpoint(tmp_path: Path, capsys) -> N
 
 
 def test_start_anyplace_requires_root_and_config(tmp_path: Path, capsys) -> None:
-    assert (
-        cli.main(
-            ["start", "anyplace", "--state-dir", str(tmp_path), "--dry-run"]
-        )
-        == 2
-    )
+    assert cli.main(["start", "anyplace", "--state-dir", str(tmp_path), "--dry-run"]) == 2
 
     assert "anyplace root" in capsys.readouterr().err.lower()
 
 
 def test_start_contact_graspnet_requires_root_and_checkpoint(tmp_path: Path, capsys) -> None:
-    assert (
-        cli.main(
-            ["start", "contact_graspnet", "--state-dir", str(tmp_path), "--dry-run"]
-        )
-        == 2
-    )
+    assert cli.main(["start", "contact_graspnet", "--state-dir", str(tmp_path), "--dry-run"]) == 2
 
     assert "contact-graspnet root" in capsys.readouterr().err.lower()
 
@@ -106,12 +96,7 @@ def test_start_contact_graspnet_requires_root_and_checkpoint(tmp_path: Path, cap
 
 
 def test_start_graspgenx_requires_all_backend_roots(tmp_path: Path, capsys) -> None:
-    assert (
-        cli.main(
-            ["start", "graspgenx", "--state-dir", str(tmp_path), "--dry-run"]
-        )
-        == 2
-    )
+    assert cli.main(["start", "graspgenx", "--state-dir", str(tmp_path), "--dry-run"]) == 2
     assert "graspgenx root" in capsys.readouterr().err.lower()
 
     assert (
@@ -285,6 +270,7 @@ def test_start_all_dry_run_includes_seven_services(tmp_path: Path, capsys) -> No
     assert "--graspgenx-root /path/to/graspgenx" in output
     assert "--checkpoint-root /path/to/graspgenx-checkpoints" in output
     assert "--gripper-descriptions-root /path/to/gripper-descriptions" in output
+    assert "--inference-seed 0" in output
     assert "--port 8778" in output
     assert "--model-id lpiccinelli/unidepth-v2-vitl14" in output
     assert "--port 8779" in output
@@ -446,7 +432,9 @@ def test_stop_force_uses_sigkill(tmp_path: Path, monkeypatch) -> None:
     assert sent == [(1234, signal.SIGKILL)]
 
 
-def test_smoke_uses_mcp_list_tools_without_real_service(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_smoke_uses_mcp_list_tools_without_real_service(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
     monkeypatch.setattr(cli, "_mcp_list_tools", lambda _url: ["segment"])
 
     assert cli.main(["smoke", "sam3", "--state-dir", str(tmp_path), "--json"]) == 0
@@ -482,10 +470,7 @@ def test_contact_graspnet_smoke_requires_predict_grasps(
 ) -> None:
     monkeypatch.setattr(cli, "_mcp_list_tools", lambda _url: ["predict_grasps"])
 
-    assert (
-        cli.main(["smoke", "contact_graspnet", "--state-dir", str(tmp_path), "--json"])
-        == 0
-    )
+    assert cli.main(["smoke", "contact_graspnet", "--state-dir", str(tmp_path), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["contact_graspnet"]["smoke"] == "ok"
@@ -533,10 +518,7 @@ def test_unidepth_v2_smoke_requires_estimate_depth(
     capsys,
 ) -> None:
     monkeypatch.setattr(cli, "_mcp_list_tools", lambda _url: ["estimate_depth"])
-    assert (
-        cli.main(["smoke", "unidepth_v2", "--state-dir", str(tmp_path), "--json"])
-        == 0
-    )
+    assert cli.main(["smoke", "unidepth_v2", "--state-dir", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["unidepth_v2"]["smoke"] == "ok"
 

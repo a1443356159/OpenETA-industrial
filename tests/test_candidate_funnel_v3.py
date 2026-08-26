@@ -141,9 +141,7 @@ def test_frozen_pair_retains_two_diverse_l5_passes_without_early_cutoff():
 
 def test_frozen_pair_l5_order_prefers_distinct_grasp_and_goal_cluster():
     candidates = []
-    for index, (grasp_id, score) in enumerate(
-        (("g0", 4.0), ("g0", 3.0), ("g1", 2.0), ("g1", 1.0))
-    ):
+    for index, (grasp_id, score) in enumerate((("g0", 4.0), ("g0", 3.0), ("g1", 2.0), ("g1", 1.0))):
         candidate = _candidate(index, score=score)
         candidate.update(
             {
@@ -199,9 +197,7 @@ def test_grasp_minimum_two_stops_after_small_wave_without_recovery_chase():
             "ok": passed,
             "execution_started": False,
             "trajectory_points": ([{"positions": [0.2]}] if passed else []),
-            "end_joint_state": (
-                {"names": ["j1"], "positions": [0.2]} if passed else None
-            ),
+            "end_joint_state": ({"names": ["j1"], "positions": [0.2]} if passed else None),
         }
 
     response = _engine(plan_only=plan_only).qualify(
@@ -216,18 +212,13 @@ def test_grasp_minimum_two_stops_after_small_wave_without_recovery_chase():
         )
     )
 
-    assert response["stop_reason"] == (
-        "complete_l5_pass_found_minimum_lookahead"
-    )
+    assert response["stop_reason"] == ("complete_l5_pass_found_minimum_lookahead")
     assert response["selected_candidate_ids"] == ["c0", "c1"]
     assert len(response["waves"]) == 1
     assert response["waves"][0]["candidate_count"] == 4
     assert response["waves"][0]["recovery_layer"] is False
     assert response["metrics"]["screening_attempt_count"] == 4
-    assert all(
-        row["verdict"] == "NOT_EVALUATED"
-        for row in response["results"][4:]
-    )
+    assert sum(row["verdict"] == "NOT_EVALUATED" for row in response["results"]) == 4
 
 
 def test_same_run_frozen_pair_seed_is_used_as_second_fast_seed():
@@ -309,13 +300,42 @@ def test_joint_scheduler_covers_two_complete_anyplace_branches():
     assert [wave.cumulative_per_branch for wave in waves] == [4, 8, 16, 32, 96]
     assert [len(wave.candidates) for wave in waves] == [8, 8, 16, 32, 128]
     assert sum(len(wave.candidates) for wave in waves) == 192
-    assert [
-        wave.candidates[0]["candidate"]["source_grasp_id"] for wave in waves
-    ] == ["g0"] * 5
+    assert [wave.candidates[0]["candidate"]["source_grasp_id"] for wave in waves] == ["g0"] * 5
     assert [
         waves[0].candidates[0]["candidate"]["source_grasp_id"],
         waves[0].candidates[1]["candidate"]["source_grasp_id"],
     ] == ["g0", "g1"]
+
+
+def test_grasp_first_wave_is_quality_seeded_but_pose_diverse_without_deletion():
+    descriptors = []
+    for index in range(8):
+        candidate = _candidate(index, score=8.0 - index)
+        candidate["qualification_stages"][0]["xyz"] = [
+            0.4 + index * 0.012,
+            0.0,
+            0.5,
+        ]
+        descriptors.append(
+            {
+                "candidate_id": candidate["id"],
+                "candidate": candidate,
+                "candidate_pose_sha256": _hash(candidate),
+            }
+        )
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="grasp",
+        grasp_waves=[4, 8],
+    )
+
+    first_ids = [item["candidate_id"] for item in waves[0].candidates]
+    all_ids = [item["candidate_id"] for wave in waves for item in wave.candidates]
+    assert first_ids[0] == "c0"
+    assert "c7" in first_ids
+    assert len(set(first_ids)) == 4
+    assert sorted(all_ids) == [f"c{index}" for index in range(8)]
 
 
 def test_joint_scheduler_defers_frozen_reserve_branches_until_primary_exhausts():
@@ -327,9 +347,7 @@ def test_joint_scheduler_defers_frozen_reserve_branches_until_primary_exhausts()
                 {
                     "source_grasp_id": f"g{grasp_index}",
                     "frozen_pair_batch_index": grasp_index // 2,
-                    "frozen_pair_batch_role": (
-                        "primary" if grasp_index < 2 else "reserve"
-                    ),
+                    "frozen_pair_batch_role": ("primary" if grasp_index < 2 else "reserve"),
                 }
             )
             descriptors.append(
@@ -421,8 +439,7 @@ def test_goal_legality_barrier_evaluates_one_goal_once_and_rejects_before_ik():
         "goal_footprint_outside_placement_region",
     ]
     assert all(
-        item["pair_legality"]["reason"] == "goal_legality_rejected"
-        for item in response["results"]
+        item["pair_legality"]["reason"] == "goal_legality_rejected" for item in response["results"]
     )
 
 
@@ -535,16 +552,10 @@ def test_frozen_goal_binds_anyplace_motion_to_scene_box_not_pointcloud_centroid(
     response = _engine(clone_scene=_placement_scene).qualify(_request([candidate]))
 
     assert response["selected_candidate_ids"] == ["c0"]
-    binding = response["results"][0]["goal_legality"]["checks"][
-        "object_frame_binding"
-    ]
+    binding = response["results"][0]["goal_legality"]["checks"]["object_frame_binding"]
     assert binding["pointcloud_goal_translation_xyz"][2] == 0.50
-    assert binding["collision_goal_translation_xyz"] == pytest.approx(
-        [0.48, -0.1, 0.43]
-    )
-    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
-        [0.48, -0.1, 0.43]
-    )
+    assert binding["collision_goal_translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
+    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
     assert response["results"][0]["goal_legality"]["verdict"] == "PASS"
 
 
@@ -585,14 +596,10 @@ def test_attached_frozen_goal_ignores_stale_predicted_object_motion():
     response = _engine(clone_scene=lambda: scene).qualify(_request([candidate]))
 
     assert response["selected_candidate_ids"] == ["c0"]
-    binding = response["results"][0]["goal_legality"]["checks"][
-        "object_frame_binding"
-    ]
+    binding = response["results"][0]["goal_legality"]["checks"]["object_frame_binding"]
     assert binding["method"] == "direct_physical_object_goal"
     assert binding["target_is_attached"] is True
-    assert binding["collision_goal_translation_xyz"] == pytest.approx(
-        [0.48, -0.1, 0.43]
-    )
+    assert binding["collision_goal_translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
 
 
 def test_support_contact_uncertainty_is_separate_from_static_collision_tolerance():
@@ -622,9 +629,10 @@ def test_support_contact_uncertainty_is_separate_from_static_collision_tolerance
     )
 
     assert response["selected_candidate_ids"] == ["c0"]
-    assert response["results"][0]["goal_legality"]["checks"]["support"][
-        "tolerance_basis"
-    ] == "sensor_and_model_support_contact_uncertainty"
+    assert (
+        response["results"][0]["goal_legality"]["checks"]["support"]["tolerance_basis"]
+        == "sensor_and_model_support_contact_uncertainty"
+    )
     assert response["results"][1]["reason"] == "goal_support_surface_penetration"
 
 
@@ -661,7 +669,7 @@ def test_artificial_placement_waypoints_are_rejected_before_ik():
                             [0.0, 0.0, 1.0],
                         ],
                     }
-                }
+                },
             },
         }
     )
@@ -779,9 +787,7 @@ def test_attached_pair_chain_derives_eef_goal_from_measured_attachment():
     chain = response["results"][0]["pair_legality"]["checks"]["eef_chain"]
     assert chain["pass"] is True
     assert chain["translation_error_m"] == pytest.approx(0.0)
-    assert response["results"][0]["pair_legality"]["checks"]["stage_se3"][
-        "stage_count"
-    ] == 1
+    assert response["results"][0]["pair_legality"]["checks"]["stage_se3"]["stage_count"] == 1
 
 
 def test_object_goal_static_collision_is_rejected_by_target_gate():
@@ -822,9 +828,9 @@ def test_object_goal_static_collision_is_rejected_by_target_gate():
     response = _engine(clone_scene=lambda: scene).qualify(_request([candidate]))
 
     assert response["results"][0]["reason"] == "goal_static_obstacle_penetration"
-    collisions = response["results"][0]["goal_legality"]["checks"][
-        "static_scene_collision"
-    ]["collision_ids"]
+    collisions = response["results"][0]["goal_legality"]["checks"]["static_scene_collision"][
+        "collision_ids"
+    ]
     assert collisions == ["distractor"]
     assert response["metrics"]["screening_attempt_count"] == 0
 
@@ -875,9 +881,9 @@ def test_exact_gripper_collision_primitive_is_rejected_by_pair_gate():
     response = _engine(clone_scene=lambda: scene).qualify(_request([candidate]))
 
     assert response["results"][0]["reason"] == "gripper_static_collision"
-    collision = response["results"][0]["pair_legality"]["checks"][
-        "static_scene_collision"
-    ]["collisions"][0]
+    collision = response["results"][0]["pair_legality"]["checks"]["static_scene_collision"][
+        "collisions"
+    ][0]
     assert collision["body"] == "mount_plate"
     assert collision["obstacle"] == "table"
 
@@ -889,9 +895,7 @@ def test_symmetry_twin_does_not_consume_second_grasp_branch_slot():
     twin["qualification_stages"][0]["quat_xyzw"] = [1.0, 0.0, 0.0, 0.0]
     independent = _candidate(20, score=1.0)
 
-    response = _engine().qualify(
-        _request([base, twin, independent], purpose="grasp")
-    )
+    response = _engine().qualify(_request([base, twin, independent], purpose="grasp"))
 
     assert response["selected_candidate_ids"] == ["c0", "c20"]
     assert len(response["l5_attempts"]) == 3
@@ -907,17 +911,12 @@ def test_grasp_profile_does_not_publish_only_one_qualified_branch():
 
 
 def test_grasp_branch_selection_preserves_screen_quality_if_plan_omits_margin():
-    response = _engine().qualify(
-        _request([_candidate(0), _candidate(1)], purpose="grasp")
-    )
+    response = _engine().qualify(_request([_candidate(0), _candidate(1)], purpose="grasp"))
 
     assert response["selected_candidate_ids"] == ["c0", "c1"]
     assert response["stop_reason"] == "complete_l5_pass_found_joint_space_fallback"
     for result in response["results"]:
-        assert all(
-            isinstance(stage.get("joint_margin"), float)
-            for stage in result["stages"]
-        )
+        assert all(isinstance(stage.get("joint_margin"), float) for stage in result["stages"])
 
 
 def test_valid_pure_ik_never_calls_collision_aware_ik():
@@ -1034,9 +1033,7 @@ def test_beam_two_propagates_parent_solutions_to_the_next_stage():
             "min_singular_value": 0.2,
         }
 
-    response = _engine(compute_ik=ik).qualify(
-        _request([_candidate(0, stages=2)])
-    )
+    response = _engine(compute_ik=ik).qualify(_request([_candidate(0, stages=2)]))
 
     assert response["selected_candidate_ids"] == ["c0"]
     assert second_stage_seeds == [[0.2], [1.0]]
@@ -1070,15 +1067,11 @@ def test_recovery_uses_six_fixed_seeds_only_at_first_chain_stage():
             "end_joint_state": {"names": ["j1"], "positions": [0.2]},
         }
 
-    response = _engine(compute_ik=ik, plan_only=plan).qualify(
-        _request([_candidate(0, stages=2)])
-    )
+    response = _engine(compute_ik=ik, plan_only=plan).qualify(_request([_candidate(0, stages=2)]))
 
     assert response["selected_candidate_ids"] == ["c0"]
     assert sum(source.startswith("fixed_recovery") for source in by_stage["stage0"]) == 6
-    assert all(
-        not source.startswith("fixed_recovery") for source in by_stage["stage1"]
-    )
+    assert all(not source.startswith("fixed_recovery") for source in by_stage["stage1"])
     # Two fast parents and two recovery parents: dependent stages never widen
     # to the six-seed recovery budget.
     assert len(by_stage["stage1"]) == 4
@@ -1160,9 +1153,7 @@ def test_l5_failure_continues_to_next_quality_ranked_candidate():
     ]
     assert all(attempt["elapsed_s"] >= 0.0 for attempt in response["l5_attempts"])
     assert all(
-        stage["elapsed_s"] >= 0.0
-        for result in response["results"]
-        for stage in result["stages"]
+        stage["elapsed_s"] >= 0.0 for result in response["results"] for stage in result["stages"]
     )
 
 
@@ -1181,9 +1172,7 @@ def test_l5_plan_only_is_constrained_to_selected_beam_joint_branch():
     response = _engine(plan_only=plan).qualify(_request([_candidate(0)]))
 
     assert goals == [{"names": ["j1"], "positions": [0.2]}]
-    assert response["results"][0]["stages"][0][
-        "selected_ik_end_joint_state_sha256"
-    ]
+    assert response["results"][0]["stages"][0]["selected_ik_end_joint_state_sha256"]
 
 
 def test_l5_failure_is_replanned_with_fixed_recovery_branch():
@@ -1209,8 +1198,7 @@ def test_l5_failure_is_replanned_with_fixed_recovery_branch():
         True,
     ]
     assert [
-        attempt["recovery_layer"]
-        for attempt in response["results"][0]["screening_attempts"]
+        attempt["recovery_layer"] for attempt in response["results"][0]["screening_attempts"]
     ] == [False, True]
     assert all(
         attempt["stages"][0]["pure_ik_attempts"]
@@ -1237,9 +1225,7 @@ def test_pick_ik_uses_global_mode_only_for_recovery_and_restores_local():
             "end_joint_state": {"names": ["j1"], "positions": [0.2]},
         }
 
-    request = _request(
-        [_candidate(0)], overrides={"solver_profile": "pick_ik_local"}
-    )
+    request = _request([_candidate(0)], overrides={"solver_profile": "pick_ik_local"})
     response = _engine(
         plan_only=plan,
         set_solver_mode=set_mode,
@@ -1249,9 +1235,7 @@ def test_pick_ik_uses_global_mode_only_for_recovery_and_restores_local():
     assert modes == ["local", "global", "local"]
     recovery_result = response["results"][0]
     assert recovery_result["recovery_layer"] is True
-    assert recovery_result["stages"][0]["pure_ik_attempts"][0]["solver"] == (
-        "pick_ik_global"
-    )
+    assert recovery_result["stages"][0]["pure_ik_attempts"][0]["solver"] == ("pick_ik_global")
 
 
 def test_recovery_seeds_start_only_after_complete_fast_pool_failure():
@@ -1263,9 +1247,7 @@ def test_recovery_seeds_start_only_after_complete_fast_pool_failure():
             sources.append(str(seed.get("seed_source") or ""))
         return {"ok": False}
 
-    response = _engine(compute_ik=ik).qualify(
-        _request([_candidate(0), _candidate(1)])
-    )
+    response = _engine(compute_ik=ik).qualify(_request([_candidate(0), _candidate(1)]))
 
     first_recovery = next(
         index for index, source in enumerate(sources) if source.startswith("fixed_recovery")
@@ -1410,13 +1392,9 @@ def test_fast_grasp_lookahead_expands_l5_capacity_without_model_rerun():
     assert len({item["id"] for item in result.details["grasp_candidates"]}) == 4
     assert result.details["ranking"] == "moveit_physical_quality"
     assert [
-        item["moveit_physical_quality_rank"]
-        for item in result.details["grasp_candidates"]
+        item["moveit_physical_quality_rank"] for item in result.details["grasp_candidates"]
     ] == [0, 1, 2, 3]
-    assert all(
-        item["moveit_l5_qualified"] is True
-        for item in result.details["grasp_candidates"]
-    )
+    assert all(item["moveit_l5_qualified"] is True for item in result.details["grasp_candidates"])
 
 
 def test_shadow_preserves_complete_fast_pool_but_legacy_uses_old_dedup_subset():
@@ -1467,9 +1445,7 @@ def test_fast_qualifier_writes_v3_artifact_and_selected_candidate(tmp_path: Path
     )
 
     assert [item["id"] for item in result.details["placement_candidates"]] == ["c0"]
-    artifact = json.loads(
-        Path(result.details["qualification_artifact"]["path"]).read_text()
-    )
+    artifact = json.loads(Path(result.details["qualification_artifact"]["path"]).read_text())
     assert artifact["schema_version"] == QUALIFICATION_SCHEMA_V3
     assert artifact["qualification_profile"] == "fast_v3"
     assert artifact["selected_candidate_ids"] == ["c0"]

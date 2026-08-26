@@ -26,6 +26,7 @@ from tools.graspgenx_core import (
     scan_gripper_descriptions,
     validate_cuda_device_name,
     validate_intrinsics,
+    validate_inference_seed,
     validate_raw_grasp_outputs,
     validate_up_direction,
 )
@@ -60,21 +61,13 @@ def _gripper_config() -> dict[str, Any]:
 
 
 def _write_gripper(root: Path, name: str, *, valid: bool = True) -> Path:
-    asset = (
-        root
-        / "gripper_descriptions"
-        / "assets"
-        / "x_grippers"
-        / name
-    )
+    asset = root / "gripper_descriptions" / "assets" / "x_grippers" / name
     asset.mkdir(parents=True)
     config = _gripper_config()
     if not valid:
         config["fingertip"] = [0.0, 0.0, -1.0]
     (asset / "config.json").write_text(json.dumps(config), encoding="utf-8")
-    (asset / "coll_mesh.obj").write_text(
-        "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8"
-    )
+    (asset / "coll_mesh.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
     return asset
 
 
@@ -97,9 +90,13 @@ def _backend_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def test_validate_intrinsics_and_up_direction_normalise_values() -> None:
-    assert validate_intrinsics(
-        {"fx": "100", "fy": 101, "cx": 2, "cy": 3, "scale": "1000"}
-    ) == {"fx": 100.0, "fy": 101.0, "cx": 2.0, "cy": 3.0, "scale": 1000.0}
+    assert validate_intrinsics({"fx": "100", "fy": 101, "cx": 2, "cy": 3, "scale": "1000"}) == {
+        "fx": 100.0,
+        "fy": 101.0,
+        "cx": 2.0,
+        "cy": 3.0,
+        "scale": 1000.0,
+    }
     np.testing.assert_allclose(validate_up_direction([0, 0, -2]), [0, 0, -1])
 
 
@@ -190,9 +187,7 @@ def test_build_point_clouds_reports_scale_and_point_count_diagnostics() -> None:
     with pytest.raises(GraspGenXInputError, match="insufficient_object_points") as raised:
         build_targeted_point_clouds(
             depth_array=np.full((11, 11), 500, dtype=np.uint16),
-            object_mask_array=np.pad(
-                np.full((9, 11), 255, dtype=np.uint8), ((0, 2), (0, 0))
-            ),
+            object_mask_array=np.pad(np.full((9, 11), 255, dtype=np.uint8), ((0, 2), (0, 0))),
             intrinsics=_intrinsics(),
         )
     assert raised.value.metadata["object_point_count"] == 99
@@ -282,9 +277,7 @@ def test_normalise_candidates_builds_dual_pose_and_real_tip() -> None:
         [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
     )
     np.testing.assert_allclose(candidate["gripper_tip_position_xyz"], [0.21, 0.32, 0.5])
-    np.testing.assert_allclose(
-        candidate["model_native_grasp_pose"]["transform_matrix"], native[0]
-    )
+    np.testing.assert_allclose(candidate["model_native_grasp_pose"]["transform_matrix"], native[0])
     assert candidate["depth"] == 0.1
     assert candidate["width"] == 0.08
     assert candidate["height"] == 0.02
@@ -309,9 +302,7 @@ def test_scan_grippers_rejects_unmaterialized_lfs_collision_mesh(
 ) -> None:
     asset = _write_gripper(tmp_path, "lfs_pointer")
     (asset / "coll_mesh.obj").write_text(
-        "version https://git-lfs.github.com/spec/v1\n"
-        "oid sha256:deadbeef\n"
-        "size 1234\n",
+        "version https://git-lfs.github.com/spec/v1\noid sha256:deadbeef\nsize 1234\n",
         encoding="utf-8",
     )
 
@@ -324,6 +315,14 @@ def test_validate_cuda_device_name_rejects_cpu_fallback() -> None:
     assert validate_cuda_device_name("cuda:2") == "cuda:2"
     with pytest.raises(ValueError, match="cuda"):
         validate_cuda_device_name("cpu")
+
+
+def test_validate_inference_seed_rejects_implicit_or_unbounded_values() -> None:
+    assert validate_inference_seed(0) == 0
+    assert validate_inference_seed(123) == 123
+    for value in (True, -1, 2**31, "0"):
+        with pytest.raises(ValueError, match="inference_seed"):
+            validate_inference_seed(value)
 
 
 def test_backend_is_lazy_and_list_grippers_does_not_load_model(tmp_path: Path) -> None:
@@ -376,12 +375,8 @@ def test_offline_paths_are_set_before_official_import(
     fake_server.GraspGenXSampler = object  # type: ignore[attr-defined]
 
     def load_model(_config: Any) -> object:
-        observed_environment["checkpoints"] = os.environ.get(
-            "GRASPGENX_CHECKPOINT_DIR"
-        )
-        observed_environment["grippers"] = os.environ.get(
-            "GRASPGENX_GRIPPER_CFG_DIR"
-        )
+        observed_environment["checkpoints"] = os.environ.get("GRASPGENX_CHECKPOINT_DIR")
+        observed_environment["grippers"] = os.environ.get("GRASPGENX_GRIPPER_CFG_DIR")
         return object()
 
     fake_server.load_grasp_gen_model = load_model  # type: ignore[attr-defined]
@@ -428,9 +423,7 @@ def test_run_planner_uses_fixed_graspmoe_configuration(tmp_path: Path) -> None:
         def device(_index: int):
             return contextlib.nullcontext()
 
-    fake_torch = SimpleNamespace(
-        cuda=FakeCuda(), inference_mode=lambda: contextlib.nullcontext()
-    )
+    fake_torch = SimpleNamespace(cuda=FakeCuda(), inference_mode=lambda: contextlib.nullcontext())
 
     def run_planner(points: np.ndarray, sampler: object, **kwargs: Any):
         captured["points"] = points
@@ -466,9 +459,7 @@ class _FakeBackend(GraspGenXBackend):
             "discriminator_checkpoint_sha256": "c" * 64,
         }
 
-    def _get_sampler_entry(
-        self, _loaded: dict[str, Any], _gripper_name: str
-    ) -> dict[str, Any]:
+    def _get_sampler_entry(self, _loaded: dict[str, Any], _gripper_name: str) -> dict[str, Any]:
         return {"collision_surface_points": np.zeros((2000, 3), dtype=np.float32)}
 
     def _run_planner(self, **_kwargs: Any) -> tuple[Any, Any, Any]:
@@ -516,13 +507,24 @@ def test_backend_returns_ranked_contract_without_transport_payloads(
 def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
     tmp_path: Path,
 ) -> None:
+    class SeedRecordingTorch:
+        def __init__(self) -> None:
+            self.seeds: list[int] = []
+
+        def manual_seed(self, seed: int) -> None:
+            self.seeds.append(seed)
+
     class MultiDrawBackend(_FakeBackend):
         calls = 0
         planners: list[str] = []
 
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.fake_torch = SeedRecordingTorch()
+
         def _get_loaded_backend(self) -> dict[str, Any]:
             loaded = super()._get_loaded_backend()
-            loaded["torch"] = object()
+            loaded["torch"] = self.fake_torch
             return loaded
 
         def _run_planner(self, **kwargs: Any) -> tuple[Any, Any, Any]:
@@ -550,18 +552,18 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
     )
 
     assert result["success"] is True
+    assert result["details"]["deterministic"] is True
     assert backend.calls == MODEL_INFERENCE_DRAWS
+    assert backend.fake_torch.seeds == list(range(MODEL_INFERENCE_DRAWS))
     assert backend.planners == ["graspmoe", "diffusion", "diffusion", "diffusion"]
     assert result["details"]["model_raw_candidate_count"] == 9
-    assert result["details"]["metadata"]["model_inference_draw_count"] == (
-        MODEL_INFERENCE_DRAWS
+    assert result["details"]["metadata"]["model_inference_draw_count"] == (MODEL_INFERENCE_DRAWS)
+    assert result["details"]["metadata"]["model_inference_draw_seeds"] == list(
+        range(MODEL_INFERENCE_DRAWS)
     )
     assert result["details"]["metadata"]["graspmoe_draw_count"] == 1
     assert result["details"]["metadata"]["diffusion_only_draw_count"] == 3
-    assert (
-        result["details"]["metadata"]["deterministic_obb_reuse_policy"]
-        == "single_full_draw"
-    )
+    assert result["details"]["metadata"]["deterministic_obb_reuse_policy"] == "single_full_draw"
     assert result["details"]["metadata"]["obb_candidate_count"] == 1
     # Repeated identical candidates remain one formal SE(3) mode per pose.
     assert result["details"]["candidate_count"] == 3
@@ -591,9 +593,7 @@ def test_collision_selection_checks_source_balanced_ranked_batches(
 
     selected, metadata = backend._select_collision_free(
         loaded={"filter_collisions": filter_collisions},
-        sampler_entry={
-            "collision_surface_points": np.zeros((2000, 3), dtype=np.float32)
-        },
+        sampler_entry={"collision_surface_points": np.zeros((2000, 3), dtype=np.float32)},
         scene_points=np.ones((10, 3), dtype=np.float32),
         camera_native_grasps=poses,
         scores=scores,
@@ -622,9 +622,7 @@ def test_collision_selection_reports_all_grasps_colliding(tmp_path: Path) -> Non
                     len(kwargs["grasp_poses"]), dtype=bool
                 )
             },
-            sampler_entry={
-                "collision_surface_points": np.zeros((2000, 3), dtype=np.float32)
-            },
+            sampler_entry={"collision_surface_points": np.zeros((2000, 3), dtype=np.float32)},
             scene_points=np.ones((10, 3), dtype=np.float32),
             camera_native_grasps=np.tile(np.eye(4), (3, 1, 1)),
             scores=np.array([0.9, 0.8, 0.7]),
@@ -657,10 +655,7 @@ def test_no_scene_selection_seeds_both_model_sources(tmp_path: Path) -> None:
     )
 
     assert {tags[index] for index in selected} == {"obb", "diff"}
-    assert (
-        metadata["candidate_selection"]
-        == "source_aware_se3_mmr_with_minimum_se3_separation"
-    )
+    assert metadata["candidate_selection"] == "source_aware_se3_mmr_with_minimum_se3_separation"
 
 
 def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
@@ -677,13 +672,9 @@ def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
 
     selected, metadata = backend._select_collision_free(
         loaded={
-            "filter_collisions": lambda **kwargs: np.ones(
-                len(kwargs["grasp_poses"]), dtype=bool
-            )
+            "filter_collisions": lambda **kwargs: np.ones(len(kwargs["grasp_poses"]), dtype=bool)
         },
-        sampler_entry={
-            "collision_surface_points": np.zeros((2000, 3), dtype=np.float32)
-        },
+        sampler_entry={"collision_surface_points": np.zeros((2000, 3), dtype=np.float32)},
         scene_points=np.ones((10, 3), dtype=np.float32),
         camera_native_grasps=poses,
         scores=np.array([0.99, 0.98, 0.97, 0.7, 0.6, 0.5]),
@@ -704,22 +695,14 @@ def test_formal_selection_retains_same_approach_with_distinct_wrist_rotation(
         gripper_descriptions_root=grippers,
     )
     poses = np.tile(np.eye(4), (3, 1, 1))
-    poses[1, :3, :3] = np.array(
-        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
-    )
-    poses[2, :3, :3] = np.array(
-        [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]
-    )
+    poses[1, :3, :3] = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    poses[2, :3, :3] = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
 
     selected, metadata = backend._select_collision_free(
         loaded={
-            "filter_collisions": lambda **kwargs: np.ones(
-                len(kwargs["grasp_poses"]), dtype=bool
-            )
+            "filter_collisions": lambda **kwargs: np.ones(len(kwargs["grasp_poses"]), dtype=bool)
         },
-        sampler_entry={
-            "collision_surface_points": np.zeros((2000, 3), dtype=np.float32)
-        },
+        sampler_entry={"collision_surface_points": np.zeros((2000, 3), dtype=np.float32)},
         scene_points=np.ones((10, 3), dtype=np.float32),
         camera_native_grasps=poses,
         scores=np.array([0.99, 0.98, 0.7]),
@@ -739,9 +722,7 @@ def test_no_scene_selection_retains_lower_scored_side_approaches(tmp_path: Path)
         gripper_descriptions_root=grippers,
     )
     poses = np.tile(np.eye(4), (20, 1, 1))
-    poses[10:, :3, :3] = np.array(
-        [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]]
-    )
+    poses[10:, :3, :3] = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]])
     scores = np.arange(20.0, 0.0, -1.0)
 
     selected, _metadata = backend._select_collision_free(

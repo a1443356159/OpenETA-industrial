@@ -69,53 +69,36 @@ EXECUTION_PROFILE_SCOPES = {
 }
 
 
-INSTRUCTIONS = f"""
-[automation=scripted_tui; planner_mode=agentic_closed_loop; environment_id={ENV_ID}; environment_task=normal_pick_and_place; grasp_target=red_rectangular_block; placement_object=red_rectangular_block; placement_region=green_placement_zone_marker] 在隔离 Gazebo RM75/Robotiq 环境完成一次 normal 拾放。
-创建环境后只做一次显式 observe；create 返回的 initial observation 不计作这次显式 observe。
-用固定语义 `red rectangular block` 选择目标，
-用 `green placement zone marker` 选择放置区。主 VLM 必须在每个闭环回合显式选择
-下一合法工具或终止响应；宿主 obligation 只约束工具、精确参数、几何与安全门，不能
-代替 Planner 串行派发整条任务。SAM3 有多个候选时由主 VLM 检查候选图，但
-不得固定 detection id、使用 Oracle 或假候选，也不得调用 python_exec 或具体抓取后端。
-目标 mask 必须覆盖完整目标轮廓且不粘连邻物；放置区 mask 必须对应完整绿色标记区。
-红色方块对应场景中的 target_object；物体与放置区必须各自使用独立 placement RGB-D 证据包。
+AGENTIC_CONTROL = """
+你是 OpenETA 闭环 Planner。每回合只选择下一个合法工具或结束；宿主负责精确参数、
+坐标变换、候选漏斗和安全证明，不替你做语义决策。SAM3 多候选时检查候选图；
+不得固定 detection id、使用 Oracle/假候选或指定具体抓取后端；不得调用 python_exec。
+""".strip()
 
-在抓取前按宿主 obligation 调用一次 AnyPlace，保留全部 96 个模型 object goals。
-随后只按 unified grasp_pose_estimate obligation 调用配置的抓取 provider。Provider
-输出的位姿就是精确 EEF contact 终点；宿主只能做标定坐标系/TCP表示变换，禁止
-centering、镜像、180度变体、reverse、pregrasp、hover、precontact、approach offset
-和 fixed lift。MoveIt 从当前状态一次规划到精确 contact，闭合后必须由双垫 native
-target contact 与 attach ACK 直接证明抓取。
+SMOKE_CONTROL = """
+本 smoke_normal 只验证无 VLM 控制链：宿主逐步派发确定性 obligation，禁止调用 Planner/VLM。
+SAM3 必须返回唯一合法候选；有语义歧义时立即阻断。
+""".strip()
 
-漏斗先对全部模型候选做一次廉价合法性广度检查并缓存。昂贵链路使用 Best-first 小波次
-深度贯通：抓取按每批 4 个增量展开；放置对两个抓取分支交错按每分支
-`4 → 8 → 16 → 32 → 剩余` 展开。候选进入当前波次后才连续执行配对合法性、
-Beam-2 链式 IK、MoveIt 状态有效性和 L5 plan-only；波次 barrier 后按固定编号归并。
-得到主方案和不同 SE(3)/物理族的备用抓取后立即进入执行，不为凑满第三或第四分支
-进入全池或恢复层。若首批抓取经联合配对后不足两个来源，宿主漏斗在同一次工具调用内
-从 frozen_frontier 取下一最小波，只补资格检查，不增加 TUI/VLM 回合且不重跑模型。
-若当前物理方案失败，先切换已通过备用；备用耗尽后再由 Planner 显式请求
-`model_inference=false` 的 frozen_frontier 继续未访问尾部。不得重跑 SAM3、抓取模型或
-AnyPlace；冻结池与恢复预算真正耗尽时才显式失败。
+TASK_INSTRUCTIONS = """
+在隔离 Gazebo RM75/Robotiq 环境完成 normal 拾放。创建后显式 observe 一次（create 的
+initial observation 不计）。用 `red rectangular block` 选目标，用
+`green placement zone marker` 选放置区；mask 必须完整且不粘连。红色方块是
+target_object，物体与放置区使用各自的 RGB-D 证据。
 
-attach 后宿主直接复用冻结目标池，以实测 T_eef_object 和当前 PlanningScene revision
-重新计算 exact release EEF，并通过 inference=false 的内部 AnyPlace 资格波次调用。
-若物理 transport 已知失败但 attach、终态和场景版本仍有完整证明，排除该目标并从
-冻结前沿继续下一波；不得重复相同 request fingerprint，也不得重新运行 AnyPlace 模型。
-不得重新分割物体/放置区。MoveIt 一次规划当前 attached 状态到 exact release；每个
-transport receipt 必须验证 attached ACK 和相对漂移 <=10 mm。到达后原地开爪；禁止
-carry lift、placement hover、descend offset、release clearance、adaptive near-target
-acceptance 和 post-release retreat。
+只运行一次 AnyPlace 和一次 unified grasp_pose_estimate，冻结全部模型候选。模型抓取
+位姿是 exact EEF contact，放置目标经实测 T_eef_object 转为 exact release；除标定/
+TCP 表示变换外不得修改。禁止 pregrasp、hover、lift、approach/descend offset、镜像或
+人工位姿变体。MoveIt 自当前状态直接规划到 contact/release。
 
-成功必须包含 detach ACK、稳定落区 PASS（最终窗口 >=0.5 s、漂移 <=5 mm、中心高度
-0.43±0.01 m、完整 footprint 在标记区）以及唯一一次 close_simulator_env。
-60 秒是性能目标而非硬截止；基础设施错误不得记为不可达，也不得重复失败 fingerprint。
-""".strip() + "\n"
+闭爪后要有双垫 target contact 与 attach ACK；transport 要有 attached ACK 且相对漂移
+<=10 mm；到 release 后原地开爪。成功需 detach ACK、稳定落区 PASS 与唯一一次
+close_simulator_env。
 
-GRASPGENX_INSTRUCTIONS = INSTRUCTIONS.replace(
-    "配置的抓取 provider",
-    "GraspGenX provider（gripper_name=robotiq_2f_85）",
-)
+候选或物理执行失败时，先用已通过备用，再以 `model_inference=false` 从
+frozen_frontier 继续；不重跑 SAM3/抓取模型/AnyPlace。只有场景确已改变或冻结池耗尽，
+才重新观察或推理。基础设施错误不得记为不可达。
+""".strip()
 
 
 SCENARIO_INSTRUCTIONS = {
@@ -158,40 +141,25 @@ def _instructions_for_backend(
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
     qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
 ) -> str:
-    instructions = (
-        GRASPGENX_INSTRUCTIONS
-        if _validated_grasp_backend(grasp_backend) == "graspgenx"
-        else INSTRUCTIONS
-    )
+    backend = _validated_grasp_backend(grasp_backend)
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
-    instructions = instructions.replace(
-        "] 在隔离 Gazebo",
-        f"; qualification_profile={funnel_profile}] 在隔离 Gazebo",
-        1,
+    planner_mode = EXECUTION_PROFILE_PLANNER_MODES[profile]
+    metadata = (
+        f"[automation=scripted_tui; planner_mode={planner_mode}; "
+        f"execution_profile={profile}; qualification_profile={funnel_profile}; "
+        f"environment_id={ENV_ID}; environment_task=normal_pick_and_place; "
+        "grasp_target=red_rectangular_block; "
+        "placement_object=red_rectangular_block; "
+        "placement_region=green_placement_zone_marker]"
     )
-    if profile != "smoke_normal":
-        return instructions
-    instructions = instructions.replace(
-        "planner_mode=agentic_closed_loop;",
-        "planner_mode=host_macro; execution_profile=smoke_normal;",
-        1,
+    control = AGENTIC_CONTROL if profile == "agentic_normal" else SMOKE_CONTROL
+    provider = (
+        "宿主已配置 GraspGenX（gripper_name=robotiq_2f_85）。"
+        if backend == "graspgenx"
+        else "宿主已配置 AnyGrasp。"
     )
-    instructions = instructions.replace(
-        "用 `green placement zone marker` 选择放置区。主 VLM 必须在每个闭环回合显式选择\n"
-        "下一合法工具或终止响应；宿主 obligation 只约束工具、精确参数、几何与安全门，不能\n"
-        "代替 Planner 串行派发整条任务。SAM3 有多个候选时由主 VLM 检查候选图，但\n",
-        "用 `green placement zone marker` 选择放置区。本 smoke_normal 只验证无 VLM 控制链：\n"
-        "所有确定性 obligation 由宿主逐步派发，禁止调用 Planner/VLM。SAM3 必须返回无需\n"
-        "语义复核的唯一合法候选；若出现多候选歧义，立即阻断而不是调用 VLM。\n",
-        1,
-    )
-    instructions = instructions.replace(
-        "再由 Planner 显式\n请求 `model_inference=false` 的 frozen_frontier 扩展",
-        "再由宿主从冻结前沿\n请求 `model_inference=false` 的 frozen_frontier 扩展",
-        1,
-    )
-    return instructions
+    return f"{metadata}\n{control}\n\n{provider}\n{TASK_INSTRUCTIONS}\n"
 
 
 def _required_tools_for_backend(grasp_backend: str) -> tuple[str, ...]:
@@ -250,8 +218,7 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                 and (
                     name == "openeta-sam3"
                     or (
-                        payload.get("raw_pool_size")
-                        == (96 if name == "openeta-anyplace" else 200)
+                        payload.get("raw_pool_size") == (96 if name == "openeta-anyplace" else 200)
                         and isinstance(payload.get("returned_candidate_count"), int)
                         and payload.get("returned_candidate_count") >= 0
                     )
@@ -261,7 +228,9 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                 "status": "passed" if ok else "failed",
                 "url": url,
                 "server": payload.get("server") if isinstance(payload, Mapping) else None,
-                "model_loaded": payload.get("model_loaded") if isinstance(payload, Mapping) else None,
+                "model_loaded": payload.get("model_loaded")
+                if isinstance(payload, Mapping)
+                else None,
                 "tools": payload.get("tools") if isinstance(payload, Mapping) else None,
                 "returned_candidate_count": (
                     payload.get("returned_candidate_count")
@@ -269,9 +238,7 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
                     else None
                 ),
                 "raw_pool_size": (
-                    payload.get("raw_pool_size")
-                    if isinstance(payload, Mapping)
-                    else None
+                    payload.get("raw_pool_size") if isinstance(payload, Mapping) else None
                 ),
             }
         except Exception as exc:  # noqa: BLE001 - bounded preflight evidence.
@@ -315,8 +282,7 @@ def gazebo_runtime_preflight(repo: Path) -> dict[str, Any]:
     """
 
     expected_overlay = Path(
-        os.environ.get("OPENETA_GAZEBO_OVERLAY")
-        or repo / "extensions/gazebo/ros2_ws/install"
+        os.environ.get("OPENETA_GAZEBO_OVERLAY") or repo / "extensions/gazebo/ros2_ws/install"
     ).resolve()
     errors: list[str] = []
     import_error = _ros_python_import_error()
@@ -330,23 +296,16 @@ def gazebo_runtime_preflight(repo: Path) -> dict[str, Any]:
         package_error = f"{type(exc).__name__}: {exc}"[:500]
         errors.append("OPENETA_GAZEBO_OVERLAY_PACKAGE_UNAVAILABLE")
     else:
-        if (
-            actual_prefix != expected_overlay
-            and expected_overlay not in actual_prefix.parents
-        ):
+        if actual_prefix != expected_overlay and expected_overlay not in actual_prefix.parents:
             errors.append("OPENETA_GAZEBO_OVERLAY_PACKAGE_MISMATCH")
-    missing_commands = [
-        name for name in ("ros2", "gz") if shutil.which(name) is None
-    ]
+    missing_commands = [name for name in ("ros2", "gz") if shutil.which(name) is None]
     if missing_commands:
         errors.append("OPENETA_GAZEBO_COMMAND_UNAVAILABLE")
     return {
         "schema_version": "openeta.gazebo_runtime_preflight.v1",
         "status": "passed" if not errors else "blocked",
         "reason_codes": errors,
-        "canonical_runner": str(
-            (repo / "scripts/run_pick_place_acceptance.sh").resolve()
-        ),
+        "canonical_runner": str((repo / "scripts/run_pick_place_acceptance.sh").resolve()),
         "expected_overlay": str(expected_overlay),
         "declared_overlay": os.environ.get("OPENETA_GAZEBO_OVERLAY", ""),
         "package": GAZEBO_SIM_PACKAGE,
@@ -378,8 +337,7 @@ def prepare_case(
     required_grasp_service = GRASP_SERVICE_NAMES[backend]
     if configured_grasp_services != {required_grasp_service}:
         raise ValueError(
-            "strict acceptance requires exactly one grasp service: "
-            f"{required_grasp_service}"
+            f"strict acceptance requires exactly one grasp service: {required_grasp_service}"
         )
     paths = base.case_paths(run_root, MILESTONE, MODE)
     paths.root.mkdir(parents=True, exist_ok=False)
@@ -480,13 +438,7 @@ def _repeated_failed_motion_fingerprints(
         if not base._contains(event, "execution_started", False):
             continue
         failed.extend(
-            sorted(
-                {
-                    str(value)
-                    for value in base._values(event, "request_fingerprint")
-                    if value
-                }
-            )
+            sorted({str(value) for value in base._values(event, "request_fingerprint") if value})
         )
     counts = {fingerprint: failed.count(fingerprint) for fingerprint in set(failed)}
     return {fingerprint for fingerprint, count in counts.items() if count > 1}
@@ -520,9 +472,7 @@ def _planner_evidence(
             continue
         metadata = command.get("metadata")
         planner_metadata = (
-            metadata.get("planner_metadata")
-            if isinstance(metadata, Mapping)
-            else None
+            metadata.get("planner_metadata") if isinstance(metadata, Mapping) else None
         )
         if not isinstance(planner_metadata, Mapping):
             missing_or_unknown_actions += 1
@@ -585,9 +535,7 @@ def _planner_evidence(
             token_usage_sources = {
                 str(key): int(value)
                 for key, value in sources.items()
-                if isinstance(value, int)
-                and not isinstance(value, bool)
-                and value >= 0
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0
             }
     return {
         "planner_mode": expected_planner_mode,
@@ -709,16 +657,12 @@ def _qualification_blocks(
                     payload = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     continue
-                if isinstance(payload, Mapping) and isinstance(
-                    payload.get("results"), list
-                ):
+                if isinstance(payload, Mapping) and isinstance(payload.get("results"), list):
                     blocks.append(payload)
     return blocks
 
 
-def _has_v3_grasp_diversity_evidence(
-    call: Mapping[str, Any], *, artifact_root: Path
-) -> bool:
+def _has_v3_grasp_diversity_evidence(call: Mapping[str, Any], *, artifact_root: Path) -> bool:
     """Accept the deterministic two-branch best-first grasp result."""
 
     reported_counts = {
@@ -729,8 +673,7 @@ def _has_v3_grasp_diversity_evidence(
     for block in _qualification_blocks(call, artifact_root=artifact_root):
         if (
             block.get("schema_version") != "openeta.moveit_candidate_funnel.v3"
-            or block.get("artifact_schema_version")
-            != "openeta.moveit_candidate_qualification.v3"
+            or block.get("artifact_schema_version") != "openeta.moveit_candidate_qualification.v3"
             or block.get("purpose") != "grasp"
             or block.get("stop_reason")
             not in {
@@ -802,17 +745,13 @@ def _has_v3_grasp_diversity_evidence(
             and isinstance(row.get("se3_cluster_id"), str)
             and row.get("se3_cluster_id")
         }
-        if not qualified_clusters or len(selected_clusters) < min(
-            2, len(qualified_clusters)
-        ):
+        if not qualified_clusters or len(selected_clusters) < min(2, len(qualified_clusters)):
             continue
         return True
     return False
 
 
-def _has_bounded_grasp_l5_evidence(
-    call: Mapping[str, Any], *, artifact_root: Path
-) -> bool:
+def _has_bounded_grasp_l5_evidence(call: Mapping[str, Any], *, artifact_root: Path) -> bool:
     """Accept the legacy submit cap or the v3 two-branch proof."""
 
     legacy_bound = any(
@@ -820,9 +759,7 @@ def _has_bounded_grasp_l5_evidence(
         for value in base._values(call, "full_plan_submitted_count")
         if isinstance(value, int) and not isinstance(value, bool)
     )
-    return legacy_bound or _has_v3_grasp_diversity_evidence(
-        call, artifact_root=artifact_root
-    )
+    return legacy_bound or _has_v3_grasp_diversity_evidence(call, artifact_root=artifact_root)
 
 
 def verify_case(
@@ -860,9 +797,7 @@ def verify_case(
                 errors.append(f"required real pick-place tool call missing: {required}")
         if names.count("sam3") < 2:
             errors.append("target-object and placement-region SAM3 calls are required")
-        grasp_indices = [
-            index for index, name in enumerate(names) if name == backend
-        ]
+        grasp_indices = [index for index, name in enumerate(names) if name == backend]
         sam_indices = [index for index, name in enumerate(names) if name == "sam3"]
         if grasp_indices and sam_indices and max(sam_indices) > min(grasp_indices):
             errors.append("SAM3 was rerun after the cached grasp/placement funnel started")
@@ -915,20 +850,15 @@ def verify_case(
             errors.append("host grasp candidate compilation evidence missing")
         grasp_calls = [call for call in calls if _name(call) == backend]
         provider_inference_calls = [
-            call
-            for call in grasp_calls
-            if _parameters(call).get("mode") != "frozen_frontier"
+            call for call in grasp_calls if _parameters(call).get("mode") != "frozen_frontier"
         ]
         if len(provider_inference_calls) != 1:
-            errors.append(
-                f"normal requires exactly one {backend_label} model inference"
-            )
+            errors.append(f"normal requires exactly one {backend_label} model inference")
         for call in grasp_calls:
             if _parameters(call).get("mode") != "frozen_frontier":
                 continue
-            if (
-                _parameters(call).get("model_inference") is not False
-                or not base._contains(call, "model_inference_invoked", False)
+            if _parameters(call).get("model_inference") is not False or not base._contains(
+                call, "model_inference_invoked", False
             ):
                 errors.append(
                     "frozen grasp frontier expansion did not prove model-inference bypass"
@@ -937,8 +867,7 @@ def verify_case(
             int(value)
             for grasp_call in grasp_calls
             for value in base._values(grasp_call, "raw_candidate_count")
-            if isinstance(value, int)
-            and not isinstance(value, bool)
+            if isinstance(value, int) and not isinstance(value, bool)
         ]
         if not raw_grasp_counts or max(raw_grasp_counts) < 10:
             errors.append(f"{backend_label} raw candidate count evidence is missing")
@@ -949,17 +878,13 @@ def verify_case(
             if isinstance(value, int) and not isinstance(value, bool)
         )
         has_v3_diversity = any(
-            _has_v3_grasp_diversity_evidence(
-                grasp_call, artifact_root=paths.root
-            )
+            _has_v3_grasp_diversity_evidence(grasp_call, artifact_root=paths.root)
             for grasp_call in grasp_calls
         )
         if not has_legacy_diversity_pool and not has_v3_diversity:
             errors.append(f"{backend_label} diversity pool evidence is missing")
         if not any(
-            _has_bounded_grasp_l5_evidence(
-                grasp_call, artifact_root=paths.root
-            )
+            _has_bounded_grasp_l5_evidence(grasp_call, artifact_root=paths.root)
             for grasp_call in grasp_calls
         ):
             errors.append(f"{backend_label} L5 diversity evidence is missing")
@@ -973,8 +898,7 @@ def verify_case(
                 "frozen-pool requalification"
             )
         qualification_outputs = [
-            _call_outputs(call)
-            for call in [*grasp_calls, *anyplace_calls[1:]]
+            _call_outputs(call) for call in [*grasp_calls, *anyplace_calls[1:]]
         ]
         observed_profiles = {
             str(outputs.get("qualification_profile") or "")
@@ -986,12 +910,8 @@ def verify_case(
                 "qualification profile evidence mismatch: expected "
                 f"{funnel_profile}, observed {sorted(observed_profiles)}"
             )
-        for requalification_index, requalification in enumerate(
-            anyplace_calls[1:], start=1
-        ):
-            if not base._contains(
-                requalification, "anyplace_model_inference_invoked", False
-            ):
+        for requalification_index, requalification in enumerate(anyplace_calls[1:], start=1):
+            if not base._contains(requalification, "anyplace_model_inference_invoked", False):
                 errors.append(
                     "post-attach AnyPlace requalification "
                     f"{requalification_index} did not prove frozen-pool inference bypass"
@@ -1005,12 +925,11 @@ def verify_case(
             errors.append("AnyPlace model raw pool evidence is missing")
         candidate_count = anyplace_outputs.get("candidate_count")
         full_plan_pass_count = anyplace_outputs.get("full_plan_pass_count")
-        candidate_count_valid = (
-            isinstance(candidate_count, int) and not isinstance(candidate_count, bool)
+        candidate_count_valid = isinstance(candidate_count, int) and not isinstance(
+            candidate_count, bool
         )
-        full_plan_pass_count_valid = (
-            isinstance(full_plan_pass_count, int)
-            and not isinstance(full_plan_pass_count, bool)
+        full_plan_pass_count_valid = isinstance(full_plan_pass_count, int) and not isinstance(
+            full_plan_pass_count, bool
         )
         if not candidate_count_valid or candidate_count < 1:
             errors.append("final AnyPlace result stored no MoveIt PASS candidate")
@@ -1079,9 +998,7 @@ def verify_case(
             base._contains(payload, "reason_code", "NATIVE_GRASP_TARGET_HELD")
             and any(
                 float(value) <= 0.01
-                for value in base._values(
-                    payload, "capture_relative_translation_m"
-                )
+                for value in base._values(payload, "capture_relative_translation_m")
                 if isinstance(value, (int, float))
             )
             for payload in payloads
@@ -1099,11 +1016,9 @@ def verify_case(
             "carry_hover",
         }
         if any(
-            str(value) in forbidden_pose_stages
-            for value in base._values(calls, "grasp_stage")
+            str(value) in forbidden_pose_stages for value in base._values(calls, "grasp_stage")
         ) or any(
-            str(value) in forbidden_pose_stages
-            for value in base._values(calls, "placement_stage")
+            str(value) in forbidden_pose_stages for value in base._values(calls, "placement_stage")
         ):
             errors.append("artificial grasp/place waypoint stage was executed")
         if not any(base._contains(payload, "state", "detached") for payload in payloads):
@@ -1122,7 +1037,9 @@ def verify_case(
             for value in placements
         ):
             errors.append("stable in-zone placement verification missing")
-        fingerprints = [str(value) for value in base._values(events, "request_fingerprint") if value]
+        fingerprints = [
+            str(value) for value in base._values(events, "request_fingerprint") if value
+        ]
         if _repeated_failed_motion_fingerprints(calls):
             errors.append("a failed motion request fingerprint was repeated")
         placement_failures = [
@@ -1138,9 +1055,7 @@ def verify_case(
         frozen_pair_qualification_blocks = [
             block
             for grasp_call in grasp_calls
-            for block in _qualification_blocks(
-                grasp_call, artifact_root=paths.root
-            )
+            for block in _qualification_blocks(grasp_call, artifact_root=paths.root)
             if block.get("purpose") == "placement"
         ]
         qualification_results = [
@@ -1248,12 +1163,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.execution_profile == "smoke_normal" and args.scenario != "normal":
-        raise base.AcceptanceError(
-            "--execution-profile smoke_normal requires --scenario normal"
-        )
+        raise base.AcceptanceError("--execution-profile smoke_normal requires --scenario normal")
     repo = Path(__file__).resolve().parents[1]
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    run_root = Path(args.run_root).resolve() if args.run_root else repo / ".cache/reports" / f"pick-place-gazebo-{stamp}"
+    run_root = (
+        Path(args.run_root).resolve()
+        if args.run_root
+        else repo / ".cache/reports" / f"pick-place-gazebo-{stamp}"
+    )
     paths = base.case_paths(run_root, MILESTONE, MODE)
     if args.verify_only:
         report = verify_case(
@@ -1319,9 +1236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
         extra_environment={
             "OPENETA_EPISODE_MAX_TOTAL_TOKENS": (
-                "1"
-                if args.execution_profile == "smoke_normal"
-                else "10000000"
+                "1" if args.execution_profile == "smoke_normal" else "10000000"
             ),
             "OPENETA_GRASP_BACKEND": args.grasp_backend,
             "OPENETA_QUALIFICATION_PROFILE": args.qualification_profile,
