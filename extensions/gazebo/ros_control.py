@@ -108,8 +108,16 @@ def _qualification_robot_model_sha256(config: GazeboControlConfig) -> str:
 
     from agent.runtime.capability_map import robot_model_hash
 
-    _, srdf = _qualification_model_paths(config)
-    urdf_bytes = _expanded_qualification_urdf(config)
+    urdf, srdf = _qualification_model_paths(config)
+    # The offline generator hashes the versioned model input supplied on its
+    # command line. Hash that same URDF/Xacro source here: expanded XML must
+    # not give an identical robot a different capability-map identity merely
+    # because the optional xacro module is available. FK/Jacobian evaluation
+    # still uses the expanded document above.
+    try:
+        urdf_bytes = urdf.read_bytes()
+    except OSError:
+        urdf_bytes = b"<missing-urdf>"
     try:
         srdf_bytes = srdf.read_bytes()
     except OSError:
