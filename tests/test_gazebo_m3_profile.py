@@ -115,6 +115,18 @@ def test_m3_complex_acceptance_scenes_share_one_versioned_geometry_contract(
     assert config.acceptance_scene_evidence()["contract_sha256"] == contract["contract_sha256"]
 
 
+def test_m3_narrow_pick_corridor_is_constrained_without_excluding_the_full_gripper() -> None:
+    contract = load_acceptance_scene_contract("narrow-pick")
+    left, right = contract["static_obstacles"]
+    center_separation = abs(left["pose_xyz"][1] - right["pose_xyz"][1])
+    inner_gap = center_separation - (left["size_xyz"][1] + right["size_xyz"][1]) / 2.0
+
+    # Robotiq's full outer body needs substantially more room than its 85 mm
+    # finger opening.  A 164 mm corridor still rejects oblique approaches but
+    # preserves the model's physically useful side-contact family.
+    assert 0.16 <= inner_gap <= 0.17
+
+
 @pytest.mark.parametrize(
     ("scene_id", "obstacle_ids"),
     [
