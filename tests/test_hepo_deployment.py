@@ -33,6 +33,8 @@ def test_hepo_container_keeps_model_services_in_separate_venvs() -> None:
     assert "COPY checkpoint" not in dockerfile
     assert "unset PIP_CONSTRAINT" in dockerfile
     assert "pip==25.2" in dockerfile
+    assert "from graspgenx.grasp_server import" in dockerfile
+    assert "from anyplace.model.transformer.policy import" in dockerfile
 
 
 def test_hepo_slurm_job_leaves_cluster_resources_to_submit_wrapper() -> None:
