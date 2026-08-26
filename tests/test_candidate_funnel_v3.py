@@ -16,6 +16,11 @@ from agent.runtime.moveit_qualification import (
     SAME_RUN_QUALIFICATION_SEED_PROVENANCE,
     SAME_RUN_QUALIFICATION_SEED_SCHEMA,
 )
+from agent.runtime.qualification_legality import (
+    bind_qualified_placement_goal,
+    evaluate_grasp_placement_pair_legality,
+    evaluate_placement_goal_legality,
+)
 from agent.runtime.qualification_v3 import schedule_candidate_waves
 from agent.tools.registry import ToolResult
 
@@ -634,6 +639,103 @@ def test_support_contact_uncertainty_is_separate_from_static_collision_tolerance
         == "sensor_and_model_support_contact_uncertainty"
     )
     assert response["results"][1]["reason"] == "goal_support_surface_penetration"
+
+
+def test_partial_pointcloud_goal_is_bound_to_exact_physical_support_before_pair_ik():
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, -0.1, 0.443],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "object_motion_world_transform": {
+                "frame": "world",
+                "transform_matrix": [
+                    [1.0, 0.0, 0.0, 0.2],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, -0.0115],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+            },
+            "frozen_contact_pose": {
+                "frame": "world",
+                "xyz": [0.3, 0.0, 0.5],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "initial_scene_transition": "virtual_attach",
+            "initial_scene_transition_pose": {
+                "frame": "world",
+                "xyz": [0.3, 0.0, 0.5],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "predicted_attachment_transform": {
+                "translation_xyz": [-0.018, -0.1, -0.045],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.5, 0.0, 0.4885],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            ],
+        }
+    )
+    descriptor = {"candidate_id": "c0", "candidate": candidate}
+
+    legality = evaluate_placement_goal_legality(
+        descriptor,
+        scene=_placement_scene(),
+    )
+
+    assert legality["verdict"] == "PASS"
+    binding = legality["checks"]["object_frame_binding"]
+    reconciliation = binding["support_contact_reconciliation"]
+    assert reconciliation["applied"] is True
+    assert reconciliation["required_translation_z_m"] == pytest.approx(0.0115)
+    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.43]
+    )
+    assert binding["pointcloud_goal_translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.443]
+    )
+
+    bind_qualified_placement_goal(descriptor, legality)
+
+    bound = descriptor["candidate"]
+    assert bound["qualification_stages"][0]["xyz"] == pytest.approx(
+        [0.5, 0.0, 0.5]
+    )
+    assert bound["object_motion_world_transform"]["transform_matrix"][2][3] == (
+        pytest.approx(0.0)
+    )
+    assert bound["physical_scene_attachment_required"] is True
+    pair = evaluate_grasp_placement_pair_legality(
+        descriptor,
+        scene=_placement_scene(),
+        workspace_filter=None,
+    )
+    assert pair["verdict"] == "PASS"
 
 
 def test_artificial_placement_waypoints_are_rejected_before_ik():

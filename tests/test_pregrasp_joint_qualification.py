@@ -551,6 +551,139 @@ def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:
     assert returned.details["grasp_candidates"] == [{"id": "g0"}]
 
 
+def test_complete_goal_rejection_never_leaks_a_grasp_only_frontier_candidate() -> None:
+    calls: list[str] = []
+
+    def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        calls.append(request["purpose"])
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "qualification_profile": "fast_v3",
+            "stop_reason": "candidate_and_recovery_exhausted",
+            "selected_candidate_ids": [],
+            "results": [
+                {
+                    "candidate_id": item["candidate_id"],
+                    "candidate_pose_sha256": item["candidate_pose_sha256"],
+                    "qualification_binding_sha256": request[
+                        "qualification_binding_sha256"
+                    ],
+                    "execution_started": False,
+                    "verdict": "FAIL",
+                    "reason": "goal_support_surface_penetration",
+                    "stages": [],
+                    "endpoint_pass": False,
+                    "full_plan_submitted": False,
+                    "goal_legality": {
+                        "goal_id": item["candidate"]["source_object_goal_id"],
+                        "verdict": "FAIL",
+                        "reason": "goal_support_surface_penetration",
+                        "checks": {},
+                    },
+                }
+                for item in request["candidates"]
+            ],
+        }
+
+    cache = QualificationCache()
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        cache=cache,
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.48, 0.0, 0.5],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            ]
+        },
+    )
+    initial_grasps = [{"id": "g0"}, {"id": "g1"}]
+    cache.replace(
+        purpose="grasp",
+        candidates=initial_grasps,
+        proofs={
+            grasp["id"]: {
+                "verdict": "PASS",
+                "stages": [
+                    {
+                        "name": "contact",
+                        "target_pose": {
+                            "xyz": [0.3, 0.0, 0.45],
+                            "rotation_matrix": [
+                                [1.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                                [0.0, 0.0, 1.0],
+                            ],
+                        },
+                        "end_joint_state": {
+                            "joint_names": ["j1"],
+                            "positions": [0.0],
+                        },
+                    }
+                ],
+            }
+            for grasp in initial_grasps
+        },
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+    coordinator = _FrozenGoalPairCoordinator(
+        qualifier,
+        object_goals=[
+            {
+                "id": "p0",
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [0.48, 0.0, 0.43],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                },
+            }
+        ],
+        object_current_pose={
+            "frame": "world",
+            "translation_xyz": [0.3, 0.0, 0.43],
+            "rotation_matrix": [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        },
+        scene_epoch=3,
+        planning_scene_revision=7,
+        grasp_frontier_candidates=[{"id": "g2"}],
+        grasp_frontier_template={"backend": "graspgenx_mcp"},
+        grasp_frontier_scene_epoch=3,
+        grasp_frontier_planning_scene_revision=7,
+    )
+
+    result = coordinator.filter_grasps(
+        ToolResult(True, "qualified", {"grasp_candidates": initial_grasps}),
+        scene_epoch=3,
+        planning_scene_revision=7,
+        source={},
+    )
+
+    assert result.details["grasp_candidates"] == []
+    assert result.details["frozen_pair_stop_reason"] == "frozen_goal_pool_exhausted"
+    assert coordinator.qualified_goals_by_grasp == {}
+    assert coordinator.object_goals == []
+    assert calls == ["placement"]
+
+
 def test_complete_goal_legality_evidence_caches_only_physical_pass_frontier() -> None:
     coordinator = _FrozenGoalPairCoordinator(
         MoveItCandidateQualifier(lambda *_args: {}),

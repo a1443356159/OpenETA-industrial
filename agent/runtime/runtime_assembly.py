@@ -1715,16 +1715,31 @@ class _FrozenGoalPairCoordinator:
         point without rerunning a model.
         """
 
-        valid_goal_pool = (
-            self.object_goals
-            and isinstance(self.object_current_pose, Mapping)
+        matching_goal_pool = (
+            isinstance(self.object_current_pose, Mapping)
             and self.scene_epoch == scene_epoch
             and self.planning_scene_revision == planning_scene_revision
         )
+        valid_goal_pool = bool(self.object_goals) and matching_goal_pool
         fast_frontier = (
             getattr(self.qualifier, "qualification_profile", "legacy") == "fast_v3"
         )
         target = 1
+        if matching_goal_pool and not self.object_goals:
+            result.details.update(
+                {
+                    "frozen_pair_stop_reason": "frozen_goal_pool_exhausted",
+                    "frozen_pair_full_plan_pass_count": 0,
+                    "frozen_goal_legality_frontier_count": 0,
+                }
+            )
+            return self._replace_grasps(
+                result,
+                [],
+                {},
+                scene_epoch,
+                planning_scene_revision,
+            )
         if not fast_frontier or not valid_goal_pool:
             return self._filter_grasp_batch(
                 result,
@@ -1754,6 +1769,7 @@ class _FrozenGoalPairCoordinator:
         }
         reserve_activated = False
         deferred_count = 0
+        goal_pool_exhausted = False
 
         while True:
             batch_input_grasps = current.details.get("grasp_candidates")
@@ -1784,6 +1800,13 @@ class _FrozenGoalPairCoordinator:
             )
             if isinstance(pair_artifact, Mapping):
                 pair_artifacts.append(json.loads(json.dumps(pair_artifact)))
+
+            if (
+                filtered.details.get("frozen_goal_legality_screen_complete") is True
+                and not self.object_goals
+            ):
+                goal_pool_exhausted = True
+                break
 
             batch_goals = self.qualified_goals_by_grasp
             batch_grasps = filtered.details.get("grasp_candidates")
@@ -1925,6 +1948,13 @@ class _FrozenGoalPairCoordinator:
                 ),
                 "frozen_grasp_frontier_generation": self.grasp_frontier_generation,
                 "frozen_grasp_frontier_model_inference_invoked": False,
+                "frozen_pair_stop_reason": (
+                    "frozen_goal_pool_exhausted"
+                    if goal_pool_exhausted
+                    else "complete_pair_found"
+                    if final_grasps
+                    else "frozen_grasp_frontier_exhausted"
+                ),
                 "ranking": "grasp_place_physical_quality",
             }
         )
@@ -1976,14 +2006,29 @@ class _FrozenGoalPairCoordinator:
         grasps = result.details.get("grasp_candidates")
         if not isinstance(grasps, list) or not grasps:
             return result
-        if not (
-            self.object_goals
-            and isinstance(self.object_current_pose, Mapping)
+        matching_goal_pool = (
+            isinstance(self.object_current_pose, Mapping)
             and self.scene_epoch == scene_epoch
             and self.planning_scene_revision == planning_scene_revision
-        ):
+        )
+        if not matching_goal_pool:
             # A stale or absent pool cannot influence grasp qualification.
             return result
+        if not self.object_goals:
+            result.details.update(
+                {
+                    "frozen_pair_stop_reason": "frozen_goal_pool_exhausted",
+                    "frozen_pair_full_plan_pass_count": 0,
+                    "frozen_goal_legality_frontier_count": 0,
+                }
+            )
+            return self._replace_grasps(
+                result,
+                [],
+                {},
+                scene_epoch,
+                planning_scene_revision,
+            )
 
         retained_entries: dict[str, JsonDict] = {}
         per_grasp_pairs: list[list[JsonDict]] = []

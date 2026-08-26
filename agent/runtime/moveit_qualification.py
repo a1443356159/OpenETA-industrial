@@ -24,6 +24,7 @@ from adapter.protocol import JsonDict
 from agent.tools.registry import ToolResult
 from agent.runtime.capability_map import SparseCapabilityMap, target_pose
 from agent.runtime.qualification_legality import (
+    bind_qualified_placement_goal,
     evaluate_grasp_placement_pair_legality,
     evaluate_placement_goal_legality,
 )
@@ -2429,7 +2430,10 @@ class MoveItQualificationEngine:
                     else stages[0]
                 )
                 predicted_attachment = candidate.get("predicted_attachment_transform")
-                if isinstance(predicted_attachment, Mapping):
+                if (
+                    isinstance(predicted_attachment, Mapping)
+                    and candidate.get("physical_scene_attachment_required") is not True
+                ):
                     transition_target["attachment_transform"] = dict(
                         predicted_attachment
                     )
@@ -3046,7 +3050,10 @@ class MoveItQualificationEngine:
                     else stages[0]
                 )
                 predicted_attachment = candidate.get("predicted_attachment_transform")
-                if isinstance(predicted_attachment, Mapping):
+                if (
+                    isinstance(predicted_attachment, Mapping)
+                    and candidate.get("physical_scene_attachment_required") is not True
+                ):
                     transition_target["attachment_transform"] = dict(
                         predicted_attachment
                     )
@@ -3322,6 +3329,18 @@ class MoveItQualificationEngine:
             candidate_id = str(descriptor.get("candidate_id") or "")
             candidate = descriptor.get("candidate")
             candidate = candidate if isinstance(candidate, Mapping) else {}
+            if purpose == "placement":
+                goal_id = str(
+                    candidate.get("source_object_goal_id")
+                    or candidate.get("id")
+                    or candidate_id
+                )
+                bind_qualified_placement_goal(
+                    descriptor,
+                    goal_by_id[goal_id],
+                )
+                candidate = descriptor.get("candidate")
+                candidate = candidate if isinstance(candidate, Mapping) else {}
             precheck = self._fast_workspace_precheck(descriptor)
             precheck["fixed_candidate_index"] = int(
                 descriptor.get("fixed_candidate_index", 0)
@@ -3613,7 +3632,10 @@ class MoveItQualificationEngine:
                     else stages[0]
                 )
                 predicted_attachment = candidate.get("predicted_attachment_transform")
-                if isinstance(predicted_attachment, Mapping):
+                if (
+                    isinstance(predicted_attachment, Mapping)
+                    and candidate.get("physical_scene_attachment_required") is not True
+                ):
                     transition_target["attachment_transform"] = dict(
                         predicted_attachment
                     )

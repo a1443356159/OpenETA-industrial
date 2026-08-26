@@ -160,6 +160,19 @@ def _compose(left: Transform, right: Transform) -> Transform:
     return rotation, xyz  # type: ignore[return-value]
 
 
+def _transform_payload(transform: Transform, *, convention: str) -> JsonDict:
+    rotation, xyz = transform
+    return {
+        "frame": "world",
+        "transform_matrix": [
+            [*map(float, rotation[row]), float(xyz[row])]
+            for row in range(3)
+        ]
+        + [[0.0, 0.0, 0.0, 1.0]],
+        "convention": convention,
+    }
+
+
 def _inverse(transform: Transform) -> Transform:
     rotation, xyz = transform
     inverse_rotation = _transpose(rotation)
@@ -346,11 +359,43 @@ def evaluate_placement_goal_legality(
             elapsed_s=time.monotonic() - started,
         )
         return result
+    region = _scene_mapping(scene, "placement_region")
+    support_object_id = str(region.get("support_object_id") or "")
+    support_z_value = region.get("support_z_m")
+    support_z = (
+        float(support_z_value)
+        if isinstance(support_z_value, (int, float))
+        and not isinstance(support_z_value, bool)
+        and math.isfinite(float(support_z_value))
+        else None
+    )
+    support_tolerance = float(region.get("support_height_tolerance_m", 0.01))
+    support_penetration_tolerance = float(
+        region.get(
+            "support_penetration_tolerance_m",
+            region.get("penetration_tolerance_m", 0.001),
+        )
+    )
+    static_penetration_tolerance = float(
+        region.get(
+            "static_penetration_tolerance_m",
+            region.get("penetration_tolerance_m", 0.001),
+        )
+    )
+
     # Frozen AnyPlace goals are expressed at the measured point-cloud
     # centroid, which is not generally the PlanningScene collision-box origin.
     # Bind the model's rigid world motion to the exact current scene object:
     # T_world_collision_goal = Delta_world_object * T_world_collision_current.
-    # Post-attachment goals already use the measured physical attachment and
+    # A top-view RGB-D centroid represents the visible surface, so applying
+    # that motion to the complete collision body can put its lower extent a
+    # few centimetres below the support plane.  When the discrepancy is no
+    # larger than the body's own bounding radius, reconcile only world Z to
+    # exact support contact.  The model's complete rotation and in-plane
+    # target remain unchanged, and the same deterministic correction is later
+    # applied to the release EEF terminal before IK.
+    #
+    # Post-attachment goals already carry the measured physical binding and
     # therefore legitimately fall back to their direct object_goal_pose.
     collision_goal = goal
     motion_value = candidate.get("object_motion_world_transform")
@@ -375,18 +420,85 @@ def evaluate_placement_goal_legality(
                 elapsed_s=time.monotonic() - started,
             )
             return result
-        collision_goal = _compose(motion, current_collision)
+        raw_collision_goal = _compose(motion, current_collision)
+        collision_goal = raw_collision_goal
+        qualified_motion = motion
+        raw_vertices = _obb_vertices(_obb(raw_collision_goal, size))
+        raw_minimum_z = min(vertex[2] for vertex in raw_vertices)
+        support_reconciliation: JsonDict = {
+            "available": support_z is not None,
+            "applied": False,
+            "raw_bottom_z_m": raw_minimum_z,
+            "basis": "partial_rgbd_centroid_to_complete_collision_body",
+        }
+        if support_z is not None and raw_minimum_z < support_z:
+            correction_z = support_z - raw_minimum_z
+            geometric_limit = math.sqrt(
+                sum((float(value) / 2.0) ** 2 for value in size)
+            ) + max(0.0, support_tolerance)
+            support_reconciliation.update(
+                {
+                    "required_translation_z_m": correction_z,
+                    "geometric_limit_m": geometric_limit,
+                }
+            )
+            if correction_z <= geometric_limit + 1e-12:
+                correction: Transform = (
+                    (
+                        (1.0, 0.0, 0.0),
+                        (0.0, 1.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                    ),
+                    (0.0, 0.0, correction_z),
+                )
+                collision_goal = _compose(correction, raw_collision_goal)
+                qualified_motion = _compose(correction, motion)
+                support_reconciliation.update(
+                    {
+                        "applied": True,
+                        "translation_xyz": [0.0, 0.0, correction_z],
+                        "qualified_bottom_z_m": support_z,
+                    }
+                )
+            else:
+                support_reconciliation["reason"] = (
+                    "required_correction_exceeds_collision_geometry_bound"
+                )
+        binding_method = "world_motion_times_current_planning_scene_object"
+        if support_reconciliation.get("applied") is True:
+            binding_method = (
+                "support_contact_reconciled_world_motion_times_"
+                "current_planning_scene_object"
+            )
         result["checks"]["object_frame_binding"] = {
             "available": True,
-            "method": "world_motion_times_current_planning_scene_object",
+            "method": binding_method,
             "pointcloud_goal_translation_xyz": list(goal[1]),
             "collision_goal_translation_xyz": list(collision_goal[1]),
+            "raw_collision_goal_pose": {
+                "convention": "T_world_collision_object_goal_raw",
+                "frame": "world",
+                "translation_xyz": list(raw_collision_goal[1]),
+                "rotation_matrix": [list(row) for row in raw_collision_goal[0]],
+            },
             "collision_goal_pose": {
                 "convention": "T_world_collision_object_goal",
                 "frame": "world",
                 "translation_xyz": list(collision_goal[1]),
                 "rotation_matrix": [list(row) for row in collision_goal[0]],
             },
+            "model_world_motion_transform": _transform_payload(
+                motion,
+                convention="T_world_motion_applied_left",
+            ),
+            "qualified_world_motion_transform": _transform_payload(
+                qualified_motion,
+                convention="T_world_support_reconciled_motion_applied_left",
+            ),
+            "release_target_translation_correction_xyz": list(
+                support_reconciliation.get("translation_xyz") or [0.0, 0.0, 0.0]
+            ),
+            "support_contact_reconciliation": support_reconciliation,
         }
     else:
         result["checks"]["object_frame_binding"] = {
@@ -412,28 +524,7 @@ def evaluate_placement_goal_legality(
         "maximum_z_m": maximum_z,
     }
 
-    region = _scene_mapping(scene, "placement_region")
-    support_object_id = str(region.get("support_object_id") or "")
-    support_z = region.get("support_z_m")
-    support_tolerance = float(region.get("support_height_tolerance_m", 0.01))
-    support_penetration_tolerance = float(
-        region.get(
-            "support_penetration_tolerance_m",
-            region.get("penetration_tolerance_m", 0.001),
-        )
-    )
-    static_penetration_tolerance = float(
-        region.get(
-            "static_penetration_tolerance_m",
-            region.get("penetration_tolerance_m", 0.001),
-        )
-    )
-    if (
-        isinstance(support_z, (int, float))
-        and not isinstance(support_z, bool)
-        and math.isfinite(float(support_z))
-    ):
-        support_z = float(support_z)
+    if support_z is not None:
         result["checks"]["support"] = {
             "available": True,
             "support_z_m": support_z,
@@ -569,6 +660,83 @@ def evaluate_placement_goal_legality(
         elapsed_s=time.monotonic() - started,
     )
     return result
+
+
+def bind_qualified_placement_goal(
+    descriptor: JsonDict,
+    goal_legality: Mapping[str, Any],
+) -> None:
+    """Apply one scene-derived physical goal binding before pair IK.
+
+    Candidate identity and the model pose stay immutable.  This updates only
+    the host-private compiled release terminal and world-motion evidence used
+    by the same qualification RPC, so the subsequent pair, IK, state-validity,
+    and L5 checks all prove the exact collision-body goal returned in the
+    legality evidence.
+    """
+
+    if goal_legality.get("verdict") != "PASS":
+        return
+    checks = goal_legality.get("checks")
+    binding = checks.get("object_frame_binding") if isinstance(checks, Mapping) else None
+    if not isinstance(binding, Mapping):
+        return
+    qualified_motion = binding.get("qualified_world_motion_transform")
+    collision_goal = binding.get("collision_goal_pose")
+    candidate_value = descriptor.get("candidate")
+    if not isinstance(candidate_value, Mapping):
+        return
+    candidate = dict(candidate_value)
+    if isinstance(collision_goal, Mapping):
+        candidate["qualified_world_collision_object_goal_pose"] = dict(
+            collision_goal
+        )
+    if not isinstance(qualified_motion, Mapping):
+        descriptor["candidate"] = candidate
+        return
+    if _transform_matrix(qualified_motion.get("transform_matrix")) is None:
+        return
+
+    model_motion = candidate.get("object_motion_world_transform")
+    if isinstance(model_motion, Mapping):
+        candidate["model_object_motion_world_transform"] = dict(model_motion)
+    candidate["object_motion_world_transform"] = dict(qualified_motion)
+    # A virtual pre-attachment proof must attach the actual PlanningScene
+    # collision body at the contact EEF, not the visible point-cloud centroid.
+    candidate["physical_scene_attachment_required"] = True
+    candidate["physical_scene_attachment_source"] = (
+        "current_planning_scene_collision_object"
+    )
+
+    correction = _finite_vector(
+        binding.get("release_target_translation_correction_xyz"), 3
+    )
+    if correction is not None and any(abs(value) > 1e-12 for value in correction):
+        stages_value = candidate.get("qualification_stages")
+        if isinstance(stages_value, list):
+            stages: list[object] = []
+            for raw_stage in stages_value:
+                if not isinstance(raw_stage, Mapping):
+                    stages.append(raw_stage)
+                    continue
+                stage = dict(raw_stage)
+                if str(stage.get("name") or "") == "release":
+                    for key in ("xyz", "translation_xyz", "position"):
+                        xyz = _finite_vector(stage.get(key), 3)
+                        if xyz is not None:
+                            stage[key] = [
+                                xyz[index] + correction[index]
+                                for index in range(3)
+                            ]
+                    stage["support_contact_translation_correction_xyz"] = list(
+                        correction
+                    )
+                    stage["terminal_pose_source"] = (
+                        "anyplace_se3_with_physical_support_binding"
+                    )
+                stages.append(stage)
+            candidate["qualification_stages"] = stages
+    descriptor["candidate"] = candidate
 
 
 def _expected_pair_eef_goal(candidate: Mapping[str, Any]) -> Transform | None:
