@@ -1,0 +1,31 @@
+# GraspGenX inference dependencies excluding Torch/Torchvision, which come
+# from the pinned NVIDIA PyTorch base image and are shared read-only with this
+# service venv.
+addict
+diffusers==0.11.1
+h5py
+huggingface-hub==0.25.2
+hydra-core
+imageio
+matplotlib
+numpy==1.26.4
+PyOpenGL==3.1.5
+pyrender
+PyYAML
+scene-synthesizer[recommend]
+scikit-learn
+scipy
+sharedarray
+tensorboard
+tensorboardx
+tensordict
+timm==1.0.15
+torch-geometric
+transformers==4.48.3
+trimesh==4.5.3
+tqdm
+urdfpy
+viser
+webdataset
+yapf==0.40.1
+yourdfpy==0.0.56

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import io
 import os
 import sys
@@ -19,6 +20,7 @@ from tools.anyplace_core import (
     normalise_placement_candidates,
     pad_pointcloud_for_model,
     _configure_cuda_extension_environment,
+    _install_legacy_import_shims,
     validate_intrinsics,
     validate_pointcloud_array,
 )
@@ -83,6 +85,37 @@ def test_cuda_extension_environment_keeps_symlinked_venv_bin(
     _configure_cuda_extension_environment(fake_torch)
 
     assert os.environ["PATH"].split(os.pathsep)[0] == str(venv_bin)
+
+
+def test_legacy_import_shims_only_fill_missing_optional_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def import_without_legacy_modules(name, *args, **kwargs):
+        if name in {"knn_cuda", "airobot"}:
+            raise ModuleNotFoundError(name=name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_legacy_modules)
+    monkeypatch.delitem(sys.modules, "knn_cuda", raising=False)
+    monkeypatch.delitem(sys.modules, "airobot", raising=False)
+    fake_torch = object()
+    try:
+        providers = _install_legacy_import_shims(fake_torch)
+
+        assert providers == {
+            "knn_cuda": "torch_cdist_fallback",
+            "airobot": "stdlib_logging_fallback",
+        }
+        assert sys.modules["knn_cuda"].KNN(k=1).k == 1
+        with pytest.raises(ValueError, match="k must be positive"):
+            sys.modules["knn_cuda"].KNN(k=0)
+        assert callable(sys.modules["airobot"].log_warn)
+        assert callable(sys.modules["airobot"].log_debug)
+    finally:
+        sys.modules.pop("knn_cuda", None)
+        sys.modules.pop("airobot", None)
 
 
 @pytest.mark.parametrize(

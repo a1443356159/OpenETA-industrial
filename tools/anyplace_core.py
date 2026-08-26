@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import contextlib
 import io
+import logging
 import os
 import random
 import sys
 import time
+import types
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -332,6 +334,7 @@ class AnyPlaceBackend:
         if not torch.cuda.is_available():
             raise AnyPlaceInputError("device_unavailable")
         _configure_cuda_extension_environment(torch)
+        _install_legacy_import_shims(torch)
 
         import numpy as np
         from anyplace.model.transformer.policy import NSMTransformerImplicit
@@ -526,6 +529,74 @@ def _configure_cuda_extension_environment(torch: Any) -> None:
         capability = tuple(int(item) for item in torch.cuda.get_device_capability())
         if capability >= (8, 9):
             os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "8.6+PTX")
+
+
+def _install_legacy_import_shims(torch: Any) -> dict[str, str]:
+    """Provide narrow fallbacks for optional imports in the frozen AnyPlace source.
+
+    The multitask transformer uses ``torch_cluster`` for farthest-point
+    sampling.  Its utility module still imports KNN_CUDA eagerly even though
+    that class is not used by this checkpoint, and the wheel referenced by the
+    upstream runbook is no longer published.  Preserve a mathematically exact
+    small-batch implementation for that dormant API instead of requiring a
+    runtime CUDA JIT toolchain.  The old ``airobot`` dependency is likewise
+    used only for two logging functions on this inference path.
+
+    An installed dependency always wins.  Import failures *inside* an
+    installed package remain infrastructure errors rather than silently
+    selecting a fallback.
+    """
+
+    providers: dict[str, str] = {}
+    try:
+        __import__("knn_cuda")
+        providers["knn_cuda"] = "installed"
+    except ModuleNotFoundError as exc:
+        if exc.name != "knn_cuda":
+            raise
+
+        class TorchKNN:
+            def __init__(self, *, k: int, transpose_mode: bool = False) -> None:
+                if int(k) <= 0:
+                    raise ValueError("k must be positive")
+                self.k = int(k)
+                self.transpose_mode = bool(transpose_mode)
+
+            def __call__(self, reference: Any, query: Any) -> tuple[Any, Any]:
+                ref = reference if self.transpose_mode else reference.transpose(1, 2)
+                qry = query if self.transpose_mode else query.transpose(1, 2)
+                squared = torch.cdist(qry, ref, p=2).square()
+                distances, indices = torch.topk(
+                    squared,
+                    k=self.k,
+                    dim=-1,
+                    largest=False,
+                    sorted=True,
+                )
+                if not self.transpose_mode:
+                    distances = distances.transpose(1, 2)
+                    indices = indices.transpose(1, 2)
+                return distances, indices
+
+        knn_module = types.ModuleType("knn_cuda")
+        knn_module.KNN = TorchKNN  # type: ignore[attr-defined]
+        sys.modules["knn_cuda"] = knn_module
+        providers["knn_cuda"] = "torch_cdist_fallback"
+
+    try:
+        __import__("airobot")
+        providers["airobot"] = "installed"
+    except ModuleNotFoundError as exc:
+        if exc.name != "airobot":
+            raise
+        logger = logging.getLogger("openeta.anyplace.upstream")
+        airobot_module = types.ModuleType("airobot")
+        airobot_module.log_warn = logger.warning  # type: ignore[attr-defined]
+        airobot_module.log_debug = logger.debug  # type: ignore[attr-defined]
+        sys.modules["airobot"] = airobot_module
+        providers["airobot"] = "stdlib_logging_fallback"
+
+    return providers
 
 
 def validate_intrinsics(intrinsics: dict[str, Any] | None) -> dict[str, float]:
