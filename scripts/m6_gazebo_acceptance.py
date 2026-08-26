@@ -14,6 +14,7 @@ import urllib.request
 
 from scripts import tui_gazebo_acceptance as base
 from agent.runtime.calibration_registry import RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE
+from extensions.gazebo.native_grasp import load_acceptance_scene_contract
 from tools.candidate_config import QUALIFICATION_PROFILES
 
 
@@ -50,7 +51,8 @@ REQUIRED_REAL_PICK_PLACE_TOOLS = (
 )
 # Compatibility alias for tests and integrations importing the historical name.
 REQUIRED_REAL_M6_TOOLS = REQUIRED_REAL_PICK_PLACE_TOOLS
-SCENARIOS = ("normal", "reject-first")
+SCENARIOS = ("normal", "reject-first", "narrow-pick", "barrier-transfer")
+COMPLEX_PHYSICAL_SCENARIOS = ("narrow-pick", "barrier-transfer")
 EXECUTION_PROFILES = ("agentic_normal", "smoke_normal")
 DEFAULT_EXECUTION_PROFILE = "agentic_normal"
 # Acceptance rolls the already-shadowable v3 funnel forward explicitly while
@@ -108,7 +110,33 @@ SCENARIO_INSTRUCTIONS = {
         "execution_started=false。保留该回执，宿主不得把该候选存入资格队列；宿主从其余 "
         "PASS 候选的稳定队首开始并完成放置。"
     ),
+    "narrow-pick": (
+        "场景中两个橙色静态护栏形成受限抓取通道；它们同时存在于 Gazebo 与 "
+        "MoveIt PlanningScene。只使用模型 exact contact 候选，让资格漏斗拒绝发生碰撞的 "
+        "分支，不得通过人工偏移或额外 waypoints 绕过护栏。"
+    ),
+    "barrier-transfer": (
+        "场景中黄色静态屏障阻断目标到放置区的直线搬运通道；它同时存在于 Gazebo 与 "
+        "MoveIt PlanningScene。仍只提交模型导出的 exact release，完整避障路径由 MoveIt "
+        "生成，不得人工添加 lift/hover/retreat。"
+    ),
 }
+
+
+def _scene_contract(scenario: str) -> dict[str, Any]:
+    if scenario not in SCENARIOS:
+        raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
+    return load_acceptance_scene_contract(scenario)
+
+
+def _scenario_environment(scenario: str) -> dict[str, str]:
+    """Bind one physical scene without conflating it with fault injection."""
+
+    scene = _scene_contract(scenario)
+    environment = {"OPENETA_ACCEPTANCE_SCENE": str(scene["world_scene"])}
+    if scenario == "reject-first":
+        environment["OPENETA_ACCEPTANCE_PLACEMENT_FAULT"] = "reject-first"
+    return environment
 
 
 def _validated_grasp_backend(value: str) -> str:
@@ -140,15 +168,19 @@ def _instructions_for_backend(
     *,
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
     qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
+    scenario: str = "normal",
 ) -> str:
     backend = _validated_grasp_backend(grasp_backend)
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
+    scene = _scene_contract(scenario)
     planner_mode = EXECUTION_PROFILE_PLANNER_MODES[profile]
     metadata = (
         f"[automation=scripted_tui; planner_mode={planner_mode}; "
         f"execution_profile={profile}; qualification_profile={funnel_profile}; "
         f"environment_id={ENV_ID}; environment_task=normal_pick_and_place; "
+        f"environment_seed={int(scene['seed'])}; "
+        f"acceptance_scene={str(scene['world_scene'])}; "
         "grasp_target=red_rectangular_block; "
         "placement_object=red_rectangular_block; "
         "placement_region=green_placement_zone_marker]"
@@ -331,6 +363,7 @@ def prepare_case(
     backend = _validated_grasp_backend(grasp_backend)
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
+    scene = _scene_contract(scenario)
     if profile == "smoke_normal" and scenario != "normal":
         raise ValueError("smoke_normal execution profile requires scenario=normal")
     configured_grasp_services = set(services).intersection(GRASP_SERVICE_NAMES.values())
@@ -355,6 +388,7 @@ def prepare_case(
             backend,
             execution_profile=profile,
             qualification_profile=funnel_profile,
+            scenario=scenario,
         )
         + "\n验收场景："
         + scenario
@@ -370,6 +404,15 @@ def prepare_case(
         before=base._process_snapshot(),
     )
     receipt["acceptance_scenario"] = scenario
+    receipt["acceptance_scene"] = {
+        "schema_version": "openeta.gazebo_acceptance_scene_receipt.v1",
+        "scene_id": str(scene["world_scene"]),
+        "seed": int(scene["seed"]),
+        "contract_sha256": str(scene["contract_sha256"]),
+        "static_obstacle_ids": [
+            str(obstacle["id"]) for obstacle in scene["static_obstacles"]
+        ],
+    }
     receipt["grasp_backend_mode"] = backend
     receipt["execution_profile"] = profile
     receipt["qualification_profile"] = funnel_profile
@@ -773,12 +816,28 @@ def verify_case(
     backend = _validated_grasp_backend(grasp_backend)
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
+    scene = _scene_contract(scenario)
     backend_label = "GraspGenX" if backend == "graspgenx" else "AnyGrasp"
     errors: list[str] = []
     try:
         events, trace_paths = base._load_trace_events(paths.trace_root)
         calls = base._tool_calls(events)
         errors.extend(base._base_errors(paths, events))
+        receipt = base._json_load(paths.receipt)
+        receipt_scene = (
+            receipt.get("acceptance_scene") if isinstance(receipt, Mapping) else None
+        )
+        expected_obstacle_ids = [
+            str(obstacle["id"]) for obstacle in scene["static_obstacles"]
+        ]
+        if not isinstance(receipt_scene, Mapping) or receipt_scene != {
+            "schema_version": "openeta.gazebo_acceptance_scene_receipt.v1",
+            "scene_id": str(scene["world_scene"]),
+            "seed": int(scene["seed"]),
+            "contract_sha256": str(scene["contract_sha256"]),
+            "static_obstacle_ids": expected_obstacle_ids,
+        }:
+            errors.append("acceptance scene receipt does not match the versioned contract")
         planner_evidence = _planner_evidence(
             events,
             expected_planner_mode=EXECUTION_PROFILE_PLANNER_MODES[profile],
@@ -834,6 +893,10 @@ def verify_case(
         create = next((call for call in calls if _name(call) == "create_simulator_env"), {})
         if not base._contains(create, "env_id", ENV_ID):
             errors.append("pick-place Gazebo environment identity missing")
+        if not base._contains(create, "scene_id", str(scene["world_scene"])):
+            errors.append("created Gazebo environment lacks the selected scene identity")
+        if not base._contains(create, "contract_sha256", str(scene["contract_sha256"])):
+            errors.append("created Gazebo environment lacks the selected scene hash")
         if not any(
             base._contains(event, "schema_version", "openeta.host_candidate_compilation.v1")
             and base._contains(event, "purpose", "placement")
@@ -1060,6 +1123,23 @@ def verify_case(
             for block in _qualification_blocks(grasp_call, artifact_root=paths.root)
             if block.get("purpose") == "placement"
         ]
+        if scenario in COMPLEX_PHYSICAL_SCENARIOS:
+            for obstacle_id in expected_obstacle_ids:
+                obstacle_recorded = any(
+                    obstacle_id
+                    in {
+                        str(item)
+                        for value in base._values(block, "evaluated_obstacle_ids")
+                        if isinstance(value, list)
+                        for item in value
+                    }
+                    for block in frozen_pair_qualification_blocks
+                )
+                if not obstacle_recorded:
+                    errors.append(
+                        "qualification evidence did not evaluate scene obstacle: "
+                        + obstacle_id
+                    )
         qualification_results = [
             result
             for block in frozen_pair_qualification_blocks
@@ -1107,6 +1187,12 @@ def verify_case(
                 or planner_evidence["total_tokens"]
             ),
             "scenario": scenario,
+            "acceptance_scene": {
+                "scene_id": str(scene["world_scene"]),
+                "seed": int(scene["seed"]),
+                "contract_sha256": str(scene["contract_sha256"]),
+                "static_obstacle_ids": expected_obstacle_ids,
+            },
             "grasp_backend": backend,
         }
     except Exception as exc:  # noqa: BLE001 - verifier must return a report.
@@ -1121,6 +1207,14 @@ def verify_case(
             "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
             "planner_provider_invoked": None,
             "scenario": scenario,
+            "acceptance_scene": {
+                "scene_id": str(scene["world_scene"]),
+                "seed": int(scene["seed"]),
+                "contract_sha256": str(scene["contract_sha256"]),
+                "static_obstacle_ids": [
+                    str(obstacle["id"]) for obstacle in scene["static_obstacles"]
+                ],
+            },
             "grasp_backend": backend,
         }
 
@@ -1251,11 +1345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # this bound.  A broken legacy SSE return channel is retried once
             # inside the host, without adding a TUI/model-planner turn.
             "OPENETA_PERCEPTION_RPC_TIMEOUT_S": "90",
-            **(
-                {"OPENETA_ACCEPTANCE_PLACEMENT_FAULT": args.scenario}
-                if args.scenario != "normal"
-                else {}
-            ),
+            **_scenario_environment(args.scenario),
         },
     )
     report = verify_case(

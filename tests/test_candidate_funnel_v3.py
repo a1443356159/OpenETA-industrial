@@ -934,6 +934,9 @@ def test_object_goal_static_collision_is_rejected_by_target_gate():
         "collision_ids"
     ]
     assert collisions == ["distractor"]
+    assert "distractor" in response["results"][0]["goal_legality"]["checks"][
+        "static_scene_collision"
+    ]["evaluated_obstacle_ids"]
     assert response["metrics"]["screening_attempt_count"] == 0
 
 
@@ -988,6 +991,9 @@ def test_exact_gripper_collision_primitive_is_rejected_by_pair_gate():
     ][0]
     assert collision["body"] == "mount_plate"
     assert collision["obstacle"] == "table"
+    assert "table" in response["results"][0]["pair_legality"]["checks"][
+        "static_scene_collision"
+    ]["evaluated_obstacle_ids"]
 
 
 def test_symmetry_twin_does_not_consume_second_grasp_branch_slot():

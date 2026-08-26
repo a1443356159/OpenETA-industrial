@@ -1,0 +1,52 @@
+{
+  "schema_version": "openeta.gazebo_acceptance_scenes.v1",
+  "scenes": {
+    "normal": {
+      "world_scene": "normal",
+      "seed": 0,
+      "description": "Baseline open-table pick and place.",
+      "static_obstacles": []
+    },
+    "reject-first": {
+      "world_scene": "normal",
+      "seed": 0,
+      "description": "Baseline geometry with the existing qualification-only rejection fixture.",
+      "static_obstacles": []
+    },
+    "narrow-pick": {
+      "world_scene": "narrow-pick",
+      "seed": 17,
+      "description": "Two raised guard rails constrain the collision-free grasp corridor around the target.",
+      "static_obstacles": [
+        {
+          "id": "pick_guard_left",
+          "size_xyz": [0.18, 0.018, 0.07],
+          "pose_xyz": [0.28, -0.164, 0.435],
+          "pose_rpy": [0.0, 0.0, 0.0],
+          "rgba": [0.88, 0.48, 0.08, 1.0]
+        },
+        {
+          "id": "pick_guard_right",
+          "size_xyz": [0.18, 0.018, 0.07],
+          "pose_xyz": [0.28, -0.036, 0.435],
+          "pose_rpy": [0.0, 0.0, 0.0],
+          "rgba": [0.88, 0.48, 0.08, 1.0]
+        }
+      ]
+    },
+    "barrier-transfer": {
+      "world_scene": "barrier-transfer",
+      "seed": 29,
+      "description": "A raised barrier blocks the direct target-to-destination transfer corridor.",
+      "static_obstacles": [
+        {
+          "id": "transfer_barrier",
+          "size_xyz": [0.025, 0.22, 0.12],
+          "pose_xyz": [0.385, -0.10, 0.46],
+          "pose_rpy": [0.0, 0.0, 0.0],
+          "rgba": [0.92, 0.72, 0.10, 1.0]
+        }
+      ]
+    }
+  }
+}

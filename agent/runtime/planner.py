@@ -104,6 +104,10 @@ _SCRIPTED_ENVIRONMENT_TASK_RE = re.compile(
     r"(?:^|;)\s*environment_task=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
 )
+_SCRIPTED_ENVIRONMENT_SEED_RE = re.compile(
+    r"(?:^|;)\s*environment_seed=(?P<value>[0-9]+)\s*(?:;|$)",
+    flags=re.IGNORECASE,
+)
 _SCRIPTED_PLANNER_MODE_RE = re.compile(
     r"(?:^|;)\s*planner_mode=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
@@ -6623,6 +6627,9 @@ def _scripted_environment_start_obligation(
         return None
     environment_id = environment_match.group("value")
     parameters: JsonDict = {"env_id": environment_id, "seed": 0}
+    seed_match = _SCRIPTED_ENVIRONMENT_SEED_RE.search(body)
+    if seed_match is not None:
+        parameters["seed"] = int(seed_match.group("value"))
     task_match = _SCRIPTED_ENVIRONMENT_TASK_RE.search(body)
     if task_match is not None:
         assigned_task = task_match.group("value").replace("_", " ").strip()

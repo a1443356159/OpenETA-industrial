@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import hashlib
+import json
 import math
+import os
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .robot_control import GazeboControlConfig
@@ -26,6 +30,101 @@ PLACEMENT_VERIFICATION_SCHEMA_VERSION = "openeta.gazebo.placement_verification.v
 # than one micrometre.  This epsilon is only for floating-point comparison at
 # the configured boundary; it is not added to the configured safety gate.
 _POSE_BOUNDARY_ABS_TOL_M = 1e-6
+ACCEPTANCE_SCENE_ENV = "OPENETA_ACCEPTANCE_SCENE"
+ACCEPTANCE_SCENE_SCHEMA_VERSION = "openeta.gazebo_acceptance_scenes.v1"
+
+
+def acceptance_scene_contract_path() -> Path:
+    return (
+        Path(__file__).resolve().parent
+        / "ros2_ws/src/openeta_rm75_robotiq2f85_sim/config/acceptance_scenes.json"
+    )
+
+
+def load_acceptance_scene_contract(
+    scene_id: str,
+    *,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Load and validate one immutable Gazebo/PlanningScene geometry contract."""
+
+    contract_path = path or acceptance_scene_contract_path()
+    payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("schema_version") != ACCEPTANCE_SCENE_SCHEMA_VERSION
+        or not isinstance(payload.get("scenes"), Mapping)
+    ):
+        raise ValueError("acceptance scene catalog is invalid")
+    raw = payload["scenes"].get(scene_id)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"unsupported acceptance scene: {scene_id}")
+    scene = json.loads(json.dumps(raw))
+    if not isinstance(scene.get("world_scene"), str) or not scene["world_scene"]:
+        raise ValueError("acceptance scene world identity is invalid")
+    seed = scene.get("seed")
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        raise ValueError("acceptance scene seed is invalid")
+    obstacles = scene.get("static_obstacles")
+    if not isinstance(obstacles, list):
+        raise ValueError("acceptance scene obstacle list is invalid")
+    seen: set[str] = set()
+    for obstacle in obstacles:
+        if not isinstance(obstacle, Mapping):
+            raise ValueError("acceptance scene obstacle is invalid")
+        obstacle_id = str(obstacle.get("id") or "")
+        if not obstacle_id or obstacle_id in seen:
+            raise ValueError("acceptance scene obstacle identity is invalid")
+        seen.add(obstacle_id)
+        for key, count, positive in (
+            ("size_xyz", 3, True),
+            ("pose_xyz", 3, False),
+            ("pose_rpy", 3, False),
+            ("rgba", 4, False),
+        ):
+            values = obstacle.get(key)
+            if (
+                not isinstance(values, list)
+                or len(values) != count
+                or any(
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not math.isfinite(float(value))
+                    or (positive and float(value) <= 0.0)
+                    for value in values
+                )
+            ):
+                raise ValueError(f"acceptance scene obstacle {key} is invalid")
+    scene["scene_id"] = scene_id
+    scene["contract_sha256"] = hashlib.sha256(
+        json.dumps(
+            {
+                "schema_version": ACCEPTANCE_SCENE_SCHEMA_VERSION,
+                "scene_id": scene_id,
+                "scene": raw,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return scene
+
+
+def _acceptance_scene_from_environment() -> str:
+    return str(os.environ.get(ACCEPTANCE_SCENE_ENV) or "normal").strip()
+
+
+def _quaternion_from_rpy(values: Sequence[float]) -> tuple[float, float, float, float]:
+    roll, pitch, yaw = (float(value) for value in values)
+    cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
+    cp, sp = math.cos(pitch / 2.0), math.sin(pitch / 2.0)
+    cy, sy = math.cos(yaw / 2.0), math.sin(yaw / 2.0)
+    return (
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    )
 
 
 class Verdict(StrEnum):
@@ -107,6 +206,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
     table_id: str = "work_table"
     target_link: str = "target_link"
     parent_link: str = "gripper_mount_link"
+    acceptance_scene_id: str = field(default_factory=_acceptance_scene_from_environment)
     left_contact_topic: str = "/openeta/native_grasp/contacts/left_pad"
     right_contact_topic: str = "/openeta/native_grasp/contacts/right_pad"
     attach_topic: str = "/openeta/native_grasp/detachable_joint/target/attach"
@@ -142,6 +242,40 @@ class NativePickPlaceConfig(GazeboControlConfig):
     placement_center_height_tolerance_m: float = 0.01
 
     @property
+    def acceptance_scene_contract(self) -> Mapping[str, Any]:
+        return load_acceptance_scene_contract(self.acceptance_scene_id)
+
+    @property
+    def acceptance_scene_seed(self) -> int:
+        return int(self.acceptance_scene_contract["seed"])
+
+    @property
+    def static_obstacle_specs(self) -> tuple[dict[str, Any], ...]:
+        return tuple(
+            {
+                "id": str(raw["id"]),
+                "size_xyz": [float(value) for value in raw["size_xyz"]],
+                "pose_xyz": [float(value) for value in raw["pose_xyz"]],
+                "pose_quat_xyzw": list(_quaternion_from_rpy(raw["pose_rpy"])),
+            }
+            for raw in self.acceptance_scene_contract["static_obstacles"]
+        )
+
+    def acceptance_scene_evidence(self) -> dict[str, Any]:
+        contract = self.acceptance_scene_contract
+        return {
+            "schema_version": ACCEPTANCE_SCENE_SCHEMA_VERSION,
+            "scene_id": self.acceptance_scene_id,
+            "world_scene": str(contract["world_scene"]),
+            "seed": int(contract["seed"]),
+            "contract_sha256": str(contract["contract_sha256"]),
+            "static_obstacle_ids": [
+                str(obstacle["id"])
+                for obstacle in contract["static_obstacles"]
+            ],
+        }
+
+    @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
         return {
             self.target_id: self.target_initial_xyz,
@@ -162,12 +296,15 @@ class NativePickPlaceConfig(GazeboControlConfig):
         package = self.ros_workspace / "src" / self.ros_package_name
         required = (
             package / "config/rm75_robotiq2f85_pickplace.srdf",
+            package / "config/acceptance_scenes.json",
             package / "launch/gazebo_pickplace.launch.py",
             package / "urdf/rm75_robotiq2f85_pickplace.urdf.xacro",
             package / "worlds/rm75_robotiq2f85_pickplace.sdf",
         )
         if not all(path.is_file() for path in required):
             raise RuntimeError("MODEL_ASSET_NOT_FOUND")
+        # Validate the selected variant before Gazebo allocates any process.
+        self.acceptance_scene_contract
 
 
 def verify_stable_placement(
@@ -267,6 +404,7 @@ def validated_pickplace_motion_guidance(
     return {
         "schema_version": "openeta.gazebo.model_terminal_pickplace.v2",
         "pose_semantics": cfg.parent_link,
+        "acceptance_scene": cfg.acceptance_scene_evidence(),
         "motion_parameters": {
             "velocity_scaling": 0.1,
             "acceleration_scaling": 0.1,

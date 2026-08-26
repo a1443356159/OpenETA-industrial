@@ -40,6 +40,8 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(tmp_path, monk
     assert "planner_mode=agentic_closed_loop" in prompt
     assert f"environment_id={m6.ENV_ID}" in prompt
     assert "environment_task=normal_pick_and_place" in prompt
+    assert "environment_seed=0" in prompt
+    assert "acceptance_scene=normal" in prompt
     assert "qualification_profile=fast_v3" in prompt
     assert "grasp_pose_estimate" in prompt and "AnyPlace" in prompt
     assert "exact EEF contact" in prompt
@@ -61,6 +63,58 @@ def test_m6_prepare_registers_real_services_and_constraint_prompt(tmp_path, monk
     assert "Beam-2" not in prompt
     assert "4 → 8" not in prompt
     assert len(prompt) < 2_400
+
+
+def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = m6.base.Allocation(81, "openeta-complex-scenes", 18765, "run-id")
+    monkeypatch.setattr(m6.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        m6.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    expectations = {
+        "narrow-pick": (17, ["pick_guard_left", "pick_guard_right"]),
+        "barrier-transfer": (29, ["transfer_barrier"]),
+    }
+    for scenario, (seed, obstacle_ids) in expectations.items():
+        paths = m6.prepare_case(
+            tmp_path,
+            tmp_path / scenario,
+            allocation,
+            dict(m6.DEFAULT_SERVICES),
+            scenario=scenario,
+        )
+        prompt = paths.instructions.read_text(encoding="utf-8")
+        receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+
+        assert f"environment_seed={seed}" in prompt
+        assert f"acceptance_scene={scenario}" in prompt
+        assert scenario in prompt
+        assert receipt["acceptance_scenario"] == scenario
+        assert receipt["acceptance_scene"]["scene_id"] == scenario
+        assert receipt["acceptance_scene"]["seed"] == seed
+        assert receipt["acceptance_scene"]["static_obstacle_ids"] == obstacle_ids
+        assert len(receipt["acceptance_scene"]["contract_sha256"]) == 64
+
+
+def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
+    assert m6._scenario_environment("narrow-pick") == {
+        "OPENETA_ACCEPTANCE_SCENE": "narrow-pick"
+    }
+    assert m6._scenario_environment("barrier-transfer") == {
+        "OPENETA_ACCEPTANCE_SCENE": "barrier-transfer"
+    }
+    assert m6._scenario_environment("reject-first") == {
+        "OPENETA_ACCEPTANCE_SCENE": "normal",
+        "OPENETA_ACCEPTANCE_PLACEMENT_FAULT": "reject-first",
+    }
 
 
 def test_pick_place_prepare_can_strictly_select_graspgenx(tmp_path, monkeypatch) -> None:

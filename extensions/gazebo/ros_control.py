@@ -485,6 +485,15 @@ class RosGazeboController(GazeboController):
         distractor_size = tuple(config.distractor_size_m)
         if len(distractor_size) == 2:
             distractor_size = (distractor_size[0], distractor_size[0], distractor_size[1])
+        obstacles = tuple(
+            CollisionBox(
+                str(spec["id"]),
+                tuple(float(value) for value in spec["size_xyz"]),
+                tuple(float(value) for value in spec["pose_xyz"]),
+                tuple(float(value) for value in spec["pose_quat_xyzw"]),
+            )
+            for spec in getattr(config, "static_obstacle_specs", ())
+        )
         revision = self.planning_scene.reset(
             table=table,
             distractor=CollisionBox(
@@ -497,6 +506,7 @@ class RosGazeboController(GazeboController):
                 tuple(config.target_size_m),
                 tuple(config.target_initial_xyz),
             ),
+            obstacles=obstacles,
         )
         self._require_current_planning_state_valid()
         self.runtime.scene_revision = revision
@@ -1211,6 +1221,9 @@ class _RosRuntime:
             ],
             "transitions": [],
         }
+        scene_evidence = getattr(self.config, "acceptance_scene_evidence", None)
+        if callable(scene_evidence):
+            snapshot["acceptance_scene"] = scene_evidence()
         destination_center = getattr(self.config, "destination_center_xy", None)
         destination_size = getattr(self.config, "destination_size_xy_m", None)
         support_z = getattr(self.config, "table_top_z_m", None)

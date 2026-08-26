@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 
+import pytest
+
 from extensions.gazebo.detachable_sdf import prepare_detachable_sdf
 from extensions.gazebo.robot_control import GAZEBO_CONTROL_ENV_ID, MODEL_ID, GazeboControlConfig
 from extensions.gazebo.native_grasp import (
@@ -9,7 +11,11 @@ from extensions.gazebo.native_grasp import (
     PICKPLACE_ENV_ID,
     PICKPLACE_MODEL_ID,
     NativePickPlaceConfig,
+    load_acceptance_scene_contract,
     validated_pickplace_motion_guidance,
+)
+from extensions.gazebo.ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptance_scene_world import (
+    render_acceptance_world,
 )
 from extensions.gazebo.profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, gazebo_profile
 from sim.env_registry import get_env_spec
@@ -82,6 +88,85 @@ def test_m3_assets_are_required_before_manipulation_starts() -> None:
     config.validate_assets()
     package = config.ros_workspace / "src" / config.ros_package_name
     assert (package / "worlds/rm75_robotiq2f85_pickplace.sdf").is_file()
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "seed", "obstacle_ids"),
+    [
+        ("narrow-pick", 17, ["pick_guard_left", "pick_guard_right"]),
+        ("barrier-transfer", 29, ["transfer_barrier"]),
+    ],
+)
+def test_m3_complex_acceptance_scenes_share_one_versioned_geometry_contract(
+    scene_id: str,
+    seed: int,
+    obstacle_ids: list[str],
+) -> None:
+    contract = load_acceptance_scene_contract(scene_id)
+    config = NativePickPlaceConfig(acceptance_scene_id=scene_id)
+
+    assert contract["scene_id"] == scene_id
+    assert contract["world_scene"] == scene_id
+    assert contract["seed"] == seed
+    assert len(contract["contract_sha256"]) == 64
+    assert [row["id"] for row in contract["static_obstacles"]] == obstacle_ids
+    assert config.acceptance_scene_seed == seed
+    assert [row["id"] for row in config.static_obstacle_specs] == obstacle_ids
+    assert config.acceptance_scene_evidence()["contract_sha256"] == contract["contract_sha256"]
+
+
+@pytest.mark.parametrize(
+    ("scene_id", "obstacle_ids"),
+    [
+        ("narrow-pick", ["pick_guard_left", "pick_guard_right"]),
+        ("barrier-transfer", ["transfer_barrier"]),
+    ],
+)
+def test_m3_complex_scene_renderer_adds_real_static_collision_geometry(
+    scene_id: str,
+    obstacle_ids: list[str],
+) -> None:
+    config = NativePickPlaceConfig(acceptance_scene_id=scene_id)
+    package = config.ros_workspace / "src" / config.ros_package_name
+    rendered, selected = render_acceptance_world(
+        base_world=package / "worlds/rm75_robotiq2f85_pickplace.sdf",
+        catalog_path=package / "config/acceptance_scenes.json",
+        environment={"OPENETA_ACCEPTANCE_SCENE": scene_id},
+    )
+    try:
+        world = ET.parse(rendered).getroot().find("world")
+        assert world is not None
+        assert selected == scene_id
+        for obstacle in config.acceptance_scene_contract["static_obstacles"]:
+            model = world.find(f"model[@name='{obstacle['id']}']")
+            assert model is not None
+            assert model.findtext("static") == "true"
+            assert [
+                float(value)
+                for value in model.findtext("link/collision/geometry/box/size", "").split()
+            ] == obstacle["size_xyz"]
+        assert [
+            model.get("name")
+            for model in world.findall("model")
+            if model.get("name") in obstacle_ids
+        ] == obstacle_ids
+    finally:
+        rendered.unlink(missing_ok=True)
+
+
+def test_m3_normal_scene_renderer_reuses_the_canonical_world() -> None:
+    config = NativePickPlaceConfig()
+    package = config.ros_workspace / "src" / config.ros_package_name
+    canonical = package / "worlds/rm75_robotiq2f85_pickplace.sdf"
+
+    rendered, selected = render_acceptance_world(
+        base_world=canonical,
+        catalog_path=package / "config/acceptance_scenes.json",
+        environment={"OPENETA_ACCEPTANCE_SCENE": "normal"},
+    )
+
+    assert rendered == canonical
+    assert selected == "normal"
 
 
 def test_m3_stable_motion_contract_uses_bilateral_contact_goal_tolerances() -> None:

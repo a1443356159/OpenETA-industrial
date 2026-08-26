@@ -44,6 +44,7 @@ for _directory in (Path(get_package_share_directory("openeta_rm75_robotiq2f85_si
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 from detachable_sdf import render_detachable_sdf  # noqa: E402
+from acceptance_scene_world import render_acceptance_world  # noqa: E402
 
 
 def _after_success(target, actions, label):
@@ -94,11 +95,20 @@ def generate_launch_description():
         .planning_pipelines(pipelines=["ompl"], default_planning_pipeline="ompl")
         .to_moveit_configs()
     )
+    generated_sdfs = []
+    canonical_world = share / "worlds/rm75_robotiq2f85_pickplace.sdf"
+    selected_world, acceptance_scene = render_acceptance_world(
+        base_world=canonical_world,
+        catalog_path=share / "config/acceptance_scenes.json",
+        environment=os.environ,
+    )
+    if selected_world != canonical_world:
+        generated_sdfs.append(selected_world)
     # Deliberately omit -r: Gazebo starts paused.  GazeboRuntime sends and
     # confirms the initial detach before it calls world control pause:false.
     gz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(Path(get_package_share_directory("ros_gz_sim")) / "launch/gz_sim.launch.py")),
-        launch_arguments={"gz_args": f"-s {share / 'worlds/rm75_robotiq2f85_pickplace.sdf'} --physics-engine gz-physics-dartsim-plugin"}.items(),
+        launch_arguments={"gz_args": f"-s {selected_world} --physics-engine gz-physics-dartsim-plugin"}.items(),
     )
     common = [{"use_sim_time": True}]
     rsp = Node(package="robot_state_publisher", executable="robot_state_publisher", output="screen", parameters=[{"robot_description": robot_description}, *common])
@@ -120,10 +130,10 @@ def generate_launch_description():
             "/openeta/gripper/left_outer@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_outer@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/left_inner@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_inner@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/left_tip@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_tip@std_msgs/msg/Float64]gz.msgs.Double", "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
         ], parameters=[{"use_sim_time": True}],
     )
-    generated_sdfs = []
     spawn = OpaqueFunction(function=_spawn_robot, kwargs={"xacro_file": xacro_file, "generated_sdfs": generated_sdfs, "post_spawn_actions": [jsb, bridge]})
     return LaunchDescription([
         LogInfo(msg=f"OpenETA qualification solver profile: {solver_profile}"),
+        LogInfo(msg=f"OpenETA acceptance scene: {acceptance_scene}"),
         SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", os.pathsep.join([str(share.parent), str(description_share.parent), os.environ.get("GZ_SIM_RESOURCE_PATH", "")])),
         gz_launch, rsp, spawn, RegisterEventHandler(OnShutdown(on_shutdown=_unlink_generated_sdf(generated_sdfs))),
         _after_success(jsb, [arm], "joint_state_broadcaster activation"),

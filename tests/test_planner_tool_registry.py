@@ -198,6 +198,32 @@ def test_scripted_acceptance_starts_exact_environment_without_model_routing() ->
     assert decision.metadata["host_obligation"]["source"] == "scripted_task_marker"
 
 
+def test_scripted_acceptance_uses_the_versioned_scene_seed() -> None:
+    env_id = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "[automation=scripted_tui; "
+            f"environment_id={env_id}; environment_task=normal_pick_and_place; "
+            "environment_seed=17; acceptance_scene=narrow-pick] run the acceptance"
+        )
+    )
+    tools = _tools_with_handlers("create_simulator_env")
+
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=tools,
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["environment_start_obligation"]["required_parameters"] == {
+        "env_id": env_id,
+        "seed": 17,
+        "task": "normal pick and place",
+    }
+
+
 def test_agentic_acceptance_routes_exact_environment_choice_through_model() -> None:
     env_id = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
     memory = AgentMemory()

@@ -339,6 +339,9 @@ def evaluate_placement_goal_legality(
     target_id = str(scene.get("target_id") or "") if isinstance(scene, Mapping) else ""
     world_specs = _scene_mapping(scene, "world_specs")
     attached_specs = _scene_mapping(scene, "attached_specs")
+    scene_contract = _scene_mapping(scene, "acceptance_scene")
+    if scene_contract:
+        result["acceptance_scene"] = dict(scene_contract)
     target_is_attached = target_id in attached_specs
     target_spec = attached_specs.get(target_id) if target_is_attached else world_specs.get(target_id)
     if not isinstance(target_spec, Mapping):
@@ -587,6 +590,7 @@ def evaluate_placement_goal_legality(
 
     collisions: list[str] = []
     uncheckable: list[str] = []
+    evaluated_obstacles: list[str] = []
     for object_id, spec in sorted(world_specs.items(), key=lambda item: str(item[0])):
         object_id = str(object_id)
         if object_id in {target_id, support_object_id}:
@@ -595,6 +599,7 @@ def evaluate_placement_goal_legality(
         if obstacle is None:
             uncheckable.append(object_id)
             continue
+        evaluated_obstacles.append(object_id)
         if _obb_penetrates(
             goal_box,
             obstacle,
@@ -603,6 +608,7 @@ def evaluate_placement_goal_legality(
             collisions.append(object_id)
     result["checks"]["static_scene_collision"] = {
         "available": bool(world_specs),
+        "evaluated_obstacle_ids": evaluated_obstacles,
         "collision_ids": collisions,
         "uncheckable_ids": uncheckable,
     }
@@ -956,6 +962,16 @@ def evaluate_grasp_placement_pair_legality(
         )
     )
     collision_events: list[JsonDict] = []
+    evaluated_obstacle_ids = sorted(
+        str(object_id)
+        for object_id, spec in world_specs.items()
+        if str(object_id) != target_id and _obb_from_spec(spec) is not None
+    )
+    uncheckable_obstacle_ids = sorted(
+        str(object_id)
+        for object_id, spec in world_specs.items()
+        if str(object_id) != target_id and _obb_from_spec(spec) is None
+    )
     attached_active = attachment is not None and size is not None
     for index, stage in enumerate(stages):
         name = str(stage.get("name") or f"stage_{index}")
@@ -1047,6 +1063,8 @@ def evaluate_grasp_placement_pair_legality(
         if isinstance(scene, Mapping)
         else False,
         "attached_object_geometry_available": attachment is not None and size is not None,
+        "evaluated_obstacle_ids": evaluated_obstacle_ids,
+        "uncheckable_obstacle_ids": uncheckable_obstacle_ids,
         "collisions": collision_events,
     }
     if collision_events:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -84,11 +84,20 @@ class PlanningSceneSynchronizer:
         table: CollisionBox,
         distractor: CollisionBox,
         target: CollisionBox,
+        obstacles: Sequence[CollisionBox] = (),
     ) -> int:
+        obstacle_ids = [obstacle.object_id for obstacle in obstacles]
+        if len(obstacle_ids) != len(set(obstacle_ids)) or any(
+            obstacle_id in {table.object_id, distractor.object_id, target.object_id}
+            for obstacle_id in obstacle_ids
+        ):
+            return self._fail("planning-scene obstacle identity is not unique")
+        world_objects = [table, distractor, target, *obstacles]
+        expected_world = {item.object_id for item in world_objects}
         revision = self._commit(
             {
                 "operation": "reset",
-                "world_objects": [table.to_dict(), distractor.to_dict(), target.to_dict()],
+                "world_objects": [item.to_dict() for item in world_objects],
                 "attached_objects": [],
                 "allowed_collisions": {
                     # The target begins exactly supported by the table, so
@@ -99,11 +108,11 @@ class PlanningSceneSynchronizer:
                     target.object_id: [*TARGET_TOUCH_LINKS, table.object_id],
                 },
             },
-            expected_world={table.object_id, distractor.object_id, target.object_id},
+            expected_world=expected_world,
             expected_attached=set(),
         )
         self.world_specs = {
-            item.object_id: item.to_dict() for item in (table, distractor, target)
+            item.object_id: item.to_dict() for item in world_objects
         }
         self.attached_specs = {}
         self.target_id = target.object_id

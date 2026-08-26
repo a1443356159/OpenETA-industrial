@@ -76,6 +76,39 @@ def test_planning_scene_reset_and_attach_detach_switch() -> None:
     assert scene.world_ids == {"table", "distractor", "target"}
 
 
+def test_planning_scene_preserves_acceptance_obstacles_across_attachment() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, distractor, target = _boxes()
+    guard = CollisionBox("pick_guard_left", (0.18, 0.018, 0.07), (0.28, -0.164, 0.435))
+
+    scene.reset(
+        table=table,
+        distractor=distractor,
+        target=target,
+        obstacles=(guard,),
+    )
+    assert scene.world_ids == {"table", "distractor", "target", "pick_guard_left"}
+    assert scene.world_specs["pick_guard_left"] == guard.to_dict()
+
+    scene.attach_target(target=target)
+    assert scene.world_ids == {"table", "distractor", "pick_guard_left"}
+    scene.detach_target(target=target)
+    assert scene.world_ids == {"table", "distractor", "target", "pick_guard_left"}
+
+
+def test_planning_scene_rejects_duplicate_acceptance_obstacle_identity() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, distractor, target = _boxes()
+
+    with pytest.raises(PlanningSceneError, match="identity is not unique"):
+        scene.reset(
+            table=table,
+            distractor=distractor,
+            target=target,
+            obstacles=(CollisionBox("target", (0.1, 0.1, 0.1), (0.0, 0.0, 0.0)),),
+        )
+
+
 def test_planning_scene_preserves_world_and_attached_rotations() -> None:
     calls = []
 
