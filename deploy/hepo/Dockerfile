@@ -106,7 +106,7 @@ RUN unset PIP_CONSTRAINT && \
       -r /tmp/openeta-requirements/requirements-anyplace.txt && \
     /opt/openeta/venvs/anyplace/bin/python -m pip install \
       --no-build-isolation --no-deps \
-      -e /opt/openeta/third_party/anyplace
+      /opt/openeta/third_party/anyplace
 
 RUN unset PIP_CONSTRAINT && \
     python3 -m venv --system-site-packages /opt/openeta/venvs/graspgenx && \
@@ -117,7 +117,7 @@ RUN unset PIP_CONSTRAINT && \
       -r /tmp/openeta-requirements/requirements-graspgenx.txt && \
     /opt/openeta/venvs/graspgenx/bin/python -m pip install \
       --no-build-isolation --no-deps \
-      -e /opt/openeta/third_party/GraspGenX
+      /opt/openeta/third_party/GraspGenX
 
 RUN unset PIP_CONSTRAINT && \
     python3 -m venv --system-site-packages /opt/openeta/venvs/sam3 && \
@@ -126,7 +126,7 @@ RUN unset PIP_CONSTRAINT && \
     /opt/openeta/venvs/sam3/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-sam3.txt && \
     /opt/openeta/venvs/sam3/bin/python -m pip install --no-build-isolation \
-      -e /opt/openeta/third_party/sam3
+      /opt/openeta/third_party/sam3
 
 COPY . /opt/openeta/src
 
