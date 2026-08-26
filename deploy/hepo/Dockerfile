@@ -64,26 +64,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
-      -o /usr/share/keyrings/ros-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
-      > /etc/apt/sources.list.d/ros2.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
-      python3-colcon-common-extensions \
-      python3-rosdep \
-      ros-jazzy-controller-manager \
-      ros-jazzy-gz-ros2-control \
-      ros-jazzy-moveit \
-      ros-jazzy-pick-ik \
-      ros-jazzy-robot-state-publisher \
-      ros-jazzy-ros-base \
-      ros-jazzy-ros-gz \
-      ros-jazzy-ros2-controllers \
-      ros-jazzy-trac-ik-kinematics-plugin \
-      ros-jazzy-xacro && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
 RUN python3 -m pip install "uv==${UV_VERSION}" && \
     mkdir -p \
       /opt/openeta/third_party \
@@ -117,7 +97,9 @@ RUN unset PIP_CONSTRAINT && \
       torch==1.13.1+cu117 torchvision==0.14.1+cu117 \
       --extra-index-url https://download.pytorch.org/whl/cu117 && \
     /opt/openeta/venvs/anyplace/bin/python -m pip install \
-      torch-scatter torch-cluster \
+      'torch-scatter==2.1.1+pt113cu117' \
+      'torch-cluster==1.6.1+pt113cu117' \
+      --no-deps \
       -f https://data.pyg.org/whl/torch-1.13.0+cu117.html --no-index && \
     /opt/openeta/venvs/anyplace/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-anyplace-runtime.txt \
@@ -159,6 +141,26 @@ RUN unset PIP_CONSTRAINT && \
     sed -i \
       's#\$PATH_TO_CHECKPOINT#/srv/openeta/models/anyplace/release-669f1b0ebcbe2ae3a72970ff31e911e8af73b2d6/anyplace_ckpts/anyplace_multitask/model.pth#g' \
       /opt/openeta/config/anyplace-normal.yaml
+
+RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+      -o /usr/share/keyrings/ros-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
+      > /etc/apt/sources.list.d/ros2.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+      python3-colcon-common-extensions \
+      python3-rosdep \
+      ros-jazzy-controller-manager \
+      ros-jazzy-gz-ros2-control \
+      ros-jazzy-moveit \
+      ros-jazzy-pick-ik \
+      ros-jazzy-robot-state-publisher \
+      ros-jazzy-ros-base \
+      ros-jazzy-ros-gz \
+      ros-jazzy-ros2-controllers \
+      ros-jazzy-trac-ik-kinematics-plugin \
+      ros-jazzy-xacro && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN source /opt/ros/jazzy/setup.bash && \
     cd /opt/openeta/src/extensions/gazebo/ros2_ws && \
