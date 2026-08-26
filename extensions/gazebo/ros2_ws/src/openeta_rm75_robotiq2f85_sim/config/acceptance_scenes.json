@@ -52,11 +52,11 @@
     "fastener-bin-sort": {
       "world_scene": "fastener-bin-sort",
       "seed": 41,
-      "description": "Select one large silver hex bolt from mixed industrial tools and place it in the blue of two physical parts bins.",
+      "description": "Select one red safety-coated hex bolt from mixed industrial tools and place it in the blue of two physical parts bins.",
       "task": {
-        "target_prompt": "large silver hex bolt",
-        "placement_object_prompt": "large silver hex bolt",
-        "placement_region_prompt": "blue parts bin floor"
+        "target_prompt": "red object",
+        "placement_object_prompt": "red object",
+        "placement_region_prompt": "blue square area inside bin"
       },
       "replace_default_distractor": true,
       "target_object": {
@@ -69,24 +69,24 @@
           {
             "shape": "cylinder",
             "radius": 0.014,
-            "length": 0.075,
-            "pose_xyz": [0.0175, 0.0, 0.0],
+            "length": 0.085,
+            "pose_xyz": [0.005, 0.0, 0.0],
             "pose_rpy": [0.0, 1.57079632679, 0.0],
-            "rgba": [0.68, 0.72, 0.78, 1.0]
+            "rgba": [0.86, 0.04, 0.03, 1.0]
           },
           {
             "shape": "box",
             "size_xyz": [0.022, 0.046, 0.040],
             "pose_xyz": [-0.041, 0.0, -0.003],
             "pose_rpy": [0.0, 0.0, 0.0],
-            "rgba": [0.82, 0.85, 0.90, 1.0]
+            "rgba": [0.98, 0.08, 0.04, 1.0]
           }
         ]
       },
       "placement_regions": [
         {
           "id": "blue_parts_bin",
-          "prompt": "blue parts bin floor",
+          "prompt": "blue square area inside bin",
           "center_xy": [0.55, -0.12],
           "size_xy_m": [0.18, 0.18],
           "rgba": [0.05, 0.28, 0.90, 0.95],
@@ -94,7 +94,7 @@
         },
         {
           "id": "orange_parts_bin",
-          "prompt": "orange parts bin floor",
+          "prompt": "orange square area inside bin",
           "center_xy": [0.55, 0.12],
           "size_xy_m": [0.18, 0.18],
           "rgba": [0.95, 0.33, 0.04, 0.95],
@@ -143,9 +143,9 @@
       "seed": 53,
       "description": "Select a yellow open-end wrench from a bolt, pliers and screwdriver, then place it in the green of two physical tool bins.",
       "task": {
-        "target_prompt": "yellow open-end wrench",
-        "placement_object_prompt": "yellow open-end wrench",
-        "placement_region_prompt": "green tool bin floor"
+        "target_prompt": "yellow open end tool",
+        "placement_object_prompt": "yellow open end tool",
+        "placement_region_prompt": "green square area inside bin"
       },
       "replace_default_distractor": true,
       "target_object": {
@@ -161,8 +161,8 @@
         ]
       },
       "placement_regions": [
-        {"id": "purple_tool_bin", "prompt": "purple tool bin floor", "center_xy": [0.55, -0.12], "size_xy_m": [0.18, 0.18], "rgba": [0.48, 0.08, 0.72, 0.95], "selected": false},
-        {"id": "green_tool_bin", "prompt": "green tool bin floor", "center_xy": [0.55, 0.12], "size_xy_m": [0.18, 0.18], "rgba": [0.04, 0.62, 0.20, 0.95], "selected": true}
+        {"id": "purple_tool_bin", "prompt": "purple square area inside bin", "center_xy": [0.55, -0.12], "size_xy_m": [0.18, 0.18], "rgba": [0.48, 0.08, 0.72, 0.95], "selected": false},
+        {"id": "green_tool_bin", "prompt": "green square area inside bin", "center_xy": [0.55, 0.12], "size_xy_m": [0.18, 0.18], "rgba": [0.04, 0.62, 0.20, 0.95], "selected": true}
       ],
       "static_obstacles": [
         {
@@ -173,7 +173,7 @@
           "pose_rpy": [0.0, 0.0, -0.38],
           "rgba": [0.70, 0.74, 0.80, 1.0],
           "primitives": [
-            {"shape": "cylinder", "radius": 0.014, "length": 0.075, "pose_xyz": [0.0175, 0.0, 0.0], "pose_rpy": [0.0, 1.57079632679, 0.0], "rgba": [0.68, 0.72, 0.78, 1.0]},
+            {"shape": "cylinder", "radius": 0.014, "length": 0.085, "pose_xyz": [0.005, 0.0, 0.0], "pose_rpy": [0.0, 1.57079632679, 0.0], "rgba": [0.68, 0.72, 0.78, 1.0]},
             {"shape": "box", "size_xyz": [0.022, 0.046, 0.040], "pose_xyz": [-0.041, 0.0, -0.003], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.82, 0.85, 0.90, 1.0]}
           ]
         },

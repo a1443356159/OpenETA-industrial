@@ -1085,6 +1085,12 @@ def test_process_snapshot_ignores_shell_prose_but_keeps_real_workloads() -> None
         ["/usr/bin/python3", "-u", "/workspace/sim/bench_worker.py"]
     )
     assert tui_acceptance._is_snapshot_candidate_argv(["/usr/bin/gz", "sim", "world.sdf"])
+    assert tui_acceptance._is_snapshot_candidate_argv(
+        [
+            "gz sim -g --render-engine-gui ogre2 --gui-config "
+            "/workspace/gazebo_operator_gui.config"
+        ]
+    )
 
 
 def test_control_m2_reads_precise_failure_code_from_durable_response(tmp_path: Path) -> None:

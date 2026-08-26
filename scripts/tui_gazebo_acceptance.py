@@ -309,6 +309,13 @@ def _is_snapshot_candidate_argv(argv: Sequence[str]) -> bool:
 
     if not argv:
         return False
+    # VirtualGL's ``vglrun`` helper can expose the launched Gazebo GUI as one
+    # packed argv[0] string (``gz sim -g ...``) rather than ordinary null-
+    # separated arguments. Accept only that exact executable prefix; a shell
+    # command remains multi-argv and is rejected below. This lets a GPU GUI
+    # carrying the case run-id participate in the normal ownership cleanup.
+    if len(argv) == 1 and argv[0].startswith("gz sim "):
+        argv = shlex.split(argv[0])
     executable = Path(argv[0]).name
     if executable in {"bash", "dash", "sh", "zsh", "fish"}:
         return False

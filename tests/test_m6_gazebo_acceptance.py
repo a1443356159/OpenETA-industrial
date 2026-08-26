@@ -169,14 +169,14 @@ def test_industrial_scene_prompts_bind_one_target_to_one_of_multiple_bins() -> N
     )
     tool = m6._instructions_for_backend("graspgenx", scenario="tool-bin-sort")
 
-    assert "grasp_target=large_silver_hex_bolt" in fastener
-    assert "placement_region=blue_parts_bin_floor" in fastener
-    assert "large silver hex bolt" in fastener and "blue parts bin floor" in fastener
-    assert "银色六角螺栓" in m6.SCENARIO_INSTRUCTIONS["fastener-bin-sort"]
+    assert "grasp_target=red_object" in fastener
+    assert "placement_region=blue_square_area_inside_bin" in fastener
+    assert "red object" in fastener and "blue square area inside bin" in fastener
+    assert "红色六角螺栓" in m6.SCENARIO_INSTRUCTIONS["fastener-bin-sort"]
     assert "蓝色料箱" in m6.SCENARIO_INSTRUCTIONS["fastener-bin-sort"]
-    assert "grasp_target=yellow_open-end_wrench" in tool
-    assert "placement_region=green_tool_bin_floor" in tool
-    assert "yellow open-end wrench" in tool and "green tool bin floor" in tool
+    assert "grasp_target=yellow_open_end_tool" in tool
+    assert "placement_region=green_square_area_inside_bin" in tool
+    assert "yellow open end tool" in tool and "green square area inside bin" in tool
     assert "黄色开口扳手" in m6.SCENARIO_INSTRUCTIONS["tool-bin-sort"]
     assert "绿色料箱" in m6.SCENARIO_INSTRUCTIONS["tool-bin-sort"]
 
