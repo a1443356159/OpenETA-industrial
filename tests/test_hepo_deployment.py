@@ -81,3 +81,13 @@ def test_docker_context_excludes_local_protected_assets() -> None:
     assert "checkpoint_detection.tar*" in dockerignore
     assert "checkpoint_tracking.tar*" in dockerignore
     assert "license_YuanyiYan.zip*" in dockerignore
+
+
+def test_hepo_workflow_keeps_digest_provenance_without_oversized_sbom() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/hepo-container.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "provenance: mode=max" in workflow
+    assert "sbom: false" in workflow
+    assert "digest=${{ steps.build.outputs.digest }}" in workflow
