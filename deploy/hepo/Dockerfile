@@ -88,6 +88,9 @@ COPY tools/requirements-anyplace.txt /tmp/openeta-requirements/
 COPY tools/requirements-graspgenx.txt /tmp/openeta-requirements/
 COPY tools/requirements-sam3.txt /tmp/openeta-requirements/
 
+# The pinned upstream tree is a PEP 420 namespace but its setup.py uses
+# find_packages(), which otherwise omits all Python modules from the wheel.
+# Patch only a temporary build copy so the official checkout stays clean.
 RUN unset PIP_CONSTRAINT && \
     uv python install 3.10.16 && \
     uv venv --seed --python 3.10.16 /opt/openeta/venvs/anyplace && \
@@ -104,9 +107,14 @@ RUN unset PIP_CONSTRAINT && \
     /opt/openeta/venvs/anyplace/bin/python -m pip install \
       -r /tmp/openeta-requirements/requirements-anyplace-runtime.txt \
       -r /tmp/openeta-requirements/requirements-anyplace.txt && \
+    anyplace_build="$(mktemp -d /tmp/openeta-anyplace-build.XXXXXX)" && \
+    rsync -a --exclude='.git/' \
+      /opt/openeta/third_party/anyplace/ "${anyplace_build}/" && \
+    touch "${anyplace_build}/anyplace/__init__.py" && \
     /opt/openeta/venvs/anyplace/bin/python -m pip install \
       --no-build-isolation --no-deps \
-      /opt/openeta/third_party/anyplace
+      "${anyplace_build}" && \
+    rm -rf -- "${anyplace_build:?}"
 
 RUN unset PIP_CONSTRAINT && \
     python3 -m venv --system-site-packages /opt/openeta/venvs/graspgenx && \
