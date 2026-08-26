@@ -50,7 +50,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
           provenance: mode=max
-          sbom: true
+          # The full ROS/CUDA SPDX attestation exceeds GitHub's 40 MiB
+          # artifact limit. Reproducibility remains enforced by the OCI
+          # digest, maximal provenance, immutable source and pinned inputs.
+          sbom: false
 
       - name: Record image identity
         run: |

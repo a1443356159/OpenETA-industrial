@@ -52,7 +52,10 @@ git push origin openeta-container-<release-id>
 ```
 
 workflow artifact 会记录 OCI digest 和源码 revision。部署必须使用 digest，不能只用
-tag，也不能使用 `latest`。workflow 合入默认分支后也可手动触发。
+tag，也不能使用 `latest`。workflow 同时发布 maximal provenance；由于完整 ROS/CUDA
+依赖树生成的 SPDX attestation 超过 GitHub 40 MiB artifact 限制，不附加 registry
+SBOM。源码、基础镜像、第三方 revision 和 Python 依赖仍在 Dockerfile 中固定并由
+OCI digest 封存。workflow 合入默认分支后也可手动触发。
 
 ## 在 Slurm allocation 中导入 SIF
 
