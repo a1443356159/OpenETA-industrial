@@ -520,10 +520,20 @@ def _observe_with_image(env, handle: str = "") -> dict:
 
     capabilities = frozenset(getattr(env, "openeta_capabilities", ()))
     if "fresh_observation" in capabilities:
-        obs = env.observe()
-        if handle:
-            _last_obs[handle] = obs
-        return EnvObservation.from_dict(obs).to_mcp_dict()
+        # A direct Gazebo ``env.step`` owns one atomic control receipt plus
+        # its post-action RGB-D capture.  The dashboard's background
+        # ``render_all`` path reaches this branch concurrently; without the
+        # same per-handle lock used by ``_step_with_image`` it can consume the
+        # next camera sequences first and leave the physical action waiting
+        # until its observation timeout.  Serialize the full fresh capture,
+        # cache update, and conversion so an operator dashboard remains
+        # strictly observational.
+        _obs_ctx = _obs_lock_for(handle) if handle else contextlib.nullcontext()
+        with _obs_ctx:
+            obs = env.observe()
+            if handle:
+                _last_obs[handle] = obs
+            return EnvObservation.from_dict(obs).to_mcp_dict()
 
     obs = _last_obs.get(handle, {})
     if not obs:

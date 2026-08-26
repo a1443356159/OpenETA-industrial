@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 
 from extensions.gazebo.direct_env import GazeboDirectEnv, build_gazebo_control_spec
@@ -63,3 +65,62 @@ def test_structured_receipt_raw_observation_never_clobbers_the_mcp_observation()
     assert payload["ok"] is True
     assert isinstance(payload["observation"]["cameras"], list)
     assert payload["observation"]["cameras"] == []
+
+
+def test_dashboard_fresh_observation_waits_for_atomic_physical_step() -> None:
+    handle = "fresh-observation-lock-test"
+    step_entered = threading.Event()
+    release_step = threading.Event()
+    observe_entered = threading.Event()
+    result = {
+        "task": "",
+        "cameras": {},
+        "robot": {},
+        "objects": [],
+        "metadata": {},
+    }
+
+    class Environment:
+        openeta_capabilities = frozenset({"fresh_observation"})
+
+        def step(self, _action):
+            step_entered.set()
+            assert release_step.wait(timeout=2.0)
+            return result, 0.0, False, False, {}
+
+        def observe(self):
+            observe_entered.set()
+            return result
+
+    environment = Environment()
+    bench_worker._envs[handle] = environment
+    step_thread = threading.Thread(
+        target=bench_worker._step_with_image,
+        args=(environment, {}),
+        kwargs={"handle": handle, "render": False},
+    )
+    observe_thread = threading.Thread(
+        target=bench_worker._observe_with_image,
+        args=(environment,),
+        kwargs={"handle": handle},
+    )
+    try:
+        step_thread.start()
+        assert step_entered.wait(timeout=1.0)
+        observe_thread.start()
+        assert not observe_entered.wait(timeout=0.1)
+        release_step.set()
+        step_thread.join(timeout=2.0)
+        observe_thread.join(timeout=2.0)
+        assert not step_thread.is_alive()
+        assert not observe_thread.is_alive()
+        assert observe_entered.is_set()
+    finally:
+        release_step.set()
+        step_thread.join(timeout=2.0)
+        observe_thread.join(timeout=2.0)
+        bench_worker._envs.pop(handle, None)
+        bench_worker._last_obs.pop(handle, None)
+        bench_worker._done_handles.discard(handle)
+        with bench_worker._obs_locks_guard:
+            bench_worker._obs_locks.pop(handle, None)

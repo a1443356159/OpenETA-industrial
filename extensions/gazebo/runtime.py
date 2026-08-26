@@ -12,7 +12,11 @@ from typing import Any, Callable, Mapping
 from adapter.protocol import EnvObservation, RobotState
 
 from .deployment import GazeboDeploymentConfig
-from .observation import RosRgbdCameraConfig, RosRgbdCameraSource
+from .observation import (
+    GazeboObservationError,
+    RosRgbdCameraConfig,
+    RosRgbdCameraSource,
+)
 from .process import (
     DetachableJointState,
     GazeboDetachableJointControl,
@@ -349,9 +353,24 @@ class GazeboRuntime:
         # 30-second transport timeout.  ``capture`` still consumes new RGB and
         # depth sequences, so an image delivered before this action cannot be
         # reused as its observation.
-        observation = self.observe(
-            min_camera_timestamp_s=barrier,
-        )
+        try:
+            observation = self.observe(min_camera_timestamp_s=barrier)
+        except GazeboObservationError:
+            # The control action has already completed and its native receipt
+            # must never be discarded or repeated merely because the camera
+            # transport missed one bounded refresh.  Retry only the read-only
+            # post-action observation, once, and only while the owned launch
+            # and ROS executor still look healthy.  A second miss propagates
+            # as infrastructure failure instead of candidate unreachability.
+            launch_healthy = self._launch is None or bool(
+                getattr(self._launch, "running", True)
+            )
+            ros_healthy = self._ros_thread is None or self._ros_thread.is_alive()
+            if not self.started or self.closed or not launch_healthy or not ros_healthy:
+                raise
+            receipt["observation_refresh_retry_count"] = 1
+            receipt["observation_refresh_retry_reason"] = "camera_transport_timeout"
+            observation = self.observe(min_camera_timestamp_s=barrier)
         return observation, receipt
 
     def close(self) -> None:

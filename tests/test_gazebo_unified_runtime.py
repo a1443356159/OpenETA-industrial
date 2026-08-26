@@ -10,6 +10,7 @@ import pytest
 from adapter.protocol import CameraFrame, EnvObservation, RobotState
 from extensions.gazebo.deployment import GazeboDeploymentConfig
 from extensions.gazebo.direct_env import GazeboDirectEnv
+from extensions.gazebo.observation import GazeboObservationError
 from extensions.gazebo.profiles import gazebo_profile, gazebo_profiles
 from extensions.gazebo.runtime import GazeboRuntime
 from extensions.gazebo import runtime as gazebo_runtime
@@ -253,6 +254,66 @@ def test_runtime_samples_fresh_robot_state_before_slow_camera_capture() -> None:
     runtime.execute({"action_type": "move_to"})
 
     assert events == ["robot", "camera"]
+
+
+def test_runtime_retries_only_observation_after_camera_transport_timeout() -> None:
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+
+    class Camera(_Camera):
+        def __init__(self, config):
+            super().__init__(config)
+            self.attempts = 0
+
+        def capture(self, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise GazeboObservationError("camera transport timeout")
+            return super().capture(**kwargs)
+
+    camera = Camera(profile.cameras[0])
+    controller = _ResetController(
+        [{"ok": True, "action_completed_ros_time_s": 42.0}]
+    )
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [camera]
+    runtime.controller = controller
+
+    observation, receipt = runtime.execute({"action_type": "gripper_close"})
+
+    assert observation.cameras[0].timestamp_s == 1.0
+    assert camera.attempts == 2
+    assert controller.actions == [{"action_type": "gripper_close"}]
+    assert receipt["observation_refresh_retry_count"] == 1
+    assert receipt["observation_refresh_retry_reason"] == "camera_transport_timeout"
+
+
+def test_runtime_propagates_second_camera_transport_timeout_without_repeating_action() -> None:
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+
+    class Camera(_Camera):
+        def __init__(self, config):
+            super().__init__(config)
+            self.attempts = 0
+
+        def capture(self, **kwargs):
+            self.attempts += 1
+            raise GazeboObservationError("camera transport timeout")
+
+    camera = Camera(profile.cameras[0])
+    controller = _ResetController(
+        [{"ok": True, "action_completed_ros_time_s": 42.0}]
+    )
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [camera]
+    runtime.controller = controller
+
+    with pytest.raises(GazeboObservationError, match="camera transport timeout"):
+        runtime.execute({"action_type": "gripper_close"})
+
+    assert camera.attempts == 2
+    assert controller.actions == [{"action_type": "gripper_close"}]
 
 
 def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
