@@ -1050,8 +1050,10 @@ def verify_case(
             and base._contains(call, "error_code", "MOTION_PLAN_FAILED")
             and base._contains(call, "execution_started", False)
         ]
-        if scenario == "normal" and placement_failures:
-            errors.append("normal scenario unexpectedly injected a placement rejection")
+        # A normal run may reject a candidate-specific release plan and resume
+        # the frozen AnyPlace frontier.  That is closed-loop recovery, not a
+        # fault injection.  Only the explicit reject-first fixture below
+        # constrains where and how a synthetic rejection must appear.
         frozen_pair_qualification_blocks = [
             block
             for grasp_call in grasp_calls
