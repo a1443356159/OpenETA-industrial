@@ -95,6 +95,18 @@ def load_acceptance_scene_contract(
                 )
             ):
                 raise ValueError(f"acceptance scene obstacle {key} is invalid")
+    destination = scene.get("destination_center_xy")
+    if destination is not None and (
+        not isinstance(destination, list)
+        or len(destination) != 2
+        or any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(float(value))
+            for value in destination
+        )
+    ):
+        raise ValueError("acceptance scene destination is invalid")
     scene["scene_id"] = scene_id
     scene["contract_sha256"] = hashlib.sha256(
         json.dumps(
@@ -241,6 +253,16 @@ class NativePickPlaceConfig(GazeboControlConfig):
     placement_center_height_m: float = 0.43
     placement_center_height_tolerance_m: float = 0.01
 
+    def __post_init__(self) -> None:
+        GazeboControlConfig.__post_init__(self)
+        destination = self.acceptance_scene_contract.get("destination_center_xy")
+        if destination is not None:
+            object.__setattr__(
+                self,
+                "destination_center_xy",
+                tuple(float(value) for value in destination),
+            )
+
     @property
     def acceptance_scene_contract(self) -> Mapping[str, Any]:
         return load_acceptance_scene_contract(self.acceptance_scene_id)
@@ -273,6 +295,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 str(obstacle["id"])
                 for obstacle in contract["static_obstacles"]
             ],
+            "destination_center_xy": list(self.destination_center_xy),
         }
 
     @property

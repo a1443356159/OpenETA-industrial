@@ -412,6 +412,10 @@ def prepare_case(
         "static_obstacle_ids": [
             str(obstacle["id"]) for obstacle in scene["static_obstacles"]
         ],
+        "destination_center_xy": [
+            float(value)
+            for value in scene.get("destination_center_xy", [0.48, -0.10])
+        ],
     }
     receipt["grasp_backend_mode"] = backend
     receipt["execution_profile"] = profile
@@ -836,6 +840,10 @@ def verify_case(
             "seed": int(scene["seed"]),
             "contract_sha256": str(scene["contract_sha256"]),
             "static_obstacle_ids": expected_obstacle_ids,
+            "destination_center_xy": [
+                float(value)
+                for value in scene.get("destination_center_xy", [0.48, -0.10])
+            ],
         }:
             errors.append("acceptance scene receipt does not match the versioned contract")
         planner_evidence = _planner_evidence(
@@ -1192,6 +1200,10 @@ def verify_case(
                 "seed": int(scene["seed"]),
                 "contract_sha256": str(scene["contract_sha256"]),
                 "static_obstacle_ids": expected_obstacle_ids,
+                "destination_center_xy": [
+                    float(value)
+                    for value in scene.get("destination_center_xy", [0.48, -0.10])
+                ],
             },
             "grasp_backend": backend,
         }
@@ -1213,6 +1225,10 @@ def verify_case(
                 "contract_sha256": str(scene["contract_sha256"]),
                 "static_obstacle_ids": [
                     str(obstacle["id"]) for obstacle in scene["static_obstacles"]
+                ],
+                "destination_center_xy": [
+                    float(value)
+                    for value in scene.get("destination_center_xy", [0.48, -0.10])
                 ],
             },
             "grasp_backend": backend,

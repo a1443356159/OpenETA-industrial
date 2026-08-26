@@ -37,12 +37,13 @@
     "barrier-transfer": {
       "world_scene": "barrier-transfer",
       "seed": 29,
-      "description": "A raised barrier blocks the direct target-to-destination transfer corridor.",
+      "description": "A raised barrier blocks the direct diagonal target-to-destination transfer corridor while leaving both endpoint grasps collision-free.",
+      "destination_center_xy": [0.48, 0.10],
       "static_obstacles": [
         {
           "id": "transfer_barrier",
-          "size_xyz": [0.025, 0.22, 0.12],
-          "pose_xyz": [0.385, -0.10, 0.46],
+          "size_xyz": [0.025, 0.08, 0.12],
+          "pose_xyz": [0.38, 0.0, 0.46],
           "pose_rpy": [0.0, 0.0, 0.0],
           "rgba": [0.92, 0.72, 0.10, 1.0]
         }

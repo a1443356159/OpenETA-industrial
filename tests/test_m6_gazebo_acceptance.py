@@ -101,6 +101,9 @@ def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
         assert receipt["acceptance_scene"]["scene_id"] == scenario
         assert receipt["acceptance_scene"]["seed"] == seed
         assert receipt["acceptance_scene"]["static_obstacle_ids"] == obstacle_ids
+        assert receipt["acceptance_scene"]["destination_center_xy"] == (
+            [0.48, 0.10] if scenario == "barrier-transfer" else [0.48, -0.10]
+        )
         assert len(receipt["acceptance_scene"]["contract_sha256"]) == 64
 
 

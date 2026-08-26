@@ -129,6 +129,19 @@ def test_m3_narrow_pick_corridor_is_constrained_without_excluding_the_full_gripp
     assert right["pose_xyz"][2] + right["size_xyz"][2] / 2.0 == pytest.approx(0.425)
 
 
+def test_m3_barrier_transfer_blocks_only_the_diagonal_path_not_its_endpoints() -> None:
+    config = NativePickPlaceConfig(acceptance_scene_id="barrier-transfer")
+    barrier = config.acceptance_scene_contract["static_obstacles"][0]
+    start = config.target_initial_xyz[:2]
+    destination = config.destination_center_xy
+
+    assert destination == (0.48, 0.10)
+    assert barrier["pose_xyz"][:2] == pytest.approx(
+        [(start[index] + destination[index]) / 2.0 for index in range(2)]
+    )
+    assert barrier["size_xyz"] == [0.025, 0.08, 0.12]
+
+
 @pytest.mark.parametrize(
     ("scene_id", "obstacle_ids"),
     [
@@ -159,6 +172,11 @@ def test_m3_complex_scene_renderer_adds_real_static_collision_geometry(
                 float(value)
                 for value in model.findtext("link/collision/geometry/box/size", "").split()
             ] == obstacle["size_xyz"]
+        if scene_id == "barrier-transfer":
+            marker = world.find("model[@name='placement_zone_marker']")
+            assert marker is not None
+            marker_pose = [float(value) for value in marker.findtext("pose", "").split()]
+            assert marker_pose[:2] == [0.48, 0.10]
         assert [
             model.get("name")
             for model in world.findall("model")

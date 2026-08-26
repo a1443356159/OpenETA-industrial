@@ -53,13 +53,20 @@ def render_acceptance_world(
     obstacles = scene.get("static_obstacles")
     if not world_scene or not isinstance(obstacles, list):
         raise RuntimeError("acceptance scene definition is invalid")
-    if not obstacles:
+    destination_value = scene.get("destination_center_xy")
+    if not obstacles and destination_value is None:
         return base_world, world_scene
 
     tree = ET.parse(base_world)
     world = tree.getroot().find("world")
     if world is None:
         raise RuntimeError("canonical pick-place world is invalid")
+    if destination_value is not None:
+        destination = _numbers(destination_value, 2)
+        marker = world.find("model[@name='placement_zone_marker']")
+        if marker is None or marker.find("pose") is None:
+            raise RuntimeError("canonical placement marker is invalid")
+        marker.find("pose").text = _text([*destination, 0.4005, 0.0, 0.0, 0.0])
     existing_ids = {
         str(model.get("name") or "") for model in world.findall("model")
     }
