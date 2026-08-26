@@ -1705,14 +1705,14 @@ class _FrozenGoalPairCoordinator:
         planning_scene_revision: int,
         source: Mapping[str, object],
     ) -> ToolResult:
-        """Deepen the frozen grasp frontier until a real backup is available.
+        """Find one complete pair and defer backup work to the frozen frontier.
 
         Grasp inference is immutable by this point.  ``fast_v3`` may stop its
         first grasp wave after two diverse L5 passes, yet attachment-aware
-        grasp/place qualification can still reject one of those two branches.
-        Continue from the unvisited provider tail inside the same tool call so
-        that this deterministic low-level recovery neither reruns a model nor
-        consumes another planner/TUI turn.
+        grasp/place qualification can still reject either branch.  Execute as
+        soon as one branch has a complete pair proof; retain every other
+        branch on the frozen frontier so a physical failure resumes from that
+        point without rerunning a model.
         """
 
         valid_goal_pool = (
@@ -1724,8 +1724,8 @@ class _FrozenGoalPairCoordinator:
         fast_frontier = (
             getattr(self.qualifier, "qualification_profile", "legacy") == "fast_v3"
         )
-        target = min(2, self.grasp_branch_limit)
-        if not fast_frontier or target <= 1 or not valid_goal_pool:
+        target = 1
+        if not fast_frontier or not valid_goal_pool:
             return self._filter_grasp_batch(
                 result,
                 scene_epoch=scene_epoch,
@@ -1753,8 +1753,15 @@ class _FrozenGoalPairCoordinator:
             "frozen_pair_full_plan_pass_count": 0,
         }
         reserve_activated = False
+        deferred_count = 0
 
         while True:
+            batch_input_grasps = current.details.get("grasp_candidates")
+            batch_input_grasps = (
+                [json.loads(json.dumps(candidate)) for candidate in batch_input_grasps]
+                if isinstance(batch_input_grasps, list)
+                else []
+            )
             needed = max(1, target - len(retained))
             filtered = self._filter_grasp_batch(
                 current,
@@ -1808,7 +1815,29 @@ class _FrozenGoalPairCoordinator:
                 if isinstance(goals, list):
                     retained_goals[grasp_id] = json.loads(json.dumps(goals))
 
-            if len(retained) >= target or not self.grasp_frontier_candidates:
+            if len(retained) >= target:
+                selected_ids = set(list(retained)[:target])
+                known_frontier_ids = {
+                    str(candidate.get("id") or "")
+                    for candidate in self.grasp_frontier_candidates
+                    if isinstance(candidate, Mapping)
+                }
+                deferred = [
+                    candidate
+                    for candidate in batch_input_grasps
+                    if isinstance(candidate, Mapping)
+                    and str(candidate.get("id") or "")
+                    and str(candidate.get("id") or "") not in selected_ids
+                    and str(candidate.get("id") or "") not in known_frontier_ids
+                ]
+                if deferred:
+                    self.grasp_frontier_candidates = [
+                        *deferred,
+                        *self.grasp_frontier_candidates,
+                    ]
+                    deferred_count += len(deferred)
+                break
+            if not self.grasp_frontier_candidates:
                 break
 
             previous_frontier_ids = tuple(
@@ -1880,12 +1909,16 @@ class _FrozenGoalPairCoordinator:
             {
                 "frozen_pair_grasp_branch_limit": self.grasp_branch_limit,
                 "frozen_pair_primary_grasp_count": min(target, len(final_grasps)),
-                "frozen_pair_reserve_grasp_count": max(
-                    0, pair_totals["frozen_pair_lookahead_grasp_count"] - target
-                ),
+                "frozen_pair_reserve_grasp_count": 0,
                 "frozen_pair_reserve_activated": reserve_activated,
-                "frozen_pair_backup_target": target,
-                "frozen_pair_backup_ready": len(final_grasps) >= target,
+                "frozen_pair_execution_target": target,
+                "frozen_pair_backup_target": 0,
+                "frozen_pair_backup_required": False,
+                "frozen_pair_backup_ready": False,
+                "frozen_pair_deferred_grasp_count": deferred_count,
+                "frozen_pair_recovery_policy": (
+                    "resume_frozen_frontier_after_execution_failure"
+                ),
                 "frozen_pair_frontier_expansion_count": expansion_count,
                 "frozen_grasp_frontier_remaining_count": len(
                     self.grasp_frontier_candidates
