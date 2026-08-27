@@ -227,6 +227,47 @@ def test_detachable_joint_proof_uses_the_target_model_world_pose() -> None:
     assert proof.capture_relative_translation_m == pytest.approx(0.0)
 
 
+def test_authoritative_dynamic_models_use_one_complete_native_pose_snapshot() -> None:
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._world_link_poses = lambda: {
+        "silver_box_wrench": gazebo_process.GazeboNativePose(
+            (0.31, 0.105, 0.009), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "distractor_object": gazebo_process.GazeboNativePose(
+            (0.34, 0.375, 0.011), (0.0, 0.0, 0.0, 1.0)
+        ),
+    }  # type: ignore[method-assign]
+
+    poses, attempts = control.native_model_poses_with_retry(
+        ("silver_box_wrench", "distractor_object"),
+        max_attempts=2,
+    )
+
+    assert attempts == 1
+    assert tuple(poses) == ("silver_box_wrench", "distractor_object")
+    assert poses["silver_box_wrench"].xyz == (0.31, 0.105, 0.009)
+
+
+def test_authoritative_dynamic_pose_snapshot_fails_closed_when_one_model_is_missing() -> (
+    None
+):
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._world_link_poses = lambda: {
+        "silver_box_wrench": gazebo_process.GazeboNativePose(
+            (0.31, 0.105, 0.009), (0.0, 0.0, 0.0, 1.0)
+        )
+    }  # type: ignore[method-assign]
+
+    with pytest.raises(
+        gazebo_process.GazeboProcessError,
+        match="AUTHORITATIVE_GAZEBO_MODEL_POSE_UNAVAILABLE",
+    ):
+        control.native_model_poses_with_retry(
+            ("silver_box_wrench", "distractor_object"),
+            max_attempts=2,
+        )
+
+
 def test_detachable_joint_baseline_uses_the_final_settled_pose(monkeypatch) -> None:
     control = gazebo_process.GazeboDetachableJointControl()
     control._state = gazebo_process.DetachableJointState.ATTACHED

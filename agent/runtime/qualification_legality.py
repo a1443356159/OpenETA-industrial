@@ -25,6 +25,7 @@ from agent.runtime.collision_geometry import (
 
 GOAL_LEGALITY_SCHEMA = "openeta.placement_goal_legality.v1"
 PAIR_LEGALITY_SCHEMA = "openeta.grasp_placement_pair_legality.v1"
+GRASP_TARGET_CLOSING_SCHEMA = "openeta.grasp_target_closing_alignment.v1"
 _ROTATION_TOLERANCE = 1e-4
 _POSE_TOLERANCE_M = 1e-5
 _ORIENTATION_TOLERANCE = 1e-4
@@ -225,6 +226,233 @@ def _projected_body_geometry(
         return ()
 
 
+def _camera_to_world_opencv(value: object) -> Transform | None:
+    """Parse the camera convention accepted by the grasp compiler.
+
+    New observation adapters publish OpenCV camera axes explicitly.  Missing
+    frame metadata retains the compiler's legacy OpenGL interpretation so the
+    legality evidence and the compiled terminal cannot disagree merely
+    because an older artifact is replayed.
+    """
+
+    if not isinstance(value, Mapping):
+        return None
+    rotation: Rotation | None = None
+    xyz: list[float] | None = None
+    flat = _finite_vector(value.get("mat"), 9)
+    if flat is not None:
+        xyz = _finite_vector(value.get("pos"), 3)
+        if str(value.get("matrix_layout") or "row_major").lower() == "column_major":
+            rotation = _strict_rotation(
+                [[flat[row + column * 3] for column in range(3)] for row in range(3)]
+            )
+        else:
+            rotation = _strict_rotation([flat[0:3], flat[3:6], flat[6:9]])
+    elif _finite_vector(value.get("quat_xyzw"), 4) is not None:
+        xyz = _finite_vector(value.get("pos"), 3)
+        rotation = _rotation_from_quaternion(value.get("quat_xyzw"))
+    else:
+        for key in ("camera_to_world", "pose_mat", "matrix"):
+            transform = _transform_matrix(value.get(key))
+            if transform is not None:
+                rotation, transform_xyz = transform
+                xyz = list(transform_xyz)
+                break
+    if rotation is None or xyz is None:
+        return None
+    raw_frame = str(value.get("camera_frame") or "opengl")
+    camera_frame = raw_frame.strip().lower().replace("-", "_").replace(" ", "_")
+    if camera_frame in {"opencv", "opencv_optical", "cv"}:
+        return rotation, tuple(xyz)  # type: ignore[return-value]
+    if camera_frame not in {"opengl", "opengl_renderer", "mujoco", "renderer"}:
+        return None
+    opencv_to_opengl: Rotation = (
+        (1.0, 0.0, 0.0),
+        (0.0, -1.0, 0.0),
+        (0.0, 0.0, -1.0),
+    )
+    return _compose(
+        (rotation, tuple(xyz)),  # type: ignore[arg-type]
+        (opencv_to_opengl, (0.0, 0.0, 0.0)),
+    )
+
+
+def _primitive_axis_half_extent(
+    primitive: ProjectedCollisionPrimitive,
+    axis: Sequence[float],
+) -> float:
+    primitive_axes = _columns(primitive.rotation_rows)
+    if primitive.shape == "box" and primitive.size_xyz is not None:
+        return sum(
+            primitive.size_xyz[index] * 0.5 * abs(_dot(axis, primitive_axes[index]))
+            for index in range(3)
+        )
+    if (
+        primitive.shape == "cylinder"
+        and primitive.radius_m is not None
+        and primitive.length_m is not None
+    ):
+        axial = min(1.0, abs(_dot(axis, primitive_axes[2])))
+        return (
+            primitive.radius_m * math.sqrt(max(0.0, 1.0 - axial * axial))
+            + primitive.length_m * 0.5 * axial
+        )
+    raise ValueError("collision primitive geometry is incomplete")
+
+
+def evaluate_grasp_target_closing_alignment(
+    descriptor: Mapping[str, Any],
+    *,
+    scene: object,
+) -> JsonDict:
+    """Measure an unchanged model grasp against exact scene target geometry.
+
+    The result is an ordering signal, never an empirical hard rejection.  It
+    projects the same compound primitives supplied to MoveIt through the
+    model's GraspNet closing axis, restricted to the finger-height section at
+    the reported fingertip centre.  This distinguishes a centred handle pinch
+    from a visually centred pose whose jaws would need to span an entire long
+    workpiece, while preserving every candidate for exhaustive recovery.
+    """
+
+    candidate = descriptor.get("candidate")
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    parameters = candidate.get("compile_parameters")
+    parameters = parameters if isinstance(parameters, Mapping) else {}
+    raw = parameters.get("camera_pose")
+    raw = raw if isinstance(raw, Mapping) else {}
+    candidate_id = str(candidate.get("id") or raw.get("id") or descriptor.get("candidate_id") or "")
+    result: JsonDict = {
+        "schema_version": GRASP_TARGET_CLOSING_SCHEMA,
+        "candidate_id": candidate_id,
+        "source": "planning_scene_collision_geometry",
+        "closing_axis": "graspnet_local_y",
+        "binormal_axis": "graspnet_local_z",
+        "ordering_only": True,
+        "pose_modified": False,
+        "evaluated": False,
+    }
+
+    grasp_rotation = _strict_rotation(raw.get("rotation_matrix"))
+    tip_camera = _finite_vector(raw.get("gripper_tip_position_xyz"), 3)
+    camera_to_world = _camera_to_world_opencv(parameters.get("camera_extrinsics"))
+    try:
+        finger_height_m = float(raw.get("height"))
+        maximum_aperture_m = float(parameters.get("max_gripper_width_m"))
+    except (TypeError, ValueError):
+        finger_height_m = math.nan
+        maximum_aperture_m = math.nan
+    if (
+        grasp_rotation is None
+        or tip_camera is None
+        or camera_to_world is None
+        or not math.isfinite(finger_height_m)
+        or finger_height_m <= 0.0
+        or not math.isfinite(maximum_aperture_m)
+        or maximum_aperture_m <= 0.0
+    ):
+        result.update(
+            reason="grasp_or_calibration_geometry_unavailable",
+            geometry_available=False,
+        )
+        return result
+
+    camera_rotation, camera_xyz = camera_to_world
+    world_grasp = _compose(
+        (camera_rotation, camera_xyz),
+        (grasp_rotation, (0.0, 0.0, 0.0)),
+    )[0]
+    tip_offset = _rotate(camera_rotation, tip_camera)
+    tip_world = tuple(camera_xyz[index] + tip_offset[index] for index in range(3))
+    _, closing_axis, binormal_axis = _columns(world_grasp)
+
+    target_id = str(scene.get("target_id") or "") if isinstance(scene, Mapping) else ""
+    world_specs = _scene_mapping(scene, "world_specs")
+    attached_specs = _scene_mapping(scene, "attached_specs")
+    target_spec = attached_specs.get(target_id) or world_specs.get(target_id)
+    target_pose_value = (
+        {
+            "xyz": target_spec.get("pose_xyz"),
+            "quat_xyzw": target_spec.get("pose_quat_xyzw"),
+            **(
+                {"rotation_matrix": target_spec["rotation_matrix"]}
+                if isinstance(target_spec, Mapping)
+                and target_spec.get("rotation_matrix") is not None
+                else {}
+            ),
+        }
+        if isinstance(target_spec, Mapping)
+        else None
+    )
+    target_pose = rigid_pose(target_pose_value)
+    primitives = (
+        _projected_body_geometry(target_spec, target_pose)
+        if isinstance(target_spec, Mapping) and target_pose is not None
+        else ()
+    )
+    if not primitives:
+        result.update(
+            reason="scene_target_geometry_unavailable",
+            geometry_available=False,
+        )
+        return result
+
+    tip_binormal = _dot(tip_world, binormal_axis)
+    section_low = tip_binormal - finger_height_m * 0.5
+    section_high = tip_binormal + finger_height_m * 0.5
+    section: list[ProjectedCollisionPrimitive] = []
+    for primitive in primitives:
+        center = _dot(primitive.center_xyz, binormal_axis)
+        half_extent = _primitive_axis_half_extent(primitive, binormal_axis)
+        if center + half_extent >= section_low and center - half_extent <= section_high:
+            section.append(primitive)
+
+    result.update(
+        geometry_available=True,
+        primitive_count=len(primitives),
+        section_primitive_count=len(section),
+        binormal_window_m=finger_height_m,
+        maximum_aperture_m=maximum_aperture_m,
+        gripper_tip_world_xyz=[float(value) for value in tip_world],
+    )
+    if not section:
+        result.update(
+            reason="finger_section_does_not_intersect_target",
+            evaluated=True,
+            section_intersects_target=False,
+            aperture_feasible=False,
+        )
+        return result
+
+    intervals = []
+    for primitive in section:
+        center = _dot(primitive.center_xyz, closing_axis)
+        half_extent = _primitive_axis_half_extent(primitive, closing_axis)
+        intervals.append((center - half_extent, center + half_extent))
+    low = min(interval[0] for interval in intervals)
+    high = max(interval[1] for interval in intervals)
+    tip_closing = _dot(tip_world, closing_axis)
+    target_span = high - low
+    correction = (low + high) * 0.5 - tip_closing
+    required_aperture = 2.0 * max(
+        abs(low - tip_closing),
+        abs(high - tip_closing),
+    )
+    denominator = max(target_span, 0.02)
+    result.update(
+        reason="scene_geometry_measured",
+        evaluated=True,
+        section_intersects_target=True,
+        target_span_m=target_span,
+        correction_m=correction,
+        correction_world_xyz=[float(correction * value) for value in closing_axis],
+        centering_ratio=abs(correction) / denominator,
+        required_aperture_m=required_aperture,
+        aperture_feasible=required_aperture <= maximum_aperture_m + 1e-9,
+    )
+    return result
+
+
 def _projected_obb(primitive: ProjectedCollisionPrimitive) -> Obb:
     return (
         primitive.center_xyz,
@@ -388,6 +616,15 @@ def evaluate_placement_goal_legality(
             region.get("penetration_tolerance_m", 0.001),
         )
     )
+    # A physical release need not command exact zero-distance contact.  Keep
+    # the complete attached body one calibrated support-uncertainty band above
+    # the collision support, then let Gazebo gravity settle it after detach.
+    # This preserves the model pose and avoids disabling target/support
+    # collision for the whole MoveIt trajectory.
+    release_clearance = min(
+        max(0.0, support_penetration_tolerance),
+        max(0.0, support_tolerance),
+    )
     static_penetration_tolerance = float(
         region.get(
             "static_penetration_tolerance_m",
@@ -453,8 +690,12 @@ def evaluate_placement_goal_legality(
             "raw_bottom_z_m": raw_minimum_z,
             "basis": "partial_rgbd_centroid_to_complete_collision_body",
         }
-        if support_z is not None and raw_minimum_z < support_z:
-            correction_z = support_z - raw_minimum_z
+        qualified_support_z = (
+            support_z + release_clearance if support_z is not None else None
+        )
+        support_reconciliation["release_clearance_m"] = release_clearance
+        if qualified_support_z is not None and raw_minimum_z < qualified_support_z:
+            correction_z = qualified_support_z - raw_minimum_z
             geometric_limit = orientation_invariant_radius_m(
                 raw_geometry,
                 object_xyz=raw_collision_goal[1],
@@ -480,7 +721,7 @@ def evaluate_placement_goal_legality(
                     {
                         "applied": True,
                         "translation_xyz": [0.0, 0.0, correction_z],
-                        "qualified_bottom_z_m": support_z,
+                        "qualified_bottom_z_m": qualified_support_z,
                     }
                 )
             else:
@@ -602,9 +843,7 @@ def evaluate_placement_goal_legality(
     size_xy = _finite_vector(region.get("size_xy_m"), 2)
     if center_xy is not None and size_xy is not None and all(value > 0.0 for value in size_xy):
         half_x, half_y = size_xy[0] / 2.0, size_xy[1] / 2.0
-        acceptance_semantics = str(
-            region.get("acceptance_semantics") or "complete_footprint"
-        )
+        acceptance_semantics = str(region.get("acceptance_semantics") or "complete_footprint")
         if acceptance_semantics not in {
             "complete_footprint",
             "stable_geometry_centroid_inside",
@@ -681,8 +920,8 @@ def evaluate_placement_goal_legality(
                 # yaw-invariant region clearance predicts whether settling can
                 # remain in-zone. It is deliberately ordering-only because
                 # friction and non-uniform mass are not proven here.
-                settling_shift = 2.0 * conservative_radius * math.sin(
-                    min(math.pi, float(alignment_error)) / 2.0
+                settling_shift = (
+                    2.0 * conservative_radius * math.sin(min(math.pi, float(alignment_error)) / 2.0)
                 )
                 settling_clearance = conservative_margin - settling_shift
                 settling = {
@@ -695,10 +934,7 @@ def evaluate_placement_goal_legality(
                 }
                 support_checks.update(settling)
                 result["checks"]["placement_region"].update(settling)
-        if (
-            acceptance_semantics == "stable_geometry_centroid_inside"
-            and centroid_margin < -1e-9
-        ):
+        if acceptance_semantics == "stable_geometry_centroid_inside" and centroid_margin < -1e-9:
             result.update(
                 verdict="FAIL",
                 reason="goal_geometry_centroid_outside_placement_region",
@@ -706,10 +942,7 @@ def evaluate_placement_goal_legality(
                 elapsed_s=time.monotonic() - started,
             )
             return result
-        if (
-            acceptance_semantics == "complete_footprint"
-            and footprint_margin < -1e-9
-        ):
+        if acceptance_semantics == "complete_footprint" and footprint_margin < -1e-9:
             result.update(
                 verdict="FAIL",
                 reason="goal_footprint_outside_placement_region",
@@ -1221,9 +1454,7 @@ def evaluate_grasp_placement_pair_legality(
         if isinstance(scene, Mapping)
         else False,
         "attached_object_geometry_available": (
-            attachment is not None
-            and size is not None
-            and isinstance(target_spec, Mapping)
+            attachment is not None and size is not None and isinstance(target_spec, Mapping)
         ),
         "attached_object_geometry_source": (
             "compound_collision_primitives"

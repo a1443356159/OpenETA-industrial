@@ -4,11 +4,13 @@ import base64
 import io
 import os
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
+import yaml
 from PIL import Image
 
 from tools.anyplace_core import (
@@ -25,6 +27,9 @@ from tools.anyplace_core import (
     validate_intrinsics,
     validate_pointcloud_array,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _payload(array: np.ndarray) -> dict[str, str]:
@@ -63,6 +68,17 @@ def _reason(expected: str, function, *args, **kwargs) -> None:
     with pytest.raises(AnyPlaceInputError) as caught:
         function(*args, **kwargs)
     assert caught.value.reason == expected
+
+
+def test_industrial_profile_uses_one_deterministic_refinement_step() -> None:
+    profile = yaml.safe_load(
+        (REPO_ROOT / "config" / "anyplace_multitask.yaml").read_text(encoding="utf-8")
+    )
+    evaluation = profile["experiment"]["eval"]
+
+    assert evaluation["init_orig_ori"] is True
+    assert evaluation["n_refine_iters"] == 1
+    assert evaluation["add_per_iter_noise"] is False
 
 
 def test_validate_intrinsics() -> None:

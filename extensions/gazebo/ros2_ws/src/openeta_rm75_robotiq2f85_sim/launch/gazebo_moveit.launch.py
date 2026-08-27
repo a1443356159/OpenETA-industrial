@@ -100,7 +100,6 @@ def generate_launch_description():
         parameters=[
             {
                 "use_sim_time": True,
-                "drive_mode": "multiplier",
                 "action_timeout_s": 90.0,
             }
         ],

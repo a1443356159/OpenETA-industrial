@@ -137,9 +137,7 @@ def test_falls_back_and_normalizes_backend_provenance(tmp_path: Path) -> None:
             _candidate("contact-native-0", score=0.9),
         )
 
-    handler = build_grasp_pose_estimate_handler(
-        {"anygrasp": anygrasp, "contact_graspnet": contact}
-    )
+    handler = build_grasp_pose_estimate_handler({"anygrasp": anygrasp, "contact_graspnet": contact})
 
     result = handler(_context(_parameters(tmp_path)))
 
@@ -173,9 +171,7 @@ def test_parallel_gripper_candidates_receive_mask_depth_closing_alignment(
 
     parameters = _parameters(tmp_path)
     Image.new("RGB", (16, 16), (0, 0, 0)).save(parameters["rgb"])
-    Image.fromarray(np.full((16, 16), 1000, dtype=np.uint16)).save(
-        parameters["depth"]
-    )
+    Image.fromarray(np.full((16, 16), 1000, dtype=np.uint16)).save(parameters["depth"])
     mask = np.zeros((16, 16), dtype=np.uint8)
     mask[4:13, 4:13] = 255
     Image.fromarray(mask).save(parameters["object_mask"]["mask_ref"])
@@ -201,14 +197,20 @@ def test_parallel_gripper_candidates_receive_mask_depth_closing_alignment(
     normalized = result.details["grasp_candidates"][0]
     evidence = normalized["target_closing_alignment"]
     assert normalized["gripper_name"] == "robotiq_2f_85"
-    assert evidence["source"] == "aligned_selected_mask_depth"
+    assert evidence["source"] == "aligned_selected_mask_finger_section_depth"
     assert evidence["depth_provenance"] == "sensor_depth"
     assert evidence["closing_axis"] == "graspnet_local_y"
+    assert evidence["binormal_axis"] == "graspnet_local_z"
+    assert evidence["binormal_window_m"] == pytest.approx(0.03)
     assert evidence["support_point_count"] == 81
     assert evidence["sampled_point_count"] == 81
+    assert evidence["section_point_count"] == 0
+    assert evidence["section_used"] is False
     assert evidence["target_span_m"] == pytest.approx(0.08)
     assert evidence["correction_m"] == pytest.approx(-0.02)
     assert evidence["correction_camera_xyz"] == pytest.approx([0.0, -0.02, 0.0])
+    assert evidence["ordering_only"] is True
+    assert evidence["pose_modified"] is False
     assert evidence["variant_role"] == "same_approach_centering_reserve"
     assert evidence["compatible_parent_backend_indices"] == [118, 2290]
     assert result.details["source"]["target_closing_alignment_candidate_count"] == 1
@@ -262,9 +264,9 @@ def test_host_excluded_backend_is_skipped(tmp_path: Path) -> None:
 
     parameters = _parameters(tmp_path)
     parameters["hints"]["excluded_backends"] = ["anygrasp"]
-    result = build_grasp_pose_estimate_handler(
-        {"anygrasp": backend, "contact_graspnet": backend}
-    )(_context(parameters))
+    result = build_grasp_pose_estimate_handler({"anygrasp": backend, "contact_graspnet": backend})(
+        _context(parameters)
+    )
 
     assert result.success is True
     assert calls == ["contact_graspnet"]
@@ -350,9 +352,7 @@ def test_invalid_common_input_fails_before_backend_dispatch(tmp_path: Path) -> N
         called = True
         return _success(_candidate("unused", score=1.0))
 
-    result = build_grasp_pose_estimate_handler({"anygrasp": backend})(
-        _context(parameters)
-    )
+    result = build_grasp_pose_estimate_handler({"anygrasp": backend})(_context(parameters))
 
     assert result.success is False
     assert result.details["reason"] == "object_mask_source_mismatch"
@@ -372,9 +372,7 @@ def test_non_fallback_backend_error_stops_dispatch(tmp_path: Path) -> None:
         called.append(context.name)
         return _success(_candidate("unused", score=1.0))
 
-    handler = build_grasp_pose_estimate_handler(
-        {"anygrasp": invalid, "contact_graspnet": unused}
-    )
+    handler = build_grasp_pose_estimate_handler({"anygrasp": invalid, "contact_graspnet": unused})
 
     result = handler(_context(_parameters(tmp_path)))
 
@@ -415,16 +413,14 @@ def test_malformed_success_falls_back_to_next_backend(tmp_path: Path) -> None:
         calls.append(context.name)
         return _success(_candidate("valid-0", score=0.8))
 
-    result = build_grasp_pose_estimate_handler(
-        {"anygrasp": malformed, "contact_graspnet": valid}
-    )(_context(_parameters(tmp_path)))
+    result = build_grasp_pose_estimate_handler({"anygrasp": malformed, "contact_graspnet": valid})(
+        _context(_parameters(tmp_path))
+    )
 
     assert result.success is True
     assert result.details["selected_backend"] == "contact_graspnet"
     assert calls == ["anygrasp", "contact_graspnet"]
-    assert result.details["backend_attempts"][0]["reason"] == (
-        "inconsistent_grasp_outputs"
-    )
+    assert result.details["backend_attempts"][0]["reason"] == ("inconsistent_grasp_outputs")
 
 
 def test_spent_malformed_backend_chain_is_not_repeated_for_same_frozen_input(
@@ -438,9 +434,7 @@ def test_spent_malformed_backend_chain_is_not_repeated_for_same_frozen_input(
     assert result.success is False
     assert result.details["reason"] == "model_inference_failed"
     assert result.details["retryable"] is False
-    assert result.details["backend_attempts"][0]["reason"] == (
-        "inconsistent_grasp_outputs"
-    )
+    assert result.details["backend_attempts"][0]["reason"] == ("inconsistent_grasp_outputs")
 
 
 def test_spent_no_candidate_chain_requires_changed_recovery_stage(

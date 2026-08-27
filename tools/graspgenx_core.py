@@ -120,9 +120,7 @@ CENTERING_VARIANT_MAX_APPROACH_RAD = math.radians(15.0)
 CENTERING_VARIANT_MAX_ROTATION_RAD = math.radians(45.0)
 CENTERING_VARIANT_MIN_IMPROVEMENT = 0.05
 CENTERING_VARIANT_INSPECTION_MULTIPLIER = 16
-TARGET_CLOSING_ALIGNMENT_SCHEMA = (
-    "openeta.parallel_gripper_target_closing_alignment.v1"
-)
+TARGET_CLOSING_ALIGNMENT_SCHEMA = "openeta.parallel_gripper_target_closing_alignment.v1"
 # GraspGenX produces thousands of raw diffusion/OBB samples, so this is the
 # model-side representative-pool rule, not the downstream qualification
 # funnel's 10 mm / 10 degree scheduling cluster.  Keeping a wider conjunction
@@ -539,14 +537,8 @@ def geometry_driven_moe_z_offsets_cm(
     minor_extent_m = min(positive_extents) if positive_extents else depth_quantum_m
     midplane_penetration_m = -0.5 * minor_extent_m
 
-    open_leading_m = (
-        gripper.sweep_open_offset_xyz[2]
-        + 0.5 * gripper.sweep_open_extents_xyz[2]
-    )
-    mid_leading_m = (
-        gripper.sweep_mid_offset_xyz[2]
-        + 0.5 * gripper.sweep_mid_extents_xyz[2]
-    )
+    open_leading_m = gripper.sweep_open_offset_xyz[2] + 0.5 * gripper.sweep_open_extents_xyz[2]
+    mid_leading_m = gripper.sweep_mid_offset_xyz[2] + 0.5 * gripper.sweep_mid_extents_xyz[2]
     closing_sweep_advance_m = max(0.0, mid_leading_m - open_leading_m)
 
     anchors_m: list[float] = []
@@ -664,14 +656,8 @@ def normalise_grasp_candidates(
         if centering_corrections is None
         else np.asarray(centering_corrections, dtype=np.float64)
     )
-    spans = (
-        None if centering_spans is None else np.asarray(centering_spans, dtype=np.float64)
-    )
-    ratios = (
-        None
-        if centering_ratios is None
-        else np.asarray(centering_ratios, dtype=np.float64)
-    )
+    spans = None if centering_spans is None else np.asarray(centering_spans, dtype=np.float64)
+    ratios = None if centering_ratios is None else np.asarray(centering_ratios, dtype=np.float64)
     if any(
         values is not None and values.shape != (len(native_grasps),)
         for values in (corrections, spans, ratios)
@@ -717,9 +703,11 @@ def normalise_grasp_candidates(
             correction = float(corrections[backend_index])
             candidate["target_closing_alignment"] = {
                 "schema_version": TARGET_CLOSING_ALIGNMENT_SCHEMA,
-                "source": "aligned_selected_mask_depth",
+                "source": "aligned_selected_mask_finger_section_depth",
                 "depth_provenance": "sensor_depth",
                 "closing_axis": "graspnet_local_y",
+                "binormal_axis": "graspnet_local_z",
+                "binormal_window_m": float(gripper.height),
                 "quantile_bounds": list(CENTERING_ALIGNMENT_QUANTILES),
                 "target_span_m": float(spans[backend_index]),
                 "correction_m": correction,
@@ -748,7 +736,16 @@ def _parallel_gripper_centering_metrics(
     object_points_camera: Any,
     gripper: GripperDescription,
 ) -> tuple[Any, Any, Any]:
-    """Measure closing-midplane error without changing any model pose."""
+    """Measure the finger-local closing midplane without changing a pose.
+
+    A long or compound workpiece can have a global mask centre far away from
+    the cross-section actually enclosed by a candidate's fingers.  Project
+    only target points inside that candidate's advertised finger-height band
+    along GraspNet local Z, then measure closing-axis symmetry along local Y.
+    If the visible depth surface does not intersect the band, retain the full
+    mask as low-confidence ordering evidence instead of rejecting the model
+    candidate.
+    """
 
     np, _Image = _load_image_dependencies()
     poses = np.asarray(camera_native_grasps, dtype=np.float64)
@@ -766,27 +763,36 @@ def _parallel_gripper_centering_metrics(
     # GraspNet local +Y is the parallel-jaw closing axis.  Under
     # _NATIVE_FROM_GRASPNET_ROTATION it is GraspGenX native +X.
     closing_axes = poses[:, :3, 0]
+    # GraspNet local +Z (finger-height/binormal) is GraspGenX native +Y.
+    binormal_axes = poses[:, :3, 1]
     tip_native = np.asarray(gripper.fingertip_xyz, dtype=np.float64)
-    tips_camera = (
-        np.einsum("nij,j->ni", poses[:, :3, :3], tip_native)
-        + poses[:, :3, 3]
-    )
+    tips_camera = np.einsum("nij,j->ni", poses[:, :3, :3], tip_native) + poses[:, :3, 3]
     tip_projections = np.einsum("ni,ni->n", tips_camera, closing_axes)
+    tip_binormal_projections = np.einsum("ni,ni->n", tips_camera, binormal_axes)
     corrections = np.empty(len(poses), dtype=np.float64)
     spans = np.empty(len(poses), dtype=np.float64)
     lower_quantile, upper_quantile = CENTERING_ALIGNMENT_QUANTILES
     for start in range(0, len(poses), CENTERING_PROJECTION_BATCH_SIZE):
         stop = min(len(poses), start + CENTERING_PROJECTION_BATCH_SIZE)
-        projections = points @ closing_axes[start:stop].T
-        low, high = np.quantile(
-            projections,
-            [lower_quantile, upper_quantile],
-            axis=0,
+        closing_projections = points @ closing_axes[start:stop].T
+        binormal_projections = points @ binormal_axes[start:stop].T
+        section_mask = (
+            np.abs(binormal_projections - tip_binormal_projections[start:stop][None, :])
+            <= gripper.height * 0.5
         )
-        spans[start:stop] = high - low
-        corrections[start:stop] = (
-            (low + high) * 0.5 - tip_projections[start:stop]
-        )
+        for offset in range(stop - start):
+            local = closing_projections[section_mask[:, offset], offset]
+            # Empty space is low confidence, not an unreachability proof.
+            # Two points are the mathematical minimum for a non-zero interval.
+            if len(local) < 2:
+                local = closing_projections[:, offset]
+            low, high = np.quantile(
+                local,
+                [lower_quantile, upper_quantile],
+            )
+            index = start + offset
+            spans[index] = high - low
+            corrections[index] = (low + high) * 0.5 - tip_projections[index]
     ratios = np.abs(corrections) / np.maximum(spans, CENTERING_MIN_SPAN_M)
     if not all(np.isfinite(value).all() for value in (corrections, spans, ratios)):
         raise GraspGenXInputError("inconsistent_grasp_outputs")
@@ -841,8 +847,7 @@ def _se3_mmr_order(
         """
 
         translation = (
-            np.linalg.norm(translations - translations[reference], axis=1)
-            / MMR_TRANSLATION_SCALE_M
+            np.linalg.norm(translations - translations[reference], axis=1) / MMR_TRANSLATION_SCALE_M
         )
         # GraspGenX native +Z is the approach axis.  A parallel-jaw gripper's
         # yaw about that axis is a weaker diversity signal than a genuinely
@@ -860,8 +865,7 @@ def _se3_mmr_order(
             rotations[reference],
         )
         wrist_rotation = (
-            np.arccos(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
-            / MMR_ROTATION_SCALE_RAD
+            np.arccos(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0)) / MMR_ROTATION_SCALE_RAD
         )
         return np.exp(
             -(
@@ -995,9 +999,7 @@ def _centering_variant_order(
 
     selected_mask = np.zeros(count, dtype=bool)
     selected_mask[base] = True
-    eligible = np.flatnonzero(
-        (~selected_mask) & (ratio_array <= CENTERING_RISK_RATIO)
-    )
+    eligible = np.flatnonzero((~selected_mask) & (ratio_array <= CENTERING_RISK_RATIO))
     if not len(eligible):
         return []
 
@@ -1005,18 +1007,10 @@ def _centering_variant_order(
     rows: list[tuple[tuple[float, ...], int]] = []
     for candidate_index in eligible:
         candidate = pose_array[candidate_index]
-        translation = np.linalg.norm(
-            base_poses[:, :3, 3] - candidate[:3, 3], axis=1
-        )
-        approach = np.arccos(
-            np.clip(base_poses[:, :3, 2] @ candidate[:3, 2], -1.0, 1.0)
-        )
-        relative_trace = np.einsum(
-            "nij,ij->n", base_poses[:, :3, :3], candidate[:3, :3]
-        )
-        rotation = np.arccos(
-            np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0)
-        )
+        translation = np.linalg.norm(base_poses[:, :3, 3] - candidate[:3, 3], axis=1)
+        approach = np.arccos(np.clip(base_poses[:, :3, 2] @ candidate[:3, 2], -1.0, 1.0))
+        relative_trace = np.einsum("nij,ij->n", base_poses[:, :3, :3], candidate[:3, :3])
+        rotation = np.arccos(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
         improvement = ratio_array[risky] - ratio_array[candidate_index]
         compatible = (
             (translation <= CENTERING_VARIANT_MAX_TRANSLATION_M)
@@ -1067,9 +1061,7 @@ def _compatible_centering_parent_indices(
     candidate = pose_array[candidate_index]
     parents: list[tuple[tuple[float, ...], int]] = []
     for parent_index in recall_base_indices:
-        improvement = float(
-            ratio_array[parent_index] - ratio_array[candidate_index]
-        )
+        improvement = float(ratio_array[parent_index] - ratio_array[candidate_index])
         if (
             ratio_array[parent_index] <= CENTERING_RISK_RATIO
             or ratio_array[candidate_index] > CENTERING_RISK_RATIO
@@ -1077,16 +1069,10 @@ def _compatible_centering_parent_indices(
         ):
             continue
         parent = pose_array[parent_index]
-        translation = float(
-            np.linalg.norm(parent[:3, 3] - candidate[:3, 3])
-        )
-        approach = math.acos(
-            float(np.clip(np.dot(parent[:3, 2], candidate[:3, 2]), -1.0, 1.0))
-        )
+        translation = float(np.linalg.norm(parent[:3, 3] - candidate[:3, 3]))
+        approach = math.acos(float(np.clip(np.dot(parent[:3, 2], candidate[:3, 2]), -1.0, 1.0)))
         relative_trace = float(np.trace(parent[:3, :3].T @ candidate[:3, :3]))
-        rotation = math.acos(
-            float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
-        )
+        rotation = math.acos(float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0)))
         if (
             translation <= CENTERING_VARIANT_MAX_TRANSLATION_M
             and approach <= CENTERING_VARIANT_MAX_APPROACH_RAD
@@ -1209,13 +1195,11 @@ class GraspGenXBackend:
             scene_points_aligned = np.ascontiguousarray(
                 scene_points @ alignment.T, dtype=np.float32
             )
-            moe_z_offsets_cm, geometry_anchor_metadata = (
-                geometry_driven_moe_z_offsets_cm(
-                    object_points_aligned=object_points_aligned,
-                    scene_points_aligned=scene_points_aligned,
-                    depth_scale=parsed_intrinsics["scale"],
-                    gripper=gripper,
-                )
+            moe_z_offsets_cm, geometry_anchor_metadata = geometry_driven_moe_z_offsets_cm(
+                object_points_aligned=object_points_aligned,
+                scene_points_aligned=scene_points_aligned,
+                depth_scale=parsed_intrinsics["scale"],
+                gripper=gripper,
             )
             metadata["geometry_driven_anchors"] = geometry_anchor_metadata
         except GraspGenXInputError as exc:
@@ -1272,17 +1256,11 @@ class GraspGenXBackend:
                     )
                     if diffusion_only:
                         np, _Image = _load_image_dependencies()
-                        retained = np.asarray(
-                            [tag == "diff" for tag in tags], dtype=bool
-                        )
+                        retained = np.asarray([tag == "diff" for tag in tags], dtype=bool)
                         discarded_expansion_obb_count += int((~retained).sum())
                         grasps = np.asarray(grasps)[retained]
                         scores = np.asarray(scores)[retained]
-                        tags = [
-                            str(tag)
-                            for tag, keep in zip(tags, retained)
-                            if bool(keep)
-                        ]
+                        tags = [str(tag) for tag, keep in zip(tags, retained) if bool(keep)]
                     planner_outputs.append((grasps, scores, tags))
                     if draw_index + 1 == len(RECALL_BASE_DRAW_SPECS):
                         recall_base_raw_candidate_count = sum(
@@ -1302,24 +1280,16 @@ class GraspGenXBackend:
             metadata["model_inference_draw_seeds"] = draw_seeds
             metadata["graspmoe_draw_count"] = planners.count(PLANNER)
             metadata["diffusion_only_draw_count"] = planners.count("diffusion")
-            metadata["recall_base_draw_count"] = min(
-                len(RECALL_BASE_DRAW_SPECS), len(draw_specs)
-            )
-            metadata["recall_base_raw_candidate_count"] = (
-                recall_base_raw_candidate_count
-            )
+            metadata["recall_base_draw_count"] = min(len(RECALL_BASE_DRAW_SPECS), len(draw_specs))
+            metadata["recall_base_raw_candidate_count"] = recall_base_raw_candidate_count
             metadata["diversity_expansion_draw_count"] = max(
                 0, len(draw_specs) - len(RECALL_BASE_DRAW_SPECS)
             )
             metadata["diversity_expansion_raw_candidate_count"] = (
                 int(len(raw_scores)) - recall_base_raw_candidate_count
             )
-            metadata["discarded_expansion_obb_candidate_count"] = (
-                discarded_expansion_obb_count
-            )
-            metadata["deterministic_obb_reuse_policy"] = (
-                "retain_first_full_draw_only"
-            )
+            metadata["discarded_expansion_obb_candidate_count"] = discarded_expansion_obb_count
+            metadata["deterministic_obb_reuse_policy"] = "retain_first_full_draw_only"
         except Exception as exc:  # noqa: BLE001 - third-party inference boundary.
             return failure_result(
                 reason="model_inference_failed",
@@ -1348,12 +1318,8 @@ class GraspGenXBackend:
                         "target_centering_risk_count": int(
                             (centering_ratios > CENTERING_RISK_RATIO).sum()
                         ),
-                        "target_centering_ratio_p50": float(
-                            np.quantile(centering_ratios, 0.50)
-                        ),
-                        "target_centering_ratio_p95": float(
-                            np.quantile(centering_ratios, 0.95)
-                        ),
+                        "target_centering_ratio_p50": float(np.quantile(centering_ratios, 0.50)),
+                        "target_centering_ratio_p95": float(np.quantile(centering_ratios, 0.95)),
                     }
                 )
             else:
@@ -1606,9 +1572,7 @@ class GraspGenXBackend:
         score_array = np.asarray(scores, dtype=np.float64)
         poses = np.asarray(camera_native_grasps, dtype=np.float64)
         base_raw_count = (
-            len(score_array)
-            if recall_base_raw_count is None
-            else int(recall_base_raw_count)
+            len(score_array) if recall_base_raw_count is None else int(recall_base_raw_count)
         )
         if base_raw_count <= 0 or base_raw_count > len(score_array):
             raise GraspGenXInputError("inconsistent_grasp_outputs")
@@ -1713,9 +1677,7 @@ class GraspGenXBackend:
                 "formal_min_wrist_rotation_rad": FORMAL_MIN_WRIST_ROTATION_RAD,
                 "formal_diversity_rejected_count": diversity_rejected,
                 "recall_base_raw_candidate_count": base_raw_count,
-                "diversity_expansion_raw_candidate_count": (
-                    len(score_array) - base_raw_count
-                ),
+                "diversity_expansion_raw_candidate_count": (len(score_array) - base_raw_count),
                 "recall_base_target_count": recall_base_limit,
                 "recall_base_returned_count": len(recall_base),
                 "target_centering_reserve_capacity": reserve_capacity,
@@ -1766,9 +1728,7 @@ class GraspGenXBackend:
                 else:
                     diversity_rejected += 1
             selected_by_source = {
-                source: sum(
-                    1 for index in recall_base if branch_tags[index] == source
-                )
+                source: sum(1 for index in recall_base if branch_tags[index] == source)
                 for source in set(branch_tags[:base_raw_count])
             }
             required_source_coverage = min(
@@ -1840,9 +1800,7 @@ class GraspGenXBackend:
             "formal_min_wrist_rotation_rad": FORMAL_MIN_WRIST_ROTATION_RAD,
             "formal_diversity_rejected_count": diversity_rejected,
             "recall_base_raw_candidate_count": base_raw_count,
-            "diversity_expansion_raw_candidate_count": (
-                len(score_array) - base_raw_count
-            ),
+            "diversity_expansion_raw_candidate_count": (len(score_array) - base_raw_count),
             "recall_base_target_count": recall_base_limit,
             "recall_base_returned_count": len(recall_base),
             "target_centering_reserve_capacity": reserve_capacity,
@@ -1889,24 +1847,15 @@ class GraspGenXBackend:
                     offset for offset, _planner, _ in RECALL_BASE_DRAW_SPECS
                 ],
                 "diversity_expansion_draw_seed_offsets": [
-                    offset
-                    for offset, _planner, _ in DIVERSITY_EXPANSION_DRAW_SPECS
+                    offset for offset, _planner, _ in DIVERSITY_EXPANSION_DRAW_SPECS
                 ],
                 "centering_mmr_penalty": CENTERING_MMR_PENALTY,
                 "centering_risk_ratio": CENTERING_RISK_RATIO,
                 "centering_reserve_size": CENTERING_RESERVE_SIZE,
-                "centering_variant_max_translation_m": (
-                    CENTERING_VARIANT_MAX_TRANSLATION_M
-                ),
-                "centering_variant_max_approach_rad": (
-                    CENTERING_VARIANT_MAX_APPROACH_RAD
-                ),
-                "centering_variant_max_rotation_rad": (
-                    CENTERING_VARIANT_MAX_ROTATION_RAD
-                ),
-                "centering_variant_min_improvement": (
-                    CENTERING_VARIANT_MIN_IMPROVEMENT
-                ),
+                "centering_variant_max_translation_m": (CENTERING_VARIANT_MAX_TRANSLATION_M),
+                "centering_variant_max_approach_rad": (CENTERING_VARIANT_MAX_APPROACH_RAD),
+                "centering_variant_max_rotation_rad": (CENTERING_VARIANT_MAX_ROTATION_RAD),
+                "centering_variant_min_improvement": (CENTERING_VARIANT_MIN_IMPROVEMENT),
             },
             "backend_commit": None,
             "checkpoint_version": self.checkpoint_root.name,

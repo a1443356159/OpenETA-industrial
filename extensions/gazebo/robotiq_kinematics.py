@@ -41,6 +41,7 @@ D_IN_INNER_KNUCKLE_XZ: tuple[float, float] = (0.03706, 0.04595)
 # Pad face centroid in the fingertip link frame (xmin face of the tip mesh).
 PAD_IN_TIP_XZ: tuple[float, float] = (-0.0253, 0.0283)
 
+
 # Inner-knuckle length, chosen so the loop closes exactly at theta=0.
 def _closure_length() -> float:
     cx = A_XZ[0] + C_IN_KNUCKLE_XZ[0] + D_IN_TIP_XZ[0] - B_XZ[0]
@@ -170,6 +171,95 @@ def six_joint_positions(active_rad: float) -> Mapping[str, float]:
     }
 
 
+def common_driver_position(
+    positions: Mapping[str, float],
+    *,
+    closing: bool,
+) -> float:
+    """Estimate the one physical driver from the two mirrored outer joints.
+
+    Gazebo exposes both sides as independent state variables even though the
+    real 2F-85 has one actuator.  During closing the less-closed side is the
+    conservative mechanism progress; during opening the more-closed side is.
+    Using that directional bound prevents a common command from running ahead
+    of either simulated side without inventing a second actuator.
+    """
+
+    try:
+        left = float(positions["gripper_left_finger_joint"])
+        right = -float(positions["gripper_right_finger_joint"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("both mirrored outer-finger states are required") from exc
+    if not math.isfinite(left) or not math.isfinite(right):
+        raise ValueError("outer-finger states must be finite")
+    if not all(
+        _ACTIVE_MIN_RAD - 1e-6 <= value <= _ACTIVE_MAX_RAD + 1e-6 for value in (left, right)
+    ):
+        raise ValueError("outer-finger state is outside the active-joint range")
+    return min(left, right) if closing else max(left, right)
+
+
+def one_pad_compliance_exhausted(
+    *,
+    single_contact_age_s: float,
+    no_common_progress_age_s: float,
+    commanded_active_rad: float,
+    nominal_active_rad: float,
+    measured_common_active_rad: float,
+    max_lead_rad: float,
+    progress_epsilon_rad: float,
+    mechanism_stationary: bool,
+    remaining_close_travel_rad: float,
+    goal_tolerance_rad: float,
+    compliance_dwell_s: float,
+) -> bool:
+    """Prove that bounded one-pad self-centring travel is exhausted.
+
+    One pad touching is a normal intermediate state for a single-actuator
+    parallel gripper and is never sufficient to fail a close.  Exhaustion is
+    reported only after the common command has accumulated its complete
+    bounded preload, the whole linkage is stationary, and the common driver
+    has made no measurable progress throughout the compliance window while
+    meaningful close travel remains.
+    """
+
+    values = (
+        single_contact_age_s,
+        no_common_progress_age_s,
+        commanded_active_rad,
+        nominal_active_rad,
+        measured_common_active_rad,
+        max_lead_rad,
+        progress_epsilon_rad,
+        remaining_close_travel_rad,
+        goal_tolerance_rad,
+        compliance_dwell_s,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("one-pad compliance evidence must be finite")
+    if (
+        single_contact_age_s < 0.0
+        or no_common_progress_age_s < 0.0
+        or max_lead_rad <= 0.0
+        or progress_epsilon_rad < 0.0
+        or progress_epsilon_rad >= max_lead_rad
+        or goal_tolerance_rad <= 0.0
+        or compliance_dwell_s <= 0.0
+    ):
+        raise ValueError("one-pad compliance limits are invalid")
+    common_preload_saturated = bool(
+        commanded_active_rad - measured_common_active_rad >= max_lead_rad - progress_epsilon_rad
+        and nominal_active_rad - measured_common_active_rad >= max_lead_rad - progress_epsilon_rad
+    )
+    return bool(
+        single_contact_age_s >= compliance_dwell_s
+        and no_common_progress_age_s >= compliance_dwell_s
+        and common_preload_saturated
+        and mechanism_stationary
+        and remaining_close_travel_rad > goal_tolerance_rad
+    )
+
+
 def linkage_terminal_metrics(
     targets: Mapping[str, float],
     positions: Mapping[str, float],
@@ -184,16 +274,13 @@ def linkage_terminal_metrics(
     """
 
     names = tuple(targets)
-    if not names or not set(names).issubset(positions) or not set(names).issubset(
-        velocities
-    ):
+    if not names or not set(names).issubset(positions) or not set(names).issubset(velocities):
         raise ValueError("complete gripper linkage state is required")
     target_values = [float(targets[name]) for name in names]
     position_values = [float(positions[name]) for name in names]
     velocity_values = [float(velocities[name]) for name in names]
     if not all(
-        math.isfinite(value)
-        for value in (*target_values, *position_values, *velocity_values)
+        math.isfinite(value) for value in (*target_values, *position_values, *velocity_values)
     ):
         raise ValueError("gripper linkage state must be finite")
     return (

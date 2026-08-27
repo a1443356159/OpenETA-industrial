@@ -56,9 +56,7 @@ def _bounded_state(arm_positions=None):
         (3.106 + 1.1e-6, "INVALID"),
     ],
 )
-def test_start_state_bounds_classifies_numeric_boundary_cases(
-    joint_3, classification
-) -> None:
+def test_start_state_bounds_classifies_numeric_boundary_cases(joint_3, classification) -> None:
     positions = [0.0] * 7
     positions[2] = joint_3
     assessment = assess_start_state_bounds(_bounded_state(positions))
@@ -96,9 +94,7 @@ def test_start_state_bounds_recovers_only_affected_joints() -> None:
         ("names_missing", "ARM_JOINT_NAMES_MISSING"),
     ],
 )
-def test_start_state_bounds_rejects_untrustworthy_state(
-    mutation, reason_code
-) -> None:
+def test_start_state_bounds_rejects_untrustworthy_state(mutation, reason_code) -> None:
     state = _bounded_state()
     if mutation == "missing":
         state.metadata["joint_names"] = list(JOINT_NAMES[1:])
@@ -153,22 +149,16 @@ def test_state_is_fail_closed_and_has_model_metadata():
 def test_move_goal_applies_inverse_mount_transform():
     goal = make_move_group_goal(
         {"xyz": [1, 0, 0], "quat_xyzw": [0, 0, 0, 1]},
-        config=GazeboControlConfig(
-            mount_xyz=(0.1, 0, 0), mount_quat_xyzw=(0, 0, 0, 1)
-        ),
+        config=GazeboControlConfig(mount_xyz=(0.1, 0, 0), mount_quat_xyzw=(0, 0, 0, 1)),
     )
     assert goal["group_name"] == "rm_group" and goal["link_name"] == "link_7"
     assert goal["target_pose"]["xyz"] == pytest.approx([0.9, 0, 0])
 
 
 def test_move_goal_applies_inverse_quarter_turn_gripper_mount() -> None:
-    goal = make_move_group_goal(
-        {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]}
-    )
+    goal = make_move_group_goal({"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]})
 
-    assert goal["target_pose"]["quat_xyzw"] == pytest.approx(
-        [0.0, 0.0, -(2**-0.5), 2**-0.5]
-    )
+    assert goal["target_pose"]["quat_xyzw"] == pytest.approx([0.0, 0.0, -(2**-0.5), 2**-0.5])
     assert goal["requested_tool_pose"]["quat_xyzw"] == [0.0, 0.0, 0.0, 1.0]
 
 
@@ -208,8 +198,8 @@ def test_pickplace_motion_profile_follows_verified_payload_state() -> None:
         "unloaded",
         "loaded",
     )
-    assert unloaded["max_velocity_scaling_factor"] == 0.30
-    assert unloaded["max_acceleration_scaling_factor"] == 0.20
+    assert unloaded["max_velocity_scaling_factor"] == 0.25
+    assert unloaded["max_acceleration_scaling_factor"] == 0.15
     assert loaded["max_velocity_scaling_factor"] == 0.20
     assert loaded["max_acceleration_scaling_factor"] == 0.10
 
@@ -316,24 +306,28 @@ def test_qualification_exception_is_reported_as_validated_infrastructure_error()
     def fail(_request):
         raise ValueError("bad real qualification payload")
 
-    receipt = GazeboController(
-        state_provider=_state,
-        candidate_qualifier=fail,
-    ).execute(
-        {
-            "action_type": "qualify_motion_candidates",
-            "schema_version": "openeta.moveit_candidate_funnel.v3",
-            "planning_scene_revision": 4,
-            "qualification_binding_sha256": "binding",
-            "funnel": {"qualification_profile": "fast_v3"},
-            "candidates": [
-                {
-                    "candidate_id": "c0",
-                    "candidate_pose_sha256": "pose",
-                }
-            ],
-        }
-    ).to_dict()
+    receipt = (
+        GazeboController(
+            state_provider=_state,
+            candidate_qualifier=fail,
+        )
+        .execute(
+            {
+                "action_type": "qualify_motion_candidates",
+                "schema_version": "openeta.moveit_candidate_funnel.v3",
+                "planning_scene_revision": 4,
+                "qualification_binding_sha256": "binding",
+                "funnel": {"qualification_profile": "fast_v3"},
+                "candidates": [
+                    {
+                        "candidate_id": "c0",
+                        "candidate_pose_sha256": "pose",
+                    }
+                ],
+            }
+        )
+        .to_dict()
+    )
 
     assert receipt["ok"] is True
     assert receipt["stop_reason"] == "infrastructure_error"
@@ -414,14 +408,10 @@ def test_controller_accepts_only_a_fresh_settled_pose_within_same_tolerance(
     assert receipt["position_error_m"] == pytest.approx(0.003)
     assert receipt["position_verification_tolerance_m"] == pytest.approx(0.004)
     assert receipt["position_verification_numeric_margin_m"] == pytest.approx(0.0001)
-    assert receipt["position_verification_effective_tolerance_m"] == pytest.approx(
-        0.0041
-    )
+    assert receipt["position_verification_effective_tolerance_m"] == pytest.approx(0.0041)
     assert receipt["settling_recheck"]["status"] == "target_verified"
     assert receipt["settling_recheck"]["sample_count"] == 1
-    assert receipt["settling_recheck"]["initial_position_error_m"] == pytest.approx(
-        0.0049
-    )
+    assert receipt["settling_recheck"]["initial_position_error_m"] == pytest.approx(0.0049)
 
 
 def test_controller_accepts_only_the_bounded_tf_numeric_margin() -> None:
@@ -449,9 +439,7 @@ def test_controller_accepts_only_the_bounded_tf_numeric_margin() -> None:
     assert receipt["ok"] is True
     assert receipt["position_error_m"] == pytest.approx(0.004024)
     assert receipt["position_verification_tolerance_m"] == pytest.approx(0.004)
-    assert receipt["position_verification_effective_tolerance_m"] == pytest.approx(
-        0.0041
-    )
+    assert receipt["position_verification_effective_tolerance_m"] == pytest.approx(0.0041)
     assert receipt["position_verification_policy"] == (
         "exact_terminal_euclidean_with_bounded_numeric_margin"
     )
@@ -562,9 +550,7 @@ def test_controller_rejects_upward_release_residual_outside_exact_terminal() -> 
     assert receipt["position_error_m"] > receipt["position_verification_tolerance_m"]
     assert receipt["horizontal_error_m"] < receipt["position_verification_tolerance_m"]
     assert receipt["vertical_error_m"] == pytest.approx(0.007)
-    assert receipt["position_error_m"] > receipt[
-        "position_verification_effective_tolerance_m"
-    ]
+    assert receipt["position_error_m"] > receipt["position_verification_effective_tolerance_m"]
     assert receipt["position_verification_policy"] == (
         "exact_terminal_euclidean_with_bounded_numeric_margin"
     )
@@ -611,7 +597,9 @@ def test_controller_keeps_all_release_residuals_strict(xyz) -> None:
     ],
 )
 def test_robot_gripper_never_credits_unreached_stalled_or_timed_out_results(result) -> None:
-    controller = GazeboController(state_provider=_state, gripper_action=lambda _position, _timeout: result)
+    controller = GazeboController(
+        state_provider=_state, gripper_action=lambda _position, _timeout: result
+    )
 
     receipt = controller.execute({"action_type": "gripper_open"}).to_dict()
 
@@ -708,12 +696,14 @@ def test_controller_runs_one_recovery_then_submits_the_original_target_once() ->
     controller = GazeboController(
         state_provider=_bounded_state,
         start_state_recovery=recover,
-        move_action=lambda goal, timeout: move_calls.append((goal, timeout))
-        or {
-            "ok": True,
-            "action_started_ros_time_s": 12.0,
-            "action_completed_ros_time_s": 20.0,
-        },
+        move_action=lambda goal, timeout: (
+            move_calls.append((goal, timeout))
+            or {
+                "ok": True,
+                "action_started_ros_time_s": 12.0,
+                "action_completed_ros_time_s": 20.0,
+            }
+        ),
     )
     receipt = controller.execute(
         {"action_type": "move_to", "target_pose": target, "timeout_s": 30.0}
@@ -826,16 +816,20 @@ def test_moveit_start_state_invalid_after_preflight_does_not_loop_recovery() -> 
             "moveit_error_code": -26,
         }
 
-    receipt = GazeboController(
-        state_provider=_bounded_state,
-        start_state_recovery=recovery,
-        move_action=move,
-    ).execute(
-        {
-            "action_type": "move_to",
-            "target_pose": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
-        }
-    ).to_dict()
+    receipt = (
+        GazeboController(
+            state_provider=_bounded_state,
+            start_state_recovery=recovery,
+            move_action=move,
+        )
+        .execute(
+            {
+                "action_type": "move_to",
+                "target_pose": {"xyz": [0, 0, 0.5], "quat_xyzw": [0, 0, 0, 1]},
+            }
+        )
+        .to_dict()
+    )
 
     assert calls == {"recovery": 1, "move": 1}
     assert receipt["error_code"] == "MOTION_PLAN_FAILED"
@@ -879,7 +873,9 @@ def test_robotiq_binary_mapping_and_calibrated_aperture() -> None:
 def test_controller_rejection_and_unknown_results_fail_closed(
     action_result, expected_code, expected_outcome
 ) -> None:
-    controller = GazeboController(state_provider=_state, move_action=lambda goal, timeout: action_result)
+    controller = GazeboController(
+        state_provider=_state, move_action=lambda goal, timeout: action_result
+    )
     result = controller.execute(
         {
             "action_type": "move_to",

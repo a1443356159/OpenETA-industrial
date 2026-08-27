@@ -121,6 +121,10 @@ class PlanningSceneSynchronizer:
         self.world_specs: dict[str, dict[str, Any]] = {}
         self.attached_specs: dict[str, dict[str, Any]] = {}
         self.target_id = ""
+        self.authoritative_scene_sha256 = ""
+        self.world_geometry_sha256 = ""
+        self.attached_geometry_sha256 = ""
+        self.geometry_verified_ids: tuple[str, ...] = ()
         self.last_error = ""
 
     def initialize_empty(self) -> int:
@@ -134,6 +138,10 @@ class PlanningSceneSynchronizer:
         self.world_specs = {}
         self.attached_specs = {}
         self.target_id = ""
+        self.authoritative_scene_sha256 = ""
+        self.world_geometry_sha256 = ""
+        self.attached_geometry_sha256 = ""
+        self.geometry_verified_ids = ()
         return revision
 
     def reset(
@@ -145,6 +153,7 @@ class PlanningSceneSynchronizer:
         target: CollisionGeometry,
         obstacles: Sequence[CollisionGeometry] = (),
         robot_support_link: str | None = None,
+        authoritative_scene_sha256: str = "",
     ) -> int:
         scene_distractors = [
             *([distractor] if distractor is not None else []),
@@ -178,6 +187,9 @@ class PlanningSceneSynchronizer:
                 "world_objects": [item.to_dict() for item in world_objects],
                 "attached_objects": [],
                 "allowed_collisions": allowed_collisions,
+                "authoritative_scene_sha256": str(
+                    authoritative_scene_sha256
+                ),
             },
             expected_world=expected_world,
             expected_attached=set(),
@@ -187,6 +199,7 @@ class PlanningSceneSynchronizer:
         }
         self.attached_specs = {}
         self.target_id = target.object_id
+        self.authoritative_scene_sha256 = str(authoritative_scene_sha256)
         return revision
 
     def attach_target(
@@ -298,6 +311,14 @@ class PlanningSceneSynchronizer:
             )
             if readback.get("applied") is not True:
                 raise PlanningSceneError("planning-scene apply was not acknowledged")
+            if (
+                diff.get("authoritative_scene_sha256")
+                and self._apply_readback is not None
+                and not readback.get("world_geometry_sha256")
+            ):
+                raise PlanningSceneError(
+                    "authoritative MoveIt geometry readback proof is missing"
+                )
             world = {str(value) for value in readback.get("world_ids", [])}
             attached = {str(value) for value in readback.get("attached_ids", [])}
             if world != expected_world or attached != expected_attached:
@@ -310,6 +331,27 @@ class PlanningSceneSynchronizer:
             raise PlanningSceneError(self.last_error) from exc
         self.world_ids = set(expected_world)
         self.attached_ids = set(expected_attached)
+        if readback.get("world_geometry_sha256") is not None:
+            self.world_geometry_sha256 = str(readback["world_geometry_sha256"])
+        if readback.get("attached_geometry_sha256") is not None:
+            self.attached_geometry_sha256 = str(
+                readback["attached_geometry_sha256"]
+            )
+        if readback.get("geometry_verified_ids") is not None:
+            verified_now = {
+                str(value) for value in readback["geometry_verified_ids"]
+            }
+            if diff.get("operation") == "reset":
+                verified = verified_now
+            else:
+                # Geometry not mentioned by a scene diff is unchanged. Keep
+                # its earlier exact-readback proof while replacing the proof
+                # for every object verified by this commit. Objects removed
+                # from both world and attached sets cannot retain evidence.
+                verified = set(self.geometry_verified_ids) | verified_now
+            self.geometry_verified_ids = tuple(
+                sorted(verified & (expected_world | expected_attached))
+            )
         self.revision += 1
         self.ready = True
         self.last_error = ""

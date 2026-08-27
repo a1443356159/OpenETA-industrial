@@ -24,11 +24,13 @@ experiment:
     inference_method: multistep_regression_scene
     return_rand: false
     with_coll: false
-    # Five learned refinement steps retain the observed stable orientation for
-    # elongated industrial parts and bound inference latency.  Endpoint
-    # legality, attached-state validation, and L5 planning remain mandatory,
-    # so fewer refinements cannot bypass physical acceptance.
-    n_refine_iters: 5
+    # One learned refinement step preserves the network's gravity-aligned
+    # initialization for already-supported industrial parts.  Longer
+    # diffusion chains were measured to accumulate large rotations when the
+    # success classifier is unavailable, turning otherwise stable model
+    # proposals onto narrow edges.  Endpoint legality, attached-state
+    # validation, and L5 planning remain mandatory.
+    n_refine_iters: 1
     # Industrial parts are already resting in one observed stable orientation.
     # Initialising refinement from that measured orientation preserves a
     # grasp-compatible branch for elongated parts while the learned policy
@@ -40,7 +42,11 @@ experiment:
     no_success_classifier: true
     variable_size_crop: true
     timestep_emb_decay_factor: 20
-    add_per_iter_noise: true
+    # Qualification requires a repeatable frozen frontier.  The upstream
+    # diffusion noise is useful for exploratory generation, but not when all
+    # 96 learned initializations are already retained for deterministic
+    # recovery.
+    add_per_iter_noise: false
     per_iter_noise_kwargs:
       rot:
         angle_deg: 20

@@ -223,6 +223,49 @@ def test_frozen_frontier_prioritizes_centered_sibling_of_failed_parent() -> None
     assert coordinator.grasp_frontier_candidates[0][
         "frozen_frontier_parent_priority"
     ] is True
+    assert coordinator.grasp_frontier_candidates[0][
+        "frozen_frontier_parent_priority_basis"
+    ] == "direct_backend_parent"
+
+
+def test_frozen_frontier_prioritizes_sibling_with_shared_model_parent() -> None:
+    coordinator = _FrozenGoalPairCoordinator(qualifier=SimpleNamespace())
+    coordinator.grasp_candidate_catalog = {
+        "primary": {
+            "id": "primary",
+            "backend_index": 499,
+            "target_closing_alignment": {
+                "compatible_parent_backend_indices": [707, 287]
+            },
+        }
+    }
+    coordinator.grasp_frontier_candidates = [
+        {
+            "id": "different_family",
+            "backend_index": 445,
+            "target_closing_alignment": {
+                "compatible_parent_backend_indices": [545, 765]
+            },
+        },
+        {
+            "id": "same_model_family",
+            "backend_index": 715,
+            "target_closing_alignment": {
+                "compatible_parent_backend_indices": [707, 924]
+            },
+        },
+    ]
+
+    count = coordinator.prioritize_grasp_frontier_for_parent("primary")
+
+    assert count == 1
+    assert [item["id"] for item in coordinator.grasp_frontier_candidates] == [
+        "same_model_family",
+        "different_family",
+    ]
+    assert coordinator.grasp_frontier_candidates[0][
+        "frozen_frontier_parent_priority_basis"
+    ] == "shared_model_centering_parent"
 
 
 def test_frozen_grasp_frontier_expansion_bypasses_provider_inference() -> None:

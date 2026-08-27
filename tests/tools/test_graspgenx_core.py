@@ -294,9 +294,11 @@ def test_normalise_candidates_builds_dual_pose_and_real_tip() -> None:
     assert candidate["height"] == 0.02
     assert candidate["target_closing_alignment"] == {
         "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
-        "source": "aligned_selected_mask_depth",
+        "source": "aligned_selected_mask_finger_section_depth",
         "depth_provenance": "sensor_depth",
         "closing_axis": "graspnet_local_y",
+        "binormal_axis": "graspnet_local_z",
+        "binormal_window_m": 0.02,
         "quantile_bounds": [0.02, 0.98],
         "target_span_m": 0.04,
         "correction_m": 0.004,
@@ -333,6 +335,43 @@ def test_parallel_gripper_centering_measures_midplane_error_without_pose_mutatio
     np.testing.assert_allclose(corrections, [0.0, -0.01], atol=1e-12)
     np.testing.assert_allclose(spans, [0.0384, 0.0384], atol=1e-12)
     np.testing.assert_allclose(ratios, [0.0, 0.01 / 0.0384], atol=1e-12)
+
+
+def test_parallel_gripper_centering_uses_candidate_finger_section() -> None:
+    poses = np.eye(4)[None, ...]
+    gripper = GripperDescription(
+        name="test_parallel_gripper",
+        gripper_type="parallel_2f",
+        fingertip_xyz=(0.0, 0.0, 0.1),
+        sweep_open_extents_xyz=(0.08, 0.02, 0.03),
+        sweep_open_offset_xyz=(0.0, 0.0, 0.1),
+        sweep_mid_extents_xyz=(0.04, 0.02, 0.03),
+        sweep_mid_offset_xyz=(0.0, 0.0, 0.1),
+    )
+    local_handle = np.column_stack(
+        (
+            np.linspace(0.01, 0.03, 101),
+            np.zeros(101),
+            np.zeros(101),
+        )
+    )
+    remote_head = np.column_stack(
+        (
+            np.linspace(-0.05, 0.05, 101),
+            np.full(101, 0.05),
+            np.zeros(101),
+        )
+    )
+
+    corrections, spans, ratios = _parallel_gripper_centering_metrics(
+        camera_native_grasps=poses,
+        object_points_camera=np.vstack((local_handle, remote_head)),
+        gripper=gripper,
+    )
+
+    assert corrections[0] == pytest.approx(0.02)
+    assert spans[0] == pytest.approx(0.0192)
+    assert ratios[0] == pytest.approx(1.0)
 
 
 def test_se3_mmr_prefers_centered_candidate_without_changing_source_coverage() -> None:
@@ -543,14 +582,10 @@ def test_run_planner_uses_observation_derived_graspmoe_anchors(tmp_path: Path) -
 def test_geometry_driven_anchors_follow_support_and_gripper_sweep() -> None:
     x = np.linspace(-0.10, 0.10, 21)
     y = np.linspace(-0.03, 0.03, 9)
-    object_points = np.array(
-        [[px, py, 0.030] for px in x for py in y], dtype=np.float32
-    )
+    object_points = np.array([[px, py, 0.030] for px in x for py in y], dtype=np.float32)
     table_x = np.linspace(-0.18, 0.18, 25)
     table_y = np.linspace(-0.12, 0.12, 19)
-    scene_points = np.array(
-        [[px, py, 0.0] for px in table_x for py in table_y], dtype=np.float32
-    )
+    scene_points = np.array([[px, py, 0.0] for px in table_x for py in table_y], dtype=np.float32)
     gripper = GripperDescription(
         name="generic_revolute_parallel_gripper",
         gripper_type="revolute_2f",
@@ -573,9 +608,7 @@ def test_geometry_driven_anchors_follow_support_and_gripper_sweep() -> None:
     assert evidence["minor_extent_m"] == pytest.approx(0.030)
     assert evidence["midplane_penetration_m"] == pytest.approx(-0.015)
     assert evidence["closing_sweep_advance_m"] == pytest.approx(0.013)
-    assert evidence["source"] == (
-        "aligned_target_depth_support_plane_and_gripper_sweep"
-    )
+    assert evidence["source"] == ("aligned_target_depth_support_plane_and_gripper_sweep")
     assert evidence["pose_modified"] is False
 
 
@@ -624,8 +657,7 @@ def test_backend_returns_ranked_contract_without_transport_payloads(
     assert details["generated_candidate_count"] == 3
     assert details["candidate_count"] == 3
     assert details["ranking"] == (
-        "source_aware_se3_mmr_recall_base_with_target_centering_"
-        "reserve_and_minimum_se3_separation"
+        "source_aware_se3_mmr_recall_base_with_target_centering_reserve_and_minimum_se3_separation"
     )
     assert [item["score"] for item in details["grasp_candidates"]] == [0.9, 0.9, 0.2]
     assert [item["backend_index"] for item in details["grasp_candidates"]] == [1, 2, 0]
@@ -692,25 +724,21 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
     assert backend.planners == [
         planner for _offset, planner, _diffusion_only in MODEL_INFERENCE_DRAW_SPECS
     ]
-    assert result["details"]["model_raw_candidate_count"] == (
-        1 + 2 * MODEL_INFERENCE_DRAWS
-    )
+    assert result["details"]["model_raw_candidate_count"] == (1 + 2 * MODEL_INFERENCE_DRAWS)
     assert result["details"]["metadata"]["model_inference_draw_count"] == (MODEL_INFERENCE_DRAWS)
     assert result["details"]["metadata"]["model_inference_draw_seeds"] == [
         4 + offset for offset, _planner, _diffusion_only in MODEL_INFERENCE_DRAW_SPECS
     ]
     assert result["details"]["metadata"]["graspmoe_draw_count"] == 2
     assert result["details"]["metadata"]["diffusion_only_draw_count"] == 5
-    assert result["details"]["metadata"]["recall_base_draw_count"] == len(
-        RECALL_BASE_DRAW_SPECS
-    )
+    assert result["details"]["metadata"]["recall_base_draw_count"] == len(RECALL_BASE_DRAW_SPECS)
     assert result["details"]["metadata"]["diversity_expansion_draw_count"] == len(
         DIVERSITY_EXPANSION_DRAW_SPECS
     )
     assert result["details"]["metadata"]["recall_base_raw_candidate_count"] == 9
-    assert result["details"]["metadata"][
-        "diversity_expansion_raw_candidate_count"
-    ] == 2 * len(DIVERSITY_EXPANSION_DRAW_SPECS)
+    assert result["details"]["metadata"]["diversity_expansion_raw_candidate_count"] == 2 * len(
+        DIVERSITY_EXPANSION_DRAW_SPECS
+    )
     assert result["details"]["metadata"]["discarded_expansion_obb_candidate_count"] == 1
     assert result["details"]["metadata"]["deterministic_obb_reuse_policy"] == (
         "retain_first_full_draw_only"
@@ -810,8 +838,7 @@ def test_no_scene_selection_seeds_both_model_sources(tmp_path: Path) -> None:
 
     assert {tags[index] for index in selected} == {"obb", "diff"}
     assert metadata["candidate_selection"] == (
-        "source_aware_se3_mmr_recall_base_with_target_centering_"
-        "reserve_and_minimum_se3_separation"
+        "source_aware_se3_mmr_recall_base_with_target_centering_reserve_and_minimum_se3_separation"
     )
 
 
@@ -851,9 +878,7 @@ def test_centering_reserve_appends_variant_without_removing_recall_base(
     assert metadata["recall_base_raw_candidate_count"] == 200
     assert metadata["diversity_expansion_raw_candidate_count"] == 1
     assert metadata["target_centering_reserve_returned_count"] == 1
-    assert metadata["target_centering_reserve_parent_backend_indices"] == {
-        "200": [0]
-    }
+    assert metadata["target_centering_reserve_parent_backend_indices"] == {"200": [0]}
 
 
 def test_collision_selection_does_not_fill_formal_pool_with_duplicate_poses(
@@ -910,12 +935,8 @@ def test_formal_selection_retains_same_approach_with_distinct_wrist_rotation(
     assert set(selected) == {0, 1, 2}
     assert metadata["formal_diversity_rejected_count"] == 0
     assert metadata["formal_min_translation_m"] == pytest.approx(0.015)
-    assert metadata["formal_min_approach_separation_rad"] == pytest.approx(
-        np.deg2rad(20.0)
-    )
-    assert metadata["formal_min_wrist_rotation_rad"] == pytest.approx(
-        np.deg2rad(30.0)
-    )
+    assert metadata["formal_min_approach_separation_rad"] == pytest.approx(np.deg2rad(20.0))
+    assert metadata["formal_min_wrist_rotation_rad"] == pytest.approx(np.deg2rad(30.0))
 
 
 def test_no_scene_selection_retains_lower_scored_side_approaches(tmp_path: Path) -> None:

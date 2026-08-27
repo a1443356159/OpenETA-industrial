@@ -971,6 +971,39 @@ def test_normal_accepts_single_primary_with_a_diverse_model_frozen_recovery_fron
         call[field] = original
 
 
+def test_fast_v3_pair_backup_evidence_requires_two_public_distinct_grasps() -> None:
+    call = {
+        "result": {"details": {"outputs": {
+            "candidate_count": 2,
+            "grasp_candidates": [{"id": "g0"}, {"id": "g1"}],
+            "frozen_pair_execution_target": 1,
+            "frozen_pair_backup_target": 1,
+            "frozen_pair_backup_required": True,
+            "frozen_pair_backup_ready": True,
+            "frozen_pair_qualified_grasp_count": 2,
+            "frozen_pair_stop_reason": "complete_pair_with_backup_found",
+            "frozen_grasp_frontier_model_inference_invoked": False,
+        }}}
+    }
+    outputs = call["result"]["details"]["outputs"]
+
+    assert acceptance._has_frozen_pair_backup_evidence(call)
+
+    for field, invalid in (
+        ("candidate_count", 1),
+        ("frozen_pair_backup_ready", False),
+        ("frozen_pair_stop_reason", "complete_pair_found_redundancy_degraded"),
+        ("frozen_grasp_frontier_model_inference_invoked", True),
+    ):
+        original = outputs[field]
+        outputs[field] = invalid
+        assert not acceptance._has_frozen_pair_backup_evidence(call)
+        outputs[field] = original
+
+    outputs["grasp_candidates"][1]["id"] = "g0"
+    assert not acceptance._has_frozen_pair_backup_evidence(call)
+
+
 def test_normal_rejects_obsolete_four_branch_lookahead(tmp_path) -> None:
     artifact = tmp_path / "qualification-v3-reserve.json"
     results = [

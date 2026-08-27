@@ -25,6 +25,7 @@ from agent.tools.registry import ToolResult
 from agent.runtime.capability_map import SparseCapabilityMap, target_pose
 from agent.runtime.qualification_legality import (
     bind_qualified_placement_goal,
+    evaluate_grasp_target_closing_alignment,
     evaluate_grasp_placement_pair_legality,
     evaluate_placement_goal_legality,
 )
@@ -763,6 +764,11 @@ class MoveItCandidateQualifier:
                 # travel, rescue, and fixed-index ordering after MoveIt proof.
                 candidate["moveit_physical_quality_rank"] = physical_rank
                 candidate["moveit_l5_qualified"] = True
+            scene_alignment = proof.get("scene_target_closing_alignment")
+            if isinstance(scene_alignment, Mapping):
+                candidate["scene_target_closing_alignment"] = json.loads(
+                    json.dumps(scene_alignment)
+                )
             goal_legality = proof.get("goal_legality")
             checks = goal_legality.get("checks") if isinstance(goal_legality, Mapping) else None
             binding = checks.get("object_frame_binding") if isinstance(checks, Mapping) else None
@@ -946,6 +952,10 @@ class MoveItCandidateQualifier:
                 "solver_version",
                 "robot_model_sha256",
                 "scene_sha256",
+                "authoritative_scene_sha256",
+                "moveit_world_geometry_sha256",
+                "moveit_attached_geometry_sha256",
+                "moveit_geometry_verified_ids",
                 "capability_map_id",
                 "waves",
                 "l5_attempts",
@@ -1021,6 +1031,18 @@ def _public_qualification_summary(evidence: Mapping[str, Any]) -> JsonDict:
         "solver_configuration_id": evidence.get("solver_configuration_id"),
         "robot_model_sha256": evidence.get("robot_model_sha256"),
         "scene_sha256": evidence.get("scene_sha256"),
+        "authoritative_scene_sha256": evidence.get(
+            "authoritative_scene_sha256"
+        ),
+        "moveit_world_geometry_sha256": evidence.get(
+            "moveit_world_geometry_sha256"
+        ),
+        "moveit_attached_geometry_sha256": evidence.get(
+            "moveit_attached_geometry_sha256"
+        ),
+        "moveit_geometry_verified_ids": list(
+            evidence.get("moveit_geometry_verified_ids") or []
+        ),
         "capability_map_id": evidence.get("capability_map_id"),
         "stop_reason": evidence.get("stop_reason"),
         "search_exhaustion": dict(evidence.get("search_exhaustion") or {}),
@@ -1443,6 +1465,10 @@ class MoveItQualificationEngine:
                     "solver_version",
                     "robot_model_sha256",
                     "scene_sha256",
+                    "authoritative_scene_sha256",
+                    "moveit_world_geometry_sha256",
+                    "moveit_attached_geometry_sha256",
+                    "moveit_geometry_verified_ids",
                     "capability_map_id",
                     "artifact_schema_version",
                     "qualification_case_sha256",
@@ -1577,6 +1603,19 @@ class MoveItQualificationEngine:
             ),
             "robot_model_sha256": str(source.get("robot_model_sha256") or ""),
             "scene_sha256": str(source.get("scene_sha256") or ""),
+            "authoritative_scene_sha256": str(
+                source.get("authoritative_scene_sha256") or ""
+            ),
+            "moveit_world_geometry_sha256": str(
+                source.get("moveit_world_geometry_sha256") or ""
+            ),
+            "moveit_attached_geometry_sha256": str(
+                source.get("moveit_attached_geometry_sha256") or ""
+            ),
+            "moveit_geometry_verified_ids": [
+                str(value)
+                for value in source.get("moveit_geometry_verified_ids") or []
+            ],
             "qualification_case_sha256": str(request.get("qualification_case_sha256") or ""),
             "case_id": str(request.get("qualification_case_sha256") or ""),
             "results": results,
@@ -1611,9 +1650,7 @@ class MoveItQualificationEngine:
             raise ValueError("invalid fast_v3 Beam/seed budget")
         grasp_waves = self._integer_waves(funnel.get("grasp_waves"), (4, 8, 16, 32, 64))
         placement_waves = self._integer_waves(funnel.get("placement_waves"), (4, 8, 16, 32, 96))
-        observation_waves = self._integer_waves(
-            funnel.get("observation_waves"), (4, 8, 16, 24)
-        )
+        observation_waves = self._integer_waves(funnel.get("observation_waves"), (4, 8, 16, 24))
         max_ik = max(1, int(funnel.get("max_ik_concurrency", 8)))
         max_validity = max(1, int(funnel.get("max_state_validity_concurrency", 8)))
         fast_timeout_s = float(funnel.get("fast_ik_timeout_s", 0.05))
@@ -1682,6 +1719,34 @@ class MoveItQualificationEngine:
                     "scene_identity": source.get("scene_identity"),
                 }
             )
+        )
+        authoritative_scene_hash = str(
+            source.get("authoritative_scene_sha256")
+            or current_state.get("authoritative_scene_sha256")
+            or ""
+        )
+        moveit_world_geometry_hash = str(
+            source.get("moveit_world_geometry_sha256")
+            or current_state.get("moveit_world_geometry_sha256")
+            or ""
+        )
+        moveit_attached_geometry_hash = str(
+            source.get("moveit_attached_geometry_sha256")
+            or current_state.get("moveit_attached_geometry_sha256")
+            or ""
+        )
+        raw_verified_ids = source.get("moveit_geometry_verified_ids")
+        if not isinstance(raw_verified_ids, (list, tuple, set)):
+            raw_verified_ids = current_state.get("moveit_geometry_verified_ids")
+        moveit_geometry_verified_ids = sorted(
+            {
+                str(value)
+                for value in (
+                    raw_verified_ids
+                    if isinstance(raw_verified_ids, (list, tuple, set))
+                    else []
+                )
+            }
         )
         if current_state.get("jacobian_quality_available") is False:
             return self._fast_configuration_response(
@@ -1985,9 +2050,7 @@ class MoveItQualificationEngine:
                         )
                         break
                     terminal_evidence = (
-                        planned.get("stages", [{}])[-1].get(
-                            "terminal_gripper_state_validity"
-                        )
+                        planned.get("stages", [{}])[-1].get("terminal_gripper_state_validity")
                         if isinstance(planned.get("stages"), list)
                         and planned.get("stages")
                         and isinstance(planned.get("stages", [{}])[-1], Mapping)
@@ -1997,13 +2060,8 @@ class MoveItQualificationEngine:
                         planned.get("reason") == "terminal_gripper_state_invalid"
                         and isinstance(terminal_evidence, Mapping)
                         and (
-                            terminal_evidence.get(
-                                "seed_independent_static_collision"
-                            )
-                            is True
-                            or terminal_evidence.get(
-                                "seed_independent_contact_geometry_failure"
-                            )
+                            terminal_evidence.get("seed_independent_static_collision") is True
+                            or terminal_evidence.get("seed_independent_contact_geometry_failure")
                             is True
                         )
                     ):
@@ -2397,6 +2455,10 @@ class MoveItQualificationEngine:
             ),
             "robot_model_sha256": robot_hash,
             "scene_sha256": scene_hash,
+            "authoritative_scene_sha256": authoritative_scene_hash,
+            "moveit_world_geometry_sha256": moveit_world_geometry_hash,
+            "moveit_attached_geometry_sha256": moveit_attached_geometry_hash,
+            "moveit_geometry_verified_ids": moveit_geometry_verified_ids,
             "capability_map_id": capability_map.map_id if capability_map else requested_map_id,
             "legality_screening": {
                 key: value
@@ -2533,6 +2595,9 @@ class MoveItQualificationEngine:
             # as the early-wave scheduler.  This changes order only: no model
             # pose is corrected and no candidate is removed.
             base["target_closing_alignment"] = centering_evidence
+        scene_centering = candidate.get("scene_target_closing_alignment")
+        if isinstance(scene_centering, Mapping):
+            base["scene_target_closing_alignment"] = json.loads(json.dumps(scene_centering))
         if base.get("workspace_pass") is not True:
             return base
         if not isinstance(stages, list) or not stages:
@@ -3532,7 +3597,16 @@ class MoveItQualificationEngine:
             )
             for descriptor in descriptors
         )
-        if placement_geometry_present and self.clone_scene is not None:
+        grasp_geometry_present = purpose == "grasp" and any(
+            isinstance(descriptor.get("candidate"), Mapping)
+            and isinstance(descriptor["candidate"].get("compile_parameters"), Mapping)
+            and isinstance(
+                descriptor["candidate"]["compile_parameters"].get("camera_pose"),
+                Mapping,
+            )
+            for descriptor in descriptors
+        )
+        if (placement_geometry_present or grasp_geometry_present) and self.clone_scene is not None:
             try:
                 scene = self.clone_scene()
             except Exception as exc:  # noqa: BLE001 - PlanningScene boundary.
@@ -3615,18 +3689,12 @@ class MoveItQualificationEngine:
                 ):
                     descriptor["placement_robust_clearance_m"] = float(robust_clearance)
                     precheck["placement_robust_clearance_m"] = float(robust_clearance)
-                object_bbox = (
-                    checks.get("object_bbox") if isinstance(checks, Mapping) else None
-                )
+                object_bbox = checks.get("object_bbox") if isinstance(checks, Mapping) else None
                 minimum_z = (
-                    object_bbox.get("minimum_z_m")
-                    if isinstance(object_bbox, Mapping)
-                    else None
+                    object_bbox.get("minimum_z_m") if isinstance(object_bbox, Mapping) else None
                 )
                 maximum_z = (
-                    object_bbox.get("maximum_z_m")
-                    if isinstance(object_bbox, Mapping)
-                    else None
+                    object_bbox.get("maximum_z_m") if isinstance(object_bbox, Mapping) else None
                 )
                 if all(
                     isinstance(value, (int, float))
@@ -3634,14 +3702,10 @@ class MoveItQualificationEngine:
                     and math.isfinite(float(value))
                     for value in (minimum_z, maximum_z)
                 ):
-                    vertical_extent = max(
-                        0.0, float(maximum_z) - float(minimum_z)
-                    )
+                    vertical_extent = max(0.0, float(maximum_z) - float(minimum_z))
                     descriptor["placement_vertical_extent_m"] = vertical_extent
                     precheck["placement_vertical_extent_m"] = vertical_extent
-                support_checks = (
-                    checks.get("support") if isinstance(checks, Mapping) else None
-                )
+                support_checks = checks.get("support") if isinstance(checks, Mapping) else None
                 if isinstance(support_checks, Mapping):
                     for source_key, destination_key in (
                         (
@@ -3718,6 +3782,16 @@ class MoveItQualificationEngine:
                 family = grasp_symmetry_family_id(candidate)
                 descriptor["grasp_symmetry_family_id"] = family
                 precheck["grasp_symmetry_family_id"] = family
+                scene_alignment = evaluate_grasp_target_closing_alignment(
+                    descriptor,
+                    scene=scene,
+                )
+                precheck["scene_target_closing_alignment"] = json.loads(json.dumps(scene_alignment))
+                candidate_copy = dict(candidate)
+                candidate_copy["scene_target_closing_alignment"] = json.loads(
+                    json.dumps(scene_alignment)
+                )
+                descriptor["candidate"] = candidate_copy
                 precheck["legality_pass"] = precheck.get("verdict") == "PASS"
             prechecks[candidate_id] = precheck
             if precheck.get("verdict") == "PASS":
@@ -3749,6 +3823,16 @@ class MoveItQualificationEngine:
                     precheck.get("pair_legality_pass") is None for precheck in prechecks.values()
                 ),
                 "pair_legality_elapsed_s": 0.0,
+                "grasp_scene_alignment_evaluated_count": sum(
+                    isinstance(precheck.get("scene_target_closing_alignment"), Mapping)
+                    and precheck["scene_target_closing_alignment"].get("evaluated") is True
+                    for precheck in prechecks.values()
+                ),
+                "grasp_scene_alignment_aperture_risk_count": sum(
+                    isinstance(precheck.get("scene_target_closing_alignment"), Mapping)
+                    and precheck["scene_target_closing_alignment"].get("aperture_feasible") is False
+                    for precheck in prechecks.values()
+                ),
             },
             scene,
         )
@@ -3965,9 +4049,7 @@ class MoveItQualificationEngine:
                     )
                 )
                 if binding:
-                    planning_target["_qualification_cache_binding_sha256"] = (
-                        binding
-                    )
+                    planning_target["_qualification_cache_binding_sha256"] = binding
                 allowed_collisions = _contact_allowed_collisions(scene, planning_target)
                 if allowed_collisions:
                     planning_target["qualification_allowed_collisions"] = allowed_collisions
@@ -3977,9 +4059,7 @@ class MoveItQualificationEngine:
                     evidence["selected_ik_end_joint_state_sha256"] = _hash(selected_ik_state)
                 if active_scene_diff is not None:
                     planning_target["qualification_scene_diff"] = dict(active_scene_diff)
-                terminal_gripper_state = target.get(
-                    "qualification_terminal_gripper_state"
-                )
+                terminal_gripper_state = target.get("qualification_terminal_gripper_state")
                 if terminal_gripper_state:
                     if terminal_gripper_state != "closing_sweep":
                         return self._unknown(
@@ -3998,15 +4078,11 @@ class MoveItQualificationEngine:
                         target=planning_target,
                         scene_diff=active_scene_diff,
                     )
-                    terminal_state["qualification_gripper_state"] = (
-                        "closing_sweep"
-                    )
+                    terminal_state["qualification_gripper_state"] = "closing_sweep"
                     try:
-                        terminal_result, terminal_retry, terminal_elapsed = (
-                            self._call_fast_service(
-                                lambda: self.check_state_validity(terminal_state),
-                                required_boolean="valid",
-                            )
+                        terminal_result, terminal_retry, terminal_elapsed = self._call_fast_service(
+                            lambda: self.check_state_validity(terminal_state),
+                            required_boolean="valid",
                         )
                     except _QualificationInfrastructureError as exc:
                         return self._unknown(
@@ -4023,21 +4099,15 @@ class MoveItQualificationEngine:
                         "elapsed_s": terminal_elapsed,
                         "preplan_endpoint_check": True,
                         "seed_independent_static_collision": (
-                            terminal_result.get(
-                                "qualification_seed_independent_static_collision"
-                            )
+                            terminal_result.get("qualification_seed_independent_static_collision")
                             is True
                         ),
                         "bilateral_target_contact_required": (
-                            terminal_result.get(
-                                "qualification_bilateral_target_contact_required"
-                            )
+                            terminal_result.get("qualification_bilateral_target_contact_required")
                             is True
                         ),
                         "bilateral_target_contact_predicted": (
-                            terminal_result.get(
-                                "qualification_bilateral_target_contact_predicted"
-                            )
+                            terminal_result.get("qualification_bilateral_target_contact_predicted")
                             is True
                         ),
                         "seed_independent_contact_geometry_failure": (
@@ -4047,14 +4117,9 @@ class MoveItQualificationEngine:
                             is True
                         ),
                         "reason": terminal_result.get("reason"),
-                        "collision_pairs": list(
-                            terminal_result.get("collision_pairs") or []
-                        ),
+                        "collision_pairs": list(terminal_result.get("collision_pairs") or []),
                         "sweep_checks": list(
-                            terminal_result.get(
-                                "qualification_gripper_sweep_checks"
-                            )
-                            or []
+                            terminal_result.get("qualification_gripper_sweep_checks") or []
                         ),
                     }
                     if terminal_result.get("valid") is not True:
@@ -4083,9 +4148,7 @@ class MoveItQualificationEngine:
                 planned.get("l5_trajectory_cache_stored") is True
             )
             if isinstance(planned.get("l5_trajectory_cache_key"), str):
-                evidence["l5_trajectory_cache_key"] = planned[
-                    "l5_trajectory_cache_key"
-                ]
+                evidence["l5_trajectory_cache_key"] = planned["l5_trajectory_cache_key"]
             reported_elapsed = planned.get("elapsed_s")
             evidence["elapsed_s"] = (
                 float(reported_elapsed)

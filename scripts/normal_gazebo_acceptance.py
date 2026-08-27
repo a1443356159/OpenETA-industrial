@@ -1113,6 +1113,31 @@ def _has_bounded_grasp_l5_evidence(call: Mapping[str, Any], *, artifact_root: Pa
     return legacy_bound or _has_v3_grasp_diversity_evidence(call, artifact_root=artifact_root)
 
 
+def _has_frozen_pair_backup_evidence(call: Mapping[str, Any]) -> bool:
+    """Require the fast-v3 public queue to contain a proven backup grasp."""
+
+    outputs = _call_outputs(call)
+    grasps = outputs.get("grasp_candidates")
+    grasp_ids = [
+        str(candidate.get("id") or "")
+        for candidate in grasps
+        if isinstance(candidate, Mapping) and str(candidate.get("id") or "")
+    ] if isinstance(grasps, list) else []
+    return bool(
+        outputs.get("frozen_pair_execution_target") == 1
+        and outputs.get("frozen_pair_backup_target") == 1
+        and outputs.get("frozen_pair_backup_required") is True
+        and outputs.get("frozen_pair_backup_ready") is True
+        and outputs.get("frozen_pair_stop_reason")
+        == "complete_pair_with_backup_found"
+        and outputs.get("frozen_pair_qualified_grasp_count") == 2
+        and outputs.get("candidate_count") == 2
+        and len(grasp_ids) == 2
+        and len(set(grasp_ids)) == 2
+        and outputs.get("frozen_grasp_frontier_model_inference_invoked") is False
+    )
+
+
 def verify_case(
     paths: base.CasePaths,
     *,
@@ -1264,6 +1289,13 @@ def verify_case(
             for grasp_call in grasp_calls
         ):
             errors.append(f"{backend_label} L5 diversity evidence is missing")
+        if funnel_profile == "fast_v3" and not any(
+            _has_frozen_pair_backup_evidence(grasp_call)
+            for grasp_call in provider_inference_calls
+        ):
+            errors.append(
+                f"{backend_label} fast-v3 grasp/place backup evidence is missing"
+            )
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
         first_anyplace = anyplace_calls[0] if anyplace_calls else {}

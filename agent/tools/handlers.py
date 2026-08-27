@@ -47,9 +47,7 @@ Sam3SelectionReviewCallable = Callable[[JsonDict], JsonDict]
 AnyGraspDetectCallable = Callable[[JsonDict], JsonDict]
 ContactGraspNetPredictCallable = Callable[[JsonDict], JsonDict]
 AnyPlacePredictCallable = Callable[[JsonDict], JsonDict]
-AnyPlacePreInferenceCallable = Callable[
-    [ToolExecutionContext, JsonDict], ToolResult | None
-]
+AnyPlacePreInferenceCallable = Callable[[ToolExecutionContext, JsonDict], ToolResult | None]
 MolmoPointCallable = Callable[[JsonDict], JsonDict]
 GraspGenXPredictCallable = Callable[[JsonDict], JsonDict]
 GraspGenXListCallable = Callable[[], JsonDict]
@@ -64,9 +62,7 @@ DEFAULT_SAM3_ROI_PADDING_RATIO = 0.12
 DEFAULT_SAM3_ROI_FALLBACK_PROMPT = "foreground object"
 SAM3_MAX_POINT_COUNT = 64
 DEFAULT_ANYPLACE_OUTPUT_ROOT = Path("tmp") / "tool_result" / "anyplace"
-ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA = (
-    "openeta.anyplace.object_mask_depth_cleanup.v1"
-)
+ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA = "openeta.anyplace.object_mask_depth_cleanup.v1"
 # This is intentionally a narrow observation repair, not a general point-cloud
 # filter. It only removes one tiny depth tail separated from the rest of a
 # SAM3 object mask by a physically large empty interval.
@@ -74,9 +70,7 @@ ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M = 0.03
 ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION = 0.02
 ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS = 32
 ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS = 128
-ANYPLACE_PLACEMENT_SUPPORT_MASK_SCHEMA = (
-    "openeta.anyplace.placement_support_surface_mask.v1"
-)
+ANYPLACE_PLACEMENT_SUPPORT_MASK_SCHEMA = "openeta.anyplace.placement_support_surface_mask.v1"
 # AnyPlace expects the parent point cloud to describe the surface that supports
 # the child object.  A semantic "inside the bin" mask also covers side walls
 # and the rim, so isolate a statistically dominant horizontal depth layer in
@@ -89,9 +83,7 @@ DEFAULT_MOLMOPOINT_OUTPUT_ROOT = Path("tmp") / "tool_result" / "molmopoint"
 DEFAULT_GRASPGENX_OUTPUT_ROOT = Path("tmp") / "tool_result" / "graspgenx"
 DEFAULT_DEPTH_PRIOR_OUTPUT_ROOT = Path("tmp") / "tool_result" / "depth_prior"
 GRASP_POSE_ESTIMATE_SCHEMA = "openeta.grasp_pose_estimate.v1"
-PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA = (
-    "openeta.parallel_gripper_target_closing_alignment.v1"
-)
+PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA = "openeta.parallel_gripper_target_closing_alignment.v1"
 PARALLEL_GRIPPER_ALIGNMENT_QUANTILES = (0.02, 0.98)
 PARALLEL_GRIPPER_ALIGNMENT_MAX_POINTS = 4096
 PARALLEL_GRIPPER_ALIGNMENT_MIN_SPAN_M = 0.02
@@ -386,10 +378,7 @@ def build_sam3_handler(
                     points=[],
                     source_image=image,
                     reason="conflicting_prompts",
-                    content=(
-                        "SAM3 segmentation failed: ROI and point prompts cannot be "
-                        "combined."
-                    ),
+                    content=("SAM3 segmentation failed: ROI and point prompts cannot be combined."),
                 ),
                 mcp_called=False,
                 reason="conflicting_prompts",
@@ -431,11 +420,7 @@ def build_sam3_handler(
                 reason="image_not_found",
             )
         except ValueError as exc:
-            reason = (
-                "invalid_positive_points"
-                if legacy_point_prompt
-                else "invalid_roi_bbox"
-            )
+            reason = "invalid_positive_points" if legacy_point_prompt else "invalid_roi_bbox"
             return finish(
                 _sam3_failure(
                     mode=mode,
@@ -443,10 +428,7 @@ def build_sam3_handler(
                     points=[],
                     source_image=image,
                     reason=reason,
-                    content=(
-                        "SAM3 segmentation failed: invalid prompt geometry: "
-                        f"{exc}"
-                    ),
+                    content=(f"SAM3 segmentation failed: invalid prompt geometry: {exc}"),
                 ),
                 mcp_called=False,
                 reason=reason,
@@ -539,9 +521,9 @@ def build_sam3_handler(
             mode == "points"
             and not legacy_point_prompt
             and not _is_consistent_sam3_point_response(
-            response,
-            points=points,
-            source_image=Path(image),
+                response,
+                points=points,
+                source_image=Path(image),
             )
         ):
             return finish(
@@ -649,11 +631,7 @@ def build_sam3_handler(
                     "deterministic_singleton": True,
                     "model_review_invoked": False,
                 }
-            elif (
-                selection_reviewer is not None
-                and isinstance(detections, list)
-                and detections
-            ):
+            elif selection_reviewer is not None and isinstance(detections, list) and detections:
                 try:
                     review = selection_reviewer(
                         {
@@ -696,9 +674,7 @@ def build_sam3_handler(
                                 or "isolated_main_vlm",
                                 "selection_confidence": review.get("confidence"),
                                 "selection_reason": review.get("reason"),
-                                "target_geometry_family": review.get(
-                                    "target_geometry_family"
-                                ),
+                                "target_geometry_family": review.get("target_geometry_family"),
                             }
                         )
                         details["selected_detection"] = selected
@@ -769,14 +745,15 @@ def _sam3_semantic_metadata(
     """Bind one SAM3 call to a typed role and deterministic observation attempt."""
 
     supplied_role = _string_param(parameters.get("semantic_role")).strip().lower()
-    role = supplied_role if supplied_role in {
-        "grasp_target",
-        "placement_object",
-        "placement_region",
-    } else (
-        "placement_region"
-        if _sam3_placement_region_prompt(prompt)
-        else "grasp_target"
+    role = (
+        supplied_role
+        if supplied_role
+        in {
+            "grasp_target",
+            "placement_object",
+            "placement_region",
+        }
+        else ("placement_region" if _sam3_placement_region_prompt(prompt) else "grasp_target")
     )
     role_source = "explicit" if supplied_role == role else "legacy_prompt_inference"
     semantic_target = (
@@ -785,9 +762,7 @@ def _sam3_semantic_metadata(
         else _string_param(parameters.get("semantic_target")) or prompt
     )
     observation_metadata = getattr(observation, "metadata", None)
-    observation_metadata = (
-        observation_metadata if isinstance(observation_metadata, Mapping) else {}
-    )
+    observation_metadata = observation_metadata if isinstance(observation_metadata, Mapping) else {}
     raw_scene_epoch = parameters.get("scene_epoch")
     if raw_scene_epoch is None:
         raw_scene_epoch = observation_metadata.get("scene_epoch", 0)
@@ -797,17 +772,14 @@ def _sam3_semantic_metadata(
         scene_epoch = 0
     supplied_observation_id = _string_param(parameters.get("observation_id"))
     observation_identity = supplied_observation_id or _string_param(
-        observation_metadata.get("observation_id")
-        or observation_metadata.get("capture_id")
+        observation_metadata.get("observation_id") or observation_metadata.get("capture_id")
     )
     if not observation_identity:
         observation_identity = hashlib.sha256(
             f"{scene_epoch}\0{source_image}".encode("utf-8")
         ).hexdigest()[:16]
     observation_id = (
-        observation_identity
-        if supplied_observation_id
-        else f"observation-{observation_identity}"
+        observation_identity if supplied_observation_id else f"observation-{observation_identity}"
     )
     supplied_bundle_id = _string_param(parameters.get("perception_bundle_id"))
     perception_bundle_id = supplied_bundle_id or (
@@ -835,9 +807,7 @@ def _sam3_semantic_metadata(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    attempt_id = _string_param(parameters.get("attempt_id")) or (
-        f"sam3-attempt-{fingerprint[:16]}"
-    )
+    attempt_id = _string_param(parameters.get("attempt_id")) or (f"sam3-attempt-{fingerprint[:16]}")
     return {
         "semantic_role": role,
         "semantic_role_source": role_source,
@@ -1026,9 +996,7 @@ def build_depth_prior_handler(
         intrinsics = context.parameters.get("intrinsics")
         camera_id = _string_param(context.parameters.get("camera_id")) or "camera"
         camera_model = _string_param(context.parameters.get("camera_model")) or "pinhole"
-        calibration_profile_id = _string_param(
-            context.parameters.get("calibration_profile_id")
-        )
+        calibration_profile_id = _string_param(context.parameters.get("calibration_profile_id"))
         bundle_id = _string_param(context.parameters.get("bundle_id")) or run_dir.name
         if not rgb or not isinstance(intrinsics, Mapping):
             return _depth_prior_failure(
@@ -1280,9 +1248,7 @@ def build_anygrasp_handler(
         }
         service_intrinsics = dict(intrinsics)
         try:
-            service_intrinsics["scale"] = (
-                float(service_intrinsics["scale"]) * depth_cutoff_factor
-            )
+            service_intrinsics["scale"] = float(service_intrinsics["scale"]) * depth_cutoff_factor
         except (KeyError, TypeError, ValueError):
             pass
         mcp_request = {
@@ -1354,11 +1320,15 @@ def build_grasp_pose_estimate_handler(
         hints_value = parameters.get("hints")
         hints = dict(hints_value) if isinstance(hints_value, Mapping) else {}
         excluded_value = hints.get("excluded_backends")
-        excluded_backends = {
-            str(value)
-            for value in excluded_value
-            if isinstance(value, str) and value in DEFAULT_GRASP_POSE_BACKEND_ORDER
-        } if isinstance(excluded_value, list | tuple | set) else set()
+        excluded_backends = (
+            {
+                str(value)
+                for value in excluded_value
+                if isinstance(value, str) and value in DEFAULT_GRASP_POSE_BACKEND_ORDER
+            }
+            if isinstance(excluded_value, list | tuple | set)
+            else set()
+        )
 
         invalid_reason = _grasp_pose_common_input_error(
             mode=mode,
@@ -1378,9 +1348,7 @@ def build_grasp_pose_estimate_handler(
 
         assert isinstance(intrinsics_value, Mapping)
         intrinsics = dict(intrinsics_value)
-        object_mask = (
-            dict(object_mask_value) if isinstance(object_mask_value, Mapping) else None
-        )
+        object_mask = dict(object_mask_value) if isinstance(object_mask_value, Mapping) else None
         attempts: list[JsonDict] = []
         for backend in order:
             if backend in excluded_backends:
@@ -1626,9 +1594,7 @@ def build_graspgenx_handler(
         gripper_name = _string_param(context.parameters.get("gripper_name"))
         up_value = context.parameters.get("up_direction_camera")
         object_mask_request = (
-            dict(object_mask_value)
-            if isinstance(object_mask_value, Mapping)
-            else object_mask_value
+            dict(object_mask_value) if isinstance(object_mask_value, Mapping) else object_mask_value
         )
         request: JsonDict = {
             "rgb": rgb,
@@ -1798,9 +1764,7 @@ def build_graspgenx_handler(
             try:
                 listing = list_grippers()
                 grippers = _normalise_graspgenx_gripper_listing(listing)
-                geometry = next(
-                    item for item in grippers if item["name"] == gripper_name
-                )
+                geometry = next(item for item in grippers if item["name"] == gripper_name)
                 raw_candidates = _graspgenx_raw_candidates(response)
                 result.details["artifacts"] = _build_graspgenx_visual_artifacts(
                     rgb_path=rgb,
@@ -1950,7 +1914,10 @@ def build_molmopoint_handler(
             )
             return result
 
-        if not isinstance(raw_images, list) or not 1 <= len(raw_images) <= MOLMOPOINT_MAX_IMAGE_COUNT:
+        if (
+            not isinstance(raw_images, list)
+            or not 1 <= len(raw_images) <= MOLMOPOINT_MAX_IMAGE_COUNT
+        ):
             return finish(
                 _molmopoint_failure(context, "invalid_image_count"),
                 mcp_called=False,
@@ -2039,10 +2006,7 @@ def build_anyplace_handler(
                 "invalid_scene_revision",
                 "AnyPlace placement prediction failed: planning-scene revision is missing.",
             )
-        if (
-            context.parameters.get("reuse_frozen_goal_pool") is True
-            and pre_inference is not None
-        ):
+        if context.parameters.get("reuse_frozen_goal_pool") is True and pre_inference is not None:
             frozen_request: JsonDict = {
                 "reuse_frozen_goal_pool": True,
                 "scene_revision": scene_revision,
@@ -2095,15 +2059,11 @@ def build_anyplace_handler(
         try:
             object_packet = _clean_anyplace_object_mask_sparse_depth_tail(
                 object_packet,
-                artifact_root=(
-                    artifact_session_root(output_root, session_id) / "preprocessing"
-                ),
+                artifact_root=(artifact_session_root(output_root, session_id) / "preprocessing"),
             )
             placement_packet = _clean_anyplace_placement_support_surface_mask(
                 placement_packet,
-                artifact_root=(
-                    artifact_session_root(output_root, session_id) / "preprocessing"
-                ),
+                artifact_root=(artifact_session_root(output_root, session_id) / "preprocessing"),
             )
             request["object_observation"] = object_packet
             request["placement_observation"] = placement_packet
@@ -3086,8 +3046,7 @@ def _is_consistent_sam3_point_response(
     if (
         not isinstance(metadata, Mapping)
         or any(
-            isinstance(metadata.get(key), bool)
-            or not isinstance(metadata.get(key), int)
+            isinstance(metadata.get(key), bool) or not isinstance(metadata.get(key), int)
             for key in count_keys
         )
         or any(
@@ -3394,10 +3353,7 @@ def _normalise_sam3_response(
                 points=points,
                 source_image=source_image,
                 reason="artifact_write_failed",
-                content=(
-                    "SAM3 segmentation failed: selection visualization "
-                    f"failed: {exc}"
-                ),
+                content=(f"SAM3 segmentation failed: selection visualization failed: {exc}"),
                 metadata={"error_type": type(exc).__name__},
             )
 
@@ -3905,8 +3861,7 @@ def _normalise_anygrasp_response(
         or (
             registered_raw_pool is not None
             and (
-                registered_raw_pool != expected_raw_pool_size
-                or parsed_count > registered_raw_pool
+                registered_raw_pool != expected_raw_pool_size or parsed_count > registered_raw_pool
             )
         )
     ):
@@ -4065,8 +4020,7 @@ def _grasp_pose_backend_parameters(
 ) -> JsonDict | None:
     enhancement = hints.get("depth_enhancement")
     enhanced_candidate_only = (
-        isinstance(enhancement, Mapping)
-        and enhancement.get("candidate_generation_only") is True
+        isinstance(enhancement, Mapping) and enhancement.get("candidate_generation_only") is True
     )
     if enhanced_candidate_only and backend != "anygrasp":
         return None
@@ -4077,9 +4031,7 @@ def _grasp_pose_backend_parameters(
             "depth": depth,
             "intrinsics": intrinsics,
             "collision_detection": (
-                False
-                if enhanced_candidate_only
-                else hints.get("collision_check", True)
+                False if enhanced_candidate_only else hints.get("collision_check", True)
             ),
             "dense_grasp": hints.get("dense_sampling", False),
             "depth_cutoff_factor": hints.get("depth_cutoff_factor", 1.0),
@@ -4102,9 +4054,7 @@ def _grasp_pose_backend_parameters(
     if backend == "contact_graspnet":
         return common
     if backend == "graspgenx":
-        up_direction = _normalise_graspgenx_up_direction(
-            list(graspgenx_up_direction_camera)
-        )
+        up_direction = _normalise_graspgenx_up_direction(list(graspgenx_up_direction_camera))
         if not graspgenx_gripper_name or up_direction is None:
             return None
         return {
@@ -4219,14 +4169,14 @@ def _annotate_parallel_gripper_closing_alignment(
     intrinsics: Mapping[str, Any],
     depth_provenance: str,
 ) -> int:
-    """Attach measured closing-midplane corrections to parallel-jaw grasps.
+    """Attach finger-local closing-midplane evidence to parallel-jaw grasps.
 
-    The estimator pose fixes the approach and wrist rotation, but a coupled
-    parallel gripper also needs the target to straddle its closing plane.  Use
-    only the selected target's aligned mask/depth point cloud to derive that
-    one-dimensional translation.  Missing or malformed sensor evidence leaves
-    the model candidate unchanged; every derived pose still goes through the
-    complete host qualification funnel.
+    The estimator pose fixes the complete SE(3) target.  For ordering only,
+    measure whether the selected target straddles the closing plane inside the
+    candidate's own advertised finger-height band.  A whole-object mask centre
+    is not representative for a local grasp on a long or compound part.
+    Missing section geometry falls back to the full mask at low confidence;
+    no pose is translated and every candidate remains in the recovery pool.
     """
 
     if not isinstance(object_mask, Mapping):
@@ -4294,7 +4244,19 @@ def _annotate_parallel_gripper_closing_alignment(
             continue
         rotation_array = np.asarray(rotation, dtype=np.float64)
         closing_axis = rotation_array[:, 1]
+        binormal_axis = rotation_array[:, 2]
+        height = _finite_float(candidate.get("height"))
         projections = points @ closing_axis
+        section_point_count = 0
+        section_used = False
+        if height is not None and height > 0.0:
+            binormal_projections = points @ binormal_axis
+            tip_binormal = float(np.dot(tip, binormal_axis))
+            section_mask = np.abs(binormal_projections - tip_binormal) <= height * 0.5
+            section_point_count = int(section_mask.sum())
+            if section_point_count >= 2:
+                projections = projections[section_mask]
+                section_used = True
         low, high = np.quantile(
             projections,
             [lower_quantile, upper_quantile],
@@ -4312,28 +4274,34 @@ def _annotate_parallel_gripper_closing_alignment(
         previous_alignment = candidate.get("target_closing_alignment")
         alignment = {
             "schema_version": PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA,
-            "source": "aligned_selected_mask_depth",
+            "source": "aligned_selected_mask_finger_section_depth",
             "depth_provenance": depth_provenance,
             "closing_axis": "graspnet_local_y",
+            "binormal_axis": "graspnet_local_z",
+            "binormal_window_m": height,
             "quantile_bounds": [lower_quantile, upper_quantile],
             "support_point_count": support_point_count,
             "sampled_point_count": int(points.shape[0]),
+            "section_point_count": section_point_count,
+            "section_used": section_used,
             "target_span_m": span,
             "correction_m": correction,
             "correction_camera_xyz": correction_camera.tolist(),
+            "centering_ratio": abs(correction) / max(span, 0.02),
+            "ordering_only": True,
+            "pose_modified": False,
         }
         if isinstance(previous_alignment, Mapping) and (
-            previous_alignment.get("variant_role")
-            == "same_approach_centering_reserve"
+            previous_alignment.get("variant_role") == "same_approach_centering_reserve"
         ):
-            parents = previous_alignment.get(
-                "compatible_parent_backend_indices"
-            )
-            if isinstance(parents, list) and parents and all(
-                isinstance(parent, int)
-                and not isinstance(parent, bool)
-                and parent >= 0
-                for parent in parents
+            parents = previous_alignment.get("compatible_parent_backend_indices")
+            if (
+                isinstance(parents, list)
+                and parents
+                and all(
+                    isinstance(parent, int) and not isinstance(parent, bool) and parent >= 0
+                    for parent in parents
+                )
             ):
                 alignment.update(
                     {
@@ -4415,10 +4383,7 @@ def _normalise_grasp_pose_estimate_result(
     alignment_depth = depth
     alignment_depth_provenance = "sensor_depth"
     enhancement = hints.get("depth_enhancement")
-    if (
-        isinstance(enhancement, Mapping)
-        and enhancement.get("candidate_generation_only") is True
-    ):
+    if isinstance(enhancement, Mapping) and enhancement.get("candidate_generation_only") is True:
         # Candidate-only enhanced depth may fill unseen geometry.  It remains
         # valid for the estimator, but never for this physical centering
         # correction; use the sensor-only safety depth or omit the correction.
@@ -4455,16 +4420,11 @@ def _normalise_grasp_pose_estimate_result(
             if key in backend_source:
                 source[key] = backend_source[key]
     artifacts = [
-        dict(value)
-        for value in source_details.get("artifacts", [])
-        if isinstance(value, Mapping)
+        dict(value) for value in source_details.get("artifacts", []) if isinstance(value, Mapping)
     ]
     return ToolResult(
         True,
-        content=(
-            f"Grasp pose estimation completed with {backend}; "
-            f"{len(candidates)} candidates."
-        ),
+        content=(f"Grasp pose estimation completed with {backend}; {len(candidates)} candidates."),
         details={
             "schema_version": GRASP_POSE_ESTIMATE_SCHEMA,
             "tool": "grasp_pose_estimate",
@@ -4800,9 +4760,7 @@ def _normalise_graspgenx_response(
     details = response.get("details")
     success = bool(response.get("success", False))
     if not isinstance(details, Mapping):
-        return _graspgenx_failure(
-            "inconsistent_grasp_outputs" if success else "mcp_call_failed"
-        )
+        return _graspgenx_failure("inconsistent_grasp_outputs" if success else "mcp_call_failed")
     if not success:
         reason = _string_param(details.get("reason")) or "unknown_error"
         content = _string_param(response.get("content")) or (
@@ -4811,9 +4769,7 @@ def _normalise_graspgenx_response(
         return _graspgenx_failure(
             reason,
             content=content,
-            metadata=_scrub_graspgenx_payload(
-                _dict_or_empty(details.get("metadata"))
-            ),
+            metadata=_scrub_graspgenx_payload(_dict_or_empty(details.get("metadata"))),
         )
     deterministic = details.get("deterministic")
     if (
@@ -4830,10 +4786,7 @@ def _normalise_graspgenx_response(
         not in {
             "score_descending",
             "source_aware_se3_mmr_with_minimum_se3_separation",
-            (
-                "source_aware_se3_mmr_with_target_centering_quality_"
-                "and_minimum_se3_separation"
-            ),
+            ("source_aware_se3_mmr_with_target_centering_quality_and_minimum_se3_separation"),
             (
                 "source_aware_se3_mmr_recall_base_with_target_centering_"
                 "reserve_and_minimum_se3_separation"
@@ -4846,9 +4799,7 @@ def _normalise_graspgenx_response(
     candidate_count = details.get("candidate_count")
     raw_candidate_count = details.get("raw_candidate_count")
     generated_candidate_count = details.get("generated_candidate_count")
-    model_raw_candidate_count = details.get(
-        "model_raw_candidate_count", raw_candidate_count
-    )
+    model_raw_candidate_count = details.get("model_raw_candidate_count", raw_candidate_count)
     if (
         isinstance(candidate_count, bool)
         or not isinstance(candidate_count, int)
@@ -4880,10 +4831,7 @@ def _normalise_graspgenx_response(
         if (
             candidate is None
             or candidate["id"] in candidate_ids
-            or (
-                ranking == "score_descending"
-                and float(candidate["score"]) > previous_score
-            )
+            or (ranking == "score_descending" and float(candidate["score"]) > previous_score)
         ):
             return _graspgenx_failure("inconsistent_grasp_outputs")
         candidate_ids.add(candidate["id"])
@@ -4895,12 +4843,8 @@ def _normalise_graspgenx_response(
         return _graspgenx_failure("inconsistent_grasp_outputs")
     metadata = _scrub_graspgenx_payload(metadata_value)
     registered_count = metadata.get("max_returned_candidates")
-    if (
-        registered_count is not None
-        and (
-            registered_count != expected_raw_pool_size
-            or candidate_count > registered_count
-        )
+    if registered_count is not None and (
+        registered_count != expected_raw_pool_size or candidate_count > registered_count
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
     registered_raw_pool = metadata.get("raw_pool_size")
@@ -4909,8 +4853,7 @@ def _normalise_graspgenx_response(
     v2_reserve_contract = "raw_pool_size" in metadata
     return ToolResult(
         True,
-        content=_string_param(response.get("content"))
-        or "GraspGenX grasp prediction completed.",
+        content=_string_param(response.get("content")) or "GraspGenX grasp prediction completed.",
         details={
             "tool": "graspgenx",
             "backend": GRASPGENX_BACKEND,
@@ -5003,9 +4946,7 @@ def _normalise_graspgenx_candidate(
     ):
         return None
     for row in range(3):
-        if not math.isclose(
-            transform[row][3], translation[row], rel_tol=0.0, abs_tol=1e-6
-        ):
+        if not math.isclose(transform[row][3], translation[row], rel_tol=0.0, abs_tol=1e-6):
             return None
         for column in range(3):
             if not math.isclose(
@@ -5042,18 +4983,34 @@ def _normalise_graspgenx_candidate(
         correction = _finite_float(alignment_value.get("correction_m"))
         span = _finite_float(alignment_value.get("target_span_m"))
         ratio = _finite_float(alignment_value.get("centering_ratio"))
-        correction_camera = _finite_vector(
-            alignment_value.get("correction_camera_xyz"), length=3
-        )
-        quantiles = _finite_vector(
-            alignment_value.get("quantile_bounds"), length=2
-        )
+        correction_camera = _finite_vector(alignment_value.get("correction_camera_xyz"), length=3)
+        quantiles = _finite_vector(alignment_value.get("quantile_bounds"), length=2)
+        alignment_source = str(alignment_value.get("source") or "")
+        finger_section_source = alignment_source == "aligned_selected_mask_finger_section_depth"
+        binormal_window = _finite_float(alignment_value.get("binormal_window_m"))
         if (
-            alignment_value.get("schema_version")
-            != PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA
-            or alignment_value.get("source") != "aligned_selected_mask_depth"
+            alignment_value.get("schema_version") != PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA
+            or alignment_source
+            not in {
+                "aligned_selected_mask_depth",
+                "aligned_selected_mask_finger_section_depth",
+            }
             or alignment_value.get("depth_provenance") != "sensor_depth"
             or alignment_value.get("closing_axis") != "graspnet_local_y"
+            or (
+                finger_section_source
+                and (
+                    alignment_value.get("binormal_axis") != "graspnet_local_z"
+                    or binormal_window is None
+                    or binormal_window <= 0.0
+                    or not math.isclose(
+                        binormal_window,
+                        height,
+                        rel_tol=0.0,
+                        abs_tol=1e-6,
+                    )
+                )
+            )
             or alignment_value.get("ordering_only") is not True
             or alignment_value.get("pose_modified") is not False
             or correction is None
@@ -5066,12 +5023,8 @@ def _normalise_graspgenx_candidate(
             or not 0.0 <= quantiles[0] < quantiles[1] <= 1.0
         ):
             return None
-        expected_ratio = abs(correction) / max(
-            span, PARALLEL_GRIPPER_ALIGNMENT_MIN_SPAN_M
-        )
-        expected_correction = [
-            rotation[row][1] * correction for row in range(3)
-        ]
+        expected_ratio = abs(correction) / max(span, PARALLEL_GRIPPER_ALIGNMENT_MIN_SPAN_M)
+        expected_correction = [rotation[row][1] * correction for row in range(3)]
         if not math.isclose(ratio, expected_ratio, rel_tol=0.0, abs_tol=1e-6) or any(
             not math.isclose(
                 correction_camera[row],
@@ -5084,7 +5037,7 @@ def _normalise_graspgenx_candidate(
             return None
         normalized["target_closing_alignment"] = {
             "schema_version": PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA,
-            "source": "aligned_selected_mask_depth",
+            "source": alignment_source,
             "depth_provenance": "sensor_depth",
             "closing_axis": "graspnet_local_y",
             "quantile_bounds": quantiles,
@@ -5095,19 +5048,22 @@ def _normalise_graspgenx_candidate(
             "ordering_only": True,
             "pose_modified": False,
         }
+        if finger_section_source:
+            normalized["target_closing_alignment"].update(
+                {
+                    "binormal_axis": "graspnet_local_z",
+                    "binormal_window_m": binormal_window,
+                }
+            )
         variant_role = alignment_value.get("variant_role")
-        parent_indices = alignment_value.get(
-            "compatible_parent_backend_indices"
-        )
+        parent_indices = alignment_value.get("compatible_parent_backend_indices")
         if variant_role is not None or parent_indices is not None:
             if (
                 variant_role != "same_approach_centering_reserve"
                 or not isinstance(parent_indices, list)
                 or not parent_indices
                 or any(
-                    isinstance(parent, bool)
-                    or not isinstance(parent, int)
-                    or parent < 0
+                    isinstance(parent, bool) or not isinstance(parent, int) or parent < 0
                     for parent in parent_indices
                 )
                 or len(set(parent_indices)) != len(parent_indices)
@@ -5376,10 +5332,7 @@ def _normalise_molmopoint_response(
         return _molmopoint_failure(context, "inconsistent_point_outputs")
     revision = _string_param(metadata_value.get("model_revision"))
     returned_images = metadata_value.get("images")
-    if (
-        re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None
-        or returned_images != image_metadata
-    ):
+    if re.fullmatch(r"[0-9a-fA-F]{40}", revision) is None or returned_images != image_metadata:
         return _molmopoint_failure(context, "inconsistent_point_outputs")
     metadata: JsonDict = {
         "model": model,
@@ -5435,8 +5388,7 @@ def _normalise_molmopoint_response(
     return make_tool_result(
         context,
         success=True,
-        content=_string_param(response.get("content"))
-        or "MolmoPoint image pointing completed.",
+        content=_string_param(response.get("content")) or "MolmoPoint image pointing completed.",
         outputs={
             "image_count": len(image_metadata),
             "point_count": len(points),
@@ -5449,9 +5401,11 @@ def _normalise_molmopoint_response(
 
 
 def _molmopoint_failure(context: ToolExecutionContext, reason: str) -> ToolResult:
-    image_count = len(context.parameters.get("images", [])) if isinstance(
-        context.parameters.get("images"), list
-    ) else 0
+    image_count = (
+        len(context.parameters.get("images", []))
+        if isinstance(context.parameters.get("images"), list)
+        else 0
+    )
     return make_tool_result(
         context,
         success=False,
@@ -5666,18 +5620,12 @@ def _build_graspgenx_visual_artifacts(
         points_array = np.asarray(points, dtype=np.float64)
         pixels = np.full((len(points_array), 2), np.nan, dtype=np.float64)
         valid = points_array[:, 2] > 1e-6
-        pixels[valid, 0] = (
-            float(intrinsics["fx"])
-            * points_array[valid, 0]
-            / points_array[valid, 2]
-            + float(intrinsics["cx"])
-        )
-        pixels[valid, 1] = (
-            float(intrinsics["fy"])
-            * points_array[valid, 1]
-            / points_array[valid, 2]
-            + float(intrinsics["cy"])
-        )
+        pixels[valid, 0] = float(intrinsics["fx"]) * points_array[valid, 0] / points_array[
+            valid, 2
+        ] + float(intrinsics["cx"])
+        pixels[valid, 1] = float(intrinsics["fy"]) * points_array[valid, 1] / points_array[
+            valid, 2
+        ] + float(intrinsics["cy"])
         return pixels
 
     def render(selected: list[JsonDict], output_path: Path, title: str) -> None:
@@ -5910,9 +5858,7 @@ def _normalise_anyplace_response(
         }
     ]
     if object_preprocessing.get("applied") is True:
-        filtered_mask_ref = _string_param(
-            object_preprocessing.get("filtered_mask_ref")
-        )
+        filtered_mask_ref = _string_param(object_preprocessing.get("filtered_mask_ref"))
         if filtered_mask_ref:
             artifacts.append(
                 {
@@ -5923,9 +5869,7 @@ def _normalise_anyplace_response(
                 }
             )
     if placement_preprocessing.get("applied") is True:
-        filtered_mask_ref = _string_param(
-            placement_preprocessing.get("filtered_mask_ref")
-        )
+        filtered_mask_ref = _string_param(placement_preprocessing.get("filtered_mask_ref"))
         if filtered_mask_ref:
             artifacts.append(
                 {
@@ -5961,17 +5905,15 @@ def _normalise_anyplace_response(
             "scene_revision": request["scene_revision"],
             "raw_output_ref": str(raw_output_ref),
             "candidate_count": len(candidates),
-            "model_raw_candidate_count": int(details.get("model_raw_candidate_count", len(candidates))),
+            "model_raw_candidate_count": int(
+                details.get("model_raw_candidate_count", len(candidates))
+            ),
             "raw_candidate_count": len(candidates),
             "generated_candidate_count": len(candidates),
             "placement_candidates": candidates,
             "object_current_pose": dict(object_current_pose),
             "candidate_image_ref": candidate_image_ref,
-            **(
-                {"object_mask_preprocessing": object_preprocessing}
-                if object_preprocessing
-                else {}
-            ),
+            **({"object_mask_preprocessing": object_preprocessing} if object_preprocessing else {}),
             **(
                 {"placement_mask_preprocessing": placement_preprocessing}
                 if placement_preprocessing
@@ -6140,9 +6082,7 @@ def _normalise_anygrasp_candidate(candidate: Any) -> JsonDict | None:
         if transform is None or not _is_rigid_transform4(transform):
             return None
         for row in range(3):
-            if not math.isclose(
-                transform[row][3], translation[row], rel_tol=0.0, abs_tol=1e-6
-            ):
+            if not math.isclose(transform[row][3], translation[row], rel_tol=0.0, abs_tol=1e-6):
                 return None
             for column in range(3):
                 if not math.isclose(
@@ -6660,9 +6600,7 @@ def _clean_anyplace_object_mask_sparse_depth_tail(
 
     gaps = np.diff(values)
     qualifying: list[tuple[str, int, int, float, float]] = []
-    for index in np.flatnonzero(
-        gaps >= ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M
-    ).tolist():
+    for index in np.flatnonzero(gaps >= ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M).tolist():
         lower_count = int(index) + 1
         upper_count = point_count - lower_count
         gap = float(gaps[index])
@@ -6674,17 +6612,14 @@ def _clean_anyplace_object_mask_sparse_depth_tail(
             if (
                 retained_count >= ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
                 and sparse_count <= ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS
-                and sparse_count / point_count
-                <= ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION
+                and sparse_count / point_count <= ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION
             ):
                 qualifying.append((side, sparse_count, retained_count, gap, boundary))
     if len(qualifying) != 1:
         return normalized
 
     side, sparse_count, retained_count, gap, boundary = qualifying[0]
-    sparse_pixels = valid & (
-        metric_depth < boundary if side == "near" else metric_depth > boundary
-    )
+    sparse_pixels = valid & (metric_depth < boundary if side == "near" else metric_depth > boundary)
     if int(np.count_nonzero(sparse_pixels)) != sparse_count:
         return normalized
 
@@ -6699,12 +6634,8 @@ def _clean_anyplace_object_mask_sparse_depth_tail(
     artifact_root.mkdir(parents=True, exist_ok=True)
     filtered_ref = artifact_root / f"object-mask-depth-clean-{digest.hexdigest()[:16]}.png"
     if not filtered_ref.is_file():
-        temporary_ref = filtered_ref.with_name(
-            f".{filtered_ref.name}.{uuid4().hex}.tmp.png"
-        )
-        Image.fromarray(filtered_mask.astype(np.uint8) * 255, mode="L").save(
-            temporary_ref
-        )
+        temporary_ref = filtered_ref.with_name(f".{filtered_ref.name}.{uuid4().hex}.tmp.png")
+        Image.fromarray(filtered_mask.astype(np.uint8) * 255, mode="L").save(temporary_ref)
         temporary_ref.replace(filtered_ref)
 
     cleanup = {
@@ -6720,13 +6651,9 @@ def _clean_anyplace_object_mask_sparse_depth_tail(
         "depth_boundary_m": round(boundary, 6),
         "limits": {
             "minimum_gap_m": ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M,
-            "maximum_sparse_fraction": (
-                ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION
-            ),
+            "maximum_sparse_fraction": (ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION),
             "maximum_sparse_points": ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS,
-            "minimum_retained_points": (
-                ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
-            ),
+            "minimum_retained_points": (ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS),
         },
     }
     normalized["mask"] = str(filtered_ref)
@@ -6804,9 +6731,7 @@ def _clean_anyplace_placement_support_surface_mask(
     ray_x = (u - cx) / fx
     ray_y = (v - cy) / fy
     world_z_coefficient = (
-        float(rotation_z[0]) * ray_x
-        + float(rotation_z[1]) * ray_y
-        + float(rotation_z[2])
+        float(rotation_z[0]) * ray_x + float(rotation_z[1]) * ray_y + float(rotation_z[2])
     )
     world_z = metric_depth * world_z_coefficient + translation_z
     values = world_z[valid]
@@ -6815,9 +6740,7 @@ def _clean_anyplace_placement_support_surface_mask(
     depth_quantum_m = float(np.median(finite_quantization))
     if not math.isfinite(depth_quantum_m) or depth_quantum_m <= 0.0:
         return normalized
-    bin_width_m = (
-        ANYPLACE_PLACEMENT_SUPPORT_HISTOGRAM_DEPTH_QUANTA * depth_quantum_m
-    )
+    bin_width_m = ANYPLACE_PLACEMENT_SUPPORT_HISTOGRAM_DEPTH_QUANTA * depth_quantum_m
     value_min = float(np.min(values))
     value_max = float(np.max(values))
     if value_max - value_min <= bin_width_m:
@@ -6825,9 +6748,7 @@ def _clean_anyplace_placement_support_surface_mask(
     bin_count = max(2, int(math.ceil((value_max - value_min) / bin_width_m)))
     counts, edges = np.histogram(values, bins=bin_count, range=(value_min, value_max))
     mode_count = int(np.max(counts))
-    lower_quartile, upper_quartile = np.percentile(
-        counts.astype(np.float64), [25, 75]
-    )
+    lower_quartile, upper_quartile = np.percentile(counts.astype(np.float64), [25, 75])
     interquartile_range = float(upper_quartile - lower_quartile)
     counting_noise = max(
         interquartile_range,
@@ -6848,23 +6769,18 @@ def _clean_anyplace_placement_support_surface_mask(
     mode_lower = float(edges[mode_index])
     mode_upper = float(edges[mode_index + 1])
     mode_neighbourhood = values[
-        (values >= mode_lower - bin_width_m)
-        & (values <= mode_upper + bin_width_m)
+        (values >= mode_lower - bin_width_m) & (values <= mode_upper + bin_width_m)
     ]
     if mode_neighbourhood.size == 0:
         return normalized
     support_z_m = float(np.median(mode_neighbourhood))
-    median_absolute_deviation = float(
-        np.median(np.abs(mode_neighbourhood - support_z_m))
-    )
+    median_absolute_deviation = float(np.median(np.abs(mode_neighbourhood - support_z_m)))
     robust_sigma_m = 1.4826 * median_absolute_deviation
     band_half_width_m = max(
         bin_width_m,
         ANYPLACE_PLACEMENT_SUPPORT_OUTLIER_SIGMA * robust_sigma_m,
     )
-    support_pixels = valid & (
-        np.abs(world_z - support_z_m) <= band_half_width_m
-    )
+    support_pixels = valid & (np.abs(world_z - support_z_m) <= band_half_width_m)
     retained_count = int(np.count_nonzero(support_pixels))
     if (
         retained_count < ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
@@ -6887,16 +6803,10 @@ def _clean_anyplace_placement_support_surface_mask(
     )
     digest.update(ANYPLACE_PLACEMENT_SUPPORT_MASK_SCHEMA.encode("ascii"))
     artifact_root.mkdir(parents=True, exist_ok=True)
-    filtered_ref = artifact_root / (
-        f"placement-support-mask-{digest.hexdigest()[:16]}.png"
-    )
+    filtered_ref = artifact_root / (f"placement-support-mask-{digest.hexdigest()[:16]}.png")
     if not filtered_ref.is_file():
-        temporary_ref = filtered_ref.with_name(
-            f".{filtered_ref.name}.{uuid4().hex}.tmp.png"
-        )
-        Image.fromarray(filtered_mask.astype(np.uint8) * 255, mode="L").save(
-            temporary_ref
-        )
+        temporary_ref = filtered_ref.with_name(f".{filtered_ref.name}.{uuid4().hex}.tmp.png")
+        Image.fromarray(filtered_mask.astype(np.uint8) * 255, mode="L").save(temporary_ref)
         temporary_ref.replace(filtered_ref)
 
     cleanup = {
@@ -6914,17 +6824,11 @@ def _clean_anyplace_placement_support_surface_mask(
             "histogram_bin_width_m": round(bin_width_m, 6),
             "mode_points": mode_count,
             "dominant_threshold_points": round(dominant_threshold, 3),
-            "plane_median_absolute_deviation_m": round(
-                median_absolute_deviation, 6
-            ),
+            "plane_median_absolute_deviation_m": round(median_absolute_deviation, 6),
         },
         "limits": {
-            "minimum_retained_points": (
-                ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
-            ),
-            "histogram_depth_quanta": (
-                ANYPLACE_PLACEMENT_SUPPORT_HISTOGRAM_DEPTH_QUANTA
-            ),
+            "minimum_retained_points": (ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS),
+            "histogram_depth_quanta": (ANYPLACE_PLACEMENT_SUPPORT_HISTOGRAM_DEPTH_QUANTA),
             "outlier_sigma": ANYPLACE_PLACEMENT_SUPPORT_OUTLIER_SIGMA,
         },
     }
@@ -6937,9 +6841,7 @@ def _clean_anyplace_placement_support_surface_mask(
     return normalized
 
 
-def _encode_anyplace_observation(
-    value: Mapping[str, Any], *, mask_key: str
-) -> JsonDict:
+def _encode_anyplace_observation(value: Mapping[str, Any], *, mask_key: str) -> JsonDict:
     return {
         "rgb": _encode_file_payload(str(value["rgb"])),
         "depth": _encode_file_payload(str(value["depth"])),
@@ -6961,7 +6863,10 @@ def _camera_frame_transform(
         return [rotation_t[row] + [inverse_translation[row]] for row in range(3)] + [[0, 0, 0, 1]]
 
     def multiply(left: list[list[float]], right: list[list[float]]) -> list[list[float]]:
-        return [[sum(left[row][k] * right[k][column] for k in range(4)) for column in range(4)] for row in range(4)]
+        return [
+            [sum(left[row][k] * right[k][column] for k in range(4)) for column in range(4)]
+            for row in range(4)
+        ]
 
     return multiply(
         inverse_rigid(_camera_to_world_opencv_transform(placement_extrinsics)),
@@ -7461,19 +7366,14 @@ def _scrub_sam3_response(
             if isinstance(mask, dict) and mask.get("base64_omitted") is True:
                 raw_backend_index = _sam3_backend_index(detection, fallback=idx)
                 matches = [
-                    item
-                    for item in detections
-                    if item.get("backend_index") == raw_backend_index
+                    item for item in detections if item.get("backend_index") == raw_backend_index
                 ]
                 if len(matches) == 1:
                     mask["artifact_ref"] = matches[0].get("mask_ref")
     raw_artifacts = details.get("artifacts", [])
     if isinstance(raw_artifacts, list):
         for idx, artifact in enumerate(raw_artifacts):
-            if (
-                not isinstance(artifact, dict)
-                or artifact.get("base64_omitted") is not True
-            ):
+            if not isinstance(artifact, dict) or artifact.get("base64_omitted") is not True:
                 continue
             if idx < len(artifacts):
                 artifact["artifact_ref"] = artifacts[idx].get("artifact_ref")

@@ -1,5 +1,5 @@
-default_velocity_scaling_factor: 0.3
-default_acceleration_scaling_factor: 0.2
+default_velocity_scaling_factor: 0.25
+default_acceleration_scaling_factor: 0.15
 joint_limits:
   joint_1: {has_position_limits: true, min_position: -3.106, max_position: 3.106, has_velocity_limits: true, max_velocity: 3.14, has_acceleration_limits: true, max_acceleration: 3.14}
   joint_2: {has_position_limits: true, min_position: -2.2689, max_position: 2.2689, has_velocity_limits: true, max_velocity: 3.14, has_acceleration_limits: true, max_acceleration: 3.14}

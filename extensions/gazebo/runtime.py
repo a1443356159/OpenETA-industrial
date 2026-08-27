@@ -83,6 +83,7 @@ class GazeboRuntime:
         self._ros_context: Any | None = None
         self._ros_executor: Any | None = None
         self._ros_thread: threading.Thread | None = None
+        self._reset_target_pose_evidence: dict[str, Any] | None = None
         # The last fully validated observation is retained only for read-only
         # controller RPCs.  Motion qualification can spend tens of seconds in
         # MoveIt without changing either the world or robot; forcing another
@@ -106,9 +107,7 @@ class GazeboRuntime:
         # reentrant clients responsive while preserving room for state/camera
         # callbacks; request-specific semaphores enforce the actual limits.
         executor = MultiThreadedExecutor(num_threads=12, context=context)
-        thread = threading.Thread(
-            target=executor.spin, name="openeta-gazebo-ros", daemon=True
-        )
+        thread = threading.Thread(target=executor.spin, name="openeta-gazebo-ros", daemon=True)
         thread.start()
         self._ros_context, self._ros_executor, self._ros_thread = context, executor, thread
 
@@ -141,7 +140,9 @@ class GazeboRuntime:
             for config in self._camera_configs()
             for topic in (config.rgb_topic, config.depth_topic, config.camera_info_topic)
         }
-        executable = shutil.which(self.deployment.ros2_executable) or self.deployment.ros2_executable
+        executable = (
+            shutil.which(self.deployment.ros2_executable) or self.deployment.ros2_executable
+        )
         last_error = "topics were not advertised"
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -182,8 +183,10 @@ class GazeboRuntime:
             self._start_ros_graph()
             self._cameras = [
                 self._camera_factory(
-                    config, node_name=f"openeta_rgbd_camera_{index}",
-                    context=self._ros_context, executor=self._ros_executor,
+                    config,
+                    node_name=f"openeta_rgbd_camera_{index}",
+                    context=self._ros_context,
+                    executor=self._ros_executor,
                 )
                 for index, config in enumerate(self._camera_configs())
             ]
@@ -221,7 +224,8 @@ class GazeboRuntime:
             if CONTROL in self.profile.capabilities:
                 self.controller = self._controller_factory.create(
                     self.profile.model_config,
-                    context=self._ros_context, executor=self._ros_executor,
+                    context=self._ros_context,
+                    executor=self._ros_executor,
                 )
                 wait_ready = getattr(self.controller, "wait_ready", None)
                 if callable(wait_ready):
@@ -299,6 +303,7 @@ class GazeboRuntime:
             self.close()
             self.closed = False
         self._start()
+        self._reset_target_pose_evidence = None
         if self.controller is not None:
             reset_sources = getattr(self.controller, "reset_sources", None)
             if callable(reset_sources):
@@ -312,19 +317,90 @@ class GazeboRuntime:
                 raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
         else:
             # Preserve /clock after the ROS action stack has started.
-            self._world.reset_models(seed=seed) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
+            self._world.reset_models(
+                seed=seed
+            ) if CONTROL in self.profile.capabilities else self._world.reset_all(seed=seed)
         self.scene_epoch += 1
         if self.controller is not None:
             if PHYSICS in self.profile.capabilities:
                 sync_scene = getattr(self.controller, "sync_planning_scene_reset", None)
                 scene_args = (self.profile.model_config,)
+                try:
+                    target_pose, _mount_pose, pose_attempts = (
+                        self.attachment.native_target_mount_poses_with_retry(max_attempts=2)
+                    )
+                except Exception as exc:
+                    raise GazeboProcessError(
+                        f"PLANNING_SCENE_TARGET_POSE_UNAVAILABLE: {exc}"
+                    ) from exc
+                scene_kwargs = {
+                    "target_xyz": tuple(float(value) for value in target_pose.xyz),
+                    "target_quat_xyzw": tuple(float(value) for value in target_pose.quat_xyzw),
+                }
+                dynamic_ids = tuple(
+                    str(value)
+                    for value in getattr(
+                        self.profile.model_config,
+                        "authoritative_dynamic_obstacle_ids",
+                        (),
+                    )
+                )
+                dynamic_pose_attempts = 0
+                if dynamic_ids:
+                    read_model_poses = getattr(
+                        self.attachment,
+                        "native_model_poses_with_retry",
+                        None,
+                    )
+                    if not callable(read_model_poses):
+                        raise GazeboProcessError(
+                            "AUTHORITATIVE_GAZEBO_MODEL_POSE_UNAVAILABLE"
+                        )
+                    try:
+                        model_poses, dynamic_pose_attempts = read_model_poses(
+                            dynamic_ids,
+                            max_attempts=2,
+                        )
+                    except Exception as exc:
+                        raise GazeboProcessError(
+                            f"AUTHORITATIVE_GAZEBO_MODEL_POSE_UNAVAILABLE: {exc}"
+                        ) from exc
+                    scene_kwargs["world_model_poses"] = {
+                        model_id: (
+                            tuple(float(value) for value in model_poses[model_id].xyz),
+                            tuple(
+                                float(value)
+                                for value in model_poses[model_id].quat_xyzw
+                            ),
+                        )
+                        for model_id in dynamic_ids
+                    }
+                self._reset_target_pose_evidence = {
+                    "source": "gazebo_native_pose_v_after_physics_settle",
+                    "pose_read_attempt_count": int(pose_attempts),
+                    "xyz": list(scene_kwargs["target_xyz"]),
+                    "quat_xyzw": list(scene_kwargs["target_quat_xyzw"]),
+                    "authoritative_scene_sha256": str(
+                        getattr(
+                            self.profile.model_config,
+                            "authoritative_scene_sha256",
+                            "",
+                        )
+                    ),
+                    "dynamic_world_pose_source": "single_gazebo_native_pose_v_snapshot",
+                    "dynamic_world_pose_read_attempt_count": int(
+                        dynamic_pose_attempts
+                    ),
+                    "dynamic_world_pose_ids": list(dynamic_ids),
+                }
             else:
                 sync_scene = getattr(self.controller, "sync_planning_scene_empty", None)
                 scene_args = ()
+                scene_kwargs = {}
             if not callable(sync_scene):
                 raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
             try:
-                sync_scene(*scene_args)
+                sync_scene(*scene_args, **scene_kwargs)
             except Exception as exc:
                 raise GazeboProcessError(f"PLANNING_SCENE_SYNC_FAILED: {exc}") from exc
         barrier: float | None = None
@@ -344,6 +420,10 @@ class GazeboRuntime:
             barrier = float(value) if value is not None else None
         observation = self.observe(min_camera_timestamp_s=barrier)
         observation.metadata["reset_seed"] = seed
+        if self._reset_target_pose_evidence is not None:
+            observation.metadata["planning_scene_reset_target_pose"] = dict(
+                self._reset_target_pose_evidence
+            )
         return observation
 
     def execute(self, action: Mapping[str, Any]) -> tuple[EnvObservation, dict[str, Any]]:
@@ -359,13 +439,9 @@ class GazeboRuntime:
             # streams to publish again.  A missing cache means the normal
             # reset/observe lifecycle was bypassed and must fail closed.
             if self._last_observation is None:
-                raise GazeboProcessError(
-                    "READ_ONLY_ACTION_OBSERVATION_UNAVAILABLE"
-                )
+                raise GazeboProcessError("READ_ONLY_ACTION_OBSERVATION_UNAVAILABLE")
             receipt["observation_reused"] = True
-            receipt["observation_reuse_reason"] = (
-                "read_only_motion_qualification"
-            )
+            receipt["observation_reuse_reason"] = "read_only_motion_qualification"
             receipt["observation_scene_epoch"] = int(
                 self._last_observation.metadata.get("scene_epoch", self.scene_epoch)
             )
@@ -390,9 +466,7 @@ class GazeboRuntime:
             # post-action observation, once, and only while the owned launch
             # and ROS executor still look healthy.  A second miss propagates
             # as infrastructure failure instead of candidate unreachability.
-            launch_healthy = self._launch is None or bool(
-                getattr(self._launch, "running", True)
-            )
+            launch_healthy = self._launch is None or bool(getattr(self._launch, "running", True))
             ros_healthy = self._ros_thread is None or self._ros_thread.is_alive()
             if not self.started or self.closed or not launch_healthy or not ros_healthy:
                 raise
@@ -412,7 +486,10 @@ class GazeboRuntime:
                 # detached emits no state transition in Gazebo Sim, so never
                 # manufacture a second ACK requirement at cleanup. Unknown
                 # or attached state still requires a real detach ACK.
-                if getattr(self.attachment, "state", DetachableJointState.UNKNOWN) != DetachableJointState.DETACHED:
+                if (
+                    getattr(self.attachment, "state", DetachableJointState.UNKNOWN)
+                    != DetachableJointState.DETACHED
+                ):
                     self.attachment.ensure_detached(require_ack=True)
             except BaseException as exc:
                 errors.append(exc)

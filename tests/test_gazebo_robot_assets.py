@@ -43,7 +43,11 @@ def test_asset_preflight_detects_digest_mutation(tmp_path: Path) -> None:
 
 def test_ros_package_is_relocatable_and_has_required_control_contract(tmp_path: Path) -> None:
     relocated = tmp_path / "openeta-control-relocated"
-    shutil.copytree(ROOT / "extensions/gazebo", relocated / "extensions/gazebo", ignore=shutil.ignore_patterns("build", "install", "log", "__pycache__"))
+    shutil.copytree(
+        ROOT / "extensions/gazebo",
+        relocated / "extensions/gazebo",
+        ignore=shutil.ignore_patterns("build", "install", "log", "__pycache__"),
+    )
     validate_asset_root(relocated / "extensions/gazebo/assets/rm75_6fb_v_vendor")
 
     xacro = (PACKAGE / "urdf/ros2_control.xacro").read_text(encoding="utf-8")
@@ -67,9 +71,7 @@ def test_all_repository_robot_xml_is_well_formed() -> None:
 def test_robotiq_z_motion_world_is_test_only_and_launch_selectable() -> None:
     production = ROBOTIQ_PACKAGE / "worlds/rm75_robotiq2f85.sdf"
     z_test = ROBOTIQ_PACKAGE / "worlds/rm75_robotiq2f85_z_test.sdf"
-    launch = (ROBOTIQ_PACKAGE / "launch/gazebo_moveit.launch.py").read_text(
-        encoding="utf-8"
-    )
+    launch = (ROBOTIQ_PACKAGE / "launch/gazebo_moveit.launch.py").read_text(encoding="utf-8")
 
     production_root = ET.parse(production).getroot()
     z_test_root = ET.parse(z_test).getroot()
@@ -101,8 +103,16 @@ def test_robot_profiles_use_production_command_limits_without_ineffective_adapte
     for package in (ROBOTIQ_PACKAGE,):
         controllers = (package / "config/controllers.yaml").read_text(encoding="utf-8")
         ompl = (package / "config/ompl_planning.yaml").read_text(encoding="utf-8")
+        arm_interfaces = (
+            ROOT / "extensions/gazebo/assets/rm75_6fb_v_vendor/urdf/arm_ros2_control.xacro"
+        ).read_text(encoding="utf-8")
 
         assert controllers.count("enforce_command_limits: true") == 1
+        # Keep controller-manager limiting enabled globally, but do not apply
+        # its measured-state rate limiter a second time to already
+        # time-parameterized simulated arm trajectories.  This joint-scoped
+        # opt-out prevents command clipping while physical/planning limits remain.
+        assert arm_interfaces.count('<limits enable="false"/>') == 1
         assert "start_state_max_bounds_error" not in ompl
         assert "longest_valid_segment_fraction: 0.002" in ompl
 
@@ -112,9 +122,7 @@ def test_arm_controller_proves_loaded_terminal_tracking() -> None:
         (ROBOTIQ_PACKAGE / "config/controllers.yaml").read_text(encoding="utf-8")
     )["rm_group_controller"]["ros__parameters"]
     constraints = controllers["constraints"]
-    control_xacro = (ROBOTIQ_PACKAGE / "urdf/ros2_control.xacro").read_text(
-        encoding="utf-8"
-    )
+    control_xacro = (ROBOTIQ_PACKAGE / "urdf/ros2_control.xacro").read_text(encoding="utf-8")
 
     assert controllers["action_monitor_rate"] == 50.0
     assert constraints["goal_time"] == 2.0
@@ -122,17 +130,12 @@ def test_arm_controller_proves_loaded_terminal_tracking() -> None:
     assert {name: constraints[name] for name in ARM_JOINTS} == {
         name: {"trajectory": 0.05, "goal": 0.002} for name in ARM_JOINTS
     }
-    assert (
-        "<position_proportional_gain>0.75</position_proportional_gain>"
-        in control_xacro
-    )
+    assert "<position_proportional_gain>1.0</position_proportional_gain>" in control_xacro
 
 
 def test_moveit_execution_monitor_accounts_for_simulated_time() -> None:
     execution = yaml.safe_load(
-        (ROBOTIQ_PACKAGE / "config/moveit_controllers.yaml").read_text(
-            encoding="utf-8"
-        )
+        (ROBOTIQ_PACKAGE / "config/moveit_controllers.yaml").read_text(encoding="utf-8")
     )["trajectory_execution"]
 
     assert execution["allowed_execution_duration_scaling"] == pytest.approx(1.8)
@@ -150,9 +153,7 @@ def test_pickplace_physics_and_contact_rates_match_controller_budget() -> None:
     )
 
     step_s = float(world.findtext(".//physics/max_step_size"))
-    control_rate_hz = controllers["controller_manager"]["ros__parameters"][
-        "update_rate"
-    ]
+    control_rate_hz = controllers["controller_manager"]["ros__parameters"]["update_rate"]
     assert step_s == pytest.approx(0.002)
     assert control_rate_hz == pytest.approx(1.0 / step_s)
     contact_rates = [
@@ -173,15 +174,13 @@ def test_rm75_urdf_moveit_and_python_position_limits_are_identical() -> None:
                 float(limit.attrib["lower"]),
                 float(limit.attrib["upper"]),
             )
-    python_limits = {
-        name: (lower, upper) for name, lower, upper in ARM_JOINT_BOUNDS
-    }
+    python_limits = {name: (lower, upper) for name, lower, upper in ARM_JOINT_BOUNDS}
 
     assert urdf_limits == python_limits
     for package in (ROBOTIQ_PACKAGE,):
-        moveit = yaml.safe_load(
-            (package / "config/joint_limits.yaml").read_text(encoding="utf-8")
-        )["joint_limits"]
+        moveit = yaml.safe_load((package / "config/joint_limits.yaml").read_text(encoding="utf-8"))[
+            "joint_limits"
+        ]
         assert {
             name: (
                 float(moveit[name]["min_position"]),
@@ -210,8 +209,7 @@ def test_robot_profiles_have_no_test_only_robot_or_control_assets() -> None:
         assert offenders == []
 
         production_text = "\n".join(
-            path.read_text(encoding="utf-8", errors="replace")
-            for path in protected_files
+            path.read_text(encoding="utf-8", errors="replace") for path in protected_files
         ).lower()
         for forbidden_token in (
             "z-motion mode",
@@ -232,19 +230,20 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     control = (ROBOTIQ_PACKAGE / "urdf/ros2_control.xacro").read_text(encoding="utf-8")
     controllers = (ROBOTIQ_PACKAGE / "config/controllers.yaml").read_text(encoding="utf-8")
     robot = (ROBOTIQ_PACKAGE / "urdf/rm75_robotiq2f85.urdf.xacro").read_text(encoding="utf-8")
-    pickplace_robot = (
-        ROBOTIQ_PACKAGE / "urdf/rm75_robotiq2f85_pickplace.urdf.xacro"
-    ).read_text(encoding="utf-8")
+    pickplace_robot = (ROBOTIQ_PACKAGE / "urdf/rm75_robotiq2f85_pickplace.urdf.xacro").read_text(
+        encoding="utf-8"
+    )
     launch = (ROBOTIQ_PACKAGE / "launch/gazebo_moveit.launch.py").read_text(encoding="utf-8")
-    pickplace_launch = (
-        ROBOTIQ_PACKAGE / "launch/gazebo_pickplace.launch.py"
-    ).read_text(encoding="utf-8")
+    pickplace_launch = (ROBOTIQ_PACKAGE / "launch/gazebo_pickplace.launch.py").read_text(
+        encoding="utf-8"
+    )
     adapter = (ROBOTIQ_PACKAGE / "scripts/gripper_action_adapter.py").read_text(encoding="utf-8")
     shared_control = (ASSETS / "urdf/arm_ros2_control.xacro").read_text(encoding="utf-8")
     assert control.count("xacro:rm75_v_arm_control_interfaces") == 1
     assert shared_control.count("xacro:rm75_v_arm_interface name=") == 7
     assert control.count('<command_interface name="effort"/>') == 2
     assert shared_control.count('<command_interface name="position"/>') == 1
+    assert shared_control.count('<limits enable="false"/>') == 1
     assert 'mimic="false"' in control
     assert "mimic_interface" in control
     assert "forward_command_controller/ForwardCommandController" in controllers
@@ -268,42 +267,40 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert "ParallelGripperCommand" in adapter
     assert "ros_gz_interfaces.msg import Contacts" in adapter
     assert "_target_contact_callback" in adapter
-    assert "native_target_contact" in adapter
-    assert "self._allow_stalling and closing_goal" in adapter
-    assert "target_exhausted" in adapter
+    assert "self._allow_stalling" in adapter
+    assert "closing_goal" in adapter
     assert "TERMINAL_CONTACT_FRESHNESS_SIM_S" in adapter
     assert "TERMINAL_BILATERAL_CONTACT_DWELL_SIM_S" in adapter
-    assert "TERMINAL_HOLD_TIMEOUT_SIM_S" in adapter
     assert "TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S" in adapter
     assert "TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S" in adapter
+    assert "COMMON_PROGRESS_EPSILON_RAD" in adapter
     assert "linkage_settle_complete" in adapter
     assert "CONTROLLER_BOUNDARY_INSET_RAD" in adapter
-    assert "bilateral_native_hold" in adapter
-    assert "CONTACT_HOLD_FRESHNESS_SIM_S" in adapter
+    assert "CONTACT_FRESHNESS_SIM_S" in adapter
     assert "_target_contact_sequences" in adapter
     assert "self._sim_time_s()" in adapter
-    assert "stale_contact_holds" in adapter
-    assert 'side_hold_sources.get(side) == "native_target_contact"' in adapter
-    assert "and len(side_holds) < len(SIDE_JOINTS)" not in adapter
+    assert "sim_dt = max(0.0, sim_now_s - last_sim_tick_s)" in adapter
+    assert "self._common_driver_position" in adapter
+    assert "self._six_joint_positions(commanded_active_position)" in adapter
+    assert "fresh_contact_sides" in adapter
     assert "sim_now_s - target_contact_sim_times.get" in adapter
-    assert 'else "mechanical_endpoint"' in adapter
-    assert "side_holds.pop(side, None)" in adapter
     assert "fresh_bilateral_contact" in adapter
     assert "bilateral_contact_started_sim_time_s = None" in adapter
-    assert "terminal_wait_exhausted" in adapter
-    assert "velocity_stalled" not in adapter
-    assert "stall_velocity_threshold" not in adapter
+    assert "self._one_pad_compliance_exhausted" in adapter
+    assert "compliance_exhausted" in adapter
+    assert "COMMON_COMPLIANCE_DWELL_SIM_S" in adapter
+    assert "side_holds" not in adapter
+    assert "stall_hold_extra_rad" not in adapter
+    assert "drive_mode" not in adapter
+    assert "expanded_targets" not in adapter
+    assert "freezing" not in adapter
     assert "JOINT_MULTIPLIERS" in adapter
     assert 'declare_parameter("action_timeout_s", ACTION_TIMEOUT_S)' in adapter
     assert '"action_timeout_s": 90.0' in launch
     assert launch.count("std_msgs/msg/Float64]gz.msgs.Double") == 6
-    assert (
-        pickplace_launch.count(
-            "ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts"
-        )
-        == 2
-    )
-    assert '"stall_hold_extra_rad": 0.01' in pickplace_launch
+    assert pickplace_launch.count("ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts") == 2
+    assert '"stall_hold_extra_rad"' not in pickplace_launch
+    assert '"drive_mode"' not in pickplace_launch
     for token in (
         "rm75_robotiq_2f85_sim_v1",
         "joint_state_broadcaster",
@@ -327,9 +324,7 @@ def test_production_config_ignores_external_vendor_environment(monkeypatch) -> N
 
 def test_v_description_is_shared_and_camera_is_fixed() -> None:
     arm = (ASSETS / "urdf/rm75_6fb_v.urdf.xacro").read_text(encoding="utf-8")
-    arm_control = (ASSETS / "urdf/arm_ros2_control.xacro").read_text(
-        encoding="utf-8"
-    )
+    arm_control = (ASSETS / "urdf/arm_ros2_control.xacro").read_text(encoding="utf-8")
     assert 'name="camera_rojoint"' not in arm
     assert 'name="camera_joint"' not in arm
     assert "openeta_wrist_rgbd" in arm
@@ -349,14 +344,15 @@ def test_v_description_is_shared_and_camera_is_fixed() -> None:
         "xyz": "-0.0335 0.0085 -0.07388",
         "rpy": "-1.57079632679 -1.1344640138 0",
     }
-    bracket_mesh = root.find(
-        "link[@name='wrist_camera_bracket_link']/visual/geometry/mesh"
-    )
+    bracket_mesh = root.find("link[@name='wrist_camera_bracket_link']/visual/geometry/mesh")
     assert bracket_mesh is not None
     assert bracket_mesh.attrib["scale"] == "1 1 1"
-    assert root.find(
-        "link[@name='wrist_camera_bracket_link']/visual[@name='wrist_camera_lateral_adapter']"
-    ) is None
+    assert (
+        root.find(
+            "link[@name='wrist_camera_bracket_link']/visual[@name='wrist_camera_lateral_adapter']"
+        )
+        is None
+    )
     housing_joint = root.find("joint[@name='wrist_camera_housing_joint']")
     assert housing_joint is not None
     assert housing_joint.find("parent").attrib["link"] == "wrist_camera_bracket_link"
@@ -371,15 +367,17 @@ def test_v_description_is_shared_and_camera_is_fixed() -> None:
         "xyz": "0 0 -0.0242",
         "rpy": "0 1.57079632679 0",
     }
-    assert len(
-        root.findall("link[@name='wrist_camera_housing_link']/visual")
-    ) == 9
-    assert root.findtext(
-        "gazebo[@reference='wrist_camera_optical_frame']/sensor/camera/clip/near"
-    ) == "0.02"
-    assert root.findtext(
-        "gazebo[@reference='wrist_camera_optical_frame']/sensor/camera/horizontal_fov"
-    ) == "1.308996938996"
+    assert len(root.findall("link[@name='wrist_camera_housing_link']/visual")) == 9
+    assert (
+        root.findtext("gazebo[@reference='wrist_camera_optical_frame']/sensor/camera/clip/near")
+        == "0.02"
+    )
+    assert (
+        root.findtext(
+            "gazebo[@reference='wrist_camera_optical_frame']/sensor/camera/horizontal_fov"
+        )
+        == "1.308996938996"
+    )
     assert "package://openeta_rm75_v_description/meshes/" in arm
     assert (DESCRIPTION_PACKAGE / "package.xml").is_file()
     for package in (PACKAGE, ROBOTIQ_PACKAGE):
@@ -388,9 +386,7 @@ def test_v_description_is_shared_and_camera_is_fixed() -> None:
 
 
 def test_wrist_camera_optical_ray_clears_gripper_and_converges_on_operation_axis() -> None:
-    root = ET.fromstring(
-        (ASSETS / "urdf/rm75_6fb_v.urdf.xacro").read_text(encoding="utf-8")
-    )
+    root = ET.fromstring((ASSETS / "urdf/rm75_6fb_v.urdf.xacro").read_text(encoding="utf-8"))
 
     def origin(name: str) -> tuple[list[float], list[float]]:
         element = root.find(f"joint[@name='{name}']/origin")
@@ -411,25 +407,17 @@ def test_wrist_camera_optical_ray_clears_gripper_and_converges_on_operation_axis
             [-sp, cp * sr, cp * cr],
         ]
 
-    def multiply(
-        left: list[list[float]], right: list[list[float]]
-    ) -> list[list[float]]:
+    def multiply(left: list[list[float]], right: list[list[float]]) -> list[list[float]]:
         return [
             [
-                sum(
-                    left[row][index] * right[index][column]
-                    for index in range(3)
-                )
+                sum(left[row][index] * right[index][column] for index in range(3))
                 for column in range(3)
             ]
             for row in range(3)
         ]
 
     def transform(matrix: list[list[float]], vector: list[float]) -> list[float]:
-        return [
-            sum(matrix[row][index] * vector[index] for index in range(3))
-            for row in range(3)
-        ]
+        return [sum(matrix[row][index] * vector[index] for index in range(3)) for row in range(3)]
 
     bracket_xyz, bracket_rpy = origin("wrist_camera_bracket_joint")
     housing_xyz, housing_rpy = origin("wrist_camera_housing_joint")
@@ -438,24 +426,15 @@ def test_wrist_camera_optical_ray_clears_gripper_and_converges_on_operation_axis
     housing_rotation = multiply(bracket_rotation, rotation(housing_rpy))
     optical_rotation = multiply(housing_rotation, rotation(optical_rpy))
     transformed_housing = transform(bracket_rotation, housing_xyz)
-    housing_position = [
-        bracket_xyz[index] + transformed_housing[index] for index in range(3)
-    ]
+    housing_position = [bracket_xyz[index] + transformed_housing[index] for index in range(3)]
     transformed_optical = transform(housing_rotation, optical_xyz)
-    optical_position = [
-        housing_position[index] + transformed_optical[index] for index in range(3)
-    ]
+    optical_position = [housing_position[index] + transformed_optical[index] for index in range(3)]
     optical_forward = [optical_rotation[index][0] for index in range(3)]
     operation_axis_target = [0.0, 0.0, 0.4]
-    center_delta = [
-        operation_axis_target[index] - optical_position[index] for index in range(3)
-    ]
-    ray_distance = sum(
-        center_delta[index] * optical_forward[index] for index in range(3)
-    )
+    center_delta = [operation_axis_target[index] - optical_position[index] for index in range(3)]
+    ray_distance = sum(center_delta[index] * optical_forward[index] for index in range(3))
     closest_point = [
-        optical_position[index] + ray_distance * optical_forward[index]
-        for index in range(3)
+        optical_position[index] + ray_distance * optical_forward[index] for index in range(3)
     ]
 
     # The lens is mounted outside the gripper envelope; at the finger plane
@@ -470,23 +449,17 @@ def test_wrist_camera_optical_ray_clears_gripper_and_converges_on_operation_axis
 
 
 def test_robotiq_mount_is_flange_flush_and_matches_runtime_transform() -> None:
-    fixture = ET.parse(
-        ROBOTIQ_ASSETS / "urdf/rm75_robotiq2f85.urdf.xacro"
-    ).getroot()
+    fixture = ET.parse(ROBOTIQ_ASSETS / "urdf/rm75_robotiq2f85.urdf.xacro").getroot()
     fixed_joint = fixture.find(".//joint[@name='rm75_to_gripper_mount']")
 
     assert fixed_joint is not None
     assert fixed_joint.find("origin").attrib["xyz"] == "0 0 ${mount_z}"
     assert fixed_joint.find("origin").attrib["rpy"] == "0 0 1.57079632679"
     assert GazeboControlConfig().mount_xyz == (0.0, 0.0, 0.0)
-    assert GazeboControlConfig().mount_quat_xyzw == pytest.approx(
-        (0.0, 0.0, 2**-0.5, 2**-0.5)
-    )
+    assert GazeboControlConfig().mount_quat_xyzw == pytest.approx((0.0, 0.0, 2**-0.5, 2**-0.5))
     for profile_name in (
         "rm75_robotiq2f85.urdf.xacro",
         "rm75_robotiq2f85_pickplace.urdf.xacro",
     ):
-        profile = (ROBOTIQ_PACKAGE / "urdf" / profile_name).read_text(
-            encoding="utf-8"
-        )
+        profile = (ROBOTIQ_PACKAGE / "urdf" / profile_name).read_text(encoding="utf-8")
         assert 'parent="link_7" mount_z="0.0"' in profile

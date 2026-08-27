@@ -73,11 +73,7 @@ def _normalized_arm_joint_state(value: object) -> dict[str, float] | None:
             parsed[joint] = numeric
     except (TypeError, ValueError):
         return None
-    return (
-        {name: parsed[name] for name in ARM_JOINTS}
-        if set(ARM_JOINTS).issubset(parsed)
-        else None
-    )
+    return {name: parsed[name] for name in ARM_JOINTS} if set(ARM_JOINTS).issubset(parsed) else None
 
 
 def _joint_states_within_l5_start_tolerance(
@@ -95,10 +91,7 @@ def _joint_states_within_l5_start_tolerance(
     return bool(
         planned_state is not None
         and live_state is not None
-        and all(
-            abs(planned_state[name] - live_state[name]) <= tolerance_rad
-            for name in ARM_JOINTS
-        )
+        and all(abs(planned_state[name] - live_state[name]) <= tolerance_rad for name in ARM_JOINTS)
     )
 
 
@@ -109,9 +102,7 @@ def _joint_state_max_abs_delta(planned: object, live: object) -> float | None:
     live_state = _normalized_arm_joint_state(live)
     if planned_state is None or live_state is None:
         return None
-    return max(
-        abs(planned_state[name] - live_state[name]) for name in ARM_JOINTS
-    )
+    return max(abs(planned_state[name] - live_state[name]) for name in ARM_JOINTS)
 
 
 def _qualification_joint_state_with_sha256(
@@ -132,9 +123,7 @@ def _qualification_joint_state_with_sha256(
         "positions": [float(parsed[name]) for name in ARM_JOINTS],
     }
     digest = hashlib.sha256(
-        json.dumps(
-            normalized, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return normalized, digest
 
@@ -162,9 +151,7 @@ def _trajectory_end_joint_state_with_sha256(
     ):
         return None
     positions = getattr(points[-1], "positions", None)
-    return _qualification_joint_state_with_sha256(
-        {"names": list(names), "positions": positions}
-    )
+    return _qualification_joint_state_with_sha256({"names": list(names), "positions": positions})
 
 
 def _canonical_l5_pose(value: object) -> object:
@@ -183,9 +170,7 @@ def _canonical_l5_pose(value: object) -> object:
     canonical = dict(value)
     for field in ("xyz", "quat_xyzw"):
         raw = canonical.get(field)
-        if not isinstance(raw, Sequence) or isinstance(
-            raw, (str, bytes, bytearray)
-        ):
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
             continue
         try:
             numeric = [float(item) for item in raw]
@@ -204,9 +189,7 @@ def _canonical_l5_pose(value: object) -> object:
                 )
                 if first_nonzero < 0.0:
                     numeric = [-item for item in numeric]
-        canonical[field] = [
-            round(item, L5_TRAJECTORY_POSE_DECIMALS) for item in numeric
-        ]
+        canonical[field] = [round(item, L5_TRAJECTORY_POSE_DECIMALS) for item in numeric]
     return canonical
 
 
@@ -234,9 +217,7 @@ def _l5_trajectory_cache_key(
     payload = {
         "schema_version": "openeta.l5_trajectory_cache_key.v1",
         "binding": binding,
-        "qualification_goal_joint_state_sha256": goal.get(
-            "qualification_goal_joint_state_sha256"
-        ),
+        "qualification_goal_joint_state_sha256": goal.get("qualification_goal_joint_state_sha256"),
         "compiled_grasp_id": goal.get("compiled_grasp_id"),
         "grasp_stage": goal.get("grasp_stage"),
         "compiled_placement_id": goal.get("compiled_placement_id"),
@@ -247,22 +228,14 @@ def _l5_trajectory_cache_key(
         "scene_sha256": scene_sha256,
         "group_name": goal.get("group_name"),
         "link_name": goal.get("link_name"),
-        "requested_tool_pose": _canonical_l5_pose(
-            goal.get("requested_tool_pose")
-        ),
+        "requested_tool_pose": _canonical_l5_pose(goal.get("requested_tool_pose")),
         "target_pose": _canonical_l5_pose(goal.get("target_pose")),
         "position_tolerance_m": goal.get("position_tolerance_m"),
         "orientation_tolerance_rad": goal.get("orientation_tolerance_rad"),
         "motion_profile": goal.get("motion_profile"),
-        "max_velocity_scaling_factor": goal.get(
-            "max_velocity_scaling_factor"
-        ),
-        "max_acceleration_scaling_factor": goal.get(
-            "max_acceleration_scaling_factor"
-        ),
-        "qualification_allowed_collisions": goal.get(
-            "qualification_allowed_collisions"
-        ),
+        "max_velocity_scaling_factor": goal.get("max_velocity_scaling_factor"),
+        "max_acceleration_scaling_factor": goal.get("max_acceleration_scaling_factor"),
+        "qualification_allowed_collisions": goal.get("qualification_allowed_collisions"),
         # A virtual attach/detach changes this field and therefore cannot be
         # confused with the physically current PlanningScene.
         "qualification_scene_diff": goal.get("qualification_scene_diff"),
@@ -297,10 +270,7 @@ def _move_group_failure_result(
     if (
         plan_only
         or moveit_error_code in planning_failure_codes
-        or (
-            moveit_error_code == generic_failure_code
-            and planned_point_count == 0
-        )
+        or (moveit_error_code == generic_failure_code and planned_point_count == 0)
     ):
         error_code = "MOTION_PLAN_FAILED"
         execution_started = False
@@ -343,15 +313,15 @@ def _urdf_reach_upper_bound_m(config: GazeboControlConfig) -> float:
 def _qualification_model_paths(config: GazeboControlConfig) -> tuple[Path, Path]:
     package = config.ros_workspace / "src" / "openeta_rm75_robotiq2f85_sim"
     pickplace = "pickplace" in config.model_id
-    urdf = package / "urdf" / (
-        "rm75_robotiq2f85_pickplace.urdf.xacro"
-        if pickplace
-        else "rm75_robotiq2f85.urdf.xacro"
+    urdf = (
+        package
+        / "urdf"
+        / ("rm75_robotiq2f85_pickplace.urdf.xacro" if pickplace else "rm75_robotiq2f85.urdf.xacro")
     )
-    srdf = package / "config" / (
-        "rm75_robotiq2f85_pickplace.srdf"
-        if pickplace
-        else "rm75_robotiq2f85.srdf"
+    srdf = (
+        package
+        / "config"
+        / ("rm75_robotiq2f85_pickplace.srdf" if pickplace else "rm75_robotiq2f85.srdf")
     )
     return urdf, srdf
 
@@ -461,16 +431,12 @@ def _load_qualification_capability_map(
 
     from agent.runtime.capability_map import SparseCapabilityMap
 
-    if len(map_id) != 64 or any(
-        character not in "0123456789abcdef" for character in map_id
-    ):
+    if len(map_id) != 64 or any(character not in "0123456789abcdef" for character in map_id):
         raise ValueError("capability map ID must be a lowercase SHA-256 digest")
     override = os.environ.get("OPENETA_CAPABILITY_MAP_PATH", "").strip()
     repo_root = config.ros_workspace.parents[2]
     path = (
-        Path(override)
-        if override
-        else repo_root / "config" / "capability_maps" / f"{map_id}.json"
+        Path(override) if override else repo_root / "config" / "capability_maps" / f"{map_id}.json"
     )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -624,9 +590,7 @@ def _target_collision_geometry(
 def _stamp_seconds(stamp: Any) -> float | None:
     if stamp is None:
         return None
-    return float(int(getattr(stamp, "sec", 0))) + float(
-        int(getattr(stamp, "nanosec", 0))
-    ) * 1e-9
+    return float(int(getattr(stamp, "sec", 0))) + float(int(getattr(stamp, "nanosec", 0))) * 1e-9
 
 
 def _moveit_scene_frame(frame: object, *, base_link: str) -> str:
@@ -638,6 +602,121 @@ def _moveit_scene_frame(frame: object, *, base_link: str) -> str:
     # World collision poses are numerically base_link poses under that asset
     # contract; attached-object link frames must pass through unchanged.
     return base_link if value in {"", "world"} else value
+
+
+def _canonical_pose_values(
+    xyz: Sequence[float], quaternion_xyzw: Sequence[float]
+) -> dict[str, list[float]]:
+    quaternion = _normalized_quaternion(tuple(float(value) for value in quaternion_xyzw))
+    # q and -q are the same rotation. Canonicalize the sign before hashing a
+    # MoveIt readback so transport normalization cannot create a false drift.
+    for value in reversed(quaternion):
+        if abs(value) > 1e-15:
+            if value < 0.0:
+                quaternion = tuple(-item for item in quaternion)
+            break
+
+    def finite(value: float) -> float:
+        if not math.isfinite(value):
+            raise PlanningSceneError("MoveIt collision readback contains non-finite data")
+        return round(value, 12)
+
+    return {
+        "xyz": [finite(float(value)) for value in xyz],
+        "quat_xyzw": [finite(float(value)) for value in quaternion],
+    }
+
+
+def _ros_pose_values(
+    pose: Any,
+    *,
+    allow_default_identity: bool = False,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    xyz = (
+        float(pose.position.x),
+        float(pose.position.y),
+        float(pose.position.z),
+    )
+    quaternion = (
+        float(pose.orientation.x),
+        float(pose.orientation.y),
+        float(pose.orientation.z),
+        float(pose.orientation.w),
+    )
+    if not all(math.isfinite(value) for value in (*xyz, *quaternion)):
+        raise PlanningSceneError("MoveIt collision readback contains non-finite data")
+    norm = math.sqrt(sum(value * value for value in quaternion))
+    if allow_default_identity and norm <= 1e-15:
+        return xyz, (0.0, 0.0, 0.0, 1.0)
+    return xyz, _normalized_quaternion(quaternion)
+
+
+def _collision_message_geometry_record(collision: Any) -> dict[str, Any]:
+    primitives = list(getattr(collision, "primitives", ()))
+    poses = list(getattr(collision, "primitive_poses", ()))
+    if len(primitives) != len(poses) or not primitives:
+        raise PlanningSceneError("MoveIt collision readback primitive count is invalid")
+    object_pose = getattr(collision, "pose", None)
+    if object_pose is None:
+        object_xyz = (0.0, 0.0, 0.0)
+        object_quaternion = (0.0, 0.0, 0.0, 1.0)
+    else:
+        object_xyz, object_quaternion = _ros_pose_values(
+            object_pose,
+            allow_default_identity=True,
+        )
+    entries = []
+    for primitive, pose in zip(primitives, poses, strict=True):
+        dimensions = [round(float(value), 12) for value in primitive.dimensions]
+        if not dimensions or any(
+            not math.isfinite(value) or value <= 0.0 for value in dimensions
+        ):
+            raise PlanningSceneError("MoveIt collision readback dimensions are invalid")
+        primitive_xyz, primitive_quaternion = _ros_pose_values(pose)
+        world_xyz, world_quaternion = _child_world_pose(
+            parent_xyz=object_xyz,
+            parent_quat_xyzw=object_quaternion,
+            relative_xyz=primitive_xyz,
+            relative_quat_xyzw=primitive_quaternion,
+        )
+        entries.append(
+            {
+                "type": int(primitive.type),
+                "dimensions": dimensions,
+                "pose": _canonical_pose_values(world_xyz, world_quaternion),
+            }
+        )
+    entries.sort(key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+    return {
+        "id": str(collision.id),
+        "frame": str(collision.header.frame_id),
+        "primitives": entries,
+    }
+
+
+def _collision_message_geometry_map(
+    collisions: Sequence[Any],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for collision in collisions:
+        record = _collision_message_geometry_record(collision)
+        object_id = record["id"]
+        if not object_id or object_id in result:
+            raise PlanningSceneError("MoveIt collision readback identity is invalid")
+        result[object_id] = record
+    return result
+
+
+def _collision_geometry_manifest_sha256(
+    records: Mapping[str, Mapping[str, Any]],
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            [records[key] for key in sorted(records)],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def gripper_action_success(
@@ -717,9 +796,7 @@ def _merged_allowed_collision_rows(
     owned_objects = {str(key) for key in replacements}
     if replace_owned:
         enabled_pairs = {
-            pair
-            for pair in enabled_pairs
-            if not any(name in owned_objects for name in pair)
+            pair for pair in enabled_pairs if not any(name in owned_objects for name in pair)
         }
     for object_id, links in replacements.items():
         for link in links:
@@ -754,16 +831,18 @@ def _state_valid_with_allowed_collision_pairs(
         for link in links
     }
     observed = {
-        tuple(sorted((str(pair[0]), str(pair[1]))))
-        for pair in collision_pairs
-        if len(pair) == 2
+        tuple(sorted((str(pair[0]), str(pair[1])))) for pair in collision_pairs if len(pair) == 2
     }
-    accepted = bool(observed) and len(observed) == len(collision_pairs) and observed <= allowed_pairs
+    accepted = (
+        bool(observed) and len(observed) == len(collision_pairs) and observed <= allowed_pairs
+    )
     return accepted, accepted
 
 
 class RosGazeboStateSource:
-    def __init__(self, node: Any, tf_buffer: Any, *, config: GazeboControlConfig, freshness_s: float = 2.0):
+    def __init__(
+        self, node: Any, tf_buffer: Any, *, config: GazeboControlConfig, freshness_s: float = 2.0
+    ):
         self.node, self.tf_buffer, self.config = node, tf_buffer, config
         self.freshness_s = float(freshness_s)
         self._lock = threading.Lock()
@@ -792,9 +871,7 @@ class RosGazeboStateSource:
         with self._lock:
             self._joint_state, self._joint_received, self._joint_stamp = None, 0.0, None
             self._minimum_ros_timestamp_s = (
-                float(min_ros_timestamp_s)
-                if min_ros_timestamp_s is not None
-                else None
+                float(min_ros_timestamp_s) if min_ros_timestamp_s is not None else None
             )
 
     def state(self):
@@ -811,6 +888,7 @@ class RosGazeboStateSource:
             # still receiving simulated time ticks.
             try:
                 from rclpy.time import Time
+
                 lookup_time = Time()
             except ImportError:
                 lookup_time = self.node.get_clock().now()
@@ -830,12 +908,25 @@ class RosGazeboStateSource:
             or tf_stamp + 1e-9 < minimum_stamp
         ):
             raise RuntimeError("POST_ACTION_STATE_NOT_FRESH")
-        state = robot_state_from_sources(joint, {
-            f"{self.config.base_link}->{self.config.mount_child}": {
-                "xyz": [transform.translation.x, transform.translation.y, transform.translation.z],
-                "quat_xyzw": [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w],
-            }
-        }, config=self.config)
+        state = robot_state_from_sources(
+            joint,
+            {
+                f"{self.config.base_link}->{self.config.mount_child}": {
+                    "xyz": [
+                        transform.translation.x,
+                        transform.translation.y,
+                        transform.translation.z,
+                    ],
+                    "quat_xyzw": [
+                        transform.rotation.x,
+                        transform.rotation.y,
+                        transform.rotation.z,
+                        transform.rotation.w,
+                    ],
+                }
+            },
+            config=self.config,
+        )
         state.metadata.update(
             {
                 "joint_state_timestamp_s": joint_stamp,
@@ -887,40 +978,124 @@ class RosGazeboController(GazeboController):
     def planning_scene(self) -> PlanningSceneSynchronizer:
         return self.runtime.planning_scene
 
-    def sync_planning_scene_reset(self, config: Any) -> int:
-        table = CollisionBox(config.table_id, tuple(config.table_size_m), tuple(config.table_pose_xyz))
+    def sync_planning_scene_reset(
+        self,
+        config: Any,
+        *,
+        target_xyz: Sequence[float] | None = None,
+        target_quat_xyzw: Sequence[float] | None = None,
+        world_model_poses: Mapping[
+            str, tuple[Sequence[float], Sequence[float]]
+        ] | None = None,
+    ) -> int:
+        """Reset MoveIt from the settled native Gazebo target pose.
+
+        RGB-D and native contact observe the dynamic body after Gazebo physics
+        starts.  Reusing its pre-physics SDF declaration here can make model
+        candidates and collision proof refer to different object poses.
+        Callers therefore supply one atomic native Pose_V sample; the optional
+        fallback exists only for non-physics/unit-test controller use.
+        """
+
+        if (target_xyz is None) != (target_quat_xyzw is None):
+            raise ValueError("reset target position and orientation must be paired")
+        measured_target_xyz = tuple(
+            float(value)
+            for value in (config.target_initial_xyz if target_xyz is None else target_xyz)
+        )
+        measured_target_quat = tuple(
+            float(value)
+            for value in (
+                config.target_initial_quat_xyzw if target_quat_xyzw is None else target_quat_xyzw
+            )
+        )
+        if (
+            len(measured_target_xyz) != 3
+            or len(measured_target_quat) != 4
+            or not all(
+                math.isfinite(value) for value in (*measured_target_xyz, *measured_target_quat)
+            )
+        ):
+            raise ValueError("reset target pose must be finite SE(3) data")
+        measured_target_quat = _normalized_quaternion(measured_target_quat)
+        authoritative_table = getattr(config, "authoritative_table_spec", None)
+        if isinstance(authoritative_table, Mapping):
+            table = _collision_geometry(
+                object_id=str(authoritative_table["id"]),
+                bounding_box_xyz=authoritative_table["size_xyz"],
+                pose_xyz=authoritative_table["pose_xyz"],
+                pose_quat_xyzw=authoritative_table["pose_quat_xyzw"],
+                primitives=tuple(authoritative_table.get("primitives") or ()),
+            )
+        else:
+            table = CollisionBox(
+                config.table_id,
+                tuple(config.table_size_m),
+                tuple(config.table_pose_xyz),
+            )
         distractor_size = tuple(config.distractor_size_m)
         if len(distractor_size) == 2:
             distractor_size = (distractor_size[0], distractor_size[0], distractor_size[1])
         distractor = (
             None
-            if getattr(config, "replace_default_distractor", False)
+            if isinstance(authoritative_table, Mapping)
+            or getattr(config, "replace_default_distractor", False)
             else CollisionBox(
                 config.distractor_id,
                 distractor_size,
                 tuple(config.distractor_initial_xyz),
             )
         )
+        measured_world_poses = dict(world_model_poses or {})
+        expected_dynamic_ids = set(
+            getattr(config, "authoritative_dynamic_obstacle_ids", ())
+        )
+        if expected_dynamic_ids and set(measured_world_poses) != expected_dynamic_ids:
+            raise ValueError(
+                "authoritative Gazebo pose snapshot is incomplete: "
+                f"expected={sorted(expected_dynamic_ids)} "
+                f"actual={sorted(measured_world_poses)}"
+            )
+
+        def settled_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
+            result = dict(spec)
+            measured = measured_world_poses.get(str(spec["id"]))
+            if measured is not None:
+                xyz, quaternion = measured
+                if len(xyz) != 3 or len(quaternion) != 4 or not all(
+                    math.isfinite(float(value)) for value in (*xyz, *quaternion)
+                ):
+                    raise ValueError("authoritative Gazebo object pose is invalid")
+                result["pose_xyz"] = [float(value) for value in xyz]
+                result["pose_quat_xyzw"] = list(
+                    _normalized_quaternion(tuple(float(value) for value in quaternion))
+                )
+            return result
+
         obstacles = tuple(
             _collision_geometry(
-                object_id=str(spec["id"]),
-                bounding_box_xyz=spec["size_xyz"],
-                pose_xyz=spec["pose_xyz"],
-                pose_quat_xyzw=spec["pose_quat_xyzw"],
-                primitives=tuple(spec.get("primitives") or ()),
+                object_id=str(settled["id"]),
+                bounding_box_xyz=settled["size_xyz"],
+                pose_xyz=settled["pose_xyz"],
+                pose_quat_xyzw=settled["pose_quat_xyzw"],
+                primitives=tuple(settled.get("primitives") or ()),
             )
             for spec in getattr(config, "static_obstacle_specs", ())
+            for settled in (settled_spec(spec),)
         )
         revision = self.planning_scene.reset(
             table=table,
             distractor=distractor,
             target=_target_collision_geometry(
                 config,
-                pose_xyz=config.target_initial_xyz,
-                pose_quat_xyzw=config.target_initial_quat_xyzw,
+                pose_xyz=measured_target_xyz,
+                pose_quat_xyzw=measured_target_quat,
             ),
             obstacles=obstacles,
             robot_support_link=str(config.base_link),
+            authoritative_scene_sha256=str(
+                getattr(config, "authoritative_scene_sha256", "")
+            ),
         )
         self._require_current_planning_state_valid()
         self.runtime.scene_revision = revision
@@ -980,9 +1155,7 @@ class RosGazeboController(GazeboController):
         )
         self._require_current_planning_state_valid(
             allowed_collisions=(
-                {config.target_id: list(TARGET_TOUCH_LINKS)}
-                if allow_target_touch
-                else None
+                {config.target_id: list(TARGET_TOUCH_LINKS)} if allow_target_touch else None
             )
         )
         self.runtime.scene_revision = revision
@@ -1008,8 +1181,7 @@ class RosGazeboController(GazeboController):
         self.planning_scene.ready = False
         pairs = validity.get("collision_pairs") or []
         raise PlanningSceneError(
-            "planning-scene current state is invalid; collision_pairs="
-            + repr(pairs)
+            "planning-scene current state is invalid; collision_pairs=" + repr(pairs)
         )
 
     def sync_planning_scene_detach(
@@ -1054,8 +1226,13 @@ class RosGazeboControllerFactory:
     def __call__(self, config: GazeboControlConfig | None = None) -> RosGazeboController:
         return self.create(config)
 
-    def create(self, config: GazeboControlConfig | None = None, *, context: Any | None = None,
-               executor: Any | None = None) -> RosGazeboController:
+    def create(
+        self,
+        config: GazeboControlConfig | None = None,
+        *,
+        context: Any | None = None,
+        executor: Any | None = None,
+    ) -> RosGazeboController:
         cfg = config or GazeboControlConfig()
         cfg.validate_assets()
         try:
@@ -1087,6 +1264,7 @@ class RosGazeboControllerFactory:
         if owns_context:
             rclpy.init(args=None)
         from rclpy.parameter import Parameter
+
         node = rclpy.create_node(
             "openeta_gazebo_controller",
             parameter_overrides=[Parameter("use_sim_time", Parameter.Type.BOOL, True)],
@@ -1095,15 +1273,21 @@ class RosGazeboControllerFactory:
         tf_buffer = Buffer(node=node)
         listener = TransformListener(tf_buffer, node, spin_thread=False)
         source = RosGazeboStateSource(node, tf_buffer, config=cfg)
-        subscription = node.create_subscription(JointState, "/joint_states", source.joint_state_callback, 10)
+        subscription = node.create_subscription(
+            JointState, "/joint_states", source.joint_state_callback, 10
+        )
         move_client = ActionClient(node, MoveGroup, "/move_action")
-        gripper_client = ActionClient(node, ParallelGripperCommand, "/parallel_gripper_controller/gripper_cmd")
+        gripper_client = ActionClient(
+            node, ParallelGripperCommand, "/parallel_gripper_controller/gripper_cmd"
+        )
         trajectory_client = ActionClient(
             node,
             FollowJointTrajectory,
             "/rm_group_controller/follow_joint_trajectory",
         )
-        controller_list_client = node.create_client(ListControllers, "/controller_manager/list_controllers")
+        controller_list_client = node.create_client(
+            ListControllers, "/controller_manager/list_controllers"
+        )
         controller_parameter_client = node.create_client(
             GetParameters, "/controller_manager/get_parameters"
         )
@@ -1129,8 +1313,12 @@ class RosGazeboControllerFactory:
         executor = executor or MultiThreadedExecutor(num_threads=12, context=context)
         executor.add_node(node)
         runtime = _RosRuntime(
-            rclpy=rclpy, node=node, executor=executor, state_source=source,
-            move_client=move_client, gripper_client=gripper_client,
+            rclpy=rclpy,
+            node=node,
+            executor=executor,
+            state_source=source,
+            move_client=move_client,
+            gripper_client=gripper_client,
             trajectory_client=trajectory_client,
             controller_list_client=controller_list_client,
             controller_parameter_client=controller_parameter_client,
@@ -1147,7 +1335,8 @@ class RosGazeboControllerFactory:
             follow_trajectory_action_type=FollowJointTrajectory,
             duration_type=Duration,
             trajectory_point_type=JointTrajectoryPoint,
-            listener=listener, subscription=subscription,
+            listener=listener,
+            subscription=subscription,
             owns_context=owns_context,
             config=cfg,
             allow_stalling=bool(getattr(cfg, "allow_stalling", False)),
@@ -1165,7 +1354,9 @@ class RosGazeboControllerFactory:
             collision_object_type=CollisionObject,
             attached_collision_object_type=AttachedCollisionObject,
             allowed_collision_entry_type=AllowedCollisionEntry,
-            solid_primitive_type=__import__("shape_msgs.msg", fromlist=["SolidPrimitive"]).SolidPrimitive,
+            solid_primitive_type=__import__(
+                "shape_msgs.msg", fromlist=["SolidPrimitive"]
+            ).SolidPrimitive,
             pose_type=__import__("geometry_msgs.msg", fromlist=["Pose"]).Pose,
         )
         runtime.planning_scene = PlanningSceneSynchronizer(runtime.apply_planning_scene)
@@ -1220,9 +1411,7 @@ class _RosRuntime:
         end_joint_state, end_joint_state_sha256 = endpoint
         cache_goal = dict(goal)
         cache_goal["qualification_goal_joint_state"] = end_joint_state
-        cache_goal["qualification_goal_joint_state_sha256"] = (
-            end_joint_state_sha256
-        )
+        cache_goal["qualification_goal_joint_state_sha256"] = end_joint_state_sha256
         key = _l5_trajectory_cache_key(
             cache_goal,
             scene_revision=revision,
@@ -1294,22 +1483,15 @@ class _RosRuntime:
             current = self.state_source.wait_fresh(1.0)
             current_start = {
                 "names": list(ARM_JOINTS),
-                "positions": [
-                    float(value)
-                    for value in current.joint_positions[: len(ARM_JOINTS)]
-                ],
+                "positions": [float(value) for value in current.joint_positions[: len(ARM_JOINTS)]],
             }
         except Exception:  # noqa: BLE001 - normal replanning is safe fallback.
             return None, {
                 "status": "miss",
                 "reason": "fresh_joint_state_unavailable",
             }
-        requested_delta = _joint_state_max_abs_delta(
-            entry.get("start_joint_state"), live_start
-        )
-        measured_delta = _joint_state_max_abs_delta(
-            entry.get("start_joint_state"), current_start
-        )
+        requested_delta = _joint_state_max_abs_delta(entry.get("start_joint_state"), live_start)
+        measured_delta = _joint_state_max_abs_delta(entry.get("start_joint_state"), current_start)
         if (
             requested_delta is None
             or measured_delta is None
@@ -1347,9 +1529,7 @@ class _RosRuntime:
             [float(value) for value in state.joint_positions[: len(ARM_JOINTS)]],
             group_name=self.config.move_group,
         )
-        response = self._await(
-            self.state_validity_client.call_async(request), timeout_s
-        )
+        response = self._await(self.state_validity_client.call_async(request), timeout_s)
         pairs = sorted(
             {
                 tuple(
@@ -1361,8 +1541,7 @@ class _RosRuntime:
                     )
                 )
                 for contact in getattr(response, "contacts", ())
-                if getattr(contact, "contact_body_1", "")
-                or getattr(contact, "contact_body_2", "")
+                if getattr(contact, "contact_body_1", "") or getattr(contact, "contact_body_2", "")
             }
         )
         valid, contact_override = _state_valid_with_allowed_collision_pairs(
@@ -1381,9 +1560,7 @@ class _RosRuntime:
         state = self.state_source.wait_fresh(3.0)
         lower = [float(item[1]) for item in ARM_JOINT_BOUNDS]
         upper = [float(item[2]) for item in ARM_JOINT_BOUNDS]
-        positions = [
-            float(value) for value in state.joint_positions[: len(ARM_JOINTS)]
-        ]
+        positions = [float(value) for value in state.joint_positions[: len(ARM_JOINTS)]]
         jacobian_quality = self.qualification_joint_quality(
             {"names": list(ARM_JOINTS), "positions": positions}
         )
@@ -1391,6 +1568,7 @@ class _RosRuntime:
         if robot_hash is None:
             robot_hash = _qualification_robot_model_sha256(self.config)
             self._qualification_robot_model_hash = robot_hash
+        scene = self.planning_scene
         return {
             "names": list(ARM_JOINTS),
             "positions": positions,
@@ -1408,13 +1586,23 @@ class _RosRuntime:
                 _configured_qualification_solver_profile()
             ),
             "scene_sha256": self.qualification_scene_sha256(),
+            "authoritative_scene_sha256": str(
+                getattr(scene, "authoritative_scene_sha256", "")
+            ),
+            "moveit_world_geometry_sha256": str(
+                getattr(scene, "world_geometry_sha256", "")
+            ),
+            "moveit_attached_geometry_sha256": str(
+                getattr(scene, "attached_geometry_sha256", "")
+            ),
+            "moveit_geometry_verified_ids": list(
+                getattr(scene, "geometry_verified_ids", ())
+            ),
             "jacobian_quality_available": jacobian_quality.get("ok") is True,
             "jacobian_quality_error": jacobian_quality.get("error"),
         }
 
-    def qualification_joint_quality(
-        self, joint_state: Mapping[str, Any]
-    ) -> Mapping[str, Any]:
+    def qualification_joint_quality(self, joint_state: Mapping[str, Any]) -> Mapping[str, Any]:
         """Evaluate the concrete IK branch against the expanded runtime URDF."""
 
         try:
@@ -1474,23 +1662,18 @@ class _RosRuntime:
             }
         request = self.set_parameters_service_type.Request()
         mode_parameter = self.interface_parameter_type()
-        mode_parameter.name = (
-            f"robot_description_kinematics.{self.config.move_group}.mode"
-        )
+        mode_parameter.name = f"robot_description_kinematics.{self.config.move_group}.mode"
         mode_parameter.value.type = self.parameter_type.PARAMETER_STRING
         mode_parameter.value.string_value = mode
         displacement_parameter = self.interface_parameter_type()
         displacement_parameter.name = (
-            "robot_description_kinematics."
-            f"{self.config.move_group}.minimal_displacement_weight"
+            f"robot_description_kinematics.{self.config.move_group}.minimal_displacement_weight"
         )
         displacement_parameter.value.type = self.parameter_type.PARAMETER_DOUBLE
         displacement_parameter.value.double_value = 0.0 if mode == "global" else 0.001
         request.parameters = [mode_parameter, displacement_parameter]
         try:
-            response = self._await(
-                self.move_group_parameter_client.call_async(request), 1.0
-            )
+            response = self._await(self.move_group_parameter_client.call_async(request), 1.0)
         except Exception as exc:  # noqa: BLE001 - ROS service boundary.
             return {
                 "ok": False,
@@ -1562,7 +1745,9 @@ class _RosRuntime:
         if reach is None:
             reach = _urdf_reach_upper_bound_m(self.config)
             self._qualification_reach_upper_bound_m = reach
-        return not math.isfinite(reach) or math.sqrt(sum(value * value for value in values)) <= reach
+        return (
+            not math.isfinite(reach) or math.sqrt(sum(value * value for value in values)) <= reach
+        )
 
     def qualification_compute_ik(
         self,
@@ -1576,7 +1761,12 @@ class _RosRuntime:
         goal = make_move_group_goal(dict(target), config=self.config, tolerances=target)
         xyz = goal["target_pose"].get("xyz")
         quat = goal["target_pose"].get("quat_xyzw")
-        if not isinstance(xyz, list) or len(xyz) != 3 or not isinstance(quat, list) or len(quat) != 4:
+        if (
+            not isinstance(xyz, list)
+            or len(xyz) != 3
+            or not isinstance(quat, list)
+            or len(quat) != 4
+        ):
             return {"ok": False}
         configured_solver = _configured_qualification_solver_profile()
         requested_solver = str(target.get("solver_profile") or "auto")
@@ -1610,9 +1800,7 @@ class _RosRuntime:
             ),
         )
         ik.timeout.sec = int(seed_timeout_s)
-        ik.timeout.nanosec = int(
-            (seed_timeout_s - int(seed_timeout_s)) * 1_000_000_000
-        )
+        ik.timeout.nanosec = int((seed_timeout_s - int(seed_timeout_s)) * 1_000_000_000)
         ik.robot_state.is_diff = False
         ik.robot_state.joint_state.name = list(start.get("names") or ARM_JOINTS)
         ik.robot_state.joint_state.position = [float(v) for v in start.get("positions") or []]
@@ -1626,7 +1814,12 @@ class _RosRuntime:
         pose = PoseStamped()
         pose.header.frame_id = goal["base_frame"]
         pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = [float(v) for v in xyz]
-        pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = [float(v) for v in quat]
+        (
+            pose.pose.orientation.x,
+            pose.pose.orientation.y,
+            pose.pose.orientation.z,
+            pose.pose.orientation.w,
+        ) = [float(v) for v in quat]
         ik.pose_stamped = pose
         response = self._await(
             self.compute_ik_client.call_async(request),
@@ -1639,9 +1832,7 @@ class _RosRuntime:
         ordered = [float(by_name[name]) for name in ARM_JOINTS if name in by_name]
         ok = int(response.error_code.val) == 1 and len(ordered) == len(ARM_JOINTS)
         quality = (
-            self.qualification_joint_quality(
-                {"names": list(ARM_JOINTS), "positions": ordered}
-            )
+            self.qualification_joint_quality({"names": list(ARM_JOINTS), "positions": ordered})
             if ok
             else {}
         )
@@ -1649,9 +1840,7 @@ class _RosRuntime:
             "ok": ok,
             "infrastructure_error": ok and quality.get("ok") is not True,
             "reason": (
-                "jacobian_quality_unavailable"
-                if ok and quality.get("ok") is not True
-                else None
+                "jacobian_quality_unavailable" if ok and quality.get("ok") is not True else None
             ),
             "moveit_error_code": int(response.error_code.val),
             "solver": "pick_ik_global" if dynamic_pick_global else configured_solver,
@@ -1672,9 +1861,7 @@ class _RosRuntime:
             ),
         }
 
-    def qualification_state_validity(
-        self, joint_state: Mapping[str, Any]
-    ) -> Mapping[str, Any]:
+    def qualification_state_validity(self, joint_state: Mapping[str, Any]) -> Mapping[str, Any]:
         from agent.runtime.moveit_qualification import STATE_VALIDITY_TIMEOUT_S
 
         names = list(ARM_JOINTS)
@@ -1691,9 +1878,7 @@ class _RosRuntime:
                 ("near_open", min(0.05, closed)),
                 *[
                     (f"close_{index}", float(value))
-                    for index, value in enumerate(
-                        self.config.calibration.angles_rad[1:], 1
-                    )
+                    for index, value in enumerate(self.config.calibration.angles_rad[1:], 1)
                 ],
             ]
         elif requested_gripper_state is None:
@@ -1716,9 +1901,7 @@ class _RosRuntime:
         target_contact_id = next(
             (
                 str(object_id)
-                for object_id, links in (
-                    allowed.items() if isinstance(allowed, Mapping) else ()
-                )
+                for object_id, links in (allowed.items() if isinstance(allowed, Mapping) else ())
                 if isinstance(links, (list, tuple))
                 and LEFT_FINGERTIP in {str(link) for link in links}
                 and RIGHT_FINGERTIP in {str(link) for link in links}
@@ -1761,15 +1944,11 @@ class _RosRuntime:
                 # collision probe with no touch links.  At this single robot
                 # state its geometry is identical to the detached world body,
                 # while MoveIt can now prove every robot/object collision.
-                for spec in scene_diff.get(
-                    "detached_collision_probe_objects", []
-                ):
+                for spec in scene_diff.get("detached_collision_probe_objects", []):
                     if not isinstance(spec, Mapping):
                         continue
                     probe = self.attached_collision_object_type()
-                    probe.link_name = str(
-                        spec.get("link_name") or self.config.mount_child
-                    )
+                    probe.link_name = str(spec.get("link_name") or self.config.mount_child)
                     probe.touch_links = []
                     probe.object = self._collision_object_from_spec(spec)
                     # The same RobotState diff already contains a REMOVE for
@@ -1781,12 +1960,8 @@ class _RosRuntime:
                     # qualification-only id makes both operations unambiguous
                     # and deliberately inherits no target/touch-link ACM
                     # exemptions.
-                    probe.object.id = (
-                        f"{probe.object.id}__openeta_detached_probe"
-                    )
-                    request.robot_state.attached_collision_objects.append(
-                        probe
-                    )
+                    probe.object.id = f"{probe.object.id}__openeta_detached_probe"
+                    request.robot_state.attached_collision_objects.append(probe)
                     detached_collision_probe_count += 1
             response = self._await(
                 self.state_validity_client.call_async(request),
@@ -1801,24 +1976,17 @@ class _RosRuntime:
             valid, contact_override = _state_valid_with_allowed_collision_pairs(
                 response_valid=bool(response.valid),
                 collision_pairs=pairs,
-                allowed_collisions=(
-                    allowed if isinstance(allowed, Mapping) else None
-                ),
+                allowed_collisions=(allowed if isinstance(allowed, Mapping) else None),
             )
             allowed_pairs = {
                 tuple(sorted((str(object_id), str(link))))
-                for object_id, links in (
-                    allowed.items() if isinstance(allowed, Mapping) else ()
-                )
+                for object_id, links in (allowed.items() if isinstance(allowed, Mapping) else ())
                 if isinstance(links, (list, tuple))
                 for link in links
             }
             unallowed_pairs = set(pairs) - allowed_pairs
             planning_scene = getattr(self, "planning_scene", None)
-            world_ids = {
-                str(value)
-                for value in getattr(planning_scene, "world_ids", ())
-            }
+            world_ids = {str(value) for value in getattr(planning_scene, "world_ids", ())}
             gripper_links = set(TARGET_TOUCH_LINKS)
             sample_seed_independent = bool(unallowed_pairs) and all(
                 (left in gripper_links and right in world_ids)
@@ -1837,9 +2005,7 @@ class _RosRuntime:
                 LEFT_FINGERTIP,
                 RIGHT_FINGERTIP,
             }
-            bilateral_contact_predicted = (
-                bilateral_contact_predicted or sample_bilateral_contact
-            )
+            bilateral_contact_predicted = bilateral_contact_predicted or sample_bilateral_contact
             all_valid = all_valid and valid
             any_contact_override = any_contact_override or contact_override
             all_pairs.update(pairs)
@@ -1850,9 +2016,7 @@ class _RosRuntime:
                     "valid": valid,
                     "collision_pairs": [list(pair) for pair in pairs],
                     "contact_collision_override": contact_override,
-                    "seed_independent_gripper_static_collision": (
-                        sample_seed_independent
-                    ),
+                    "seed_independent_gripper_static_collision": (sample_seed_independent),
                     "target_contact_links": sample_target_contact_links,
                     "bilateral_target_contact": sample_bilateral_contact,
                 }
@@ -1879,19 +2043,13 @@ class _RosRuntime:
             result["qualification_seed_independent_static_collision"] = (
                 seed_independent_static_collision
             )
-            result["qualification_bilateral_target_contact_required"] = (
-                bilateral_contact_required
-            )
-            result["qualification_bilateral_target_contact_predicted"] = (
-                bilateral_contact_predicted
-            )
+            result["qualification_bilateral_target_contact_required"] = bilateral_contact_required
+            result["qualification_bilateral_target_contact_predicted"] = bilateral_contact_predicted
             result["qualification_seed_independent_contact_geometry_failure"] = (
                 seed_independent_contact_geometry_failure
             )
             if seed_independent_contact_geometry_failure:
-                result["reason"] = (
-                    "qualification_bilateral_target_contact_not_predicted"
-                )
+                result["reason"] = "qualification_bilateral_target_contact_not_predicted"
         return result
 
     def qualification_plan_only(
@@ -1904,15 +2062,9 @@ class _RosRuntime:
         # This private L5 call is generating the proof, so its branch cannot
         # yet carry the proof hash required at the public execution boundary.
         pose_target = dict(target)
-        cache_binding = str(
-            pose_target.pop("_qualification_cache_binding_sha256", "") or ""
-        )
-        qualification_goal_joint_state = pose_target.pop(
-            "qualification_goal_joint_state", None
-        )
-        goal = make_move_group_goal(
-            pose_target, config=self.config, tolerances=target
-        )
+        cache_binding = str(pose_target.pop("_qualification_cache_binding_sha256", "") or "")
+        qualification_goal_joint_state = pose_target.pop("qualification_goal_joint_state", None)
+        goal = make_move_group_goal(pose_target, config=self.config, tolerances=target)
         goal.update(
             {
                 "plan_only": True,
@@ -1926,9 +2078,7 @@ class _RosRuntime:
         if cache_binding:
             goal["qualification_cache_binding_sha256"] = cache_binding
         if isinstance(qualification_goal_joint_state, Mapping):
-            qualified_state = _qualification_joint_state_with_sha256(
-                qualification_goal_joint_state
-            )
+            qualified_state = _qualification_joint_state_with_sha256(qualification_goal_joint_state)
             if qualified_state is None:
                 raise ValueError("qualification joint goal state is invalid")
             normalized_state, state_sha256 = qualified_state
@@ -1957,9 +2107,7 @@ class _RosRuntime:
             collision.operation = self.collision_object_type.REMOVE
             scene.world.collision_objects.append(collision)
         for spec in diff.get("world_objects", []):
-            scene.world.collision_objects.append(
-                self._collision_object_from_spec(spec)
-            )
+            scene.world.collision_objects.append(self._collision_object_from_spec(spec))
         for object_id in diff.get("remove_attached_ids", []):
             attached = self.attached_collision_object_type()
             attached.object.id = str(object_id)
@@ -1968,21 +2116,15 @@ class _RosRuntime:
         for spec in diff.get("attached_objects", []):
             attached = self.attached_collision_object_type()
             attached.link_name = str(spec["link_name"])
-            attached.touch_links = [
-                str(value) for value in spec.get("touch_links", [])
-            ]
+            attached.touch_links = [str(value) for value in spec.get("touch_links", [])]
             attached.object = self._collision_object_from_spec(spec)
             scene.robot_state.attached_collision_objects.append(attached)
         allowed = diff.get("allowed_collisions")
         if isinstance(allowed, Mapping):
             components = self.planning_scene_components_type
             acm_request = self.get_scene_service_type.Request()
-            acm_request.components.components = int(
-                components.ALLOWED_COLLISION_MATRIX
-            )
-            acm_readback = self._await(
-                self.get_scene_client.call_async(acm_request), 5.0
-            )
+            acm_request.components.components = int(components.ALLOWED_COLLISION_MATRIX)
+            acm_readback = self._await(self.get_scene_client.call_async(acm_request), 5.0)
             current_acm = acm_readback.scene.allowed_collision_matrix
             names, merged_rows = _merged_allowed_collision_rows(
                 [str(value) for value in current_acm.entry_names],
@@ -2015,14 +2157,21 @@ class _RosRuntime:
             "world_ids": set(self.planning_scene.world_ids),
             "attached_ids": set(self.planning_scene.attached_ids),
             "world_specs": {
-                key: dict(value)
-                for key, value in self.planning_scene.world_specs.items()
+                key: dict(value) for key, value in self.planning_scene.world_specs.items()
             },
             "attached_specs": {
-                key: dict(value)
-                for key, value in self.planning_scene.attached_specs.items()
+                key: dict(value) for key, value in self.planning_scene.attached_specs.items()
             },
             "target_id": self.planning_scene.target_id,
+            "authoritative_scene_sha256": str(
+                getattr(self.planning_scene, "authoritative_scene_sha256", "")
+            ),
+            "moveit_world_geometry_sha256": str(
+                getattr(self.planning_scene, "world_geometry_sha256", "")
+            ),
+            "moveit_geometry_verified_ids": list(
+                getattr(self.planning_scene, "geometry_verified_ids", ())
+            ),
             "target_touch_links": list(TARGET_TOUCH_LINKS),
             "workspace_envelope": {
                 "frame": self.config.base_link,
@@ -2123,21 +2272,14 @@ class _RosRuntime:
                 return {"ok": False, "reason": "virtual_attach_object_missing"}
             predicted = target.get("attachment_transform")
             if isinstance(predicted, Mapping):
-                relative_xyz = tuple(
-                    float(value)
-                    for value in predicted.get("translation_xyz", [])
-                )
-                relative_quat = tuple(
-                    float(value) for value in predicted.get("quat_xyzw", [])
-                )
+                relative_xyz = tuple(float(value) for value in predicted.get("translation_xyz", []))
+                relative_quat = tuple(float(value) for value in predicted.get("quat_xyzw", []))
                 if len(relative_xyz) != 3 or len(relative_quat) != 4:
                     return {"ok": False, "reason": "predicted_attachment_invalid"}
             else:
                 relative_xyz, relative_quat = _relative_pose(
                     child_xyz=tuple(float(value) for value in spec["pose_xyz"]),
-                    child_quat_xyzw=tuple(
-                        float(value) for value in spec["pose_quat_xyzw"]
-                    ),
+                    child_quat_xyzw=tuple(float(value) for value in spec["pose_quat_xyzw"]),
                     parent_xyz=tuple(float(value) for value in xyz),
                     parent_quat_xyzw=tuple(float(value) for value in quat),
                 )
@@ -2147,7 +2289,9 @@ class _RosRuntime:
                 "pose_xyz": list(relative_xyz),
                 "pose_quat_xyzw": list(relative_quat),
                 "link_name": self.config.mount_child,
-                "touch_links": list(self.planning_scene.attached_specs.get(target_id, {}).get("touch_links") or ()),
+                "touch_links": list(
+                    self.planning_scene.attached_specs.get(target_id, {}).get("touch_links") or ()
+                ),
             }
             if not attached["touch_links"]:
                 attached["touch_links"] = list(TARGET_TOUCH_LINKS)
@@ -2165,9 +2309,7 @@ class _RosRuntime:
                 parent_xyz=tuple(float(value) for value in xyz),
                 parent_quat_xyzw=tuple(float(value) for value in quat),
                 relative_xyz=tuple(float(value) for value in attached["pose_xyz"]),
-                relative_quat_xyzw=tuple(
-                    float(value) for value in attached["pose_quat_xyzw"]
-                ),
+                relative_quat_xyzw=tuple(float(value) for value in attached["pose_quat_xyzw"]),
             )
             world = {
                 **dict(attached),
@@ -2230,14 +2372,28 @@ class _RosRuntime:
         source = dict(source) if isinstance(source, Mapping) else {}
         configured_solver = _configured_qualification_solver_profile()
         source.setdefault("solver_profile", configured_solver)
-        source.setdefault(
-            "solver_version", _qualification_solver_version(configured_solver)
-        )
+        source.setdefault("solver_version", _qualification_solver_version(configured_solver))
         source.setdefault(
             "robot_model_sha256",
             _qualification_robot_model_sha256(self.config),
         )
         source.setdefault("scene_sha256", self.qualification_scene_sha256())
+        source.setdefault(
+            "authoritative_scene_sha256",
+            str(getattr(self.planning_scene, "authoritative_scene_sha256", "")),
+        )
+        source.setdefault(
+            "moveit_world_geometry_sha256",
+            str(getattr(self.planning_scene, "world_geometry_sha256", "")),
+        )
+        source.setdefault(
+            "moveit_attached_geometry_sha256",
+            str(getattr(self.planning_scene, "attached_geometry_sha256", "")),
+        )
+        source.setdefault(
+            "moveit_geometry_verified_ids",
+            list(getattr(self.planning_scene, "geometry_verified_ids", ())),
+        )
         map_id = str(funnel.get("capability_map_id") or "")
         if map_id:
             payload, error = self.qualification_capability_map(
@@ -2271,31 +2427,38 @@ class _RosRuntime:
             remaining = max(0.0, deadline - time.monotonic())
             actions_ready = (
                 self.move_client.wait_for_server(timeout_sec=min(0.2, remaining))
-                and self.gripper_client.wait_for_server(
-                    timeout_sec=min(0.2, remaining)
-                )
-                and self.trajectory_client.wait_for_server(
-                    timeout_sec=min(0.2, remaining)
-                )
+                and self.gripper_client.wait_for_server(timeout_sec=min(0.2, remaining))
+                and self.trajectory_client.wait_for_server(timeout_sec=min(0.2, remaining))
             )
             if actions_ready:
-                services = tuple(client for client in (
-                    self.controller_list_client,
-                    self.controller_parameter_client,
-                    self.state_validity_client,
-                    getattr(self, "compute_ik_client", None),
-                    getattr(self, "move_group_parameter_client", None),
-                ) if client is not None)
+                services = tuple(
+                    client
+                    for client in (
+                        self.controller_list_client,
+                        self.controller_parameter_client,
+                        self.state_validity_client,
+                        getattr(self, "compute_ik_client", None),
+                        getattr(self, "move_group_parameter_client", None),
+                    )
+                    if client is not None
+                )
                 if not all(
-                    client.wait_for_service(timeout_sec=min(0.2, remaining))
-                    for client in services
+                    client.wait_for_service(timeout_sec=min(0.2, remaining)) for client in services
                 ):
                     continue
                 request = self.controller_service_type.Request()
-                response = self._await(self.controller_list_client.call_async(request), min(0.5, remaining))
+                response = self._await(
+                    self.controller_list_client.call_async(request), min(0.5, remaining)
+                )
                 states = {item.name: item.state for item in response.controller}
-                required = {"joint_state_broadcaster", "rm_group_controller", "parallel_gripper_controller"}
-                if not required.issubset({name for name, state in states.items() if state == "active"}):
+                required = {
+                    "joint_state_broadcaster",
+                    "rm_group_controller",
+                    "parallel_gripper_controller",
+                }
+                if not required.issubset(
+                    {name for name, state in states.items() if state == "active"}
+                ):
                     continue
                 parameter_request = self.controller_parameter_service_type.Request()
                 parameter_request.names = ["enforce_command_limits"]
@@ -2377,12 +2540,8 @@ class _RosRuntime:
             # self-collision and all subsequent plans fail at the start state.
             components = self.planning_scene_components_type
             acm_request = self.get_scene_service_type.Request()
-            acm_request.components.components = int(
-                components.ALLOWED_COLLISION_MATRIX
-            )
-            acm_readback = self._await(
-                self.get_scene_client.call_async(acm_request), 5.0
-            )
+            acm_request.components.components = int(components.ALLOWED_COLLISION_MATRIX)
+            acm_readback = self._await(self.get_scene_client.call_async(acm_request), 5.0)
             current_acm = acm_readback.scene.allowed_collision_matrix
             names, merged_rows = _merged_allowed_collision_rows(
                 [str(value) for value in current_acm.entry_names],
@@ -2402,19 +2561,74 @@ class _RosRuntime:
             )
         apply_request = self.apply_scene_service_type.Request()
         apply_request.scene = scene
+        expected_world_geometry = _collision_message_geometry_map(
+            [
+                item
+                for item in scene.world.collision_objects
+                if list(getattr(item, "primitives", ()))
+            ]
+        )
+        expected_attached_geometry = _collision_message_geometry_map(
+            [
+                item.object
+                for item in scene.robot_state.attached_collision_objects
+                if list(getattr(item.object, "primitives", ()))
+            ]
+        )
         applied = self._await(self.apply_scene_client.call_async(apply_request), 5.0)
         get_request = self.get_scene_service_type.Request()
         components = self.planning_scene_components_type
-        get_request.components.components = int(components.WORLD_OBJECT_NAMES) | int(
-            components.ROBOT_STATE_ATTACHED_OBJECTS
+        get_request.components.components = (
+            int(components.WORLD_OBJECT_NAMES)
+            | int(components.WORLD_OBJECT_GEOMETRY)
+            | int(components.ROBOT_STATE_ATTACHED_OBJECTS)
         )
         readback = self._await(self.get_scene_client.call_async(get_request), 5.0)
+        actual_world_geometry = _collision_message_geometry_map(
+            list(readback.scene.world.collision_objects)
+        )
+        actual_attached_geometry = _collision_message_geometry_map(
+            [
+                item.object
+                for item in readback.scene.robot_state.attached_collision_objects
+            ]
+        )
+        for expected, actual, label in (
+            (expected_world_geometry, actual_world_geometry, "world"),
+            (expected_attached_geometry, actual_attached_geometry, "attached"),
+        ):
+            mismatched = [
+                object_id
+                for object_id, record in expected.items()
+                if actual.get(object_id) != record
+            ]
+            if mismatched:
+                details = {
+                    object_id: {
+                        "expected": expected.get(object_id),
+                        "actual": actual.get(object_id),
+                    }
+                    for object_id in mismatched
+                }
+                raise PlanningSceneError(
+                    f"MoveIt {label} collision geometry readback mismatch: "
+                    + json.dumps(details, sort_keys=True, separators=(",", ":"))
+                )
         return {
             "applied": bool(getattr(applied, "success", False)),
             "world_ids": [item.id for item in readback.scene.world.collision_objects],
             "attached_ids": [
                 item.object.id for item in readback.scene.robot_state.attached_collision_objects
             ],
+            "world_geometry_sha256": _collision_geometry_manifest_sha256(
+                actual_world_geometry
+            ),
+            "attached_geometry_sha256": _collision_geometry_manifest_sha256(
+                actual_attached_geometry
+            ),
+            "geometry_verified_ids": sorted(
+                {*expected_world_geometry, *expected_attached_geometry}
+            ),
         }
 
     def _collision_object_from_spec(self, spec: Mapping[str, Any]) -> Any:
@@ -2424,9 +2638,7 @@ class _RosRuntime:
             spec.get("frame"), base_link=self.config.base_link
         )
         body_xyz = tuple(float(value) for value in spec["pose_xyz"])
-        body_quat = _normalized_quaternion(
-            tuple(float(value) for value in spec["pose_quat_xyzw"])
-        )
+        body_quat = _normalized_quaternion(tuple(float(value) for value in spec["pose_quat_xyzw"]))
         raw_primitives = spec.get("primitives")
         primitive_specs = (
             list(raw_primitives)
@@ -2449,9 +2661,7 @@ class _RosRuntime:
             shape = str(raw.get("shape") or "")
             if shape == "box":
                 primitive.type = self.solid_primitive_type.BOX
-                primitive.dimensions = [
-                    float(value) for value in raw["size_xyz"]
-                ]
+                primitive.dimensions = [float(value) for value in raw["size_xyz"]]
             elif shape == "cylinder":
                 primitive.type = self.solid_primitive_type.CYLINDER
                 primitive.dimensions = [
@@ -2464,9 +2674,7 @@ class _RosRuntime:
                 parent_xyz=body_xyz,  # type: ignore[arg-type]
                 parent_quat_xyzw=body_quat,
                 relative_xyz=tuple(float(value) for value in raw["pose_xyz"]),
-                relative_quat_xyzw=tuple(
-                    float(value) for value in raw["pose_quat_xyzw"]
-                ),
+                relative_quat_xyzw=tuple(float(value) for value in raw["pose_quat_xyzw"]),
             )
             pose = self.pose_type()
             pose.position.x, pose.position.y, pose.position.z = primitive_xyz
@@ -2483,9 +2691,7 @@ class _RosRuntime:
         collision.operation = self.collision_object_type.ADD
         return collision
 
-    def recover_start_state(
-        self, state: Any, timeout_s: float
-    ) -> Mapping[str, Any]:
+    def recover_start_state(self, state: Any, timeout_s: float) -> Mapping[str, Any]:
         assessment = assess_start_state_bounds(state)
         classification = assessment["classification"]
         if classification == "WITHIN_BOUNDS":
@@ -2500,9 +2706,7 @@ class _RosRuntime:
                 "ok": False,
                 "error_code": "START_STATE_INVALID",
                 "motion_outcome": "failed",
-                "start_state_recovery": start_state_recovery_record(
-                    assessment, status="REJECTED"
-                ),
+                "start_state_recovery": start_state_recovery_record(assessment, status="REJECTED"),
             }
 
         started = self.ros_time_s()
@@ -2567,9 +2771,7 @@ class _RosRuntime:
             sec=duration_ns // 1_000_000_000,
             nanosec=duration_ns % 1_000_000_000,
         )
-        _populate_recovery_trajectory_goal(
-            goal, point, duration, candidate_positions
-        )
+        _populate_recovery_trajectory_goal(goal, point, duration, candidate_positions)
         # Keep only samples produced after this recovery began.  The
         # controller result is itself the completion ACK, so the last
         # still-fresh sample from the trajectory is valid terminal evidence
@@ -2617,9 +2819,7 @@ class _RosRuntime:
         post_timestamp = post_assessment.get("pre_joint_state_timestamp_s")
         if post_assessment["classification"] == "INVALID":
             return {
-                **failed(
-                    "POST_RECOVERY_STATE_OUT_OF_BOUNDS", result_code=result_code
-                ),
+                **failed("POST_RECOVERY_STATE_OUT_OF_BOUNDS", result_code=result_code),
                 "start_state_recovery": start_state_recovery_record(
                     assessment,
                     status="FAILED",
@@ -2654,15 +2854,15 @@ class _RosRuntime:
             sec=duration_ns // 1_000_000_000,
             nanosec=duration_ns % 1_000_000_000,
         )
-        _populate_recovery_trajectory_goal(
-            goal, point, duration, list(ARM_HOME_JOINT_POSITIONS)
-        )
+        _populate_recovery_trajectory_goal(goal, point, duration, list(ARM_HOME_JOINT_POSITIONS))
         self.state_source.clear(min_ros_timestamp_s=action_started)
         handle = self._await(self.trajectory_client.send_goal_async(goal), min(5.0, timeout_s))
         if not handle.accepted:
             raise RuntimeError("HOME_TRAJECTORY_REJECTED")
         wrapped = self._await(handle.get_result_async(), timeout_s)
-        if int(wrapped.result.error_code) != int(self.follow_trajectory_action_type.Result.SUCCESSFUL):
+        if int(wrapped.result.error_code) != int(
+            self.follow_trajectory_action_type.Result.SUCCESSFUL
+        ):
             raise RuntimeError("HOME_TRAJECTORY_FAILED")
         return {"ok": True, "trajectory_result_code": int(wrapped.result.error_code)}
 
@@ -2722,9 +2922,7 @@ class _RosRuntime:
                 "l5_trajectory_cache_key": cache_key,
             }
         result_code = int(wrapped.result.error_code)
-        success = result_code == int(
-            self.follow_trajectory_action_type.Result.SUCCESSFUL
-        )
+        success = result_code == int(self.follow_trajectory_action_type.Result.SUCCESSFUL)
         return {
             "ok": success,
             "reached_goal": success,
@@ -2761,21 +2959,15 @@ class _RosRuntime:
             payload["action_started_ros_time_s"] = action_started
             completed = self.ros_time_s()
             payload["action_completed_ros_time_s"] = completed
-            payload["motion_profile"] = str(
-                goal.get("motion_profile") or "unloaded"
-            )
+            payload["motion_profile"] = str(goal.get("motion_profile") or "unloaded")
             payload["max_velocity_scaling_factor"] = float(
                 goal.get("max_velocity_scaling_factor", 0.3)
             )
             payload["max_acceleration_scaling_factor"] = float(
                 goal.get("max_acceleration_scaling_factor", 0.3)
             )
-            payload["l5_trajectory_cache_status"] = str(
-                cache_lookup.get("status") or "unknown"
-            )
-            payload["l5_trajectory_cache_reason"] = str(
-                cache_lookup.get("reason") or "unknown"
-            )
+            payload["l5_trajectory_cache_status"] = str(cache_lookup.get("status") or "unknown")
+            payload["l5_trajectory_cache_reason"] = str(cache_lookup.get("reason") or "unknown")
             for key in (
                 "entry_count",
                 "lookup_key",
@@ -2830,9 +3022,7 @@ class _RosRuntime:
         # terminal result and can trigger an invalid goal-state transition in
         # MoveIt Jazzy. Qualification uses the same planning budget as execution.
         planning_limit_s = float(goal.get("allowed_planning_time_s", 30.0))
-        request.request.allowed_planning_time = min(
-            planning_limit_s, max(0.1, timeout_s - 2.0)
-        )
+        request.request.allowed_planning_time = min(planning_limit_s, max(0.1, timeout_s - 2.0))
         # The caller selects a load-state profile from immutable target
         # semantics. MoveIt still time-parameterizes the complete path and the
         # controller enforces the URDF limits.
@@ -2869,15 +3059,26 @@ class _RosRuntime:
             # position constraint and must itself return an empty plan.  No
             # receipt or AnyPlace candidate is fabricated or rewritten.
             pose.position.z = 100.0
-        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = goal["target_pose"]["quat_xyzw"]
-        primitive = SolidPrimitive(type=SolidPrimitive.BOX, dimensions=[2 * goal["position_tolerance_m"]] * 3)
+        pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = goal[
+            "target_pose"
+        ]["quat_xyzw"]
+        primitive = SolidPrimitive(
+            type=SolidPrimitive.BOX, dimensions=[2 * goal["position_tolerance_m"]] * 3
+        )
         pc = PositionConstraint()
         pc.header.frame_id, pc.link_name, pc.weight = goal["base_frame"], goal["link_name"], 1.0
         pc.constraint_region.primitives = [primitive]
         pc.constraint_region.primitive_poses = [pose]
         oc = OrientationConstraint()
-        oc.header.frame_id, oc.link_name, oc.orientation, oc.weight = goal["base_frame"], goal["link_name"], pose.orientation, 1.0
-        oc.absolute_x_axis_tolerance = oc.absolute_y_axis_tolerance = oc.absolute_z_axis_tolerance = goal["orientation_tolerance_rad"]
+        oc.header.frame_id, oc.link_name, oc.orientation, oc.weight = (
+            goal["base_frame"],
+            goal["link_name"],
+            pose.orientation,
+            1.0,
+        )
+        oc.absolute_x_axis_tolerance = oc.absolute_y_axis_tolerance = (
+            oc.absolute_z_axis_tolerance
+        ) = goal["orientation_tolerance_rad"]
         qualification_goal = goal.get("qualification_goal_joint_state")
         if isinstance(qualification_goal, Mapping) and not inject_rejection:
             names = list(qualification_goal.get("names") or ARM_JOINTS)
@@ -2914,15 +3115,11 @@ class _RosRuntime:
             ]
         else:
             request.request.goal_constraints = [
-                Constraints(
-                    position_constraints=[pc], orientation_constraints=[oc]
-                )
+                Constraints(position_constraints=[pc], orientation_constraints=[oc])
             ]
         qualification_diff_value = goal.get("qualification_scene_diff")
         qualification_diff = (
-            dict(qualification_diff_value)
-            if isinstance(qualification_diff_value, Mapping)
-            else {}
+            dict(qualification_diff_value) if isinstance(qualification_diff_value, Mapping) else {}
         )
         qualification_allowed = goal.get("qualification_allowed_collisions")
         if isinstance(qualification_allowed, Mapping):
@@ -2932,8 +3129,7 @@ class _RosRuntime:
                 if isinstance(values, (list, tuple))
             }
             normalized_allowed = {
-                key: sorted(set(values))
-                for key, values in normalized_allowed.items()
+                key: sorted(set(values)) for key, values in normalized_allowed.items()
             }
             expected_allowed = (
                 {
@@ -2957,20 +3153,22 @@ class _RosRuntime:
                 )
             qualification_diff["allowed_collisions"] = normalized_allowed
         if qualification_diff:
-            request.planning_options.planning_scene_diff = (
-                self._qualification_scene_diff_message(qualification_diff)
+            request.planning_options.planning_scene_diff = self._qualification_scene_diff_message(
+                qualification_diff
             )
         request.planning_options.plan_only = bool(goal.get("plan_only", False))
         send = self.move_client.send_goal_async(request)
         handle = self._await(send, min(5.0, timeout_s))
         if not handle.accepted:
-            return finish({
-                "ok": False,
-                "error_code": "MOTION_PLAN_FAILED",
-                "motion_outcome": "failed",
-                "planned_point_count": 0,
-                "execution_started": False,
-            })
+            return finish(
+                {
+                    "ok": False,
+                    "error_code": "MOTION_PLAN_FAILED",
+                    "motion_outcome": "failed",
+                    "planned_point_count": 0,
+                    "execution_started": False,
+                }
+            )
         result_future = handle.get_result_async()
         try:
             wrapped = self._await(result_future, timeout_s)
@@ -2980,13 +3178,15 @@ class _RosRuntime:
                 self._await(result_future, 2.0)
             except Exception:
                 pass
-            return finish({
-                "ok": False,
-                "error_code": "MOTION_OUTCOME_UNKNOWN",
-                "motion_outcome": "unknown",
-                "planned_point_count": 0,
-                "execution_started": None,
-            })
+            return finish(
+                {
+                    "ok": False,
+                    "error_code": "MOTION_OUTCOME_UNKNOWN",
+                    "motion_outcome": "unknown",
+                    "planned_point_count": 0,
+                    "execution_started": None,
+                }
+            )
         code = wrapped.result.error_code.val
         planned_joint_trajectory = getattr(
             wrapped.result.planned_trajectory,
@@ -3019,30 +3219,32 @@ class _RosRuntime:
                         trajectory=planned_joint_trajectory,
                         point_count=len(planned_points),
                     )
-            return finish({
-                "ok": True,
-                "reached_goal": not request.planning_options.plan_only,
-                "plan_only": request.planning_options.plan_only,
-                "motion_outcome": "planned" if request.planning_options.plan_only else "completed",
-                "planned_point_count": len(planned_points),
-                "execution_started": not request.planning_options.plan_only,
-                **(
-                    {
-                        "trajectory_points": trajectory_points,
-                        "end_joint_state": end_joint_state,
-                        "l5_trajectory_cache_stored": (
-                            trajectory_cache_key is not None
-                        ),
-                        **(
-                            {"l5_trajectory_cache_key": trajectory_cache_key}
-                            if trajectory_cache_key is not None
-                            else {}
-                        ),
-                    }
+            return finish(
+                {
+                    "ok": True,
+                    "reached_goal": not request.planning_options.plan_only,
+                    "plan_only": request.planning_options.plan_only,
+                    "motion_outcome": "planned"
                     if request.planning_options.plan_only
-                    else {}
-                ),
-            })
+                    else "completed",
+                    "planned_point_count": len(planned_points),
+                    "execution_started": not request.planning_options.plan_only,
+                    **(
+                        {
+                            "trajectory_points": trajectory_points,
+                            "end_joint_state": end_joint_state,
+                            "l5_trajectory_cache_stored": (trajectory_cache_key is not None),
+                            **(
+                                {"l5_trajectory_cache_key": trajectory_cache_key}
+                                if trajectory_cache_key is not None
+                                else {}
+                            ),
+                        }
+                        if request.planning_options.plan_only
+                        else {}
+                    ),
+                }
+            )
         planning_failures = {
             MoveItErrorCodes.PLANNING_FAILED,
             MoveItErrorCodes.INVALID_MOTION_PLAN,
@@ -3108,21 +3310,25 @@ class _RosRuntime:
                 self._await(handle.cancel_goal_async(), min(2.0, timeout_s))
             except Exception:
                 pass
-            return finish({
-                "ok": False,
-                "reached_goal": False,
-                "stalled": False,
-                "error_code": "GRIPPER_TIMEOUT",
-                "terminal_status": "timed_out",
-            })
+            return finish(
+                {
+                    "ok": False,
+                    "reached_goal": False,
+                    "stalled": False,
+                    "error_code": "GRIPPER_TIMEOUT",
+                    "terminal_status": "timed_out",
+                }
+            )
         except Exception:
-            return finish({
-                "ok": False,
-                "reached_goal": False,
-                "stalled": False,
-                "error_code": "GRIPPER_FAILED",
-                "terminal_status": "result_error",
-            })
+            return finish(
+                {
+                    "ok": False,
+                    "reached_goal": False,
+                    "stalled": False,
+                    "error_code": "GRIPPER_FAILED",
+                    "terminal_status": "result_error",
+                }
+            )
         result = wrapped.result
         reached_goal = bool(result.reached_goal)
         stalled = bool(result.stalled)
@@ -3141,9 +3347,7 @@ class _RosRuntime:
                     "names": names,
                     "positions": positions,
                     "velocities": velocities,
-                    "maximum_absolute_velocity_rad_s": max(
-                        abs(value) for value in velocities
-                    ),
+                    "maximum_absolute_velocity_rad_s": max(abs(value) for value in velocities),
                 }
         terminal_status_code = getattr(wrapped, "status", None)
         terminal_succeeded = gripper_terminal_succeeded(terminal_status_code)
@@ -3163,24 +3367,27 @@ class _RosRuntime:
             allow_stalling=stall_is_valid_for_command,
             terminal_succeeded=terminal_succeeded,
         )
-        return finish({
-            "ok": ok,
-            "reached_goal": reached_goal,
-            "stalled": stalled,
-            "stall_accepted_for_command": stall_is_valid_for_command,
-            "error_code": None if ok else "GRIPPER_FAILED",
-            "terminal_status": "succeeded" if terminal_succeeded else "not_succeeded",
-            "terminal_status_code": (
-                int(terminal_status_code)
-                if isinstance(terminal_status_code, int) and not isinstance(terminal_status_code, bool)
-                else None
-            ),
-            **(
-                {"terminal_gripper_joint_state": terminal_joint_state}
-                if terminal_joint_state is not None
-                else {}
-            ),
-        })
+        return finish(
+            {
+                "ok": ok,
+                "reached_goal": reached_goal,
+                "stalled": stalled,
+                "stall_accepted_for_command": stall_is_valid_for_command,
+                "error_code": None if ok else "GRIPPER_FAILED",
+                "terminal_status": "succeeded" if terminal_succeeded else "not_succeeded",
+                "terminal_status_code": (
+                    int(terminal_status_code)
+                    if isinstance(terminal_status_code, int)
+                    and not isinstance(terminal_status_code, bool)
+                    else None
+                ),
+                **(
+                    {"terminal_gripper_joint_state": terminal_joint_state}
+                    if terminal_joint_state is not None
+                    else {}
+                ),
+            }
+        )
 
     def cancel_pending(self) -> None:
         with self._lock:

@@ -3,6 +3,15 @@
   <xacro:macro name="rm75_v_arm_control_interfaces">
     <xacro:macro name="rm75_v_arm_interface" params="name initial_value:=0.0">
       <joint name="${name}">
+        <!-- MoveIt time-parameterizes every accepted arm trajectory and the
+             JointTrajectoryController enforces path/goal tolerances.  The
+             resource-manager limiter derives an extra velocity command from
+             measured state; with a simulated position servo, that feedback
+             clips a safe trajectory whenever tracking lags.  Disable this
+             duplicate limiter only for the simulated arm control joint.
+             Physical URDF bounds, MoveIt velocity/acceleration limits, and
+             JTC terminal checks remain authoritative. -->
+        <limits enable="false"/>
         <command_interface name="position"/>
         <state_interface name="position"><param name="initial_value">${initial_value}</param></state_interface>
         <state_interface name="velocity"/>

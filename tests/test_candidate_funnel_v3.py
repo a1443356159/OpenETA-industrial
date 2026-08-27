@@ -21,12 +21,14 @@ from agent.runtime.moveit_qualification import (
 )
 from agent.runtime.qualification_legality import (
     bind_qualified_placement_goal,
+    evaluate_grasp_target_closing_alignment,
     evaluate_grasp_placement_pair_legality,
     evaluate_placement_goal_legality,
 )
 from agent.runtime.qualification_v3 import (
     candidate_physical_quality_key,
     frozen_frontier_parent_priority,
+    parallel_gripper_centering_quality,
     parallel_gripper_centering_variant_priority,
     schedule_candidate_waves,
     select_grasp_branches,
@@ -331,6 +333,10 @@ def _engine(**overrides):
             "positions": [0.0],
             "joint_limits": {"lower": [-1.0], "upper": [1.0]},
             "home_joint_state": {"names": ["j1"], "positions": [0.8]},
+            "authoritative_scene_sha256": "a" * 64,
+            "moveit_world_geometry_sha256": "b" * 64,
+            "moveit_attached_geometry_sha256": "c" * 64,
+            "moveit_geometry_verified_ids": ["table", "target"],
         },
         "scene_revision": lambda: 4,
         "compute_ik": lambda target, seed, collision: {
@@ -575,6 +581,103 @@ def _placement_scene():
     }
 
 
+def _scene_aligned_grasp_candidate(
+    index: int,
+    *,
+    tip_y_m: float,
+    score: float,
+) -> dict:
+    candidate = _candidate(index, score=score)
+    candidate["target_closing_alignment"] = {
+        "source": "aligned_selected_mask_depth",
+        "correction_m": 0.0,
+        "target_span_m": 0.04,
+    }
+    candidate["compile_parameters"] = {
+        "camera_pose": {
+            "id": candidate["id"],
+            "frame": "camera",
+            "camera_frame": "opencv",
+            "translation_xyz": [0.28, tip_y_m, 0.43],
+            "gripper_tip_position_xyz": [0.28, tip_y_m, 0.43],
+            "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            "width": 0.04,
+            "height": 0.03,
+        },
+        "camera_extrinsics": {
+            "camera_frame": "opencv",
+            "camera_to_world": [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        },
+        "max_gripper_width_m": 0.085,
+    }
+    return candidate
+
+
+def test_scene_target_closing_alignment_is_exact_ordering_evidence_not_pose_edit():
+    candidate = _scene_aligned_grasp_candidate(0, tip_y_m=-0.02, score=100.0)
+    original_tip = list(candidate["compile_parameters"]["camera_pose"]["gripper_tip_position_xyz"])
+
+    evidence = evaluate_grasp_target_closing_alignment(
+        {"candidate_id": "c0", "candidate": candidate},
+        scene=_placement_scene(),
+    )
+
+    assert evidence["evaluated"] is True
+    assert evidence["section_intersects_target"] is True
+    assert evidence["target_span_m"] == pytest.approx(0.04)
+    assert evidence["correction_m"] == pytest.approx(-0.08)
+    assert evidence["required_aperture_m"] == pytest.approx(0.20)
+    assert evidence["aperture_feasible"] is False
+    assert evidence["ordering_only"] is True
+    assert evidence["pose_modified"] is False
+    assert (
+        candidate["compile_parameters"]["camera_pose"]["gripper_tip_position_xyz"] == original_tip
+    )
+
+
+def test_grasp_scene_geometry_demotes_one_sided_pose_without_pruning_it():
+    risky = _scene_aligned_grasp_candidate(0, tip_y_m=-0.02, score=100.0)
+    centered = _scene_aligned_grasp_candidate(1, tip_y_m=-0.1, score=1.0)
+    planned: list[str] = []
+
+    def plan_only(target, start, timeout, attempts):
+        del start, timeout, attempts
+        planned.append(str(target["name"]))
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [0.2]}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(
+        clone_scene=_placement_scene,
+        plan_only=plan_only,
+    ).qualify(
+        _request(
+            [risky, centered],
+            purpose="grasp",
+            overrides={"grasp_waves": [2], "l5_pass_target": 1},
+        )
+    )
+
+    assert response["selected_candidate_ids"] == ["c1"]
+    assert planned == ["c1_stage0"]
+    assert response["metrics"]["grasp_scene_alignment_evaluated_count"] == 2
+    assert response["metrics"]["grasp_scene_alignment_aperture_risk_count"] == 1
+    results = {row["candidate_id"]: row for row in response["results"]}
+    assert results["c0"]["workspace_pass"] is True
+    assert results["c0"]["scene_target_closing_alignment"]["ordering_only"] is True
+    assert results["c1"]["scene_target_closing_alignment"]["aperture_feasible"] is True
+    assert parallel_gripper_centering_quality(results["c0"])[0] == 2
+    assert parallel_gripper_centering_quality(results["c1"])[0] == 0
+
+
 def test_goal_legality_projects_offset_compound_body_instead_of_centered_outer_box():
     scene = _placement_scene()
     scene["world_specs"]["target"] = {
@@ -633,20 +736,18 @@ def test_goal_legality_projects_offset_compound_body_instead_of_centered_outer_b
     )
 
     assert compound["verdict"] == "PASS"
-    assert compound["checks"]["object_bbox"]["geometry_source"] == (
-        "compound_collision_primitives"
-    )
+    assert compound["checks"]["object_bbox"]["geometry_source"] == ("compound_collision_primitives")
     assert compound["checks"]["placement_region"]["minimum_margin_m"] == (
         pytest.approx(0.0015652853126949529)
     )
     support = compound["checks"]["support"]
     region = compound["checks"]["placement_region"]
-    expected_sweep = 2.0 * region["conservative_footprint_radius_m"] * math.sin(
-        support["support_face_alignment_error_rad"] / 2.0
+    expected_sweep = (
+        2.0
+        * region["conservative_footprint_radius_m"]
+        * math.sin(support["support_face_alignment_error_rad"] / 2.0)
     )
-    assert support["settling_sweep_translation_bound_m"] == pytest.approx(
-        expected_sweep
-    )
+    assert support["settling_sweep_translation_bound_m"] == pytest.approx(expected_sweep)
     assert support["settling_sweep_clearance_m"] == pytest.approx(
         region["conservative_minimum_margin_m"] - expected_sweep
     )
@@ -656,9 +757,7 @@ def test_goal_legality_projects_offset_compound_body_instead_of_centered_outer_b
 
 def test_container_goal_legality_keeps_edge_goal_when_geometry_centroid_is_inside():
     scene = _placement_scene()
-    scene["placement_region"]["acceptance_semantics"] = (
-        "stable_geometry_centroid_inside"
-    )
+    scene["placement_region"]["acceptance_semantics"] = "stable_geometry_centroid_inside"
     candidate = {
         "id": "container_edge",
         "object_goal_pose": {
@@ -862,9 +961,7 @@ def test_face_alignment_precedes_resolved_support_energy() -> None:
         "stages": [{"joint_margin": 0.8, "min_singular_value": 0.8}],
     }
 
-    assert candidate_physical_quality_key(high_energy) < candidate_physical_quality_key(
-        low_energy
-    )
+    assert candidate_physical_quality_key(high_energy) < candidate_physical_quality_key(low_energy)
 
 
 def test_settling_sweep_clearance_precedes_lower_nominal_energy() -> None:
@@ -964,9 +1061,9 @@ def test_placement_first_wave_prioritizes_supported_geometry_before_pose_extreme
     )
 
     assert [row["candidate_id"] for row in waves[0].candidates] == ["c0", "c1"]
-    assert sorted(
-        row["candidate_id"] for wave in waves for row in wave.candidates
-    ) == [f"c{index}" for index in range(6)]
+    assert sorted(row["candidate_id"] for wave in waves for row in wave.candidates) == [
+        f"c{index}" for index in range(6)
+    ]
 
 
 def test_grasp_first_wave_is_quality_seeded_but_pose_diverse_without_deletion():
@@ -1281,8 +1378,10 @@ def test_frozen_goal_binds_anyplace_motion_to_scene_box_not_pointcloud_centroid(
     assert response["selected_candidate_ids"] == ["c0"]
     binding = response["results"][0]["goal_legality"]["checks"]["object_frame_binding"]
     assert binding["pointcloud_goal_translation_xyz"][2] == 0.50
-    assert binding["collision_goal_translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
-    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
+    assert binding["collision_goal_translation_xyz"] == pytest.approx([0.48, -0.1, 0.435])
+    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.435]
+    )
     assert response["results"][0]["goal_legality"]["verdict"] == "PASS"
 
 
@@ -1434,15 +1533,21 @@ def test_partial_pointcloud_goal_is_bound_to_exact_physical_support_before_pair_
     binding = legality["checks"]["object_frame_binding"]
     reconciliation = binding["support_contact_reconciliation"]
     assert reconciliation["applied"] is True
-    assert reconciliation["required_translation_z_m"] == pytest.approx(0.0115)
-    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
+    assert reconciliation["release_clearance_m"] == pytest.approx(0.005)
+    assert reconciliation["required_translation_z_m"] == pytest.approx(0.0165)
+    assert reconciliation["qualified_bottom_z_m"] == pytest.approx(0.405)
+    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.435]
+    )
     assert binding["pointcloud_goal_translation_xyz"] == pytest.approx([0.48, -0.1, 0.443])
 
     bind_qualified_placement_goal(descriptor, legality)
 
     bound = descriptor["candidate"]
-    assert bound["qualification_stages"][0]["xyz"] == pytest.approx([0.5, 0.0, 0.5])
-    assert bound["object_motion_world_transform"]["transform_matrix"][2][3] == (pytest.approx(0.0))
+    assert bound["qualification_stages"][0]["xyz"] == pytest.approx([0.5, 0.0, 0.505])
+    assert bound["object_motion_world_transform"]["transform_matrix"][2][3] == (
+        pytest.approx(0.005)
+    )
     assert bound["physical_scene_attachment_required"] is True
     pair = evaluate_grasp_placement_pair_legality(
         descriptor,
@@ -2066,9 +2171,7 @@ def test_grasp_contact_rejects_static_collision_during_l5_close_sweep() -> None:
             sweep_requests.append(dict(state))
             return {
                 "valid": False,
-                "collision_pairs": [
-                    ["robotiq_85_left_finger_tip_link", "work_table"]
-                ],
+                "collision_pairs": [["robotiq_85_left_finger_tip_link", "work_table"]],
                 "qualification_gripper_sweep_checks": [
                     {
                         "sample": "near_open",
@@ -2119,9 +2222,7 @@ def test_grasp_contact_rejects_static_collision_during_l5_close_sweep() -> None:
     assert terminal["requested_gripper_state"] == "closing_sweep"
     assert terminal["preplan_endpoint_check"] is True
     assert terminal["seed_independent_static_collision"] is True
-    assert terminal["collision_pairs"] == [
-        ["robotiq_85_left_finger_tip_link", "work_table"]
-    ]
+    assert terminal["collision_pairs"] == [["robotiq_85_left_finger_tip_link", "work_table"]]
 
 
 def test_grasp_contact_rejects_seed_independent_one_sided_contact_geometry() -> None:
@@ -2140,9 +2241,7 @@ def test_grasp_contact_rejects_seed_independent_one_sided_contact_geometry() -> 
             return {
                 "valid": False,
                 "reason": "qualification_bilateral_target_contact_not_predicted",
-                "collision_pairs": [
-                    ["robotiq_85_left_finger_tip_link", "target_object"]
-                ],
+                "collision_pairs": [["robotiq_85_left_finger_tip_link", "target_object"]],
                 "qualification_gripper_sweep_checks": [
                     {
                         "sample": "close_2",
@@ -2154,9 +2253,7 @@ def test_grasp_contact_rejects_seed_independent_one_sided_contact_geometry() -> 
                                 "target_object",
                             ]
                         ],
-                        "target_contact_links": [
-                            "robotiq_85_left_finger_tip_link"
-                        ],
+                        "target_contact_links": ["robotiq_85_left_finger_tip_link"],
                         "bilateral_target_contact": False,
                     }
                 ],
@@ -2196,9 +2293,7 @@ def test_grasp_contact_rejects_seed_independent_one_sided_contact_geometry() -> 
     assert terminal["bilateral_target_contact_required"] is True
     assert terminal["bilateral_target_contact_predicted"] is False
     assert terminal["seed_independent_contact_geometry_failure"] is True
-    assert terminal["reason"] == (
-        "qualification_bilateral_target_contact_not_predicted"
-    )
+    assert terminal["reason"] == ("qualification_bilateral_target_contact_not_predicted")
 
 
 def test_nonfinite_transform_is_hard_rejected_before_ik():
@@ -2684,3 +2779,7 @@ def test_fast_qualifier_writes_v3_artifact_and_selected_candidate(tmp_path: Path
     assert artifact["legality_screening"]["goal_legality_unique_count"] == 1
     assert artifact["legality_screening"]["pair_legality_evaluation_count"] == 1
     assert artifact["stop_reason"] == "complete_l5_pass_found_minimum_lookahead"
+    assert artifact["authoritative_scene_sha256"] == "a" * 64
+    assert artifact["moveit_world_geometry_sha256"] == "b" * 64
+    assert artifact["moveit_attached_geometry_sha256"] == "c" * 64
+    assert artifact["moveit_geometry_verified_ids"] == ["table", "target"]

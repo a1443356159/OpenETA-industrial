@@ -11,9 +11,11 @@ from extensions.gazebo.robotiq_kinematics import (
     BD_M,
     DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD,
     aperture_from_angle_closed_form,
+    common_driver_position,
     controller_safe_targets,
     linkage_terminal_metrics,
     minimum_feasible_active_position,
+    one_pad_compliance_exhausted,
     six_joint_positions,
     solve_four_bar,
 )
@@ -69,8 +71,13 @@ def test_aperture_endpoints_match_the_fk_calibration_table() -> None:
 def test_six_joint_positions_mirror_and_respect_legacy_shape() -> None:
     positions = six_joint_positions(0.4)
     assert positions["gripper_right_finger_joint"] == -positions["gripper_left_finger_joint"]
-    assert positions["gripper_right_inner_knuckle_joint"] == -positions["gripper_left_inner_knuckle_joint"]
-    assert positions["gripper_right_finger_tip_joint"] == -positions["gripper_left_finger_tip_joint"]
+    assert (
+        positions["gripper_right_inner_knuckle_joint"]
+        == -positions["gripper_left_inner_knuckle_joint"]
+    )
+    assert (
+        positions["gripper_right_finger_tip_joint"] == -positions["gripper_left_finger_tip_joint"]
+    )
     # The vendor constant multipliers are already within 2 mrad of the exact
     # solution at this point; the closed form keeps that behaviour.
     assert positions["gripper_left_inner_knuckle_joint"] == pytest.approx(0.4, abs=0.05)
@@ -90,9 +97,7 @@ def test_open_controller_endpoint_is_exact_limit_safe_four_bar_pose() -> None:
     assert -solved["tip_rad"] > DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD
     # The controller-safe pose retains at least 95% of the theoretical CAD
     # aperture while avoiding every independently modelled hard stop.
-    assert aperture_from_angle_closed_form(
-        endpoint
-    ) >= 0.95 * aperture_from_angle_closed_form(0.0)
+    assert aperture_from_angle_closed_form(endpoint) >= 0.95 * aperture_from_angle_closed_form(0.0)
 
     with pytest.raises(ValueError, match="positive"):
         minimum_feasible_active_position(boundary_inset_rad=0.0)
@@ -112,9 +117,7 @@ def test_linkage_terminal_metrics_require_all_six_finite_joint_samples() -> None
     positions["gripper_left_finger_tip_joint"] = -0.012
     velocities["gripper_right_inner_knuckle_joint"] = -0.07
 
-    position_error, maximum_speed = linkage_terminal_metrics(
-        targets, positions, velocities
-    )
+    position_error, maximum_speed = linkage_terminal_metrics(targets, positions, velocities)
 
     assert position_error == pytest.approx(0.012)
     assert maximum_speed == pytest.approx(0.07)
@@ -123,6 +126,54 @@ def test_linkage_terminal_metrics_require_all_six_finite_joint_samples() -> None
     velocities["gripper_left_finger_joint"] = math.nan
     with pytest.raises(ValueError, match="finite"):
         linkage_terminal_metrics(targets, positions, velocities)
+
+
+def test_common_driver_uses_directional_slowest_mirrored_side() -> None:
+    positions = {
+        "gripper_left_finger_joint": 0.42,
+        "gripper_right_finger_joint": -0.38,
+    }
+
+    assert common_driver_position(positions, closing=True) == pytest.approx(0.38)
+    assert common_driver_position(positions, closing=False) == pytest.approx(0.42)
+
+    with pytest.raises(ValueError, match="both mirrored"):
+        common_driver_position(
+            {"gripper_left_finger_joint": 0.4},
+            closing=True,
+        )
+    positions["gripper_right_finger_joint"] = math.nan
+    with pytest.raises(ValueError, match="finite"):
+        common_driver_position(positions, closing=True)
+
+
+def test_one_pad_contact_remains_compliance_until_all_exhaustion_proofs_hold() -> None:
+    evidence = {
+        "single_contact_age_s": 0.8,
+        "no_common_progress_age_s": 0.8,
+        "commanded_active_rad": 0.46,
+        "nominal_active_rad": 0.60,
+        "measured_common_active_rad": 0.40,
+        "max_lead_rad": 0.06,
+        "progress_epsilon_rad": 0.005,
+        "mechanism_stationary": True,
+        "remaining_close_travel_rad": 0.30,
+        "goal_tolerance_rad": 0.02,
+        "compliance_dwell_s": 0.5,
+    }
+
+    assert one_pad_compliance_exhausted(**evidence) is True
+    # Contact age alone is not failure: preload, stationarity, recent common
+    # progress, and remaining stroke are independent mandatory proofs.
+    for override in (
+        {"commanded_active_rad": 0.43},
+        {"mechanism_stationary": False},
+        {"no_common_progress_age_s": 0.1},
+        {"remaining_close_travel_rad": 0.01},
+    ):
+        assert one_pad_compliance_exhausted(**(evidence | override)) is False
+    with pytest.raises(ValueError, match="limits"):
+        one_pad_compliance_exhausted(**(evidence | {"max_lead_rad": 0.0}))
 
 
 def test_controller_safe_targets_inset_each_hard_stop_inside_action_tolerance() -> None:

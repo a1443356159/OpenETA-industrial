@@ -23,8 +23,11 @@ from sim.mcp_server.worker_mgr import (
 
 def _deployment() -> GazeboDeploymentConfig:
     return GazeboDeploymentConfig(
-        ros_domain_id=17, gz_partition="test-partition", ros2_executable="ros2",
-        gz_executable="gz", process_environment={"ROS_DOMAIN_ID": "17"},
+        ros_domain_id=17,
+        gz_partition="test-partition",
+        ros2_executable="ros2",
+        gz_executable="gz",
+        process_environment={"ROS_DOMAIN_ID": "17"},
     )
 
 
@@ -54,10 +57,13 @@ class _Camera:
     def capture(self, **_kwargs):
         self.sequence += 1
         return CameraFrame(
-            frame_id=self.config.frame_id, role=self.config.role,
-            rgb=[[[0, 0, 0]]], depth=[[1.0]],
+            frame_id=self.config.frame_id,
+            role=self.config.role,
+            rgb=[[[0, 0, 0]]],
+            depth=[[1.0]],
             intrinsics={"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0},
-            extrinsics=dict(self.config.extrinsics), timestamp_s=float(self.sequence),
+            extrinsics=dict(self.config.extrinsics),
+            timestamp_s=float(self.sequence),
         )
 
     def close(self):
@@ -118,6 +124,35 @@ class _Receipt:
         return dict(self.payload)
 
 
+def _native_target_pose_readback():
+    return (
+        SimpleNamespace(
+            xyz=(0.291, -0.104, 0.0151),
+            quat_xyzw=(0.0, 0.0, 0.079914693969, 0.996801706303),
+        ),
+        SimpleNamespace(
+            xyz=(0.0, 0.0, 0.891),
+            quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+        ),
+        1,
+    )
+
+
+def _native_dynamic_pose_readback(model_names):
+    config = gazebo_profile("rm75_robotiq2f85_pickplace").model_config
+    objects = {item.object_id: item for item in config.authoritative_scene.objects}
+    return (
+        {
+            model_name: SimpleNamespace(
+                xyz=objects[model_name].pose_xyz,
+                quat_xyzw=objects[model_name].pose_quat_xyzw,
+            )
+            for model_name in model_names
+        },
+        1,
+    )
+
+
 class _ResetController:
     def __init__(self, receipts):
         self.receipts = list(receipts)
@@ -131,8 +166,23 @@ class _ResetController:
     def state_provider():
         return RobotState()
 
-    def sync_planning_scene_reset(self, config):
-        self.actions.append({"action_type": "planning_scene_reset", "target": config.target_id})
+    def sync_planning_scene_reset(
+        self,
+        config,
+        *,
+        target_xyz=None,
+        target_quat_xyzw=None,
+        world_model_poses=None,
+    ):
+        action = {
+            "action_type": "planning_scene_reset",
+            "target": config.target_id,
+            "target_xyz": target_xyz,
+            "target_quat_xyzw": target_quat_xyzw,
+        }
+        if world_model_poses is not None:
+            action["world_model_pose_ids"] = sorted(world_model_poses)
+        self.actions.append(action)
         return 1
 
     def sync_planning_scene_empty(self):
@@ -192,8 +242,11 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
 
     world = _World()
     runtime = GazeboRuntime(
-        _deployment(), gazebo_profile("rgbd_observation"), launch_factory=launch_factory,
-        camera_factory=camera_factory, world_control=world,
+        _deployment(),
+        gazebo_profile("rgbd_observation"),
+        launch_factory=launch_factory,
+        camera_factory=camera_factory,
+        world_control=world,
     )
     assert runtime.started is False and not made_launch and not made_cameras
     first = runtime.reset(seed=3)
@@ -201,7 +254,9 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
     fresh = runtime.observe()
     assert runtime.start_count == 1
     assert world.resets == [("all", 3), ("all", 4)]
-    assert first.cameras[0].timestamp_s < second.cameras[0].timestamp_s < fresh.cameras[0].timestamp_s
+    assert (
+        first.cameras[0].timestamp_s < second.cameras[0].timestamp_s < fresh.cameras[0].timestamp_s
+    )
     runtime.close()
     runtime.close()
     assert made_launch[0].closed == 1
@@ -220,14 +275,22 @@ def test_runtime_action_observation_uses_ros_completion_barrier_without_callback
     runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
     runtime.started = True
     runtime._cameras = [camera]
-    runtime.controller = _ResetController([
-        {"ok": True, "action_completed_ros_time_s": 42.0},
-    ])
+    runtime.controller = _ResetController(
+        [
+            {"ok": True, "action_completed_ros_time_s": 42.0},
+        ]
+    )
 
     _observation, receipt = runtime.execute({"action_type": "move_to"})
 
     assert receipt["action_completed_ros_time_s"] == 42.0
-    assert camera.capture_arguments == [{"timeout_s": pytest.approx(30.0), "min_timestamp_s": 42.0, "min_received_monotonic_s": None}]
+    assert camera.capture_arguments == [
+        {
+            "timeout_s": pytest.approx(30.0),
+            "min_timestamp_s": 42.0,
+            "min_received_monotonic_s": None,
+        }
+    ]
 
 
 def test_read_only_motion_qualification_reuses_frozen_observation() -> None:
@@ -237,9 +300,7 @@ def test_read_only_motion_qualification_reuses_frozen_observation() -> None:
     runtime.started = True
     runtime._cameras = [camera]
     cached = runtime.observe()
-    runtime.controller = _ResetController(
-        [{"ok": True, "execution_started": False, "results": []}]
-    )
+    runtime.controller = _ResetController([{"ok": True, "execution_started": False, "results": []}])
 
     observation, receipt = runtime.execute(
         {"action_type": "qualify_motion_candidates", "candidates": []}
@@ -262,16 +323,10 @@ def test_read_only_motion_qualification_without_frozen_observation_fails_closed(
     profile = gazebo_profile("rm75_robotiq2f85_control")
     runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
     runtime.started = True
-    runtime.controller = _ResetController(
-        [{"ok": True, "execution_started": False, "results": []}]
-    )
+    runtime.controller = _ResetController([{"ok": True, "execution_started": False, "results": []}])
 
-    with pytest.raises(
-        RuntimeError, match="READ_ONLY_ACTION_OBSERVATION_UNAVAILABLE"
-    ):
-        runtime.execute(
-            {"action_type": "qualify_motion_candidates", "candidates": []}
-        )
+    with pytest.raises(RuntimeError, match="READ_ONLY_ACTION_OBSERVATION_UNAVAILABLE"):
+        runtime.execute({"action_type": "qualify_motion_candidates", "candidates": []})
 
 
 def test_runtime_samples_fresh_robot_state_before_slow_camera_capture() -> None:
@@ -291,9 +346,7 @@ def test_runtime_samples_fresh_robot_state_before_slow_camera_capture() -> None:
     runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
     runtime.started = True
     runtime._cameras = [Camera(profile.cameras[0])]
-    runtime.controller = Controller(
-        [{"ok": True, "action_completed_ros_time_s": 42.0}]
-    )
+    runtime.controller = Controller([{"ok": True, "action_completed_ros_time_s": 42.0}])
 
     runtime.execute({"action_type": "move_to"})
 
@@ -315,9 +368,7 @@ def test_runtime_retries_only_observation_after_camera_transport_timeout() -> No
             return super().capture(**kwargs)
 
     camera = Camera(profile.cameras[0])
-    controller = _ResetController(
-        [{"ok": True, "action_completed_ros_time_s": 42.0}]
-    )
+    controller = _ResetController([{"ok": True, "action_completed_ros_time_s": 42.0}])
     runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
     runtime.started = True
     runtime._cameras = [camera]
@@ -345,9 +396,7 @@ def test_runtime_propagates_second_camera_transport_timeout_without_repeating_ac
             raise GazeboObservationError("camera transport timeout")
 
     camera = Camera(profile.cameras[0])
-    controller = _ResetController(
-        [{"ok": True, "action_completed_ros_time_s": 42.0}]
-    )
+    controller = _ResetController([{"ok": True, "action_completed_ros_time_s": 42.0}])
     runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
     runtime.started = True
     runtime._cameras = [camera]
@@ -370,7 +419,8 @@ def test_runtime_waits_for_world_control_before_its_first_rgbd_reset() -> None:
 
     world = _ReadyWorld(events)
     runtime = GazeboRuntime(
-        _deployment(), gazebo_profile("rgbd_observation"),
+        _deployment(),
+        gazebo_profile("rgbd_observation"),
         launch_factory=lambda **kwargs: Launch(**kwargs),
         camera_factory=lambda config, **kwargs: _Camera(config, **kwargs),
         world_control=world,
@@ -449,10 +499,12 @@ def test_runtime_reset_retries_only_one_transient_gripper_timeout() -> None:
     runtime = GazeboRuntime(_deployment(), profile, world_control=world)
     runtime.started = True
     runtime._cameras = [_Camera(profile.cameras[0])]
-    controller = _ResetController([
-        {"ok": False, "error_code": "GRIPPER_TIMEOUT"},
-        {"ok": True, "action_completed_ros_time_s": 4.0},
-    ])
+    controller = _ResetController(
+        [
+            {"ok": False, "error_code": "GRIPPER_TIMEOUT"},
+            {"ok": True, "action_completed_ros_time_s": 4.0},
+        ]
+    )
     runtime.controller = controller
 
     runtime.reset(seed=7)
@@ -481,7 +533,9 @@ def test_runtime_reset_does_not_retry_non_transient_gripper_failure() -> None:
     ]
 
 
-def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_reset_poses() -> None:
+def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_reset_poses() -> (
+    None
+):
     events = []
 
     class Attachment:
@@ -495,6 +549,16 @@ def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_
             assert require_ack is True
             self.state = "detached"
             events.append(("detach_ack",))
+
+        @staticmethod
+        def native_target_mount_poses_with_retry(*, max_attempts):
+            assert max_attempts == 2
+            return _native_target_pose_readback()
+
+        @staticmethod
+        def native_model_poses_with_retry(model_names, *, max_attempts):
+            assert max_attempts == 2
+            return _native_dynamic_pose_readback(model_names)
 
     class Controller(_ResetController):
         def __init__(self):
@@ -527,7 +591,7 @@ def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_
         attachment_factory=lambda **_kwargs: Attachment(),
     )
 
-    runtime.reset(seed=11)
+    observation = runtime.reset(seed=11)
 
     first_detach = events.index(("detach_ack",))
     assert events[:first_detach] == [("launch",), ("attachment_ready",), ("paused", True)]
@@ -537,6 +601,33 @@ def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_
     # object poses and gives the stock plugin a real detached transition.
     assert world.resets == []
     assert world.poses == []
+    pose_evidence = observation.metadata["planning_scene_reset_target_pose"]
+    assert pose_evidence["source"] == "gazebo_native_pose_v_after_physics_settle"
+    assert pose_evidence["pose_read_attempt_count"] == 1
+    assert pose_evidence["xyz"] == [0.291, -0.104, 0.0151]
+    assert pose_evidence["quat_xyzw"] == [
+        0.0,
+        0.0,
+        0.079914693969,
+        0.996801706303,
+    ]
+    assert len(pose_evidence["authoritative_scene_sha256"]) == 64
+    assert pose_evidence["dynamic_world_pose_source"] == (
+        "single_gazebo_native_pose_v_snapshot"
+    )
+    assert pose_evidence["dynamic_world_pose_read_attempt_count"] == 1
+    assert pose_evidence["dynamic_world_pose_ids"]
+    assert runtime.controller.actions[0] == {
+        "action_type": "planning_scene_reset",
+        "target": "target_object",
+        "target_xyz": (0.291, -0.104, 0.0151),
+        "target_quat_xyzw": (0.0, 0.0, 0.079914693969, 0.996801706303),
+        "world_model_pose_ids": sorted(
+            gazebo_profile(
+                "rm75_robotiq2f85_pickplace"
+            ).model_config.authoritative_dynamic_obstacle_ids
+        ),
+    }
     # A known detached state must not request an impossible no-op ACK at close.
     runtime.close()
     assert events.count(("detach_ack",)) == 1
@@ -557,6 +648,16 @@ def test_native_grasp_runtime_recreates_the_paused_world_for_a_second_reset() ->
             assert require_ack is True
             self.state = "detached"
             events.append("detach_ack")
+
+        @staticmethod
+        def native_target_mount_poses_with_retry(*, max_attempts):
+            assert max_attempts == 2
+            return _native_target_pose_readback()
+
+        @staticmethod
+        def native_model_poses_with_retry(model_names, *, max_attempts):
+            assert max_attempts == 2
+            return _native_dynamic_pose_readback(model_names)
 
     class Controller(_ResetController):
         def __init__(self):
@@ -605,7 +706,8 @@ def test_native_grasp_runtime_recreates_the_paused_world_for_a_second_reset() ->
 
 def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit() -> None:
     source = {
-        "ROS_DOMAIN_ID": "23", "GZ_PARTITION": "locked",
+        "ROS_DOMAIN_ID": "23",
+        "GZ_PARTITION": "locked",
         "OPENETA_GAZEBO_LAUNCH_ARGUMENTS": '["rviz:=false"]',
         "OPENETA_GAZEBO_CAMERA_EXTRINSICS": '{"camera_frame":"opencv"}',
         "OPENETA_ACCEPTANCE_SCENE": "narrow-pick",
@@ -638,9 +740,7 @@ def test_deployment_sanitizes_host_ruby_for_the_vendor_gz_wrapper() -> None:
     config = GazeboDeploymentConfig.from_environment(source)
 
     child = config.process_environment
-    assert child["PATH"] == (
-        "/usr/bin:/root/autodl-tmp/env/ros2_jazzy/bin:/opt/ros/jazzy/bin"
-    )
+    assert child["PATH"] == ("/usr/bin:/root/autodl-tmp/env/ros2_jazzy/bin:/opt/ros/jazzy/bin")
     assert not any(name.startswith(("RUBY", "GEM", "BUNDLE")) for name in child)
     assert child["PYTHONPATH"] == source["PYTHONPATH"]
     assert child["GZ_SIM_RESOURCE_PATH"] == source["GZ_SIM_RESOURCE_PATH"]
@@ -716,6 +816,7 @@ def test_gazebo_worker_uses_only_the_sourced_ros_python_and_native_libraries(
 def test_manager_rejects_second_gazebo_and_retires_worker_on_release() -> None:
     manager = object.__new__(BenchWorkerManager)
     import threading
+
     manager._lock = threading.RLock()
     stopped = []
     worker = BenchWorkerHandle(
@@ -741,7 +842,8 @@ def test_architecture_gate_keeps_generic_worker_and_runtime_free_of_backdoors() 
         for path in ("sim/bench_worker.py", "sim/mcp_server/server.py")
     )
     for forbidden in (
-        '_backend", "") == "gazebo"', "refresh_observation",
+        '_backend", "") == "gazebo"',
+        "refresh_observation",
         "_openeta_structured_actions",
     ):
         assert forbidden not in generic

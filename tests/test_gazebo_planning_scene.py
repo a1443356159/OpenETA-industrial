@@ -104,6 +104,89 @@ def test_planning_scene_allows_only_the_fixed_robot_support_contact() -> None:
     }
 
 
+def test_authoritative_scene_requires_moveit_geometry_readback_proof() -> None:
+    table, distractor, target = _boxes()
+    scene = PlanningSceneSynchronizer(
+        lambda _diff: {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+        }
+    )
+
+    with pytest.raises(PlanningSceneError, match="geometry readback proof is missing"):
+        scene.reset(
+            table=table,
+            distractor=distractor,
+            target=target,
+            authoritative_scene_sha256="a" * 64,
+        )
+    assert scene.ready is False
+
+
+def test_authoritative_scene_retains_moveit_geometry_readback_hash() -> None:
+    table, distractor, target = _boxes()
+    scene = PlanningSceneSynchronizer(
+        lambda _diff: {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+            "world_geometry_sha256": "b" * 64,
+            "attached_geometry_sha256": "c" * 64,
+            "geometry_verified_ids": ["distractor", "table", "target"],
+        }
+    )
+
+    scene.reset(
+        table=table,
+        distractor=distractor,
+        target=target,
+        authoritative_scene_sha256="a" * 64,
+    )
+
+    assert scene.authoritative_scene_sha256 == "a" * 64
+    assert scene.world_geometry_sha256 == "b" * 64
+    assert scene.attached_geometry_sha256 == "c" * 64
+    assert scene.geometry_verified_ids == ("distractor", "table", "target")
+
+
+def test_authoritative_geometry_proofs_survive_target_attach_diff() -> None:
+    table, distractor, target = _boxes()
+
+    def apply(diff):
+        if diff["operation"] == "reset":
+            return {
+                "applied": True,
+                "world_ids": ["table", "distractor", "target"],
+                "attached_ids": [],
+                "world_geometry_sha256": "b" * 64,
+                "attached_geometry_sha256": "c" * 64,
+                "geometry_verified_ids": ["distractor", "table", "target"],
+            }
+        assert diff["operation"] == "attach"
+        return {
+            "applied": True,
+            "world_ids": ["table", "distractor"],
+            "attached_ids": ["target"],
+            "world_geometry_sha256": "d" * 64,
+            "attached_geometry_sha256": "e" * 64,
+            "geometry_verified_ids": ["target"],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
+    scene.reset(
+        table=table,
+        distractor=distractor,
+        target=target,
+        authoritative_scene_sha256="a" * 64,
+    )
+    scene.attach_target(target=target)
+
+    assert scene.geometry_verified_ids == ("distractor", "table", "target")
+    assert scene.world_geometry_sha256 == "d" * 64
+    assert scene.attached_geometry_sha256 == "e" * 64
+
+
 def test_planning_scene_preserves_acceptance_obstacles_across_attachment() -> None:
     scene = PlanningSceneSynchronizer()
     table, distractor, target = _boxes()

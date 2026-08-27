@@ -68,14 +68,27 @@ def parallel_gripper_centering_evidence(
         compiled_camera_pose = compile_parameters.get("camera_pose")
         if isinstance(compiled_camera_pose, Mapping):
             sources.append(compiled_camera_pose)
+    # Exact PlanningScene collision geometry is a stronger physical signal
+    # than the provider's visible-depth quantiles.  Both remain immutable
+    # evidence, but prefer the scene-derived measurement when available.
     alignment = next(
         (
-            source.get("target_closing_alignment")
+            source.get("scene_target_closing_alignment")
             for source in sources
-            if isinstance(source.get("target_closing_alignment"), Mapping)
+            if isinstance(source.get("scene_target_closing_alignment"), Mapping)
+            and source["scene_target_closing_alignment"].get("evaluated") is True
         ),
         None,
     )
+    if alignment is None:
+        alignment = next(
+            (
+                source.get("target_closing_alignment")
+                for source in sources
+                if isinstance(source.get("target_closing_alignment"), Mapping)
+            ),
+            None,
+        )
     return dict(alignment) if isinstance(alignment, Mapping) else None
 
 
@@ -95,6 +108,20 @@ def parallel_gripper_centering_quality(
     alignment = parallel_gripper_centering_evidence(value)
     if not isinstance(alignment, Mapping):
         return (0, PARALLEL_GRIPPER_CENTERING_RISK_RATIO)
+    if (
+        alignment.get("aperture_feasible") is False
+        or alignment.get("section_intersects_target") is False
+    ):
+        # Ordering only: exhaustive waves still retain this model pose.
+        ratio = alignment.get("centering_ratio")
+        return (
+            2,
+            float(ratio)
+            if isinstance(ratio, (int, float))
+            and not isinstance(ratio, bool)
+            and math.isfinite(float(ratio))
+            else math.inf,
+        )
     correction = alignment.get("correction_m")
     span = alignment.get("target_span_m")
     if any(
@@ -251,9 +278,7 @@ def placement_support_stability_quality(value: Mapping[str, Any]) -> tuple[Any, 
             and not isinstance(alignment_cosine, bool)
             and math.isfinite(float(alignment_cosine))
         ):
-            alignment_error = math.acos(
-                min(1.0, max(0.0, float(alignment_cosine)))
-            )
+            alignment_error = math.acos(min(1.0, max(0.0, float(alignment_cosine))))
     if (
         isinstance(support_energy, (int, float))
         and not isinstance(support_energy, bool)
@@ -635,8 +660,7 @@ def schedule_candidate_waves(
             )
         branches[branch].append(descriptor)
     ordered_branches = {
-        branch: _quality_ordered_cluster_round_robin(branches[branch])
-        for branch in branch_order
+        branch: _quality_ordered_cluster_round_robin(branches[branch]) for branch in branch_order
     }
     waves: list[CandidateWave] = []
     for batch_index in sorted(set(branch_batch.values())):

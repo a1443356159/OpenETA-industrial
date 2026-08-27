@@ -26,6 +26,10 @@ from agent.runtime.collision_geometry import (
 )
 
 from .robot_control import GazeboControlConfig
+from .ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptance_scene_world import (
+    CompiledAuthoritativeScene,
+    compile_authoritative_scene,
+)
 
 
 PICKPLACE_ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
@@ -40,9 +44,7 @@ _POSE_BOUNDARY_ABS_TOL_M = 1e-6
 ACCEPTANCE_SCENE_ENV = "OPENETA_ACCEPTANCE_SCENE"
 ACCEPTANCE_SCENE_SCHEMA_VERSION = "openeta.gazebo_acceptance_scenes.v2"
 PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT = "complete_footprint"
-PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID = (
-    "stable_geometry_centroid_inside"
-)
+PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID = "stable_geometry_centroid_inside"
 PLACEMENT_ACCEPTANCE_SEMANTICS = frozenset(
     {
         PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
@@ -85,14 +87,15 @@ def load_acceptance_scene_contract(
     obstacles = scene.get("static_obstacles")
     if not isinstance(obstacles, list):
         raise ValueError("acceptance scene obstacle list is invalid")
-    planning_scene_obstacles = scene.get("planning_scene_obstacles", [])
-    if not isinstance(planning_scene_obstacles, list):
-        raise ValueError("acceptance planning-scene obstacle list is invalid")
+    if "planning_scene_obstacles" in scene:
+        raise ValueError(
+            "legacy planning_scene_obstacles are forbidden; "
+            "MoveIt geometry is compiled from the authoritative Gazebo world"
+        )
     canonical_world_complete = scene.get("canonical_world_complete")
-    if canonical_world_complete is not None and not isinstance(
-        canonical_world_complete, bool
-    ):
+    if canonical_world_complete is not None and not isinstance(canonical_world_complete, bool):
         raise ValueError("acceptance canonical-world flag is invalid")
+
     def vector(
         owner: Mapping[str, Any],
         key: str,
@@ -145,7 +148,7 @@ def load_acceptance_scene_contract(
             vector(primitive, "rgba", 4)
 
     seen: set[str] = {"work_table", "target_object", "distractor_object"}
-    for obstacle in [*obstacles, *planning_scene_obstacles]:
+    for obstacle in obstacles:
         if not isinstance(obstacle, Mapping):
             raise ValueError("acceptance scene obstacle is invalid")
         obstacle_id = str(obstacle.get("id") or "")
@@ -173,8 +176,7 @@ def load_acceptance_scene_contract(
             raise ValueError("acceptance scene task semantics are invalid")
         operator_instruction = task.get("operator_instruction")
         if operator_instruction is not None and (
-            not isinstance(operator_instruction, str)
-            or not operator_instruction.strip()
+            not isinstance(operator_instruction, str) or not operator_instruction.strip()
         ):
             raise ValueError("acceptance scene operator instruction is invalid")
     target = scene.get("target_object")
@@ -226,9 +228,7 @@ def load_acceptance_scene_contract(
                 PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
             )
             if acceptance_semantics not in PLACEMENT_ACCEPTANCE_SEMANTICS:
-                raise ValueError(
-                    "acceptance scene placement semantics are invalid"
-                )
+                raise ValueError("acceptance scene placement semantics are invalid")
             if region.get("selected") is True:
                 selected.append(region)
             elif region.get("selected") is not False:
@@ -238,12 +238,8 @@ def load_acceptance_scene_contract(
         chosen = selected[0]
         if task is None or task["placement_region_prompt"] != chosen["prompt"]:
             raise ValueError("acceptance scene task/bin semantic binding is invalid")
-        scene["destination_center_xy"] = [
-            float(value) for value in chosen["center_xy"]
-        ]
-        scene["destination_size_xy_m"] = [
-            float(value) for value in chosen["size_xy_m"]
-        ]
+        scene["destination_center_xy"] = [float(value) for value in chosen["center_xy"]]
+        scene["destination_size_xy_m"] = [float(value) for value in chosen["size_xy_m"]]
         if chosen.get("support_z_m") is not None:
             scene["destination_support_z_m"] = float(chosen["support_z_m"])
         scene["placement_acceptance_semantics"] = str(
@@ -295,37 +291,6 @@ def _quaternion_from_rpy(values: Sequence[float]) -> tuple[float, float, float, 
         cr * cp * sy - sr * sp * cy,
         cr * cp * cy + sr * sp * sy,
     )
-
-
-def _collision_primitive_specs(owner: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
-    """Normalize versioned scene primitives for the MoveIt scene adapter."""
-
-    raw_primitives = owner.get("primitives")
-    if not isinstance(raw_primitives, list):
-        return ()
-    normalized: list[dict[str, Any]] = []
-    for raw in raw_primitives:
-        if not isinstance(raw, Mapping):
-            raise ValueError("acceptance scene primitive is invalid")
-        shape = str(raw.get("shape") or "")
-        primitive: dict[str, Any] = {
-            "shape": shape,
-            "pose_xyz": [float(value) for value in raw["pose_xyz"]],
-            "pose_quat_xyzw": list(_quaternion_from_rpy(raw["pose_rpy"])),
-        }
-        if shape == "box":
-            primitive["size_xyz"] = [float(value) for value in raw["size_xyz"]]
-        elif shape == "cylinder":
-            primitive.update(
-                {
-                    "radius": float(raw["radius"]),
-                    "length": float(raw["length"]),
-                }
-            )
-        else:
-            raise ValueError("acceptance scene primitive shape is invalid")
-        normalized.append(primitive)
-    return tuple(normalized)
 
 
 class Verdict(StrEnum):
@@ -465,8 +430,12 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # General motion profiles are selected from physical load state, never a
     # scene/object identity.  The unloaded contact move can use more of the
     # RM75 limits; a retained payload uses a gentler profile until release.
-    unloaded_velocity_scaling: float = 0.30
-    unloaded_acceleration_scaling: float = 0.20
+    # Keep the unloaded contact path inside the measured Gazebo tracking
+    # envelope.  At 0.30/0.20 joint_4 crossed the unchanged 0.05 rad path
+    # tolerance under load variance; 0.25/0.15 is the conservative profile
+    # already used by the generic direct-motion contract.
+    unloaded_velocity_scaling: float = 0.25
+    unloaded_acceleration_scaling: float = 0.15
     # The loaded path is the only profile that showed repeatable controller
     # clipping at 0.25/0.15. Preserve the proven 500 Hz control chain and use
     # the legacy-stable payload envelope instead of relaxing path tolerances.
@@ -516,14 +485,12 @@ class NativePickPlaceConfig(GazeboControlConfig):
             self.loaded_acceleration_scaling,
         )
         if any(
-            not math.isfinite(value) or value <= 0.0 or value > 1.0
-            for value in motion_scalings
+            not math.isfinite(value) or value <= 0.0 or value > 1.0 for value in motion_scalings
         ):
             raise ValueError("pick/place motion scaling is invalid")
         if (
             self.loaded_velocity_scaling > self.unloaded_velocity_scaling
-            or self.loaded_acceleration_scaling
-            > self.unloaded_acceleration_scaling
+            or self.loaded_acceleration_scaling > self.unloaded_acceleration_scaling
         ):
             raise ValueError("loaded motion profile cannot exceed unloaded profile")
         target = contract.get("target_object")
@@ -547,44 +514,61 @@ class NativePickPlaceConfig(GazeboControlConfig):
         return load_acceptance_scene_contract(self.acceptance_scene_id)
 
     @property
+    def authoritative_scene(self) -> CompiledAuthoritativeScene:
+        """Return the one world artifact shared by Gazebo and MoveIt."""
+
+        package = self.ros_workspace / "src" / self.ros_package_name
+        return compile_authoritative_scene(
+            base_world=package / "worlds/rm75_robotiq2f85_pickplace.sdf",
+            catalog_path=package / "config/acceptance_scenes.json",
+            scene_id=self.acceptance_scene_id,
+        )
+
+    @property
+    def authoritative_scene_sha256(self) -> str:
+        return self.authoritative_scene.authority_sha256
+
+    @property
+    def authoritative_table_spec(self) -> dict[str, Any]:
+        return self.authoritative_scene.object(self.table_id).moveit_spec()
+
+    @property
+    def authoritative_dynamic_obstacle_ids(self) -> tuple[str, ...]:
+        return tuple(
+            object_id
+            for object_id in self.authoritative_scene.dynamic_object_ids
+            if object_id != self.target_id
+        )
+
+    @property
     def acceptance_scene_seed(self) -> int:
         return int(self.acceptance_scene_contract["seed"])
 
     @property
     def selected_placement_region_id(self) -> str:
         return str(
-            self.acceptance_scene_contract.get("selected_placement_region_id")
-            or self.table_id
+            self.acceptance_scene_contract.get("selected_placement_region_id") or self.table_id
         )
 
     @property
     def static_obstacle_specs(self) -> tuple[dict[str, Any], ...]:
+        """Exact non-table/non-target bodies extracted from the final SDF.
+
+        ``static`` here means PlanningScene world geometry. Gazebo-dynamic
+        clutter is tagged in each spec and its settled pose is overlaid from
+        one native Pose_V snapshot during reset.
+        """
+
         return tuple(
-            {
-                "id": str(raw["id"]),
-                "size_xyz": [float(value) for value in raw["size_xyz"]],
-                "pose_xyz": [float(value) for value in raw["pose_xyz"]],
-                "pose_quat_xyzw": list(_quaternion_from_rpy(raw["pose_rpy"])),
-                **(
-                    {"primitives": list(_collision_primitive_specs(raw))}
-                    if _collision_primitive_specs(raw)
-                    else {}
-                ),
-            }
-            for raw in [
-                *self.acceptance_scene_contract["static_obstacles"],
-                *self.acceptance_scene_contract.get("planning_scene_obstacles", []),
-            ]
+            item.moveit_spec()
+            for item in self.authoritative_scene.objects
+            if item.object_id not in {self.table_id, self.target_id}
         )
 
     @property
     def target_collision_primitives(self) -> tuple[dict[str, Any], ...]:
-        target = self.acceptance_scene_contract.get("target_object")
-        return (
-            _collision_primitive_specs(target)
-            if isinstance(target, Mapping)
-            else ()
-        )
+        target = self.authoritative_scene.object(self.target_id)
+        return tuple(primitive.moveit_spec() for primitive in target.primitives)
 
     def acceptance_scene_evidence(self) -> dict[str, Any]:
         contract = self.acceptance_scene_contract
@@ -595,19 +579,13 @@ class NativePickPlaceConfig(GazeboControlConfig):
             "seed": int(contract["seed"]),
             "contract_sha256": str(contract["contract_sha256"]),
             "static_obstacle_ids": [
-                str(obstacle["id"])
-                for obstacle in contract["static_obstacles"]
+                str(obstacle["id"]) for obstacle in contract["static_obstacles"]
             ],
-            "planning_scene_obstacle_ids": [
-                str(obstacle["id"])
-                for obstacle in contract.get("planning_scene_obstacles", [])
-            ],
+            "authoritative_world": self.authoritative_scene.evidence(),
             "destination_center_xy": list(self.destination_center_xy),
             "destination_size_xy_m": list(self.destination_size_xy_m),
             "destination_support_z_m": self.destination_support_z_m,
-            "placement_acceptance_semantics": (
-                self.placement_acceptance_semantics
-            ),
+            "placement_acceptance_semantics": (self.placement_acceptance_semantics),
         }
         task = contract.get("task")
         if isinstance(task, Mapping):
@@ -620,20 +598,14 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "shape_class": str(target["shape_class"]),
                 "bounding_box_xyz": list(self.target_size_m),
                 "collision_model": (
-                    "compound_primitives"
-                    if collision_primitives
-                    else "bounding_box"
+                    "compound_primitives" if collision_primitives else "bounding_box"
                 ),
                 "collision_primitive_count": len(collision_primitives),
             }
         regions = contract.get("placement_regions")
         if isinstance(regions, list):
-            evidence["placement_region_ids"] = [
-                str(region["id"]) for region in regions
-            ]
-            evidence["selected_placement_region_id"] = str(
-                contract["selected_placement_region_id"]
-            )
+            evidence["placement_region_ids"] = [str(region["id"]) for region in regions]
+            evidence["selected_placement_region_id"] = str(contract["selected_placement_region_id"])
         return evidence
 
     @property
@@ -668,8 +640,11 @@ class NativePickPlaceConfig(GazeboControlConfig):
         )
         if not all(path.is_file() for path in required):
             raise RuntimeError("MODEL_ASSET_NOT_FOUND")
-        # Validate the selected variant before Gazebo allocates any process.
+        # Compile the complete visual/physics/MoveIt world before Gazebo
+        # allocates any process. Unsupported or divergent geometry therefore
+        # fails at the lifecycle boundary, not during a motion attempt.
         self.acceptance_scene_contract
+        self.authoritative_scene
 
 
 def verify_stable_placement(
@@ -693,12 +668,8 @@ def verify_stable_placement(
     qx, qy, qz, qw = final.quat_xyzw
     quaternion_norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
     if quaternion_norm <= 1e-12:
-        return PlacementVerification(
-            Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE
-        )
-    qx, qy, qz, qw = (
-        value / quaternion_norm for value in (qx, qy, qz, qw)
-    )
+        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE)
+    qx, qy, qz, qw = (value / quaternion_norm for value in (qx, qy, qz, qw))
     rotation_rows = (
         (
             1.0 - 2.0 * (qy * qy + qz * qz),
@@ -730,9 +701,7 @@ def verify_stable_placement(
             object_xyz=final.xyz,
         )
     except ValueError:
-        return PlacementVerification(
-            Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE
-        )
+        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE)
     half_x = cfg.destination_size_xy_m[0] / 2.0
     half_y = cfg.destination_size_xy_m[1] / 2.0
     x_margin_m = min(
@@ -743,12 +712,8 @@ def verify_stable_placement(
         bounds.minimum_xyz[1] - (cfg.destination_center_xy[1] - half_y),
         cfg.destination_center_xy[1] + half_y - bounds.maximum_xyz[1],
     )
-    centroid_x_margin_m = half_x - abs(
-        geometry_centroid[0] - cfg.destination_center_xy[0]
-    )
-    centroid_y_margin_m = half_y - abs(
-        geometry_centroid[1] - cfg.destination_center_xy[1]
-    )
+    centroid_x_margin_m = half_x - abs(geometry_centroid[0] - cfg.destination_center_xy[0])
+    centroid_y_margin_m = half_y - abs(geometry_centroid[1] - cfg.destination_center_xy[1])
     support_height_error_m = abs(bounds.minimum_xyz[2] - cfg.destination_support_z_m)
     expected_link_origin_height_m = (
         final.xyz[2] + cfg.destination_support_z_m - bounds.minimum_xyz[2]
@@ -765,8 +730,7 @@ def verify_stable_placement(
     if (
         len(ordered) >= 3
         and terminal
-        and terminal[-1].monotonic_s - terminal[0].monotonic_s
-        < cfg.placement_stability_duration_s
+        and terminal[-1].monotonic_s - terminal[0].monotonic_s < cfg.placement_stability_duration_s
     ):
         terminal_start = ordered.index(terminal[0])
         if terminal_start > 0:
@@ -815,7 +779,9 @@ def verify_stable_placement(
         "footprint_margin_xy_m": [x_margin_m, y_margin_m],
     }
     if len(terminal) < 2:
-        return PlacementVerification(Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE, evidence)
+        return PlacementVerification(
+            Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE, evidence
+        )
     if stable_duration_s + 1e-9 < cfg.placement_stability_duration_s:
         return PlacementVerification(
             Verdict.UNKNOWN, PlacementReasonCode.OBSERVATION_TOO_SHORT, evidence
@@ -832,8 +798,7 @@ def verify_stable_placement(
             Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
         )
     if (
-        cfg.placement_acceptance_semantics
-        == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+        cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
         and min(centroid_x_margin_m, centroid_y_margin_m) < 0.0
     ):
         return PlacementVerification(
@@ -842,8 +807,7 @@ def verify_stable_placement(
             evidence,
         )
     if (
-        cfg.placement_acceptance_semantics
-        == PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
+        cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
         and min(x_margin_m, y_margin_m) < 0.0
     ):
         return PlacementVerification(
@@ -910,9 +874,7 @@ def validated_pickplace_motion_guidance(
         ],
         "success_evidence": {
             "grasp_admission": "bilateral_native_contact_and_attach_ack",
-            "maximum_capture_relative_translation_m": (
-                cfg.maximum_capture_relative_translation_m
-            ),
+            "maximum_capture_relative_translation_m": (cfg.maximum_capture_relative_translation_m),
             "placement": {
                 "minimum_stability_duration_s": cfg.placement_stability_duration_s,
                 "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
@@ -1035,46 +997,47 @@ def confirm_native_bilateral_contact(
     cfg = config or NativePickPlaceConfig()
     ordered = sorted(samples, key=lambda item: (item.timestamp_s, item.side))
     by_side: dict[str, list[NativeContactSample]] = {"left": [], "right": []}
-    if (
-        verification_window_started_sim_time_s is None
-        or not math.isfinite(verification_window_started_sim_time_s)
+    if verification_window_started_sim_time_s is None or not math.isfinite(
+        verification_window_started_sim_time_s
     ):
-        return ContactGateResult(
-            False, ReasonCode.CONTACT_SAMPLE_BEFORE_WINDOW, 0, 0
-        )
+        return ContactGateResult(False, ReasonCode.CONTACT_SAMPLE_BEFORE_WINDOW, 0, 0)
     closed_window = (
         verification_window_ended_sim_time_s is not None
         and math.isfinite(verification_window_ended_sim_time_s)
-        and verification_window_ended_sim_time_s
-        > verification_window_started_sim_time_s
+        and verification_window_ended_sim_time_s > verification_window_started_sim_time_s
     )
     for sample in ordered:
         if (
             not closed_window
-            and now_monotonic_s - sample.received_monotonic_s
-            > cfg.contact_freshness_s
+            and now_monotonic_s - sample.received_monotonic_s > cfg.contact_freshness_s
         ):
             return ContactGateResult(
-                False, ReasonCode.CONTACT_SAMPLE_STALE,
-                len(by_side["left"]), len(by_side["right"]),
+                False,
+                ReasonCode.CONTACT_SAMPLE_STALE,
+                len(by_side["left"]),
+                len(by_side["right"]),
             )
         if sample.timestamp_s <= verification_window_started_sim_time_s:
             return ContactGateResult(
-                False, ReasonCode.CONTACT_SAMPLE_BEFORE_WINDOW,
-                len(by_side["left"]), len(by_side["right"]),
+                False,
+                ReasonCode.CONTACT_SAMPLE_BEFORE_WINDOW,
+                len(by_side["left"]),
+                len(by_side["right"]),
             )
-        if (
-            closed_window
-            and sample.timestamp_s > verification_window_ended_sim_time_s
-        ):
+        if closed_window and sample.timestamp_s > verification_window_ended_sim_time_s:
             return ContactGateResult(
-                False, ReasonCode.CONTACT_SAMPLE_AFTER_WINDOW,
-                len(by_side["left"]), len(by_side["right"]),
+                False,
+                ReasonCode.CONTACT_SAMPLE_AFTER_WINDOW,
+                len(by_side["left"]),
+                len(by_side["right"]),
             )
         rejected = _identity_kind(sample.collision_names, cfg, sample.side)
         if rejected is not None:
             return ContactGateResult(
-                False, rejected, len(by_side["left"]), len(by_side["right"]),
+                False,
+                rejected,
+                len(by_side["left"]),
+                len(by_side["right"]),
                 evidence={"collision_names": list(sample.collision_names), "side": sample.side},
             )
         by_side[sample.side].append(sample)
@@ -1083,26 +1046,34 @@ def confirm_native_bilateral_contact(
     left_span = left[-1].timestamp_s - left[0].timestamp_s if len(left) > 1 else 0.0
     right_span = right[-1].timestamp_s - right[0].timestamp_s if len(right) > 1 else 0.0
     if len(left) < cfg.contact_samples_required or len(right) < cfg.contact_samples_required:
-        return ContactGateResult(False, ReasonCode.CONTACT_INSUFFICIENT_SAMPLES, len(left), len(right), left_span, right_span)
+        return ContactGateResult(
+            False,
+            ReasonCode.CONTACT_INSUFFICIENT_SAMPLES,
+            len(left),
+            len(right),
+            left_span,
+            right_span,
+        )
     if left_span < cfg.contact_span_s or right_span < cfg.contact_span_s:
-        return ContactGateResult(False, ReasonCode.CONTACT_WINDOW_TOO_SHORT, len(left), len(right), left_span, right_span)
+        return ContactGateResult(
+            False, ReasonCode.CONTACT_WINDOW_TOO_SHORT, len(left), len(right), left_span, right_span
+        )
     return ContactGateResult(
-        True, ReasonCode.CONTACT_TARGET_CONFIRMED, len(left), len(right), left_span, right_span,
+        True,
+        ReasonCode.CONTACT_TARGET_CONFIRMED,
+        len(left),
+        len(right),
+        left_span,
+        right_span,
         evidence={
             "target_id": cfg.target_id,
             "source": "gazebo_native_contacts",
-            "verification_window_started_sim_time_s": (
-                verification_window_started_sim_time_s
-            ),
+            "verification_window_started_sim_time_s": (verification_window_started_sim_time_s),
             "verification_window_ended_sim_time_s": (
-                verification_window_ended_sim_time_s
-                if closed_window
-                else None
+                verification_window_ended_sim_time_s if closed_window else None
             ),
             "sample_freshness_basis": (
-                "closed_gazebo_sim_time_window"
-                if closed_window
-                else "monotonic_receive_time"
+                "closed_gazebo_sim_time_window" if closed_window else "monotonic_receive_time"
             ),
         },
     )
@@ -1173,11 +1144,17 @@ class NativeGraspVerifier:
         if not gate.accepted:
             self.phase = "contact_rejected"
             self.attached = False
-            return self._remember(self._record(Verdict.FAIL, gate.reason_code, False, gate=gate.to_dict()))
+            return self._remember(
+                self._record(Verdict.FAIL, gate.reason_code, False, gate=gate.to_dict())
+            )
         if not attach_acked:
             self.phase = "attach_unacknowledged"
             self.attached = False
-            return self._remember(self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False, gate=gate.to_dict()))
+            return self._remember(
+                self._record(
+                    Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False, gate=gate.to_dict()
+                )
+            )
         self.phase = "attachment_confirmed"
         self.attached = True
         return self._remember(
@@ -1223,20 +1200,14 @@ class NativeGraspVerifier:
         """Revalidate a contact/attach-proven object during any MoveIt transport."""
 
         if not self.attached:
-            return self._remember(
-                self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False)
-            )
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.ATTACH_ACK_MISSING, False))
         if not dart_supported:
             self.phase = "dart_unsupported"
-            return self._remember(
-                self._record(Verdict.FAIL, ReasonCode.DART_UNSUPPORTED, False)
-            )
+            return self._remember(self._record(Verdict.FAIL, ReasonCode.DART_UNSUPPORTED, False))
         if proof is None:
             self.phase = "child_link_unavailable"
             return self._remember(
-                self._record(
-                    Verdict.FAIL, ReasonCode.CHILD_LINK_STATE_UNAVAILABLE, False
-                )
+                self._record(Verdict.FAIL, ReasonCode.CHILD_LINK_STATE_UNAVAILABLE, False)
             )
         evidence = {
             "source": "gazebo_pose_info_child_link",
@@ -1260,18 +1231,18 @@ class NativeGraspVerifier:
                 )
             )
         self.phase = "retained_proven"
-        return self._remember(
-            self._record(Verdict.PASS, ReasonCode.TARGET_HELD, True, **evidence)
-        )
+        return self._remember(self._record(Verdict.PASS, ReasonCode.TARGET_HELD, True, **evidence))
 
     def release_result(self, *, detached_acked: bool) -> VerificationRecord:
         self.attached = False
         self.phase = "released" if detached_acked else "release_unacknowledged"
-        return self._remember(self._record(
-            Verdict.UNKNOWN if detached_acked else Verdict.FAIL,
-            ReasonCode.READY if detached_acked else ReasonCode.RELEASE_ACK_MISSING,
-            False,
-        ))
+        return self._remember(
+            self._record(
+                Verdict.UNKNOWN if detached_acked else Verdict.FAIL,
+                ReasonCode.READY if detached_acked else ReasonCode.RELEASE_ACK_MISSING,
+                False,
+            )
+        )
 
     def detached_open_result(self) -> VerificationRecord:
         """Acknowledge an open command when no grasp is attached."""
@@ -1280,8 +1251,12 @@ class NativeGraspVerifier:
         self.attached = False
         return self._remember(self._record(Verdict.UNKNOWN, ReasonCode.READY, False))
 
-    def _record(self, verdict: Verdict, reason: ReasonCode, grasp: bool, **evidence: Any) -> VerificationRecord:
-        return VerificationRecord(self.phase, verdict, reason, self.config.target_id, grasp, evidence)
+    def _record(
+        self, verdict: Verdict, reason: ReasonCode, grasp: bool, **evidence: Any
+    ) -> VerificationRecord:
+        return VerificationRecord(
+            self.phase, verdict, reason, self.config.target_id, grasp, evidence
+        )
 
     def _remember(self, record: VerificationRecord) -> VerificationRecord:
         self._last_record = record
@@ -1300,4 +1275,8 @@ def quaternion_rotate(q: Sequence[float], v: Sequence[float]) -> tuple[float, fl
         raise ValueError("quaternion must be finite and non-zero")
     x, y, z, w = x / norm, y / norm, z / norm, w / norm
     tx, ty, tz = 2.0 * (y * vz - z * vy), 2.0 * (z * vx - x * vz), 2.0 * (x * vy - y * vx)
-    return (vx + w * tx + y * tz - z * ty, vy + w * ty + z * tx - x * tz, vz + w * tz + x * ty - y * tx)
+    return (
+        vx + w * tx + y * tz - z * ty,
+        vy + w * ty + z * tx - x * tz,
+        vz + w * tz + x * ty - y * tx,
+    )

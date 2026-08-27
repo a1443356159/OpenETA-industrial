@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import os
 import math
 import re
@@ -662,6 +663,53 @@ class GazeboDetachableJointControl:
 
     def _world_link_positions(self) -> dict[str, tuple[float, float, float]]:
         return {name: pose.xyz for name, pose in self._world_link_poses().items()}
+
+    def native_model_poses_with_retry(
+        self,
+        model_names: Sequence[str],
+        *,
+        max_attempts: int = 2,
+    ) -> tuple[dict[str, GazeboNativePose], int]:
+        """Read one settled authoritative pose snapshot for world clutter.
+
+        Gazebo and MoveIt share geometry from the compiled SDF, but dynamic
+        non-target objects can settle a few millimetres after physics starts.
+        This method overlays all such model poses from one Pose_V generation;
+        a partial snapshot is never published to PlanningScene.
+        """
+
+        requested = tuple(str(name).strip() for name in model_names)
+        if (
+            max_attempts <= 0
+            or any(not name for name in requested)
+            or len(requested) != len(set(requested))
+        ):
+            raise ValueError("authoritative Gazebo model pose request is invalid")
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                poses = self._world_link_poses()
+                selected: dict[str, GazeboNativePose] = {}
+                for model_name in requested:
+                    if model_name in poses:
+                        selected[model_name] = poses[model_name]
+                        continue
+                    matches = [
+                        pose
+                        for name, pose in poses.items()
+                        if name.endswith(f"::{model_name}")
+                    ]
+                    if len(matches) != 1:
+                        raise GazeboProcessError(
+                            "AUTHORITATIVE_GAZEBO_MODEL_POSE_UNAVAILABLE"
+                        )
+                    selected[model_name] = matches[0]
+                return selected, attempt
+            except Exception as exc:  # noqa: BLE001 - one bounded native retry.
+                last_error = exc
+        raise GazeboProcessError(
+            f"AUTHORITATIVE_GAZEBO_MODEL_POSE_UNAVAILABLE: {last_error}"
+        ) from last_error
 
     @staticmethod
     def _named_position(poses: dict[str, tuple[float, float, float]], link: str) -> tuple[float, float, float]:

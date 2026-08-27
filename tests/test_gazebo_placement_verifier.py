@@ -23,7 +23,10 @@ from extensions.gazebo.native_grasp import (
 )
 
 
-def _sample(stamp: float, xyz=(0.62, 0.145, 0.029), quat=(0.0, 0.0, 0.0, 1.0)):
+def _sample(stamp: float, xyz=None, quat=(0.0, 0.0, 0.0, 1.0)):
+    if xyz is None:
+        center_x, center_y = NativePickPlaceConfig().destination_center_xy
+        xyz = (center_x, center_y - 0.035, 0.029)
     return PlacementPoseSample(stamp, xyz, quat)
 
 
@@ -131,22 +134,23 @@ def test_stable_placement_requires_duration_drift_height_and_oriented_footprint(
 
 
 def test_placement_rejects_terminal_drift_and_wrong_height() -> None:
+    config = NativePickPlaceConfig()
+    center_x, center_y = config.destination_center_xy
     moving = [
         _sample(10.0),
         _sample(10.3),
-        _sample(10.4, (0.62, 0.145, 0.035)),
-        _sample(10.5, (0.62, 0.145, 0.029)),
+        _sample(10.4, (center_x, center_y - 0.035, 0.035)),
+        _sample(10.5, (center_x, center_y - 0.035, 0.029)),
     ]
     assert verify_stable_placement(moving).reason_code is PlacementReasonCode.TERMINAL_DRIFT
 
-    config = NativePickPlaceConfig()
     expected = _supported_link_height(config)
     wrong_height = [
         _sample(
             stamp,
             (
-                0.62,
-                0.145,
+                center_x,
+                center_y - 0.035,
                 expected + config.placement_support_height_tolerance_m + 0.001,
             ),
         )
@@ -187,13 +191,14 @@ def test_placement_height_follows_oriented_compound_support_geometry() -> None:
 
 def test_placement_height_closed_boundary_tolerates_only_float_noise() -> None:
     config = NativePickPlaceConfig()
+    center_x, center_y = config.destination_center_xy
     expected = _supported_link_height(config)
     boundary_noise = [
         _sample(
             stamp,
             (
-                0.62,
-                0.145,
+                center_x,
+                center_y - 0.035,
                 expected - config.placement_support_height_tolerance_m - 0.0000006,
             ),
         )
@@ -203,8 +208,8 @@ def test_placement_height_closed_boundary_tolerates_only_float_noise() -> None:
         _sample(
             stamp,
             (
-                0.62,
-                0.145,
+                center_x,
+                center_y - 0.035,
                 expected - config.placement_support_height_tolerance_m - 0.000002,
             ),
         )
@@ -219,9 +224,10 @@ def test_placement_height_closed_boundary_tolerates_only_float_noise() -> None:
 
 
 def test_placement_uses_stable_terminal_window_after_initial_settling() -> None:
+    center_x, center_y = NativePickPlaceConfig().destination_center_xy
     samples = [
-        _sample(10.0, (0.60, 0.145, 0.039)),
-        _sample(10.2, (0.61, 0.145, 0.034)),
+        _sample(10.0, (center_x - 0.02, center_y - 0.035, 0.039)),
+        _sample(10.2, (center_x - 0.01, center_y - 0.035, 0.034)),
         _sample(10.5),
         _sample(10.7),
         _sample(10.9),
@@ -236,9 +242,10 @@ def test_placement_uses_stable_terminal_window_after_initial_settling() -> None:
 
 
 def test_placement_terminal_window_includes_prior_discrete_sample() -> None:
+    center_x, center_y = NativePickPlaceConfig().destination_center_xy
     samples = [
-        _sample(10.0, (0.60, 0.145, 0.039)),
-        _sample(10.2, (0.61, 0.145, 0.034)),
+        _sample(10.0, (center_x - 0.02, center_y - 0.035, 0.039)),
+        _sample(10.2, (center_x - 0.01, center_y - 0.035, 0.034)),
         _sample(10.4),
         _sample(10.6),
         _sample(10.8),
@@ -253,9 +260,14 @@ def test_placement_terminal_window_includes_prior_discrete_sample() -> None:
 
 
 def test_placement_uses_compound_footprint_not_center_only_region_check() -> None:
-    samples = [_sample(stamp, (0.656, 0.145, 0.029)) for stamp in (10.0, 10.3, 10.4, 10.5)]
+    base = NativePickPlaceConfig()
+    center_x, center_y = base.destination_center_xy
+    samples = [
+        _sample(stamp, (center_x + 0.036, center_y - 0.035, 0.029))
+        for stamp in (10.0, 10.3, 10.4, 10.5)
+    ]
     config = replace(
-        NativePickPlaceConfig(),
+        base,
         placement_acceptance_semantics=PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
     )
 
@@ -267,8 +279,9 @@ def test_placement_uses_compound_footprint_not_center_only_region_check() -> Non
 
 def test_physical_bin_accepts_stable_body_centroid_with_edge_overhang() -> None:
     config = NativePickPlaceConfig()
+    center_x, center_y = config.destination_center_xy
     samples = [
-        _sample(stamp, (0.656, 0.145, 0.029))
+        _sample(stamp, (center_x + 0.036, center_y - 0.035, 0.029))
         for stamp in (10.0, 10.3, 10.4, 10.5)
     ]
 
@@ -286,8 +299,9 @@ def test_physical_bin_accepts_stable_body_centroid_with_edge_overhang() -> None:
 
 
 def test_physical_bin_rejects_stable_body_centroid_outside_region() -> None:
+    center_x, center_y = NativePickPlaceConfig().destination_center_xy
     samples = [
-        _sample(stamp, (0.90, 0.145, 0.029))
+        _sample(stamp, (center_x + 0.28, center_y - 0.035, 0.029))
         for stamp in (10.0, 10.3, 10.4, 10.5)
     ]
 
@@ -307,7 +321,8 @@ def test_offset_compound_body_uses_physical_bottom_after_tipping() -> None:
         -0.056720734639233744,
         0.7048282812249195,
     )
-    xyz = (0.64, 0.18, 0.044764681111384076)
+    center_x, center_y = NativePickPlaceConfig().destination_center_xy
+    xyz = (center_x + 0.02, center_y, 0.044764681111384076)
     samples = [_sample(stamp, xyz, quat) for stamp in (10.0, 10.3, 10.4, 10.5)]
 
     result = verify_stable_placement(samples)

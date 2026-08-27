@@ -22,6 +22,7 @@ from extensions.gazebo.ros_control import (
     QUALIFIED_JOINT_GOAL_TOLERANCE_RAD,
     RosGazeboStateSource,
     _RosRuntime,
+    _collision_message_geometry_record,
     _configured_qualification_solver_profile,
     _qualification_ik_response_timeout_s,
     _moveit_scene_frame,
@@ -38,6 +39,35 @@ from extensions.gazebo.ros_control import (
     _qualification_robot_model_sha256,
 )
 from agent.runtime.capability_map import generate_sparse_capability_map, robot_model_hash
+
+
+def _pose(xyz=(0.0, 0.0, 0.0), quat=(0.0, 0.0, 0.0, 1.0)):
+    return SimpleNamespace(
+        position=SimpleNamespace(x=xyz[0], y=xyz[1], z=xyz[2]),
+        orientation=SimpleNamespace(x=quat[0], y=quat[1], z=quat[2], w=quat[3]),
+    )
+
+
+def test_moveit_geometry_proof_accepts_equivalent_object_pose_factoring() -> None:
+    primitive = SimpleNamespace(type=1, dimensions=[1.15, 0.95, 0.06])
+    outgoing = SimpleNamespace(
+        id="work_table",
+        header=SimpleNamespace(frame_id="base_link"),
+        pose=_pose(quat=(0.0, 0.0, 0.0, 0.0)),
+        primitives=[primitive],
+        primitive_poses=[_pose((0.35, 0.0, -0.03))],
+    )
+    readback = SimpleNamespace(
+        id="work_table",
+        header=SimpleNamespace(frame_id="base_link"),
+        pose=_pose((0.35, 0.0, -0.03)),
+        primitives=[primitive],
+        primitive_poses=[_pose()],
+    )
+
+    assert _collision_message_geometry_record(outgoing) == (
+        _collision_message_geometry_record(readback)
+    )
 
 
 def test_qualification_solver_auto_matches_launch_profile(monkeypatch) -> None:

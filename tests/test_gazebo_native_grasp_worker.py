@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from extensions.gazebo.deployment import GazeboDeploymentConfig
 from extensions.gazebo.direct_env import GazeboDirectEnv
+from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.profiles import gazebo_profile
 
 
 def test_native_grasp_profile_constructs_without_starting_a_worker() -> None:
+    config = NativePickPlaceConfig()
     deployment = GazeboDeploymentConfig(
         ros_domain_id=17,
         gz_partition="test-partition",
@@ -39,7 +41,7 @@ def test_native_grasp_profile_constructs_without_starting_a_worker() -> None:
             "support_plane_height_m": 0.02,
             "height_rule": "compound_collision_geometry_contacts_destination_plane",
             "support_height_tolerance_m": 0.01,
-            "destination_center_xy": [0.62, 0.18],
+            "destination_center_xy": list(config.destination_center_xy),
             "destination_size_xy_m": [0.285, 0.275],
             "footprint_rule": "stable_geometry_centroid_inside",
             "complete_footprint_margin_role": "ordering_and_evidence_only",

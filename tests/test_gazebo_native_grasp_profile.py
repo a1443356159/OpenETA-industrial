@@ -15,6 +15,8 @@ from extensions.gazebo.native_grasp import (
     validated_pickplace_motion_guidance,
 )
 from extensions.gazebo.ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptance_scene_world import (
+    AUTHORITATIVE_SCENE_SCHEMA_VERSION,
+    compile_authoritative_scene,
     render_acceptance_world,
 )
 from extensions.gazebo.profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, gazebo_profile
@@ -23,7 +25,11 @@ from sim.env_registry import get_env_spec
 
 def test_native_grasp_registration_exposes_the_approved_detachable_joint_profile() -> None:
     pickplace, control = get_env_spec(PICKPLACE_ENV_ID), get_env_spec(GAZEBO_CONTROL_ENV_ID)
-    assert pickplace is not None and control is not None and pickplace.display_name == PICKPLACE_DISPLAY_NAME
+    assert (
+        pickplace is not None
+        and control is not None
+        and pickplace.display_name == PICKPLACE_DISPLAY_NAME
+    )
     assert NativePickPlaceConfig().model_id == PICKPLACE_MODEL_ID
     assert NativePickPlaceConfig().allow_stalling is True
     assert GazeboControlConfig().model_id == MODEL_ID
@@ -121,11 +127,23 @@ def test_native_grasp_complex_acceptance_scenes_share_one_versioned_geometry_con
     assert len(contract["contract_sha256"]) == 64
     assert [row["id"] for row in contract["static_obstacles"]] == obstacle_ids
     assert config.acceptance_scene_seed == seed
-    assert [row["id"] for row in config.static_obstacle_specs] == obstacle_ids
+    published_ids = [row["id"] for row in config.static_obstacle_specs]
+    assert set(obstacle_ids) <= set(published_ids)
+    assert {"industrial_floor", "workbench_frame", "green_parts_bin"} <= set(
+        published_ids
+    )
     assert config.acceptance_scene_evidence()["contract_sha256"] == contract["contract_sha256"]
+    authority = config.acceptance_scene_evidence()["authoritative_world"]
+    assert authority["schema_version"] == AUTHORITATIVE_SCENE_SCHEMA_VERSION
+    assert authority["authority_sha256"] == config.authoritative_scene_sha256
+    assert authority["gazebo_collision_object_ids"] == authority[
+        "moveit_collision_object_ids"
+    ]
 
 
-def test_native_grasp_narrow_pick_corridor_is_constrained_without_excluding_the_full_gripper() -> None:
+def test_native_grasp_narrow_pick_corridor_is_constrained_without_excluding_the_full_gripper() -> (
+    None
+):
     contract = load_acceptance_scene_contract("narrow-pick")
     left, right = contract["static_obstacles"]
     center_separation = abs(left["pose_xyz"][1] - right["pose_xyz"][1])
@@ -233,9 +251,7 @@ def test_native_grasp_industrial_scenes_bind_composite_target_to_one_of_two_bins
     assert len(contract["placement_regions"]) == 2
     assert sum(region["selected"] for region in contract["placement_regions"]) == 1
     assert config.replace_default_distractor is True
-    assert list(config.target_size_m) == contract["target_object"][
-        "bounding_box_xyz"
-    ]
+    assert list(config.target_size_m) == contract["target_object"]["bounding_box_xyz"]
     assert list(config.target_initial_xyz) == contract["target_object"]["pose_xyz"]
     assert list(config.destination_center_xy) == contract["destination_center_xy"]
     assert list(config.destination_size_xy_m) == contract["destination_size_xy_m"]
@@ -289,18 +305,13 @@ def test_native_grasp_industrial_renderer_materializes_real_parts_and_bin_floors
 @pytest.mark.parametrize("scene_id", ["fastener-bin-sort", "tool-bin-sort"])
 def test_native_grasp_selected_industrial_bin_walls_follow_region_geometry(scene_id: str) -> None:
     contract = load_acceptance_scene_contract(scene_id)
-    selected = next(
-        region for region in contract["placement_regions"] if region["selected"]
-    )
+    selected = next(region for region in contract["placement_regions"] if region["selected"])
     center_x, center_y = selected["center_xy"]
     size_x, size_y = selected["size_xy_m"]
     color = selected["id"].split("_", 1)[0]
-    obstacles = {
-        obstacle["id"]: obstacle for obstacle in contract["static_obstacles"]
-    }
+    obstacles = {obstacle["id"]: obstacle for obstacle in contract["static_obstacles"]}
     walls = {
-        side: obstacles[f"{color}_bin_wall_{side}"]
-        for side in ("left", "right", "near", "far")
+        side: obstacles[f"{color}_bin_wall_{side}"] for side in ("left", "right", "near", "far")
     }
 
     assert walls["left"]["pose_xyz"][0] == pytest.approx(
@@ -317,7 +328,7 @@ def test_native_grasp_selected_industrial_bin_walls_follow_region_geometry(scene
     )
 
 
-def test_native_grasp_normal_scene_renderer_reuses_the_canonical_world() -> None:
+def test_native_grasp_normal_scene_renderer_materializes_the_hashed_authoritative_world() -> None:
     config = NativePickPlaceConfig()
     package = config.ros_workspace / "src" / config.ros_package_name
     canonical = package / "worlds/rm75_robotiq2f85_pickplace.sdf"
@@ -328,23 +339,34 @@ def test_native_grasp_normal_scene_renderer_reuses_the_canonical_world() -> None
         environment={"OPENETA_ACCEPTANCE_SCENE": "normal"},
     )
 
-    assert rendered == canonical
-    assert selected == "normal"
+    try:
+        compiled = compile_authoritative_scene(
+            base_world=canonical,
+            catalog_path=package / "config/acceptance_scenes.json",
+            scene_id="normal",
+        )
+        assert rendered != canonical
+        assert selected == "normal"
+        assert rendered.read_bytes() == compiled.sdf_bytes
+        assert compiled.authority_sha256[:12] in rendered.name
+    finally:
+        rendered.unlink(missing_ok=True)
 
 
 def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -> None:
     config = NativePickPlaceConfig()
     package = config.ros_workspace / "src" / config.ros_package_name
-    world = ET.parse(
-        package / "worlds/rm75_robotiq2f85_pickplace.sdf"
-    ).getroot().find("world")
+    world = ET.parse(package / "worlds/rm75_robotiq2f85_pickplace.sdf").getroot().find("world")
     assert world is not None
 
     contract = load_acceptance_scene_contract("normal")
     green = world.find("model[@name='green_parts_bin']")
     blue = world.find("model[@name='blue_parts_bin']")
     assert green is not None and blue is not None
-    assert contract["destination_center_xy"] == [0.62, 0.180]
+    selected_region = next(
+        region for region in contract["placement_regions"] if region["selected"]
+    )
+    assert contract["destination_center_xy"] == selected_region["center_xy"]
     assert contract["destination_size_xy_m"] == [0.285, 0.275]
 
     side_centers = sorted(
@@ -358,6 +380,39 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
     clear_aperture = sum(side_centers) - wall_thickness
     target_length = float(contract["target_object"]["bounding_box_xyz"][0])
     complete_gripper_envelope = 0.149345541
+
+    # Visual, Gazebo physics and PlanningScene must describe the same closed
+    # bin.  Omitting the front wall made a visually impossible path appear
+    # collision-free to both physics and L5.
+    assert {collision.get("name") for collision in green.findall("link/collision")} == {
+        "base",
+        "left_wall",
+        "right_wall",
+        "front_wall",
+        "rear_wall",
+    }
+    authority = config.authoritative_scene
+    region_centers = {
+        str(region["id"]): tuple(float(value) for value in region["center_xy"])
+        for region in contract["placement_regions"]
+    }
+    for prefix in ("green", "blue"):
+        bin_object = authority.object(f"{prefix}_parts_bin")
+        assert bin_object.pose_xyz == pytest.approx(
+            (*region_centers[f"{prefix}_parts_bin"], 0.0)
+        )
+        assert [primitive.name for primitive in bin_object.primitives] == [
+            "base",
+            "left_wall",
+            "right_wall",
+            "front_wall",
+            "rear_wall",
+        ]
+        assert len(bin_object.moveit_spec()["primitives"]) == len(
+            world.find(f"model[@name='{prefix}_parts_bin']").findall(
+                "link/collision"
+            )
+        )
 
     # AnyPlace may rotate the part in-plane.  Leave at least 50 mm beyond
     # both the complete target and the calibrated native Robotiq envelope,
@@ -399,17 +454,14 @@ def test_native_grasp_stable_motion_contract_uses_bilateral_contact_goal_toleran
     assert motion["tolerance"] == 0.0002
     assert motion["ori_tolerance"] == 0.002
     assert motion["profile"] == "unloaded"
-    assert motion["velocity_scaling"] == 0.3
-    assert motion["acceleration_scaling"] == 0.2
+    assert motion["velocity_scaling"] == 0.25
+    assert motion["acceleration_scaling"] == 0.15
 
 
 def test_native_grasp_paused_launch_gives_runtime_a_bounded_detach_window() -> None:
     config = NativePickPlaceConfig()
     launch = (
-        config.ros_workspace
-        / "src"
-        / config.ros_package_name
-        / "launch/gazebo_pickplace.launch.py"
+        config.ros_workspace / "src" / config.ros_package_name / "launch/gazebo_pickplace.launch.py"
     ).read_text(encoding="utf-8")
 
     assert 'switch_timeout = ["--switch-timeout", "30.0"]' in launch
@@ -431,7 +483,10 @@ def test_native_grasp_target_pose_contract_is_a_single_link_at_the_model_origin(
     root = ET.parse(world_path).getroot()
     target = root.find(f".//model[@name='{config.target_id}']")
     assert target is not None
-    assert tuple(float(value) for value in target.findtext("pose", "").split()[:3]) == config.target_initial_xyz
+    assert (
+        tuple(float(value) for value in target.findtext("pose", "").split()[:3])
+        == config.target_initial_xyz
+    )
     links = target.findall("link")
     assert [link.get("name") for link in links] == [config.target_link]
     assert links[0].find("pose") is None

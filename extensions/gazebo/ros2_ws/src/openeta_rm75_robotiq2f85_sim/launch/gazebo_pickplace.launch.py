@@ -44,7 +44,10 @@ for _directory in (Path(get_package_share_directory("openeta_rm75_robotiq2f85_si
     if str(_directory) not in sys.path:
         sys.path.insert(0, str(_directory))
 from detachable_sdf import render_detachable_sdf  # noqa: E402
-from acceptance_scene_world import render_acceptance_world  # noqa: E402
+from acceptance_scene_world import (  # noqa: E402
+    compile_authoritative_scene,
+    materialize_authoritative_scene,
+)
 
 
 def _after_success(target, actions, label):
@@ -97,13 +100,14 @@ def generate_launch_description():
     )
     generated_sdfs = []
     canonical_world = share / "worlds/rm75_robotiq2f85_pickplace.sdf"
-    selected_world, acceptance_scene = render_acceptance_world(
+    authoritative_scene = compile_authoritative_scene(
         base_world=canonical_world,
         catalog_path=share / "config/acceptance_scenes.json",
-        environment=os.environ,
+        scene_id=str(os.environ.get("OPENETA_ACCEPTANCE_SCENE") or "normal").strip(),
     )
-    if selected_world != canonical_world:
-        generated_sdfs.append(selected_world)
+    selected_world = materialize_authoritative_scene(authoritative_scene)
+    acceptance_scene = authoritative_scene.world_scene
+    generated_sdfs.append(selected_world)
     # Deliberately omit -r: Gazebo starts paused.  GazeboRuntime sends and
     # confirms the initial detach before it calls world control pause:false.
     gz_launch = IncludeLaunchDescription(
@@ -128,12 +132,9 @@ def generate_launch_description():
         parameters=[{
             "use_sim_time": True,
             "allow_stalling": True,
-            "drive_mode": "four_bar",
-            # Native pad contact freezes each side before a light workpiece can
-            # be pushed over.  Keep only a small bounded closing preload after
-            # the freeze; grasp admission remains the independent post-action
-            # bilateral-contact + attach-ACK gate in DirectEnv.
-            "stall_hold_extra_rad": 0.01,
+            # One common driver produces the complete four-bar target vector.
+            # Contact changes only its rate/lead; grasp admission remains the
+            # independent bilateral-contact + attach-ACK gate in DirectEnv.
             "target_model_name": "target_object",
         }],
     )
@@ -151,6 +152,13 @@ def generate_launch_description():
     return LaunchDescription([
         LogInfo(msg=f"OpenETA qualification solver profile: {solver_profile}"),
         LogInfo(msg=f"OpenETA acceptance scene: {acceptance_scene}"),
+        LogInfo(
+            msg=(
+                "OpenETA authoritative scene: "
+                f"{authoritative_scene.authority_sha256} "
+                f"({len(authoritative_scene.objects)} MoveIt objects)"
+            )
+        ),
         SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", os.pathsep.join([str(share.parent), str(description_share.parent), os.environ.get("GZ_SIM_RESOURCE_PATH", "")])),
         gz_launch, rsp, spawn, RegisterEventHandler(OnShutdown(on_shutdown=_unlink_generated_sdf(generated_sdfs))),
         _after_success(jsb, [arm], "joint_state_broadcaster activation"),
