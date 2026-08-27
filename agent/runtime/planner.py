@@ -7676,11 +7676,9 @@ def _placement_motion_guidance(
         "target_pose": next_pose,
         "tolerance": 0.002,
         "ori_tolerance": 0.05,
-        # Load-state profile: faster than the legacy 0.2/0.1 setting while
-        # remaining below the unloaded contact move. MoveIt still owns time
-        # parameterization and the runtime proves the exact terminal state.
-        "velocity_scaling": 0.25,
-        "acceleration_scaling": 0.15,
+        # The controller owns the physical load-state profile. Keeping speed
+        # out of the planner obligation also preserves the exact profile used
+        # by the L5 plan-only proof and its single-use trajectory cache.
         "enable_collision_check": True,
     }
     return {

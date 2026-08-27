@@ -653,6 +653,51 @@ def test_ready_placement_release_suppresses_motion_and_exclusively_requires_open
     )
 
 
+def test_placement_motion_defers_load_profile_to_controller() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "grasp_execution",
+        {"status": "completed", "stage": "attached", "candidate_id": "grasp-1"},
+        source="test",
+    )
+    memory.save_fact(
+        "attachment_gate",
+        {"status": "resolved", "verdict": "PASS", "candidate_id": "grasp-1"},
+        source="test",
+    )
+    memory.save_fact(
+        "placement_candidate_policy",
+        {
+            "status": "active",
+            "active_candidate_id": "place-1",
+            "compiled_placement": {
+                "release_pose": {
+                    "frame": "world",
+                    "purpose": "placement",
+                    "placement_stage": "release",
+                    "placement_candidate_id": "place-1",
+                    "xyz": [0.2, -0.1, 0.4],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            },
+        },
+        source="test",
+    )
+
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=build_default_tool_registry(),
+        skills=build_default_skill_registry(),
+    )
+
+    parameters = context["placement_motion_guidance"]["required_parameters"]
+    assert parameters["target_pose"]["placement_stage"] == "release"
+    assert "velocity_scaling" not in parameters
+    assert "acceleration_scaling" not in parameters
+
+
 def test_host_macro_profile_fails_closed_without_calling_model() -> None:
     memory = AgentMemory()
     memory.start_session(
