@@ -2446,10 +2446,17 @@ class _RosRuntime:
                     client.wait_for_service(timeout_sec=min(0.2, remaining)) for client in services
                 ):
                     continue
-                request = self.controller_service_type.Request()
-                response = self._await(
-                    self.controller_list_client.call_async(request), min(0.5, remaining)
-                )
+                try:
+                    request = self.controller_service_type.Request()
+                    response = self._await(
+                        self.controller_list_client.call_async(request), min(0.5, remaining)
+                    )
+                except TimeoutError:
+                    # Service discovery can precede a usable response while
+                    # Gazebo and MoveIt are still starting under load.  A
+                    # short readiness probe timing out is not the terminal
+                    # startup deadline; keep polling within that one budget.
+                    continue
                 states = {item.name: item.state for item in response.controller}
                 required = {
                     "joint_state_broadcaster",
@@ -2462,10 +2469,13 @@ class _RosRuntime:
                     continue
                 parameter_request = self.controller_parameter_service_type.Request()
                 parameter_request.names = ["enforce_command_limits"]
-                parameter_response = self._await(
-                    self.controller_parameter_client.call_async(parameter_request),
-                    min(0.5, remaining),
-                )
+                try:
+                    parameter_response = self._await(
+                        self.controller_parameter_client.call_async(parameter_request),
+                        min(0.5, remaining),
+                    )
+                except TimeoutError:
+                    continue
                 if (
                     len(parameter_response.values) != 1
                     or parameter_response.values[0].bool_value is not True
@@ -2487,6 +2497,10 @@ class _RosRuntime:
             while not future.done() and time.monotonic() < deadline:
                 time.sleep(0.01)
             if not future.done():
+                try:
+                    future.cancel()
+                except Exception:
+                    pass
                 raise TimeoutError
             error = future.exception()
             if error is not None:

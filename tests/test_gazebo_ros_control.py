@@ -960,6 +960,26 @@ def test_runtime_readiness_requires_limits_trajectory_and_state_validity() -> No
         _readiness_runtime(command_limits=False).wait_ready(0.001)
 
 
+def test_runtime_readiness_retries_a_transient_service_response_timeout() -> None:
+    runtime = _readiness_runtime(command_limits=True)
+    parameter_response = runtime.controller_parameter_client.response
+    parameter_attempts = 0
+
+    def await_response(future, _timeout_s):
+        nonlocal parameter_attempts
+        if future is parameter_response:
+            parameter_attempts += 1
+            if parameter_attempts == 1:
+                raise TimeoutError
+        return future
+
+    runtime._await = await_response
+
+    runtime.wait_ready(0.1)
+
+    assert parameter_attempts == 2
+
+
 def _arm_state(joint_3: float):
     positions = [0.0] * len(JOINT_NAMES)
     positions[2] = joint_3
