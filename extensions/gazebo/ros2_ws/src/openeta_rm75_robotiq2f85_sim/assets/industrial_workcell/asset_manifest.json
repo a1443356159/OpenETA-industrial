@@ -30,7 +30,7 @@
   },
   "generated_sha256": {
     "adjustable_wrench.glb": "120030e19a88d0c2fd063a98c281387fbae04b97a0a8707e4569b90a88ceaf21",
-    "adjustable_wrench.mtl": "88e0c24d04b9e8adfff94cb23ed2e9cb797266d29bea0f530f83a4d879d4c90b",
+    "adjustable_wrench.mtl": "70a5f8c6d359a1d55b532cc162fe57d5aafde1c5a5adda8c62a13490291c9fce",
     "adjustable_wrench.obj": "0b8819543088de836451dc2974c0a13d3e45247d5fd83822102ab98f9525a76c",
     "allen_key.glb": "10872b191c44043825ba6d89331d1c4bd128856da16563fb6b8d11179b8118f9",
     "allen_key.mtl": "aa6b808c9b0e572398f80d2896c1cfe1b6163eb10a4b5a0999e7eff4de6351d8",
@@ -46,10 +46,10 @@
     "hex_bolt_24mm.obj": "91169076a1a2a1557598119dfd65ed99bfb042566e5eab46f964c2a0b559e475",
     "picking_bin.glb": "623f11b0ba68357bcb17f316ecfec81b42eae4c171aa8ecf296faf833781cd44",
     "pliers.glb": "4e64fb43599ad6246887149f907a8197d7307c70f6b441428c98fc0b1bb3fe8a",
-    "pliers.mtl": "742ef0501e0164d3d088fcd6dd529e9b2df54a3519fe09bb7c27c5d62b822b2d",
+    "pliers.mtl": "4b201889d46f5f8c2778cc3b0912ed5ae9b8d8a36aa4d241b65ff9130a43bcfe",
     "pliers.obj": "686711a9f15e66c537d1ee64f0df63344cbeef67051508269c38b10bb039edfb",
     "screwdriver.glb": "faa72852ca042f6e84c9b22305ea8295f45cdddf2bfd9a09bf276ef1285baf4a",
-    "screwdriver.mtl": "f31d3700204d10a12cd4e95b8bed7f1d2c406afb082549999448ff46fd83936e",
+    "screwdriver.mtl": "af855259cb6760ab1ffeb02a68825ff2a73c747eaf3a96ff87dc0cbf3f9d0c8a",
     "screwdriver.obj": "fd58e657b30d804f1dc447d7cf3cec6532dff8055b563facdcfad23dcc9a9e81"
   },
   "collision_policy": "high-resolution visual meshes plus low-complexity compound primitive proxies"

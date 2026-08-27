@@ -139,13 +139,15 @@ def _write_colored_obj(
     with material_path.open("w", encoding="ascii", newline="\n") as stream:
         stream.write("# Deterministically converted STARS face materials.\n")
         for index, color in enumerate(sorted(groups)):
+            if index:
+                stream.write("\n")
             r, g, b, a = (channel / 255.0 for channel in color)
             stream.write(f"newmtl face_{index:03d}\n")
             stream.write(f"Ka {r:.6f} {g:.6f} {b:.6f}\n")
             stream.write(f"Kd {r:.6f} {g:.6f} {b:.6f}\n")
             stream.write("Ks 0.180000 0.180000 0.180000\n")
             stream.write("Ns 48.000000\n")
-            stream.write(f"d {a:.6f}\n\n")
+            stream.write(f"d {a:.6f}\n")
     with output.open("w", encoding="ascii", newline="\n") as stream:
         stream.write("# OpenETA offline industrial visual mesh; units: metres.\n")
         stream.write(f"mtllib {material_path.name}\n")
