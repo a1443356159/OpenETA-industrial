@@ -529,8 +529,21 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
 ) -> None:
     calls: list[dict[str, Any]] = []
 
-    def pass_stage(*, contact: bool = False) -> dict[str, Any]:
+    def pass_stage(
+        *,
+        contact: bool = False,
+        joint_margin: float = 0.05,
+        min_singular_value: float = 0.05,
+        joint_travel: float = 0.5,
+    ) -> dict[str, Any]:
         stage = _pass_stage()
+        stage.update(
+            {
+                "joint_margin": joint_margin,
+                "min_singular_value": min_singular_value,
+                "joint_travel": joint_travel,
+            }
+        )
         if contact:
             stage.update(
                 {
@@ -572,7 +585,16 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
                 "execution_started": False,
                 "verdict": "PASS" if passed else "FAIL",
                 "reason": "qualified" if passed else "no_pair_solution",
-                "stages": [pass_stage(contact=purpose == "grasp")] if passed else [],
+                "stages": [
+                    pass_stage(
+                        contact=purpose == "grasp",
+                        joint_margin=0.20 if candidate_id == "g2" else 0.05,
+                        min_singular_value=0.20 if candidate_id == "g2" else 0.05,
+                        joint_travel=0.20 if candidate_id == "g2" else 0.50,
+                    )
+                ]
+                if passed
+                else [],
                 "endpoint_pass": passed,
                 "full_plan_submitted": passed,
             }
@@ -635,7 +657,15 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
         proofs={
             grasp["id"]: {
                 "verdict": "PASS",
-                "stages": [pass_stage(contact=True)],
+                "endpoint_pass": True,
+                "stages": [
+                    pass_stage(
+                        contact=True,
+                        joint_margin=0.05,
+                        min_singular_value=0.05,
+                        joint_travel=0.50,
+                    )
+                ],
             }
             for grasp in initial_grasps
         },
@@ -677,8 +707,8 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
     )
 
     assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == [
-        "g0",
         "g2",
+        "g0",
     ]
     assert result.details["frozen_pair_execution_target"] == 1
     assert result.details["frozen_pair_backup_target"] == 1

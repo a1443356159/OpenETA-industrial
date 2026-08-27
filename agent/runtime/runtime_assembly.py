@@ -30,6 +30,7 @@ from agent.runtime.moveit_qualification import (
     private_qualification_rpc,
 )
 from agent.runtime.qualification_v3 import (
+    candidate_physical_quality_key,
     grasp_symmetry_family_id,
     parallel_gripper_centering_quality,
 )
@@ -1902,6 +1903,19 @@ class _FrozenGoalPairCoordinator:
         goal_pool_exhausted = False
         backup_parent_priority_count = 0
 
+        def retained_quality_order() -> list[str]:
+            """Rank complete branches across every frozen-frontier batch."""
+
+            return sorted(
+                retained,
+                key=lambda grasp_id: (
+                    *candidate_physical_quality_key(
+                        retained_proofs.get(grasp_id, retained[grasp_id])
+                    ),
+                    grasp_id,
+                ),
+            )
+
         while True:
             batch_input_grasps = current.details.get("grasp_candidates")
             batch_input_grasps = (
@@ -1972,7 +1986,7 @@ class _FrozenGoalPairCoordinator:
                     retained_goals[grasp_id] = json.loads(json.dumps(goals))
 
             if len(retained) >= target:
-                selected_ids = set(list(retained)[:target])
+                selected_ids = set(retained_quality_order()[:target])
                 known_frontier_ids = {
                     str(candidate.get("id") or "")
                     for candidate in self.grasp_frontier_candidates
@@ -2056,7 +2070,7 @@ class _FrozenGoalPairCoordinator:
                     },
                 )
 
-        final_grasps = list(retained.values())[:target]
+        final_grasps = [retained[grasp_id] for grasp_id in retained_quality_order()[:target]]
         for frontier_rank, grasp in enumerate(final_grasps):
             grasp["grasp_place_frontier_quality_rank"] = frontier_rank
         final_ids = [str(grasp.get("id") or "") for grasp in final_grasps]
