@@ -25,10 +25,13 @@ the host proves exact geometry and MoveIt owns robot paths.
 
 ## Normal flow
 
-1. In a combined pick-place task, segment/select the target object and
-   destination region once, each from a complete calibrated RGB-D packet. The
-   host calls AnyPlace once and retains all 96 returned object goals. Do not
-   expose them to the VLM as motion waypoints.
+1. In a combined pick-place task, segment/select the target object and the
+   actual support surface inside the destination once, each from a complete
+   calibrated RGB-D packet. For a receptacle, describe its flat bottom rather
+   than the whole bin, rim, or side walls. The host then isolates a dominant
+   horizontal support layer from calibrated depth before calling AnyPlace once
+   and retaining all 96 returned object goals. Do not expose them to the VLM as
+   motion waypoints.
 2. Before IK, the host evaluates each AnyPlace goal exactly once for finite
    SE(3), valid rotation, full footprint inside the placement region, legal
    support/height/bounds, no static-scene penetration, and mathematically

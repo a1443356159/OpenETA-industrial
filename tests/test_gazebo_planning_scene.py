@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from extensions.gazebo.planning_scene import (
+    CollisionBody,
     CollisionBox,
+    CollisionPrimitive,
     PlanningSceneError,
     PlanningSceneSynchronizer,
     TARGET_TOUCH_LINKS,
@@ -61,10 +63,9 @@ def test_planning_scene_reset_and_attach_detach_switch() -> None:
     scene = PlanningSceneSynchronizer(apply)
     table, distractor, target = _boxes()
     assert scene.reset(table=table, distractor=distractor, target=target) == 1
-    assert calls[0]["allowed_collisions"]["target"] == [
-        *TARGET_TOUCH_LINKS,
-        "table",
-    ]
+    # Before native attach, MoveIt must reject any route whose open gripper
+    # sweeps through the target.  Only the real support contact is allowed.
+    assert calls[0]["allowed_collisions"]["target"] == ["table"]
     assert scene.attach_target(target=target, relative_pose_xyz=(0.0, 0.0, -0.04)) == 2
     assert scene.world_ids == {"table", "distractor"}
     assert scene.attached_ids == {"target"}
@@ -74,6 +75,33 @@ def test_planning_scene_reset_and_attach_detach_switch() -> None:
     assert "remove_world_ids" not in calls[1]
     assert scene.detach_target(target=target) == 3
     assert scene.world_ids == {"table", "distractor", "target"}
+
+
+def test_planning_scene_allows_only_the_fixed_robot_support_contact() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        return {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
+    table, distractor, target = _boxes()
+
+    scene.reset(
+        table=table,
+        distractor=distractor,
+        target=target,
+        robot_support_link="base_link",
+    )
+
+    assert calls[0]["allowed_collisions"] == {
+        "target": ["table"],
+        "table": ["base_link"],
+    }
 
 
 def test_planning_scene_preserves_acceptance_obstacles_across_attachment() -> None:
@@ -124,6 +152,54 @@ def test_planning_scene_can_replace_default_distractor_with_industrial_parts() -
         "blue_handle_pliers",
     }
     assert "distractor" not in scene.world_ids
+
+
+def test_planning_scene_preserves_compound_target_geometry_across_lifecycle() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        operation = diff["operation"]
+        if operation == "reset":
+            return {"applied": True, "world_ids": ["table", "target"], "attached_ids": []}
+        if operation == "attach":
+            return {"applied": True, "world_ids": ["table"], "attached_ids": ["target"]}
+        return {"applied": True, "world_ids": ["table", "target"], "attached_ids": []}
+
+    table, _, _ = _boxes()
+    target = CollisionBody(
+        "target",
+        (0.22, 0.062, 0.030),
+        (0.29, -0.105, 0.015),
+        (0.0, 0.0, 0.0, 1.0),
+        (
+            CollisionPrimitive(
+                "box",
+                (-0.025, 0.0, -0.002),
+                (0.0, 0.0, 0.0, 1.0),
+                size_xyz=(0.165, 0.025, 0.026),
+            ),
+            CollisionPrimitive(
+                "box",
+                (0.080, 0.0, 0.0),
+                (0.0, 0.0, 0.0, 1.0),
+                size_xyz=(0.055, 0.062, 0.030),
+            ),
+        ),
+    )
+
+    scene = PlanningSceneSynchronizer(apply)
+    scene.reset(table=table, target=target)
+    scene.attach_target(target=target, relative_pose_xyz=(0.0, 0.0, 0.16))
+    scene.detach_target(target=target)
+
+    reset_target = calls[0]["world_objects"][1]
+    attached_target = calls[1]["attached_objects"][0]
+    detached_target = calls[2]["world_objects"][0]
+    assert reset_target["shape"] == "compound"
+    assert len(reset_target["primitives"]) == 2
+    assert attached_target["primitives"] == reset_target["primitives"]
+    assert detached_target["primitives"] == reset_target["primitives"]
 
 
 def test_planning_scene_rejects_duplicate_acceptance_obstacle_identity() -> None:
@@ -202,6 +278,32 @@ def test_planning_scene_updates_detached_target_pose_with_new_revision() -> None
         "operation": "update_world_target",
         "world_objects": [moved_target.to_dict()],
     }
+
+
+def test_planning_scene_target_pose_sync_is_idempotent_with_native_noise() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        return {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
+    table, distractor, target = _boxes()
+    assert scene.reset(table=table, distractor=distractor, target=target) == 1
+    native_readback = CollisionBox(
+        target.object_id,
+        target.size_xyz,
+        (target.pose_xyz[0] + 5e-7, *target.pose_xyz[1:]),
+        tuple(-value for value in target.pose_quat_xyzw),
+    )
+
+    assert scene.update_world_target(target=native_readback) == 1
+    assert scene.revision == 1
+    assert len(calls) == 1
 
 
 def test_planning_scene_rejects_world_pose_update_while_target_is_attached() -> None:

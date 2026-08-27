@@ -4,7 +4,60 @@
     "normal": {
       "world_scene": "normal",
       "seed": 0,
-      "description": "Baseline open-table pick and place.",
+      "description": "Industrial workcell: sort the yellow adjustable wrench into the green physical parts bin among six realistic distractors.",
+      "canonical_world_complete": true,
+      "task": {
+        "target_prompt": "yellow adjustable wrench",
+        "placement_object_prompt": "yellow adjustable wrench",
+        "placement_region_prompt": "flat green bottom support surface inside physical parts bin",
+        "operator_instruction": "请把工作台上的黄色活动扳手放进绿色零件箱，其他物件不要动。"
+      },
+      "target_object": {
+        "shape_class": "adjustable_wrench",
+        "bounding_box_xyz": [0.22, 0.062, 0.030],
+        "mass_kg": 0.30,
+        "pose_xyz": [0.29, -0.105, 0.015],
+        "pose_rpy": [0.0, 0.0, 0.16],
+        "primitives": [
+          {"shape": "box", "size_xyz": [0.165, 0.025, 0.026], "pose_xyz": [-0.025, 0.0, -0.002], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.92, 0.68, 0.08, 1.0]},
+          {"shape": "box", "size_xyz": [0.055, 0.062, 0.030], "pose_xyz": [0.080, 0.0, 0.0], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.92, 0.68, 0.08, 1.0]}
+        ]
+      },
+      "placement_regions": [
+        {
+          "id": "green_parts_bin",
+          "prompt": "flat green bottom support surface inside physical parts bin",
+          "center_xy": [0.62, 0.180],
+          "size_xy_m": [0.285, 0.275],
+          "support_z_m": 0.020,
+          "acceptance_semantics": "stable_geometry_centroid_inside",
+          "rgba": [0.035, 0.70, 0.16, 1.0],
+          "selected": true
+        },
+        {
+          "id": "blue_parts_bin",
+          "prompt": "flat blue bottom support surface inside physical parts bin",
+          "center_xy": [0.62, -0.180],
+          "size_xy_m": [0.285, 0.275],
+          "support_z_m": 0.020,
+          "acceptance_semantics": "stable_geometry_centroid_inside",
+          "rgba": [0.035, 0.25, 0.88, 1.0],
+          "selected": false
+        }
+      ],
+      "planning_scene_obstacles": [
+        {"id": "green_bin_side_left", "size_xyz": [0.34, 0.016, 0.18], "pose_xyz": [0.62, 0.332, 0.09], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.035, 0.62, 0.14, 1.0]},
+        {"id": "green_bin_side_right", "size_xyz": [0.34, 0.016, 0.18], "pose_xyz": [0.62, 0.028, 0.09], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.035, 0.62, 0.14, 1.0]},
+        {"id": "green_bin_rear", "size_xyz": [0.016, 0.32, 0.18], "pose_xyz": [0.782, 0.180, 0.09], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.035, 0.62, 0.14, 1.0]},
+        {"id": "blue_bin_side_left", "size_xyz": [0.34, 0.016, 0.18], "pose_xyz": [0.62, -0.028, 0.09], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.035, 0.22, 0.72, 1.0]},
+        {"id": "blue_bin_side_right", "size_xyz": [0.34, 0.016, 0.18], "pose_xyz": [0.62, -0.332, 0.09], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.035, 0.22, 0.72, 1.0]},
+        {"id": "blue_bin_rear", "size_xyz": [0.016, 0.32, 0.18], "pose_xyz": [0.782, -0.180, 0.09], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.035, 0.22, 0.72, 1.0]},
+        {"id": "silver_box_wrench", "size_xyz": [0.19, 0.052, 0.018], "pose_xyz": [0.31, 0.105, 0.009], "pose_rpy": [0.0, 0.0, -0.18], "rgba": [0.76, 0.79, 0.83, 1.0]},
+        {"id": "red_m24_hex_bolt", "size_xyz": [0.117, 0.042, 0.042], "pose_xyz": [0.185, -0.285, 0.021], "pose_rpy": [0.0, 0.0, 0.12], "rgba": [0.84, 0.04, 0.025, 1.0]},
+        {"id": "orange_m20_socket_bolt", "size_xyz": [0.098, 0.034, 0.034], "pose_xyz": [0.36, -0.315, 0.017], "pose_rpy": [0.0, 0.0, -0.34], "rgba": [0.94, 0.25, 0.025, 1.0]},
+        {"id": "blue_black_screwdriver", "size_xyz": [0.18, 0.022, 0.020], "pose_xyz": [0.145, -0.39, 0.010], "pose_rpy": [0.0, 0.0, 0.05], "rgba": [0.035, 0.060, 0.14, 1.0]},
+        {"id": "silver_allen_key", "size_xyz": [0.16, 0.050, 0.011], "pose_xyz": [0.38, 0.35, 0.0055], "pose_rpy": [0.0, 0.0, 1.20], "rgba": [0.64, 0.68, 0.75, 1.0]}
+      ],
       "static_obstacles": []
     },
     "reject-first": {
@@ -56,7 +109,8 @@
       "task": {
         "target_prompt": "red object",
         "placement_object_prompt": "red object",
-        "placement_region_prompt": "blue square area inside bin"
+        "placement_region_prompt": "blue square area inside bin",
+        "operator_instruction": "请把工作台上的红色六角螺栓放进蓝色零件箱，其他物件不要动。"
       },
       "replace_default_distractor": true,
       "target_object": {
@@ -87,16 +141,18 @@
         {
           "id": "blue_parts_bin",
           "prompt": "blue square area inside bin",
-          "center_xy": [0.55, -0.12],
+          "center_xy": [0.43, -0.13],
           "size_xy_m": [0.18, 0.18],
+          "acceptance_semantics": "stable_geometry_centroid_inside",
           "rgba": [0.05, 0.28, 0.90, 0.95],
           "selected": true
         },
         {
           "id": "orange_parts_bin",
           "prompt": "orange square area inside bin",
-          "center_xy": [0.55, 0.12],
+          "center_xy": [0.43, 0.13],
           "size_xy_m": [0.18, 0.18],
+          "acceptance_semantics": "stable_geometry_centroid_inside",
           "rgba": [0.95, 0.33, 0.04, 0.95],
           "selected": false
         }
@@ -106,7 +162,7 @@
           "id": "yellow_open_end_wrench",
           "shape_class": "open_end_wrench",
           "size_xyz": [0.13, 0.055, 0.028],
-          "pose_xyz": [0.275, 0.115, 0.414],
+          "pose_xyz": [0.15, 0.20, 0.414],
           "pose_rpy": [0.0, 0.0, -0.30],
           "rgba": [0.95, 0.68, 0.05, 1.0],
           "primitives": [
@@ -119,7 +175,7 @@
           "id": "blue_handle_pliers",
           "shape_class": "combination_pliers",
           "size_xyz": [0.125, 0.060, 0.030],
-          "pose_xyz": [0.355, 0.015, 0.415],
+          "pose_xyz": [0.23, 0.06, 0.415],
           "pose_rpy": [0.0, 0.0, 0.72],
           "rgba": [0.04, 0.22, 0.78, 1.0],
           "primitives": [
@@ -128,14 +184,14 @@
             {"shape": "cylinder", "radius": 0.023, "length": 0.030, "pose_xyz": [0.025, 0.0, 0.0], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.38, 0.42, 0.48, 1.0]}
           ]
         },
-        {"id": "blue_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.454, -0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "blue_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.646, -0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "blue_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, -0.216, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "blue_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, -0.024, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.454, 0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.646, 0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, 0.024, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, 0.216, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
+        {"id": "blue_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "blue_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "blue_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "blue_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
       ]
     },
     "tool-bin-sort": {
@@ -145,14 +201,15 @@
       "task": {
         "target_prompt": "yellow open end tool",
         "placement_object_prompt": "yellow open end tool",
-        "placement_region_prompt": "green square area inside bin"
+        "placement_region_prompt": "green square area inside bin",
+        "operator_instruction": "请把工作台上的黄色开口扳手放进绿色工具箱，其他物件不要动。"
       },
       "replace_default_distractor": true,
       "target_object": {
         "shape_class": "open_end_wrench",
         "bounding_box_xyz": [0.13, 0.055, 0.036],
         "mass_kg": 0.20,
-        "pose_xyz": [0.255, -0.105, 0.418],
+        "pose_xyz": [0.23, -0.16, 0.418],
         "pose_rpy": [0.0, 0.0, 0.42],
         "primitives": [
           {"shape": "box", "size_xyz": [0.095, 0.024, 0.036], "pose_xyz": [-0.012, 0.0, 0.0], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.96, 0.68, 0.04, 1.0]},
@@ -161,15 +218,15 @@
         ]
       },
       "placement_regions": [
-        {"id": "purple_tool_bin", "prompt": "purple square area inside bin", "center_xy": [0.55, -0.12], "size_xy_m": [0.18, 0.18], "rgba": [0.48, 0.08, 0.72, 0.95], "selected": false},
-        {"id": "green_tool_bin", "prompt": "green square area inside bin", "center_xy": [0.55, 0.12], "size_xy_m": [0.18, 0.18], "rgba": [0.04, 0.62, 0.20, 0.95], "selected": true}
+        {"id": "purple_tool_bin", "prompt": "purple square area inside bin", "center_xy": [0.43, -0.13], "size_xy_m": [0.18, 0.18], "acceptance_semantics": "stable_geometry_centroid_inside", "rgba": [0.48, 0.08, 0.72, 0.95], "selected": false},
+        {"id": "green_tool_bin", "prompt": "green square area inside bin", "center_xy": [0.43, 0.13], "size_xy_m": [0.18, 0.18], "acceptance_semantics": "stable_geometry_centroid_inside", "rgba": [0.04, 0.62, 0.20, 0.95], "selected": true}
       ],
       "static_obstacles": [
         {
           "id": "silver_hex_bolt",
           "shape_class": "hex_bolt",
           "size_xyz": [0.11, 0.046, 0.046],
-          "pose_xyz": [0.245, 0.095, 0.423],
+          "pose_xyz": [0.17, 0.16, 0.423],
           "pose_rpy": [0.0, 0.0, -0.38],
           "rgba": [0.70, 0.74, 0.80, 1.0],
           "primitives": [
@@ -181,7 +238,7 @@
           "id": "blue_handle_pliers_tool_scene",
           "shape_class": "combination_pliers",
           "size_xyz": [0.125, 0.060, 0.030],
-          "pose_xyz": [0.355, 0.015, 0.415],
+          "pose_xyz": [0.15, -0.02, 0.415],
           "pose_rpy": [0.0, 0.0, 0.78],
           "rgba": [0.04, 0.22, 0.78, 1.0],
           "primitives": [
@@ -194,7 +251,7 @@
           "id": "red_screwdriver",
           "shape_class": "screwdriver",
           "size_xyz": [0.12, 0.035, 0.035],
-          "pose_xyz": [0.335, -0.005, 0.4175],
+          "pose_xyz": [0.27, 0.06, 0.4175],
           "pose_rpy": [0.0, 0.0, -0.65],
           "rgba": [0.86, 0.05, 0.04, 1.0],
           "primitives": [
@@ -202,14 +259,14 @@
             {"shape": "cylinder", "radius": 0.006, "length": 0.060, "pose_xyz": [0.0375, 0.0, 0.0], "pose_rpy": [0.0, 1.57079632679, 0.0], "rgba": [0.72, 0.75, 0.80, 1.0]}
           ]
         },
-        {"id": "purple_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.454, -0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "purple_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.646, -0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "purple_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, -0.216, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "purple_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, -0.024, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.454, 0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.646, 0.12, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, 0.024, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.55, 0.216, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
+        {"id": "purple_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "purple_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "purple_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "purple_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
       ]
     }
   }

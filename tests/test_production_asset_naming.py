@@ -36,8 +36,6 @@ def _is_acceptance_asset(path: Path) -> bool:
         or name.startswith("test_")
         or name.startswith("run_m")
         or name.startswith("cloud_m")
-        or name.startswith("m2_smoke_")
-        or name == "tui_gazebo_acceptance.py"
     )
 
 

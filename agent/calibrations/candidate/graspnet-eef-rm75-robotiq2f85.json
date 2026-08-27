@@ -21,13 +21,19 @@
       [1.0, 0.0, 0.0],
       [0.0, 1.0, 0.0]
     ],
-    "translation_xyz": [-0.006, 0.0, 0.0]
+    "translation_xyz": [-0.0065, 0.0, 0.0]
   },
   "provenance": {
-    "calibrated_on": "2026-08-19",
+    "calibrated_on": "2026-08-27",
     "task": "Gazebo RM75 Robotiq 2F-85 constraint-correct placement",
-    "method": "Official GraspGenX Robotiq native +Z approach/+X closing frame mapped rigidly to the RM75 mount +Z approach/+X closing frame",
-    "grasp_origin_note": "The normalized GraspNet +X/+Y/+Z axes are approach/closing/binormal. The official pose origin is the Robotiq base, 6 mm forward of gripper_mount_link; gripper_tip_position_xyz remains separate contact evidence.",
+    "method": "Rigid frame/TCP calibration matching the official GraspGenX Robotiq open collision envelope to the vendored Gazebo Robotiq open collision envelope",
+    "grasp_origin_note": "The normalized GraspNet +X/+Y/+Z axes are approach/closing/binormal. The official pose origin is the GraspGenX Robotiq base. Gazebo's Robotiq base joint is 6 mm forward of link_7; the additional 0.5 mm is a fixed mesh-envelope registration term, not a task or candidate offset. gripper_tip_position_xyz remains separate contact evidence.",
+    "model_native_open_collision_extent_m": 0.149074,
+    "gazebo_native_open_collision_extent_m": 0.149345541,
+    "link7_to_gazebo_native_base_m": 0.006,
+    "model_base_to_link7_m": 0.0065,
+    "registered_leading_envelope_reserve_m": 0.000228459,
+    "registration_note": "At the declared transform the Gazebo leading collision surface is 0.228459 mm behind the GraspGenX collision envelope, covering mesh discretization while preserving the model terminal pose.",
     "orientation_policy": "Preserve every candidate rotation; no fixed wrist orientation or pose preview is permitted."
   },
   "candidate_status": {

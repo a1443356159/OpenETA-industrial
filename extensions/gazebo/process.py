@@ -426,6 +426,7 @@ class GazeboDetachableJointControl:
         self.child_link = child_link
         self._state = DetachableJointState.UNKNOWN
         self._baseline: tuple[float, tuple[float, float, float]] | None = None
+        self._last_native_pose_read_attempt_count = 0
 
     @property
     def state(self) -> str:
@@ -695,7 +696,7 @@ class GazeboDetachableJointControl:
 
     def capture_baseline(
         self, *, settle_duration_s: float = 0.10, sample_interval_s: float = 0.02
-    ) -> None:
+    ) -> int:
         """Record the settled native child-link state after an attach ACK.
 
         Gazebo acknowledges a detachable joint before the next physics tick has
@@ -712,14 +713,18 @@ class GazeboDetachableJointControl:
         if settle_duration_s < 0.0 or sample_interval_s <= 0.0:
             raise ValueError("attachment baseline settling values are invalid")
         deadline = time.monotonic() + settle_duration_s
-        child, parent = self.native_target_mount_poses()
+        child, parent, pose_read_attempt_count = (
+            self.native_target_mount_poses_with_retry()
+        )
         while time.monotonic() < deadline:
             time.sleep(min(sample_interval_s, max(0.0, deadline - time.monotonic())))
-            child, parent = self.native_target_mount_poses()
+            child, parent, attempts = self.native_target_mount_poses_with_retry()
+            pose_read_attempt_count += attempts
         self._baseline = (
             child.xyz[2],
             _relative_translation(child=child, parent=parent),
         )
+        return pose_read_attempt_count
 
     def native_target_mount_positions(
         self,
@@ -753,6 +758,36 @@ class GazeboDetachableJointControl:
             poses, self.parent_link
         )
 
+    def native_target_mount_poses_with_retry(
+        self,
+        *,
+        max_attempts: int = 2,
+    ) -> tuple[GazeboNativePose, GazeboNativePose, int]:
+        """Read a fresh native pose frame with one bounded transport retry.
+
+        The detachable-joint ACK is emitted at the command transition while the
+        independent ``Pose_V`` stream advances on a physics update.  The first
+        frame after a valid ACK can therefore be incomplete.  Consume at most
+        one additional fresh frame for that exact infrastructure condition; do
+        not turn malformed geometry or arbitrary exceptions into retries.
+        """
+
+        if isinstance(max_attempts, bool) or max_attempts < 1:
+            raise ValueError("native pose max_attempts must be a positive integer")
+        self._last_native_pose_read_attempt_count = 0
+        for attempt in range(1, int(max_attempts) + 1):
+            self._last_native_pose_read_attempt_count = attempt
+            try:
+                child, parent = self.native_target_mount_poses()
+                return child, parent, attempt
+            except GazeboProcessError as exc:
+                if (
+                    str(exc) != "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
+                    or attempt >= max_attempts
+                ):
+                    raise
+        raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
+
     def sample_detached_target_poses(
         self,
         *,
@@ -769,7 +804,14 @@ class GazeboDetachableJointControl:
 
         samples: list[PlacementPoseSample] = []
         while True:
-            target, _ = self.native_target_mount_poses()
+            # Detach ACK and the first following Pose_V publication are two
+            # independent Gazebo transports.  Reuse the same one-retry bound
+            # as attach snapshots so one incomplete fresh frame cannot turn a
+            # successful physical release into a false infrastructure error.
+            # Every stability sample still comes from native Gazebo state.
+            target, _, _ = self.native_target_mount_poses_with_retry(
+                max_attempts=2
+            )
             sampled_s = time.monotonic()
             samples.append(
                 PlacementPoseSample(
@@ -805,7 +847,7 @@ class GazeboDetachableJointControl:
 
 
 class GazeboNativeContactWindow:
-    """Collect only raw Gazebo contact messages for an armed native-grasp close."""
+    """Collect raw Gazebo contacts and prove the terminal close hold."""
 
     def __init__(
         self,
@@ -887,48 +929,101 @@ class GazeboNativeContactWindow:
             self.close()
             raise GazeboProcessError("NATIVE_GRASP_NATIVE_CONTACT_UNAVAILABLE") from exc
 
-    def begin_post_close(self) -> None:
-        """Discard pre-close transport backlog while preserving subscriptions."""
-
+    def evaluate(self, *, close_completed_sim_time_s: float | None, config=None):
+        from .native_grasp import (
+            ContactGateResult,
+            NativePickPlaceConfig,
+            ReasonCode,
+            confirm_native_bilateral_contact,
+        )
         if not self._armed:
             raise GazeboProcessError("NATIVE_GRASP_CONTACT_WINDOW_NOT_ARMED")
-        with self._lock:
-            self._samples.clear()
-
-    def evaluate(self, *, close_completed_sim_time_s: float | None, config=None):
-        from .native_grasp import NativePickPlaceConfig, ReasonCode, confirm_native_bilateral_contact
         cfg = config or NativePickPlaceConfig()
+        if (
+            close_completed_sim_time_s is None
+            or not math.isfinite(close_completed_sim_time_s)
+        ):
+            return confirm_native_bilateral_contact(
+                (),
+                verification_window_started_sim_time_s=None,
+                now_monotonic_s=time.monotonic(),
+                config=cfg,
+            )
+        terminal_window_end = close_completed_sim_time_s
+        post_close_hold_end = (
+            close_completed_sim_time_s + cfg.contact_post_close_hold_s
+        )
         deadline = time.monotonic() + self.timeout_s
-        result = None
-        while time.monotonic() < deadline:
+        while True:
             now = time.monotonic()
             with self._lock:
-                # ``gz topic -e`` may still have pre-close messages buffered
-                # in its stdout pipe when ``begin_post_close`` clears the
-                # parsed list.  Those messages can arrive in the reader
-                # thread after the clear.  Keep that transport backlog out of
-                # the verifier, which must continue to reject any stale or
-                # pre-close sample it is actually asked to judge.
-                if close_completed_sim_time_s is not None:
-                    self._samples[:] = [
-                        sample for sample in self._samples
-                        if sample.timestamp_s > close_completed_sim_time_s
-                        and now - sample.received_monotonic_s <= cfg.contact_freshness_s
-                    ]
-                samples = tuple(self._samples)
+                latest_by_side = {
+                    side: max(
+                        (
+                            sample.timestamp_s
+                            for sample in self._samples
+                            if sample.side == side
+                        ),
+                        default=-math.inf,
+                    )
+                    for side in ("left", "right")
+                }
+                if all(
+                    timestamp >= post_close_hold_end
+                    for timestamp in latest_by_side.values()
+                ):
+                    terminal_window_end = post_close_hold_end
+                terminal_window_start = (
+                    terminal_window_end - cfg.contact_terminal_lookback_s
+                )
+                # The simulator can stop publishing a static contact as soon
+                # as the action result is emitted.  Preserve the samples that
+                # already prove a sustained hold immediately before that
+                # result.  If both contact streams continue, extend only to
+                # the fixed post-close hold boundary.  Reader-thread transport
+                # lag is harmless because Gazebo time defines membership.
+                samples = tuple(
+                    sample
+                    for sample in self._samples
+                    if terminal_window_start < sample.timestamp_s
+                    <= terminal_window_end
+                )
             result = confirm_native_bilateral_contact(
-                samples, close_completed_sim_time_s=close_completed_sim_time_s,
+                samples,
+                verification_window_started_sim_time_s=terminal_window_start,
+                verification_window_ended_sim_time_s=terminal_window_end,
                 now_monotonic_s=now, config=cfg,
+            )
+            post_close_hold_completed = terminal_window_end > close_completed_sim_time_s
+            evidence = {
+                **dict(result.evidence),
+                "proof_boundary": (
+                    "bounded_post_close_bilateral_hold"
+                    if post_close_hold_completed
+                    else "terminal_bilateral_hold_before_close_result"
+                ),
+                "close_completed_sim_time_s": close_completed_sim_time_s,
+                "verification_window_ended_sim_time_s": terminal_window_end,
+                "terminal_lookback_s": cfg.contact_terminal_lookback_s,
+                "post_close_hold_required_s": cfg.contact_post_close_hold_s,
+                "post_close_hold_completed": post_close_hold_completed,
+            }
+            result = ContactGateResult(
+                result.accepted,
+                result.reason_code,
+                result.left_sample_count,
+                result.right_sample_count,
+                result.left_span_s,
+                result.right_span_s,
+                evidence,
             )
             if result.accepted or result.reason_code not in {
                 ReasonCode.CONTACT_INSUFFICIENT_SAMPLES, ReasonCode.CONTACT_WINDOW_TOO_SHORT,
             }:
                 return result
+            if now >= deadline:
+                return result
             time.sleep(0.02)
-        return result or confirm_native_bilateral_contact(
-            (), close_completed_sim_time_s=close_completed_sim_time_s,
-            now_monotonic_s=time.monotonic(), config=cfg,
-        )
 
     def close(self) -> None:
         for process in self._processes:

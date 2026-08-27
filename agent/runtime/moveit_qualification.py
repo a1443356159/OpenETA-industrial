@@ -31,6 +31,7 @@ from agent.runtime.qualification_legality import (
 from agent.runtime.qualification_v3 import (
     FAST_ARTIFACT_SCHEMA,
     FAST_QUALIFICATION_SCHEMA,
+    JOINT_SOLUTION_DEDUP_DISTANCE,
     CandidateWave,
     candidate_physical_quality_key,
     deduplicate_beam_solutions,
@@ -40,6 +41,7 @@ from agent.runtime.qualification_v3 import (
     joint_limit_margin,
     latency_summary,
     normalized_joint_distance,
+    parallel_gripper_centering_evidence,
     frozen_pair_l5_submission_order,
     schedule_candidate_waves,
     select_grasp_branches,
@@ -61,17 +63,57 @@ PRIVATE_RPC_NAME = "qualify_motion_candidates"
 PLANNING_TIME_S = 30.0
 PLANNING_ATTEMPTS = 3
 KINEMATIC_IK_TIMEOUT_S = 2.0
-STATE_VALIDITY_TIMEOUT_S = 2.0
+# This is an infrastructure response deadline, not a solver/search budget.
+# Attached-object collision checks can briefly queue behind an eight-request
+# wave, so retain a bounded margin without turning service latency into a
+# false candidate rejection.
+STATE_VALIDITY_TIMEOUT_S = 5.0
 QUALIFICATION_RPC_GRACE_S = 30.0
 PROGRESSIVE_SCREENING_MODE = "progressive_until_full_plan_capacity"
 PROGRESSIVE_NOT_EVALUATED_REASON = "progressive_endpoint_capacity_reached"
-SAME_RUN_QUALIFICATION_SEED_FIELD = (
-    "_openeta_same_run_qualification_seed_evidence"
-)
-SAME_RUN_QUALIFICATION_SEED_SCHEMA = (
-    "openeta.same_run_qualification_seed_evidence.v1"
-)
+SAME_RUN_QUALIFICATION_SEED_FIELD = "_openeta_same_run_qualification_seed_evidence"
+SAME_RUN_QUALIFICATION_SEED_SCHEMA = "openeta.same_run_qualification_seed_evidence.v1"
 SAME_RUN_QUALIFICATION_SEED_PROVENANCE = "frozen_pair_l5_pass"
+
+
+def _contact_allowed_collisions(
+    scene: object,
+    target: Mapping[str, Any],
+) -> JsonDict:
+    """Return request-local target/touch-link exceptions for exact contact.
+
+    The world PlanningScene remains strict while the arm approaches.  Only the
+    contact endpoint and its plan-only proof receive this policy, so expected
+    target contact cannot be confused with table, fixture, or arm collision.
+    """
+
+    if target.get("grasp_stage") != "contact" or not isinstance(scene, Mapping):
+        return {}
+    target_id = str(scene.get("target_id") or "")
+    links = scene.get("target_touch_links")
+    if not target_id or not isinstance(links, (list, tuple)):
+        return {}
+    normalized = sorted({str(link) for link in links if str(link)})
+    return {target_id: normalized} if normalized else {}
+
+
+def _with_qualification_state_policy(
+    state: Mapping[str, Any],
+    *,
+    target: Mapping[str, Any],
+    scene_diff: Mapping[str, Any] | None,
+) -> JsonDict:
+    result = dict(state)
+    if scene_diff is not None:
+        result["qualification_scene_diff"] = dict(scene_diff)
+    allowed = target.get("qualification_allowed_collisions")
+    if isinstance(allowed, Mapping):
+        result["qualification_allowed_collisions"] = {
+            str(key): [str(value) for value in values]
+            for key, values in allowed.items()
+            if isinstance(values, (list, tuple))
+        }
+    return result
 
 
 def _hash(value: object) -> str:
@@ -80,9 +122,7 @@ def _hash(value: object) -> str:
     ).hexdigest()
 
 
-def _unique_joint_state_seeds(
-    values: Sequence[Mapping[str, Any]], *, limit: int
-) -> list[JsonDict]:
+def _unique_joint_state_seeds(values: Sequence[Mapping[str, Any]], *, limit: int) -> list[JsonDict]:
     seeds: list[JsonDict] = []
     identities: set[str] = set()
     for value in values:
@@ -132,6 +172,22 @@ def _sanitized_joint_state(value: object) -> JsonDict | None:
     }
 
 
+def _selected_ik_state_sha256(proof: Mapping[str, Any]) -> str:
+    """Return the exact first-stage IK state selected for L5 planning."""
+
+    stages = proof.get("stages")
+    if not isinstance(stages, list) or len(stages) != 1:
+        return ""
+    stage = stages[0]
+    if not isinstance(stage, Mapping):
+        return ""
+    recorded = stage.get("selected_ik_end_joint_state_sha256")
+    if isinstance(recorded, str) and recorded:
+        return recorded
+    state = _sanitized_joint_state(stage.get("end_joint_state"))
+    return _hash(state) if state is not None else ""
+
+
 def _same_run_seed_evidence(
     proof: Mapping[str, Any], *, source_candidate_id: str
 ) -> JsonDict | None:
@@ -150,17 +206,11 @@ def _same_run_seed_evidence(
     beam = first.get("beam_solutions")
     if isinstance(beam, list):
         for solution in beam:
-            state = (
-                solution.get("joint_state")
-                if isinstance(solution, Mapping)
-                else None
-            )
+            state = solution.get("joint_state") if isinstance(solution, Mapping) else None
             if isinstance(state, Mapping):
                 raw_states.append(state)
     sanitized = [
-        state
-        for value in raw_states
-        if (state := _sanitized_joint_state(value)) is not None
+        state for value in raw_states if (state := _sanitized_joint_state(value)) is not None
     ]
     states = _unique_joint_state_seeds(sanitized, limit=2)
     if not states:
@@ -187,9 +237,7 @@ def _candidate_same_run_seed_states(candidate: Mapping[str, Any]) -> list[JsonDi
     if not isinstance(raw_states, list):
         return []
     sanitized = [
-        state
-        for value in raw_states
-        if (state := _sanitized_joint_state(value)) is not None
+        state for value in raw_states if (state := _sanitized_joint_state(value)) is not None
     ]
     return _unique_joint_state_seeds(sanitized, limit=2)
 
@@ -257,9 +305,7 @@ class QualificationCache:
         planning_scene_revision: int | None = None,
     ) -> JsonDict | None:
         entry = self._entries.get((purpose, candidate_id))
-        if not entry or (
-            scene_epoch is not None and entry["scene_epoch"] != scene_epoch
-        ):
+        if not entry or (scene_epoch is not None and entry["scene_epoch"] != scene_epoch):
             return None
         if (
             planning_scene_revision is not None
@@ -291,8 +337,10 @@ class MoveItCandidateQualifier:
         | None = None,
         grasp_diversity_limit: int = DEFAULT_GRASP_DIVERSITY_POOL_SIZE,
         placement_diversity_limit: int = DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE,
+        observation_diversity_limit: int = 24,
         grasp_full_plan_limit: int = DEFAULT_GRASP_FULL_PLAN_LIMIT,
         placement_full_plan_limit: int = DEFAULT_ANYPLACE_FULL_PLAN_LIMIT,
+        observation_full_plan_limit: int = 2,
         frozen_pair_full_plan_limit: int = DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
         ik_seed_count: int = DEFAULT_MOVEIT_IK_SEED_COUNT,
         qualification_profile: str = "legacy",
@@ -300,6 +348,7 @@ class MoveItCandidateQualifier:
         beam_width: int = 2,
         grasp_waves: Sequence[int] = (4, 8, 16, 32, 64),
         placement_waves: Sequence[int] = (4, 8, 16, 32, 96),
+        observation_waves: Sequence[int] = (4, 8, 16, 24),
         max_ik_concurrency: int = 8,
         max_state_validity_concurrency: int = 8,
         fast_seed_count: int = 2,
@@ -315,10 +364,12 @@ class MoveItCandidateQualifier:
         self.diversity_limits = {
             "grasp": int(grasp_diversity_limit),
             "placement": int(placement_diversity_limit),
+            "observation": int(observation_diversity_limit),
         }
         self.full_plan_limits = {
             "grasp": int(grasp_full_plan_limit),
             "placement": int(placement_full_plan_limit),
+            "observation": int(observation_full_plan_limit),
         }
         self.frozen_pair_full_plan_limit = int(frozen_pair_full_plan_limit)
         self.ik_seed_count = int(ik_seed_count)
@@ -327,6 +378,7 @@ class MoveItCandidateQualifier:
         self.beam_width = int(beam_width)
         self.grasp_waves = tuple(int(value) for value in grasp_waves)
         self.placement_waves = tuple(int(value) for value in placement_waves)
+        self.observation_waves = tuple(int(value) for value in observation_waves)
         self.max_ik_concurrency = int(max_ik_concurrency)
         self.max_state_validity_concurrency = int(max_state_validity_concurrency)
         self.fast_seed_count = int(fast_seed_count)
@@ -350,8 +402,14 @@ class MoveItCandidateQualifier:
     ) -> ToolResult:
         if not result.success:
             return result
+        if purpose not in {"grasp", "placement", "observation"}:
+            raise ValueError("candidate qualification purpose is invalid")
         details = result.details
-        key = "placement_candidates" if purpose == "placement" else "grasp_candidates"
+        key = {
+            "grasp": "grasp_candidates",
+            "placement": "placement_candidates",
+            "observation": "observation_candidates",
+        }[purpose]
         raw = details.get(key)
         if not isinstance(raw, list) or not raw:
             return result
@@ -438,13 +496,9 @@ class MoveItCandidateQualifier:
                 compiled = {"qualification_stages": list(precompiled_stages)}
             rpc_candidate = dict(candidate)
             if isinstance(compiled.get("qualification_stages"), list):
-                rpc_candidate["qualification_stages"] = list(
-                    compiled["qualification_stages"]
-                )
+                rpc_candidate["qualification_stages"] = list(compiled["qualification_stages"])
             if isinstance(compiled.get("compile_parameters"), Mapping):
-                rpc_candidate["compile_parameters"] = dict(
-                    compiled["compile_parameters"]
-                )
+                rpc_candidate["compile_parameters"] = dict(compiled["compile_parameters"])
             compiled_descriptors.append(
                 {
                     "candidate_id": str(candidate.get("id") or ""),
@@ -508,6 +562,7 @@ class MoveItCandidateQualifier:
                     "beam_width": self.beam_width,
                     "grasp_waves": list(self.grasp_waves),
                     "placement_waves": list(self.placement_waves),
+                    "observation_waves": list(self.observation_waves),
                     "max_ik_concurrency": self.max_ik_concurrency,
                     "max_state_validity_concurrency": self.max_state_validity_concurrency,
                     "fast_seed_count": self.fast_seed_count,
@@ -522,6 +577,8 @@ class MoveItCandidateQualifier:
                         if qualification_mode == "frozen_pair"
                         else 2
                         if purpose == "grasp"
+                        else full_plan_limit
+                        if purpose == "placement"
                         else 1
                     ),
                     "l5_min_pass_target": (
@@ -533,6 +590,8 @@ class MoveItCandidateQualifier:
                         if qualification_mode == "frozen_pair"
                         else 2
                         if purpose == "grasp"
+                        else 1
+                        if purpose == "placement"
                         else 1
                     ),
                 }
@@ -548,20 +607,16 @@ class MoveItCandidateQualifier:
                         descriptor
                         for descriptor in compiled_descriptors
                         if shadow_legacy_input_ids is None
-                        or str(descriptor.get("candidate_id") or "")
-                        in shadow_legacy_input_ids
+                        or str(descriptor.get("candidate_id") or "") in shadow_legacy_input_ids
                     ],
                     purpose=purpose,
                     limit=self.diversity_limits[purpose],
                 )
                 funnel_config["shadow_legacy_candidate_ids"] = [
-                    str(item.get("candidate_id") or "")
-                    for item in shadow_legacy_candidates
+                    str(item.get("candidate_id") or "") for item in shadow_legacy_candidates
                 ]
         request: JsonDict = {
-            "schema_version": (
-                QUALIFICATION_SCHEMA_V3 if fast_profile else QUALIFICATION_SCHEMA
-            ),
+            "schema_version": (QUALIFICATION_SCHEMA_V3 if fast_profile else QUALIFICATION_SCHEMA),
             "purpose": purpose,
             "scene_epoch": scene_epoch,
             "planning_scene_revision": planning_scene_revision,
@@ -589,9 +644,7 @@ class MoveItCandidateQualifier:
                     "candidate_pool": [
                         {
                             "candidate_id": item["candidate_id"],
-                            "candidate_pose_sha256": item[
-                                "candidate_pose_sha256"
-                            ],
+                            "candidate_pose_sha256": item["candidate_pose_sha256"],
                             "compiled_candidate_sha256": _hash(item["candidate"]),
                         }
                         for item in compiled_descriptors
@@ -617,7 +670,9 @@ class MoveItCandidateQualifier:
         )
         rpc_attempts = 2 if fast_profile else 1
         response: JsonDict | None = None
+        validated_response: JsonDict | None = None
         rpc_error: Exception | None = None
+        completed_rpc_attempts = 0
         for _attempt in range(rpc_attempts):
             try:
                 response = self.rpc(
@@ -633,9 +688,13 @@ class MoveItCandidateQualifier:
                         recovery_ik_timeout_s=self.recovery_ik_timeout_s,
                     ),
                 )
-                break
+                completed_rpc_attempts = _attempt + 1
+                validated_response = self._validate_response(request, response)
+                if validated_response.get("infrastructure_error") is not True:
+                    break
             except Exception as exc:  # noqa: BLE001 - private transport boundary.
                 rpc_error = exc
+                completed_rpc_attempts = _attempt + 1
         if response is None:
             exc = rpc_error or RuntimeError("qualification RPC failed")
             response = {
@@ -653,18 +712,17 @@ class MoveItCandidateQualifier:
                         "reason": "qualification_rpc_error",
                         "error_type": type(exc).__name__,
                         "execution_started": False,
-                        "qualification_binding_sha256": request[
-                            "qualification_binding_sha256"
-                        ],
+                        "qualification_binding_sha256": request["qualification_binding_sha256"],
                     }
                     for item in request_candidates
                 ],
             }
-        evidence = self._validate_response(request, response)
+        evidence = validated_response or self._validate_response(request, response)
+        evidence["rpc_attempt_count"] = max(
+            int(evidence.get("rpc_attempt_count") or 0), completed_rpc_attempts
+        )
         for item in compile_rejections:
-            item["qualification_binding_sha256"] = request[
-                "qualification_binding_sha256"
-            ]
+            item["qualification_binding_sha256"] = request["qualification_binding_sha256"]
             evidence["results"].append(item)
         proofs = {item["candidate_id"]: item for item in evidence["results"]}
         raw_selected_candidate_ids = evidence.get("selected_candidate_ids")
@@ -683,8 +741,7 @@ class MoveItCandidateQualifier:
                 dict(candidate)
                 for candidate in raw
                 if isinstance(candidate, Mapping)
-                and proofs.get(str(candidate.get("id") or ""), {}).get("verdict")
-                == "PASS"
+                and proofs.get(str(candidate.get("id") or ""), {}).get("verdict") == "PASS"
             ]
         else:
             # The engine's selected order is the deterministic physical-quality
@@ -707,29 +764,17 @@ class MoveItCandidateQualifier:
                 candidate["moveit_physical_quality_rank"] = physical_rank
                 candidate["moveit_l5_qualified"] = True
             goal_legality = proof.get("goal_legality")
-            checks = (
-                goal_legality.get("checks")
-                if isinstance(goal_legality, Mapping)
-                else None
-            )
-            binding = (
-                checks.get("object_frame_binding")
-                if isinstance(checks, Mapping)
-                else None
-            )
+            checks = goal_legality.get("checks") if isinstance(goal_legality, Mapping) else None
+            binding = checks.get("object_frame_binding") if isinstance(checks, Mapping) else None
             collision_goal = (
-                binding.get("collision_goal_pose")
-                if isinstance(binding, Mapping)
-                else None
+                binding.get("collision_goal_pose") if isinstance(binding, Mapping) else None
             )
             if isinstance(collision_goal, Mapping):
                 # Carry the exact PlanningScene collision-body goal across the
                 # private qualification boundary.  AnyPlace's visible point
                 # centroid remains provenance, but must not become the frozen
                 # physical object pose after attachment.
-                candidate["qualified_world_collision_object_goal_pose"] = dict(
-                    collision_goal
-                )
+                candidate["qualified_world_collision_object_goal_pose"] = dict(collision_goal)
             if qualification_mode == "frozen_pair":
                 seed_evidence = _same_run_seed_evidence(
                     proof,
@@ -737,9 +782,7 @@ class MoveItCandidateQualifier:
                 )
                 if seed_evidence is not None:
                     candidate[SAME_RUN_QUALIFICATION_SEED_FIELD] = seed_evidence
-        pass_proofs = {
-            str(candidate["id"]): proofs[str(candidate["id"])] for candidate in passed
-        }
+        pass_proofs = {str(candidate["id"]): proofs[str(candidate["id"])] for candidate in passed}
         if cache_result:
             self.cache.replace(
                 purpose=purpose,
@@ -763,9 +806,7 @@ class MoveItCandidateQualifier:
         raw_count = generated if has_v2_raw or not isinstance(legacy_raw, int) else legacy_raw
         artifact = self._write_artifact(evidence)
         public_evidence = (
-            _public_qualification_summary(evidence)
-            if artifact is not None
-            else evidence
+            _public_qualification_summary(evidence) if artifact is not None else evidence
         )
         details.update(
             {
@@ -781,8 +822,7 @@ class MoveItCandidateQualifier:
                 "collision_ik_pass_count": stage_counts["collision_ik"],
                 "endpoint_pass_count": stage_counts["endpoint"],
                 "endpoint_evaluated_count": sum(
-                    item.get("endpoint_evaluated") is True
-                    for item in evidence["results"]
+                    item.get("endpoint_evaluated") is True for item in evidence["results"]
                 ),
                 "endpoint_not_evaluated_count": sum(
                     item.get("verdict") == "NOT_EVALUATED"
@@ -819,8 +859,7 @@ class MoveItCandidateQualifier:
         revision_ok = (
             isinstance(response, Mapping)
             and response.get("schema_version") == request["schema_version"]
-            and response.get("planning_scene_revision")
-            == request["planning_scene_revision"]
+            and response.get("planning_scene_revision") == request["planning_scene_revision"]
             and response.get("execution_started") is False
             and isinstance(raw_results, list)
         )
@@ -830,6 +869,7 @@ class MoveItCandidateQualifier:
             if isinstance(item, Mapping)
         }
         normalized: list[JsonDict] = []
+        response_contract_invalid = not revision_ok
         for candidate_id, descriptor in expected.items():
             item = received.get(candidate_id)
             verdict = str(item.get("verdict") or "UNKNOWN").upper() if item else "UNKNOWN"
@@ -850,9 +890,17 @@ class MoveItCandidateQualifier:
                 and bool(stages)
                 and all(_valid_pass_stage(stage) for stage in stages)
             )
+            valid_verdict = verdict in {"PASS", "FAIL", "UNKNOWN", "NOT_EVALUATED"}
+            invalid_candidate_evidence = bool(
+                not revision_ok
+                or not item
+                or not valid_identity
+                or not valid_verdict
+                or (verdict == "PASS" and not valid_pass)
+            )
             if verdict == "PASS" and not valid_pass:
                 verdict, reason = "UNKNOWN", "qualification_evidence_incomplete"
-            elif verdict not in {"PASS", "FAIL", "UNKNOWN", "NOT_EVALUATED"} or not valid_identity:
+            elif not valid_verdict or not valid_identity:
                 verdict, reason = "UNKNOWN", "qualification_evidence_incomplete"
             record = dict(item or {})
             record.update(
@@ -863,13 +911,15 @@ class MoveItCandidateQualifier:
                     "reason": reason,
                 }
             )
+            if invalid_candidate_evidence:
+                response_contract_invalid = True
+                record["infrastructure_error"] = True
+                record["infrastructure_error_detail"] = "qualification_response_contract_invalid"
             compiled_candidate = descriptor.get("candidate")
             if isinstance(compiled_candidate, Mapping) and isinstance(
                 compiled_candidate.get("compile_parameters"), Mapping
             ):
-                record["compile_parameters"] = dict(
-                    compiled_candidate["compile_parameters"]
-                )
+                record["compile_parameters"] = dict(compiled_candidate["compile_parameters"])
             else:
                 record.pop("compile_parameters", None)
             normalized.append(record)
@@ -880,12 +930,8 @@ class MoveItCandidateQualifier:
             "planning_scene_revision": request["planning_scene_revision"],
             "planning": dict(request["planning"]),
             "funnel": dict(request.get("funnel") or {}),
-            "qualification_binding_sha256": request[
-                "qualification_binding_sha256"
-            ],
-            "qualification_case_sha256": request[
-                "qualification_case_sha256"
-            ],
+            "qualification_binding_sha256": request["qualification_binding_sha256"],
+            "qualification_case_sha256": request["qualification_case_sha256"],
             "execution_started": False,
             "results": normalized,
         }
@@ -904,6 +950,8 @@ class MoveItCandidateQualifier:
                 "waves",
                 "l5_attempts",
                 "selected_candidate_ids",
+                "selected_joint_branches",
+                "search_exhaustion",
                 "stop_reason",
                 "metrics",
                 "legality_screening",
@@ -917,6 +965,10 @@ class MoveItCandidateQualifier:
                 value = response.get(key)
                 if value is not None:
                     evidence[key] = value
+        if response_contract_invalid:
+            evidence["stop_reason"] = "infrastructure_error"
+            evidence["infrastructure_error"] = True
+            evidence["infrastructure_error_detail"] = "qualification_response_contract_invalid"
         return evidence
 
     def _write_artifact(self, evidence: JsonDict) -> JsonDict | None:
@@ -927,9 +979,7 @@ class MoveItCandidateQualifier:
         if evidence.get("schema_version") == QUALIFICATION_SCHEMA_V3:
             artifact_evidence["artifact_schema_version"] = FAST_ARTIFACT_SCHEMA
         path = self.artifact_root / f"qualification-{_hash(artifact_evidence)[:16]}.json"
-        path.write_text(
-            json.dumps(artifact_evidence, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        path.write_text(json.dumps(artifact_evidence, indent=2, sort_keys=True), encoding="utf-8")
         return {
             "type": "moveit_candidate_qualification",
             "kind": "json",
@@ -948,9 +998,7 @@ def _public_qualification_summary(evidence: Mapping[str, Any]) -> JsonDict:
     results = evidence.get("results")
     results = results if isinstance(results, list) else []
     verdict_counts = Counter(
-        str(item.get("verdict") or "UNKNOWN")
-        for item in results
-        if isinstance(item, Mapping)
+        str(item.get("verdict") or "UNKNOWN") for item in results if isinstance(item, Mapping)
     )
     reason_counts = Counter(
         str(item.get("reason") or "unknown")
@@ -962,12 +1010,8 @@ def _public_qualification_summary(evidence: Mapping[str, Any]) -> JsonDict:
         "purpose": evidence.get("purpose"),
         "scene_epoch": evidence.get("scene_epoch"),
         "planning_scene_revision": evidence.get("planning_scene_revision"),
-        "qualification_binding_sha256": evidence.get(
-            "qualification_binding_sha256"
-        ),
-        "qualification_case_sha256": evidence.get(
-            "qualification_case_sha256"
-        ),
+        "qualification_binding_sha256": evidence.get("qualification_binding_sha256"),
+        "qualification_case_sha256": evidence.get("qualification_case_sha256"),
         "execution_started": False,
         "result_count": len(results),
         "verdict_counts": dict(sorted(verdict_counts.items())),
@@ -979,6 +1023,7 @@ def _public_qualification_summary(evidence: Mapping[str, Any]) -> JsonDict:
         "scene_sha256": evidence.get("scene_sha256"),
         "capability_map_id": evidence.get("capability_map_id"),
         "stop_reason": evidence.get("stop_reason"),
+        "search_exhaustion": dict(evidence.get("search_exhaustion") or {}),
         "waves": list(evidence.get("waves") or []),
         "metrics": dict(evidence.get("metrics") or {}),
         "proof_storage": "qualification_artifact",
@@ -1014,11 +1059,46 @@ def _funnel_stage_counts(results: Sequence[Mapping[str, Any]]) -> dict[str, int]
         return fallback(stages if isinstance(stages, list) else [])
 
     return {
-        "workspace": sum(passed(item, "workspace_pass", lambda stages: bool(stages)) for item in results),
-        "pure_ik": sum(passed(item, "pure_ik_pass", lambda stages: bool(stages) and all(s.get("kinematic_ik") is True for s in stages if isinstance(s, Mapping))) for item in results),
-        "collision_ik": sum(passed(item, "collision_ik_pass", lambda stages: bool(stages) and all(s.get("collision_ik") is True for s in stages if isinstance(s, Mapping))) for item in results),
-        "endpoint": sum(passed(item, "endpoint_pass", lambda stages: bool(stages) and all(s.get("state_valid") is True for s in stages if isinstance(s, Mapping))) for item in results),
-        "submitted": sum(item.get("full_plan_submitted") is True or item.get("verdict") == "PASS" for item in results),
+        "workspace": sum(
+            passed(item, "workspace_pass", lambda stages: bool(stages)) for item in results
+        ),
+        "pure_ik": sum(
+            passed(
+                item,
+                "pure_ik_pass",
+                lambda stages: (
+                    bool(stages)
+                    and all(s.get("kinematic_ik") is True for s in stages if isinstance(s, Mapping))
+                ),
+            )
+            for item in results
+        ),
+        "collision_ik": sum(
+            passed(
+                item,
+                "collision_ik_pass",
+                lambda stages: (
+                    bool(stages)
+                    and all(s.get("collision_ik") is True for s in stages if isinstance(s, Mapping))
+                ),
+            )
+            for item in results
+        ),
+        "endpoint": sum(
+            passed(
+                item,
+                "endpoint_pass",
+                lambda stages: (
+                    bool(stages)
+                    and all(s.get("state_valid") is True for s in stages if isinstance(s, Mapping))
+                ),
+            )
+            for item in results
+        ),
+        "submitted": sum(
+            item.get("full_plan_submitted") is True or item.get("verdict") == "PASS"
+            for item in results
+        ),
         "full_plan": sum(item.get("verdict") == "PASS" for item in results),
     }
 
@@ -1064,11 +1144,7 @@ def _qualification_rpc_timeout_s(
     stage_counts: list[int] = []
     for item in candidates:
         candidate = item.get("candidate")
-        stages = (
-            candidate.get("qualification_stages")
-            if isinstance(candidate, Mapping)
-            else None
-        )
+        stages = candidate.get("qualification_stages") if isinstance(candidate, Mapping) else None
         stage_counts.append(len(stages) if isinstance(stages, list) and stages else 1)
     max_stage_count = max(stage_counts, default=1)
     if qualification_profile in {"fast_v3", "shadow"}:
@@ -1076,27 +1152,20 @@ def _qualification_rpc_timeout_s(
         # Cover pure IK + possible collision rescue + validity for both the
         # fast and recovery seed budgets without assuming any concurrency.
         per_stage_screening_s = 2.0 * (
-            max(0, fast_seed_count)
-            * (max(0.0, fast_ik_timeout_s) + STATE_VALIDITY_TIMEOUT_S)
+            max(0, fast_seed_count) * (max(0.0, fast_ik_timeout_s) + STATE_VALIDITY_TIMEOUT_S)
             + max(0, recovery_seed_count)
             * (max(0.0, recovery_ik_timeout_s) + STATE_VALIDITY_TIMEOUT_S)
         )
-        screening_budget_s = (
-            len(candidates) * max_stage_count * per_stage_screening_s
-        )
+        screening_budget_s = len(candidates) * max_stage_count * per_stage_screening_s
         # Every L4 candidate may fail L5 once in the fast layer and again on
         # a different recovery branch. Shadow's bounded legacy tail fits
         # inside this same conservative envelope.
-        planning_budget_s = (
-            len(candidates) * 2 * max_stage_count * PLANNING_TIME_S
-        )
+        planning_budget_s = len(candidates) * 2 * max_stage_count * PLANNING_TIME_S
     else:
-        screening_budget_s = len(candidates) * 2.0 * (
-            KINEMATIC_IK_TIMEOUT_S + STATE_VALIDITY_TIMEOUT_S
+        screening_budget_s = (
+            len(candidates) * 2.0 * (KINEMATIC_IK_TIMEOUT_S + STATE_VALIDITY_TIMEOUT_S)
         )
-        planning_budget_s = (
-            max(0, int(full_plan_limit)) * max_stage_count * PLANNING_TIME_S
-        )
+        planning_budget_s = max(0, int(full_plan_limit)) * max_stage_count * PLANNING_TIME_S
     return screening_budget_s + planning_budget_s + QUALIFICATION_RPC_GRACE_S
 
 
@@ -1190,13 +1259,28 @@ def _pose_with_quaternion(pose: Mapping[str, Any]) -> JsonDict:
         index = max(range(3), key=lambda item: m[item][item])
         if index == 0:
             scale = math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0
-            quat = [0.25 * scale, (m[0][1] + m[1][0]) / scale, (m[0][2] + m[2][0]) / scale, (m[2][1] - m[1][2]) / scale]
+            quat = [
+                0.25 * scale,
+                (m[0][1] + m[1][0]) / scale,
+                (m[0][2] + m[2][0]) / scale,
+                (m[2][1] - m[1][2]) / scale,
+            ]
         elif index == 1:
             scale = math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0
-            quat = [(m[0][1] + m[1][0]) / scale, 0.25 * scale, (m[1][2] + m[2][1]) / scale, (m[0][2] - m[2][0]) / scale]
+            quat = [
+                (m[0][1] + m[1][0]) / scale,
+                0.25 * scale,
+                (m[1][2] + m[2][1]) / scale,
+                (m[0][2] - m[2][0]) / scale,
+            ]
         else:
             scale = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0
-            quat = [(m[0][2] + m[2][0]) / scale, (m[1][2] + m[2][1]) / scale, 0.25 * scale, (m[1][0] - m[0][1]) / scale]
+            quat = [
+                (m[0][2] + m[2][0]) / scale,
+                (m[1][2] + m[2][1]) / scale,
+                0.25 * scale,
+                (m[1][0] - m[0][1]) / scale,
+            ]
     result["quat_xyzw"] = quat
     return result
 
@@ -1236,7 +1320,9 @@ def _descriptor_distance(a: Mapping[str, Any], b: Mapping[str, Any], purpose: st
     source_bonus = 1.0 if source_a and source_b and source_a != source_b else 0.0
     object_bonus = 0.0
     if purpose == "placement":
-        object_bonus = 0.25 if ca.get("stable_contact_face") != cb.get("stable_contact_face") else 0.0
+        object_bonus = (
+            0.25 if ca.get("stable_contact_face") != cb.get("stable_contact_face") else 0.0
+        )
     return translation * 10.0 + angle + source_bonus + object_bonus
 
 
@@ -1270,19 +1356,28 @@ class MoveItQualificationEngine:
     scene_revision: Callable[[], int]
     compute_ik: Callable[[Mapping[str, Any], Mapping[str, Any], bool], Mapping[str, Any]]
     check_state_validity: Callable[[Mapping[str, Any]], Mapping[str, Any]]
-    plan_only: Callable[
-        [Mapping[str, Any], Mapping[str, Any], float, int], Mapping[str, Any]
-    ]
+    plan_only: Callable[[Mapping[str, Any], Mapping[str, Any], float, int], Mapping[str, Any]]
     workspace_filter: Callable[[Mapping[str, Any]], bool] | None = None
     clone_scene: Callable[[], Any] | None = None
     apply_scene_transition: Callable[[Any, str, Mapping[str, Any]], Mapping[str, Any]] | None = None
 
     service_health_check: Callable[[], bool] | None = None
     set_solver_mode: Callable[[str], Mapping[str, Any]] | None = None
+    _active_qualification_binding_sha256: str = field(
+        init=False,
+        default="",
+        repr=False,
+    )
 
     def qualify(self, request: Mapping[str, Any]) -> JsonDict:
         funnel = request.get("funnel")
         funnel = funnel if isinstance(funnel, Mapping) else {}
+        # The engine instance serves one private request. Carry its immutable
+        # proof binding down to L5 so the ROS adapter can cache only the exact
+        # trajectory that later appears on the public executable pose.
+        self._active_qualification_binding_sha256 = str(
+            request.get("qualification_binding_sha256") or ""
+        )
         profile = str(funnel.get("qualification_profile") or "legacy")
         if profile == "legacy":
             return self._qualify_legacy(request)
@@ -1294,9 +1389,7 @@ class MoveItQualificationEngine:
             legacy_request = dict(request)
             shadow_ids = funnel.get("shadow_legacy_candidate_ids")
             shadow_ids = (
-                {str(value) for value in shadow_ids}
-                if isinstance(shadow_ids, list)
-                else None
+                {str(value) for value in shadow_ids} if isinstance(shadow_ids, list) else None
             )
             all_candidates = request.get("candidates")
             all_candidates = all_candidates if isinstance(all_candidates, list) else []
@@ -1319,9 +1412,7 @@ class MoveItQualificationEngine:
                     str(item.get("candidate_id") or ""),
                     {
                         "candidate_id": str(item.get("candidate_id") or ""),
-                        "candidate_pose_sha256": str(
-                            item.get("candidate_pose_sha256") or ""
-                        ),
+                        "candidate_pose_sha256": str(item.get("candidate_pose_sha256") or ""),
                         "qualification_binding_sha256": binding,
                         "execution_started": False,
                         "verdict": "NOT_EVALUATED",
@@ -1407,20 +1498,13 @@ class MoveItQualificationEngine:
             # L1 compilation happened at the host boundary.  Run the entire
             # batch through the deterministic L2 workspace/structure gate
             # before progressively spending multi-seed L3/L4 work.
-            workspace_prechecks = [
-                self._workspace_precheck(item) for item in candidates
-            ]
+            workspace_prechecks = [self._workspace_precheck(item) for item in candidates]
         endpoint_passes = 0
         for index, item in enumerate(candidates):
             workspace_precheck = (
-                workspace_prechecks[index]
-                if workspace_prechecks is not None
-                else None
+                workspace_prechecks[index] if workspace_prechecks is not None else None
             )
-            if (
-                workspace_precheck is not None
-                and workspace_precheck.get("verdict") != "PASS"
-            ):
+            if workspace_precheck is not None and workspace_precheck.get("verdict") != "PASS":
                 screened.append(workspace_precheck)
                 continue
             if (
@@ -1485,21 +1569,15 @@ class MoveItQualificationEngine:
             "execution_started": False,
             "qualification_profile": "legacy",
             "solver_profile": str(
-                source.get("solver_profile")
-                or funnel.get("solver_profile")
-                or "kdl_legacy"
+                source.get("solver_profile") or funnel.get("solver_profile") or "kdl_legacy"
             ),
             "solver_version": str(source.get("solver_version") or "unknown"),
             "solver_configuration_id": str(
-                source.get("solver_profile")
-                or funnel.get("solver_profile")
-                or "kdl_legacy"
+                source.get("solver_profile") or funnel.get("solver_profile") or "kdl_legacy"
             ),
             "robot_model_sha256": str(source.get("robot_model_sha256") or ""),
             "scene_sha256": str(source.get("scene_sha256") or ""),
-            "qualification_case_sha256": str(
-                request.get("qualification_case_sha256") or ""
-            ),
+            "qualification_case_sha256": str(request.get("qualification_case_sha256") or ""),
             "case_id": str(request.get("qualification_case_sha256") or ""),
             "results": results,
         }
@@ -1519,7 +1597,7 @@ class MoveItQualificationEngine:
         funnel = request.get("funnel")
         funnel = funnel if isinstance(funnel, Mapping) else {}
         purpose = str(request.get("purpose") or "grasp")
-        if purpose not in {"grasp", "placement"}:
+        if purpose not in {"grasp", "placement", "observation"}:
             raise ValueError("invalid fast_v3 qualification purpose")
         beam_width = int(funnel.get("beam_width", 2))
         fast_seed_count = int(funnel.get("fast_seed_count", 2))
@@ -1531,16 +1609,13 @@ class MoveItQualificationEngine:
             != int(funnel.get("ik_seed_count", DEFAULT_MOVEIT_IK_SEED_COUNT))
         ):
             raise ValueError("invalid fast_v3 Beam/seed budget")
-        grasp_waves = self._integer_waves(
-            funnel.get("grasp_waves"), (4, 8, 16, 32, 64)
-        )
-        placement_waves = self._integer_waves(
-            funnel.get("placement_waves"), (4, 8, 16, 32, 96)
+        grasp_waves = self._integer_waves(funnel.get("grasp_waves"), (4, 8, 16, 32, 64))
+        placement_waves = self._integer_waves(funnel.get("placement_waves"), (4, 8, 16, 32, 96))
+        observation_waves = self._integer_waves(
+            funnel.get("observation_waves"), (4, 8, 16, 24)
         )
         max_ik = max(1, int(funnel.get("max_ik_concurrency", 8)))
-        max_validity = max(
-            1, int(funnel.get("max_state_validity_concurrency", 8))
-        )
+        max_validity = max(1, int(funnel.get("max_state_validity_concurrency", 8)))
         fast_timeout_s = float(funnel.get("fast_ik_timeout_s", 0.05))
         recovery_timeout_s = float(funnel.get("recovery_ik_timeout_s", 0.2))
         if not 0.0 < fast_timeout_s <= recovery_timeout_s:
@@ -1557,22 +1632,14 @@ class MoveItQualificationEngine:
                 request, candidates, revision, reason=str(exc)
             )
         requested_solver_profile = str(funnel.get("solver_profile") or "auto")
-        solver_profile = str(
-            current_state.get("solver_profile") or requested_solver_profile
-        )
-        if (
-            requested_solver_profile != "auto"
-            and solver_profile != requested_solver_profile
-        ):
+        solver_profile = str(current_state.get("solver_profile") or requested_solver_profile)
+        if requested_solver_profile != "auto" and solver_profile != requested_solver_profile:
             return self._fast_configuration_response(
                 request,
                 candidates,
                 revision,
                 reason="solver_profile_mismatch",
-                error=(
-                    f"requested {requested_solver_profile}, ROS configured "
-                    f"{solver_profile}"
-                ),
+                error=(f"requested {requested_solver_profile}, ROS configured {solver_profile}"),
                 robot_hash=str(current_state.get("robot_model_sha256") or ""),
                 scene_hash=str(current_state.get("scene_sha256") or ""),
             )
@@ -1599,8 +1666,7 @@ class MoveItQualificationEngine:
             or _hash(
                 {
                     "names": current_state.get("names"),
-                    "joint_limits": source.get("joint_limits")
-                    or current_state.get("joint_limits"),
+                    "joint_limits": source.get("joint_limits") or current_state.get("joint_limits"),
                     "planning_group": source.get("planning_group"),
                     "tcp": source.get("tcp"),
                     "gripper": source.get("gripper"),
@@ -1695,15 +1761,14 @@ class MoveItQualificationEngine:
             purpose=purpose,
             grasp_waves=grasp_waves,
             placement_waves=placement_waves,
+            observation_waves=observation_waves,
             capability_map=capability_map,
         )
         for wave in waves:
             for descriptor in wave.candidates:
                 candidate_id = str(descriptor.get("candidate_id") or "")
                 descriptor_by_id[candidate_id] = dict(descriptor)
-                prechecks[candidate_id]["se3_cluster_id"] = descriptor.get(
-                    "se3_cluster_id"
-                )
+                prechecks[candidate_id]["se3_cluster_id"] = descriptor.get("se3_cluster_id")
                 prechecks[candidate_id]["grasp_symmetry_family_id"] = descriptor.get(
                     "grasp_symmetry_family_id"
                 )
@@ -1717,9 +1782,12 @@ class MoveItQualificationEngine:
         screening_history: dict[str, list[JsonDict]] = {}
         batch_cache: list[JsonDict] = []
         l5_passes: list[JsonDict] = []
+        joint_branch_fallback_passes: list[JsonDict] = []
         planned_ids: set[str] = set()
+        terminal_deterministic_failure_ids: set[str] = set()
         l5_attempts: list[JsonDict] = []
         wave_evidence: list[JsonDict] = []
+        recovery_waves: list[CandidateWave] = []
         pair_legality_cache: dict[tuple[str, str], tuple[str, JsonDict]] = {}
         infrastructure_error = next(
             (
@@ -1740,34 +1808,20 @@ class MoveItQualificationEngine:
         def pass_target_reached(required: int) -> bool:
             if len(l5_passes) < required:
                 return False
+            if purpose == "observation":
+                return True
             if purpose == "placement" and qualification_mode == "frozen_pair":
                 grasp_ids = {
-                    str(
-                        item.get("source_grasp_id")
-                        or item.get("candidate_id")
-                        or ""
-                    )
+                    str(item.get("source_grasp_id") or item.get("candidate_id") or "")
                     for item in l5_passes
-                    if str(
-                        item.get("source_grasp_id")
-                        or item.get("candidate_id")
-                        or ""
-                    )
+                    if str(item.get("source_grasp_id") or item.get("candidate_id") or "")
                 }
                 return len(grasp_ids) >= required
             if purpose == "placement":
                 return True
-            clusters = {
-                str(item.get("se3_cluster_id") or "") for item in l5_passes
-            }
-            families = {
-                str(item.get("grasp_symmetry_family_id") or "")
-                for item in l5_passes
-            }
-            return (
-                len(clusters) >= required
-                and len(families) >= required
-            )
+            clusters = {str(item.get("se3_cluster_id") or "") for item in l5_passes}
+            families = {str(item.get("grasp_symmetry_family_id") or "") for item in l5_passes}
+            return len(clusters) >= required and len(families) >= required
 
         def target_reached() -> bool:
             return pass_target_reached(target)
@@ -1806,19 +1860,13 @@ class MoveItQualificationEngine:
                             self._screen_fast_candidate,
                             descriptor,
                             revision,
-                            legality_precheck=prechecks[
-                                str(descriptor.get("candidate_id") or "")
-                            ],
+                            legality_precheck=prechecks[str(descriptor.get("candidate_id") or "")],
                             source=source,
                             current_state=current_state,
                             batch_cache=tuple(batch_cache),
                             beam_width=beam_width,
-                            seed_count=(
-                                recovery_seed_count if recovery else fast_seed_count
-                            ),
-                            timeout_s=(
-                                recovery_timeout_s if recovery else fast_timeout_s
-                            ),
+                            seed_count=(recovery_seed_count if recovery else fast_seed_count),
+                            timeout_s=(recovery_timeout_s if recovery else fast_timeout_s),
                             recovery=recovery,
                             solver_profile=(
                                 "pick_ik_global"
@@ -1836,9 +1884,7 @@ class MoveItQualificationEngine:
                             screened = future.result()
                         except Exception as exc:  # noqa: BLE001 - worker boundary.
                             screened = {
-                                **prechecks[
-                                    str(descriptor.get("candidate_id") or "")
-                                ],
+                                **prechecks[str(descriptor.get("candidate_id") or "")],
                                 "verdict": "UNKNOWN",
                                 "reason": "qualification_worker_error",
                                 "infrastructure_error": True,
@@ -1863,18 +1909,10 @@ class MoveItQualificationEngine:
                 if not isinstance(stages, list) or not stages:
                     continue
                 for stage in stages:
-                    solutions = (
-                        stage.get("beam_solutions")
-                        if isinstance(stage, Mapping)
-                        else None
-                    )
-                    for solution in (
-                        solutions if isinstance(solutions, list) else []
-                    ):
+                    solutions = stage.get("beam_solutions") if isinstance(stage, Mapping) else None
+                    for solution in solutions if isinstance(solutions, list) else []:
                         state = (
-                            solution.get("joint_state")
-                            if isinstance(solution, Mapping)
-                            else None
+                            solution.get("joint_state") if isinstance(solution, Mapping) else None
                         )
                         if isinstance(state, Mapping):
                             cached = dict(state)
@@ -1888,10 +1926,7 @@ class MoveItQualificationEngine:
                         item
                         for item in completed
                         if item.get("endpoint_pass") is True
-                        and (
-                            recovery
-                            or str(item.get("candidate_id") or "") not in planned_ids
-                        )
+                        and (recovery or str(item.get("candidate_id") or "") not in planned_ids)
                     ),
                     key=candidate_physical_quality_key,
                 )
@@ -1909,10 +1944,7 @@ class MoveItQualificationEngine:
                             for item in l5_passes
                             if str(item.get("source_grasp_id") or "")
                         }
-                        if (
-                            source_grasp_id in passed_grasp_ids
-                            and len(passed_grasp_ids) < target
-                        ):
+                        if source_grasp_id in passed_grasp_ids and len(passed_grasp_ids) < target:
                             # Another goal for an already-proven grasp cannot
                             # fill the independent-backup slot.  Preserve it in
                             # the frozen frontier instead of spending L5 now.
@@ -1932,23 +1964,19 @@ class MoveItQualificationEngine:
                         {
                             "attempt_index": len(l5_attempts),
                             "candidate_id": candidate_id,
-                            "fixed_candidate_index": planned.get(
-                                "fixed_candidate_index"
-                            ),
+                            "fixed_candidate_index": planned.get("fixed_candidate_index"),
                             "source_grasp_id": planned.get("source_grasp_id"),
-                            "source_object_goal_id": planned.get(
-                                "source_object_goal_id"
-                            ),
+                            "source_object_goal_id": planned.get("source_object_goal_id"),
                             "se3_cluster_id": planned.get("se3_cluster_id"),
-                            "grasp_symmetry_family_id": planned.get(
-                                "grasp_symmetry_family_id"
-                            ),
+                            "grasp_symmetry_family_id": planned.get("grasp_symmetry_family_id"),
                             "wave_index": wave.wave_index,
                             "recovery_layer": recovery,
                             "retry_count": retry_count,
                             "elapsed_s": l5_elapsed_s,
                             "verdict": planned.get("verdict"),
                             "reason": planned.get("reason"),
+                            "joint_branch_index": 0,
+                            "joint_branch_joint_state_sha256": _selected_ik_state_sha256(planned),
                         }
                     )
                     if planned.get("infrastructure_error") is True:
@@ -1956,6 +1984,30 @@ class MoveItQualificationEngine:
                             planned.get("reason") or "plan_only_service_error"
                         )
                         break
+                    terminal_evidence = (
+                        planned.get("stages", [{}])[-1].get(
+                            "terminal_gripper_state_validity"
+                        )
+                        if isinstance(planned.get("stages"), list)
+                        and planned.get("stages")
+                        and isinstance(planned.get("stages", [{}])[-1], Mapping)
+                        else None
+                    )
+                    if (
+                        planned.get("reason") == "terminal_gripper_state_invalid"
+                        and isinstance(terminal_evidence, Mapping)
+                        and (
+                            terminal_evidence.get(
+                                "seed_independent_static_collision"
+                            )
+                            is True
+                            or terminal_evidence.get(
+                                "seed_independent_contact_geometry_failure"
+                            )
+                            is True
+                        )
+                    ):
+                        terminal_deterministic_failure_ids.add(candidate_id)
                     if planned.get("verdict") == "PASS":
                         if first_l5_pass_elapsed_s is None:
                             first_l5_pass_elapsed_s = time.monotonic() - start_time
@@ -1971,9 +2023,7 @@ class MoveItQualificationEngine:
                 "candidate_count": len(wave.candidates),
                 "deep_candidate_count": len(deep_candidates),
                 "pair_legality_reject_count": len(pair_rejections),
-                "endpoint_pass_count": sum(
-                    item.get("endpoint_pass") is True for item in completed
-                ),
+                "endpoint_pass_count": sum(item.get("endpoint_pass") is True for item in completed),
                 "l5_submitted_count": submitted_this_wave,
                 "l5_pass_count": passed_this_wave,
                 "elapsed_s": time.monotonic() - wave_started,
@@ -1983,9 +2033,7 @@ class MoveItQualificationEngine:
                     {
                         "frozen_pair_batch_index": wave.frozen_pair_batch_index,
                         "frozen_pair_batch_role": (
-                            "primary"
-                            if wave.frozen_pair_batch_index == 0
-                            else "reserve"
+                            "primary" if wave.frozen_pair_batch_index == 0 else "reserve"
                         ),
                     }
                 )
@@ -2000,24 +2048,21 @@ class MoveItQualificationEngine:
         if not infrastructure_error and not acceptable_target_reached():
             # Only after the complete fast pool fails do the fixed remaining
             # six seeds become eligible.  Preserve the same waves and barriers.
-            recovery_waves: list[CandidateWave] = []
-            l5_pass_ids = {
-                str(item.get("candidate_id") or "") for item in l5_passes
-            }
+            l5_pass_ids = {str(item.get("candidate_id") or "") for item in l5_passes}
             for wave in waves:
                 retry = tuple(
                     descriptor
                     for descriptor in wave.candidates
                     if str(descriptor.get("candidate_id") or "") not in l5_pass_ids
-                    and prechecks[
-                        str(descriptor.get("candidate_id") or "")
-                    ].get("verdict")
+                    and str(descriptor.get("candidate_id") or "")
+                    not in terminal_deterministic_failure_ids
+                    and prechecks[str(descriptor.get("candidate_id") or "")].get("verdict")
                     == "PASS"
                     and (
                         purpose != "placement"
-                        or prechecks[
-                            str(descriptor.get("candidate_id") or "")
-                        ].get("pair_legality_pass")
+                        or prechecks[str(descriptor.get("candidate_id") or "")].get(
+                            "pair_legality_pass"
+                        )
                         is True
                     )
                 )
@@ -2028,9 +2073,7 @@ class MoveItQualificationEngine:
                             cumulative_per_branch=wave.cumulative_per_branch,
                             candidates=retry,
                             recovery=True,
-                            frozen_pair_batch_index=(
-                                wave.frozen_pair_batch_index
-                            ),
+                            frozen_pair_batch_index=(wave.frozen_pair_batch_index),
                         )
                     )
             recovery_solver_mode_switched = False
@@ -2059,12 +2102,81 @@ class MoveItQualificationEngine:
                 except _QualificationInfrastructureError as exc:
                     infrastructure_error = str(exc)
 
+        # Prefer two distinct model poses.  If exhaustive fast and recovery
+        # coverage leaves exactly one L5-qualified grasp pose, independently
+        # prove the second Beam-2 joint branch before exposing a fallback.  The
+        # Cartesian contact remains byte-for-byte the provider pose.
+        if not infrastructure_error and purpose == "grasp" and len(l5_passes) == 1:
+            primary = l5_passes[0]
+            alternate = self._alternate_grasp_joint_branch_screen(
+                primary,
+                source=source,
+            )
+            if alternate is not None:
+                alternate_screen, joint_distance, alternate_state_sha256 = alternate
+                candidate_id = str(primary.get("candidate_id") or "")
+                descriptor = descriptor_by_id[candidate_id]
+                branch_started = time.monotonic()
+                planned_branch, retry_count = self._plan_fast_candidate(
+                    descriptor,
+                    revision,
+                    screen=alternate_screen,
+                )
+                branch_elapsed_s = time.monotonic() - branch_started
+                l5_attempts.append(
+                    {
+                        "attempt_index": len(l5_attempts),
+                        "candidate_id": candidate_id,
+                        "fixed_candidate_index": planned_branch.get("fixed_candidate_index"),
+                        "source_grasp_id": planned_branch.get("source_grasp_id"),
+                        "source_object_goal_id": planned_branch.get("source_object_goal_id"),
+                        "se3_cluster_id": planned_branch.get("se3_cluster_id"),
+                        "grasp_symmetry_family_id": planned_branch.get("grasp_symmetry_family_id"),
+                        "wave_index": primary.get("wave_index"),
+                        "recovery_layer": primary.get("recovery_layer") is True,
+                        "retry_count": retry_count,
+                        "elapsed_s": branch_elapsed_s,
+                        "verdict": planned_branch.get("verdict"),
+                        "reason": planned_branch.get("reason"),
+                        "joint_branch_index": 1,
+                        "joint_branch_joint_state_sha256": alternate_state_sha256,
+                        "joint_branch_normalized_distance": joint_distance,
+                    }
+                )
+                if planned_branch.get("infrastructure_error") is True:
+                    infrastructure_error = str(
+                        planned_branch.get("reason") or "plan_only_service_error"
+                    )
+                elif planned_branch.get("verdict") == "PASS":
+                    primary_state_sha256 = _selected_ik_state_sha256(primary)
+                    joint_branch_fallback_passes = [primary, planned_branch]
+                    primary["joint_branch_l5_proofs"] = [
+                        {
+                            "candidate_id": candidate_id,
+                            "joint_branch_index": 0,
+                            "verdict": "PASS",
+                            "selected_ik_joint_state_sha256": primary_state_sha256,
+                        },
+                        {
+                            "candidate_id": candidate_id,
+                            "joint_branch_index": 1,
+                            "verdict": "PASS",
+                            "selected_ik_joint_state_sha256": alternate_state_sha256,
+                            "normalized_distance_from_primary": joint_distance,
+                        },
+                    ]
+                    primary["joint_branch_pass_count"] = 2
+                    primary["joint_branch_normalized_distance"] = joint_distance
+                    latest[candidate_id] = primary
+
         if infrastructure_error:
             stop_reason = "infrastructure_error"
         elif target_reached():
             stop_reason = "complete_l5_pass_found"
         elif minimum_target_reached():
             stop_reason = "complete_l5_pass_found_minimum_lookahead"
+        elif len(joint_branch_fallback_passes) >= 2:
+            stop_reason = "complete_l5_pass_found_joint_branch_fallback"
         elif purpose == "grasp" and len(l5_passes) >= minimum_target:
             # No two independent symmetry families / SE(3) clusters survived.
             # The contract then falls back to the joint-farthest pair only
@@ -2075,19 +2187,41 @@ class MoveItQualificationEngine:
             # frozen model output contains only two or three executable ones.
             # Keep the proven primary set; never turn it into a false zero-pass.
             stop_reason = "complete_l5_pass_found_partial_lookahead"
+        elif (
+            purpose == "grasp"
+            and len(l5_passes) == 1
+            and len(joint_branch_fallback_passes) < 2
+            and sum(not bool(wave.get("recovery_layer")) for wave in wave_evidence) == len(waves)
+            and sum(bool(wave.get("recovery_layer")) for wave in wave_evidence)
+            == len(recovery_waves)
+        ):
+            # A fully state-valid and L5-proven primary is still executable.
+            # Publish it only after the frozen fast pool, fixed-seed recovery
+            # pool, and alternate Beam-2 branch have all failed to produce the
+            # preferred backup.  This is an explicit redundancy degradation,
+            # never an early-success shortcut and never a relaxed IK/L5 proof.
+            stop_reason = "complete_l5_pass_found_single_branch_exhaustive_fallback"
         else:
             stop_reason = "candidate_and_recovery_exhausted"
 
         if purpose == "grasp":
-            selected_ids = (
-                select_grasp_branches(
+            if len(l5_passes) >= min(2, minimum_target):
+                selected_ids = select_grasp_branches(
                     l5_passes,
                     source=source,
                     limit=min(target, len(l5_passes)),
                 )
-                if len(l5_passes) >= min(2, minimum_target)
-                else []
-            )
+            elif len(joint_branch_fallback_passes) >= 2:
+                selected_ids = [str(l5_passes[0].get("candidate_id") or "")]
+            elif stop_reason == "complete_l5_pass_found_single_branch_exhaustive_fallback":
+                selected_ids = [str(l5_passes[0].get("candidate_id") or "")]
+            else:
+                selected_ids = []
+        elif purpose == "observation":
+            selected_ids = [
+                str(item.get("candidate_id") or "")
+                for item in sorted(l5_passes, key=candidate_physical_quality_key)[:target]
+            ]
         else:
             if qualification_mode == "frozen_pair":
                 ordered_passes = sorted(
@@ -2107,25 +2241,18 @@ class MoveItQualificationEngine:
                         break
                 if len(selected_passes) < target:
                     selected_ids_seen = {
-                        str(item.get("candidate_id") or "")
-                        for item in selected_passes
+                        str(item.get("candidate_id") or "") for item in selected_passes
                     }
                     selected_passes.extend(
                         item
                         for item in ordered_passes
-                        if str(item.get("candidate_id") or "")
-                        not in selected_ids_seen
+                        if str(item.get("candidate_id") or "") not in selected_ids_seen
                     )
                 selected_ids = [
-                    str(item.get("candidate_id") or "")
-                    for item in selected_passes[:target]
+                    str(item.get("candidate_id") or "") for item in selected_passes[:target]
                 ]
             else:
-                selected_ids = (
-                    [str(l5_passes[0].get("candidate_id") or "")]
-                    if l5_passes
-                    else []
-                )
+                selected_ids = [str(l5_passes[0].get("candidate_id") or "")] if l5_passes else []
         binding = str(request.get("qualification_binding_sha256") or "")
         results: list[JsonDict] = []
         for fixed_index, raw_descriptor in enumerate(candidates):
@@ -2148,10 +2275,7 @@ class MoveItQualificationEngine:
                         "endpoint_evaluated": False,
                     }
                 )
-            elif (
-                result.get("endpoint_pass") is True
-                and candidate_id not in planned_ids
-            ):
+            elif result.get("endpoint_pass") is True and candidate_id not in planned_ids:
                 result.update(
                     {
                         "verdict": "NOT_EVALUATED",
@@ -2161,15 +2285,11 @@ class MoveItQualificationEngine:
                 )
             result["fixed_candidate_index"] = fixed_index
             result["qualification_binding_sha256"] = binding
-            result["screening_attempts"] = list(
-                screening_history.get(candidate_id, [])
-            )
+            result["screening_attempts"] = list(screening_history.get(candidate_id, []))
             results.append(result)
 
         screening_records = [
-            attempt
-            for attempts in screening_history.values()
-            for attempt in attempts
+            attempt for attempts in screening_history.values() for attempt in attempts
         ]
         attempt_latencies = [
             float(attempt.get("elapsed_s", 0.0))
@@ -2195,24 +2315,18 @@ class MoveItQualificationEngine:
         )
         metrics = {
             "generated_count": len(candidates),
-            "workspace_pass_count": sum(
-                result.get("workspace_pass") is True for result in results
-            ),
+            "workspace_pass_count": sum(result.get("workspace_pass") is True for result in results),
             "pure_ik_pass_count": sum(
                 any(
                     attempt.get("pure_ik_pass") is True
-                    for attempt in screening_history.get(
-                        str(result.get("candidate_id") or ""), []
-                    )
+                    for attempt in screening_history.get(str(result.get("candidate_id") or ""), [])
                 )
                 for result in results
             ),
             "collision_ik_pass_count": sum(
                 any(
                     attempt.get("collision_ik_pass") is True
-                    for attempt in screening_history.get(
-                        str(result.get("candidate_id") or ""), []
-                    )
+                    for attempt in screening_history.get(str(result.get("candidate_id") or ""), [])
                 )
                 for result in results
             ),
@@ -2222,14 +2336,17 @@ class MoveItQualificationEngine:
             "endpoint_pass_count": sum(
                 any(
                     attempt.get("endpoint_pass") is True
-                    for attempt in screening_history.get(
-                        str(result.get("candidate_id") or ""), []
-                    )
+                    for attempt in screening_history.get(str(result.get("candidate_id") or ""), [])
                 )
                 for result in results
             ),
             "l5_attempt_count": len(l5_attempts),
             "l5_pass_count": len(l5_passes),
+            "l5_joint_branch_pass_count": (
+                len(joint_branch_fallback_passes)
+                if joint_branch_fallback_passes
+                else len(l5_passes)
+            ),
             "screening_attempt_count": len(screening_records),
             "cache_hit_count": cache_hits,
             "collision_rescue_count": rescues,
@@ -2242,6 +2359,25 @@ class MoveItQualificationEngine:
             "l5_pass_target": target,
             "l5_min_pass_target": minimum_target,
             **legality_metrics,
+        }
+        completed_fast_wave_count = sum(
+            not bool(wave.get("recovery_layer")) for wave in wave_evidence
+        )
+        completed_recovery_wave_count = sum(
+            bool(wave.get("recovery_layer")) for wave in wave_evidence
+        )
+        search_exhaustion = {
+            "fast_wave_count_expected": len(waves),
+            "fast_wave_count_completed": completed_fast_wave_count,
+            "fast_pool_exhausted": completed_fast_wave_count == len(waves),
+            "recovery_wave_count_expected": len(recovery_waves),
+            "recovery_wave_count_completed": completed_recovery_wave_count,
+            "recovery_pool_exhausted": (completed_recovery_wave_count == len(recovery_waves)),
+            "preferred_grasp_branch_target": target if purpose == "grasp" else 0,
+            "published_grasp_branch_count": (len(selected_ids) if purpose == "grasp" else 0),
+            "redundancy_degraded": (
+                stop_reason == "complete_l5_pass_found_single_branch_exhaustive_fallback"
+            ),
         }
         return {
             "schema_version": request["schema_version"],
@@ -2257,9 +2393,7 @@ class MoveItQualificationEngine:
             "provider": str(source.get("provider") or "unknown"),
             "provider_version": str(source.get("provider_version") or "unknown"),
             "solver_version": str(
-                source.get("solver_version")
-                or current_state.get("solver_version")
-                or "unknown"
+                source.get("solver_version") or current_state.get("solver_version") or "unknown"
             ),
             "robot_model_sha256": robot_hash,
             "scene_sha256": scene_hash,
@@ -2274,13 +2408,22 @@ class MoveItQualificationEngine:
             "l5_pass_target": target,
             "l5_min_pass_target": minimum_target,
             "selected_candidate_ids": selected_ids,
+            "selected_joint_branches": [
+                dict(proof)
+                for proof in (
+                    l5_passes[0].get("joint_branch_l5_proofs")
+                    if joint_branch_fallback_passes
+                    and isinstance(l5_passes[0].get("joint_branch_l5_proofs"), list)
+                    else []
+                )
+                if isinstance(proof, Mapping)
+            ],
+            "search_exhaustion": search_exhaustion,
             "stop_reason": stop_reason,
             "infrastructure_error": bool(infrastructure_error),
             "metrics": metrics,
             "first_l5_pass_s": first_l5_pass_elapsed_s,
-            "qualification_case_sha256": str(
-                request.get("qualification_case_sha256") or ""
-            ),
+            "qualification_case_sha256": str(request.get("qualification_case_sha256") or ""),
             "case_id": str(request.get("qualification_case_sha256") or ""),
             "results": results,
         }
@@ -2289,8 +2432,10 @@ class MoveItQualificationEngine:
     def _integer_waves(value: object, default: Sequence[int]) -> tuple[int, ...]:
         raw = value if isinstance(value, list) else default
         waves = tuple(int(item) for item in raw)
-        if not waves or any(item <= 0 for item in waves) or any(
-            right <= left for left, right in zip(waves, waves[1:])
+        if (
+            not waves
+            or any(item <= 0 for item in waves)
+            or any(right <= left for left, right in zip(waves, waves[1:]))
         ):
             raise ValueError("qualification waves must be positive and increasing")
         return waves
@@ -2361,47 +2506,46 @@ class MoveItQualificationEngine:
         base = json.loads(json.dumps(dict(legality_precheck)))
         base.update(
             {
-                "fixed_candidate_index": int(
-                    descriptor.get("fixed_candidate_index", 0)
-                ),
+                "fixed_candidate_index": int(descriptor.get("fixed_candidate_index", 0)),
                 "se3_cluster_id": descriptor.get("se3_cluster_id"),
-                "grasp_symmetry_family_id": descriptor.get(
-                    "grasp_symmetry_family_id"
-                ),
+                "grasp_symmetry_family_id": descriptor.get("grasp_symmetry_family_id"),
                 "capability_score": dict(descriptor.get("capability_score") or {}),
                 "generator_score": generator_score(candidate),
                 "source_grasp_id": str(candidate.get("source_grasp_id") or ""),
-                "source_object_goal_id": str(
-                    candidate.get("source_object_goal_id") or ""
-                ),
-                "frozen_pair_batch_index": candidate.get(
-                    "frozen_pair_batch_index", 0
-                ),
-                "frozen_pair_batch_role": str(
-                    candidate.get("frozen_pair_batch_role") or ""
-                ),
+                "source_object_goal_id": str(candidate.get("source_object_goal_id") or ""),
+                "frozen_pair_batch_index": candidate.get("frozen_pair_batch_index", 0),
+                "frozen_pair_batch_role": str(candidate.get("frozen_pair_batch_role") or ""),
                 "endpoint_evaluated": True,
                 "stages": [],
             }
         )
+        robust_clearance = descriptor.get("placement_robust_clearance_m")
+        if (
+            isinstance(robust_clearance, (int, float))
+            and not isinstance(robust_clearance, bool)
+            and math.isfinite(float(robust_clearance))
+        ):
+            base["placement_robust_clearance_m"] = float(robust_clearance)
+        centering_evidence = parallel_gripper_centering_evidence(candidate)
+        if centering_evidence is not None:
+            # Preserve the immutable provider measurement after the private
+            # screening boundary so the L5 rank uses the same physical signal
+            # as the early-wave scheduler.  This changes order only: no model
+            # pose is corrected and no candidate is removed.
+            base["target_closing_alignment"] = centering_evidence
         if base.get("workspace_pass") is not True:
             return base
         if not isinstance(stages, list) or not stages:
             return {**base, "verdict": "UNKNOWN", "reason": "compiled_stages_missing"}
         candidate_start = candidate.get("qualification_start_joint_state")
-        start = dict(
-            candidate_start if isinstance(candidate_start, Mapping) else current_state
-        )
-        if "joint_limits" not in source and isinstance(
-            current_state.get("joint_limits"), Mapping
-        ):
+        start = dict(candidate_start if isinstance(candidate_start, Mapping) else current_state)
+        if "joint_limits" not in source and isinstance(current_state.get("joint_limits"), Mapping):
             source = {**dict(source), "joint_limits": current_state["joint_limits"]}
         active_scene_diff: Mapping[str, Any] | None = None
         scene: Any = None
         initial_transition = candidate.get("initial_scene_transition")
         staged_transition = any(
-            isinstance(stage, Mapping) and bool(stage.get("scene_transition"))
-            for stage in stages
+            isinstance(stage, Mapping) and bool(stage.get("scene_transition")) for stage in stages
         )
         if initial_transition or staged_transition:
             if self.clone_scene is None or self.apply_scene_transition is None:
@@ -2425,18 +2569,14 @@ class MoveItQualificationEngine:
             try:
                 transition_pose = candidate.get("initial_scene_transition_pose")
                 transition_target = dict(
-                    transition_pose
-                    if isinstance(transition_pose, Mapping)
-                    else stages[0]
+                    transition_pose if isinstance(transition_pose, Mapping) else stages[0]
                 )
                 predicted_attachment = candidate.get("predicted_attachment_transform")
                 if (
                     isinstance(predicted_attachment, Mapping)
                     and candidate.get("physical_scene_attachment_required") is not True
                 ):
-                    transition_target["attachment_transform"] = dict(
-                        predicted_attachment
-                    )
+                    transition_target["attachment_transform"] = dict(predicted_attachment)
                 transition = self.apply_scene_transition(
                     scene, str(initial_transition), transition_target
                 )
@@ -2469,6 +2609,9 @@ class MoveItQualificationEngine:
             if not isinstance(raw_target, Mapping):
                 return {**base, "verdict": "UNKNOWN", "reason": "compiled_stage_invalid"}
             target = dict(raw_target)
+            allowed_collisions = _contact_allowed_collisions(scene, target)
+            if allowed_collisions:
+                target["qualification_allowed_collisions"] = allowed_collisions
             if active_scene_diff is not None:
                 target["qualification_scene_diff"] = dict(active_scene_diff)
             seeds = self._fast_stage_seeds(
@@ -2489,9 +2632,7 @@ class MoveItQualificationEngine:
                     else "current_robot_state"
                 ),
                 candidate_seed_states=(
-                    _candidate_same_run_seed_states(candidate)
-                    if stage_index == 0
-                    else ()
+                    _candidate_same_run_seed_states(candidate) if stage_index == 0 else ()
                 ),
             )
             evidence: JsonDict = {
@@ -2540,11 +2681,11 @@ class MoveItQualificationEngine:
                         raise _QualificationInfrastructureError(
                             "IK success returned an invalid joint state"
                         )
-                    validity_state = dict(pure_state)
-                    if active_scene_diff is not None:
-                        validity_state["qualification_scene_diff"] = dict(
-                            active_scene_diff
-                        )
+                    validity_state = _with_qualification_state_policy(
+                        pure_state,
+                        target=target,
+                        scene_diff=active_scene_diff,
+                    )
                     validity, validity_retry, validity_elapsed = self._call_fast_service(
                         lambda validity_state=validity_state: self.check_state_validity(
                             validity_state
@@ -2557,9 +2698,7 @@ class MoveItQualificationEngine:
                             "state_valid": validity.get("valid") is True,
                             "state_validity_retry_count": validity_retry,
                             "state_validity_elapsed_s": validity_elapsed,
-                            "collision_pairs": list(
-                                validity.get("collision_pairs") or []
-                            ),
+                            "collision_pairs": list(validity.get("collision_pairs") or []),
                         }
                     )
                     solution_state: Mapping[str, Any] | None = None
@@ -2573,8 +2712,8 @@ class MoveItQualificationEngine:
                         rescue_target["ik_seed_timeout_s"] = timeout_s
                         rescue_target["solver_profile"] = solver_profile
                         rescue, rescue_retry, rescue_elapsed = self._call_fast_service(
-                            lambda rescue_target=rescue_target, pure_state=pure_state: self.compute_ik(
-                                rescue_target, pure_state, True
+                            lambda rescue_target=rescue_target, pure_state=pure_state: (
+                                self.compute_ik(rescue_target, pure_state, True)
                             ),
                             gate=ik_gate,
                             required_boolean="ok",
@@ -2597,19 +2736,17 @@ class MoveItQualificationEngine:
                             raise _QualificationInfrastructureError(
                                 "collision rescue returned an invalid joint state"
                             )
-                        rescued_validity_state = dict(rescued_state)
-                        if active_scene_diff is not None:
-                            rescued_validity_state["qualification_scene_diff"] = dict(
-                                active_scene_diff
-                            )
-                        rescued_validity, rescued_retry, rescued_elapsed = (
-                            self._call_fast_service(
-                                lambda rescued_validity_state=rescued_validity_state: self.check_state_validity(
-                                    rescued_validity_state
-                                ),
-                                gate=validity_gate,
-                                required_boolean="valid",
-                            )
+                        rescued_validity_state = _with_qualification_state_policy(
+                            rescued_state,
+                            target=target,
+                            scene_diff=active_scene_diff,
+                        )
+                        rescued_validity, rescued_retry, rescued_elapsed = self._call_fast_service(
+                            lambda rescued_validity_state=rescued_validity_state: (
+                                self.check_state_validity(rescued_validity_state)
+                            ),
+                            gate=validity_gate,
+                            required_boolean="valid",
                         )
                         rescue_attempt.update(
                             {
@@ -2627,9 +2764,7 @@ class MoveItQualificationEngine:
                         solution_result = rescue
                         rescue_count += 1
                     parent_state = seed.get("_chain_parent_state")
-                    parent_state = (
-                        parent_state if isinstance(parent_state, Mapping) else start
-                    )
+                    parent_state = parent_state if isinstance(parent_state, Mapping) else start
                     joint_travel = normalized_joint_distance(
                         parent_state, solution_state, source=source
                     )
@@ -2652,9 +2787,7 @@ class MoveItQualificationEngine:
                         {
                             "joint_state": dict(solution_state),
                             "state_valid": True,
-                            "joint_margin": joint_limit_margin(
-                                solution_state, source=source
-                            ),
+                            "joint_margin": joint_limit_margin(solution_state, source=source),
                             "min_singular_value": minimum_singular,
                             "joint_travel": joint_travel,
                             "cumulative_joint_travel": float(
@@ -2663,9 +2796,7 @@ class MoveItQualificationEngine:
                             + joint_travel,
                             "collision_rescues": rescue_count,
                             "generator_score": generator_score(candidate),
-                            "fixed_candidate_index": descriptor.get(
-                                "fixed_candidate_index", 0
-                            ),
+                            "fixed_candidate_index": descriptor.get("fixed_candidate_index", 0),
                             "seed_index": seed_index,
                             "seed_source": seed.get("seed_source"),
                         }
@@ -2680,13 +2811,10 @@ class MoveItQualificationEngine:
                     "infrastructure_error": True,
                     "infrastructure_error_detail": str(exc),
                 }
-            selected = deduplicate_beam_solutions(
-                solutions, source=source, limit=beam_width
-            )
+            selected = deduplicate_beam_solutions(solutions, source=source, limit=beam_width)
             evidence["kinematic_ik"] = saw_pure_solution
             evidence["pure_state_valid"] = any(
-                attempt.get("state_valid") is True
-                for attempt in evidence["pure_ik_attempts"]
+                attempt.get("state_valid") is True for attempt in evidence["pure_ik_attempts"]
             )
             evidence["collision_ik_called"] = saw_collision
             evidence["collision_ik"] = bool(selected)
@@ -2700,9 +2828,7 @@ class MoveItQualificationEngine:
                     **base,
                     "verdict": "FAIL",
                     "reason": (
-                        "collision_state_invalid"
-                        if saw_pure_solution
-                        else "kinematic_ik_failed"
+                        "collision_state_invalid" if saw_pure_solution else "kinematic_ik_failed"
                     ),
                 }
             best = selected[0]
@@ -2712,9 +2838,7 @@ class MoveItQualificationEngine:
                     "joint_margin": best["joint_margin"],
                     "min_singular_value": best["min_singular_value"],
                     "joint_travel": best["joint_travel"],
-                    "cumulative_joint_travel": best[
-                        "cumulative_joint_travel"
-                    ],
+                    "cumulative_joint_travel": best["cumulative_joint_travel"],
                     "collision_rescues": best["collision_rescues"],
                     "collision_pairs": [],
                 }
@@ -2732,9 +2856,7 @@ class MoveItQualificationEngine:
                         "infrastructure_error": True,
                     }
                 try:
-                    transition = self.apply_scene_transition(
-                        scene, str(transition_name), target
-                    )
+                    transition = self.apply_scene_transition(scene, str(transition_name), target)
                 except Exception as exc:  # noqa: BLE001
                     return {
                         **base,
@@ -2752,6 +2874,82 @@ class MoveItQualificationEngine:
                     }
                 if isinstance(transition.get("planning_scene_diff"), Mapping):
                     active_scene_diff = dict(transition["planning_scene_diff"])
+                post_gripper_state = target.get("qualification_post_transition_gripper_state")
+                if post_gripper_state:
+                    if post_gripper_state != "open":
+                        return {
+                            **base,
+                            "verdict": "UNKNOWN",
+                            "reason": "post_transition_gripper_state_unsupported",
+                            "infrastructure_error": True,
+                        }
+                    post_checks: list[JsonDict] = []
+                    post_valid: list[JsonDict] = []
+                    try:
+                        for branch_index, solution in enumerate(selected):
+                            post_state = _with_qualification_state_policy(
+                                solution["joint_state"],
+                                target={},
+                                scene_diff=active_scene_diff,
+                            )
+                            post_state["qualification_gripper_state"] = "open"
+                            post_result, post_retry, post_elapsed = self._call_fast_service(
+                                lambda post_state=post_state: self.check_state_validity(post_state),
+                                gate=validity_gate,
+                                required_boolean="valid",
+                            )
+                            post_checks.append(
+                                {
+                                    "joint_branch_index": branch_index,
+                                    "joint_state_sha256": _hash(solution["joint_state"]),
+                                    "requested_gripper_state": "open",
+                                    "valid": post_result.get("valid") is True,
+                                    "retry_count": post_retry,
+                                    "elapsed_s": post_elapsed,
+                                    "collision_pairs": list(
+                                        post_result.get("collision_pairs") or []
+                                    ),
+                                }
+                            )
+                            if post_result.get("valid") is True:
+                                post_valid.append(solution)
+                    except _QualificationInfrastructureError as exc:
+                        evidence["post_transition_gripper_state_checks"] = post_checks
+                        return {
+                            **base,
+                            "verdict": "UNKNOWN",
+                            "reason": "qualification_service_error",
+                            "infrastructure_error": True,
+                            "infrastructure_error_detail": str(exc),
+                        }
+                    evidence["post_transition_gripper_state_checks"] = post_checks
+                    selected = post_valid
+                    evidence["state_valid"] = bool(selected)
+                    evidence["beam_solutions"] = selected
+                    evidence["beam_width"] = len(selected)
+                    if not selected:
+                        return {
+                            **base,
+                            "verdict": "FAIL",
+                            "reason": "post_transition_gripper_state_invalid",
+                        }
+                    # A second Beam branch may be the only one that clears the
+                    # open hand envelope.  Rebase the chain on that surviving
+                    # deterministic branch instead of retaining the earlier
+                    # closed-gripper winner.
+                    best = selected[0]
+                    evidence.update(
+                        {
+                            "end_joint_state": dict(best["joint_state"]),
+                            "joint_margin": best["joint_margin"],
+                            "min_singular_value": best["min_singular_value"],
+                            "joint_travel": best["joint_travel"],
+                            "cumulative_joint_travel": best["cumulative_joint_travel"],
+                            "collision_rescues": best["collision_rescues"],
+                        }
+                    )
+                    previous_beam = selected
+                    start = dict(best["joint_state"])
         base.update(
             {
                 "pure_ik_pass": True,
@@ -2793,9 +2991,7 @@ class MoveItQualificationEngine:
                 seed["_parent_cumulative_joint_travel"] = float(
                     solution.get("cumulative_joint_travel", 0.0)
                 )
-                seed["_parent_rescues"] = int(
-                    solution.get("collision_rescues", 0)
-                )
+                seed["_parent_rescues"] = int(solution.get("collision_rescues", 0))
                 seeds.append(seed)
         else:
             seed = dict(start)
@@ -2842,9 +3038,7 @@ class MoveItQualificationEngine:
                     )
                 ]
             )
-            home = source.get("home_joint_state") or current_state.get(
-                "home_joint_state"
-            )
+            home = source.get("home_joint_state") or current_state.get("home_joint_state")
             if isinstance(home, Mapping):
                 ordered_supplements.append((home, "named_home"))
             for supplement_state, supplement_source in ordered_supplements:
@@ -2858,9 +3052,7 @@ class MoveItQualificationEngine:
                     supplement["_parent_rescues"] = int(
                         previous_beam[0].get("collision_rescues", 0)
                     )
-                expanded = _unique_joint_state_seeds(
-                    [*seeds, supplement], limit=count
-                )
+                expanded = _unique_joint_state_seeds([*seeds, supplement], limit=count)
                 if len(expanded) > len(seeds):
                     seeds = expanded
                 if len(seeds) >= count:
@@ -2874,6 +3066,70 @@ class MoveItQualificationEngine:
             "positions": list(seed.get("positions") or []),
             "seed_source": seed.get("seed_source"),
         }
+
+    @staticmethod
+    def _alternate_grasp_joint_branch_screen(
+        screen: Mapping[str, Any],
+        *,
+        source: Mapping[str, Any],
+    ) -> tuple[JsonDict, float, str] | None:
+        """Select the farthest independently screened Beam-2 contact branch.
+
+        Direct-contact grasp qualification has exactly one Cartesian stage.
+        This helper changes only that stage's selected joint solution; the
+        provider's terminal SE(3) pose and every scene input remain unchanged.
+        """
+
+        stages = screen.get("stages")
+        if not isinstance(stages, list) or len(stages) != 1:
+            return None
+        stage = stages[0]
+        if not isinstance(stage, Mapping):
+            return None
+        primary_state = _sanitized_joint_state(stage.get("end_joint_state"))
+        beam = stage.get("beam_solutions")
+        if primary_state is None or not isinstance(beam, list):
+            return None
+        primary_sha256 = _hash(primary_state)
+        alternatives: list[tuple[float, int, str, Mapping[str, Any], JsonDict]] = []
+        for beam_index, raw_solution in enumerate(beam):
+            if not isinstance(raw_solution, Mapping):
+                continue
+            state = _sanitized_joint_state(raw_solution.get("joint_state"))
+            if state is None:
+                continue
+            state_sha256 = _hash(state)
+            if state_sha256 == primary_sha256:
+                continue
+            distance = normalized_joint_distance(
+                primary_state,
+                state,
+                source=source,
+            )
+            if not math.isfinite(distance) or distance < JOINT_SOLUTION_DEDUP_DISTANCE:
+                continue
+            alternatives.append((distance, beam_index, state_sha256, raw_solution, state))
+        if not alternatives:
+            return None
+        distance, _, state_sha256, solution, state = sorted(
+            alternatives,
+            key=lambda item: (-item[0], item[1], item[2]),
+        )[0]
+        alternate = json.loads(json.dumps(dict(screen)))
+        alternate_stage = alternate["stages"][0]
+        alternate_stage["end_joint_state"] = state
+        alternate_stage["selected_joint_branch_index"] = 1
+        alternate_stage["selected_ik_end_joint_state_sha256"] = state_sha256
+        for key in (
+            "joint_margin",
+            "min_singular_value",
+            "joint_travel",
+            "cumulative_joint_travel",
+            "collision_rescues",
+        ):
+            if key in solution:
+                alternate_stage[key] = solution[key]
+        return alternate, distance, state_sha256
 
     def _plan_fast_candidate(
         self,
@@ -2928,9 +3184,7 @@ class MoveItQualificationEngine:
                     "candidate_id": str(item.get("candidate_id") or "")
                     if isinstance(item, Mapping)
                     else "",
-                    "candidate_pose_sha256": str(
-                        item.get("candidate_pose_sha256") or ""
-                    )
+                    "candidate_pose_sha256": str(item.get("candidate_pose_sha256") or "")
                     if isinstance(item, Mapping)
                     else "",
                     "qualification_binding_sha256": binding,
@@ -3025,10 +3279,19 @@ class MoveItQualificationEngine:
                 return dict(workspace_precheck)
         elif self.workspace_filter is not None:
             try:
-                if not all(self.workspace_filter(target) for target in stages if isinstance(target, Mapping)):
+                if not all(
+                    self.workspace_filter(target)
+                    for target in stages
+                    if isinstance(target, Mapping)
+                ):
                     return {**base, "verdict": "FAIL", "reason": "workspace_envelope_rejected"}
             except Exception as exc:  # noqa: BLE001
-                return {**base, "verdict": "UNKNOWN", "reason": "workspace_filter_error", "error_type": type(exc).__name__}
+                return {
+                    **base,
+                    "verdict": "UNKNOWN",
+                    "reason": "workspace_filter_error",
+                    "error_type": type(exc).__name__,
+                }
         base["workspace_pass"] = True
         base["endpoint_evaluated"] = True
         previous_solution: Mapping[str, Any] | None = None
@@ -3045,18 +3308,14 @@ class MoveItQualificationEngine:
                 scene = self.clone_scene()
                 transition_pose = candidate.get("initial_scene_transition_pose")
                 transition_target = dict(
-                    transition_pose
-                    if isinstance(transition_pose, Mapping)
-                    else stages[0]
+                    transition_pose if isinstance(transition_pose, Mapping) else stages[0]
                 )
                 predicted_attachment = candidate.get("predicted_attachment_transform")
                 if (
                     isinstance(predicted_attachment, Mapping)
                     and candidate.get("physical_scene_attachment_required") is not True
                 ):
-                    transition_target["attachment_transform"] = dict(
-                        predicted_attachment
-                    )
+                    transition_target["attachment_transform"] = dict(predicted_attachment)
                 transition = self.apply_scene_transition(
                     scene, str(initial_transition), transition_target
                 )
@@ -3113,9 +3372,7 @@ class MoveItQualificationEngine:
             try:
                 validity_state = dict(pure_state)
                 if active_scene_diff is not None:
-                    validity_state["qualification_scene_diff"] = dict(
-                        active_scene_diff
-                    )
+                    validity_state["qualification_scene_diff"] = dict(active_scene_diff)
                 validity = dict(self.check_state_validity(validity_state))
             except TimeoutError:
                 evidence["pure_state_valid"] = None
@@ -3126,9 +3383,7 @@ class MoveItQualificationEngine:
                 evidence["pure_state_validity_error_type"] = type(exc).__name__
             else:
                 evidence["pure_state_valid"] = validity.get("valid") is True
-                evidence["pure_collision_pairs"] = list(
-                    validity.get("collision_pairs") or []
-                )
+                evidence["pure_collision_pairs"] = list(validity.get("collision_pairs") or [])
             collision_seeds = _unique_joint_state_seeds(
                 [dict(pure_state), *seeds],
                 limit=seed_count,
@@ -3166,9 +3421,7 @@ class MoveItQualificationEngine:
                 return self._unknown(base, evidence, "collision_ik_evidence_missing")
             evidence["collision_state_valid"] = collision_validity.get("valid") is True
             evidence["state_valid"] = evidence["collision_state_valid"]
-            evidence["collision_pairs"] = list(
-                collision_validity.get("collision_pairs") or []
-            )
+            evidence["collision_pairs"] = list(collision_validity.get("collision_pairs") or [])
             if not evidence["state_valid"]:
                 return self._fail(base, evidence, "collision_ik_state_invalid")
             end_state = collision_state
@@ -3262,9 +3515,7 @@ class MoveItQualificationEngine:
 
         descriptors: list[JsonDict] = []
         for fixed_index, raw_descriptor in enumerate(candidates):
-            descriptor = (
-                dict(raw_descriptor) if isinstance(raw_descriptor, Mapping) else {}
-            )
+            descriptor = dict(raw_descriptor) if isinstance(raw_descriptor, Mapping) else {}
             descriptor["fixed_candidate_index"] = fixed_index
             descriptors.append(descriptor)
 
@@ -3298,9 +3549,7 @@ class MoveItQualificationEngine:
                 and not isinstance(scene_revision, bool)
                 and scene_revision != revision
             ):
-                raise _QualificationInfrastructureError(
-                    "placement legality scene revision drift"
-                )
+                raise _QualificationInfrastructureError("placement legality scene revision drift")
 
         goal_started = time.monotonic()
         goal_by_id: dict[str, JsonDict] = {}
@@ -3331,9 +3580,7 @@ class MoveItQualificationEngine:
             candidate = candidate if isinstance(candidate, Mapping) else {}
             if purpose == "placement":
                 goal_id = str(
-                    candidate.get("source_object_goal_id")
-                    or candidate.get("id")
-                    or candidate_id
+                    candidate.get("source_object_goal_id") or candidate.get("id") or candidate_id
                 )
                 bind_qualified_placement_goal(
                     descriptor,
@@ -3342,20 +3589,95 @@ class MoveItQualificationEngine:
                 candidate = descriptor.get("candidate")
                 candidate = candidate if isinstance(candidate, Mapping) else {}
             precheck = self._fast_workspace_precheck(descriptor)
-            precheck["fixed_candidate_index"] = int(
-                descriptor.get("fixed_candidate_index", 0)
-            )
+            precheck["fixed_candidate_index"] = int(descriptor.get("fixed_candidate_index", 0))
             if purpose == "placement":
                 goal_id = str(
-                    candidate.get("source_object_goal_id")
-                    or candidate.get("id")
-                    or candidate_id
+                    candidate.get("source_object_goal_id") or candidate.get("id") or candidate_id
                 )
                 goal_evidence = json.loads(json.dumps(goal_by_id[goal_id]))
                 precheck["goal_legality"] = goal_evidence
-                precheck["goal_legality_pass"] = (
-                    goal_evidence.get("verdict") == "PASS"
+                checks = goal_evidence.get("checks")
+                region_checks = (
+                    checks.get("placement_region") if isinstance(checks, Mapping) else None
                 )
+                robust_clearance = (
+                    region_checks.get(
+                        "conservative_minimum_margin_m",
+                        region_checks.get("minimum_margin_m"),
+                    )
+                    if isinstance(region_checks, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(robust_clearance, (int, float))
+                    and not isinstance(robust_clearance, bool)
+                    and math.isfinite(float(robust_clearance))
+                ):
+                    descriptor["placement_robust_clearance_m"] = float(robust_clearance)
+                    precheck["placement_robust_clearance_m"] = float(robust_clearance)
+                object_bbox = (
+                    checks.get("object_bbox") if isinstance(checks, Mapping) else None
+                )
+                minimum_z = (
+                    object_bbox.get("minimum_z_m")
+                    if isinstance(object_bbox, Mapping)
+                    else None
+                )
+                maximum_z = (
+                    object_bbox.get("maximum_z_m")
+                    if isinstance(object_bbox, Mapping)
+                    else None
+                )
+                if all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(float(value))
+                    for value in (minimum_z, maximum_z)
+                ):
+                    vertical_extent = max(
+                        0.0, float(maximum_z) - float(minimum_z)
+                    )
+                    descriptor["placement_vertical_extent_m"] = vertical_extent
+                    precheck["placement_vertical_extent_m"] = vertical_extent
+                support_checks = (
+                    checks.get("support") if isinstance(checks, Mapping) else None
+                )
+                if isinstance(support_checks, Mapping):
+                    for source_key, destination_key in (
+                        (
+                            "geometry_volume_centroid_height_m",
+                            "placement_support_energy_m",
+                        ),
+                        (
+                            "support_energy_resolution_m",
+                            "placement_support_energy_resolution_m",
+                        ),
+                        (
+                            "support_face_alignment_cosine",
+                            "placement_support_face_alignment_cosine",
+                        ),
+                        (
+                            "support_face_alignment_error_rad",
+                            "placement_support_face_alignment_error_rad",
+                        ),
+                        (
+                            "settling_sweep_translation_bound_m",
+                            "placement_settling_sweep_translation_bound_m",
+                        ),
+                        (
+                            "settling_sweep_clearance_m",
+                            "placement_settling_sweep_clearance_m",
+                        ),
+                    ):
+                        value = support_checks.get(source_key)
+                        if (
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(float(value))
+                        ):
+                            descriptor[destination_key] = float(value)
+                            precheck[destination_key] = float(value)
+                precheck["goal_legality_pass"] = goal_evidence.get("verdict") == "PASS"
                 if goal_evidence.get("verdict") != "PASS":
                     precheck.update(
                         {
@@ -3363,13 +3685,8 @@ class MoveItQualificationEngine:
                             "pair_legality_pass": False,
                             "legality_pass": False,
                             "verdict": str(goal_evidence.get("verdict") or "UNKNOWN"),
-                            "reason": str(
-                                goal_evidence.get("reason")
-                                or "goal_legality_rejected"
-                            ),
-                            "infrastructure_error": bool(
-                                goal_evidence.get("infrastructure_error")
-                            ),
+                            "reason": str(goal_evidence.get("reason") or "goal_legality_rejected"),
+                            "infrastructure_error": bool(goal_evidence.get("infrastructure_error")),
                             "pair_legality": {
                                 "verdict": "NOT_EVALUATED",
                                 "reason": "goal_legality_rejected",
@@ -3381,9 +3698,7 @@ class MoveItQualificationEngine:
                     precheck["pair_legality"] = {
                         "schema_version": "openeta.grasp_placement_pair_legality.v1",
                         "candidate_id": candidate_id,
-                        "source_grasp_id": str(
-                            candidate.get("source_grasp_id") or ""
-                        ),
+                        "source_grasp_id": str(candidate.get("source_grasp_id") or ""),
                         "source_object_goal_id": goal_id,
                         "verdict": "NOT_EVALUATED",
                         "reason": "pending_candidate_wave",
@@ -3431,8 +3746,7 @@ class MoveItQualificationEngine:
                 "pair_legality_pass_count": 0,
                 "pair_legality_reject_count": 0,
                 "pair_legality_pending_count": sum(
-                    precheck.get("pair_legality_pass") is None
-                    for precheck in prechecks.values()
+                    precheck.get("pair_legality_pass") is None for precheck in prechecks.values()
                 ),
                 "pair_legality_elapsed_s": 0.0,
             },
@@ -3468,26 +3782,16 @@ class MoveItQualificationEngine:
             candidate = descriptor.get("candidate")
             candidate = candidate if isinstance(candidate, Mapping) else {}
             goal_id = str(
-                candidate.get("source_object_goal_id")
-                or candidate.get("id")
-                or candidate_id
+                candidate.get("source_object_goal_id") or candidate.get("id") or candidate_id
             )
-            explicit_family = str(
-                candidate.get("source_grasp_equivalence_id") or ""
-            )
+            explicit_family = str(candidate.get("source_grasp_equivalence_id") or "")
             family = explicit_family or str(
-                candidate.get("source_grasp_id")
-                or candidate.get("id")
-                or candidate_id
+                candidate.get("source_grasp_id") or candidate.get("id") or candidate_id
             )
             # Only an explicit host equivalence family may share geometry.
             # Unmarked candidates retain independent evidence even when their
             # provider labels happen to match.
-            cache_key = (
-                (goal_id, family)
-                if explicit_family
-                else (candidate_id, candidate_id)
-            )
+            cache_key = (goal_id, family) if explicit_family else (candidate_id, candidate_id)
             cached = pair_cache.get(cache_key)
             if cached is None:
                 pair_evidence = evaluate_grasp_placement_pair_legality(
@@ -3507,9 +3811,7 @@ class MoveItQualificationEngine:
                 pair_evidence.update(
                     {
                         "candidate_id": candidate_id,
-                        "source_grasp_id": str(
-                            candidate.get("source_grasp_id") or ""
-                        ),
+                        "source_grasp_id": str(candidate.get("source_grasp_id") or ""),
                         "source_object_goal_id": goal_id,
                         "screening_reused": True,
                         "shared_from_candidate_id": shared_from,
@@ -3530,13 +3832,8 @@ class MoveItQualificationEngine:
                 precheck.update(
                     {
                         "verdict": str(pair_evidence.get("verdict") or "UNKNOWN"),
-                        "reason": str(
-                            pair_evidence.get("reason")
-                            or "pair_legality_rejected"
-                        ),
-                        "infrastructure_error": bool(
-                            pair_evidence.get("infrastructure_error")
-                        ),
+                        "reason": str(pair_evidence.get("reason") or "pair_legality_rejected"),
+                        "infrastructure_error": bool(pair_evidence.get("infrastructure_error")),
                     }
                 )
                 rejected.append(dict(precheck))
@@ -3550,8 +3847,7 @@ class MoveItQualificationEngine:
             {
                 "pair_legality_reached_count": len(pair_rows),
                 "pair_legality_pass_count": sum(
-                    precheck.get("pair_legality_pass") is True
-                    for precheck in pair_rows
+                    precheck.get("pair_legality_pass") is True for precheck in pair_rows
                 ),
                 "pair_legality_reject_count": sum(
                     isinstance(precheck.get("pair_legality"), Mapping)
@@ -3559,12 +3855,9 @@ class MoveItQualificationEngine:
                     for precheck in pair_rows
                 ),
                 "pair_legality_pending_count": sum(
-                    precheck.get("pair_legality_pass") is None
-                    for precheck in prechecks.values()
+                    precheck.get("pair_legality_pass") is None for precheck in prechecks.values()
                 ),
-                "pair_legality_elapsed_s": float(
-                    metrics.get("pair_legality_elapsed_s") or 0.0
-                )
+                "pair_legality_elapsed_s": float(metrics.get("pair_legality_elapsed_s") or 0.0)
                 + time.monotonic()
                 - started,
             }
@@ -3582,8 +3875,7 @@ class MoveItQualificationEngine:
         candidate = candidate if isinstance(candidate, Mapping) else {}
         stages = candidate.get("qualification_stages")
         if not isinstance(stages, list) or any(
-            not isinstance(stage, Mapping) or target_pose(stage) is None
-            for stage in stages
+            not isinstance(stage, Mapping) or target_pose(stage) is None for stage in stages
         ):
             return {
                 **precheck,
@@ -3615,7 +3907,12 @@ class MoveItQualificationEngine:
             )
             scene = self.clone_scene() if self.clone_scene is not None else None
         except Exception as exc:  # noqa: BLE001
-            return {**base, "verdict": "UNKNOWN", "reason": "planning_context_unavailable", "error_type": type(exc).__name__}
+            return {
+                **base,
+                "verdict": "UNKNOWN",
+                "reason": "planning_context_unavailable",
+                "error_type": type(exc).__name__,
+            }
         initial_transition = candidate.get("initial_scene_transition")
         if initial_transition:
             if self.apply_scene_transition is None or scene is None:
@@ -3627,18 +3924,14 @@ class MoveItQualificationEngine:
             try:
                 transition_pose = candidate.get("initial_scene_transition_pose")
                 transition_target = dict(
-                    transition_pose
-                    if isinstance(transition_pose, Mapping)
-                    else stages[0]
+                    transition_pose if isinstance(transition_pose, Mapping) else stages[0]
                 )
                 predicted_attachment = candidate.get("predicted_attachment_transform")
                 if (
                     isinstance(predicted_attachment, Mapping)
                     and candidate.get("physical_scene_attachment_required") is not True
                 ):
-                    transition_target["attachment_transform"] = dict(
-                        predicted_attachment
-                    )
+                    transition_target["attachment_transform"] = dict(predicted_attachment)
                 transition_evidence = self.apply_scene_transition(
                     scene, str(initial_transition), transition_target
                 )
@@ -3664,18 +3957,112 @@ class MoveItQualificationEngine:
             planning_started = time.monotonic()
             try:
                 planning_target = dict(target)
+                binding = str(
+                    getattr(
+                        self,
+                        "_active_qualification_binding_sha256",
+                        "",
+                    )
+                )
+                if binding:
+                    planning_target["_qualification_cache_binding_sha256"] = (
+                        binding
+                    )
+                allowed_collisions = _contact_allowed_collisions(scene, planning_target)
+                if allowed_collisions:
+                    planning_target["qualification_allowed_collisions"] = allowed_collisions
                 selected_ik_state = evidence.get("end_joint_state")
                 if isinstance(selected_ik_state, Mapping):
-                    planning_target["qualification_goal_joint_state"] = dict(
-                        selected_ik_state
-                    )
-                    evidence["selected_ik_end_joint_state_sha256"] = _hash(
-                        selected_ik_state
-                    )
+                    planning_target["qualification_goal_joint_state"] = dict(selected_ik_state)
+                    evidence["selected_ik_end_joint_state_sha256"] = _hash(selected_ik_state)
                 if active_scene_diff is not None:
-                    planning_target["qualification_scene_diff"] = dict(
-                        active_scene_diff
+                    planning_target["qualification_scene_diff"] = dict(active_scene_diff)
+                terminal_gripper_state = target.get(
+                    "qualification_terminal_gripper_state"
+                )
+                if terminal_gripper_state:
+                    if terminal_gripper_state != "closing_sweep":
+                        return self._unknown(
+                            base,
+                            evidence,
+                            "terminal_gripper_state_unsupported",
+                        )
+                    if not isinstance(selected_ik_state, Mapping):
+                        return self._unknown(
+                            base,
+                            evidence,
+                            "terminal_gripper_state_joint_state_missing",
+                        )
+                    terminal_state = _with_qualification_state_policy(
+                        selected_ik_state,
+                        target=planning_target,
+                        scene_diff=active_scene_diff,
                     )
+                    terminal_state["qualification_gripper_state"] = (
+                        "closing_sweep"
+                    )
+                    try:
+                        terminal_result, terminal_retry, terminal_elapsed = (
+                            self._call_fast_service(
+                                lambda: self.check_state_validity(terminal_state),
+                                required_boolean="valid",
+                            )
+                        )
+                    except _QualificationInfrastructureError as exc:
+                        return self._unknown(
+                            base,
+                            evidence,
+                            "terminal_gripper_state_service_error",
+                            exc,
+                        )
+                    evidence["terminal_gripper_state_validity"] = {
+                        "requested_gripper_state": "closing_sweep",
+                        "joint_state_sha256": _hash(selected_ik_state),
+                        "valid": terminal_result.get("valid") is True,
+                        "retry_count": terminal_retry,
+                        "elapsed_s": terminal_elapsed,
+                        "preplan_endpoint_check": True,
+                        "seed_independent_static_collision": (
+                            terminal_result.get(
+                                "qualification_seed_independent_static_collision"
+                            )
+                            is True
+                        ),
+                        "bilateral_target_contact_required": (
+                            terminal_result.get(
+                                "qualification_bilateral_target_contact_required"
+                            )
+                            is True
+                        ),
+                        "bilateral_target_contact_predicted": (
+                            terminal_result.get(
+                                "qualification_bilateral_target_contact_predicted"
+                            )
+                            is True
+                        ),
+                        "seed_independent_contact_geometry_failure": (
+                            terminal_result.get(
+                                "qualification_seed_independent_contact_geometry_failure"
+                            )
+                            is True
+                        ),
+                        "reason": terminal_result.get("reason"),
+                        "collision_pairs": list(
+                            terminal_result.get("collision_pairs") or []
+                        ),
+                        "sweep_checks": list(
+                            terminal_result.get(
+                                "qualification_gripper_sweep_checks"
+                            )
+                            or []
+                        ),
+                    }
+                    if terminal_result.get("valid") is not True:
+                        return self._fail(
+                            base,
+                            evidence,
+                            "terminal_gripper_state_invalid",
+                        )
                 planned = dict(
                     self.plan_only(
                         planning_target,
@@ -3692,6 +4079,13 @@ class MoveItQualificationEngine:
                 return self._unknown(base, evidence, "plan_only_service_error", exc)
             evidence["moveit_error_code"] = planned.get("moveit_error_code")
             evidence["solver"] = planned.get("solver")
+            evidence["l5_trajectory_cache_stored"] = (
+                planned.get("l5_trajectory_cache_stored") is True
+            )
+            if isinstance(planned.get("l5_trajectory_cache_key"), str):
+                evidence["l5_trajectory_cache_key"] = planned[
+                    "l5_trajectory_cache_key"
+                ]
             reported_elapsed = planned.get("elapsed_s")
             evidence["elapsed_s"] = (
                 float(reported_elapsed)
@@ -3712,30 +4106,90 @@ class MoveItQualificationEngine:
             if planned.get("execution_started") is not False:
                 return self._unknown(base, evidence, "plan_only_execution_evidence_missing")
             if planned.get("ok") is not True:
-                evidence["collision_pairs"] = list(planned.get("collision_pairs") or evidence.get("collision_pairs") or [])
+                evidence["collision_pairs"] = list(
+                    planned.get("collision_pairs") or evidence.get("collision_pairs") or []
+                )
                 return self._fail(base, evidence, "plan_only_failed")
             if not isinstance(points, list) or not points:
                 return self._unknown(base, evidence, "plan_only_empty_trajectory")
             end_state = planned.get("end_joint_state")
             if not isinstance(end_state, Mapping):
                 return self._unknown(base, evidence, "plan_only_end_state_missing")
-            evidence.update({"plan_only": True, "execution_started": False, "trajectory": {"point_count": len(points)}, "end_joint_state": dict(end_state)})
+            evidence.update(
+                {
+                    "plan_only": True,
+                    "execution_started": False,
+                    "trajectory": {"point_count": len(points)},
+                    "end_joint_state": dict(end_state),
+                }
+            )
             base["stages"].append(evidence)
             start = dict(end_state)
             transition = target.get("scene_transition") if isinstance(target, Mapping) else None
             if transition:
-                transition_evidence: Mapping[str, Any] = {"ok": True, "transition": transition, "virtual": True}
+                transition_evidence: Mapping[str, Any] = {
+                    "ok": True,
+                    "transition": transition,
+                    "virtual": True,
+                }
                 if self.apply_scene_transition is not None:
                     try:
-                        transition_evidence = self.apply_scene_transition(scene, str(transition), target)
+                        transition_evidence = self.apply_scene_transition(
+                            scene, str(transition), target
+                        )
                     except Exception as exc:  # noqa: BLE001
-                        return {**base, "verdict": "UNKNOWN", "reason": "virtual_scene_transition_error", "error_type": type(exc).__name__}
+                        return {
+                            **base,
+                            "verdict": "UNKNOWN",
+                            "reason": "virtual_scene_transition_error",
+                            "error_type": type(exc).__name__,
+                        }
                 evidence["scene_transition"] = dict(transition_evidence)
                 if transition_evidence.get("ok") is not True:
                     return self._fail(base, evidence, "virtual_scene_transition_failed")
                 next_diff = transition_evidence.get("planning_scene_diff")
                 if isinstance(next_diff, Mapping):
                     active_scene_diff = dict(next_diff)
+                post_gripper_state = target.get("qualification_post_transition_gripper_state")
+                if post_gripper_state:
+                    if post_gripper_state != "open":
+                        return self._unknown(
+                            base,
+                            evidence,
+                            "post_transition_gripper_state_unsupported",
+                        )
+                    post_state = _with_qualification_state_policy(
+                        end_state,
+                        target={},
+                        scene_diff=active_scene_diff,
+                    )
+                    post_state["qualification_gripper_state"] = "open"
+                    try:
+                        post_result, post_retry, post_elapsed = self._call_fast_service(
+                            lambda: self.check_state_validity(post_state),
+                            required_boolean="valid",
+                        )
+                    except _QualificationInfrastructureError as exc:
+                        return self._unknown(
+                            base,
+                            evidence,
+                            "post_transition_gripper_state_service_error",
+                            exc,
+                        )
+                    evidence["post_transition_gripper_state_validity"] = {
+                        "requested_gripper_state": "open",
+                        "joint_state_sha256": _hash(end_state),
+                        "valid": post_result.get("valid") is True,
+                        "retry_count": post_retry,
+                        "elapsed_s": post_elapsed,
+                        "collision_pairs": list(post_result.get("collision_pairs") or []),
+                    }
+                    if post_result.get("valid") is not True:
+                        return self._fail(
+                            base,
+                            evidence,
+                            "post_transition_gripper_state_invalid",
+                        )
         if self.scene_revision() != revision:
             return {**base, "verdict": "UNKNOWN", "reason": "planning_scene_revision_drift"}
         return {**base, "verdict": "PASS", "reason": "qualified"}
@@ -3754,17 +4208,25 @@ class MoveItQualificationEngine:
                 return {}, attempts, "collision_ik_timeout" if collision else "kinematic_ik_timeout"
             remaining_seeds = max(1, len(seeds) - index)
             seeded_target = dict(target)
-            seeded_target["ik_seed_timeout_s"] = max(
-                0.001, remaining_budget / remaining_seeds
-            )
+            seeded_target["ik_seed_timeout_s"] = max(0.001, remaining_budget / remaining_seeds)
             try:
                 result = dict(self.compute_ik(seeded_target, seed, collision))
             except TimeoutError:
                 continue
             except Exception as exc:  # noqa: BLE001
-                attempts.append({"seed_sha256": _hash(seed), "ok": False, "error_type": type(exc).__name__})
+                attempts.append(
+                    {"seed_sha256": _hash(seed), "ok": False, "error_type": type(exc).__name__}
+                )
                 continue
-            attempts.append({"seed_sha256": _hash(seed), "ok": result.get("ok") is True, "moveit_error_code": result.get("moveit_error_code"), "solver": result.get("solver"), "elapsed_s": result.get("elapsed_s")})
+            attempts.append(
+                {
+                    "seed_sha256": _hash(seed),
+                    "ok": result.get("ok") is True,
+                    "moveit_error_code": result.get("moveit_error_code"),
+                    "solver": result.get("solver"),
+                    "elapsed_s": result.get("elapsed_s"),
+                }
+            )
             if result.get("ok") is True:
                 return result, attempts, ""
         return {"ok": False}, attempts, ""
@@ -3789,9 +4251,7 @@ class MoveItQualificationEngine:
                 return {}, attempts, "collision_ik_timeout"
             remaining_seeds = max(1, len(seeds) - index)
             seeded_target = dict(target)
-            seeded_target["ik_seed_timeout_s"] = max(
-                0.001, remaining_budget / remaining_seeds
-            )
+            seeded_target["ik_seed_timeout_s"] = max(0.001, remaining_budget / remaining_seeds)
             attempt: JsonDict = {"seed_sha256": _hash(seed), "ok": False}
             try:
                 result = dict(self.compute_ik(seeded_target, seed, True))
@@ -3824,9 +4284,11 @@ class MoveItQualificationEngine:
                 attempt["state_evidence"] = "missing"
                 attempts.append(attempt)
                 continue
-            validity_state = dict(state)
-            if active_scene_diff is not None:
-                validity_state["qualification_scene_diff"] = dict(active_scene_diff)
+            validity_state = _with_qualification_state_policy(
+                state,
+                target=target,
+                scene_diff=active_scene_diff,
+            )
             try:
                 validity = dict(self.check_state_validity(validity_state))
             except TimeoutError:
@@ -3851,21 +4313,29 @@ class MoveItQualificationEngine:
                 continue
             attempt["ok"] = True
             attempts.append(attempt)
-            return {
-                **result,
-                "state_validity": validity,
-            }, attempts, ""
+            return (
+                {
+                    **result,
+                    "state_validity": validity,
+                },
+                attempts,
+                "",
+            )
         if saw_validity_timeout:
             return {}, attempts, "collision_state_validity_timeout"
         if saw_validity_error:
             return {}, attempts, "collision_state_validity_service_error"
         if saw_state_missing:
             return {}, attempts, "collision_ik_evidence_missing"
-        return {
-            "ok": False,
-            "all_solutions_state_invalid": saw_state_invalid,
-            "collision_pairs": collision_pairs,
-        }, attempts, ""
+        return (
+            {
+                "ok": False,
+                "all_solutions_state_invalid": saw_state_invalid,
+                "collision_pairs": collision_pairs,
+            },
+            attempts,
+            "",
+        )
 
     @staticmethod
     def _ik_seeds(
@@ -3895,7 +4365,11 @@ class MoveItQualificationEngine:
         upper = [math.pi] * len(positions)
         if isinstance(limits, Mapping):
             lower_value, upper_value = limits.get("lower"), limits.get("upper")
-            if isinstance(lower_value, list) and isinstance(upper_value, list) and len(lower_value) == len(upper_value) == len(positions):
+            if (
+                isinstance(lower_value, list)
+                and isinstance(upper_value, list)
+                and len(lower_value) == len(upper_value) == len(positions)
+            ):
                 lower = [float(value) for value in lower_value]
                 upper = [float(value) for value in upper_value]
         rng = random.Random(int(_hash({"candidate": candidate_id, "stage": stage_index})[:16], 16))

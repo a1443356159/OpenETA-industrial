@@ -68,7 +68,7 @@ def validate_asset_root(root: Path) -> dict:
         required = [
             *(f"joint_{i}" for i in range(1, 8)),
             *(f"link_{i}" for i in range(1, 8)),
-            "base_link", "camera_rolink", "camera_link",
+            "base_link", "wrist_camera_bracket_link", "wrist_camera_housing_link",
             "wrist_camera_optical_frame", "openeta_wrist_rgbd",
         ]
         if any(token not in combined for token in required):

@@ -25,7 +25,11 @@ FRAME = "placement_camera"
 CAMERA_FRAME = "opencv"
 POSE_CONVENTION = "p_placed = R @ p_current + t"
 MODEL_SAMPLE_COUNT = 1024
-DEFAULT_DEPTH_TRUNCATION = 1.0
+# The fixed scene camera is mounted 1.35 m above the work surface. Keep the
+# default below the simulated floor/background range while admitting the full
+# calibrated industrial work volume. Deployments can override this at the MCP
+# server boundary for a different RGB-D installation.
+DEFAULT_DEPTH_TRUNCATION = 2.0
 DEFAULT_INFERENCE_SEED = 0
 
 

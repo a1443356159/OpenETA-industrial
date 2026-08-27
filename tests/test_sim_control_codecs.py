@@ -271,7 +271,7 @@ def test_close_env_propagates_worker_cleanup_failure(monkeypatch) -> None:
     assert ("release", "worker") in calls
 
 
-def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
+def test_control_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
     calls: list[tuple[dict, int]] = []
     meta = {
         "backend": "gazebo",
@@ -300,9 +300,7 @@ def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
                 "target_pose": {"xyz": [0.1, 0.2, 0.3], "quat_xyzw": [0.0, 0.0, 0.0, 1.0]},
                 "position_tolerance_m": 0.002,
                 "orientation_tolerance_rad": 0.05,
-                "timeout_s": 60.0,
-                "max_velocity_scaling_factor": 0.3,
-                "max_acceleration_scaling_factor": 0.3,
+                "timeout_s": 110.0,
             },
             1,
         ),
@@ -311,7 +309,38 @@ def test_m2_tools_send_exactly_one_structured_worker_step(monkeypatch) -> None:
     ]
 
 
-def test_m2_move_to_preserves_worker_start_state_recovery_receipt(monkeypatch) -> None:
+def test_move_to_only_overrides_load_aware_profile_when_explicit(monkeypatch) -> None:
+    calls: list[dict] = []
+    meta = {
+        "backend": "gazebo",
+        "control_spec": {"motion_control": True},
+    }
+    monkeypatch.setattr(server, "_session_envs", {"sid": {"local": meta}})
+    monkeypatch.setattr(server, "_touch_session", lambda _sid: None)
+    monkeypatch.setattr(
+        server,
+        "_proxy_step",
+        lambda _meta, action, num_steps=1: calls.append(action) or {"ok": True},
+    )
+
+    server.move_to.__wrapped__(
+        "local",
+        0.1,
+        0.2,
+        0.3,
+        roll=0.0,
+        pitch=0.0,
+        yaw=0.0,
+        session_id="sid",
+        velocity_scaling=0.25,
+        acceleration_scaling=0.15,
+    )
+
+    assert calls[0]["max_velocity_scaling_factor"] == pytest.approx(0.25)
+    assert calls[0]["max_acceleration_scaling_factor"] == pytest.approx(0.15)
+
+
+def test_move_to_preserves_worker_start_state_recovery_receipt(monkeypatch) -> None:
     recovery = {
         "schema_version": "openeta.gazebo.start_state_recovery.v1",
         "status": "RECOVERED",

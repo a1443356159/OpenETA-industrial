@@ -13,7 +13,7 @@ def test_gazebo_create_reset_observe_is_deterministic() -> None:
     second = env.reset(seed=17)
     assert first.to_dict()["objects"] == second.to_dict()["objects"]
     assert first.metadata["scene_epoch"] == 0
-    assert first.metadata["observation_provenance"] == "gazebo_oracle"
+    assert first.metadata["observation_provenance"] == "gazebo_fixture"
     assert second.cameras[0].depth[0][0] == pytest.approx(1.0)
     assert second.cameras[0].extrinsics["camera_frame"] == "opencv"
     assert second.metadata["camera_topics"]["depth"] == "/top_camera/depth_image"
@@ -36,7 +36,7 @@ def test_gazebo_requires_create_before_observe() -> None:
         GazeboEnvironment().observe()
 
 
-def test_standard_adapter_exposes_lifecycle_and_rejects_control_in_m1() -> None:
+def test_observation_adapter_exposes_lifecycle_and_rejects_control() -> None:
     adapter = GazeboSimulatorAdapter()
     assert adapter.reset(task="observe only").metadata["backend"] == "gazebo"
     with pytest.raises(GazeboLifecycleError):

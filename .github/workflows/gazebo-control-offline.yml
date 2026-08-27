@@ -1,12 +1,12 @@
-name: Gazebo M2 offline contracts
+name: Gazebo offline contracts
 
 on:
   push:
     paths:
       - "config/runtime/**"
       - "extensions/gazebo/**"
-      - "scripts/*openeta_m2.sh"
-      - "tests/test_gazebo_m2*"
+      - "tests/test_gazebo_robot_*"
+      - "tests/test_gazebo_native_grasp_*"
       - "tests/test_gazebo_ros_control.py"
       - "pyproject.toml"
       - "uv.lock"
@@ -19,16 +19,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Reproduce Python environment
         run: bash scripts/setup_openeta_gazebo.sh --no-apt --python-only
-      - name: Compile and test M2 contracts
+      - name: Compile and test Gazebo contracts
         run: |
           .venv/bin/python -m compileall -q extensions/gazebo sim
           .venv/bin/python -m pytest -q \
-            tests/test_gazebo_m2_assets.py \
-            tests/test_gazebo_m2_contract.py \
-            tests/test_gazebo_m2_worker.py \
-            tests/test_gazebo_m3_profile.py \
-            tests/test_gazebo_m3_verifier.py \
-            tests/test_gazebo_m3_worker.py \
+            tests/test_gazebo_robot_assets.py \
+            tests/test_gazebo_robot_contract.py \
+            tests/test_gazebo_robot_worker.py \
+            tests/test_gazebo_native_grasp_profile.py \
+            tests/test_gazebo_native_grasp_verifier.py \
+            tests/test_gazebo_native_grasp_worker.py \
             tests/test_gazebo_ros_control.py
       - name: Relocation preflight
         run: |

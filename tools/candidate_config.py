@@ -8,6 +8,11 @@ from typing import Any, Iterable
 
 
 DEFAULT_GRASP_RAW_POOL_SIZE = 200
+# GraspGenX keeps the complete legacy 200-representative pool and adds a
+# bounded, model-native centering/support reserve.  The extra entries come
+# from deterministic model draws, never host-generated pose variants.
+# AnyGrasp retains its existing 200-candidate contract.
+DEFAULT_GRASPGENX_RAW_POOL_SIZE = 256
 DEFAULT_ANYPLACE_RAW_POOL_SIZE = 96
 DEFAULT_GRASP_DIVERSITY_POOL_SIZE = 64
 DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE = 96
@@ -123,7 +128,7 @@ def argparse_raw_pool_size(*, placement: bool = False):
 class CandidateFunnelConfig:
     """Immutable host configuration for reserve pools and bounded planning."""
 
-    graspgenx_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE
+    graspgenx_raw_pool_size: int = DEFAULT_GRASPGENX_RAW_POOL_SIZE
     anygrasp_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE
     anyplace_raw_pool_size: int = DEFAULT_ANYPLACE_RAW_POOL_SIZE
     grasp_diversity_pool_size: int = DEFAULT_GRASP_DIVERSITY_POOL_SIZE

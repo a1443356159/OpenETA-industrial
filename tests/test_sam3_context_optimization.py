@@ -16,7 +16,9 @@ from agent.runtime.planner import (
     ToolCallingPlanner,
     _default_tool_planner_system_prompt,
     _model_request_context,
+    _model_phase_and_legal_tools,
     _sam3_request_identity,
+    _semantic_camera_view_identity,
     _semantic_perception_obligation,
     _scripted_semantic_prompts,
 )
@@ -26,6 +28,7 @@ from agent.runtime.sam3_selection import (
     Sam3SelectionReviewError,
     Sam3SelectionParentContext,
 )
+from agent.tools.handlers import _sam3_semantic_metadata
 
 
 def test_isolated_sam3_reviewer_receives_only_typed_bundle_and_two_images() -> None:
@@ -773,6 +776,88 @@ def test_model_projection_deduplicates_task_and_omits_images_for_typed_action() 
     assert "required_parameters" not in obligation
 
 
+def test_model_projection_summarizes_durable_evidence_and_keeps_only_latest_feedback() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    private_marker = "PRIVATE_QUALIFICATION_MATRIX"
+    for index in range(4):
+        memory.begin_user_turn(f"follow-up {index} {private_marker * 50}")
+    detection = {
+        "id": "target-mask",
+        "result_id": "sam3-result",
+        "semantic_role": "grasp_target",
+        "target_prompt": "red bolt",
+        "score": 0.97,
+        "mask_ref": "/tmp/target-mask.png",
+        "source_image": "/tmp/top.png",
+        "overlay_ref": private_marker * 100,
+    }
+    full_context = {
+        "task": "pick and place",
+        "planner_mode": "agentic_closed_loop",
+        "active_environment_task": {"status": "running", "env_id": "normal"},
+        "observation": {"camera_ids": ["top"], "metadata": {"scene_epoch": 4}},
+        "selected_sam3_detection": dict(detection),
+        "placement_object_detection": dict(detection),
+        "sam3_semantic_state": {
+            "schema_version": "openeta.sam3_semantic_state.v1",
+            "roles": {"grasp_target": {"status": "selected", **detection}},
+            "attempts": [
+                {"result": private_marker * 100, "candidate_count": 4}
+                for _ in range(12)
+            ],
+        },
+        "grasp_candidate_policy": {
+            "status": "frozen_frontier_required",
+            "candidate_count": 232,
+            "frozen_grasp_frontier_remaining_count": 168,
+            "qualification_artifact": {"proof": private_marker * 100},
+            "candidates_summary": [
+                {"pose": private_marker * 100} for _ in range(100)
+            ],
+        },
+        "grasp_frontier_obligation": {
+            "status": "required",
+            "required_tool": "grasp_pose_estimate",
+            "required_parameters": {
+                "mode": "frozen_frontier",
+                "model_inference": False,
+                "scene_revision": 4,
+            },
+        },
+        "tool_references": [
+            {
+                "name": "grasp_pose_estimate",
+                "description": "x" * 5_000,
+                "parameters": {"mode": "string", "model_inference": "boolean"},
+            }
+        ],
+        "memory": {"metadata": {}},
+        "selected_skill_guidance": [],
+        "skill_usage": {},
+    }
+
+    projected, messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    serialized = json.dumps(projected, sort_keys=True)
+    assert private_marker not in serialized
+    assert len(messages) <= 1
+    assert projected["state"]["grasp_candidate_policy"] == {
+        "status": "frozen_frontier_required",
+        "candidate_count": 232,
+        "frozen_grasp_frontier_remaining_count": 168,
+    }
+    assert projected["state"]["sam3_semantic_state"]["attempt_count"] == 12
+    assert len(projected["tool_references"][0]["description"]) <= 240
+    assert projected["obligations"]["grasp_frontier_obligation"][
+        "parameter_mode"
+    ] == "host_hydrated"
+
+
 def test_model_projection_hides_anyplace_paths_and_release_geometry() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick and place")
@@ -1180,6 +1265,43 @@ def test_explicit_post_create_observe_precedes_semantic_perception() -> None:
     }
 
 
+def test_out_of_band_scripted_metadata_keeps_human_task_natural(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "OPENETA_SCRIPTED_TASK_METADATA",
+        "[automation=scripted_tui; planner_mode=agentic_closed_loop; "
+        "initial_observe=required; grasp_target=yellow_adjustable_wrench]",
+    )
+    memory_context = {
+        "scene_epoch": 1,
+        "current_user_request": (
+            "环境打开以后先看一眼工作台，再把黄色活动扳手放进绿色料箱。"
+        ),
+        "latest_environment_receipt": {
+            "info": {
+                "previous_action": {"request_name": "create_simulator_env"}
+            }
+        },
+        "sam3_semantic_state": {"roles": {}, "attempts": []},
+    }
+
+    obligation = _semantic_perception_obligation(
+        observation=EnvObservation(
+            task="normal",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"step_idx": 2},
+        ),
+        camera_artifacts=[
+            {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/reset.png"}
+        ],
+        memory_context=memory_context,
+    )
+
+    assert "automation=" not in memory_context["current_user_request"]
+    assert obligation["required_tool"] == "observe"
+    assert obligation["semantic_role"] == "grasp_target"
+
+
 def test_scripted_fixed_semantics_dispatch_sam3_without_model_routing_turn() -> None:
     scripted_request = (
         "[automation=scripted_tui; environment_id=openeta/test-v0; "
@@ -1221,6 +1343,87 @@ def test_scripted_fixed_semantics_dispatch_sam3_without_model_routing_turn() -> 
     assert obligation["semantic_target"] == "red rectangular block"
     assert obligation["required_parameters"]["prompt"] == "red rectangular block"
     assert obligation["required_parameters"]["image"] == "/tmp/top.png"
+
+
+def test_initial_grasp_target_prefers_scene_camera_even_with_calibrated_wrist() -> None:
+    observation = EnvObservation(
+        task="normal pick and place",
+        cameras=[
+            CameraFrame(
+                frame_id="top_camera_optical_frame",
+                role="scene_primary",
+                rgb=[],
+                extrinsics={
+                    "camera_frame": "opencv",
+                    "pos": [0.35, 0.0, 1.3],
+                    "mat": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0],
+                },
+            ),
+            CameraFrame(
+                frame_id="wrist_camera_optical_frame",
+                role="wrist_primary",
+                rgb=[],
+                extrinsics={
+                    "frame_transform": "camera_to_world",
+                    "camera_frame": "opencv",
+                    "pos": [0.0, -0.05, 0.996],
+                    "quat_xyzw": [0.63, -0.73, 0.20, -0.17],
+                    "calibration_source": "tf2_at_rgb_timestamp",
+                },
+            ),
+        ],
+        robot=RobotState(),
+        metadata={"step_idx": 2},
+    )
+    camera_artifacts = [
+        {
+            "kind": "rgb",
+            "frame_id": "top_camera_optical_frame",
+            "role": "scene_primary",
+            "path": "/tmp/top.png",
+        },
+        {
+            "kind": "depth",
+            "frame_id": "top_camera_optical_frame",
+            "role": "scene_primary",
+            "path": "/tmp/top-depth.png",
+        },
+        {
+            "kind": "rgb",
+            "frame_id": "wrist_camera_optical_frame",
+            "role": "wrist_primary",
+            "path": "/tmp/wrist.png",
+        },
+        {
+            "kind": "depth",
+            "frame_id": "wrist_camera_optical_frame",
+            "role": "wrist_primary",
+            "path": "/tmp/wrist-depth.png",
+        },
+    ]
+
+    obligation = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=camera_artifacts,
+        memory_context={
+            "scene_epoch": 1,
+            "sam3_semantic_state": {
+                "roles": {
+                    "grasp_target": {
+                        "canonical_prompt": "red hex bolt",
+                        "scene_epoch": 1,
+                    }
+                },
+                "attempts": [],
+            },
+        },
+    )
+
+    assert obligation is not None
+    assert obligation["semantic_role"] == "grasp_target"
+    assert obligation["required_tool"] == "sam3"
+    assert obligation["required_parameters"]["image"] == "/tmp/top.png"
+    assert obligation["required_parameters"]["prompt"] == "red hex bolt"
 
 
 def _grasp_target_retry_obligation(
@@ -1329,6 +1532,248 @@ def test_grasp_target_retry_budget_exhausts_without_repeating_sam3() -> None:
     assert obligation["status"] == "exhausted"
     assert obligation["failure_code"] == "grasp_target_localization_exhausted"
     assert "required_tool" not in obligation
+
+
+def _semantic_view_observation(
+    *,
+    wrist_position: list[float],
+) -> EnvObservation:
+    return EnvObservation(
+        task="normal pick and place",
+        cameras=[
+            CameraFrame(
+                frame_id="top_camera_optical_frame",
+                role="scene_primary",
+                rgb=[],
+                intrinsics={"width": 1280, "height": 720, "fx": 700.0, "fy": 700.0},
+                extrinsics={
+                    "frame_transform": "camera_to_world",
+                    "camera_frame": "opencv",
+                    "pos": [0.38, 0.0, 1.35],
+                    "quat_xyzw": [0.7071067812, -0.7071067812, 0.0, 0.0],
+                },
+            ),
+            CameraFrame(
+                frame_id="wrist_camera_optical_frame",
+                role="wrist_primary",
+                rgb=[],
+                intrinsics={"width": 1280, "height": 720, "fx": 700.0, "fy": 700.0},
+                extrinsics={
+                    "frame_transform": "camera_to_world",
+                    "camera_frame": "opencv",
+                    "pos": wrist_position,
+                    "quat_xyzw": [-0.73, -0.54, -0.27, -0.33],
+                    "timestamp_s": 123.456,
+                },
+            ),
+        ],
+        robot=RobotState(),
+        metadata={"step_idx": 2},
+    )
+
+
+def _semantic_view_artifacts(prefix: str) -> list[dict[str, object]]:
+    return [
+        {
+            "kind": "rgb",
+            "frame_id": "top_camera_optical_frame",
+            "role": "scene_primary",
+            "path": f"/tmp/{prefix}-top.png",
+            "width": 1280,
+            "height": 720,
+        },
+        {
+            "kind": "rgb",
+            "frame_id": "wrist_camera_optical_frame",
+            "role": "wrist_primary",
+            "path": f"/tmp/{prefix}-wrist.png",
+            "width": 1280,
+            "height": 720,
+        },
+    ]
+
+
+def _view_retry_obligation(
+    *,
+    observation: EnvObservation,
+    artifacts: list[dict[str, object]],
+    attempts: list[dict[str, object]],
+) -> dict[str, object]:
+    obligation = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=artifacts,
+        memory_context={
+            "scene_epoch": 4,
+            "sam3_semantic_state": {
+                "roles": {
+                    "grasp_target": {
+                        "canonical_prompt": "yellow adjustable wrench",
+                        "scene_epoch": 4,
+                    }
+                },
+                "attempts": attempts,
+            },
+        },
+    )
+    assert obligation is not None
+    return obligation
+
+
+def test_new_file_for_same_physical_view_does_not_reset_retry_budget() -> None:
+    first_observation = _semantic_view_observation(wrist_position=[0.55, 0.19, 0.26])
+    first_artifacts = _semantic_view_artifacts("first")
+    first = _view_retry_obligation(
+        observation=first_observation,
+        artifacts=first_artifacts,
+        attempts=[],
+    )
+    top_view_identity = str(first["required_parameters"]["view_identity"])
+
+    second_observation = _semantic_view_observation(wrist_position=[0.55, 0.19, 0.26])
+    second_artifacts = _semantic_view_artifacts("second")
+    second = _view_retry_obligation(
+        observation=second_observation,
+        artifacts=second_artifacts,
+        attempts=[
+            {
+                **_failed_grasp_target_attempt(
+                    source_image="/tmp/first-top.png",
+                    prompt="yellow adjustable wrench",
+                    attempt_id="top-exact",
+                ),
+                "view_identity": top_view_identity,
+            }
+        ],
+    )
+
+    assert second["required_parameters"]["image"] == "/tmp/second-wrist.png"
+    assert second["required_parameters"]["view_identity"] != top_view_identity
+
+
+def test_intentional_wrist_camera_move_creates_a_fresh_semantic_view() -> None:
+    first_observation = _semantic_view_observation(wrist_position=[0.55, 0.19, 0.26])
+    first_artifacts = _semantic_view_artifacts("first")
+    top_view = _semantic_camera_view_identity(
+        observation=first_observation,
+        artifact=first_artifacts[0],
+    )
+    wrist_view = _semantic_camera_view_identity(
+        observation=first_observation,
+        artifact=first_artifacts[1],
+    )
+    attempts = [
+        {
+            **_failed_grasp_target_attempt(
+                source_image="/tmp/first-top.png",
+                prompt="yellow adjustable wrench",
+                attempt_id="top-exact",
+            ),
+            "view_identity": top_view,
+        },
+        {
+            **_failed_grasp_target_attempt(
+                source_image="/tmp/first-wrist.png",
+                prompt="yellow adjustable wrench",
+                attempt_id="wrist-exact",
+            ),
+            "view_identity": wrist_view,
+        },
+    ]
+
+    moved_observation = _semantic_view_observation(wrist_position=[0.47, 0.08, 0.42])
+    moved_artifacts = _semantic_view_artifacts("moved")
+    obligation = _view_retry_obligation(
+        observation=moved_observation,
+        artifacts=moved_artifacts,
+        attempts=attempts,
+    )
+
+    assert obligation["required_parameters"]["image"] == "/tmp/moved-wrist.png"
+    assert obligation["required_parameters"]["prompt"] == "yellow adjustable wrench"
+    assert obligation["required_parameters"]["view_identity"] != wrist_view
+
+
+def test_planner_and_sam3_handler_share_physical_view_attempt_identity() -> None:
+    observation = _semantic_view_observation(wrist_position=[0.55, 0.19, 0.26])
+    view_identity = _semantic_camera_view_identity(
+        observation=observation,
+        artifact=_semantic_view_artifacts("capture")[0],
+    )
+    planned = _sam3_request_identity(
+        observation=observation,
+        scene_epoch=4,
+        source_image="/tmp/capture-top.png",
+        semantic_role="grasp_target",
+        semantic_target="yellow adjustable wrench",
+        mode="text",
+        prompt="yellow adjustable wrench",
+        points=[],
+        roi_bbox_xyxy=None,
+        view_identity=view_identity,
+    )
+    handled = _sam3_semantic_metadata(
+        parameters={
+            **planned,
+            "semantic_role": "grasp_target",
+            "semantic_target": "yellow adjustable wrench",
+        },
+        observation=observation,
+        source_image="/tmp/capture-top.png",
+        mode="text",
+        prompt="yellow adjustable wrench",
+        raw_points=[],
+    )
+
+    assert handled["view_identity"] == view_identity
+    assert handled["attempt_id"] == planned["attempt_id"]
+    assert handled["attempt_fingerprint"] == planned["attempt_fingerprint"]
+
+
+def test_sam3_semantic_memory_persists_view_provenance() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="normal pick and place")
+    memory._record_sam3_semantic_result(  # noqa: SLF001 - state-machine unit test.
+        {
+            "result_id": "failed-top",
+            "semantic_role": "grasp_target",
+            "target_prompt": "yellow adjustable wrench",
+            "source_image": "/tmp/top.png",
+            "frame_id": "top_camera_optical_frame",
+            "camera_role": "scene_primary",
+            "view_identity": "camera-view-fixed-top",
+            "segmentation_mode": "text",
+            "scene_epoch": 4,
+            "attempt_id": "top-exact",
+            "attempt_fingerprint": "fingerprint-top-exact",
+        },
+        status="no_detection",
+    )
+
+    attempt = memory.sam3_semantic_state()["attempts"][0]
+    assert attempt["frame_id"] == "top_camera_optical_frame"
+    assert attempt["camera_role"] == "scene_primary"
+    assert attempt["view_identity"] == "camera-view-fixed-top"
+
+
+def test_exhausted_semantic_phase_advertises_no_more_tools() -> None:
+    phase, tools = _model_phase_and_legal_tools(
+        {
+            "semantic_perception_obligation": {
+                "status": "exhausted",
+                "semantic_role": "grasp_target",
+                "failure_code": "grasp_target_localization_exhausted",
+            },
+            "tool_references": [
+                {"name": "observe"},
+                {"name": "sam3"},
+                {"name": "active_observe"},
+            ],
+        },
+        max_tools=8,
+    )
+
+    assert phase == "semantic_perception_exhausted"
+    assert tools == []
 
 
 def test_simplified_retry_does_not_replace_canonical_semantic_prompt() -> None:

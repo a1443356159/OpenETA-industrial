@@ -19,6 +19,7 @@ from typing import Any, Iterable
 
 from tools.candidate_config import (
     CandidateFunnelConfig,
+    DEFAULT_GRASPGENX_RAW_POOL_SIZE,
     argparse_raw_pool_size,
 )
 
@@ -524,7 +525,10 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
         anyplace_full_default = 2
         return CandidateFunnelConfig(
             graspgenx_raw_pool_size=_startup_value(
-                args, "graspgenx_raw_pool_size", "OPENETA_GRASPGENX_RAW_POOL_SIZE", 200
+                args,
+                "graspgenx_raw_pool_size",
+                "OPENETA_GRASPGENX_RAW_POOL_SIZE",
+                DEFAULT_GRASPGENX_RAW_POOL_SIZE,
             ),
             anygrasp_raw_pool_size=_startup_value(
                 args, "anygrasp_raw_pool_size", "OPENETA_ANYGRASP_RAW_POOL_SIZE", 200

@@ -210,6 +210,7 @@ def test_health_reports_transport_readiness_without_loading_model(
         "gripper_count": 2,
         "raw_pool_size": 200,
         "returned_candidate_count": 0,
+        "depth_truncation_m": 2.0,
     }
 
 

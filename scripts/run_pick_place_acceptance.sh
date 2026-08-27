@@ -2,4 +2,4 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec "${SCRIPT_DIR}/run_m6_gazebo_acceptance.sh" "$@"
+exec "${SCRIPT_DIR}/run_normal_gazebo_acceptance.sh" "$@"

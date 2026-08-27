@@ -73,6 +73,28 @@ def _object_depth_tail(
     mask.save(packet["object_mask"]["mask_ref"])
 
 
+def _placement_floor_and_walls(parameters: dict[str, Any]) -> None:
+    packet = parameters["placement_observation"]
+    depth = Image.new("I;16", (64, 64), 0)
+    mask = Image.new("L", (64, 64), 255)
+    for y in range(64):
+        for x in range(64):
+            # A top camera sees the horizontal bin floor at world Z=0.02 m;
+            # the semantic bin mask also contains a wall/rim layer at 0.18 m.
+            depth.putpixel((x, y), 980 if x < 48 else 820)
+    depth.save(packet["depth"])
+    mask.save(packet["placement_region_mask"]["mask_ref"])
+    packet["camera_extrinsics"] = {
+        "camera_frame": "opencv",
+        "camera_to_world": [
+            [1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 1],
+            [0, 0, 0, 1],
+        ],
+    }
+
+
 def _mask_point_count(image: Image.Image | str) -> int:
     if isinstance(image, str):
         with Image.open(image) as loaded:
@@ -223,6 +245,94 @@ def test_handler_preserves_ambiguous_depth_tails(tmp_path: Path) -> None:
 
     assert result.success is True
     assert "object_mask_preprocessing" not in result.details
+
+
+def test_handler_isolates_dominant_horizontal_placement_support_surface(
+    tmp_path: Path,
+) -> None:
+    parameters = _parameters(tmp_path)
+    _placement_floor_and_walls(parameters)
+    source_mask = parameters["placement_observation"]["placement_region_mask"][
+        "mask_ref"
+    ]
+    calls: list[dict[str, Any]] = []
+
+    result = build_anyplace_handler(
+        lambda request: calls.append(request) or _response(96),
+        output_root=tmp_path / "runs",
+    )(_context(parameters))
+
+    assert result.success is True
+    cleanup = result.details["placement_mask_preprocessing"]
+    assert cleanup == {
+        "schema": "openeta.anyplace.placement_support_surface_mask.v1",
+        "applied": True,
+        "source_mask_ref": source_mask,
+        "filtered_mask_ref": cleanup["filtered_mask_ref"],
+        "valid_depth_points_before": 4096,
+        "valid_depth_points_after": 3072,
+        "removed_non_support_points": 1024,
+        "support_plane_world_z_m": 0.02,
+        "support_band_half_width_m": 0.004,
+        "selection": "dominant_horizontal_world_z_layer",
+        "statistics": {
+            "histogram_bin_width_m": 0.004,
+            "mode_points": 3072,
+            "dominant_threshold_points": 3.0,
+            "plane_median_absolute_deviation_m": 0.0,
+        },
+        "limits": {
+            "minimum_retained_points": 128,
+            "histogram_depth_quanta": 4.0,
+            "outlier_sigma": 3.0,
+        },
+    }
+    assert Path(cleanup["filtered_mask_ref"]).is_file()
+    assert _mask_point_count(source_mask) == 4096
+    encoded_mask = calls[0]["placement_observation"]["placement_region_mask"][
+        "base64"
+    ]
+    with Image.open(io.BytesIO(base64.b64decode(encoded_mask))) as filtered:
+        assert _mask_point_count(filtered) == 3072
+    assert result.details["artifacts"][1]["type"] == (
+        "placement_support_surface_mask"
+    )
+
+
+def test_handler_preserves_placement_mask_without_a_dominant_plane(
+    tmp_path: Path,
+) -> None:
+    parameters = _parameters(tmp_path)
+    packet = parameters["placement_observation"]
+    depth = Image.new("I;16", (64, 64), 0)
+    for y in range(64):
+        value = 800 + round(180 * y / 63)
+        for x in range(64):
+            depth.putpixel((x, y), value)
+    depth.save(packet["depth"])
+    packet["camera_extrinsics"] = {
+        "camera_frame": "opencv",
+        "camera_to_world": [
+            [1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 1],
+            [0, 0, 0, 1],
+        ],
+    }
+    calls: list[dict[str, Any]] = []
+
+    result = build_anyplace_handler(
+        lambda request: calls.append(request) or _response(),
+        output_root=tmp_path / "runs",
+    )(_context(parameters))
+
+    assert result.success is True
+    assert "placement_mask_preprocessing" not in result.details
+    encoded_mask = calls[0]["placement_observation"]["placement_region_mask"][
+        "base64"
+    ]
+    with Image.open(io.BytesIO(base64.b64decode(encoded_mask))) as preserved:
+        assert _mask_point_count(preserved) == 4096
 
 
 def test_handler_does_not_preprocess_when_frozen_pool_short_circuits(

@@ -127,9 +127,26 @@ def _success_response() -> dict[str, Any]:
     }
 
 
-def test_graspgenx_handler_accepts_formal_se3_mmr_order(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "ranking",
+    [
+        "source_aware_se3_mmr_with_minimum_se3_separation",
+        (
+            "source_aware_se3_mmr_with_target_centering_quality_"
+            "and_minimum_se3_separation"
+        ),
+        (
+            "source_aware_se3_mmr_recall_base_with_target_centering_"
+            "reserve_and_minimum_se3_separation"
+        ),
+    ],
+)
+def test_graspgenx_handler_accepts_formal_se3_mmr_order(
+    tmp_path: Path,
+    ranking: str,
+) -> None:
     response = _success_response()
-    response["details"]["ranking"] = "source_aware_se3_mmr_with_minimum_se3_separation"
+    response["details"]["ranking"] = ranking
     response["details"]["grasp_candidates"] = [
         _candidate(0, score=0.7),
         _candidate(1, score=0.9),
@@ -143,7 +160,43 @@ def test_graspgenx_handler_accepts_formal_se3_mmr_order(tmp_path: Path) -> None:
 
     assert result.success is True
     assert result.details["deterministic"] is True
-    assert result.details["ranking"] == "source_aware_se3_mmr_with_minimum_se3_separation"
+    assert result.details["ranking"] == ranking
+
+
+def test_graspgenx_handler_preserves_valid_ordering_only_centering_evidence(
+    tmp_path: Path,
+) -> None:
+    response = _success_response()
+    response["details"]["ranking"] = (
+        "source_aware_se3_mmr_recall_base_with_target_centering_"
+        "reserve_and_minimum_se3_separation"
+    )
+    response["details"]["grasp_candidates"][0]["target_closing_alignment"] = {
+        "schema_version": "openeta.parallel_gripper_target_closing_alignment.v1",
+        "source": "aligned_selected_mask_depth",
+        "depth_provenance": "sensor_depth",
+        "closing_axis": "graspnet_local_y",
+        "quantile_bounds": [0.02, 0.98],
+        "target_span_m": 0.04,
+        "correction_m": 0.004,
+        "correction_camera_xyz": [0.0, 0.004, 0.0],
+        "centering_ratio": 0.1,
+        "ordering_only": True,
+        "pose_modified": False,
+        "variant_role": "same_approach_centering_reserve",
+        "compatible_parent_backend_indices": [118, 2290],
+    }
+
+    result = build_graspgenx_handler(
+        lambda _request: response,
+        _listing_response,
+    )(_context(_parameters(tmp_path)))
+
+    assert result.success is True
+    evidence = result.details["grasp_candidates"][0]["target_closing_alignment"]
+    assert evidence["centering_ratio"] == pytest.approx(0.1)
+    assert evidence["pose_modified"] is False
+    assert evidence["compatible_parent_backend_indices"] == [118, 2290]
 
 
 def test_graspgenx_handler_preserves_legacy_stochastic_marker(tmp_path: Path) -> None:

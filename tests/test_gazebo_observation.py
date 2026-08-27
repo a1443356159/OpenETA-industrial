@@ -14,6 +14,7 @@ from extensions.gazebo import (
     decode_ros_depth,
     decode_ros_rgb,
 )
+from extensions.gazebo.observation import _tf_camera_to_world_extrinsics
 
 
 def _image(*, encoding: str, array: np.ndarray, step: int | None = None):
@@ -38,6 +39,37 @@ def test_camera_info_and_invalid_ros_packets_fail_closed() -> None:
         decode_ros_rgb(_image(encoding="mono8", array=np.zeros((1, 1), dtype=np.uint8)))
     with pytest.raises(GazeboObservationError, match="focal"):
         camera_info_intrinsics(SimpleNamespace(width=1, height=1, k=[0] * 9))
+
+
+def test_dynamic_gazebo_camera_tf_is_resolved_to_opencv_camera_to_world() -> None:
+    transform = SimpleNamespace(
+        transform=SimpleNamespace(
+            translation=SimpleNamespace(x=0.35, y=-0.05, z=0.996),
+            # A Gazebo top camera is +pi/2 around world Y.
+            rotation=SimpleNamespace(
+                x=0.0,
+                y=2**-0.5,
+                z=0.0,
+                w=2**-0.5,
+            ),
+        )
+    )
+
+    extrinsics = _tf_camera_to_world_extrinsics(
+        transform,
+        reference_frame="base_link",
+        sensor_frame="wrist_camera_optical_frame",
+        timestamp_s=12.5,
+    )
+
+    assert extrinsics["frame_transform"] == "camera_to_world"
+    assert extrinsics["camera_frame"] == "opencv"
+    assert extrinsics["pos"] == [0.35, -0.05, 0.996]
+    assert extrinsics["quat_xyzw"] == pytest.approx(
+        [2**-0.5, -(2**-0.5), 0.0, 0.0]
+    )
+    assert extrinsics["calibration_source"] == "tf2_at_rgb_timestamp"
+    assert extrinsics["timestamp_s"] == 12.5
 
 
 def _stamped_image(*, encoding: str, array: np.ndarray, timestamp: float):

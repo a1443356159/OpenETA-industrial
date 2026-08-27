@@ -823,7 +823,18 @@ class ToolFeedbackEpisodeEnvironment:
             simulator_session_id=self.simulator_session_id,
             handle=self.handle,
         )
-        if receipt:
+        abandoned_start_cleanup = bool(
+            receipt
+            and _action_request_name(action) == "create_simulator_env"
+            and receipt.get("environment_closed") is True
+        )
+        if abandoned_start_cleanup:
+            # A failed start may return the identity of the temporary
+            # environment it already closed.  That identity is evidence for
+            # this receipt, not the identity of the next startup attempt.
+            self.simulator_session_id = ""
+            self.handle = ""
+        elif receipt:
             self.simulator_session_id = str(
                 receipt.get("simulator_session_id") or self.simulator_session_id
             )

@@ -914,17 +914,6 @@ def _proxy_render(meta: dict) -> dict:
     )
 
 
-def _proxy_oracle_perceive(meta: dict, *, image_base64: str, prompt: str) -> dict:
-    """Proxy an oracle perception request to the worker."""
-    mgr = _get_mgr()
-    return mgr.proxy_handle_op(
-        meta,
-        f"/env/{meta['remote_handle']}/oracle_perceive",
-        method="POST",
-        body={"image_base64": image_base64, "prompt": prompt},
-    )
-
-
 def _proxy_render_all(worker_url: str, remote_handles: list[str]) -> dict:
     """Call the worker's ``/render_all`` endpoint for parallel batch rendering."""
     wh = BenchWorkerHandle(bench="", port=0, process=None, base_url=worker_url)

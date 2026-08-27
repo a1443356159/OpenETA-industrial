@@ -19,6 +19,7 @@ from mcp.server.fastmcp import FastMCP
 
 from tools.graspgenx_core import (
     CAMERA_FRAME,
+    DEFAULT_DEPTH_TRUNCATION,
     DEFAULT_INFERENCE_SEED,
     FRAME,
     GRASP_FRAME,
@@ -29,7 +30,7 @@ from tools.graspgenx_core import (
     failure_result,
 )
 from tools.candidate_config import (
-    DEFAULT_GRASP_RAW_POOL_SIZE,
+    DEFAULT_GRASPGENX_RAW_POOL_SIZE,
     argparse_raw_pool_size,
 )
 
@@ -93,13 +94,14 @@ def predict_grasps(
     points are required; larger point clouds, including those above 3500 points,
     are passed to GraspGenX without wrapper downsampling or padding.
 
-    One full GraspMoE draw combines diffusion and OBB candidates; three
-    additional official diffusion-only draws preserve stochastic mode coverage
-    without repeating the deterministic OBB branch. Scores are sorted descending
-    without a 0.7 cutoff and the configured number of collision-free grasps are
-    returned. Collision filtering only covers visible non-target geometry in the
-    supplied depth image; it is not robot motion planning. Inference is
-    stochastic, so repeated calls can differ.
+    A frozen recall prefix uses one full GraspMoE draw plus three official
+    diffusion-only draws. One decorrelated full draw contributes only its
+    model-native diffusion poses to a bounded parallel-jaw centering reserve;
+    its duplicate OBB family is discarded. The original recall representatives
+    cannot be displaced by this reserve. Scores are returned without a 0.7 cutoff,
+    up to the configured number of collision-free grasps. Collision filtering
+    only covers visible non-target geometry in the supplied depth image; it is
+    not robot motion planning. Fixed seeds make the same input deterministic.
 
     Returned poses are in ``camera/opencv``. Each candidate contains both the
     GraspNet/AnyGrasp-compatible pose used by OpenETA and the original GraspGenX
@@ -210,6 +212,11 @@ def health_payload() -> dict[str, Any]:
         "returned_candidate_count": (
             0 if backend is None else int(getattr(backend, "last_returned_candidate_count", 0))
         ),
+        "depth_truncation_m": (
+            DEFAULT_DEPTH_TRUNCATION
+            if backend is None
+            else float(getattr(backend, "depth_truncation", DEFAULT_DEPTH_TRUNCATION))
+        ),
     }
 
 
@@ -232,11 +239,17 @@ def main() -> int:
     parser.add_argument("--checkpoint-root", required=True)
     parser.add_argument("--gripper-descriptions-root", required=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--depth-truncation",
+        type=float,
+        default=DEFAULT_DEPTH_TRUNCATION,
+        help="Maximum calibrated RGB-D working distance in metres.",
+    )
     parser.add_argument("--inference-seed", type=int, default=DEFAULT_INFERENCE_SEED)
     parser.add_argument(
         "--raw-pool-size",
         type=argparse_raw_pool_size(),
-        default=DEFAULT_GRASP_RAW_POOL_SIZE,
+        default=DEFAULT_GRASPGENX_RAW_POOL_SIZE,
     )
     args = parser.parse_args()
 
@@ -249,6 +262,7 @@ def main() -> int:
             checkpoint_root=args.checkpoint_root,
             gripper_descriptions_root=args.gripper_descriptions_root,
             device=args.device,
+            depth_truncation=args.depth_truncation,
             raw_pool_size=args.raw_pool_size,
             inference_seed=args.inference_seed,
         )

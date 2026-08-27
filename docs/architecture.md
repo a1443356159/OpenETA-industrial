@@ -211,10 +211,8 @@ workflows, or online RL.
 
 ## production asset naming
 
-Milestone labels such as M1, M2, and M3 describe development and acceptance
-progress; they are not architecture boundaries. Production modules, classes,
-profiles, schemas, topics, launch files, worlds, and deployment configuration
-must use capability, device, or task names. Milestone labels may remain in
-tests, acceptance drivers, evidence reports, and historical documentation when
-they identify the gate being verified. `tests/test_production_asset_naming.py`
-enforces this boundary for the production tree.
+Historical milestone labels are not architecture boundaries. Production code,
+tests, acceptance drivers, schemas, topics, launch files, worlds, deployment
+configuration and current documentation use capability, device or task names.
+`tests/test_production_asset_naming.py` enforces this boundary for the
+production tree.

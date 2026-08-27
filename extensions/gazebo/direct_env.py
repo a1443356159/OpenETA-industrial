@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from typing import Any, Mapping
 
 import numpy as np
@@ -21,6 +24,7 @@ from .native_grasp import (
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .process import GazeboProcessError
 from .process import GazeboNativeContactWindow
+from .planning_scene import PlanningSceneError
 from .runtime import GazeboRuntime
 from .ros_control import _relative_pose
 
@@ -298,6 +302,9 @@ class GazeboDirectEnv(Env):
             attachment = getattr(self.runtime, "attachment", None)
             if action_type == "gripper_close":
                 gate = None
+                attach_acked = False
+                pose_snapshot_attempt_count = 0
+                baseline_pose_snapshot_attempt_count = 0
                 self._native_grasp_transport_locked = True
                 try:
                     if receipt.get("ok") is not True:
@@ -305,14 +312,29 @@ class GazeboDirectEnv(Env):
                     barrier_value = receipt.get("action_completed_ros_time_s")
                     barrier = float(barrier_value) if isinstance(barrier_value, int | float) else None
                     assert contact_window is not None
-                    contact_window.begin_post_close()
                     gate = contact_window.evaluate(close_completed_sim_time_s=barrier, config=self._native_grasp_config)
                     if not gate.accepted or attachment is None:
                         record = self._native_grasp_verifier.close_result(gate, attach_acked=False)
                         receipt.update({"ok": False, "error_code": record.reason_code.value, "native_contact_gate": gate.to_dict()})
                     else:
                         attachment.attach()
-                        target_pose, mount_pose = attachment.native_target_mount_poses()
+                        attach_acked = True
+                        retrying_pose_reader = getattr(
+                            attachment,
+                            "native_target_mount_poses_with_retry",
+                            None,
+                        )
+                        if callable(retrying_pose_reader):
+                            (
+                                target_pose,
+                                mount_pose,
+                                pose_snapshot_attempt_count,
+                            ) = retrying_pose_reader(max_attempts=2)
+                        else:
+                            target_pose, mount_pose = (
+                                attachment.native_target_mount_poses()
+                            )
+                            pose_snapshot_attempt_count = 1
                         relative_xyz, relative_quat = _relative_pose(
                             child_xyz=target_pose.xyz,
                             child_quat_xyzw=target_pose.quat_xyzw,
@@ -338,7 +360,11 @@ class GazeboDirectEnv(Env):
                             mount_quat_xyzw=mount_pose.quat_xyzw,
                         )
                         record = self._native_grasp_verifier.close_result(gate, attach_acked=True)
-                        attachment.capture_baseline()
+                        baseline_attempts = attachment.capture_baseline()
+                        if isinstance(baseline_attempts, int) and not isinstance(
+                            baseline_attempts, bool
+                        ):
+                            baseline_pose_snapshot_attempt_count = baseline_attempts
                         self._native_grasp_transport_locked = False
                         receipt.update({
                             "native_contact_gate": gate.to_dict(),
@@ -349,8 +375,24 @@ class GazeboDirectEnv(Env):
                             },
                             "planning_scene_revision": scene_revision,
                             "attachment_transform": dict(self._attachment_transform),
+                            "native_state_snapshot": {
+                                "post_attach_attempt_count": pose_snapshot_attempt_count,
+                                "baseline_attempt_count": (
+                                    baseline_pose_snapshot_attempt_count
+                                ),
+                                "maximum_attempts_per_read": 2,
+                            },
                         })
                 except Exception as exc:
+                    if pose_snapshot_attempt_count == 0:
+                        pose_snapshot_attempt_count = int(
+                            getattr(
+                                attachment,
+                                "_last_native_pose_read_attempt_count",
+                                0,
+                            )
+                            or 0
+                        )
                     attached_before_cleanup = getattr(attachment, "state", None) == "attached"
                     rollback_target_pose = None
                     if attached_before_cleanup:
@@ -398,11 +440,69 @@ class GazeboDirectEnv(Env):
                                 "state": "failed",
                                 "detail": str(rollback_exc),
                             }
-                    record = self._native_grasp_verifier.close_result(
-                        gate if gate is not None else self._contact_unavailable_result(),
-                        attach_acked=False,
+                    original_error = str(exc) or type(exc).__name__
+                    measured_attachment_collision = bool(
+                        attach_acked
+                        and isinstance(exc, PlanningSceneError)
+                        and original_error.startswith(
+                            "planning-scene current state is invalid; collision_pairs="
+                        )
                     )
-                    receipt.update({"ok": False, "error_code": record.reason_code.value, "physical_verification": record.to_dict(), "detail": str(exc)})
+                    post_attach_infrastructure_failure = bool(
+                        attach_acked and not measured_attachment_collision
+                    )
+                    terminal_gate = (
+                        gate
+                        if gate is not None
+                        else self._contact_unavailable_result()
+                    )
+                    record = (
+                        self._native_grasp_verifier.attachment_state_rejected(
+                            terminal_gate,
+                            detail=original_error,
+                        )
+                        if measured_attachment_collision
+                        else self._native_grasp_verifier.close_result(
+                            terminal_gate,
+                            attach_acked=False,
+                        )
+                    )
+                    receipt.update({
+                        "ok": False,
+                        "error_code": (
+                            original_error
+                            if post_attach_infrastructure_failure
+                            else record.reason_code.value
+                        ),
+                        "physical_verification": record.to_dict(),
+                        "detail": original_error,
+                        "attach_acked_before_rollback": attach_acked,
+                        "infrastructure_error": post_attach_infrastructure_failure,
+                        "candidate_rejection": measured_attachment_collision,
+                        "failure_class": (
+                            "measured_attachment_collision"
+                            if measured_attachment_collision
+                            else (
+                                "post_attach_infrastructure_failure"
+                                if post_attach_infrastructure_failure
+                                else "native_attach_unacknowledged"
+                            )
+                        ),
+                        "motion_outcome": "failed",
+                        "execution_started": True,
+                        "native_state_snapshot": {
+                            "post_attach_attempt_count": pose_snapshot_attempt_count,
+                            "baseline_attempt_count": (
+                                baseline_pose_snapshot_attempt_count
+                            ),
+                            "maximum_attempts_per_read": 2,
+                            "retry_exhausted": (
+                                post_attach_infrastructure_failure
+                                and original_error
+                                == "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
+                            ),
+                        },
+                    })
                     self._native_grasp_transport_locked = True
                     self._attachment_transform = None
                 finally:
@@ -455,6 +555,14 @@ class GazeboDirectEnv(Env):
                             self._native_grasp_config,
                             target_xyz=target_pose.xyz,
                             target_quat_xyzw=target_pose.quat_xyzw,
+                            # Detach is intentionally acknowledged before the
+                            # fingers open.  A just-released part can therefore
+                            # remain in transient fingertip contact at the
+                            # terminal sample even after it has settled inside
+                            # its container.  Permit only target-to-gripper
+                            # touch for this current-state proof; every other
+                            # robot/world collision remains a hard failure.
+                            allow_target_touch=True,
                         )
                         release_sequence.append(
                             {
@@ -489,7 +597,11 @@ class GazeboDirectEnv(Env):
                             raise GazeboProcessError(
                                 str(receipt.get("error_code") or "GRIPPER_FAILED")
                             )
-                        if self._native_grasp_verifier.phase == "contact_rejected":
+                        if self._native_grasp_verifier.phase in {
+                            "contact_rejected",
+                            "attach_unacknowledged",
+                            "attachment_rejected",
+                        }:
                             pose_sync = self._sync_failed_close_target_pose()
                             receipt["planning_scene_revision"] = pose_sync[
                                 "revision"
@@ -567,7 +679,38 @@ class GazeboDirectEnv(Env):
         attachment = getattr(self.runtime, "attachment", None)
         if attachment is None or getattr(attachment, "state", None) == "attached":
             raise GazeboProcessError("NATIVE_GRASP_TARGET_POSE_UNAVAILABLE")
+        planning_scene = getattr(self.controller, "planning_scene", None)
+        target_id = self._native_grasp_config.target_id
+        source_spec = (
+            getattr(planning_scene, "world_specs", {}).get(target_id)
+            if planning_scene is not None
+            else None
+        )
+        source_revision = getattr(planning_scene, "revision", None)
+        source_world_ids = sorted(getattr(planning_scene, "world_ids", set()))
+        source_attached_ids = sorted(
+            getattr(planning_scene, "attached_ids", set())
+        )
+        if not (
+            isinstance(source_spec, Mapping)
+            and isinstance(source_revision, int)
+            and not isinstance(source_revision, bool)
+        ):
+            raise GazeboProcessError("PLANNING_SCENE_TARGET_SOURCE_POSE_UNAVAILABLE")
+        source_pose = {
+            "frame": "world",
+            "translation_xyz": list(source_spec.get("pose_xyz") or []),
+            "quat_xyzw": list(source_spec.get("pose_quat_xyzw") or []),
+        }
+        static_world_sha256_before = _static_world_sha256(
+            planning_scene, target_id=target_id
+        )
         target_pose, _ = attachment.native_target_mount_poses()
+        measured_pose = {
+            "frame": "world",
+            "translation_xyz": list(target_pose.xyz),
+            "quat_xyzw": list(target_pose.quat_xyzw),
+        }
         sync_target_pose = getattr(
             self.controller, "sync_planning_scene_target_pose", None
         )
@@ -577,11 +720,49 @@ class GazeboDirectEnv(Env):
             self._native_grasp_config,
             target_xyz=target_pose.xyz,
             target_quat_xyzw=target_pose.quat_xyzw,
+            allow_target_touch=True,
+        )
+        target_world_ids = sorted(getattr(planning_scene, "world_ids", set()))
+        target_attached_ids = sorted(
+            getattr(planning_scene, "attached_ids", set())
+        )
+        static_world_sha256_after = _static_world_sha256(
+            planning_scene, target_id=target_id
+        )
+        translation_delta_m = math.dist(
+            source_pose["translation_xyz"], measured_pose["translation_xyz"]
+        )
+        rotation_delta_rad = _quaternion_distance_rad(
+            source_pose["quat_xyzw"], measured_pose["quat_xyzw"]
         )
         return {
-            "status": "synchronized_from_native_world_pose",
+            "schema_version": "openeta.planning_scene_target_pose_sync.v1",
+            "status": (
+                "verified_unchanged_from_native_world_pose"
+                if int(revision) == source_revision
+                else "synchronized_from_native_world_pose"
+            ),
+            "operation": "update_world_target",
+            "source_revision": source_revision,
             "revision": int(revision),
-            "target_id": self._native_grasp_config.target_id,
+            "target_id": target_id,
+            "source_target_pose": source_pose,
+            "target_pose": measured_pose,
+            "translation_delta_m": translation_delta_m,
+            "rotation_delta_rad": rotation_delta_rad,
+            "world_ids_before": source_world_ids,
+            "world_ids_after": target_world_ids,
+            "attached_ids_before": source_attached_ids,
+            "attached_ids_after": target_attached_ids,
+            "static_world_sha256_before": static_world_sha256_before,
+            "static_world_sha256_after": static_world_sha256_after,
+            "topology_unchanged": (
+                source_world_ids == target_world_ids
+                and source_attached_ids == target_attached_ids
+            ),
+            "static_world_unchanged": (
+                static_world_sha256_before == static_world_sha256_after
+            ),
             "execution_started": False,
         }
 
@@ -594,3 +775,35 @@ class GazeboDirectEnv(Env):
     def close(self) -> None:
         self.runtime.close()
         self._latest = None
+
+
+def _static_world_sha256(planning_scene: object, *, target_id: str) -> str:
+    specs = getattr(planning_scene, "world_specs", {})
+    if not isinstance(specs, Mapping):
+        raise GazeboProcessError("PLANNING_SCENE_STATIC_WORLD_UNAVAILABLE")
+    payload = {
+        str(object_id): specs[object_id]
+        for object_id in sorted(specs)
+        if str(object_id) != target_id
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _quaternion_distance_rad(source: object, target: object) -> float:
+    try:
+        left = [float(value) for value in source]
+        right = [float(value) for value in target]
+    except (TypeError, ValueError) as exc:
+        raise GazeboProcessError("PLANNING_SCENE_TARGET_ORIENTATION_INVALID") from exc
+    if len(left) != 4 or len(right) != 4:
+        raise GazeboProcessError("PLANNING_SCENE_TARGET_ORIENTATION_INVALID")
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm <= 1e-12 or right_norm <= 1e-12:
+        raise GazeboProcessError("PLANNING_SCENE_TARGET_ORIENTATION_INVALID")
+    dot = abs(
+        sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
+    )
+    return 2.0 * math.acos(max(-1.0, min(1.0, dot)))

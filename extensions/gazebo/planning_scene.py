@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -24,6 +25,8 @@ TARGET_TOUCH_LINKS = (
     LEFT_FINGERTIP,
     RIGHT_FINGERTIP,
 )
+_TARGET_POSE_POSITION_ABS_TOL_M = 1e-6
+_TARGET_POSE_QUATERNION_ABS_TOL = 1e-8
 
 
 class PlanningSceneError(RuntimeError):
@@ -46,6 +49,61 @@ class CollisionBox:
             "pose_xyz": list(self.pose_xyz),
             "pose_quat_xyzw": list(self.pose_quat_xyzw),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class CollisionPrimitive:
+    """One primitive expressed in its owning rigid body's local frame."""
+
+    shape: str
+    pose_xyz: tuple[float, float, float]
+    pose_quat_xyzw: tuple[float, float, float, float]
+    size_xyz: tuple[float, float, float] | None = None
+    radius: float | None = None
+    length: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "shape": self.shape,
+            "pose_xyz": list(self.pose_xyz),
+            "pose_quat_xyzw": list(self.pose_quat_xyzw),
+        }
+        if self.shape == "box" and self.size_xyz is not None:
+            result["size_xyz"] = list(self.size_xyz)
+        elif self.shape == "cylinder" and self.radius is not None and self.length is not None:
+            result.update({"radius": self.radius, "length": self.length})
+        else:
+            raise PlanningSceneError("collision primitive geometry is invalid")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CollisionBody:
+    """A rigid body whose exact collision model contains several primitives."""
+
+    object_id: str
+    bounding_box_xyz: tuple[float, float, float]
+    pose_xyz: tuple[float, float, float]
+    pose_quat_xyzw: tuple[float, float, float, float]
+    primitives: tuple[CollisionPrimitive, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        if not self.primitives:
+            raise PlanningSceneError("compound collision body has no primitives")
+        return {
+            "id": self.object_id,
+            "frame": "world",
+            "shape": "compound",
+            # Preserve the conservative outer dimensions for placement and
+            # workspace reasoning; MoveIt consumes ``primitives`` below.
+            "size_xyz": list(self.bounding_box_xyz),
+            "pose_xyz": list(self.pose_xyz),
+            "pose_quat_xyzw": list(self.pose_quat_xyzw),
+            "primitives": [primitive.to_dict() for primitive in self.primitives],
+        }
+
+
+CollisionGeometry = CollisionBox | CollisionBody
 
 
 ApplyReadback = Callable[[dict[str, Any]], Mapping[str, Any]]
@@ -81,11 +139,12 @@ class PlanningSceneSynchronizer:
     def reset(
         self,
         *,
-        table: CollisionBox,
-        distractor: CollisionBox | None = None,
-        distractors: Sequence[CollisionBox] = (),
-        target: CollisionBox,
-        obstacles: Sequence[CollisionBox] = (),
+        table: CollisionGeometry,
+        distractor: CollisionGeometry | None = None,
+        distractors: Sequence[CollisionGeometry] = (),
+        target: CollisionGeometry,
+        obstacles: Sequence[CollisionGeometry] = (),
+        robot_support_link: str | None = None,
     ) -> int:
         scene_distractors = [
             *([distractor] if distractor is not None else []),
@@ -101,19 +160,24 @@ class PlanningSceneSynchronizer:
             return self._fail("planning-scene obstacle identity is not unique")
         world_objects = [table, *scene_distractors, target, *obstacles]
         expected_world = {item.object_id for item in world_objects}
+        support_link = str(robot_support_link or "").strip()
+        allowed_collisions: dict[str, list[str]] = {
+            # The target begins exactly supported by the table, so FCL reports
+            # their coincident surfaces as contact. This does not permit the
+            # open gripper to sweep through the target.
+            target.object_id: [table.object_id],
+        }
+        if support_link:
+            # A workcell-mounted robot intentionally shares a fixed contact
+            # interface with its support surface. Scope the exception to the
+            # configured root link; every moving-link/table pair remains live.
+            allowed_collisions[table.object_id] = [support_link]
         revision = self._commit(
             {
                 "operation": "reset",
                 "world_objects": [item.to_dict() for item in world_objects],
                 "attached_objects": [],
-                "allowed_collisions": {
-                    # The target begins exactly supported by the table, so
-                    # FCL reports their coincident surfaces as contact. This
-                    # is the one support-surface exception required for native
-                    # attachment and exact release; all other world
-                    # objects and non-touch robot links remain collidable.
-                    target.object_id: [*TARGET_TOUCH_LINKS, table.object_id],
-                },
+                "allowed_collisions": allowed_collisions,
             },
             expected_world=expected_world,
             expected_attached=set(),
@@ -128,7 +192,7 @@ class PlanningSceneSynchronizer:
     def attach_target(
         self,
         *,
-        target: CollisionBox,
+        target: CollisionGeometry,
         link_name: str = "gripper_mount_link",
         relative_pose_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0),
         relative_pose_quat_xyzw: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0),
@@ -161,7 +225,7 @@ class PlanningSceneSynchronizer:
         self.attached_specs = {target.object_id: attached_spec}
         return revision
 
-    def update_world_target(self, *, target: CollisionBox) -> int:
+    def update_world_target(self, *, target: CollisionGeometry) -> int:
         """Replace the detached target pose without changing scene identity.
 
         A rejected physical close can push the object even though no attach is
@@ -176,18 +240,29 @@ class PlanningSceneSynchronizer:
             return self._fail("attached target cannot be updated as a world object")
         if target.object_id not in self.world_ids:
             return self._fail("target is missing from the world scene before pose update")
+        existing = self.world_specs.get(target.object_id)
+        target_spec = target.to_dict()
+        if isinstance(existing, Mapping) and _same_collision_geometry_pose(
+            existing, target_spec
+        ):
+            # Native pose readback is allowed to contain sub-micrometre numeric
+            # noise.  An idempotent synchronization is not a PlanningScene
+            # mutation and must not invalidate a frozen qualification frontier.
+            self.ready = True
+            self.last_error = ""
+            return self.revision
         revision = self._commit(
             {
                 "operation": "update_world_target",
-                "world_objects": [target.to_dict()],
+                "world_objects": [target_spec],
             },
             expected_world=set(self.world_ids),
             expected_attached=set(self.attached_ids),
         )
-        self.world_specs[target.object_id] = target.to_dict()
+        self.world_specs[target.object_id] = target_spec
         return revision
 
-    def detach_target(self, *, target: CollisionBox) -> int:
+    def detach_target(self, *, target: CollisionGeometry) -> int:
         if target.object_id not in self.attached_ids:
             return self._fail("target is not attached in the planning scene")
         revision = self._commit(
@@ -244,3 +319,55 @@ class PlanningSceneSynchronizer:
         self.ready = False
         self.last_error = reason
         raise PlanningSceneError(reason)
+
+
+def _same_collision_geometry_pose(
+    source: Mapping[str, Any], target: Mapping[str, Any]
+) -> bool:
+    """Return whether two rigid-body specs differ only by native pose noise."""
+
+    if any(source.get(key) != target.get(key) for key in ("id", "frame", "shape")):
+        return False
+    if source.get("primitives") != target.get("primitives"):
+        return False
+    try:
+        source_size = [float(value) for value in source["size_xyz"]]
+        target_size = [float(value) for value in target["size_xyz"]]
+        source_xyz = [float(value) for value in source["pose_xyz"]]
+        target_xyz = [float(value) for value in target["pose_xyz"]]
+        source_quat = [float(value) for value in source["pose_quat_xyzw"]]
+        target_quat = [float(value) for value in target["pose_quat_xyzw"]]
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not (
+        len(source_size) == len(target_size) == 3
+        and len(source_xyz) == len(target_xyz) == 3
+        and len(source_quat) == len(target_quat) == 4
+        and all(
+            math.isfinite(value)
+            for value in (
+                *source_size,
+                *target_size,
+                *source_xyz,
+                *target_xyz,
+                *source_quat,
+                *target_quat,
+            )
+        )
+    ):
+        return False
+    if any(abs(left - right) > 1e-12 for left, right in zip(source_size, target_size)):
+        return False
+    if any(
+        abs(left - right) > _TARGET_POSE_POSITION_ABS_TOL_M
+        for left, right in zip(source_xyz, target_xyz)
+    ):
+        return False
+    # q and -q encode the same orientation.
+    direct = math.sqrt(
+        sum((left - right) ** 2 for left, right in zip(source_quat, target_quat))
+    )
+    negated = math.sqrt(
+        sum((left + right) ** 2 for left, right in zip(source_quat, target_quat))
+    )
+    return min(direct, negated) <= _TARGET_POSE_QUATERNION_ABS_TOL

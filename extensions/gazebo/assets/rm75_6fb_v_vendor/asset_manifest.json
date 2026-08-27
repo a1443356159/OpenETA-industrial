@@ -4,7 +4,7 @@
   "upstream_license": "BSD-3-Clause",
   "terminal_link": "link_7",
   "joint_names": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"],
-  "camera_links": ["camera_rolink", "camera_link", "wrist_camera_optical_frame"],
+  "camera_links": ["wrist_camera_bracket_link", "wrist_camera_housing_link", "wrist_camera_optical_frame"],
   "files": [
     {"path":"LICENSE","sha256":"075f2da1c58b7816b003eee607709060dfd6ae6106dfaeb050f443748ac1b621"},
     {"path":"NOTICE","sha256":"8e0f471c1488df55ec0beb950556e7625a6407c36231b3a45475bd0c31ec6fd1"},
@@ -18,7 +18,7 @@
     {"path":"meshes/link_5.STL","sha256":"2fc93b2bc970eadca950afa3120129766e2bead60234c6d8752d3b223e407046"},
     {"path":"meshes/link_6.STL","sha256":"f9d0216056f7e1512858033163b0415973e1db573a1fee5af1609171967c043f"},
     {"path":"meshes/link_7.STL","sha256":"825b4e75fe965c268d19cda2c563ffb5b1381a5e7ab4d5b6b1565bc910045c3b"},
-    {"path":"urdf/arm_ros2_control.xacro","sha256":"e41e85add715c0cf4de0b2e2c557cc8eee0d328fcc4d2b19cb46fb19d6b89209"},
-    {"path":"urdf/rm75_6fb_v.urdf.xacro","sha256":"a8a3aef39b261a488f76b12a4623058dae40477edab464a614634eae4a7fba5d"}
+    {"path":"urdf/arm_ros2_control.xacro","sha256":"e2361d6dbc5b1c8bcb8dc336e7355d19086adb17a518711270c5ae62453b440f"},
+    {"path":"urdf/rm75_6fb_v.urdf.xacro","sha256":"9608b118e6072ed0a73d3f2beb2d73e792a3f7bbc296888500ad2bcfcd2d6cbb"}
   ]
 }

@@ -1,4 +1,4 @@
-"""Deterministic, oracle-only Gazebo lifecycle boundary (observation-only).
+"""Deterministic Gazebo fixture lifecycle boundary (observation-only).
 
 The class is intentionally transport agnostic: a real Gazebo process can be
 attached behind the same methods in a later milestone.  It never pretends that
@@ -21,7 +21,7 @@ class GazeboLifecycleError(RuntimeError):
 
 
 class GazeboEnvironment:
-    """Minimal create/reset/observe/close environment with oracle objects."""
+    """Minimal create/reset/observe/close environment with fixture objects."""
 
     def __init__(self, *, config: GazeboConfig | None = None, task: str = "", seed: int = 0) -> None:
         self.config = config or GazeboConfig()
@@ -93,7 +93,7 @@ class GazeboEnvironment:
             {"id": o.name, "name": o.name, "label": o.label, "confidence": o.confidence,
              "position": list(o.position), "orientation": list(o.orientation_xyzw),
              "visibility": "clear", "source_camera": self.config.top_camera_name,
-             "provenance": "gazebo_oracle"}
+             "provenance": "gazebo_fixture"}
             for o in self._objects
         ]
         return EnvObservation(
@@ -102,5 +102,5 @@ class GazeboEnvironment:
                       "camera_topics": {"rgb": self.config.top_rgb_topic,
                                          "depth": self.config.top_depth_topic,
                                          "camera_info": self.config.top_camera_info_topic},
-                      "scene_epoch": self._epoch, "observation_provenance": "gazebo_oracle"},
+                      "scene_epoch": self._epoch, "observation_provenance": "gazebo_fixture"},
         )

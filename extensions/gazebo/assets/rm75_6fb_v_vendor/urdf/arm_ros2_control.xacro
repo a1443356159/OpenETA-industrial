@@ -1,10 +1,10 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:macro name="rm75_v_arm_control_interfaces">
-    <xacro:macro name="rm75_v_arm_interface" params="name">
+    <xacro:macro name="rm75_v_arm_interface" params="name initial_value:=0.0">
       <joint name="${name}">
         <command_interface name="position"/>
-        <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+        <state_interface name="position"><param name="initial_value">${initial_value}</param></state_interface>
         <state_interface name="velocity"/>
       </joint>
     </xacro:macro>
@@ -14,6 +14,8 @@
     <xacro:rm75_v_arm_interface name="joint_4"/>
     <xacro:rm75_v_arm_interface name="joint_5"/>
     <xacro:rm75_v_arm_interface name="joint_6"/>
-    <xacro:rm75_v_arm_interface name="joint_7"/>
+    <!-- Keep the terminal wrist square with the 180-degree pedestal
+         installation so the gripper and rear camera share a workcell axis. -->
+    <xacro:rm75_v_arm_interface name="joint_7" initial_value="3.141592653589793"/>
   </xacro:macro>
 </robot>

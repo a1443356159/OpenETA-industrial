@@ -24,8 +24,17 @@ experiment:
     inference_method: multistep_regression_scene
     return_rand: false
     with_coll: false
-    n_refine_iters: 50
-    init_orig_ori: false
+    # Five learned refinement steps retain the observed stable orientation for
+    # elongated industrial parts and bound inference latency.  Endpoint
+    # legality, attached-state validation, and L5 planning remain mandatory,
+    # so fewer refinements cannot bypass physical acceptance.
+    n_refine_iters: 5
+    # Industrial parts are already resting in one observed stable orientation.
+    # Initialising refinement from that measured orientation preserves a
+    # grasp-compatible branch for elongated parts while the learned policy
+    # still refines all 96 translations and rotations against the destination.
+    # This is an upstream AnyPlace inference mode, not a host-generated pose.
+    init_orig_ori: true
     # Overridden by the OpenETA AnyPlace service's startup-only candidate count.
     init_k_val: 10
     no_success_classifier: true

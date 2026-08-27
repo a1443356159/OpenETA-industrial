@@ -18,6 +18,13 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from agent.runtime.collision_geometry import (
+    collision_geometry_volume_centroid,
+    compound_axis_aligned_bounds,
+    orientation_invariant_radius_m,
+    project_collision_geometry,
+)
+
 from .robot_control import GazeboControlConfig
 
 
@@ -32,6 +39,16 @@ PLACEMENT_VERIFICATION_SCHEMA_VERSION = "openeta.gazebo.placement_verification.v
 _POSE_BOUNDARY_ABS_TOL_M = 1e-6
 ACCEPTANCE_SCENE_ENV = "OPENETA_ACCEPTANCE_SCENE"
 ACCEPTANCE_SCENE_SCHEMA_VERSION = "openeta.gazebo_acceptance_scenes.v2"
+PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT = "complete_footprint"
+PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID = (
+    "stable_geometry_centroid_inside"
+)
+PLACEMENT_ACCEPTANCE_SEMANTICS = frozenset(
+    {
+        PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
+        PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID,
+    }
+)
 
 
 def acceptance_scene_contract_path() -> Path:
@@ -68,6 +85,14 @@ def load_acceptance_scene_contract(
     obstacles = scene.get("static_obstacles")
     if not isinstance(obstacles, list):
         raise ValueError("acceptance scene obstacle list is invalid")
+    planning_scene_obstacles = scene.get("planning_scene_obstacles", [])
+    if not isinstance(planning_scene_obstacles, list):
+        raise ValueError("acceptance planning-scene obstacle list is invalid")
+    canonical_world_complete = scene.get("canonical_world_complete")
+    if canonical_world_complete is not None and not isinstance(
+        canonical_world_complete, bool
+    ):
+        raise ValueError("acceptance canonical-world flag is invalid")
     def vector(
         owner: Mapping[str, Any],
         key: str,
@@ -119,8 +144,8 @@ def load_acceptance_scene_contract(
             vector(primitive, "pose_rpy", 3)
             vector(primitive, "rgba", 4)
 
-    seen: set[str] = set()
-    for obstacle in obstacles:
+    seen: set[str] = {"work_table", "target_object", "distractor_object"}
+    for obstacle in [*obstacles, *planning_scene_obstacles]:
         if not isinstance(obstacle, Mapping):
             raise ValueError("acceptance scene obstacle is invalid")
         obstacle_id = str(obstacle.get("id") or "")
@@ -146,6 +171,12 @@ def load_acceptance_scene_contract(
             )
         ):
             raise ValueError("acceptance scene task semantics are invalid")
+        operator_instruction = task.get("operator_instruction")
+        if operator_instruction is not None and (
+            not isinstance(operator_instruction, str)
+            or not operator_instruction.strip()
+        ):
+            raise ValueError("acceptance scene operator instruction is invalid")
     target = scene.get("target_object")
     if target is not None:
         if (
@@ -183,6 +214,21 @@ def load_acceptance_scene_contract(
             vector(region, "center_xy", 2)
             vector(region, "size_xy_m", 2, positive=True)
             vector(region, "rgba", 4)
+            support_z = region.get("support_z_m")
+            if support_z is not None and (
+                not isinstance(support_z, (int, float))
+                or isinstance(support_z, bool)
+                or not math.isfinite(float(support_z))
+            ):
+                raise ValueError("acceptance scene placement support is invalid")
+            acceptance_semantics = region.get(
+                "acceptance_semantics",
+                PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
+            )
+            if acceptance_semantics not in PLACEMENT_ACCEPTANCE_SEMANTICS:
+                raise ValueError(
+                    "acceptance scene placement semantics are invalid"
+                )
             if region.get("selected") is True:
                 selected.append(region)
             elif region.get("selected") is not False:
@@ -198,6 +244,14 @@ def load_acceptance_scene_contract(
         scene["destination_size_xy_m"] = [
             float(value) for value in chosen["size_xy_m"]
         ]
+        if chosen.get("support_z_m") is not None:
+            scene["destination_support_z_m"] = float(chosen["support_z_m"])
+        scene["placement_acceptance_semantics"] = str(
+            chosen.get(
+                "acceptance_semantics",
+                PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
+            )
+        )
         scene["selected_placement_region_id"] = str(chosen["id"])
     destination = scene.get("destination_center_xy")
     if destination is not None and (
@@ -243,6 +297,37 @@ def _quaternion_from_rpy(values: Sequence[float]) -> tuple[float, float, float, 
     )
 
 
+def _collision_primitive_specs(owner: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    """Normalize versioned scene primitives for the MoveIt scene adapter."""
+
+    raw_primitives = owner.get("primitives")
+    if not isinstance(raw_primitives, list):
+        return ()
+    normalized: list[dict[str, Any]] = []
+    for raw in raw_primitives:
+        if not isinstance(raw, Mapping):
+            raise ValueError("acceptance scene primitive is invalid")
+        shape = str(raw.get("shape") or "")
+        primitive: dict[str, Any] = {
+            "shape": shape,
+            "pose_xyz": [float(value) for value in raw["pose_xyz"]],
+            "pose_quat_xyzw": list(_quaternion_from_rpy(raw["pose_rpy"])),
+        }
+        if shape == "box":
+            primitive["size_xyz"] = [float(value) for value in raw["size_xyz"]]
+        elif shape == "cylinder":
+            primitive.update(
+                {
+                    "radius": float(raw["radius"]),
+                    "length": float(raw["length"]),
+                }
+            )
+        else:
+            raise ValueError("acceptance scene primitive shape is invalid")
+        normalized.append(primitive)
+    return tuple(normalized)
+
+
 class Verdict(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
@@ -255,13 +340,15 @@ class ReasonCode(StrEnum):
     CONTACT_INSUFFICIENT_SAMPLES = "NATIVE_GRASP_CONTACT_INSUFFICIENT_SAMPLES"
     CONTACT_WINDOW_TOO_SHORT = "NATIVE_GRASP_CONTACT_WINDOW_TOO_SHORT"
     CONTACT_SAMPLE_STALE = "NATIVE_GRASP_CONTACT_SAMPLE_STALE"
-    CONTACT_SAMPLE_BEFORE_CLOSE = "NATIVE_GRASP_CONTACT_SAMPLE_BEFORE_CLOSE"
+    CONTACT_SAMPLE_BEFORE_WINDOW = "NATIVE_GRASP_CONTACT_SAMPLE_BEFORE_WINDOW"
+    CONTACT_SAMPLE_AFTER_WINDOW = "NATIVE_GRASP_CONTACT_SAMPLE_AFTER_WINDOW"
     CONTACT_UNKNOWN = "NATIVE_GRASP_CONTACT_UNKNOWN"
     CONTACT_MIXED = "NATIVE_GRASP_CONTACT_MIXED"
     CONTACT_DISTRACTOR = "NATIVE_GRASP_CONTACT_DISTRACTOR"
     CONTACT_TARGET_CONFIRMED = "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED"
     DETACH_ACK_MISSING = "NATIVE_GRASP_DETACH_ACK_MISSING"
     ATTACH_ACK_MISSING = "NATIVE_GRASP_ATTACH_ACK_MISSING"
+    ATTACHMENT_STATE_INVALID = "NATIVE_GRASP_ATTACHMENT_STATE_INVALID"
     ATTACHMENT_CONFIRMED = "NATIVE_GRASP_ATTACHMENT_CONFIRMED"
     CHILD_LINK_STATE_UNAVAILABLE = "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
     DART_UNSUPPORTED = "NATIVE_GRASP_DART_UNSUPPORTED"
@@ -275,8 +362,9 @@ class PlacementReasonCode(StrEnum):
     POSE_UNAVAILABLE = "PLACEMENT_NATIVE_POSE_UNAVAILABLE"
     OBSERVATION_TOO_SHORT = "PLACEMENT_OBSERVATION_TOO_SHORT"
     TERMINAL_DRIFT = "PLACEMENT_TERMINAL_DRIFT_EXCEEDED"
-    HEIGHT_OUT_OF_RANGE = "PLACEMENT_CENTER_HEIGHT_OUT_OF_RANGE"
+    HEIGHT_OUT_OF_RANGE = "PLACEMENT_SUPPORT_HEIGHT_OUT_OF_RANGE"
     FOOTPRINT_OUTSIDE_DESTINATION = "PLACEMENT_FOOTPRINT_OUTSIDE_DESTINATION"
+    CENTROID_OUTSIDE_DESTINATION = "PLACEMENT_GEOMETRY_CENTROID_OUTSIDE_DESTINATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,10 +419,21 @@ class NativePickPlaceConfig(GazeboControlConfig):
     contact_samples_required: int = 3
     contact_span_s: float = 0.100
     contact_freshness_s: float = 2.0
+    # A contact sensor is not required to publish a new message after the
+    # gripper action result.  Admit only a sustained bilateral hold from this
+    # short terminal part of the close action; earlier transient collisions
+    # remain outside the proof window.
+    contact_terminal_lookback_s: float = 0.500
+    # Once the gripper action reports its terminal position, keep the same
+    # close command active while native contacts advance through one short
+    # simulator-time hold.  This strengthens the physical proof for a pad
+    # whose first stable contact begins immediately before the action result;
+    # the 100 ms bilateral span requirement itself remains unchanged.
+    contact_post_close_hold_s: float = 0.120
     maximum_capture_relative_translation_m: float = 0.010
-    table_size_m: tuple[float, float, float] = (0.70, 0.60, 0.04)
-    table_pose_xyz: tuple[float, float, float] = (0.40, 0.0, 0.38)
-    table_top_z_m: float = 0.40
+    table_size_m: tuple[float, float, float] = (1.15, 0.95, 0.06)
+    table_pose_xyz: tuple[float, float, float] = (0.35, 0.0, -0.03)
+    table_top_z_m: float = 0.0
     target_size_m: tuple[float, float, float] = (0.04, 0.04, 0.06)
     target_mass_kg: float = 0.10
     target_initial_xyz: tuple[float, float, float] = (0.28, -0.10, 0.43)
@@ -344,11 +443,13 @@ class NativePickPlaceConfig(GazeboControlConfig):
         0.0,
         1.0,
     )
-    distractor_size_m: tuple[float, float] = (0.05, 0.08)
-    distractor_mass_kg: float = 0.12
-    distractor_initial_xyz: tuple[float, float, float] = (0.28, 0.12, 0.44)
+    distractor_size_m: tuple[float, float, float] = (0.20, 0.06, 0.022)
+    distractor_mass_kg: float = 0.23
+    distractor_initial_xyz: tuple[float, float, float] = (0.34, 0.375, 0.011)
     destination_center_xy: tuple[float, float] = (0.48, -0.10)
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
+    destination_support_z_m: float = 0.0
+    placement_acceptance_semantics: str | None = None
     placement_stability_duration_s: float = 0.50
     placement_sample_interval_s: float = 0.10
     # Allow detached rigid-body dynamics to settle before the unchanged final
@@ -360,8 +461,17 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # proof retains at least two real samples under normal ROS/Gazebo latency.
     placement_terminal_window_s: float = 0.50
     maximum_placement_terminal_drift_m: float = 0.005
-    placement_center_height_m: float = 0.43
-    placement_center_height_tolerance_m: float = 0.01
+    placement_support_height_tolerance_m: float = 0.01
+    # General motion profiles are selected from physical load state, never a
+    # scene/object identity.  The unloaded contact move can use more of the
+    # RM75 limits; a retained payload uses a gentler profile until release.
+    unloaded_velocity_scaling: float = 0.30
+    unloaded_acceleration_scaling: float = 0.20
+    # The loaded path is the only profile that showed repeatable controller
+    # clipping at 0.25/0.15. Preserve the proven 500 Hz control chain and use
+    # the legacy-stable payload envelope instead of relaxing path tolerances.
+    loaded_velocity_scaling: float = 0.20
+    loaded_acceleration_scaling: float = 0.10
 
     def __post_init__(self) -> None:
         GazeboControlConfig.__post_init__(self)
@@ -380,6 +490,42 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "destination_size_xy_m",
                 tuple(float(value) for value in destination_size),
             )
+        destination_support = contract.get("destination_support_z_m")
+        if destination_support is not None:
+            object.__setattr__(
+                self,
+                "destination_support_z_m",
+                float(destination_support),
+            )
+        placement_semantics = str(
+            self.placement_acceptance_semantics
+            or contract.get("placement_acceptance_semantics")
+            or PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
+        )
+        if placement_semantics not in PLACEMENT_ACCEPTANCE_SEMANTICS:
+            raise ValueError("placement acceptance semantics are invalid")
+        object.__setattr__(
+            self,
+            "placement_acceptance_semantics",
+            placement_semantics,
+        )
+        motion_scalings = (
+            self.unloaded_velocity_scaling,
+            self.unloaded_acceleration_scaling,
+            self.loaded_velocity_scaling,
+            self.loaded_acceleration_scaling,
+        )
+        if any(
+            not math.isfinite(value) or value <= 0.0 or value > 1.0
+            for value in motion_scalings
+        ):
+            raise ValueError("pick/place motion scaling is invalid")
+        if (
+            self.loaded_velocity_scaling > self.unloaded_velocity_scaling
+            or self.loaded_acceleration_scaling
+            > self.unloaded_acceleration_scaling
+        ):
+            raise ValueError("loaded motion profile cannot exceed unloaded profile")
         target = contract.get("target_object")
         if isinstance(target, Mapping):
             target_size = tuple(float(value) for value in target["bounding_box_xyz"])
@@ -395,11 +541,6 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "target_initial_quat_xyzw",
                 _quaternion_from_rpy(target["pose_rpy"]),
             )
-            object.__setattr__(
-                self,
-                "placement_center_height_m",
-                self.table_top_z_m + target_size[2] / 2.0,
-            )
 
     @property
     def acceptance_scene_contract(self) -> Mapping[str, Any]:
@@ -410,6 +551,13 @@ class NativePickPlaceConfig(GazeboControlConfig):
         return int(self.acceptance_scene_contract["seed"])
 
     @property
+    def selected_placement_region_id(self) -> str:
+        return str(
+            self.acceptance_scene_contract.get("selected_placement_region_id")
+            or self.table_id
+        )
+
+    @property
     def static_obstacle_specs(self) -> tuple[dict[str, Any], ...]:
         return tuple(
             {
@@ -417,8 +565,25 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "size_xyz": [float(value) for value in raw["size_xyz"]],
                 "pose_xyz": [float(value) for value in raw["pose_xyz"]],
                 "pose_quat_xyzw": list(_quaternion_from_rpy(raw["pose_rpy"])),
+                **(
+                    {"primitives": list(_collision_primitive_specs(raw))}
+                    if _collision_primitive_specs(raw)
+                    else {}
+                ),
             }
-            for raw in self.acceptance_scene_contract["static_obstacles"]
+            for raw in [
+                *self.acceptance_scene_contract["static_obstacles"],
+                *self.acceptance_scene_contract.get("planning_scene_obstacles", []),
+            ]
+        )
+
+    @property
+    def target_collision_primitives(self) -> tuple[dict[str, Any], ...]:
+        target = self.acceptance_scene_contract.get("target_object")
+        return (
+            _collision_primitive_specs(target)
+            if isinstance(target, Mapping)
+            else ()
         )
 
     def acceptance_scene_evidence(self) -> dict[str, Any]:
@@ -433,18 +598,33 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 str(obstacle["id"])
                 for obstacle in contract["static_obstacles"]
             ],
+            "planning_scene_obstacle_ids": [
+                str(obstacle["id"])
+                for obstacle in contract.get("planning_scene_obstacles", [])
+            ],
             "destination_center_xy": list(self.destination_center_xy),
             "destination_size_xy_m": list(self.destination_size_xy_m),
+            "destination_support_z_m": self.destination_support_z_m,
+            "placement_acceptance_semantics": (
+                self.placement_acceptance_semantics
+            ),
         }
         task = contract.get("task")
         if isinstance(task, Mapping):
             evidence["task"] = dict(task)
         target = contract.get("target_object")
         if isinstance(target, Mapping):
+            collision_primitives = self.target_collision_primitives
             evidence["target_object"] = {
                 "id": self.target_id,
                 "shape_class": str(target["shape_class"]),
                 "bounding_box_xyz": list(self.target_size_m),
+                "collision_model": (
+                    "compound_primitives"
+                    if collision_primitives
+                    else "bounding_box"
+                ),
+                "collision_primitive_count": len(collision_primitives),
             }
         regions = contract.get("placement_regions")
         if isinstance(regions, list):
@@ -510,12 +690,69 @@ def verify_stable_placement(
 
     ordered = sorted(samples, key=lambda sample: sample.monotonic_s)
     final = ordered[-1]
-    radius_m = math.hypot(cfg.target_size_m[0], cfg.target_size_m[1]) / 2.0
+    qx, qy, qz, qw = final.quat_xyzw
+    quaternion_norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if quaternion_norm <= 1e-12:
+        return PlacementVerification(
+            Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE
+        )
+    qx, qy, qz, qw = (
+        value / quaternion_norm for value in (qx, qy, qz, qw)
+    )
+    rotation_rows = (
+        (
+            1.0 - 2.0 * (qy * qy + qz * qz),
+            2.0 * (qx * qy - qz * qw),
+            2.0 * (qx * qz + qy * qw),
+        ),
+        (
+            2.0 * (qx * qy + qz * qw),
+            1.0 - 2.0 * (qx * qx + qz * qz),
+            2.0 * (qy * qz - qx * qw),
+        ),
+        (
+            2.0 * (qx * qz - qy * qw),
+            2.0 * (qy * qz + qx * qw),
+            1.0 - 2.0 * (qx * qx + qy * qy),
+        ),
+    )
+    try:
+        projected_geometry = project_collision_geometry(
+            object_xyz=final.xyz,
+            object_rotation=rotation_rows,
+            primitives=cfg.target_collision_primitives,
+            fallback_size_xyz=cfg.target_size_m,
+        )
+        bounds = compound_axis_aligned_bounds(projected_geometry)
+        geometry_centroid = collision_geometry_volume_centroid(projected_geometry)
+        radius_m = orientation_invariant_radius_m(
+            projected_geometry,
+            object_xyz=final.xyz,
+        )
+    except ValueError:
+        return PlacementVerification(
+            Verdict.UNKNOWN, PlacementReasonCode.POSE_UNAVAILABLE
+        )
     half_x = cfg.destination_size_xy_m[0] / 2.0
     half_y = cfg.destination_size_xy_m[1] / 2.0
-    x_margin_m = half_x - abs(final.xyz[0] - cfg.destination_center_xy[0]) - radius_m
-    y_margin_m = half_y - abs(final.xyz[1] - cfg.destination_center_xy[1]) - radius_m
-    height_error_m = abs(final.xyz[2] - cfg.placement_center_height_m)
+    x_margin_m = min(
+        bounds.minimum_xyz[0] - (cfg.destination_center_xy[0] - half_x),
+        cfg.destination_center_xy[0] + half_x - bounds.maximum_xyz[0],
+    )
+    y_margin_m = min(
+        bounds.minimum_xyz[1] - (cfg.destination_center_xy[1] - half_y),
+        cfg.destination_center_xy[1] + half_y - bounds.maximum_xyz[1],
+    )
+    centroid_x_margin_m = half_x - abs(
+        geometry_centroid[0] - cfg.destination_center_xy[0]
+    )
+    centroid_y_margin_m = half_y - abs(
+        geometry_centroid[1] - cfg.destination_center_xy[1]
+    )
+    support_height_error_m = abs(bounds.minimum_xyz[2] - cfg.destination_support_z_m)
+    expected_link_origin_height_m = (
+        final.xyz[2] + cfg.destination_support_z_m - bounds.minimum_xyz[2]
+    )
     terminal = [
         sample
         for sample in ordered
@@ -547,12 +784,34 @@ def verify_stable_placement(
             "xyz": list(final.xyz),
             "quat_xyzw": list(final.quat_xyzw),
         },
-        "expected_center_height_m": cfg.placement_center_height_m,
-        "center_height_tolerance_m": cfg.placement_center_height_tolerance_m,
-        "center_height_error_m": height_error_m,
+        "height_rule": "compound_collision_geometry_contacts_destination_plane",
+        "geometry_source": (
+            "compound_collision_primitives"
+            if cfg.target_collision_primitives
+            else "centered_bounding_box"
+        ),
+        "collision_primitive_count": len(projected_geometry),
+        "support_plane_height_m": cfg.destination_support_z_m,
+        "projected_collision_minimum_z_m": bounds.minimum_xyz[2],
+        "projected_collision_maximum_z_m": bounds.maximum_xyz[2],
+        "expected_link_origin_height_m": expected_link_origin_height_m,
+        "support_height_tolerance_m": cfg.placement_support_height_tolerance_m,
+        "support_height_error_m": support_height_error_m,
         "destination_center_xy": list(cfg.destination_center_xy),
         "destination_size_xy_m": list(cfg.destination_size_xy_m),
+        "placement_acceptance_semantics": cfg.placement_acceptance_semantics,
+        "geometry_volume_centroid_xyz": list(geometry_centroid),
+        "centroid_margin_xy_m": [centroid_x_margin_m, centroid_y_margin_m],
+        "complete_footprint_inside": min(x_margin_m, y_margin_m) >= 0.0,
         "conservative_footprint_radius_m": radius_m,
+        "projected_footprint_half_extent_xy_m": [
+            (bounds.maximum_xyz[0] - bounds.minimum_xyz[0]) / 2.0,
+            (bounds.maximum_xyz[1] - bounds.minimum_xyz[1]) / 2.0,
+        ],
+        "projected_footprint_bounds_xy_m": {
+            "minimum": list(bounds.minimum_xyz[:2]),
+            "maximum": list(bounds.maximum_xyz[:2]),
+        },
         "footprint_margin_xy_m": [x_margin_m, y_margin_m],
     }
     if len(terminal) < 2:
@@ -563,16 +822,30 @@ def verify_stable_placement(
         )
     if terminal_drift_m > cfg.maximum_placement_terminal_drift_m:
         return PlacementVerification(Verdict.FAIL, PlacementReasonCode.TERMINAL_DRIFT, evidence)
-    if height_error_m > cfg.placement_center_height_tolerance_m and not math.isclose(
-        height_error_m,
-        cfg.placement_center_height_tolerance_m,
+    if support_height_error_m > cfg.placement_support_height_tolerance_m and not math.isclose(
+        support_height_error_m,
+        cfg.placement_support_height_tolerance_m,
         rel_tol=0.0,
         abs_tol=_POSE_BOUNDARY_ABS_TOL_M,
     ):
         return PlacementVerification(
             Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
         )
-    if min(x_margin_m, y_margin_m) < 0.0:
+    if (
+        cfg.placement_acceptance_semantics
+        == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+        and min(centroid_x_margin_m, centroid_y_margin_m) < 0.0
+    ):
+        return PlacementVerification(
+            Verdict.FAIL,
+            PlacementReasonCode.CENTROID_OUTSIDE_DESTINATION,
+            evidence,
+        )
+    if (
+        cfg.placement_acceptance_semantics
+        == PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
+        and min(x_margin_m, y_margin_m) < 0.0
+    ):
         return PlacementVerification(
             Verdict.FAIL, PlacementReasonCode.FOOTPRINT_OUTSIDE_DESTINATION, evidence
         )
@@ -591,10 +864,24 @@ def validated_pickplace_motion_guidance(
         "pose_semantics": cfg.parent_link,
         "acceptance_scene": cfg.acceptance_scene_evidence(),
         "motion_parameters": {
-            "velocity_scaling": 0.1,
-            "acceleration_scaling": 0.1,
+            "profile": "unloaded",
+            "velocity_scaling": cfg.unloaded_velocity_scaling,
+            "acceleration_scaling": cfg.unloaded_acceleration_scaling,
             "tolerance": 0.0002,
             "ori_tolerance": 0.002,
+        },
+        "motion_profiles": {
+            "unloaded": {
+                "selection": "no_attached_payload",
+                "velocity_scaling": cfg.unloaded_velocity_scaling,
+                "acceleration_scaling": cfg.unloaded_acceleration_scaling,
+            },
+            "loaded": {
+                "selection": "verified_attached_payload",
+                "velocity_scaling": cfg.loaded_velocity_scaling,
+                "acceleration_scaling": cfg.loaded_acceleration_scaling,
+            },
+            "terminal_time_parameterization": "moveit",
         },
         "terminal_poses": {
             "grasp_contact": "grasp_provider_model_pose_after_calibrated_frame_transform",
@@ -629,11 +916,23 @@ def validated_pickplace_motion_guidance(
             "placement": {
                 "minimum_stability_duration_s": cfg.placement_stability_duration_s,
                 "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
-                "center_height_m": cfg.placement_center_height_m,
-                "center_height_tolerance_m": cfg.placement_center_height_tolerance_m,
+                "support_plane_height_m": cfg.destination_support_z_m,
+                "height_rule": "compound_collision_geometry_contacts_destination_plane",
+                "support_height_tolerance_m": cfg.placement_support_height_tolerance_m,
                 "destination_center_xy": list(cfg.destination_center_xy),
                 "destination_size_xy_m": list(cfg.destination_size_xy_m),
-                "footprint_rule": "target_xy_circumscribed_circle_fully_inside",
+                "footprint_rule": (
+                    "stable_geometry_centroid_inside"
+                    if cfg.placement_acceptance_semantics
+                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+                    else "compound_collision_projection_fully_inside"
+                ),
+                "complete_footprint_margin_role": (
+                    "ordering_and_evidence_only"
+                    if cfg.placement_acceptance_semantics
+                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+                    else "acceptance_gate"
+                ),
             },
         },
         "on_rejection": "observe_and_report; do_not_bypass_native_receipt_gates",
@@ -716,31 +1015,60 @@ def _identity_kind(
 def confirm_native_bilateral_contact(
     samples: Iterable[NativeContactSample],
     *,
-    close_completed_sim_time_s: float | None,
+    verification_window_started_sim_time_s: float | None,
+    verification_window_ended_sim_time_s: float | None = None,
     now_monotonic_s: float,
     config: NativePickPlaceConfig | None = None,
 ) -> ContactGateResult:
-    """Accept only stable, post-close, bilateral target contacts.
+    """Accept only stable bilateral target contacts in an explicit window.
 
     Every observed message in the armed window is inspected.  Therefore a
     distractor, unknown, or mixed event rejects the entire request instead of
-    silently selecting the later target-looking contacts.
+    silently selecting the later target-looking contacts.  When the caller
+    supplies a closed Gazebo-time window, both boundaries share the simulator
+    clock and wall-clock receive age is deliberately irrelevant.  This keeps
+    GPU rendering or a low real-time factor from making valid terminal contact
+    evidence look stale while retaining the wall-clock freshness gate for
+    open-ended callers.
     """
 
     cfg = config or NativePickPlaceConfig()
     ordered = sorted(samples, key=lambda item: (item.timestamp_s, item.side))
     by_side: dict[str, list[NativeContactSample]] = {"left": [], "right": []}
-    if close_completed_sim_time_s is None or not math.isfinite(close_completed_sim_time_s):
-        return ContactGateResult(False, ReasonCode.CONTACT_SAMPLE_BEFORE_CLOSE, 0, 0)
+    if (
+        verification_window_started_sim_time_s is None
+        or not math.isfinite(verification_window_started_sim_time_s)
+    ):
+        return ContactGateResult(
+            False, ReasonCode.CONTACT_SAMPLE_BEFORE_WINDOW, 0, 0
+        )
+    closed_window = (
+        verification_window_ended_sim_time_s is not None
+        and math.isfinite(verification_window_ended_sim_time_s)
+        and verification_window_ended_sim_time_s
+        > verification_window_started_sim_time_s
+    )
     for sample in ordered:
-        if now_monotonic_s - sample.received_monotonic_s > cfg.contact_freshness_s:
+        if (
+            not closed_window
+            and now_monotonic_s - sample.received_monotonic_s
+            > cfg.contact_freshness_s
+        ):
             return ContactGateResult(
                 False, ReasonCode.CONTACT_SAMPLE_STALE,
                 len(by_side["left"]), len(by_side["right"]),
             )
-        if sample.timestamp_s <= close_completed_sim_time_s:
+        if sample.timestamp_s <= verification_window_started_sim_time_s:
             return ContactGateResult(
-                False, ReasonCode.CONTACT_SAMPLE_BEFORE_CLOSE,
+                False, ReasonCode.CONTACT_SAMPLE_BEFORE_WINDOW,
+                len(by_side["left"]), len(by_side["right"]),
+            )
+        if (
+            closed_window
+            and sample.timestamp_s > verification_window_ended_sim_time_s
+        ):
+            return ContactGateResult(
+                False, ReasonCode.CONTACT_SAMPLE_AFTER_WINDOW,
                 len(by_side["left"]), len(by_side["right"]),
             )
         rejected = _identity_kind(sample.collision_names, cfg, sample.side)
@@ -760,7 +1088,23 @@ def confirm_native_bilateral_contact(
         return ContactGateResult(False, ReasonCode.CONTACT_WINDOW_TOO_SHORT, len(left), len(right), left_span, right_span)
     return ContactGateResult(
         True, ReasonCode.CONTACT_TARGET_CONFIRMED, len(left), len(right), left_span, right_span,
-        evidence={"target_id": cfg.target_id, "source": "gazebo_native_contacts"},
+        evidence={
+            "target_id": cfg.target_id,
+            "source": "gazebo_native_contacts",
+            "verification_window_started_sim_time_s": (
+                verification_window_started_sim_time_s
+            ),
+            "verification_window_ended_sim_time_s": (
+                verification_window_ended_sim_time_s
+                if closed_window
+                else None
+            ),
+            "sample_freshness_basis": (
+                "closed_gazebo_sim_time_window"
+                if closed_window
+                else "monotonic_receive_time"
+            ),
+        },
     )
 
 
@@ -843,6 +1187,33 @@ class NativeGraspVerifier:
                 True,
                 gate=gate.to_dict(),
                 proof_boundary="bilateral_native_contact_and_attach_ack",
+            )
+        )
+
+    def attachment_state_rejected(
+        self,
+        gate: ContactGateResult,
+        *,
+        detail: str,
+    ) -> VerificationRecord:
+        """Record a measured attached pose rejected by PlanningScene.
+
+        Native bilateral contact and the detachable-joint ACK both occurred,
+        but the measured object transform made the current robot/object state
+        collide.  The native and PlanningScene bindings have already been
+        rolled back before this candidate-level result is emitted.
+        """
+
+        self.phase = "attachment_rejected"
+        self.attached = False
+        return self._remember(
+            self._record(
+                Verdict.FAIL,
+                ReasonCode.ATTACHMENT_STATE_INVALID,
+                False,
+                gate=gate.to_dict(),
+                native_attach_acked_before_rollback=True,
+                detail=str(detail),
             )
         )
 

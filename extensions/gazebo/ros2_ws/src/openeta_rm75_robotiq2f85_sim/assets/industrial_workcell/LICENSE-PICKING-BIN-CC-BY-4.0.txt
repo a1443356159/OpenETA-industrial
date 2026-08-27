@@ -1,0 +1,8 @@
+Picking_Bin version 1
+Creator: Open Robotics
+Source: https://fuel.gazebosim.org/1.0/OpenRobotics/models/Picking%20Bin
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+License text: https://creativecommons.org/licenses/by/4.0/legalcode
+
+The model is redistributed unchanged. Attribution and the source/license links
+are retained with the offline copy.

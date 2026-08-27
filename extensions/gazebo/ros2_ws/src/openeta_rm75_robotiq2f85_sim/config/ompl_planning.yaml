@@ -13,3 +13,9 @@ planner_configs:
   RRTConnectkConfigDefault: {type: geometric::RRTConnect, range: 0.0}
 rm_group:
   planner_configs: [RRTConnectkConfigDefault]
+  # The default 1% state-space interpolation can step over thin industrial
+  # parts (bolt shafts, wrench handles) during OMPL search.  ValidateSolution
+  # then rejects the otherwise complete path too late for RRTConnect to find
+  # another route.  Keep target/gripper collisions forbidden and sample the
+  # path densely enough for the planner itself to route around those parts.
+  longest_valid_segment_fraction: 0.002

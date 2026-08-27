@@ -13,7 +13,7 @@ def test_ros_gz_clock_bridge_lifecycle() -> None:
     gz = shutil.which("gz") or ("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz" if os.path.exists("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz") else None)
     if ros2 is None or gz is None:
         pytest.skip("ROS 2 Jazzy/Gazebo Sim is not installed")
-    world = "extensions/gazebo/worlds/oracle.sdf"
+    world = "extensions/gazebo/worlds/industrial_fixture.sdf"
     sim = GazeboProcess(world=world, gz_executable=gz)
     bridge = RosGzBridgeProcess(
         ros2_executable=ros2,

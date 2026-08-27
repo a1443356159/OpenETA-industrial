@@ -21,7 +21,7 @@ Python environments.
 The service layout is:
 
 ```text
-/root/autodl-tmp/openeta-services/m6/anygrasp/
+/root/autodl-tmp/openeta-services/anygrasp/
 ├── source/
 │   └── grasp_detection/
 │       ├── gsnet.so
@@ -40,7 +40,7 @@ verify the feature id from `source/grasp_detection`:
 
 ```bash
 cp gsnet_versions/gsnet.cpython-312-x86_64-linux-gnu.so gsnet.so
-/root/autodl-tmp/openeta-services/m6/anygrasp/venv/bin/python \
+/root/autodl-tmp/openeta-services/anygrasp/venv/bin/python \
   -c 'from gsnet import get_feature_id; print(get_feature_id())'
 ```
 
@@ -49,7 +49,7 @@ The current machine reports `N66466733051868466746`. Place the issued files at
 inference:
 
 ```bash
-/root/autodl-tmp/openeta-services/m6/anygrasp/venv/bin/python \
+/root/autodl-tmp/openeta-services/anygrasp/venv/bin/python \
   -c "from gsnet import check_license; check_license('license')"
 ```
 
@@ -83,8 +83,8 @@ Build for the 4090 only and use the system BLAS development package:
 export CUDA_HOME=/usr/local/cuda
 export TORCH_CUDA_ARCH_LIST=8.9
 export MAX_JOBS=12
-export PATH=/root/autodl-tmp/openeta-services/m6/anygrasp/venv/bin:$PATH
-cd /root/autodl-tmp/openeta-services/m6/anygrasp/dependencies/MinkowskiEngine
+export PATH=/root/autodl-tmp/openeta-services/anygrasp/venv/bin:$PATH
+cd /root/autodl-tmp/openeta-services/anygrasp/dependencies/MinkowskiEngine
 python setup.py install \
   --blas=blas \
   --blas_include_dirs=/usr/include/x86_64-linux-gnu \
@@ -112,13 +112,13 @@ For the RM75/Robotiq 2F-85 profile, start the general service with the physical
 opening bound and the unchanged 200-candidate reserve:
 
 ```bash
-/root/autodl-tmp/openeta-services/m6/anygrasp/venv/bin/python \
+/root/autodl-tmp/openeta-services/anygrasp/venv/bin/python \
   tools/anygrasp_mcp_server.py \
   --transport sse \
   --host 127.0.0.1 \
   --port 8874 \
-  --sdk-root /root/autodl-tmp/openeta-services/m6/anygrasp/source \
-  --checkpoint-path /root/autodl-tmp/openeta-services/m6/anygrasp/checkpoints/checkpoint_detection.tar \
+  --sdk-root /root/autodl-tmp/openeta-services/anygrasp/source \
+  --checkpoint-path /root/autodl-tmp/openeta-services/anygrasp/checkpoints/checkpoint_detection.tar \
   --max-gripper-width 0.085 \
   --gripper-height 0.03 \
   --raw-pool-size 200
@@ -132,14 +132,14 @@ also runs the real sample inference test:
 
 ```bash
 OPENETA_RUN_ANYGRASP_INTEGRATION=1 \
-OPENETA_ANYGRASP_PYTHON=/root/autodl-tmp/openeta-services/m6/anygrasp/venv/bin/python \
-OPENETA_ANYGRASP_SDK_ROOT=/root/autodl-tmp/openeta-services/m6/anygrasp/source \
-OPENETA_ANYGRASP_SAMPLE_DIR=/root/autodl-tmp/openeta-services/m6/anygrasp/source/grasp_detection/example_data \
-OPENETA_ANYGRASP_CHECKPOINT_PATH=/root/autodl-tmp/openeta-services/m6/anygrasp/checkpoints/checkpoint_detection.tar \
+OPENETA_ANYGRASP_PYTHON=/root/autodl-tmp/openeta-services/anygrasp/venv/bin/python \
+OPENETA_ANYGRASP_SDK_ROOT=/root/autodl-tmp/openeta-services/anygrasp/source \
+OPENETA_ANYGRASP_SAMPLE_DIR=/root/autodl-tmp/openeta-services/anygrasp/source/grasp_detection/example_data \
+OPENETA_ANYGRASP_CHECKPOINT_PATH=/root/autodl-tmp/openeta-services/anygrasp/checkpoints/checkpoint_detection.tar \
 pytest -q tests/integration/test_anygrasp_mcp_server.py
 ```
 
-Only after that smoke passes should M6 run with `--anygrasp-url` and
+Only after that smoke passes should normal acceptance run with `--anygrasp-url` and
 `--anyplace-url`. The acceptance verifier still requires real model provenance,
 full host qualification evidence, native contact/attach/detach, and stable
 placement; changing the primary grasp backend does not relax those gates.

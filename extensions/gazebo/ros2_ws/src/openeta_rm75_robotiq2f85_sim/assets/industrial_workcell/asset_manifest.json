@@ -1,0 +1,56 @@
+{
+  "schema_version": "openeta.industrial_asset_manifest.v1",
+  "runtime_network_access": false,
+  "sources": {
+    "stars_workshop_tools": {
+      "url": "https://github.com/STARS-Project-2020/Workshop-Tools-Dataset",
+      "commit": "48928088e4877c872ea5aaed92f2ef315190153a",
+      "license": "MIT",
+      "input_sha256": {
+        "Adjustable Wrench/mesh.ply": "5bc45db348dfd74d2b64bdc25f7d9c46646987ccc602ce279dbc972b1011d771",
+        "Allen Key/mesh.ply": "a29a03fc395aff66ee620884c6bb7588a7baa7e8da41a859729a2b515b5bec7e",
+        "Box Wrench/mesh.ply": "2c3eb1b431242e72f794ceedc912f41f3934a56b5b5c5a7cfbb086af44cadab6",
+        "Pliers/mesh.ply": "d88c692945d59d8dab10b2f3be35248db3a8511e87de2dc13c717452767a5451",
+        "Screwdriver/mesh.ply": "fa88a66b97ed11194c26b4817d55b8f948f8a340cbdb76b0002d7eb368041915"
+      },
+      "transform": "millimetres_to_metres; axis-normalized; centered_xy; bottom_z_zero; semantic coating palette"
+    },
+    "tq_threads": {
+      "url": "https://github.com/tinkerquarry/tq-threads",
+      "commit": "08d4700532dac58f8c983312a1965948e2533875",
+      "license": "MIT",
+      "reference_sha256": "662563dbe5857d48bdbd4eced550a8e84bf02b30d9a0613c61ad3d2520356f72"
+    },
+    "openrobotics_picking_bin": {
+      "url": "https://fuel.gazebosim.org/1.0/OpenRobotics/models/Picking%20Bin",
+      "version": 1,
+      "license": "CC-BY-4.0",
+      "sha256": "623f11b0ba68357bcb17f316ecfec81b42eae4c171aa8ecf296faf833781cd44"
+    }
+  },
+  "generated_sha256": {
+    "adjustable_wrench.glb": "120030e19a88d0c2fd063a98c281387fbae04b97a0a8707e4569b90a88ceaf21",
+    "adjustable_wrench.mtl": "88e0c24d04b9e8adfff94cb23ed2e9cb797266d29bea0f530f83a4d879d4c90b",
+    "adjustable_wrench.obj": "0b8819543088de836451dc2974c0a13d3e45247d5fd83822102ab98f9525a76c",
+    "allen_key.glb": "10872b191c44043825ba6d89331d1c4bd128856da16563fb6b8d11179b8118f9",
+    "allen_key.mtl": "aa6b808c9b0e572398f80d2896c1cfe1b6163eb10a4b5a0999e7eff4de6351d8",
+    "allen_key.obj": "4e7815477b5f0d694a51df2dfb91ff8f3958467e8b5b39b77ba12a2d0fc687d3",
+    "box_wrench.glb": "5071b8f42478de820d22fc17e85596a6e058a462c95c5f8c062381767fbf07f8",
+    "box_wrench.mtl": "ec7ff4fbbd0cd782970ff4a12b58be7a8734beb9ffdf3a163b0ebf4246ca450c",
+    "box_wrench.obj": "ab2803191dcff0c21d3d9c4ed0e5545510ea1fa9f454d5ff58bbcac0ca0a99e2",
+    "socket_bolt_20mm.glb": "062d5607a9c53d9481aed64ddcc8b1a51f462536998bcd98fccf7c8a3b1c0469",
+    "socket_bolt_20mm.mtl": "2897c5aaad401d4d18415e5a39b90010b27deab2fa172a7aaa9d925b0ff1d003",
+    "socket_bolt_20mm.obj": "14d7b400c357752a7e8fbb62214ad00c1fe79531d4850c80c957a0ee3a1a9fd6",
+    "hex_bolt_24mm.glb": "939ecf0b1c21b8ccb48451396d19ba6a55818f5e27d79809a22fdd0f1c888f9c",
+    "hex_bolt_24mm.mtl": "3129b0bda29bbbdc99cd7301593c76f8efa4a956a45ced4c21759a5ab882591b",
+    "hex_bolt_24mm.obj": "91169076a1a2a1557598119dfd65ed99bfb042566e5eab46f964c2a0b559e475",
+    "picking_bin.glb": "623f11b0ba68357bcb17f316ecfec81b42eae4c171aa8ecf296faf833781cd44",
+    "pliers.glb": "4e64fb43599ad6246887149f907a8197d7307c70f6b441428c98fc0b1bb3fe8a",
+    "pliers.mtl": "742ef0501e0164d3d088fcd6dd529e9b2df54a3519fe09bb7c27c5d62b822b2d",
+    "pliers.obj": "686711a9f15e66c537d1ee64f0df63344cbeef67051508269c38b10bb039edfb",
+    "screwdriver.glb": "faa72852ca042f6e84c9b22305ea8295f45cdddf2bfd9a09bf276ef1285baf4a",
+    "screwdriver.mtl": "f31d3700204d10a12cd4e95b8bed7f1d2c406afb082549999448ff46fd83936e",
+    "screwdriver.obj": "fd58e657b30d804f1dc447d7cf3cec6532dff8055b563facdcfad23dcc9a9e81"
+  },
+  "collision_policy": "high-resolution visual meshes plus low-complexity compound primitive proxies"
+}

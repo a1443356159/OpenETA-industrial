@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 from tools.anyplace_core import (  # noqa: E402
+    DEFAULT_DEPTH_TRUNCATION,
     DEFAULT_INFERENCE_SEED,
     AnyPlaceBackend,
 )
@@ -112,6 +113,11 @@ def health_payload() -> dict[str, Any]:
             DEFAULT_INFERENCE_SEED if backend is None else int(backend.seed)
         ),
         "raw_pool_size": 0 if backend is None else int(backend.raw_pool_size),
+        "depth_truncation_m": (
+            DEFAULT_DEPTH_TRUNCATION
+            if backend is None
+            else float(backend.depth_truncation)
+        ),
         "returned_candidate_count": (
             0 if backend is None else int(backend.last_returned_candidate_count)
         ),
@@ -134,6 +140,12 @@ def main() -> int:
         type=argparse_raw_pool_size(placement=True),
         default=DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     )
+    parser.add_argument(
+        "--depth-truncation",
+        type=float,
+        default=DEFAULT_DEPTH_TRUNCATION,
+        help="Maximum calibrated RGB-D working distance in metres.",
+    )
     args = parser.parse_args()
 
     anyplace_root = Path(args.anyplace_root)
@@ -148,6 +160,7 @@ def main() -> int:
             anyplace_root=anyplace_root,
             config_path=config_path,
             seed=args.inference_seed,
+            depth_truncation=args.depth_truncation,
             raw_pool_size=args.raw_pool_size,
         )
     except ValueError as exc:

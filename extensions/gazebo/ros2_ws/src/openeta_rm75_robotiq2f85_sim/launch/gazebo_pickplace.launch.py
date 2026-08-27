@@ -117,16 +117,33 @@ def generate_launch_description():
     # so retain the spawner through that bounded preflight window instead of
     # letting its five-second default tear down the whole launch.
     switch_timeout = ["--switch-timeout", "30.0"]
-    jsb = Node(package="controller_manager", executable="spawner", output="screen", arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager", *switch_timeout])
-    arm = Node(package="controller_manager", executable="spawner", output="screen", arguments=["rm_group_controller", "--controller-manager", "/controller_manager", *switch_timeout])
-    gripper = Node(package="controller_manager", executable="spawner", output="screen", arguments=["parallel_gripper_controller", "--controller-manager", "/controller_manager", *switch_timeout])
-    gripper_action = Node(package="openeta_rm75_robotiq2f85_sim", executable="gripper_action_adapter.py", output="screen", parameters=[{"use_sim_time": True, "allow_stalling": True, "drive_mode": "four_bar"}])
+    service_call_timeout = ["--service-call-timeout", "30.0"]
+    jsb = Node(package="controller_manager", executable="spawner", output="screen", arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager", *switch_timeout, *service_call_timeout])
+    arm = Node(package="controller_manager", executable="spawner", output="screen", arguments=["rm_group_controller", "--controller-manager", "/controller_manager", *switch_timeout, *service_call_timeout])
+    gripper = Node(package="controller_manager", executable="spawner", output="screen", arguments=["parallel_gripper_controller", "--controller-manager", "/controller_manager", *switch_timeout, *service_call_timeout])
+    gripper_action = Node(
+        package="openeta_rm75_robotiq2f85_sim",
+        executable="gripper_action_adapter.py",
+        output="screen",
+        parameters=[{
+            "use_sim_time": True,
+            "allow_stalling": True,
+            "drive_mode": "four_bar",
+            # Native pad contact freezes each side before a light workpiece can
+            # be pushed over.  Keep only a small bounded closing preload after
+            # the freeze; grasp admission remains the independent post-action
+            # bilateral-contact + attach-ACK gate in DirectEnv.
+            "stall_hold_extra_rad": 0.01,
+            "target_model_name": "target_object",
+        }],
+    )
     move_group = Node(package="moveit_ros_move_group", executable="move_group", output="screen", parameters=[moveit.to_dict(), {"use_sim_time": True}])
     bridge = Node(
         package="ros_gz_bridge", executable="parameter_bridge", output="screen",
         arguments=[
             "/openeta_rgbd/image@sensor_msgs/msg/Image[gz.msgs.Image", "/openeta_rgbd/depth_image@sensor_msgs/msg/Image[gz.msgs.Image", "/openeta_rgbd/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
             "/openeta_wrist_rgbd/image@sensor_msgs/msg/Image[gz.msgs.Image", "/openeta_wrist_rgbd/depth_image@sensor_msgs/msg/Image[gz.msgs.Image", "/openeta_wrist_rgbd/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+            "/openeta/native_grasp/contacts/left_pad@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts", "/openeta/native_grasp/contacts/right_pad@ros_gz_interfaces/msg/Contacts[gz.msgs.Contacts",
             "/openeta/gripper/left_outer@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_outer@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/left_inner@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_inner@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/left_tip@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_tip@std_msgs/msg/Float64]gz.msgs.Double", "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
         ], parameters=[{"use_sim_time": True}],
     )

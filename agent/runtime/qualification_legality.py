@@ -13,6 +13,14 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from adapter.protocol import JsonDict
+from agent.runtime.collision_geometry import (
+    ProjectedCollisionPrimitive,
+    collision_geometry_volume_centroid,
+    compound_axis_aligned_bounds,
+    orientation_invariant_radius_m,
+    project_collision_geometry,
+    support_face_alignment_cosine,
+)
 
 
 GOAL_LEGALITY_SCHEMA = "openeta.placement_goal_legality.v1"
@@ -164,10 +172,7 @@ def _transform_payload(transform: Transform, *, convention: str) -> JsonDict:
     rotation, xyz = transform
     return {
         "frame": "world",
-        "transform_matrix": [
-            [*map(float, rotation[row]), float(xyz[row])]
-            for row in range(3)
-        ]
+        "transform_matrix": [[*map(float, rotation[row]), float(xyz[row])] for row in range(3)]
         + [[0.0, 0.0, 0.0, 1.0]],
         "convention": convention,
     }
@@ -193,18 +198,44 @@ def _rotation_distance(left: Rotation, right: Rotation) -> float:
         relative[1][0] - relative[0][1],
     )
     sine = 0.5 * math.sqrt(_dot(skew, skew))
-    cosine = 0.5 * (
-        relative[0][0] + relative[1][1] + relative[2][2] - 1.0
-    )
+    cosine = 0.5 * (relative[0][0] + relative[1][1] + relative[2][2] - 1.0)
     return math.atan2(sine, cosine)
 
 
-def _obb_from_spec(spec: object) -> Obb | None:
-    if not isinstance(spec, Mapping) or str(spec.get("shape") or "box") != "box":
-        return None
-    size = _finite_vector(spec.get("size_xyz"), 3)
-    if size is None or any(value <= 0.0 for value in size):
-        return None
+def _obb(transform: Transform, size_xyz: Sequence[float]) -> Obb:
+    rotation, xyz = transform
+    return xyz, rotation, tuple(float(value) / 2.0 for value in size_xyz)  # type: ignore[return-value]
+
+
+def _projected_body_geometry(
+    spec: Mapping[str, Any],
+    transform: Transform,
+) -> tuple[ProjectedCollisionPrimitive, ...]:
+    """Project the same compound body supplied to MoveIt at one pose."""
+
+    rotation, xyz = transform
+    try:
+        return project_collision_geometry(
+            object_xyz=xyz,
+            object_rotation=rotation,
+            primitives=spec.get("primitives") or (),
+            fallback_size_xyz=spec.get("size_xyz"),
+        )
+    except ValueError:
+        return ()
+
+
+def _projected_obb(primitive: ProjectedCollisionPrimitive) -> Obb:
+    return (
+        primitive.center_xyz,
+        primitive.rotation_rows,
+        primitive.enclosing_obb_half_sizes(),
+    )
+
+
+def _spec_obbs(spec: object) -> tuple[Obb, ...]:
+    if not isinstance(spec, Mapping):
+        return ()
     pose = rigid_pose(
         {
             "xyz": spec.get("pose_xyz"),
@@ -217,32 +248,8 @@ def _obb_from_spec(spec: object) -> Obb | None:
         }
     )
     if pose is None:
-        return None
-    rotation, xyz = pose
-    return xyz, rotation, tuple(value / 2.0 for value in size)  # type: ignore[return-value]
-
-
-def _obb(transform: Transform, size_xyz: Sequence[float]) -> Obb:
-    rotation, xyz = transform
-    return xyz, rotation, tuple(float(value) / 2.0 for value in size_xyz)  # type: ignore[return-value]
-
-
-def _obb_vertices(box: Obb) -> list[Vector]:
-    center, rotation, half = box
-    axes = _columns(rotation)
-    vertices: list[Vector] = []
-    for sx in (-1.0, 1.0):
-        for sy in (-1.0, 1.0):
-            for sz in (-1.0, 1.0):
-                signs = (sx, sy, sz)
-                vertices.append(
-                    tuple(
-                        center[row]
-                        + sum(signs[axis] * half[axis] * axes[axis][row] for axis in range(3))
-                        for row in range(3)
-                    )  # type: ignore[arg-type]
-                )
-    return vertices
+        return ()
+    return tuple(_projected_obb(item) for item in _projected_body_geometry(spec, pose))
 
 
 def _obb_penetrates(left: Obb, right: Obb, *, tolerance_m: float) -> bool:
@@ -343,7 +350,9 @@ def evaluate_placement_goal_legality(
     if scene_contract:
         result["acceptance_scene"] = dict(scene_contract)
     target_is_attached = target_id in attached_specs
-    target_spec = attached_specs.get(target_id) if target_is_attached else world_specs.get(target_id)
+    target_spec = (
+        attached_specs.get(target_id) if target_is_attached else world_specs.get(target_id)
+    )
     if not isinstance(target_spec, Mapping):
         result.update(
             verdict="PASS",
@@ -426,8 +435,18 @@ def evaluate_placement_goal_legality(
         raw_collision_goal = _compose(motion, current_collision)
         collision_goal = raw_collision_goal
         qualified_motion = motion
-        raw_vertices = _obb_vertices(_obb(raw_collision_goal, size))
-        raw_minimum_z = min(vertex[2] for vertex in raw_vertices)
+        raw_geometry = _projected_body_geometry(target_spec, raw_collision_goal)
+        if not raw_geometry:
+            result.update(
+                verdict="UNKNOWN",
+                reason="scene_target_geometry_invalid",
+                geometry_available=False,
+                infrastructure_error=True,
+                elapsed_s=time.monotonic() - started,
+            )
+            return result
+        raw_bounds = compound_axis_aligned_bounds(raw_geometry)
+        raw_minimum_z = raw_bounds.minimum_xyz[2]
         support_reconciliation: JsonDict = {
             "available": support_z is not None,
             "applied": False,
@@ -436,8 +455,9 @@ def evaluate_placement_goal_legality(
         }
         if support_z is not None and raw_minimum_z < support_z:
             correction_z = support_z - raw_minimum_z
-            geometric_limit = math.sqrt(
-                sum((float(value) / 2.0) ** 2 for value in size)
+            geometric_limit = orientation_invariant_radius_m(
+                raw_geometry,
+                object_xyz=raw_collision_goal[1],
             ) + max(0.0, support_tolerance)
             support_reconciliation.update(
                 {
@@ -470,8 +490,7 @@ def evaluate_placement_goal_legality(
         binding_method = "world_motion_times_current_planning_scene_object"
         if support_reconciliation.get("applied") is True:
             binding_method = (
-                "support_contact_reconciled_world_motion_times_"
-                "current_planning_scene_object"
+                "support_contact_reconciled_world_motion_times_current_planning_scene_object"
             )
         result["checks"]["object_frame_binding"] = {
             "available": True,
@@ -516,18 +535,35 @@ def evaluate_placement_goal_legality(
                 "rotation_matrix": [list(row) for row in collision_goal[0]],
             },
         }
-    goal_box = _obb(collision_goal, size)
-    vertices = _obb_vertices(goal_box)
-    minimum_z = min(vertex[2] for vertex in vertices)
-    maximum_z = max(vertex[2] for vertex in vertices)
+    goal_geometry = _projected_body_geometry(target_spec, collision_goal)
+    if not goal_geometry:
+        result.update(
+            verdict="UNKNOWN",
+            reason="scene_target_geometry_invalid",
+            geometry_available=False,
+            infrastructure_error=True,
+            elapsed_s=time.monotonic() - started,
+        )
+        return result
+    goal_bounds = compound_axis_aligned_bounds(goal_geometry)
+    volume_centroid = collision_geometry_volume_centroid(goal_geometry)
+    minimum_z = goal_bounds.minimum_xyz[2]
+    maximum_z = goal_bounds.maximum_xyz[2]
     result["checks"]["object_bbox"] = {
         "available": True,
         "size_xyz": size,
         "minimum_z_m": minimum_z,
         "maximum_z_m": maximum_z,
+        "geometry_source": (
+            "compound_collision_primitives"
+            if target_spec.get("primitives")
+            else "centered_bounding_box"
+        ),
+        "primitive_count": len(goal_geometry),
     }
 
     if support_z is not None:
+        support_alignment_cosine = support_face_alignment_cosine(goal_geometry)
         result["checks"]["support"] = {
             "available": True,
             "support_z_m": support_z,
@@ -536,6 +572,12 @@ def evaluate_placement_goal_legality(
             "height_tolerance_m": support_tolerance,
             "penetration_tolerance_m": support_penetration_tolerance,
             "tolerance_basis": "sensor_and_model_support_contact_uncertainty",
+            "geometry_volume_centroid_xyz": list(volume_centroid),
+            "geometry_volume_centroid_height_m": volume_centroid[2] - support_z,
+            "support_energy_resolution_m": support_tolerance,
+            "support_face_alignment_cosine": support_alignment_cosine,
+            "support_face_alignment_error_rad": math.acos(support_alignment_cosine),
+            "stability_role": "ordering_only",
         }
         if minimum_z < support_z - support_penetration_tolerance:
             result.update(
@@ -560,24 +602,114 @@ def evaluate_placement_goal_legality(
     size_xy = _finite_vector(region.get("size_xy_m"), 2)
     if center_xy is not None and size_xy is not None and all(value > 0.0 for value in size_xy):
         half_x, half_y = size_xy[0] / 2.0, size_xy[1] / 2.0
-        margins = [
-            min(
-                vertex[0] - (center_xy[0] - half_x),
-                center_xy[0] + half_x - vertex[0],
-                vertex[1] - (center_xy[1] - half_y),
-                center_xy[1] + half_y - vertex[1],
+        acceptance_semantics = str(
+            region.get("acceptance_semantics") or "complete_footprint"
+        )
+        if acceptance_semantics not in {
+            "complete_footprint",
+            "stable_geometry_centroid_inside",
+        }:
+            result.update(
+                verdict="UNKNOWN",
+                reason="placement_region_semantics_invalid",
+                geometry_available=False,
+                infrastructure_error=True,
+                elapsed_s=time.monotonic() - started,
             )
-            for vertex in vertices
-        ]
-        footprint_margin = min(margins)
+            return result
+        # The exact compound-primitive footprint is the legality proof.  Its
+        # orientation-invariant link-origin radius remains an ordering signal
+        # only; a negative conservative clearance never deletes an otherwise
+        # legal AnyPlace goal.
+        conservative_radius = orientation_invariant_radius_m(
+            goal_geometry,
+            object_xyz=collision_goal[1],
+        )
+        conservative_margin = min(
+            half_x - abs(collision_goal[1][0] - center_xy[0]) - conservative_radius,
+            half_y - abs(collision_goal[1][1] - center_xy[1]) - conservative_radius,
+        )
+        footprint_margin = min(
+            goal_bounds.minimum_xyz[0] - (center_xy[0] - half_x),
+            center_xy[0] + half_x - goal_bounds.maximum_xyz[0],
+            goal_bounds.minimum_xyz[1] - (center_xy[1] - half_y),
+            center_xy[1] + half_y - goal_bounds.maximum_xyz[1],
+        )
+        centroid_margin = min(
+            half_x - abs(volume_centroid[0] - center_xy[0]),
+            half_y - abs(volume_centroid[1] - center_xy[1]),
+        )
         result["checks"]["placement_region"] = {
             "available": True,
+            "acceptance_semantics": acceptance_semantics,
             "complete_footprint_inside": footprint_margin >= -1e-9,
+            "geometry_centroid_inside": centroid_margin >= -1e-9,
             "minimum_margin_m": footprint_margin,
+            "geometry_centroid_minimum_margin_m": centroid_margin,
+            "geometry_volume_centroid_xyz": list(volume_centroid),
+            "footprint_rule": (
+                "stable_geometry_centroid_inside"
+                if acceptance_semantics == "stable_geometry_centroid_inside"
+                else "compound_collision_projection_fully_inside"
+            ),
+            "complete_footprint_margin_role": (
+                "ordering_only"
+                if acceptance_semantics == "stable_geometry_centroid_inside"
+                else "legality_gate"
+            ),
+            "projected_minimum_xy_m": list(goal_bounds.minimum_xyz[:2]),
+            "projected_maximum_xy_m": list(goal_bounds.maximum_xyz[:2]),
+            "conservative_footprint_radius_m": conservative_radius,
+            "conservative_minimum_margin_m": conservative_margin,
+            "conservative_margin_role": "ordering_only",
             "center_xy": center_xy,
             "size_xy_m": size_xy,
         }
-        if footprint_margin < -1e-9:
+        support_checks = result["checks"].get("support")
+        if isinstance(support_checks, dict):
+            alignment_error = support_checks.get("support_face_alignment_error_rad")
+            if (
+                isinstance(alignment_error, (int, float))
+                and not isinstance(alignment_error, bool)
+                and math.isfinite(float(alignment_error))
+                and float(alignment_error) >= 0.0
+            ):
+                # If the model pose settles onto its nearest analytic support
+                # face, every body point moves by at most the chord of the
+                # orientation-invariant radius through that angular error.
+                # Subtracting that exact swept-displacement bound from the
+                # yaw-invariant region clearance predicts whether settling can
+                # remain in-zone. It is deliberately ordering-only because
+                # friction and non-uniform mass are not proven here.
+                settling_shift = 2.0 * conservative_radius * math.sin(
+                    min(math.pi, float(alignment_error)) / 2.0
+                )
+                settling_clearance = conservative_margin - settling_shift
+                settling = {
+                    "settling_sweep_translation_bound_m": settling_shift,
+                    "settling_sweep_clearance_m": settling_clearance,
+                    "settling_sweep_rule": (
+                        "orientation_invariant_radius_chord_to_nearest_support_face"
+                    ),
+                    "settling_sweep_role": "ordering_only",
+                }
+                support_checks.update(settling)
+                result["checks"]["placement_region"].update(settling)
+        if (
+            acceptance_semantics == "stable_geometry_centroid_inside"
+            and centroid_margin < -1e-9
+        ):
+            result.update(
+                verdict="FAIL",
+                reason="goal_geometry_centroid_outside_placement_region",
+                geometry_available=True,
+                elapsed_s=time.monotonic() - started,
+            )
+            return result
+        if (
+            acceptance_semantics == "complete_footprint"
+            and footprint_margin < -1e-9
+        ):
             result.update(
                 verdict="FAIL",
                 reason="goal_footprint_outside_placement_region",
@@ -595,15 +727,19 @@ def evaluate_placement_goal_legality(
         object_id = str(object_id)
         if object_id in {target_id, support_object_id}:
             continue
-        obstacle = _obb_from_spec(spec)
-        if obstacle is None:
+        obstacle_boxes = _spec_obbs(spec)
+        if not obstacle_boxes:
             uncheckable.append(object_id)
             continue
         evaluated_obstacles.append(object_id)
-        if _obb_penetrates(
-            goal_box,
-            obstacle,
-            tolerance_m=static_penetration_tolerance,
+        if any(
+            _obb_penetrates(
+                _projected_obb(body),
+                obstacle,
+                tolerance_m=static_penetration_tolerance,
+            )
+            for body in goal_geometry
+            for obstacle in obstacle_boxes
         ):
             collisions.append(object_id)
     result["checks"]["static_scene_collision"] = {
@@ -634,10 +770,7 @@ def evaluate_placement_goal_legality(
     ):
         object_radius = math.sqrt(sum((value / 2.0) ** 2 for value in size))
         center_distance = math.sqrt(
-            sum(
-                (collision_goal[1][index] - base_xyz[index]) ** 2
-                for index in range(3)
-            )
+            sum((collision_goal[1][index] - base_xyz[index]) ** 2 for index in range(3))
         )
         reachable = center_distance - object_radius <= float(outer) + attachment_allowance
         result["checks"]["analytic_workspace"] = {
@@ -694,9 +827,7 @@ def bind_qualified_placement_goal(
         return
     candidate = dict(candidate_value)
     if isinstance(collision_goal, Mapping):
-        candidate["qualified_world_collision_object_goal_pose"] = dict(
-            collision_goal
-        )
+        candidate["qualified_world_collision_object_goal_pose"] = dict(collision_goal)
     if not isinstance(qualified_motion, Mapping):
         descriptor["candidate"] = candidate
         return
@@ -710,13 +841,9 @@ def bind_qualified_placement_goal(
     # A virtual pre-attachment proof must attach the actual PlanningScene
     # collision body at the contact EEF, not the visible point-cloud centroid.
     candidate["physical_scene_attachment_required"] = True
-    candidate["physical_scene_attachment_source"] = (
-        "current_planning_scene_collision_object"
-    )
+    candidate["physical_scene_attachment_source"] = "current_planning_scene_collision_object"
 
-    correction = _finite_vector(
-        binding.get("release_target_translation_correction_xyz"), 3
-    )
+    correction = _finite_vector(binding.get("release_target_translation_correction_xyz"), 3)
     if correction is not None and any(abs(value) > 1e-12 for value in correction):
         stages_value = candidate.get("qualification_stages")
         if isinstance(stages_value, list):
@@ -730,22 +857,32 @@ def bind_qualified_placement_goal(
                     for key in ("xyz", "translation_xyz", "position"):
                         xyz = _finite_vector(stage.get(key), 3)
                         if xyz is not None:
-                            stage[key] = [
-                                xyz[index] + correction[index]
-                                for index in range(3)
-                            ]
-                    stage["support_contact_translation_correction_xyz"] = list(
-                        correction
-                    )
-                    stage["terminal_pose_source"] = (
-                        "anyplace_se3_with_physical_support_binding"
-                    )
+                            stage[key] = [xyz[index] + correction[index] for index in range(3)]
+                    stage["support_contact_translation_correction_xyz"] = list(correction)
+                    stage["terminal_pose_source"] = "anyplace_se3_with_physical_support_binding"
                 stages.append(stage)
             candidate["qualification_stages"] = stages
     descriptor["candidate"] = candidate
 
 
 def _expected_pair_eef_goal(candidate: Mapping[str, Any]) -> Transform | None:
+    compile_parameters = candidate.get("compile_parameters")
+    compile_parameters = compile_parameters if isinstance(compile_parameters, Mapping) else {}
+    attachment = rigid_pose(compile_parameters.get("attachment_transform"))
+    # Once a failed close rigidly moves the detached collision body, the
+    # rebased grasp and its predicted attachment both use that physical object
+    # frame.  The desired bin goal then stays fixed and is authoritative.
+    # Initial model pairs are different: their attachment uses the partial
+    # point-cloud frame, so mixing in the physical collision-body goal would
+    # introduce the centroid/body offset a second time.
+    qualified_object_goal = rigid_pose(candidate.get("qualified_world_collision_object_goal_pose"))
+    physical_rebase = candidate.get("frozen_object_motion_rebase")
+    if (
+        isinstance(physical_rebase, Mapping)
+        and qualified_object_goal is not None
+        and attachment is not None
+    ):
+        return _compose(qualified_object_goal, _inverse(attachment))
     contact = rigid_pose(candidate.get("frozen_contact_pose"))
     motion_value = candidate.get("object_motion_world_transform")
     motion = (
@@ -755,13 +892,10 @@ def _expected_pair_eef_goal(candidate: Mapping[str, Any]) -> Transform | None:
     )
     if contact is not None and motion is not None:
         return _compose(motion, contact)
-    compile_parameters = candidate.get("compile_parameters")
-    compile_parameters = compile_parameters if isinstance(compile_parameters, Mapping) else {}
     # In the attached-object path the model supplies T_world_object_goal.
     # Derive the sole release EEF terminal from the measured native attachment;
     # a direct-EFF fallback would silently change the model/attachment contract.
     object_goal = rigid_pose(_object_goal(candidate))
-    attachment = rigid_pose(compile_parameters.get("attachment_transform"))
     if object_goal is not None and attachment is not None:
         return _compose(object_goal, _inverse(attachment))
     return None
@@ -965,26 +1099,43 @@ def evaluate_grasp_placement_pair_legality(
     evaluated_obstacle_ids = sorted(
         str(object_id)
         for object_id, spec in world_specs.items()
-        if str(object_id) != target_id and _obb_from_spec(spec) is not None
+        if str(object_id) != target_id and _spec_obbs(spec)
     )
     uncheckable_obstacle_ids = sorted(
         str(object_id)
         for object_id, spec in world_specs.items()
-        if str(object_id) != target_id and _obb_from_spec(spec) is None
+        if str(object_id) != target_id and not _spec_obbs(spec)
     )
-    attached_active = attachment is not None and size is not None
+    attached_active = (
+        attachment is not None and size is not None and isinstance(target_spec, Mapping)
+    )
     for index, stage in enumerate(stages):
         name = str(stage.get("name") or f"stage_{index}")
         stage_transform = stage_poses[name]
-        if attached_active and attachment is not None and size is not None:
-            object_box = _obb(_compose(stage_transform, attachment), size)
-            minimum_z = min(vertex[2] for vertex in _obb_vertices(object_box))
+        if (
+            attached_active
+            and attachment is not None
+            and size is not None
+            and isinstance(target_spec, Mapping)
+        ):
+            object_geometry = _projected_body_geometry(
+                target_spec,
+                _compose(stage_transform, attachment),
+            )
+            if not object_geometry:
+                result.update(
+                    verdict="UNKNOWN",
+                    reason="pair_attached_geometry_invalid",
+                    infrastructure_error=True,
+                    elapsed_s=time.monotonic() - started,
+                )
+                return result
+            minimum_z = compound_axis_aligned_bounds(object_geometry).minimum_xyz[2]
             if (
                 isinstance(support_z, (int, float))
                 and not isinstance(support_z, bool)
                 and math.isfinite(float(support_z))
-                and minimum_z
-                < float(support_z) - support_penetration_tolerance
+                and minimum_z < float(support_z) - support_penetration_tolerance
             ):
                 collision_events.append(
                     {
@@ -999,11 +1150,15 @@ def evaluate_grasp_placement_pair_legality(
                 object_id = str(object_id)
                 if object_id in {target_id, support_object_id}:
                     continue
-                obstacle = _obb_from_spec(spec)
-                if obstacle is not None and _obb_penetrates(
-                    object_box,
-                    obstacle,
-                    tolerance_m=static_penetration_tolerance,
+                obstacle_boxes = _spec_obbs(spec)
+                if obstacle_boxes and any(
+                    _obb_penetrates(
+                        _projected_obb(body),
+                        obstacle,
+                        tolerance_m=static_penetration_tolerance,
+                    )
+                    for body in object_geometry
+                    for obstacle in obstacle_boxes
                 ):
                     collision_events.append(
                         {
@@ -1039,11 +1194,14 @@ def evaluate_grasp_placement_pair_legality(
                 object_id = str(object_id)
                 if object_id == target_id:
                     continue
-                obstacle = _obb_from_spec(spec)
-                if obstacle is not None and _obb_penetrates(
-                    proxy_box,
-                    obstacle,
-                    tolerance_m=static_penetration_tolerance,
+                obstacle_boxes = _spec_obbs(spec)
+                if obstacle_boxes and any(
+                    _obb_penetrates(
+                        proxy_box,
+                        obstacle,
+                        tolerance_m=static_penetration_tolerance,
+                    )
+                    for obstacle in obstacle_boxes
                 ):
                     collision_events.append(
                         {
@@ -1062,7 +1220,16 @@ def evaluate_grasp_placement_pair_legality(
         "gripper_geometry_available": bool(scene.get("gripper_collision_boxes"))
         if isinstance(scene, Mapping)
         else False,
-        "attached_object_geometry_available": attachment is not None and size is not None,
+        "attached_object_geometry_available": (
+            attachment is not None
+            and size is not None
+            and isinstance(target_spec, Mapping)
+        ),
+        "attached_object_geometry_source": (
+            "compound_collision_primitives"
+            if isinstance(target_spec, Mapping) and target_spec.get("primitives")
+            else "centered_bounding_box"
+        ),
         "evaluated_obstacle_ids": evaluated_obstacle_ids,
         "uncheckable_obstacle_ids": uncheckable_obstacle_ids,
         "collisions": collision_events,

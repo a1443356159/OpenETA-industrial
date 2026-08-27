@@ -83,6 +83,12 @@ class GazeboRuntime:
         self._ros_context: Any | None = None
         self._ros_executor: Any | None = None
         self._ros_thread: threading.Thread | None = None
+        # The last fully validated observation is retained only for read-only
+        # controller RPCs.  Motion qualification can spend tens of seconds in
+        # MoveIt without changing either the world or robot; forcing another
+        # RGB-D transfer afterwards adds no evidence and can turn a successful
+        # qualification into a camera-transport timeout.
+        self._last_observation: EnvObservation | None = None
 
     def _start_ros_graph(self) -> None:
         """Create the one explicit rclpy context/executor for this runtime."""
@@ -265,7 +271,7 @@ class GazeboRuntime:
             )
             for camera in self._cameras
         ]
-        return EnvObservation(
+        observation = EnvObservation(
             task=self.task,
             cameras=frames,
             robot=robot,
@@ -276,6 +282,8 @@ class GazeboRuntime:
                 "scene_epoch": self.scene_epoch,
             },
         )
+        self._last_observation = observation
+        return observation
 
     def reset(self, *, seed: int | None = None) -> EnvObservation:
         # Gazebo Sim's stock DetachableJoint emits an output-topic transition
@@ -341,7 +349,27 @@ class GazeboRuntime:
     def execute(self, action: Mapping[str, Any]) -> tuple[EnvObservation, dict[str, Any]]:
         if self.controller is None:
             raise GazeboProcessError("Gazebo profile is read-only")
-        receipt = self.controller.execute(dict(action)).to_dict()
+        normalized_action = dict(action)
+        receipt = self.controller.execute(normalized_action).to_dict()
+        if normalized_action.get("action_type") == "qualify_motion_candidates":
+            # Qualification is an explicitly read-only host RPC: it computes
+            # IK, validity and plan-only evidence but never executes a robot or
+            # world mutation.  Reuse the observation that supplied the frozen
+            # candidate frontier instead of waiting for two unrelated camera
+            # streams to publish again.  A missing cache means the normal
+            # reset/observe lifecycle was bypassed and must fail closed.
+            if self._last_observation is None:
+                raise GazeboProcessError(
+                    "READ_ONLY_ACTION_OBSERVATION_UNAVAILABLE"
+                )
+            receipt["observation_reused"] = True
+            receipt["observation_reuse_reason"] = (
+                "read_only_motion_qualification"
+            )
+            receipt["observation_scene_epoch"] = int(
+                self._last_observation.metadata.get("scene_epoch", self.scene_epoch)
+            )
+            return self._last_observation, receipt
         barrier_value = receipt.get("action_completed_ros_time_s")
         barrier = float(barrier_value) if barrier_value is not None else None
         # Header timestamps and ``action_completed_ros_time_s`` share the
@@ -417,6 +445,7 @@ class GazeboRuntime:
             except BaseException as exc:
                 errors.append(exc)
         self._launch = None
+        self._last_observation = None
         self.started = False
         self.closed = True
         if errors:

@@ -15,6 +15,7 @@ allowed_tools:
   - create_simulator_env
   - close_simulator_env
   - observe
+  - active_observe
   - move_to
   - gripper_control
 ---

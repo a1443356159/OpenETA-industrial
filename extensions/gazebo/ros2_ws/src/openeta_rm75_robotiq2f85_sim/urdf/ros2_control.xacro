@@ -30,6 +30,10 @@
       <plugin filename="gz_ros2_control-system"
               name="gz_ros2_control::GazeboSimROS2ControlPlugin">
         <parameters>${controller_config}</parameters>
+        <!-- Keep the simulated joint inside the trajectory tolerance under
+             load. 0.75 remains below gz_ros2_control's non-overshooting gain
+             of 1.0 while correcting more of each 2 ms position error. -->
+        <position_proportional_gain>0.75</position_proportional_gain>
       </plugin>
     </gazebo>
   </xacro:macro>

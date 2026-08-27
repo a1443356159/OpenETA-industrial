@@ -2,66 +2,172 @@
 <sdf version="1.10">
   <world name="rm75_robotiq2f85_pickplace">
     <gravity>0 0 -9.81</gravity>
-    <physics name="1ms" type="ignored"><max_step_size>0.001</max_step_size><real_time_factor>1.0</real_time_factor></physics>
+    <!-- A 2 ms physics step matches the 500 Hz ros2_control period. This
+         removes redundant half-cycle physics work while retaining one physics
+         update for every commanded arm state. -->
+    <physics name="2ms" type="ignored">
+      <max_step_size>0.002</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
     <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
-    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
 
-    <!-- A low-contrast key plus ambient fill preserves link curvature in the
-         operator view without casting distracting shadows into RGB-D input. -->
+    <!-- Neutral studio lighting keeps painted tools distinguishable without
+         washing out metallic curvature or the two destination colours. -->
     <scene>
-      <ambient>0.42 0.43 0.45 1</ambient>
-      <background>0.16 0.19 0.24 1</background>
-      <shadows>false</shadows>
+      <ambient>0.28 0.30 0.34 1</ambient>
+      <background>0.10 0.13 0.18 1</background>
+      <shadows>true</shadows>
+      <grid>false</grid>
     </scene>
-    <light name="soft_key_light" type="directional">
-      <pose>0 0 4 0 0 0</pose>
-      <cast_shadows>false</cast_shadows>
-      <diffuse>0.78 0.76 0.72 1</diffuse>
-      <specular>0.12 0.12 0.12 1</specular>
-      <direction>-0.45 0.25 -0.86</direction>
+    <light name="workcell_key" type="directional">
+      <visualize>false</visualize>
+      <pose>0 0 3 0 0 0</pose>
+      <cast_shadows>true</cast_shadows>
+      <diffuse>0.64 0.67 0.72 1</diffuse>
+      <specular>0.22 0.24 0.28 1</specular>
+      <direction>-0.42 0.25 -0.87</direction>
     </light>
+
+    <!-- The robot and work surface share z=0.  The floor is intentionally
+         below the workbench so the full RM75 workspace remains available. -->
     <model name="industrial_floor">
       <static>true</static>
-      <pose>0 0 -0.01 0 0 0</pose>
+      <pose>0 0 -0.81 0 0 0</pose>
       <link name="floor_link">
-        <collision name="floor_collision"><geometry><box><size>10 10 0.02</size></box></geometry></collision>
-        <visual name="floor_visual">
-          <!-- Keep the collision surface at z=0 while rendering the black
-               surface 1 mm above Gazebo's client grid to avoid z-fighting. -->
-          <pose>0 0 0.001 0 0 0</pose>
-          <geometry><box><size>10 10 0.02</size></box></geometry>
-          <material>
-            <ambient>0.015 0.018 0.025 1</ambient>
-            <diffuse>0.025 0.030 0.040 1</diffuse>
-            <specular>0.01 0.01 0.01 1</specular>
-          </material>
-        </visual>
+        <collision name="floor_collision"><geometry><box><size>8 8 0.02</size></box></geometry></collision>
+        <visual name="floor_visual"><geometry><box><size>8 8 0.02</size></box></geometry><material><ambient>0.012 0.015 0.021 1</ambient><diffuse>0.022 0.027 0.038 1</diffuse><specular>0.025 0.028 0.034 1</specular></material></visual>
       </link>
     </model>
-    <model name="work_table"><static>true</static><pose>0.40 0 0.38 0 0 0</pose><link name="table_link"><collision name="table_collision"><geometry><box><size>0.70 0.60 0.04</size></box></geometry></collision><visual name="table_visual"><geometry><box><size>0.70 0.60 0.04</size></box></geometry><material><ambient>0.58 0.60 0.64 1</ambient><diffuse>0.70 0.72 0.76 1</diffuse><specular>0.08 0.08 0.08 1</specular></material></visual></link></model>
-    <model name="placement_zone_marker"><static>true</static><pose>0.48 -0.10 0.4005 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.12 0.12 0.001</size></box></geometry><material><ambient>0.05 0.55 0.10 0.8</ambient><diffuse>0.05 0.75 0.15 0.8</diffuse></material></visual></link></model>
 
+    <model name="work_table">
+      <static>true</static><pose>0.35 0 -0.03 0 0 0</pose>
+      <link name="table_link">
+        <collision name="table_collision"><geometry><box><size>1.15 0.95 0.06</size></box></geometry></collision>
+        <visual name="table_visual"><geometry><box><size>1.15 0.95 0.06</size></box></geometry><material><ambient>0.25 0.28 0.32 1</ambient><diffuse>0.38 0.42 0.48 1</diffuse><specular>0.14 0.16 0.19 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="workbench_frame">
+      <static>true</static><link name="frame_link">
+        <visual name="front_rail"><pose>0.35 -0.425 -0.105 0 0 0</pose><geometry><box><size>1.05 0.045 0.09</size></box></geometry><material><ambient>0.055 0.12 0.19 1</ambient><diffuse>0.08 0.22 0.34 1</diffuse><specular>0.18 0.20 0.24 1</specular></material></visual>
+        <visual name="rear_rail"><pose>0.35 0.425 -0.105 0 0 0</pose><geometry><box><size>1.05 0.045 0.09</size></box></geometry><material><ambient>0.055 0.12 0.19 1</ambient><diffuse>0.08 0.22 0.34 1</diffuse><specular>0.18 0.20 0.24 1</specular></material></visual>
+        <collision name="front_rail_collision"><pose>0.35 -0.425 -0.105 0 0 0</pose><geometry><box><size>1.05 0.045 0.09</size></box></geometry></collision>
+        <collision name="rear_rail_collision"><pose>0.35 0.425 -0.105 0 0 0</pose><geometry><box><size>1.05 0.045 0.09</size></box></geometry></collision>
+        <visual name="leg_fl"><pose>-0.13 -0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry><material><ambient>0.055 0.12 0.19 1</ambient><diffuse>0.08 0.22 0.34 1</diffuse></material></visual>
+        <visual name="leg_fr"><pose>-0.13 0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry><material><ambient>0.055 0.12 0.19 1</ambient><diffuse>0.08 0.22 0.34 1</diffuse></material></visual>
+        <visual name="leg_rl"><pose>0.83 -0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry><material><ambient>0.055 0.12 0.19 1</ambient><diffuse>0.08 0.22 0.34 1</diffuse></material></visual>
+        <visual name="leg_rr"><pose>0.83 0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry><material><ambient>0.055 0.12 0.19 1</ambient><diffuse>0.08 0.22 0.34 1</diffuse></material></visual>
+        <collision name="leg_fl_collision"><pose>-0.13 -0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry></collision>
+        <collision name="leg_fr_collision"><pose>-0.13 0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry></collision>
+        <collision name="leg_rl_collision"><pose>0.83 -0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry></collision>
+        <collision name="leg_rr_collision"><pose>0.83 0.37 -0.42 0 0 0</pose><geometry><box><size>0.065 0.065 0.72</size></box></geometry></collision>
+      </link>
+    </model>
+
+    <!-- Real Open Robotics picking-bin visuals with simple compound physics.
+         The 288 mm clear aperture admits the complete Robotiq release
+         envelope around the 220 mm wrench; a target-only footprint fit is
+         insufficient because release occurs before the gripper opens. -->
+    <model name="green_parts_bin">
+      <static>true</static><pose>0.62 0.180 0 0 0 -1.57079632679</pose>
+      <link name="green_parts_bin_link">
+        <collision name="base"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.34 0.020</size></box></geometry></collision>
+        <collision name="left_wall"><pose>-0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
+        <collision name="right_wall"><pose>0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
+        <collision name="rear_wall"><pose>0 0.162 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
+        <visual name="bin_mesh"><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/picking_bin.glb</uri><scale>0.04 0.02 0.02</scale></mesh></geometry><material><ambient>0.025 0.30 0.08 1</ambient><diffuse>0.035 0.62 0.14 1</diffuse><specular>0.10 0.13 0.10 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="blue_parts_bin">
+      <static>true</static><pose>0.62 -0.180 0 0 0 -1.57079632679</pose>
+      <link name="blue_parts_bin_link">
+        <collision name="base"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.34 0.020</size></box></geometry></collision>
+        <collision name="left_wall"><pose>-0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
+        <collision name="right_wall"><pose>0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
+        <collision name="rear_wall"><pose>0 0.162 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
+        <visual name="bin_mesh"><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/picking_bin.glb</uri><scale>0.04 0.02 0.02</scale></mesh></geometry><material><ambient>0.025 0.10 0.34 1</ambient><diffuse>0.035 0.22 0.72 1</diffuse><specular>0.10 0.12 0.18 1</specular></material></visual>
+      </link>
+    </model>
+    <model name="placement_zone_marker"><static>true</static><pose>0.62 0.180 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.275 0.004</size></box></geometry><material><ambient>0.025 0.34 0.095 1</ambient><diffuse>0.035 0.70 0.16 1</diffuse><specular>0.08 0.10 0.08 1</specular></material></visual></link></model>
+    <model name="blue_destination_marker"><static>true</static><pose>0.62 -0.180 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.275 0.004</size></box></geometry><material><ambient>0.025 0.11 0.42 1</ambient><diffuse>0.035 0.25 0.88 1</diffuse><specular>0.08 0.09 0.14 1</specular></material></visual></link></model>
+
+    <!-- Required sort item plus six physically independent neighbouring parts. -->
     <model name="target_object">
-      <pose>0.28 -0.10 0.43 0 0 0</pose>
+      <pose>0.29 -0.105 0.015 0 0 0.16</pose>
       <link name="target_link">
-        <inertial><mass>0.10</mass><inertia><ixx>0.0000433333</ixx><iyy>0.0000433333</iyy><izz>0.0000266667</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-        <collision name="target_collision"><geometry><box><size>0.04 0.04 0.06</size></box></geometry></collision>
-        <visual name="target_visual"><geometry><box><size>0.04 0.04 0.06</size></box></geometry><material><ambient>0.80 0.12 0.08 1</ambient><diffuse>0.95 0.18 0.10 1</diffuse></material></visual>
+        <inertial><mass>0.30</mass><inertia><ixx>0.0001186</ixx><iyy>0.0012325</iyy><izz>0.0013061</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="target_handle_collision"><pose>-0.025 0 -0.002 0 0 0</pose><geometry><box><size>0.165 0.025 0.026</size></box></geometry></collision>
+        <collision name="target_jaw_collision"><pose>0.080 0 0 0 0 0</pose><geometry><box><size>0.055 0.062 0.030</size></box></geometry></collision>
+        <visual name="target_visual"><pose>0 0 -0.0145 0 0 0</pose><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/adjustable_wrench.glb</uri><scale>1 1 2.0</scale></mesh></geometry></visual>
+      </link>
+    </model>
+    <model name="silver_box_wrench">
+      <pose>0.31 0.105 0.003 0 0 -0.18</pose>
+      <link name="silver_box_wrench_link">
+        <inertial><mass>0.18</mass><inertia><ixx>0.00012</ixx><iyy>0.00055</iyy><izz>0.00058</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="handle"><pose>0 0 0.007 0 0 0</pose><geometry><box><size>0.15 0.022 0.014</size></box></geometry></collision>
+        <collision name="head_left"><pose>-0.078 0 0.009 0 0 0</pose><geometry><cylinder><radius>0.023</radius><length>0.018</length></cylinder></geometry></collision>
+        <collision name="head_right"><pose>0.078 0 0.009 0 0 0</pose><geometry><cylinder><radius>0.023</radius><length>0.018</length></cylinder></geometry></collision>
+        <visual name="mesh"><pose>0 0 0.0015 0 0 0</pose><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/box_wrench.glb</uri></mesh></geometry></visual>
+      </link>
+    </model>
+    <model name="red_m24_hex_bolt">
+      <pose>0.185 -0.285 0.002 0 0 0.12</pose>
+      <link name="red_m24_hex_bolt_link">
+        <inertial><mass>0.17</mass><inertia><ixx>0.00005</ixx><iyy>0.00018</iyy><izz>0.00018</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="shaft"><pose>0.012 0 0.012 0 1.57079632679 0</pose><geometry><cylinder><radius>0.012</radius><length>0.095</length></cylinder></geometry></collision>
+        <collision name="head"><pose>-0.047 0 0.021 0 0 0</pose><geometry><box><size>0.022 0.042 0.042</size></box></geometry></collision>
+        <visual name="mesh"><pose>0 0 0.0015 0 0 0</pose><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/hex_bolt_24mm.glb</uri></mesh></geometry></visual>
+      </link>
+    </model>
+    <model name="orange_m20_socket_bolt">
+      <pose>0.36 -0.315 0.002 0 0 -0.34</pose>
+      <link name="orange_m20_socket_bolt_link">
+        <inertial><mass>0.13</mass><inertia><ixx>0.00004</ixx><iyy>0.00013</iyy><izz>0.00013</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="shaft"><pose>0.010 0 0.010 0 1.57079632679 0</pose><geometry><cylinder><radius>0.010</radius><length>0.080</length></cylinder></geometry></collision>
+        <collision name="head"><pose>-0.040 0 0.017 0 1.57079632679 0</pose><geometry><cylinder><radius>0.017</radius><length>0.018</length></cylinder></geometry></collision>
+        <visual name="mesh"><pose>0 0 0.0015 0 0 0</pose><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/socket_bolt_20mm.glb</uri></mesh></geometry></visual>
       </link>
     </model>
     <model name="distractor_object">
-      <pose>0.28 0.12 0.44 0 0 0</pose>
+      <pose>0.34 0.375 0.011 0 0 -0.10</pose>
       <link name="distractor_link">
-        <inertial><mass>0.12</mass><inertia><ixx>0.0000715</ixx><iyy>0.0000715</iyy><izz>0.0000375</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
-        <collision name="distractor_collision"><geometry><cylinder><radius>0.025</radius><length>0.08</length></cylinder></geometry></collision>
-        <visual name="distractor_visual"><geometry><cylinder><radius>0.025</radius><length>0.08</length></cylinder></geometry><material><ambient>0.08 0.20 0.75 1</ambient><diffuse>0.10 0.28 0.95 1</diffuse></material></visual>
+        <inertial><mass>0.23</mass><inertia><ixx>0.00016</ixx><iyy>0.00066</iyy><izz>0.00070</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="handles"><pose>-0.025 0 -0.002 0 0 0</pose><geometry><box><size>0.145 0.055 0.018</size></box></geometry></collision>
+        <collision name="jaws"><pose>0.075 0 -0.003 0 0 0</pose><geometry><box><size>0.055 0.030 0.016</size></box></geometry></collision>
+        <visual name="mesh"><pose>0 0 -0.0095 0 0 0</pose><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/pliers.glb</uri></mesh></geometry></visual>
       </link>
     </model>
-    <!-- Center the independent placement view over the work surface so the
-         attached object and the complete placement marker remain observable. -->
-    <model name="openeta_top_camera"><static>true</static><pose>0.35 0 1.30 0 1.5707963 0</pose><link name="top_camera_link"><sensor name="openeta_rgbd" type="rgbd_camera"><camera><horizontal_fov>1.047</horizontal_fov><image><width>640</width><height>480</height><format>R8G8B8</format></image><clip><near>0.1</near><far>10.0</far></clip></camera><always_on>true</always_on><update_rate>15</update_rate><topic>openeta_rgbd</topic><gz_frame_id>top_camera_optical_frame</gz_frame_id></sensor></link></model>
+    <model name="blue_black_screwdriver">
+      <pose>0.145 -0.390 0.003 0 0 0.05</pose>
+      <link name="blue_black_screwdriver_link">
+        <inertial><mass>0.12</mass><inertia><ixx>0.00005</ixx><iyy>0.00034</iyy><izz>0.00034</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="handle"><pose>-0.057 0 0.010 0 1.57079632679 0</pose><geometry><cylinder><radius>0.010</radius><length>0.065</length></cylinder></geometry></collision>
+        <collision name="shaft"><pose>0.052 0 0.004 0 1.57079632679 0</pose><geometry><cylinder><radius>0.004</radius><length>0.115</length></cylinder></geometry></collision>
+        <visual name="mesh"><pose>0 0 0.0015 0 0 0</pose><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/screwdriver.glb</uri></mesh></geometry></visual>
+      </link>
+    </model>
+    <model name="silver_allen_key">
+      <pose>0.38 0.35 0.003 0 0 1.20</pose>
+      <link name="silver_allen_key_link">
+        <inertial><mass>0.055</mass><inertia><ixx>0.00002</ixx><iyy>0.00011</iyy><izz>0.00012</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
+        <collision name="long_leg"><pose>-0.018 0 0.0055 0 0 0</pose><geometry><box><size>0.125 0.011 0.011</size></box></geometry></collision>
+        <collision name="short_leg"><pose>0.068 0.020 0.0055 0 0 1.57079632679</pose><geometry><box><size>0.050 0.011 0.011</size></box></geometry></collision>
+        <visual name="mesh"><pose>0 0 0.0015 0 0 0</pose><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/allen_key.glb</uri></mesh></geometry></visual>
+      </link>
+    </model>
+
+    <model name="openeta_top_camera">
+      <static>true</static><pose>0.38 0 1.35 0 1.57079632679 0</pose>
+      <!-- Observation consumes one fresh full-resolution frame.  A 3 Hz idle
+           stream keeps acquisition latency bounded without rendering this
+           1280x720 RGB-D sensor fifteen times per second during arm motion. -->
+      <link name="top_camera_link"><sensor name="openeta_rgbd" type="rgbd_camera"><camera><horizontal_fov>1.20</horizontal_fov><image><width>1280</width><height>720</height><format>R8G8B8</format></image><clip><near>0.08</near><far>8.0</far></clip></camera><always_on>true</always_on><visualize>false</visualize><update_rate>3</update_rate><topic>openeta_rgbd</topic><gz_frame_id>top_camera_optical_frame</gz_frame_id></sensor></link>
+    </model>
   </world>
 </sdf>

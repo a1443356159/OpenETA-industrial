@@ -58,6 +58,7 @@ focus_operator_view &
 exec vglrun \
   -d "${OPENETA_VGL_DISPLAY:-egl}" \
   -c "${OPENETA_VGL_TRANSPORT:-proxy}" \
+  -fps "${OPENETA_GAZEBO_GUI_FPS:-30}" \
   -ms "${OPENETA_VGL_MSAA_SAMPLES:-8}" \
   gz sim -g \
   --render-engine-gui ogre2 \

@@ -63,6 +63,7 @@ DEFAULT_READ_ONLY_MCP_MAX_ATTEMPTS = 2
 DEFAULT_READ_ONLY_MCP_HEALTH_TIMEOUT_S = 5.0
 READ_ONLY_MCP_RETRY_RECEIPT_SCHEMA_VERSION = "openeta.read_only_mcp_retry.v1"
 ENVIRONMENT_RECEIPT_SCHEMA_VERSION = "openeta.environment_receipt.v1"
+SIMULATOR_STARTUP_RETRY_METADATA_KEY = "_openeta_simulator_startup_retry_attempt"
 
 # Controller-produced evidence that must remain available after the raw MCP
 # response is materialized as an artifact.  The simulator proxy is an
@@ -84,11 +85,38 @@ CONTROL_RECEIPT_FIELDS = (
     "reached_goal",
     "terminal_status",
     "terminal_status_code",
+    # Compact terminal diagnostics used to distinguish an empty planning
+    # rejection from a completed-but-missed controller trajectory.  The full
+    # joint-state proof remains in the host-only observation snapshot.
+    "planned_point_count",
+    "position_error_m",
+    "orientation_error_rad",
     "detachable_joint",
     "attachment_transform",
     "physical_verification",
     "child_link_proof",
     "placement_verification",
+    # A native attach can be acknowledged before a later controller-owned
+    # planning-scene or pose-read step fails.  These bounded fields distinguish
+    # that infrastructure failure from an ordinary unreachable candidate and
+    # prove whether the native/planning-scene rollback completed.
+    "infrastructure_error",
+    "attach_acked_before_rollback",
+    "native_state_snapshot",
+    # A release can fail only after the irreversible native detach and
+    # physical open have already completed.  Preserve this controller-owned
+    # boolean so AgentMemory can stop replaying open instead of treating the
+    # artifact-truncated response as a reversible tool failure.
+    "gripper_open_executed",
+    # The release transition is atomic but spans four independently proven
+    # environment events.  Keep the bounded ordered evidence in the trusted
+    # host receipt so AgentMemory can consume the transition without reopening
+    # the raw response artifact from disk.
+    "release_sequence",
+    # A failed physical close may resynchronize the detached target pose before
+    # the frozen frontier resumes.  This controller-authored proof is likewise
+    # needed by the host state machine, not by the model context.
+    "planning_scene_target_pose_sync",
     "planning_scene_rollback",
 )
 
@@ -973,6 +1001,9 @@ class SimulatorEnvironmentCreator:
         self.proxy = SimulatorMcpToolProxy(transport=transport, config=self.config)
 
     def handler(self, context: ToolExecutionContext) -> ToolResult:
+        startup_retry_attempt = int(
+            context.metadata.get(SIMULATOR_STARTUP_RETRY_METADATA_KEY, 0) or 0
+        )
         env_id = str(context.parameters.get("env_id") or "").strip()
         if not env_id:
             return self._failure(
@@ -1194,7 +1225,7 @@ class SimulatorEnvironmentCreator:
             summary = reset_normalized["outputs"].get(key)
             if isinstance(summary, dict):
                 outputs[key] = summary
-        return ToolResult(
+        result = ToolResult(
             success,
             content=(
                 (
@@ -1253,6 +1284,70 @@ class SimulatorEnvironmentCreator:
                 ),
             ),
         )
+        retryable_detach_readiness_failure = bool(
+            not success
+            and startup_retry_attempt == 0
+            and reset_failure_cleanup
+            and reset_failure_cleanup.get("success") is True
+            and "NATIVE_GRASP_DETACH_ACK_MISSING"
+            in json.dumps(reset_response, sort_keys=True)
+        )
+        if not retryable_detach_readiness_failure:
+            return result
+
+        # The failed handle has been positively closed, so a second isolated
+        # create/reset is a safe host-level infrastructure retry.  Keep it in
+        # this single planner tool call: another VLM turn cannot improve a
+        # transient stock DetachableJoint readiness race and only inflates
+        # latency/context.  The metadata marker bounds recursion to one retry.
+        previous_marker = context.metadata.get(SIMULATOR_STARTUP_RETRY_METADATA_KEY)
+        context.metadata[SIMULATOR_STARTUP_RETRY_METADATA_KEY] = 1
+        try:
+            retried = self.handler(context)
+        finally:
+            if previous_marker is None:
+                context.metadata.pop(SIMULATOR_STARTUP_RETRY_METADATA_KEY, None)
+            else:
+                context.metadata[SIMULATOR_STARTUP_RETRY_METADATA_KEY] = (
+                    previous_marker
+                )
+
+        retry_outputs = retried.details.setdefault("outputs", {})
+        second_calls = list(retry_outputs.get("mcp_calls") or [])
+        first_calls = [
+            *create_normalized["outputs"]["mcp_calls"],
+            *reset_normalized["outputs"]["mcp_calls"],
+        ]
+        retry_outputs["mcp_calls"] = [*first_calls, *second_calls]
+        retry_outputs["startup_retry"] = {
+            "schema_version": "openeta.simulator_startup_retry.v1",
+            "attempt_count": 2,
+            "retry_count": 1,
+            "reason": "NATIVE_GRASP_DETACH_ACK_MISSING",
+            "first_environment_closed": True,
+            "first_create_response": create_ref,
+            "first_reset_response": reset_ref,
+            "first_cleanup": reset_failure_cleanup,
+            "final_success": retried.success,
+        }
+        retry_artifacts = retried.details.setdefault("artifacts", [])
+        retried.details["artifacts"] = [
+            *create_normalized["artifacts"],
+            *reset_normalized["artifacts"],
+            *retry_artifacts,
+        ]
+        retry_receipt = retried.details.get("environment_receipt")
+        if isinstance(retry_receipt, dict):
+            retry_receipt.update(
+                {
+                    "startup_attempt_count": 2,
+                    "startup_retry_count": 1,
+                    "startup_retry_reason": (
+                        "NATIVE_GRASP_DETACH_ACK_MISSING"
+                    ),
+                }
+            )
+        return retried
 
     def _create_arguments(
         self,

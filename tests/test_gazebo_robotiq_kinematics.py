@@ -9,7 +9,11 @@ import pytest
 from extensions.gazebo.robot_control import Robotiq2F85Calibration
 from extensions.gazebo.robotiq_kinematics import (
     BD_M,
+    DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD,
     aperture_from_angle_closed_form,
+    controller_safe_targets,
+    linkage_terminal_metrics,
+    minimum_feasible_active_position,
     six_joint_positions,
     solve_four_bar,
 )
@@ -73,8 +77,62 @@ def test_six_joint_positions_mirror_and_respect_legacy_shape() -> None:
     assert positions["gripper_left_finger_tip_joint"] == pytest.approx(-0.4, abs=0.05)
 
 
+def test_open_controller_endpoint_is_exact_limit_safe_four_bar_pose() -> None:
+    endpoint = minimum_feasible_active_position(
+        boundary_inset_rad=DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD
+    )
+    solved = solve_four_bar(endpoint)
+
+    assert solved["inner_knuckle_rad"] == pytest.approx(
+        DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD, abs=1e-12
+    )
+    assert endpoint > DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD
+    assert -solved["tip_rad"] > DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD
+    # The controller-safe pose retains at least 95% of the theoretical CAD
+    # aperture while avoiding every independently modelled hard stop.
+    assert aperture_from_angle_closed_form(
+        endpoint
+    ) >= 0.95 * aperture_from_angle_closed_form(0.0)
+
+    with pytest.raises(ValueError, match="positive"):
+        minimum_feasible_active_position(boundary_inset_rad=0.0)
+
+
 def test_out_of_range_active_angles_are_rejected() -> None:
     with pytest.raises(ValueError, match="outside"):
         solve_four_bar(-0.1)
     with pytest.raises(ValueError, match="outside"):
         solve_four_bar(0.9)
+
+
+def test_linkage_terminal_metrics_require_all_six_finite_joint_samples() -> None:
+    targets = six_joint_positions(0.0)
+    positions = dict(targets)
+    velocities = {name: 0.0 for name in targets}
+    positions["gripper_left_finger_tip_joint"] = -0.012
+    velocities["gripper_right_inner_knuckle_joint"] = -0.07
+
+    position_error, maximum_speed = linkage_terminal_metrics(
+        targets, positions, velocities
+    )
+
+    assert position_error == pytest.approx(0.012)
+    assert maximum_speed == pytest.approx(0.07)
+    with pytest.raises(ValueError, match="complete"):
+        linkage_terminal_metrics(targets, positions, {})
+    velocities["gripper_left_finger_joint"] = math.nan
+    with pytest.raises(ValueError, match="finite"):
+        linkage_terminal_metrics(targets, positions, velocities)
+
+
+def test_controller_safe_targets_inset_each_hard_stop_inside_action_tolerance() -> None:
+    requested = dict(six_joint_positions(0.0))
+
+    safe = controller_safe_targets(requested, boundary_inset_rad=0.01)
+
+    assert all(abs(value) == pytest.approx(0.01) for value in safe.values())
+    assert all(abs(safe[name] - requested[name]) == pytest.approx(0.01) for name in safe)
+    midstroke = dict(six_joint_positions(0.4))
+    assert controller_safe_targets(midstroke, boundary_inset_rad=0.01) == midstroke
+    with pytest.raises(ValueError, match="positive"):
+        controller_safe_targets(requested, boundary_inset_rad=0.0)

@@ -1,4 +1,4 @@
-"""Offline checks that Gazebo documentation matches the guarded M3 status."""
+"""Offline checks that Gazebo documentation matches the guarded native-grasp status."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def test_registered_gazebo_env_ids_match_documented_set() -> None:
     assert _registered_gazebo_env_ids() == GAZEBO_ENV_IDS
 
 
-def test_design_doc_marks_m3_contact_and_joint_guards_and_preserves_m1_m2_runtime() -> None:
+def test_design_doc_marks_native_contact_and_joint_guards() -> None:
     for profile_name in gazebo_profiles():
         assert profile_name in DESIGN_DOC
     for symbol in ("GazeboDirectEnv", "GazeboRuntime", "UnifiedEnv", "DetachableJoint"):

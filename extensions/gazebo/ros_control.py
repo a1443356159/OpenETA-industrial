@@ -6,6 +6,7 @@ OpenETA on a non-ROS test machine remains supported.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
@@ -15,14 +16,16 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from xml.etree import ElementTree
 
 from .robot_control import (
     ARM_JOINTS,
     ARM_JOINT_BOUNDS,
+    ARM_HOME_JOINT_POSITIONS,
     GazeboControlConfig,
     GazeboController,
+    MOVEIT_CONTROL_FAILED,
     START_STATE_RECOVERY_TRAJECTORY_S,
     assess_start_state_bounds,
     make_move_group_goal,
@@ -30,11 +33,291 @@ from .robot_control import (
     start_state_recovery_record,
 )
 from .planning_scene import (
+    LEFT_FINGERTIP,
+    RIGHT_FINGERTIP,
     TARGET_TOUCH_LINKS,
+    CollisionBody,
     CollisionBox,
+    CollisionGeometry,
+    CollisionPrimitive,
     PlanningSceneError,
     PlanningSceneSynchronizer,
 )
+
+QUALIFIED_JOINT_GOAL_TOLERANCE_RAD = 0.001
+L5_TRAJECTORY_START_TOLERANCE_RAD = 0.001
+L5_TRAJECTORY_CACHE_LIMIT = 64
+L5_TRAJECTORY_POSE_DECIMALS = 6
+
+
+def _normalized_arm_joint_state(value: object) -> dict[str, float] | None:
+    if not isinstance(value, Mapping):
+        return None
+    names = value.get("names", value.get("joint_names"))
+    positions = value.get("positions")
+    if (
+        not isinstance(names, Sequence)
+        or isinstance(names, (str, bytes, bytearray))
+        or not isinstance(positions, Sequence)
+        or isinstance(positions, (str, bytes, bytearray))
+        or len(names) != len(positions)
+    ):
+        return None
+    parsed: dict[str, float] = {}
+    try:
+        for name, position in zip(names, positions, strict=True):
+            joint = str(name)
+            numeric = float(position)
+            if joint in parsed or not joint or not math.isfinite(numeric):
+                return None
+            parsed[joint] = numeric
+    except (TypeError, ValueError):
+        return None
+    return (
+        {name: parsed[name] for name in ARM_JOINTS}
+        if set(ARM_JOINTS).issubset(parsed)
+        else None
+    )
+
+
+def _joint_states_within_l5_start_tolerance(
+    planned: object,
+    live: object,
+    *,
+    tolerance_rad: float = L5_TRAJECTORY_START_TOLERANCE_RAD,
+) -> bool:
+    """Require the live arm to remain at the L5 trajectory's proven start."""
+
+    if not math.isfinite(tolerance_rad) or tolerance_rad < 0.0:
+        return False
+    planned_state = _normalized_arm_joint_state(planned)
+    live_state = _normalized_arm_joint_state(live)
+    return bool(
+        planned_state is not None
+        and live_state is not None
+        and all(
+            abs(planned_state[name] - live_state[name]) <= tolerance_rad
+            for name in ARM_JOINTS
+        )
+    )
+
+
+def _joint_state_max_abs_delta(planned: object, live: object) -> float | None:
+    """Return the largest named arm-joint delta, or ``None`` for bad input."""
+
+    planned_state = _normalized_arm_joint_state(planned)
+    live_state = _normalized_arm_joint_state(live)
+    if planned_state is None or live_state is None:
+        return None
+    return max(
+        abs(planned_state[name] - live_state[name]) for name in ARM_JOINTS
+    )
+
+
+def _qualification_joint_state_with_sha256(
+    value: object,
+) -> tuple[dict[str, list[Any]], str] | None:
+    """Canonicalize an internal L5 joint goal with the public proof digest.
+
+    Private qualification owns the newly solved joint state, so it cannot yet
+    carry the public tool boundary's caller-supplied digest. The transient L5
+    trajectory cache still has to bind both routes to the exact same state.
+    """
+
+    parsed = _normalized_arm_joint_state(value)
+    if parsed is None:
+        return None
+    normalized: dict[str, list[Any]] = {
+        "names": list(ARM_JOINTS),
+        "positions": [float(parsed[name]) for name in ARM_JOINTS],
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            normalized, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    return normalized, digest
+
+
+def _trajectory_end_joint_state_with_sha256(
+    trajectory: object,
+) -> tuple[dict[str, list[Any]], str] | None:
+    """Return the exact executable endpoint used by an L5 trajectory.
+
+    MoveIt may make a small, valid adjustment between the IK seed supplied to
+    plan-only and the final point of the time-parameterized trajectory.  The
+    public qualification proof exposes that final point, so the transient
+    execution cache must bind to the same point rather than the pre-plan IK
+    seed.
+    """
+
+    points = getattr(trajectory, "points", None)
+    names = getattr(trajectory, "joint_names", None)
+    if (
+        not isinstance(points, Sequence)
+        or isinstance(points, (str, bytes, bytearray))
+        or not points
+        or not isinstance(names, Sequence)
+        or isinstance(names, (str, bytes, bytearray))
+    ):
+        return None
+    positions = getattr(points[-1], "positions", None)
+    return _qualification_joint_state_with_sha256(
+        {"names": list(names), "positions": positions}
+    )
+
+
+def _canonical_l5_pose(value: object) -> object:
+    """Canonicalize sub-micrometre/Euler-roundtrip noise in a proven pose.
+
+    The public tool schema transports orientation through roll/pitch/yaw while
+    private L5 qualification uses the provider quaternion.  Both routes name
+    the same cryptographically bound candidate, but the round trip can differ
+    by roughly 1e-7 and must not turn a safe cache hit into a fresh stochastic
+    plan.  Six decimal places remain orders of magnitude tighter than the
+    execution tolerances while preserving the proof identity fields below.
+    """
+
+    if not isinstance(value, Mapping):
+        return value
+    canonical = dict(value)
+    for field in ("xyz", "quat_xyzw"):
+        raw = canonical.get(field)
+        if not isinstance(raw, Sequence) or isinstance(
+            raw, (str, bytes, bytearray)
+        ):
+            continue
+        try:
+            numeric = [float(item) for item in raw]
+        except (TypeError, ValueError):
+            continue
+        if not all(math.isfinite(item) for item in numeric):
+            continue
+        if field == "quat_xyzw" and len(numeric) == 4:
+            norm = math.sqrt(sum(item * item for item in numeric))
+            if norm > 0.0:
+                numeric = [item / norm for item in numeric]
+                # q and -q encode the same rotation. Keep one representation.
+                first_nonzero = next(
+                    (item for item in reversed(numeric) if abs(item) > 1e-15),
+                    1.0,
+                )
+                if first_nonzero < 0.0:
+                    numeric = [-item for item in numeric]
+        canonical[field] = [
+            round(item, L5_TRAJECTORY_POSE_DECIMALS) for item in numeric
+        ]
+    return canonical
+
+
+def _l5_trajectory_cache_key(
+    goal: Mapping[str, Any],
+    *,
+    scene_revision: int,
+    scene_sha256: str,
+) -> str | None:
+    """Bind one transient L5 trajectory to geometry, scene, and load state."""
+
+    binding = str(
+        goal.get("qualification_cache_binding_sha256")
+        or goal.get("qualification_binding_sha256")
+        or ""
+    )
+    if (
+        len(binding) != 64
+        or any(character not in "0123456789abcdef" for character in binding)
+        or not scene_sha256
+        or isinstance(scene_revision, bool)
+        or scene_revision < 0
+    ):
+        return None
+    payload = {
+        "schema_version": "openeta.l5_trajectory_cache_key.v1",
+        "binding": binding,
+        "qualification_goal_joint_state_sha256": goal.get(
+            "qualification_goal_joint_state_sha256"
+        ),
+        "compiled_grasp_id": goal.get("compiled_grasp_id"),
+        "grasp_stage": goal.get("grasp_stage"),
+        "compiled_placement_id": goal.get("compiled_placement_id"),
+        "placement_candidate_id": goal.get("placement_candidate_id"),
+        "placement_stage": goal.get("placement_stage"),
+        "model_id": str(goal.get("model_id") or ""),
+        "scene_revision": int(scene_revision),
+        "scene_sha256": scene_sha256,
+        "group_name": goal.get("group_name"),
+        "link_name": goal.get("link_name"),
+        "requested_tool_pose": _canonical_l5_pose(
+            goal.get("requested_tool_pose")
+        ),
+        "target_pose": _canonical_l5_pose(goal.get("target_pose")),
+        "position_tolerance_m": goal.get("position_tolerance_m"),
+        "orientation_tolerance_rad": goal.get("orientation_tolerance_rad"),
+        "motion_profile": goal.get("motion_profile"),
+        "max_velocity_scaling_factor": goal.get(
+            "max_velocity_scaling_factor"
+        ),
+        "max_acceleration_scaling_factor": goal.get(
+            "max_acceleration_scaling_factor"
+        ),
+        "qualification_allowed_collisions": goal.get(
+            "qualification_allowed_collisions"
+        ),
+        # A virtual attach/detach changes this field and therefore cannot be
+        # confused with the physically current PlanningScene.
+        "qualification_scene_diff": goal.get("qualification_scene_diff"),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _move_group_failure_result(
+    moveit_error_code: int,
+    planned_point_count: int,
+    *,
+    plan_only: bool,
+    planning_failure_codes: set[int],
+    timed_out_code: int,
+    generic_failure_code: int,
+) -> dict[str, Any]:
+    """Classify a non-success MoveGroup result without inventing execution.
+
+    MoveIt can return a populated candidate trajectory together with generic
+    ``FAILURE`` when its response adapter rejects that trajectory.  In a
+    plan-only request those points were never sent to a controller, so they
+    are planning evidence only and ``execution_started`` must remain false.
+    """
+
+    if (
+        plan_only
+        or moveit_error_code in planning_failure_codes
+        or (
+            moveit_error_code == generic_failure_code
+            and planned_point_count == 0
+        )
+    ):
+        error_code = "MOTION_PLAN_FAILED"
+        execution_started = False
+    elif moveit_error_code == timed_out_code:
+        error_code = "MOTION_EXECUTION_TIMEOUT"
+        execution_started = planned_point_count > 0
+    else:
+        error_code = "MOTION_EXECUTION_FAILED"
+        execution_started = planned_point_count > 0
+    return {
+        "ok": False,
+        "error_code": error_code,
+        "motion_outcome": "failed",
+        "moveit_error_code": int(moveit_error_code),
+        "planned_point_count": int(planned_point_count),
+        "execution_started": execution_started,
+    }
 
 
 def _qualification_ik_response_timeout_s(seed_timeout_s: float) -> float:
@@ -273,6 +556,71 @@ def _child_world_pose(
     )
 
 
+def _collision_primitive_from_spec(spec: Mapping[str, Any]) -> CollisionPrimitive:
+    shape = str(spec.get("shape") or "")
+    common = {
+        "shape": shape,
+        "pose_xyz": tuple(float(value) for value in spec["pose_xyz"]),
+        "pose_quat_xyzw": tuple(float(value) for value in spec["pose_quat_xyzw"]),
+    }
+    if shape == "box":
+        return CollisionPrimitive(
+            **common,
+            size_xyz=tuple(float(value) for value in spec["size_xyz"]),
+        )
+    if shape == "cylinder":
+        return CollisionPrimitive(
+            **common,
+            radius=float(spec["radius"]),
+            length=float(spec["length"]),
+        )
+    raise PlanningSceneError("collision primitive shape is unsupported")
+
+
+def _collision_geometry(
+    *,
+    object_id: str,
+    bounding_box_xyz: Sequence[float],
+    pose_xyz: Sequence[float],
+    pose_quat_xyzw: Sequence[float],
+    primitives: Sequence[Mapping[str, Any]] = (),
+) -> CollisionGeometry:
+    """Build one exact scene body without changing its outer-bound contract."""
+
+    size = tuple(float(value) for value in bounding_box_xyz)
+    xyz = tuple(float(value) for value in pose_xyz)
+    quat = tuple(float(value) for value in pose_quat_xyzw)
+    if primitives:
+        return CollisionBody(
+            object_id,
+            size,  # type: ignore[arg-type]
+            xyz,  # type: ignore[arg-type]
+            quat,  # type: ignore[arg-type]
+            tuple(_collision_primitive_from_spec(spec) for spec in primitives),
+        )
+    return CollisionBox(
+        object_id,
+        size,  # type: ignore[arg-type]
+        xyz,  # type: ignore[arg-type]
+        quat,  # type: ignore[arg-type]
+    )
+
+
+def _target_collision_geometry(
+    config: Any,
+    *,
+    pose_xyz: Sequence[float],
+    pose_quat_xyzw: Sequence[float],
+) -> CollisionGeometry:
+    return _collision_geometry(
+        object_id=str(config.target_id),
+        bounding_box_xyz=config.target_size_m,
+        pose_xyz=pose_xyz,
+        pose_quat_xyzw=pose_quat_xyzw,
+        primitives=tuple(getattr(config, "target_collision_primitives", ())),
+    )
+
+
 def _stamp_seconds(stamp: Any) -> float | None:
     if stamp is None:
         return None
@@ -316,11 +664,18 @@ def gripper_terminal_succeeded(status: Any) -> bool:
 
 
 def _populate_state_validity_request(
-    request: Any, candidate_positions: list[float], *, group_name: str
+    request: Any,
+    candidate_positions: list[float],
+    *,
+    group_name: str,
+    joint_names: Sequence[str] = ARM_JOINTS,
 ) -> None:
+    names = [str(name) for name in joint_names]
+    if len(names) != len(candidate_positions):
+        raise ValueError("state-validity joint names and positions must align")
     request.group_name = group_name
     request.robot_state.is_diff = True
-    request.robot_state.joint_state.name = list(ARM_JOINTS)
+    request.robot_state.joint_state.name = names
     request.robot_state.joint_state.position = list(candidate_positions)
 
 
@@ -339,9 +694,19 @@ def _populate_recovery_trajectory_goal(
 def _merged_allowed_collision_rows(
     current_names: list[str],
     current_rows: list[list[bool]],
-    additions: Mapping[str, Any],
+    replacements: Mapping[str, Any],
+    *,
+    replace_owned: bool = True,
 ) -> tuple[list[str], list[list[bool]]]:
-    """Merge object/link allowances without erasing the SRDF self matrix."""
+    """Replace owned object rows without erasing the SRDF self matrix.
+
+    PlanningScene diffs replace an entire ACM, while this adapter starts from
+    MoveIt's live SRDF-derived matrix.  Entries named by ``replacements`` are
+    OpenETA-owned world-object policies: clear every stale pair involving each
+    such object before adding the exact requested links.  This is required when
+    upgrading a running workcell that previously allowed target/gripper touch
+    before native attachment.
+    """
 
     enabled_pairs: set[tuple[str, str]] = set()
     for row_index, row_name in enumerate(current_names):
@@ -349,18 +714,52 @@ def _merged_allowed_collision_rows(
         for column_index, column_name in enumerate(current_names):
             if column_index < len(values) and bool(values[column_index]):
                 enabled_pairs.add(tuple(sorted((row_name, column_name))))
-    for object_id, links in additions.items():
+    owned_objects = {str(key) for key in replacements}
+    if replace_owned:
+        enabled_pairs = {
+            pair
+            for pair in enabled_pairs
+            if not any(name in owned_objects for name in pair)
+        }
+    for object_id, links in replacements.items():
         for link in links:
             enabled_pairs.add(tuple(sorted((str(object_id), str(link)))))
     names = sorted(
         set(current_names)
-        | {str(key) for key in additions}
-        | {str(link) for links in additions.values() for link in links}
+        | owned_objects
+        | {str(link) for links in replacements.values() for link in links}
     )
     return names, [
         [tuple(sorted((row_name, column))) in enabled_pairs for column in names]
         for row_name in names
     ]
+
+
+def _state_valid_with_allowed_collision_pairs(
+    *,
+    response_valid: bool,
+    collision_pairs: Sequence[Sequence[str]],
+    allowed_collisions: Mapping[str, Any] | None,
+) -> tuple[bool, bool]:
+    """Accept only collisions explicitly scoped to this contact endpoint."""
+
+    if response_valid:
+        return True, False
+    if not collision_pairs or not isinstance(allowed_collisions, Mapping):
+        return False, False
+    allowed_pairs = {
+        tuple(sorted((str(object_id), str(link))))
+        for object_id, links in allowed_collisions.items()
+        if isinstance(links, (list, tuple))
+        for link in links
+    }
+    observed = {
+        tuple(sorted((str(pair[0]), str(pair[1]))))
+        for pair in collision_pairs
+        if len(pair) == 2
+    }
+    accepted = bool(observed) and len(observed) == len(collision_pairs) and observed <= allowed_pairs
+    return accepted, accepted
 
 
 class RosGazeboStateSource:
@@ -503,24 +902,25 @@ class RosGazeboController(GazeboController):
             )
         )
         obstacles = tuple(
-            CollisionBox(
-                str(spec["id"]),
-                tuple(float(value) for value in spec["size_xyz"]),
-                tuple(float(value) for value in spec["pose_xyz"]),
-                tuple(float(value) for value in spec["pose_quat_xyzw"]),
+            _collision_geometry(
+                object_id=str(spec["id"]),
+                bounding_box_xyz=spec["size_xyz"],
+                pose_xyz=spec["pose_xyz"],
+                pose_quat_xyzw=spec["pose_quat_xyzw"],
+                primitives=tuple(spec.get("primitives") or ()),
             )
             for spec in getattr(config, "static_obstacle_specs", ())
         )
         revision = self.planning_scene.reset(
             table=table,
             distractor=distractor,
-            target=CollisionBox(
-                config.target_id,
-                tuple(config.target_size_m),
-                tuple(config.target_initial_xyz),
-                tuple(config.target_initial_quat_xyzw),
+            target=_target_collision_geometry(
+                config,
+                pose_xyz=config.target_initial_xyz,
+                pose_quat_xyzw=config.target_initial_quat_xyzw,
             ),
             obstacles=obstacles,
+            robot_support_link=str(config.base_link),
         )
         self._require_current_planning_state_valid()
         self.runtime.scene_revision = revision
@@ -549,11 +949,10 @@ class RosGazeboController(GazeboController):
             parent_quat_xyzw=mount_quat_xyzw,
         )
         revision = self.planning_scene.attach_target(
-            target=CollisionBox(
-                config.target_id,
-                tuple(config.target_size_m),
-                target_xyz,
-                target_quat_xyzw,
+            target=_target_collision_geometry(
+                config,
+                pose_xyz=target_xyz,
+                pose_quat_xyzw=target_quat_xyzw,
             ),
             link_name=config.parent_link,
             relative_pose_xyz=relative_xyz,
@@ -570,22 +969,39 @@ class RosGazeboController(GazeboController):
         *,
         target_xyz: tuple[float, float, float],
         target_quat_xyzw: tuple[float, float, float, float],
+        allow_target_touch: bool = False,
     ) -> int:
         revision = self.planning_scene.update_world_target(
-            target=CollisionBox(
-                config.target_id,
-                tuple(config.target_size_m),
-                target_xyz,
-                target_quat_xyzw,
+            target=_target_collision_geometry(
+                config,
+                pose_xyz=target_xyz,
+                pose_quat_xyzw=target_quat_xyzw,
             )
         )
-        self._require_current_planning_state_valid()
+        self._require_current_planning_state_valid(
+            allowed_collisions=(
+                {config.target_id: list(TARGET_TOUCH_LINKS)}
+                if allow_target_touch
+                else None
+            )
+        )
         self.runtime.scene_revision = revision
         self.runtime.planning_scene_ready = self.planning_scene.ready
         return revision
 
-    def _require_current_planning_state_valid(self) -> None:
-        validity = self.runtime.current_state_validity(timeout_s=3.0)
+    def _require_current_planning_state_valid(
+        self,
+        *,
+        allowed_collisions: Mapping[str, Any] | None = None,
+    ) -> None:
+        validity = (
+            self.runtime.current_state_validity(
+                timeout_s=3.0,
+                allowed_collisions=allowed_collisions,
+            )
+            if allowed_collisions is not None
+            else self.runtime.current_state_validity(timeout_s=3.0)
+        )
         self.runtime.planning_scene_validation = validity
         if validity.get("valid") is True:
             return
@@ -604,11 +1020,10 @@ class RosGazeboController(GazeboController):
         target_quat_xyzw: tuple[float, float, float, float],
     ) -> int:
         revision = self.planning_scene.detach_target(
-            target=CollisionBox(
-                config.target_id,
-                tuple(config.target_size_m),
-                target_xyz,
-                target_quat_xyzw,
+            target=_target_collision_geometry(
+                config,
+                pose_xyz=target_xyz,
+                pose_quat_xyzw=target_quat_xyzw,
             )
         )
         self.runtime.scene_revision = revision
@@ -771,9 +1186,158 @@ class _RosRuntime:
         self._pending: list[Any] = []
         self._lock = threading.Lock()
         self._qualification_map_lock = threading.Lock()
+        # L5 trajectories are process-local and single-use. They are never
+        # persisted under a user-home cache or shared across acceptance runs.
+        self._l5_trajectory_cache: dict[str, dict[str, Any]] = {}
         self._closed = False
 
-    def current_state_validity(self, *, timeout_s: float) -> Mapping[str, Any]:
+    def _l5_scene_sha256(self) -> str:
+        try:
+            return self.qualification_scene_sha256()
+        except Exception:  # noqa: BLE001 - cache miss is the safe fallback.
+            return ""
+
+    def _store_l5_trajectory(
+        self,
+        *,
+        goal: Mapping[str, Any],
+        trajectory: Any,
+        point_count: int,
+    ) -> str | None:
+        start = goal.get("start_joint_state")
+        if _normalized_arm_joint_state(start) is None or point_count <= 0:
+            return None
+        revision = int(
+            goal.get(
+                "planning_scene_revision",
+                getattr(self.planning_scene, "revision", -1),
+            )
+        )
+        scene_sha256 = self._l5_scene_sha256()
+        endpoint = _trajectory_end_joint_state_with_sha256(trajectory)
+        if endpoint is None:
+            return None
+        end_joint_state, end_joint_state_sha256 = endpoint
+        cache_goal = dict(goal)
+        cache_goal["qualification_goal_joint_state"] = end_joint_state
+        cache_goal["qualification_goal_joint_state_sha256"] = (
+            end_joint_state_sha256
+        )
+        key = _l5_trajectory_cache_key(
+            cache_goal,
+            scene_revision=revision,
+            scene_sha256=scene_sha256,
+        )
+        if key is None:
+            return None
+        self._l5_trajectory_cache[key] = {
+            "trajectory": copy.deepcopy(trajectory),
+            "start_joint_state": dict(start),
+            "scene_revision": revision,
+            "scene_sha256": scene_sha256,
+            "point_count": int(point_count),
+            "end_joint_state": end_joint_state,
+            "end_joint_state_sha256": end_joint_state_sha256,
+        }
+        while len(self._l5_trajectory_cache) > L5_TRAJECTORY_CACHE_LIMIT:
+            del self._l5_trajectory_cache[next(iter(self._l5_trajectory_cache))]
+        return key
+
+    def _take_matching_l5_trajectory(
+        self,
+        goal: Mapping[str, Any],
+    ) -> tuple[
+        tuple[str, dict[str, Any]] | None,
+        dict[str, Any],
+    ]:
+        live_start = goal.get("live_start_joint_state")
+        if _normalized_arm_joint_state(live_start) is None:
+            return None, {
+                "status": "miss",
+                "reason": "invalid_live_start_joint_state",
+            }
+        revision = int(
+            goal.get(
+                "planning_scene_revision",
+                getattr(self.planning_scene, "revision", -1),
+            )
+        )
+        current_revision = int(getattr(self.planning_scene, "revision", -2))
+        if revision != current_revision:
+            return None, {
+                "status": "miss",
+                "reason": "planning_scene_revision_changed",
+                "requested_scene_revision": revision,
+                "current_scene_revision": current_revision,
+            }
+        scene_sha256 = self._l5_scene_sha256()
+        key = _l5_trajectory_cache_key(
+            goal,
+            scene_revision=revision,
+            scene_sha256=scene_sha256,
+        )
+        if key is None:
+            return None, {
+                "status": "miss",
+                "reason": "proof_cache_key_unavailable",
+                "entry_count": len(self._l5_trajectory_cache),
+            }
+        entry = self._l5_trajectory_cache.get(key or "")
+        if not isinstance(entry, dict):
+            return None, {
+                "status": "miss",
+                "reason": "proof_cache_key_not_found",
+                "entry_count": len(self._l5_trajectory_cache),
+                "lookup_key": key,
+            }
+        try:
+            current = self.state_source.wait_fresh(1.0)
+            current_start = {
+                "names": list(ARM_JOINTS),
+                "positions": [
+                    float(value)
+                    for value in current.joint_positions[: len(ARM_JOINTS)]
+                ],
+            }
+        except Exception:  # noqa: BLE001 - normal replanning is safe fallback.
+            return None, {
+                "status": "miss",
+                "reason": "fresh_joint_state_unavailable",
+            }
+        requested_delta = _joint_state_max_abs_delta(
+            entry.get("start_joint_state"), live_start
+        )
+        measured_delta = _joint_state_max_abs_delta(
+            entry.get("start_joint_state"), current_start
+        )
+        if (
+            requested_delta is None
+            or measured_delta is None
+            or requested_delta > L5_TRAJECTORY_START_TOLERANCE_RAD
+            or measured_delta > L5_TRAJECTORY_START_TOLERANCE_RAD
+        ):
+            return None, {
+                "status": "miss",
+                "reason": "proven_start_state_changed",
+                "requested_start_max_delta_rad": requested_delta,
+                "measured_start_max_delta_rad": measured_delta,
+            }
+        self._l5_trajectory_cache.pop(key, None)
+        return (str(key), entry), {
+            "status": "hit",
+            "reason": "proof_and_start_state_match",
+            "entry_count": len(self._l5_trajectory_cache),
+            "lookup_key": key,
+            "requested_start_max_delta_rad": requested_delta,
+            "measured_start_max_delta_rad": measured_delta,
+        }
+
+    def current_state_validity(
+        self,
+        *,
+        timeout_s: float,
+        allowed_collisions: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         """Read back MoveIt's verdict and collision pairs for the live arm state."""
 
         state = self.state_source.wait_fresh(timeout_s)
@@ -801,9 +1365,15 @@ class _RosRuntime:
                 or getattr(contact, "contact_body_2", "")
             }
         )
+        valid, contact_override = _state_valid_with_allowed_collision_pairs(
+            response_valid=bool(response.valid),
+            collision_pairs=pairs,
+            allowed_collisions=allowed_collisions,
+        )
         return {
-            "valid": bool(response.valid),
+            "valid": valid,
             "collision_pairs": [list(pair) for pair in pairs],
+            "contact_collision_override": contact_override,
             "joint_state_timestamp_s": state.metadata.get("joint_state_timestamp_s"),
         }
 
@@ -827,7 +1397,7 @@ class _RosRuntime:
             "joint_limits": {"lower": lower, "upper": upper},
             "home_joint_state": {
                 "names": list(ARM_JOINTS),
-                "positions": [(lo + hi) / 2.0 for lo, hi in zip(lower, upper)],
+                "positions": list(ARM_HOME_JOINT_POSITIONS),
             },
             "robot_model_sha256": robot_hash,
             "planning_group": self.config.move_group,
@@ -1107,29 +1677,222 @@ class _RosRuntime:
     ) -> Mapping[str, Any]:
         from agent.runtime.moveit_qualification import STATE_VALIDITY_TIMEOUT_S
 
-        request = self.state_validity_service_type.Request()
-        _populate_state_validity_request(
-            request,
-            [float(value) for value in joint_state.get("positions") or []],
-            group_name=self.config.move_group,
-        )
-        scene_diff = joint_state.get("qualification_scene_diff")
-        if isinstance(scene_diff, Mapping):
-            diff_message = self._qualification_scene_diff_message(scene_diff)
-            request.robot_state.is_diff = True
-            request.robot_state.attached_collision_objects = list(
-                diff_message.robot_state.attached_collision_objects
-            )
-        response = self._await(
-            self.state_validity_client.call_async(request), STATE_VALIDITY_TIMEOUT_S
-        )
-        pairs = sorted(
-            {
-                tuple(sorted((str(c.contact_body_1), str(c.contact_body_2))))
-                for c in getattr(response, "contacts", ())
+        names = list(ARM_JOINTS)
+        positions = [float(value) for value in joint_state.get("positions") or []]
+        requested_gripper_state = joint_state.get("qualification_gripper_state")
+        gripper_positions: list[tuple[str, float | None]]
+        if requested_gripper_state == "open":
+            gripper_positions = [("open", float(self.config.gripper_position(1)))]
+        elif requested_gripper_state == "closed":
+            gripper_positions = [("closed", float(self.config.gripper_position(0)))]
+        elif requested_gripper_state == "closing_sweep":
+            closed = float(self.config.gripper_position(0))
+            gripper_positions = [
+                ("near_open", min(0.05, closed)),
+                *[
+                    (f"close_{index}", float(value))
+                    for index, value in enumerate(
+                        self.config.calibration.angles_rad[1:], 1
+                    )
+                ],
+            ]
+        elif requested_gripper_state is None:
+            gripper_positions = [("current", None)]
+        else:
+            return {
+                "valid": False,
+                "collision_pairs": [],
+                "contact_collision_override": False,
+                "reason": "qualification_gripper_state_unsupported",
             }
+
+        allowed = joint_state.get("qualification_allowed_collisions")
+        scene_diff = joint_state.get("qualification_scene_diff")
+        checks: list[dict[str, Any]] = []
+        all_pairs: set[tuple[str, str]] = set()
+        all_valid = True
+        any_contact_override = False
+        seed_independent_static_collision = False
+        target_contact_id = next(
+            (
+                str(object_id)
+                for object_id, links in (
+                    allowed.items() if isinstance(allowed, Mapping) else ()
+                )
+                if isinstance(links, (list, tuple))
+                and LEFT_FINGERTIP in {str(link) for link in links}
+                and RIGHT_FINGERTIP in {str(link) for link in links}
+            ),
+            "",
         )
-        return {"valid": bool(response.valid), "collision_pairs": [list(p) for p in pairs]}
+        bilateral_contact_required = bool(
+            requested_gripper_state == "closing_sweep" and target_contact_id
+        )
+        bilateral_contact_predicted = False
+        detached_collision_probe_count = 0
+        for label, gripper_position in gripper_positions:
+            request = self.state_validity_service_type.Request()
+            request_names = list(names)
+            request_positions = list(positions)
+            if gripper_position is not None:
+                # MoveIt's mimic-joint model expands the remaining Robotiq
+                # linkage from this active joint.  A deterministic close sweep
+                # catches static collisions that an open-hand contact state
+                # cannot reveal before the physical gripper is actuated.
+                request_names.append(self.config.active_joint)
+                request_positions.append(gripper_position)
+            _populate_state_validity_request(
+                request,
+                request_positions,
+                group_name=self.config.move_group,
+                joint_names=request_names,
+            )
+            if isinstance(scene_diff, Mapping):
+                diff_message = self._qualification_scene_diff_message(scene_diff)
+                request.robot_state.is_diff = True
+                request.robot_state.attached_collision_objects = list(
+                    diff_message.robot_state.attached_collision_objects
+                )
+                # GetStateValidity accepts a RobotState diff but no world
+                # PlanningScene diff.  After a virtual detach, checking only
+                # the removal silently drops the released object and misses
+                # robot/object overlap at the open-gripper endpoint.  Re-add
+                # that exact world geometry as a request-local attached-body
+                # collision probe with no touch links.  At this single robot
+                # state its geometry is identical to the detached world body,
+                # while MoveIt can now prove every robot/object collision.
+                for spec in scene_diff.get(
+                    "detached_collision_probe_objects", []
+                ):
+                    if not isinstance(spec, Mapping):
+                        continue
+                    probe = self.attached_collision_object_type()
+                    probe.link_name = str(
+                        spec.get("link_name") or self.config.mount_child
+                    )
+                    probe.touch_links = []
+                    probe.object = self._collision_object_from_spec(spec)
+                    # The same RobotState diff already contains a REMOVE for
+                    # the real attached object.  Reusing that id for the
+                    # request-local ADD leaves the result dependent on how a
+                    # MoveIt version coalesces duplicate operations; in
+                    # practice the removal can win and the released geometry
+                    # silently disappears from collision checking.  A unique
+                    # qualification-only id makes both operations unambiguous
+                    # and deliberately inherits no target/touch-link ACM
+                    # exemptions.
+                    probe.object.id = (
+                        f"{probe.object.id}__openeta_detached_probe"
+                    )
+                    request.robot_state.attached_collision_objects.append(
+                        probe
+                    )
+                    detached_collision_probe_count += 1
+            response = self._await(
+                self.state_validity_client.call_async(request),
+                STATE_VALIDITY_TIMEOUT_S,
+            )
+            pairs = sorted(
+                {
+                    tuple(sorted((str(c.contact_body_1), str(c.contact_body_2))))
+                    for c in getattr(response, "contacts", ())
+                }
+            )
+            valid, contact_override = _state_valid_with_allowed_collision_pairs(
+                response_valid=bool(response.valid),
+                collision_pairs=pairs,
+                allowed_collisions=(
+                    allowed if isinstance(allowed, Mapping) else None
+                ),
+            )
+            allowed_pairs = {
+                tuple(sorted((str(object_id), str(link))))
+                for object_id, links in (
+                    allowed.items() if isinstance(allowed, Mapping) else ()
+                )
+                if isinstance(links, (list, tuple))
+                for link in links
+            }
+            unallowed_pairs = set(pairs) - allowed_pairs
+            planning_scene = getattr(self, "planning_scene", None)
+            world_ids = {
+                str(value)
+                for value in getattr(planning_scene, "world_ids", ())
+            }
+            gripper_links = set(TARGET_TOUCH_LINKS)
+            sample_seed_independent = bool(unallowed_pairs) and all(
+                (left in gripper_links and right in world_ids)
+                or (right in gripper_links and left in world_ids)
+                for left, right in unallowed_pairs
+            )
+            seed_independent_static_collision = (
+                seed_independent_static_collision or sample_seed_independent
+            )
+            sample_target_contact_links = sorted(
+                link
+                for link in (LEFT_FINGERTIP, RIGHT_FINGERTIP)
+                if tuple(sorted((link, target_contact_id))) in set(pairs)
+            )
+            sample_bilateral_contact = set(sample_target_contact_links) == {
+                LEFT_FINGERTIP,
+                RIGHT_FINGERTIP,
+            }
+            bilateral_contact_predicted = (
+                bilateral_contact_predicted or sample_bilateral_contact
+            )
+            all_valid = all_valid and valid
+            any_contact_override = any_contact_override or contact_override
+            all_pairs.update(pairs)
+            checks.append(
+                {
+                    "sample": label,
+                    "active_joint_position_rad": gripper_position,
+                    "valid": valid,
+                    "collision_pairs": [list(pair) for pair in pairs],
+                    "contact_collision_override": contact_override,
+                    "seed_independent_gripper_static_collision": (
+                        sample_seed_independent
+                    ),
+                    "target_contact_links": sample_target_contact_links,
+                    "bilateral_target_contact": sample_bilateral_contact,
+                }
+            )
+            # One proven static collision is sufficient to reject this grasp
+            # endpoint.  Do not spend the remaining sweep RPCs on a candidate
+            # that cannot be executed.
+            if not valid:
+                break
+        seed_independent_contact_geometry_failure = bool(
+            bilateral_contact_required and not bilateral_contact_predicted
+        )
+        result: dict[str, Any] = {
+            "valid": all_valid and not seed_independent_contact_geometry_failure,
+            "collision_pairs": [list(pair) for pair in sorted(all_pairs)],
+            "contact_collision_override": any_contact_override,
+        }
+        if detached_collision_probe_count:
+            result["qualification_detached_collision_probe_count"] = (
+                detached_collision_probe_count // len(gripper_positions)
+            )
+        if requested_gripper_state == "closing_sweep":
+            result["qualification_gripper_sweep_checks"] = checks
+            result["qualification_seed_independent_static_collision"] = (
+                seed_independent_static_collision
+            )
+            result["qualification_bilateral_target_contact_required"] = (
+                bilateral_contact_required
+            )
+            result["qualification_bilateral_target_contact_predicted"] = (
+                bilateral_contact_predicted
+            )
+            result["qualification_seed_independent_contact_geometry_failure"] = (
+                seed_independent_contact_geometry_failure
+            )
+            if seed_independent_contact_geometry_failure:
+                result["reason"] = (
+                    "qualification_bilateral_target_contact_not_predicted"
+                )
+        return result
 
     def qualification_plan_only(
         self,
@@ -1141,6 +1904,9 @@ class _RosRuntime:
         # This private L5 call is generating the proof, so its branch cannot
         # yet carry the proof hash required at the public execution boundary.
         pose_target = dict(target)
+        cache_binding = str(
+            pose_target.pop("_qualification_cache_binding_sha256", "") or ""
+        )
         qualification_goal_joint_state = pose_target.pop(
             "qualification_goal_joint_state", None
         )
@@ -1153,15 +1919,31 @@ class _RosRuntime:
                 "start_joint_state": dict(start),
                 "allowed_planning_time_s": planning_time_s,
                 "num_planning_attempts": planning_attempts,
+                "model_id": self.config.model_id,
+                "planning_scene_revision": int(self.planning_scene.revision),
             }
         )
+        if cache_binding:
+            goal["qualification_cache_binding_sha256"] = cache_binding
         if isinstance(qualification_goal_joint_state, Mapping):
-            goal["qualification_goal_joint_state"] = dict(
+            qualified_state = _qualification_joint_state_with_sha256(
                 qualification_goal_joint_state
             )
+            if qualified_state is None:
+                raise ValueError("qualification joint goal state is invalid")
+            normalized_state, state_sha256 = qualified_state
+            goal["qualification_goal_joint_state"] = normalized_state
+            goal["qualification_goal_joint_state_sha256"] = state_sha256
         scene_diff = target.get("qualification_scene_diff")
         if isinstance(scene_diff, Mapping):
             goal["qualification_scene_diff"] = dict(scene_diff)
+        allowed_collisions = target.get("qualification_allowed_collisions")
+        if isinstance(allowed_collisions, Mapping):
+            goal["qualification_allowed_collisions"] = {
+                str(key): [str(value) for value in values]
+                for key, values in allowed_collisions.items()
+                if isinstance(values, (list, tuple))
+            }
         return self.move(goal, planning_time_s + 5.0)
 
     def _qualification_scene_diff_message(self, diff: Mapping[str, Any]) -> Any:
@@ -1191,6 +1973,34 @@ class _RosRuntime:
             ]
             attached.object = self._collision_object_from_spec(spec)
             scene.robot_state.attached_collision_objects.append(attached)
+        allowed = diff.get("allowed_collisions")
+        if isinstance(allowed, Mapping):
+            components = self.planning_scene_components_type
+            acm_request = self.get_scene_service_type.Request()
+            acm_request.components.components = int(
+                components.ALLOWED_COLLISION_MATRIX
+            )
+            acm_readback = self._await(
+                self.get_scene_client.call_async(acm_request), 5.0
+            )
+            current_acm = acm_readback.scene.allowed_collision_matrix
+            names, merged_rows = _merged_allowed_collision_rows(
+                [str(value) for value in current_acm.entry_names],
+                [list(row.enabled) for row in current_acm.entry_values],
+                allowed,
+                replace_owned=False,
+            )
+            scene.allowed_collision_matrix.entry_names = names
+            for enabled in merged_rows:
+                row = self.allowed_collision_entry_type()
+                row.enabled = enabled
+                scene.allowed_collision_matrix.entry_values.append(row)
+            scene.allowed_collision_matrix.default_entry_names = list(
+                current_acm.default_entry_names
+            )
+            scene.allowed_collision_matrix.default_entry_values = list(
+                current_acm.default_entry_values
+            )
         return scene
 
     def qualification_clone_scene(self) -> dict[str, Any]:
@@ -1213,6 +2023,7 @@ class _RosRuntime:
                 for key, value in self.planning_scene.attached_specs.items()
             },
             "target_id": self.planning_scene.target_id,
+            "target_touch_links": list(TARGET_TOUCH_LINKS),
             "workspace_envelope": {
                 "frame": self.config.base_link,
                 "base_xyz": [0.0, 0.0, 0.0],
@@ -1240,7 +2051,11 @@ class _RosRuntime:
             snapshot["acceptance_scene"] = scene_evidence()
         destination_center = getattr(self.config, "destination_center_xy", None)
         destination_size = getattr(self.config, "destination_size_xy_m", None)
-        support_z = getattr(self.config, "table_top_z_m", None)
+        support_z = getattr(
+            self.config,
+            "destination_support_z_m",
+            getattr(self.config, "table_top_z_m", None),
+        )
         if (
             isinstance(destination_center, tuple)
             and len(destination_center) == 2
@@ -1254,9 +2069,22 @@ class _RosRuntime:
                 "center_xy": [float(value) for value in destination_center],
                 "size_xy_m": [float(value) for value in destination_size],
                 "support_z_m": float(support_z),
-                "support_object_id": str(getattr(self.config, "table_id", "")),
+                "acceptance_semantics": str(
+                    getattr(
+                        self.config,
+                        "placement_acceptance_semantics",
+                        "complete_footprint",
+                    )
+                ),
+                "support_object_id": str(
+                    getattr(
+                        self.config,
+                        "selected_placement_region_id",
+                        getattr(self.config, "table_id", ""),
+                    )
+                ),
                 "support_height_tolerance_m": float(
-                    getattr(self.config, "placement_center_height_tolerance_m", 0.01)
+                    getattr(self.config, "placement_support_height_tolerance_m", 0.01)
                 ),
                 # AnyPlace consumes RGB-D point geometry.  Treat a sub-5 mm
                 # support overlap as the calibrated contact uncertainty band,
@@ -1352,6 +2180,11 @@ class _RosRuntime:
             planning_diff = {
                 "remove_attached_ids": [target_id],
                 "world_objects": [world],
+                # See qualification_state_validity: the public
+                # GetStateValidity service cannot carry world-object diffs.
+                # Preserve the exact released geometry for its request-local
+                # post-open collision probe.
+                "detached_collision_probe_objects": [world],
             }
         scene.setdefault("transitions", []).append(transition)
         scene_hash = hashlib.sha256(
@@ -1590,22 +2423,63 @@ class _RosRuntime:
         collision.header.frame_id = _moveit_scene_frame(
             spec.get("frame"), base_link=self.config.base_link
         )
-        primitive = self.solid_primitive_type()
-        primitive.type = self.solid_primitive_type.BOX
-        primitive.dimensions = [float(value) for value in spec["size_xyz"]]
-        pose = self.pose_type()
-        pose.position.x, pose.position.y, pose.position.z = [
-            float(value) for value in spec["pose_xyz"]
-        ]
-        quaternion = spec.get("pose_quat_xyzw", (0.0, 0.0, 0.0, 1.0))
-        (
-            pose.orientation.x,
-            pose.orientation.y,
-            pose.orientation.z,
-            pose.orientation.w,
-        ) = _normalized_quaternion(tuple(float(value) for value in quaternion))
-        collision.primitives = [primitive]
-        collision.primitive_poses = [pose]
+        body_xyz = tuple(float(value) for value in spec["pose_xyz"])
+        body_quat = _normalized_quaternion(
+            tuple(float(value) for value in spec["pose_quat_xyzw"])
+        )
+        raw_primitives = spec.get("primitives")
+        primitive_specs = (
+            list(raw_primitives)
+            if isinstance(raw_primitives, list) and raw_primitives
+            else [
+                {
+                    "shape": "box",
+                    "size_xyz": spec["size_xyz"],
+                    "pose_xyz": [0.0, 0.0, 0.0],
+                    "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            ]
+        )
+        primitives = []
+        poses = []
+        for raw in primitive_specs:
+            if not isinstance(raw, Mapping):
+                raise PlanningSceneError("collision primitive is invalid")
+            primitive = self.solid_primitive_type()
+            shape = str(raw.get("shape") or "")
+            if shape == "box":
+                primitive.type = self.solid_primitive_type.BOX
+                primitive.dimensions = [
+                    float(value) for value in raw["size_xyz"]
+                ]
+            elif shape == "cylinder":
+                primitive.type = self.solid_primitive_type.CYLINDER
+                primitive.dimensions = [
+                    float(raw["length"]),
+                    float(raw["radius"]),
+                ]
+            else:
+                raise PlanningSceneError("collision primitive shape is unsupported")
+            primitive_xyz, primitive_quat = _child_world_pose(
+                parent_xyz=body_xyz,  # type: ignore[arg-type]
+                parent_quat_xyzw=body_quat,
+                relative_xyz=tuple(float(value) for value in raw["pose_xyz"]),
+                relative_quat_xyzw=tuple(
+                    float(value) for value in raw["pose_quat_xyzw"]
+                ),
+            )
+            pose = self.pose_type()
+            pose.position.x, pose.position.y, pose.position.z = primitive_xyz
+            (
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            ) = primitive_quat
+            primitives.append(primitive)
+            poses.append(pose)
+        collision.primitives = primitives
+        collision.primitive_poses = poses
         collision.operation = self.collision_object_type.ADD
         return collision
 
@@ -1770,7 +2644,7 @@ class _RosRuntime:
         }
 
     def return_home(self, timeout_s: float) -> Mapping[str, Any]:
-        """Command all arm joints to zero through the trajectory controller."""
+        """Command all arm joints to the workcell home configuration."""
 
         action_started = self.ros_time_s()
         goal = self.follow_trajectory_action_type.Goal()
@@ -1781,7 +2655,7 @@ class _RosRuntime:
             nanosec=duration_ns % 1_000_000_000,
         )
         _populate_recovery_trajectory_goal(
-            goal, point, duration, [0.0] * len(ARM_JOINTS)
+            goal, point, duration, list(ARM_HOME_JOINT_POSITIONS)
         )
         self.state_source.clear(min_ros_timestamp_s=action_started)
         handle = self._await(self.trajectory_client.send_goal_async(goal), min(5.0, timeout_s))
@@ -1791,6 +2665,79 @@ class _RosRuntime:
         if int(wrapped.result.error_code) != int(self.follow_trajectory_action_type.Result.SUCCESSFUL):
             raise RuntimeError("HOME_TRAJECTORY_FAILED")
         return {"ok": True, "trajectory_result_code": int(wrapped.result.error_code)}
+
+    def _execute_cached_l5_trajectory(
+        self,
+        *,
+        cache_key: str,
+        entry: Mapping[str, Any],
+        action_started: float,
+        timeout_s: float,
+    ) -> Mapping[str, Any] | None:
+        """Execute one single-use L5 trajectory, or fall back before motion."""
+
+        trajectory = copy.deepcopy(entry.get("trajectory"))
+        if trajectory is None or not getattr(trajectory, "points", None):
+            return None
+        if (
+            int(entry.get("scene_revision", -1))
+            != int(getattr(self.planning_scene, "revision", -2))
+            or str(entry.get("scene_sha256") or "") != self._l5_scene_sha256()
+        ):
+            return None
+        header = getattr(trajectory, "header", None)
+        stamp = getattr(header, "stamp", None)
+        if stamp is not None:
+            # A zero header asks the controller to start immediately. Reusing
+            # the old plan timestamp would be rejected as an ancient goal.
+            stamp.sec = 0
+            stamp.nanosec = 0
+        follow_goal = self.follow_trajectory_action_type.Goal()
+        follow_goal.trajectory = trajectory
+        self.state_source.clear(min_ros_timestamp_s=action_started)
+        handle = self._await(
+            self.trajectory_client.send_goal_async(follow_goal),
+            min(5.0, timeout_s),
+        )
+        if not handle.accepted:
+            # No trajectory started. Refresh state and let the ordinary
+            # MoveGroup path plan again under the same safety contract.
+            self.state_source.wait_fresh(min(2.0, timeout_s))
+            return None
+        try:
+            wrapped = self._await(handle.get_result_async(), timeout_s)
+        except TimeoutError:
+            try:
+                self._await(handle.cancel_goal_async(), min(2.0, timeout_s))
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error_code": "MOTION_OUTCOME_UNKNOWN",
+                "motion_outcome": "unknown",
+                "reconciliation_required": True,
+                "execution_started": True,
+                "planned_point_count": int(entry.get("point_count") or 0),
+                "l5_trajectory_reused": True,
+                "l5_trajectory_cache_key": cache_key,
+            }
+        result_code = int(wrapped.result.error_code)
+        success = result_code == int(
+            self.follow_trajectory_action_type.Result.SUCCESSFUL
+        )
+        return {
+            "ok": success,
+            "reached_goal": success,
+            "error_code": None if success else "MOTION_EXECUTION_FAILED",
+            "motion_outcome": "completed" if success else "failed",
+            "execution_started": True,
+            "planned_point_count": int(entry.get("point_count") or 0),
+            "trajectory_result_code": result_code,
+            **({"moveit_error_code": MOVEIT_CONTROL_FAILED} if not success else {}),
+            "l5_trajectory_reused": True,
+            "l5_trajectory_cache_key": cache_key,
+            "l5_trajectory_scene_sha256": str(entry.get("scene_sha256") or ""),
+        }
 
     def move(self, goal: dict, timeout_s: float) -> Mapping[str, Any]:
         from geometry_msgs.msg import Pose
@@ -1805,11 +2752,40 @@ class _RosRuntime:
         from shape_msgs.msg import SolidPrimitive
 
         action_started = self.ros_time_s()
+        cache_lookup: dict[str, Any] = {
+            "status": "not_applicable",
+            "reason": "plan_only_request",
+        }
 
         def finish(payload: dict[str, Any]) -> dict[str, Any]:
             payload["action_started_ros_time_s"] = action_started
             completed = self.ros_time_s()
             payload["action_completed_ros_time_s"] = completed
+            payload["motion_profile"] = str(
+                goal.get("motion_profile") or "unloaded"
+            )
+            payload["max_velocity_scaling_factor"] = float(
+                goal.get("max_velocity_scaling_factor", 0.3)
+            )
+            payload["max_acceleration_scaling_factor"] = float(
+                goal.get("max_acceleration_scaling_factor", 0.3)
+            )
+            payload["l5_trajectory_cache_status"] = str(
+                cache_lookup.get("status") or "unknown"
+            )
+            payload["l5_trajectory_cache_reason"] = str(
+                cache_lookup.get("reason") or "unknown"
+            )
+            for key in (
+                "entry_count",
+                "lookup_key",
+                "requested_scene_revision",
+                "current_scene_revision",
+                "requested_start_max_delta_rad",
+                "measured_start_max_delta_rad",
+            ):
+                if key in cache_lookup:
+                    payload[f"l5_trajectory_cache_{key}"] = cache_lookup[key]
             # Preserve the latest still-fresh state received during execution.
             # Some real controllers stop publishing as soon as their result ACK
             # is emitted.  Requiring an additional sample after that ACK drops
@@ -1818,6 +2794,24 @@ class _RosRuntime:
             # queued pre-action samples; GazeboController additionally verifies
             # the measured terminal pose against the requested target.
             return payload
+
+        cached = None
+        if goal.get("plan_only") is not True:
+            cached, cache_lookup = self._take_matching_l5_trajectory(goal)
+        if cached is not None:
+            cache_key, entry = cached
+            cached_result = self._execute_cached_l5_trajectory(
+                cache_key=cache_key,
+                entry=entry,
+                action_started=action_started,
+                timeout_s=timeout_s,
+            )
+            if cached_result is not None:
+                return finish(dict(cached_result))
+            cache_lookup = {
+                "status": "miss",
+                "reason": "cached_trajectory_rejected_before_execution",
+            }
 
         # The start state read in GazeboController happened before this call.  Do
         # not permit it to double as post-action reconciliation state.
@@ -1839,15 +2833,9 @@ class _RosRuntime:
         request.request.allowed_planning_time = min(
             planning_limit_s, max(0.1, timeout_s - 2.0)
         )
-        # The 7-DOF arm is redundant, so OMPL may legitimately choose a
-        # several-radian joint-space path even for the small Cartesian moves
-        # used by motion-control.  At 10% scaling those collision-checked trajectories can
-        # exceed the public action deadline on a software-rendered simulator
-        # (which commonly runs below real time).  Thirty percent remains a
-        # conservative MoveIt limit while keeping every valid planned path
-        # inside the control contract's timeout.  Grasp-critical carry moves
-        # may lower the scaling further through the goal to keep a jointed or
-        # caged payload quiet.
+        # The caller selects a load-state profile from immutable target
+        # semantics. MoveIt still time-parameterizes the complete path and the
+        # controller enforces the URDF limits.
         request.request.max_velocity_scaling_factor = float(
             goal.get("max_velocity_scaling_factor", 0.3)
         )
@@ -1909,12 +2897,20 @@ class _RosRuntime:
                 constraint = JointConstraint()
                 constraint.joint_name = str(name)
                 constraint.position = position
-                constraint.tolerance_above = 0.005
-                constraint.tolerance_below = 0.005
+                constraint.tolerance_above = QUALIFIED_JOINT_GOAL_TOLERANCE_RAD
+                constraint.tolerance_below = QUALIFIED_JOINT_GOAL_TOLERANCE_RAD
                 constraint.weight = 1.0
                 joint_constraints.append(constraint)
+            # Preserve the Beam-2 IK branch while still proving the model's
+            # exact Cartesian contact/release target.  Joint constraints alone
+            # permit MoveIt to stop at their edge, which can accumulate into a
+            # several-millimetre TCP residual despite a successful plan.
             request.request.goal_constraints = [
-                Constraints(joint_constraints=joint_constraints)
+                Constraints(
+                    joint_constraints=joint_constraints,
+                    position_constraints=[pc],
+                    orientation_constraints=[oc],
+                )
             ]
         else:
             request.request.goal_constraints = [
@@ -1922,8 +2918,45 @@ class _RosRuntime:
                     position_constraints=[pc], orientation_constraints=[oc]
                 )
             ]
-        qualification_diff = goal.get("qualification_scene_diff")
-        if isinstance(qualification_diff, Mapping):
+        qualification_diff_value = goal.get("qualification_scene_diff")
+        qualification_diff = (
+            dict(qualification_diff_value)
+            if isinstance(qualification_diff_value, Mapping)
+            else {}
+        )
+        qualification_allowed = goal.get("qualification_allowed_collisions")
+        if isinstance(qualification_allowed, Mapping):
+            normalized_allowed = {
+                str(key): [str(value) for value in values]
+                for key, values in qualification_allowed.items()
+                if isinstance(values, (list, tuple))
+            }
+            normalized_allowed = {
+                key: sorted(set(values))
+                for key, values in normalized_allowed.items()
+            }
+            expected_allowed = (
+                {
+                    str(self.planning_scene.target_id): sorted(
+                        str(link) for link in TARGET_TOUCH_LINKS
+                    )
+                }
+                if self.planning_scene.target_id
+                else {}
+            )
+            if normalized_allowed != expected_allowed:
+                return finish(
+                    {
+                        "ok": False,
+                        "error_code": "MOTION_PLAN_FAILED",
+                        "reason": "qualification_collision_policy_mismatch",
+                        "motion_outcome": "failed",
+                        "planned_point_count": 0,
+                        "execution_started": False,
+                    }
+                )
+            qualification_diff["allowed_collisions"] = normalized_allowed
+        if qualification_diff:
             request.planning_options.planning_scene_diff = (
                 self._qualification_scene_diff_message(qualification_diff)
             )
@@ -1955,16 +2988,16 @@ class _RosRuntime:
                 "execution_started": None,
             })
         code = wrapped.result.error_code.val
-        planned_points = list(
-            getattr(
-                getattr(wrapped.result.planned_trajectory, "joint_trajectory", None),
-                "points",
-                (),
-            )
+        planned_joint_trajectory = getattr(
+            wrapped.result.planned_trajectory,
+            "joint_trajectory",
+            None,
         )
+        planned_points = list(getattr(planned_joint_trajectory, "points", ()))
         if code == MoveItErrorCodes.SUCCESS:
             end_joint_state = None
             trajectory_points = []
+            trajectory_cache_key = None
             if planned_points:
                 trajectory_points = [
                     {"positions": [float(value) for value in point.positions]}
@@ -1980,6 +3013,12 @@ class _RosRuntime:
                     ),
                     "positions": trajectory_points[-1]["positions"],
                 }
+                if request.planning_options.plan_only:
+                    trajectory_cache_key = self._store_l5_trajectory(
+                        goal=goal,
+                        trajectory=planned_joint_trajectory,
+                        point_count=len(planned_points),
+                    )
             return finish({
                 "ok": True,
                 "reached_goal": not request.planning_options.plan_only,
@@ -1991,6 +3030,14 @@ class _RosRuntime:
                     {
                         "trajectory_points": trajectory_points,
                         "end_joint_state": end_joint_state,
+                        "l5_trajectory_cache_stored": (
+                            trajectory_cache_key is not None
+                        ),
+                        **(
+                            {"l5_trajectory_cache_key": trajectory_cache_key}
+                            if trajectory_cache_key is not None
+                            else {}
+                        ),
                     }
                     if request.planning_options.plan_only
                     else {}
@@ -2015,37 +3062,16 @@ class _RosRuntime:
             MoveItErrorCodes.UNRECOGNIZED_GOAL_TYPE,
             MoveItErrorCodes.NO_IK_SOLUTION,
         }
-        # MoveGroup sometimes collapses a goal-sampling failure to the generic
-        # FAILURE code. An empty returned trajectory proves execution never
-        # started, so classify it as a planning rejection.
-        if code in planning_failures or (
-            code == MoveItErrorCodes.FAILURE and not planned_points
-        ):
-            return finish({
-                "ok": False,
-                "error_code": "MOTION_PLAN_FAILED",
-                "motion_outcome": "failed",
-                "moveit_error_code": int(code),
-                "planned_point_count": len(planned_points),
-                "execution_started": False,
-            })
-        if code == MoveItErrorCodes.TIMED_OUT:
-            return finish({
-                "ok": False,
-                "error_code": "MOTION_EXECUTION_TIMEOUT",
-                "motion_outcome": "failed",
-                "moveit_error_code": int(code),
-                "planned_point_count": len(planned_points),
-                "execution_started": bool(planned_points),
-            })
-        return finish({
-            "ok": False,
-            "error_code": "MOTION_EXECUTION_FAILED",
-            "motion_outcome": "failed",
-            "moveit_error_code": int(code),
-            "planned_point_count": len(planned_points),
-            "execution_started": bool(planned_points),
-        })
+        return finish(
+            _move_group_failure_result(
+                int(code),
+                len(planned_points),
+                plan_only=bool(request.planning_options.plan_only),
+                planning_failure_codes={int(value) for value in planning_failures},
+                timed_out_code=int(MoveItErrorCodes.TIMED_OUT),
+                generic_failure_code=int(MoveItErrorCodes.FAILURE),
+            )
+        )
 
     def gripper(self, position: float, timeout_s: float) -> Mapping[str, Any]:
         from control_msgs.action import ParallelGripperCommand
@@ -2100,24 +3126,59 @@ class _RosRuntime:
         result = wrapped.result
         reached_goal = bool(result.reached_goal)
         stalled = bool(result.stalled)
+        terminal_state = getattr(result, "state", None)
+        terminal_joint_state = None
+        if terminal_state is not None:
+            names = [str(value) for value in getattr(terminal_state, "name", ())]
+            positions = [float(value) for value in getattr(terminal_state, "position", ())]
+            velocities = [float(value) for value in getattr(terminal_state, "velocity", ())]
+            if (
+                names
+                and len(names) == len(positions) == len(velocities)
+                and all(math.isfinite(value) for value in (*positions, *velocities))
+            ):
+                terminal_joint_state = {
+                    "names": names,
+                    "positions": positions,
+                    "velocities": velocities,
+                    "maximum_absolute_velocity_rad_s": max(
+                        abs(value) for value in velocities
+                    ),
+                }
         terminal_status_code = getattr(wrapped, "status", None)
         terminal_succeeded = gripper_terminal_succeeded(terminal_status_code)
+        closed_target = float(self.config.gripper_position(0))
+        stall_is_valid_for_command = bool(
+            self.allow_stalling
+            and math.isclose(
+                float(position),
+                closed_target,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        )
         ok = gripper_action_success(
             reached_goal=reached_goal,
             stalled=stalled,
-            allow_stalling=bool(self.allow_stalling),
+            allow_stalling=stall_is_valid_for_command,
             terminal_succeeded=terminal_succeeded,
         )
         return finish({
             "ok": ok,
             "reached_goal": reached_goal,
             "stalled": stalled,
+            "stall_accepted_for_command": stall_is_valid_for_command,
             "error_code": None if ok else "GRIPPER_FAILED",
             "terminal_status": "succeeded" if terminal_succeeded else "not_succeeded",
             "terminal_status_code": (
                 int(terminal_status_code)
                 if isinstance(terminal_status_code, int) and not isinstance(terminal_status_code, bool)
                 else None
+            ),
+            **(
+                {"terminal_gripper_joint_state": terminal_joint_state}
+                if terminal_joint_state is not None
+                else {}
             ),
         })
 

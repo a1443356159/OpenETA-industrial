@@ -16,7 +16,7 @@ def test_gazebo_process_lifecycle_when_gz_is_installed() -> None:
     gz = shutil.which("gz") or ("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz" if os.path.exists("/opt/ros/jazzy/opt/gz_tools_vendor/bin/gz") else None)
     if gz is None:
         pytest.skip("Gazebo Sim executable is not installed")
-    process = GazeboProcess(world="extensions/gazebo/worlds/oracle.sdf", gz_executable=gz)
+    process = GazeboProcess(world="extensions/gazebo/worlds/industrial_fixture.sdf", gz_executable=gz)
     try:
         pid = process.start()
         assert pid > 0
@@ -97,7 +97,7 @@ def test_ros_launch_inherits_worker_streams_for_case_local_diagnostics(
 def test_detachable_joint_wait_ready_requires_the_stock_endpoint_triplet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M3 must not publish its one-shot detach before plugin endpoints exist."""
+    """Native grasp must not publish its one-shot detach before plugin endpoints exist."""
 
     seen = []
 
@@ -199,8 +199,8 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
     assert events == ["state_listener", "command_listener", "publish", "ack"]
 
 
-def test_detachable_joint_proof_uses_the_target_model_world_pose_for_m3() -> None:
-    """M3's target link is local-to-model in Gazebo Pose_V, not world-space."""
+def test_detachable_joint_proof_uses_the_target_model_world_pose() -> None:
+    """The target link is local-to-model in Gazebo Pose_V, not world-space."""
 
     poses = {
         "gripper_mount_link": (0.10, -0.20, 0.50),
@@ -249,6 +249,97 @@ def test_detachable_joint_baseline_uses_the_final_settled_pose(monkeypatch) -> N
     assert control._baseline is not None
     assert control._baseline[0] == pytest.approx(0.41)
     assert control._baseline[1] == pytest.approx((0.0, 0.0, -0.09))
+
+
+def test_native_pose_snapshot_retries_one_incomplete_gazebo_frame() -> None:
+    control = gazebo_process.GazeboDetachableJointControl()
+    target = gazebo_process.GazeboNativePose(
+        (0.2, -0.1, 0.43), (0.0, 0.0, 0.0, 1.0)
+    )
+    mount = gazebo_process.GazeboNativePose(
+        (0.2, -0.1, 0.55), (0.0, 0.0, 0.0, 1.0)
+    )
+    calls = 0
+
+    def read_pose():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise gazebo_process.GazeboProcessError(
+                "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
+            )
+        return target, mount
+
+    control.native_target_mount_poses = read_pose  # type: ignore[method-assign]
+
+    observed_target, observed_mount, attempts = (
+        control.native_target_mount_poses_with_retry(max_attempts=2)
+    )
+
+    assert (observed_target, observed_mount) == (target, mount)
+    assert attempts == 2
+    assert control._last_native_pose_read_attempt_count == 2
+
+
+def test_native_pose_snapshot_stops_after_one_transport_retry() -> None:
+    control = gazebo_process.GazeboDetachableJointControl()
+    calls = 0
+
+    def read_pose():
+        nonlocal calls
+        calls += 1
+        raise gazebo_process.GazeboProcessError(
+            "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
+        )
+
+    control.native_target_mount_poses = read_pose  # type: ignore[method-assign]
+
+    with pytest.raises(
+        gazebo_process.GazeboProcessError,
+        match="NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE",
+    ):
+        control.native_target_mount_poses_with_retry(max_attempts=2)
+
+    assert calls == 2
+    assert control._last_native_pose_read_attempt_count == 2
+
+
+def test_detached_placement_sampling_retries_one_incomplete_pose_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._state = gazebo_process.DetachableJointState.DETACHED
+    target = gazebo_process.GazeboNativePose(
+        (0.48, -0.10, 0.43), (0.0, 0.0, 0.0, 1.0)
+    )
+    mount = gazebo_process.GazeboNativePose(
+        (0.48, -0.10, 0.55), (0.0, 0.0, 0.0, 1.0)
+    )
+    reads = 0
+
+    def read_pose():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise gazebo_process.GazeboProcessError(
+                "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
+            )
+        return target, mount
+
+    control.native_target_mount_poses = read_pose  # type: ignore[method-assign]
+    sampled_times = iter([0.0, 0.02])
+    monkeypatch.setattr(
+        gazebo_process.time, "monotonic", lambda: next(sampled_times)
+    )
+    monkeypatch.setattr(gazebo_process.time, "sleep", lambda _seconds: None)
+
+    samples = control.sample_detached_target_poses(
+        duration_s=0.01,
+        interval_s=0.01,
+    )
+
+    assert reads == 3
+    assert [sample.xyz for sample in samples] == [target.xyz, target.xyz]
 
 
 def test_detachable_joint_rigid_rotation_has_zero_relative_translation_drift() -> None:
@@ -351,24 +442,25 @@ def test_detachable_joint_proof_rejects_a_noncanonical_child_link_frame() -> Non
         control.capture_baseline()
 
 
-def test_native_contact_window_drops_pipe_backlog_before_verification(
+def test_native_contact_window_accepts_terminal_hold_without_post_result_publish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Late-parsed pre-close transport data must not poison fresh contacts."""
+    """A stable end-of-close hold needs no new post-result sensor message."""
 
     now = 100.0
     monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: now)
     window = gazebo_process.GazeboNativeContactWindow(timeout_s=0.1)
+    window._armed = True
     target = "target_object::target_link::target_collision"
     window._samples.append(
         NativeContactSample(
-            "left", 9.9, 90.0,
+            "left", 9.4, 90.0,
             ("robot::robotiq_85_left_finger_tip_link::collision", target),
         )
     )
     for side in ("left", "right"):
         tip = f"robot::robotiq_85_{side}_finger_tip_link::collision"
-        for timestamp in (10.1, 10.2, 10.3):
+        for timestamp in (9.62, 9.76, 9.91):
             window._samples.append(
                 NativeContactSample(side, timestamp, 99.9, (tip, target))
             )
@@ -381,3 +473,94 @@ def test_native_contact_window_drops_pipe_backlog_before_verification(
     assert result.accepted is True
     assert result.left_sample_count == 3
     assert result.right_sample_count == 3
+    assert result.evidence["proof_boundary"] == (
+        "terminal_bilateral_hold_before_close_result"
+    )
+    assert result.evidence["close_completed_sim_time_s"] == 10.0
+    assert result.evidence["sample_freshness_basis"] == (
+        "closed_gazebo_sim_time_window"
+    )
+
+
+def test_native_contact_window_uses_gazebo_time_under_slow_real_time_factor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GPU/UI wall time must not invalidate a closed simulator-time proof."""
+
+    monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: 100.0)
+    window = gazebo_process.GazeboNativeContactWindow(timeout_s=0.0)
+    window._armed = True
+    target = "target_object::target_link::target_collision"
+    for side in ("left", "right"):
+        tip = f"robot::robotiq_85_{side}_finger_tip_link::collision"
+        for timestamp in (9.62, 9.76, 9.91):
+            window._samples.append(
+                NativeContactSample(side, timestamp, 90.0, (tip, target))
+            )
+
+    result = window.evaluate(
+        close_completed_sim_time_s=10.0,
+        config=NativePickPlaceConfig(contact_freshness_s=2.0),
+    )
+
+    assert result.accepted is True
+    assert result.reason_code.name == "CONTACT_TARGET_CONFIRMED"
+    assert result.left_sample_count == 3
+    assert result.right_sample_count == 3
+    assert result.evidence["sample_freshness_basis"] == (
+        "closed_gazebo_sim_time_window"
+    )
+
+
+def test_native_contact_window_rejects_a_transient_terminal_touch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: now)
+    window = gazebo_process.GazeboNativeContactWindow(timeout_s=0.0)
+    window._armed = True
+    target = "target_object::target_link::target_collision"
+    for side in ("left", "right"):
+        tip = f"robot::robotiq_85_{side}_finger_tip_link::collision"
+        for timestamp in (9.80, 9.82, 9.84):
+            window._samples.append(
+                NativeContactSample(side, timestamp, 99.9, (tip, target))
+            )
+
+    result = window.evaluate(
+        close_completed_sim_time_s=10.0,
+        config=NativePickPlaceConfig(contact_freshness_s=2.0),
+    )
+
+    assert result.accepted is False
+    assert result.reason_code.name == "CONTACT_WINDOW_TOO_SHORT"
+
+
+def test_native_contact_window_proves_a_bounded_post_close_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late stable pad contact may prove itself while close stays commanded."""
+
+    monkeypatch.setattr(gazebo_process.time, "monotonic", lambda: 100.0)
+    window = gazebo_process.GazeboNativeContactWindow(timeout_s=0.0)
+    window._armed = True
+    target = "target_object::target_link::target_collision"
+    for side in ("left", "right"):
+        tip = f"robot::robotiq_85_{side}_finger_tip_link::collision"
+        for timestamp in (9.95, 10.02, 10.08, 10.12):
+            window._samples.append(
+                NativeContactSample(side, timestamp, 100.0, (tip, target))
+            )
+
+    result = window.evaluate(
+        close_completed_sim_time_s=10.0,
+        config=NativePickPlaceConfig(contact_post_close_hold_s=0.12),
+    )
+
+    assert result.accepted is True
+    assert result.left_span_s == pytest.approx(0.17)
+    assert result.right_span_s == pytest.approx(0.17)
+    assert result.evidence["proof_boundary"] == (
+        "bounded_post_close_bilateral_hold"
+    )
+    assert result.evidence["post_close_hold_completed"] is True

@@ -96,7 +96,7 @@ class _ReadyWorld(_World):
         self.deadlines.append(timeout_s)
 
 
-class _M3World(_World):
+class _NativeGraspWorld(_World):
     def __init__(self, events):
         super().__init__()
         self.events = events
@@ -230,6 +230,50 @@ def test_runtime_action_observation_uses_ros_completion_barrier_without_callback
     assert camera.capture_arguments == [{"timeout_s": pytest.approx(30.0), "min_timestamp_s": 42.0, "min_received_monotonic_s": None}]
 
 
+def test_read_only_motion_qualification_reuses_frozen_observation() -> None:
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+    camera = _RecordingCamera(profile.cameras[0])
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [camera]
+    cached = runtime.observe()
+    runtime.controller = _ResetController(
+        [{"ok": True, "execution_started": False, "results": []}]
+    )
+
+    observation, receipt = runtime.execute(
+        {"action_type": "qualify_motion_candidates", "candidates": []}
+    )
+
+    assert observation is cached
+    assert camera.capture_arguments == [
+        {
+            "timeout_s": pytest.approx(30.0),
+            "min_timestamp_s": None,
+            "min_received_monotonic_s": None,
+        }
+    ]
+    assert receipt["observation_reused"] is True
+    assert receipt["observation_reuse_reason"] == "read_only_motion_qualification"
+    assert receipt["observation_scene_epoch"] == 0
+
+
+def test_read_only_motion_qualification_without_frozen_observation_fails_closed() -> None:
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime.controller = _ResetController(
+        [{"ok": True, "execution_started": False, "results": []}]
+    )
+
+    with pytest.raises(
+        RuntimeError, match="READ_ONLY_ACTION_OBSERVATION_UNAVAILABLE"
+    ):
+        runtime.execute(
+            {"action_type": "qualify_motion_candidates", "candidates": []}
+        )
+
+
 def test_runtime_samples_fresh_robot_state_before_slow_camera_capture() -> None:
     events = []
     profile = gazebo_profile("rm75_robotiq2f85_control")
@@ -316,7 +360,7 @@ def test_runtime_propagates_second_camera_transport_timeout_without_repeating_ac
     assert controller.actions == [{"action_type": "gripper_close"}]
 
 
-def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
+def test_runtime_waits_for_world_control_before_its_first_rgbd_reset() -> None:
     events = []
 
     class Launch(_Launch):
@@ -341,7 +385,7 @@ def test_runtime_waits_for_world_control_before_its_first_m1_reset() -> None:
 
 
 def test_runtime_subscribes_to_cameras_only_after_launch_bridge_readiness() -> None:
-    """Headless M1 must not create DDS subscriptions before its publishers."""
+    """Headless RGB-D runtime must not create DDS subscriptions before its publishers."""
 
     events = []
 
@@ -437,7 +481,7 @@ def test_runtime_reset_does_not_retry_non_transient_gripper_failure() -> None:
     ]
 
 
-def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_poses() -> None:
+def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_reset_poses() -> None:
     events = []
 
     class Attachment:
@@ -472,7 +516,7 @@ def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_pose
             super().start()
             events.append(("launch",))
 
-    world = _M3World(events)
+    world = _NativeGraspWorld(events)
     runtime = GazeboRuntime(
         _deployment(),
         gazebo_profile("rm75_robotiq2f85_pickplace"),
@@ -498,7 +542,7 @@ def test_m3_runtime_detaches_while_paused_before_controller_ready_and_reset_pose
     assert events.count(("detach_ack",)) == 1
 
 
-def test_m3_runtime_recreates_the_paused_world_for_a_second_reset() -> None:
+def test_native_grasp_runtime_recreates_the_paused_world_for_a_second_reset() -> None:
     events = []
     launches = []
 
@@ -538,7 +582,7 @@ def test_m3_runtime_recreates_the_paused_world_for_a_second_reset() -> None:
         launches.append(launch)
         return launch
 
-    world = _M3World(events)
+    world = _NativeGraspWorld(events)
     runtime = GazeboRuntime(
         _deployment(),
         gazebo_profile("rm75_robotiq2f85_pickplace"),

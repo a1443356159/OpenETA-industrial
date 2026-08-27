@@ -216,7 +216,11 @@ class OpenEtaAgentRuntime:
             "python_exec": PythonExecRuntime().handler,
         }
         for name, handler in handlers.items():
-            if not self.tools.can_execute(name):
+            # A host profile may hide a tool after assembly has already bound
+            # its production handler. ``can_execute`` intentionally reports
+            # hidden tools as unavailable to the planner, so it cannot be
+            # used to detect whether the handler slot is occupied here.
+            if self.tools.bound_handler(name) is None:
                 self.tools.bind_handler(name, handler)
 
     def _save_memory_tool(self, context: ToolExecutionContext) -> ToolResult:

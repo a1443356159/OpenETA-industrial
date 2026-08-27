@@ -604,6 +604,102 @@ def test_worker_proxy_retains_native_control_proof_in_trusted_receipt(tmp_path: 
         assert receipt[key] == value
 
 
+def test_worker_proxy_retains_post_attach_failure_and_rollback_proof(
+    tmp_path: Path,
+) -> None:
+    response = {
+        "ok": False,
+        "error_code": "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE",
+        "infrastructure_error": True,
+        "attach_acked_before_rollback": True,
+        "native_state_snapshot": {
+            "post_attach_attempt_count": 2,
+            "maximum_attempts_per_read": 2,
+            "retry_exhausted": True,
+        },
+        "planning_scene_rollback": {"state": "detached", "revision": 3},
+        "detachable_joint": {"state": "detached"},
+        "motion_outcome": "failed",
+        "execution_started": True,
+    }
+    transport = FakeSimulatorMcpTransport(response)
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-post-attach-failure",
+            handle="env-post-attach-failure",
+            response_output_root=tmp_path / "responses",
+        ),
+        tool_names=("gripper_control",),
+    )
+
+    result = tools.call("gripper_control", {"position": 0})
+
+    assert result.success is False
+    receipt = result.details["environment_receipt"]
+    for key, value in response.items():
+        assert receipt[key] == value
+
+
+def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
+    tmp_path: Path,
+) -> None:
+    release_sequence = [
+        {"sequence": 1, "event": "native_detach_ack", "state": "detached"},
+        {
+            "sequence": 2,
+            "event": "planning_scene_detach_ack",
+            "revision": 3,
+        },
+        {"sequence": 3, "event": "gripper_open_completed", "ok": True},
+        {
+            "sequence": 4,
+            "event": "released_target_pose_sync_ack",
+            "revision": 4,
+        },
+    ]
+    target_pose_sync = {
+        "schema_version": "openeta.planning_scene_target_pose_sync.v1",
+        "operation": "update_world_target",
+        "revision": 4,
+    }
+    response = {
+        "ok": False,
+        "error_code": "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE",
+        "planning_scene_revision": 4,
+        "gripper_open_executed": True,
+        "detachable_joint": {"state": "detached"},
+        "release_sequence": release_sequence,
+        "planning_scene_target_pose_sync": target_pose_sync,
+        "placement_verification": {
+            "schema_version": "openeta.gazebo.placement_verification.v1",
+            "placement_confirmed": True,
+            "verdict": "PASS",
+            "reason_code": "PLACEMENT_STABLE_IN_DESTINATION",
+        },
+    }
+    transport = FakeSimulatorMcpTransport(response)
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-release-proof",
+            handle="env-release-proof",
+            response_output_root=tmp_path / "responses",
+        ),
+        tool_names=("gripper_control",),
+    )
+
+    result = tools.call("gripper_control", {"position": 1})
+
+    receipt = result.details["environment_receipt"]
+    assert receipt["gripper_open_executed"] is True
+    assert receipt["release_sequence"] == release_sequence
+    assert receipt["planning_scene_target_pose_sync"] == target_pose_sync
+    assert receipt["placement_verification"] == response["placement_verification"]
+
+
 def test_worker_proxy_retains_moveit_rejection_in_trusted_receipt(tmp_path: Path) -> None:
     response = {
         "ok": False,
@@ -613,6 +709,9 @@ def test_worker_proxy_retains_moveit_rejection_in_trusted_receipt(tmp_path: Path
         "candidate_rejection": True,
         "motion_outcome": "not_started",
         "execution_started": False,
+        "planned_point_count": 0,
+        "position_error_m": 0.12,
+        "orientation_error_rad": 0.4,
         "request_fingerprint": "placement-fingerprint",
         "planning_scene_revision": 2,
     }
@@ -727,6 +826,71 @@ def test_create_simulator_env_rolls_back_failed_reset_before_next_create(
         "reset_env",
     ]
     assert config.handle == "env-retry"
+
+
+def test_create_simulator_env_retries_transient_detach_ack_inside_one_tool_call(
+    tmp_path: Path,
+) -> None:
+    transport = SequencedSimulatorMcpTransport(
+        [
+            {
+                "success": True,
+                "handle": "env-detach-race",
+                "session_id": "session-detach-race",
+            },
+            {
+                "success": False,
+                "error": "Reset failed: NATIVE_GRASP_DETACH_ACK_MISSING",
+                "fatal": True,
+            },
+            {"ok": True},
+            {
+                "success": True,
+                "handle": "env-recovered",
+                "session_id": "session-recovered",
+            },
+            {
+                "success": True,
+                "cameras": [],
+                "robot": {},
+                "observation": {"task": "pick and place", "cameras": [], "robot": {}},
+            },
+        ]
+    )
+    config = SimulatorMcpToolProxyConfig(
+        image_output_root=tmp_path / "images",
+        response_output_root=tmp_path / "responses",
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=config,
+        tool_names=("create_simulator_env",),
+    )
+
+    result = tools.call(
+        "create_simulator_env",
+        {"env_id": "openeta/demo-v0", "seed": 0},
+    )
+
+    assert result.success is True
+    assert [call["name"] for call in transport.calls] == [
+        "create_env",
+        "reset_env",
+        "close_env",
+        "create_env",
+        "reset_env",
+    ]
+    retry = result.details["outputs"]["startup_retry"]
+    assert retry["attempt_count"] == 2
+    assert retry["reason"] == "NATIVE_GRASP_DETACH_ACK_MISSING"
+    assert retry["first_environment_closed"] is True
+    assert retry["final_success"] is True
+    assert len(result.details["outputs"]["mcp_calls"]) == 4
+    assert result.details["environment_receipt"]["startup_attempt_count"] == 2
+    assert result.details["environment_receipt"]["startup_retry_count"] == 1
+    assert config.handle == "env-recovered"
+    assert config.session_id == "session-recovered"
 
 
 def test_close_simulator_env_closes_and_clears_bound_handle() -> None:
@@ -1018,6 +1182,10 @@ def test_move_to_proxy_preserves_compiled_grasp_contact_identity() -> None:
                 },
                 "qualification_goal_joint_state_sha256": "c" * 64,
                 "qualification_binding_sha256": "d" * 64,
+                "qualification_allowed_collisions": {
+                    "target_object": ["left_tip", "right_tip"]
+                },
+                "qualification_allowed_collisions_sha256": "e" * 64,
             }
         },
     )
@@ -1037,6 +1205,10 @@ def test_move_to_proxy_preserves_compiled_grasp_contact_identity() -> None:
     ]
     assert provenance["qualification_goal_joint_state_sha256"] == "c" * 64
     assert provenance["qualification_binding_sha256"] == "d" * 64
+    assert provenance["qualification_allowed_collisions"] == {
+        "target_object": ["left_tip", "right_tip"]
+    }
+    assert provenance["qualification_allowed_collisions_sha256"] == "e" * 64
 
 
 def test_move_to_proxy_rejects_unsupported_speed_parameter() -> None:

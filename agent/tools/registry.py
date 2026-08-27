@@ -20,12 +20,63 @@ ENVIRONMENT_AUTHORITY = "environment"
 
 PERCEPTION_PROFILE_ENV_VAR = "OPENETA_PERCEPTION_PROFILE"
 PERCEPTION_PROFILE_SAM3 = "sam3"
-PERCEPTION_PROFILE_ORACLE = "oracle"
 DEFAULT_PERCEPTION_PROFILE = PERCEPTION_PROFILE_SAM3
 _PROFILE_SEGMENTER_TOOLS = {
     PERCEPTION_PROFILE_SAM3: "sam3",
-    PERCEPTION_PROFILE_ORACLE: "oracle_perceive",
 }
+
+TOOL_PROFILE_ENV_VAR = "OPENETA_TOOL_PROFILE"
+TOOL_PROFILE_FULL = "full"
+TOOL_PROFILE_GAZEBO_INDUSTRIAL = "gazebo_industrial"
+DEFAULT_TOOL_PROFILE = TOOL_PROFILE_FULL
+
+# One host-owned visibility profile is enough for the fixed industrial cell.
+# Contracts stay registered for other embodiments; the planner simply does not
+# see unrelated navigation, dexterous-hand, web, calibration, or coding tools.
+_GAZEBO_INDUSTRIAL_TOOL_NAMES = frozenset(
+    {
+        "observe",
+        "create_simulator_env",
+        "close_simulator_env",
+        "sam3",
+        "select_sam3_detection",
+        "reject_sam3_detections",
+        "active_observe",
+        "grasp_pose_estimate",
+        "activate_final_grasp_candidate",
+        "anyplace",
+        "camera_pose_to_world",
+        "move_to",
+        "gripper_control",
+    }
+)
+
+
+def resolve_tool_profile(environ: Mapping[str, str] | None = None) -> str:
+    """Resolve the host-selected agent-tool visibility profile."""
+
+    source = os.environ if environ is None else environ
+    return str(source.get(TOOL_PROFILE_ENV_VAR, DEFAULT_TOOL_PROFILE) or "").strip().lower()
+
+
+def apply_tool_profile(registry: "ToolRegistry", profile: str) -> "ToolRegistry":
+    """Apply one visibility profile without deleting immutable contracts."""
+
+    normalized = str(profile or DEFAULT_TOOL_PROFILE).strip().lower()
+    if normalized == TOOL_PROFILE_FULL:
+        registry.enable_all()
+        return registry
+    if normalized != TOOL_PROFILE_GAZEBO_INDUSTRIAL:
+        raise ValueError(f"Unknown OpenETA tool profile: {profile}")
+    registered = {spec.name for spec in registry.list(include_disabled=True)}
+    missing = _GAZEBO_INDUSTRIAL_TOOL_NAMES - registered
+    if missing:
+        raise ValueError(
+            "Gazebo industrial tool profile references missing contracts: "
+            + ", ".join(sorted(missing))
+        )
+    registry.disable(registered - _GAZEBO_INDUSTRIAL_TOOL_NAMES)
+    return registry
 
 
 def resolve_perception_profile(environ: Mapping[str, str] | None = None) -> str:
@@ -208,6 +259,7 @@ class ToolRegistry:
         self._specs: dict[str, ToolSpec] = {}
         self._handlers: dict[str, ToolHandler] = {}
         self._handler_authorities: dict[str, str] = {}
+        self._disabled: set[str] = set()
         self._listeners: list[ToolEventListener] = []
         self._execution_local = threading.local()
         self._execution_gate: ToolExecutionGate | None = None
@@ -266,14 +318,57 @@ class ToolRegistry:
         except KeyError as exc:
             raise KeyError(f"Unknown tool: {name}") from exc
 
-    def list(self, *, category: str | None = None) -> list[ToolSpec]:
+    def list(
+        self,
+        *,
+        category: str | None = None,
+        include_disabled: bool = False,
+    ) -> list[ToolSpec]:
         specs = list(self._specs.values())
+        if not include_disabled:
+            specs = [spec for spec in specs if spec.name not in self._disabled]
         if category is not None:
             specs = [spec for spec in specs if spec.category == category]
         return specs
 
     def can_execute(self, name: str) -> bool:
-        return name in self._handlers
+        return name in self._handlers and name not in self._disabled
+
+    def bound_handler(self, name: str) -> ToolHandler | None:
+        """Return a host-bound handler for composite host capabilities.
+
+        This is intentionally not an AgentTool.  Runtime assembly uses it to
+        compose one public tool from existing trusted handlers without routing
+        internal work back through the planner/event loop.
+        """
+
+        if name not in self._specs:
+            raise KeyError(f"Unknown tool: {name}")
+        return self._handlers.get(name)
+
+    def disable(self, names: Any) -> None:
+        """Hide registered tools from planners and reject direct dispatch."""
+
+        normalized = {str(name) for name in names}
+        unknown = normalized - self._specs.keys()
+        if unknown:
+            raise KeyError(f"Unknown tools: {', '.join(sorted(unknown))}")
+        self._disabled.update(normalized)
+
+    def enable(self, names: Any) -> None:
+        """Re-enable previously hidden registered tools."""
+
+        normalized = {str(name) for name in names}
+        unknown = normalized - self._specs.keys()
+        if unknown:
+            raise KeyError(f"Unknown tools: {', '.join(sorted(unknown))}")
+        self._disabled.difference_update(normalized)
+
+    def enable_all(self) -> None:
+        self._disabled.clear()
+
+    def is_enabled(self, name: str) -> bool:
+        return name in self._specs and name not in self._disabled
 
     def add_listener(self, listener: ToolEventListener) -> None:
         """Register a best-effort callback for tool execution events."""
@@ -335,6 +430,28 @@ class ToolRegistry:
                 "metadata": _public_execution_metadata(combined_metadata),
             }
         )
+        if name in self._disabled:
+            disabled_context = ToolExecutionContext(
+                name=name,
+                spec=spec,
+                parameters=parameters,
+                observation=observation,
+                metadata=combined_metadata,
+            )
+            result = make_tool_result(
+                disabled_context,
+                success=False,
+                content=f"Tool is disabled by the active host profile: {requested_name}",
+                diagnostics=[{"code": "tool_disabled_by_profile"}],
+            )
+            self._emit_tool_result(
+                requested_name,
+                parameters,
+                result,
+                spec=spec,
+                metadata=_public_execution_metadata(combined_metadata),
+            )
+            return result
         handler = self._handlers.get(name)
         if handler is None:
             result = ToolResult(
@@ -506,7 +623,7 @@ class ToolRegistry:
     def handler_names(self) -> list[str]:
         """Return names of tools that currently have executable handlers."""
 
-        return sorted(self._handlers)
+        return sorted(name for name in self._handlers if name not in self._disabled)
 
     def _emit_tool_result(
         self,
@@ -767,6 +884,27 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             effect=ToolEffect.READ_ONLY,
         ),
         ToolSpec(
+            name="active_observe",
+            category="perception",
+            description=(
+                "Acquire a grasp-quality RGB-D view of one already grounded target. "
+                "The host reuses a sufficient current view, or deterministically "
+                "generates and MoveIt-qualifies wrist-camera viewpoints before "
+                "executing at most two frozen alternatives. It never reruns grasp or "
+                "placement generation and never invents manipulation waypoints."
+            ),
+            parameters={
+                "target_evidence_id": (
+                    "required selected SAM3 result_id for the current grounded target"
+                ),
+                "semantic_role": "grasp_target; v1 supports pre-contact grasp observation",
+                "quality_profile": "grasp_rgbd",
+                "max_motion_attempts": "optional integer 0-2; defaults to 2",
+            },
+            effect=ToolEffect.WORLD_MUTATING,
+            batchable=False,
+        ),
+        ToolSpec(
             name="materialize_mcp_images",
             category="artifact",
             description=(
@@ -973,6 +1111,10 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                     "observation; never invent a cross-observation join"
                 ),
                 "observation_id": "optional host-bound current observation id",
+                "view_identity": (
+                    "optional host-bound physical camera-view identity derived from "
+                    "camera frame, calibrated pose, and image geometry"
+                ),
                 "scene_epoch": "optional host-bound non-negative scene epoch",
                 "attempt_id": (
                     "optional deterministic host-bound attempt id; identical role, "
@@ -1000,25 +1142,6 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                     "{x, y, label}; label=1 is foreground and label=0 is background; "
                     "use the exact points returned by retrieve_asset_reference"
                 ),
-            },
-            effect=ToolEffect.READ_ONLY,
-        ),
-        ToolSpec(
-            name="oracle_perceive",
-            category="perception",
-            description=(
-                "Simulator-only oracle (Gazebo ground truth): segment objects from "
-                "RGB observations using a text prompt by projecting known simulator "
-                "object poses into the camera frame. Available only in the oracle "
-                "perception profile, where it replaces sam3; detections follow the "
-                "same ranking and explicit VLM selection flow."
-            ),
-            parameters={
-                "image": (
-                    "exact local RGB image path (preferred), or a frame id present in the "
-                    "current observation's image_artifacts"
-                ),
-                "prompt": "concise visual object phrase, preferably English",
             },
             effect=ToolEffect.READ_ONLY,
         ),

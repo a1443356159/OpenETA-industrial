@@ -42,7 +42,6 @@ from sim.mcp_server.session import (
 from sim.mcp_server.worker_mgr import (
     _forget_obs_dirty,
     _proxy_observe,
-    _proxy_oracle_perceive,
     _proxy_render,
     _proxy_reset,
     _proxy_step,
@@ -725,7 +724,8 @@ def move_to(handle: str, x: float, y: float, z: float, *,
             num_steps: int = 100, tolerance: float = 0.002, ori_tolerance: float = 0.05,
             session_id: str = "",
             enable_collision_check: bool = True,
-            velocity_scaling: float = 0.3, acceleration_scaling: float = 0.3,
+            velocity_scaling: float | None = None,
+            acceleration_scaling: float | None = None,
             motion_provenance: dict | None = None) -> dict:
     """Move the end-effector to an absolute pose using closed-loop interpolation.
 
@@ -796,15 +796,30 @@ def move_to(handle: str, x: float, y: float, z: float, *,
             else {}
         )
         target_pose = {"xyz": [x, y, z], "quat_xyzw": quat[:4], **provenance}
-        return _proxy_step(meta, {"action_type": "move_to",
+        action = {"action_type": "move_to",
             "target_pose": target_pose,
             "position_tolerance_m": tolerance,
             # The conservative RM75 trajectory scaling can require slightly
             # over 30 seconds for a 30 mm Cartesian offset after gripper
             # reaction forces have perturbed the reset pose.
-            "orientation_tolerance_rad": ori_tolerance, "timeout_s": 60.0,
-            "max_velocity_scaling_factor": velocity_scaling,
-            "max_acceleration_scaling_factor": acceleration_scaling}, num_steps=1)
+            "orientation_tolerance_rad": ori_tolerance,
+            # GPU operator rendering can lower Gazebo's real-time factor. The
+            # 60 s objective is a performance target, not a cancellation
+            # boundary; keep the wall deadline configurable so a progressing
+            # trajectory is not relabelled as an unreachable candidate.
+            "timeout_s": float(
+                os.environ.get("OPENETA_GAZEBO_MOVE_TIMEOUT_S", "110")
+            ),
+        }
+        # Omitted values deliberately defer to the backend's load-aware
+        # profile.  An agent can still override either factor explicitly.
+        if velocity_scaling is not None:
+            action["max_velocity_scaling_factor"] = float(velocity_scaling)
+        if acceleration_scaling is not None:
+            action["max_acceleration_scaling_factor"] = float(
+                acceleration_scaling
+            )
+        return _proxy_step(meta, action, num_steps=1)
 
     if use_ori and backend == "metaworld":
         return {"error": "Orientation control is not supported on MetaWorld (4D action, no rotation)"}
@@ -1494,49 +1509,6 @@ def observe_env(handle: str, *, session_id: str = "") -> dict:
     if not meta:
         return {"error": f"Unknown: {handle}"}
     return _proxy_observe(meta)
-
-
-@_blocking_tool
-def oracle_perceive(handle: str, image_base64: str, prompt: str, *, session_id: str = "") -> dict:
-    """Segment prompt-matched objects using simulator ground truth (Gazebo oracle).
-
-    Simulator-only perception oracle: instead of running a learned segmentation
-    model, the worker projects the environment's ground-truth object poses
-    (odometry bridge) through the calibrated camera model and returns masks in
-    exactly the same response contract as the ``sam3`` tool — ``success``,
-    ``content`` and ``details`` with ``detections[]`` items of
-    ``{label, score, bbox_xyxy, mask:{format:"png",base64}, area_px,
-    backend_index, rank}``.  ``details.metadata.perception_source`` is
-    ``"gazebo_oracle"`` so oracle output is never silently mixed with learned
-    perception.
-
-    Limitations: Gazebo native-grasp envs only; the static top camera only — wrist
-    camera frames fail explicitly with reason ``ORACLE_FRAME_UNSUPPORTED``
-    because their ``tf_dynamic`` extrinsics are never numerically resolved.
-    Occlusion is ignored (oracle is ground truth).
-
-    Args:
-        handle: Environment handle from create_env.
-        image_base64: Base64-encoded PNG of the camera image to perceive,
-            typically the RGB frame returned by observe_env/reset_env.  The
-            worker matches it against its cached observation frames
-            (pixel-exact, or unique-size fallback reported as
-            ``metadata.frame_match == "fallback_size"``).
-        prompt: Text prompt naming the target object(s); matched
-            case-insensitively as a substring of each oracle object's
-            id/name/label (e.g. ``"target block"``, ``"distractor"``).
-        session_id: Optional session id to reuse an existing session.
-
-    Returns:
-        SAM3-shaped dict; on failure ``success`` is False and
-        ``details.reason`` carries a structured reason code.
-    """
-    sid = session_id or _current_session.get() or ""
-    _touch_session(sid)
-    meta = _session_envs.get(sid, {}).get(handle)
-    if not meta:
-        return {"error": f"Unknown: {handle}"}
-    return _proxy_oracle_perceive(meta, image_base64=image_base64, prompt=prompt)
 
 
 @_blocking_tool

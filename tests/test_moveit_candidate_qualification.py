@@ -10,6 +10,7 @@ from agent.runtime.moveit_qualification import (
     KINEMATIC_IK_TIMEOUT_S,
     PLANNING_ATTEMPTS,
     PLANNING_TIME_S,
+    QUALIFICATION_RPC_GRACE_S,
     QUALIFICATION_SCHEMA,
     STATE_VALIDITY_TIMEOUT_S,
     MoveItCandidateQualifier,
@@ -231,7 +232,13 @@ def test_qualification_rpc_deadline_covers_screening_pool_and_plan_tail():
     )
 
     assert captured["timeout"] > PLANNING_TIME_S * 4 + 10.0
-    assert captured["timeout"] == pytest.approx(1158.0)
+    expected_screening = 96 * 2.0 * (
+        KINEMATIC_IK_TIMEOUT_S + STATE_VALIDITY_TIMEOUT_S
+    )
+    expected_planning = 4 * 3 * PLANNING_TIME_S
+    assert captured["timeout"] == pytest.approx(
+        expected_screening + expected_planning + QUALIFICATION_RPC_GRACE_S
+    )
 
 
 def test_fast_rpc_deadline_covers_exhaustive_l5_and_recovery_without_60s_cutoff():
@@ -274,6 +281,74 @@ def test_qualification_rpc_error_reason_is_preserved():
     assert result.details["rejection_reason_counts"] == {
         "qualification_rpc_error": 1
     }
+
+
+def test_fast_qualification_retries_malformed_response_before_accepting_evidence():
+    calls = 0
+
+    def rpc(name, request, timeout):
+        nonlocal calls
+        del name, timeout
+        calls += 1
+        if calls == 1:
+            return {}
+        return _engine().qualify(request)
+
+    result = MoveItCandidateQualifier(
+        rpc,
+        qualification_profile="fast_v3",
+        compile_candidate=lambda *args: {
+            "qualification_stages": [
+                {
+                    "name": "contact",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            ]
+        },
+    ).qualify_result(
+        ToolResult(True, "ok", {"grasp_candidates": [{"id": "g0"}]}),
+        purpose="grasp",
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    evidence = result.details["qualification_evidence"]
+    assert calls == 2
+    assert evidence["rpc_attempt_count"] == 2
+    assert evidence.get("infrastructure_error") is not True
+    assert [item["verdict"] for item in evidence["results"]] == ["PASS"]
+
+
+def test_repeated_malformed_qualification_response_is_infrastructure_error():
+    calls = 0
+
+    def rpc(name, request, timeout):
+        nonlocal calls
+        del name, request, timeout
+        calls += 1
+        return {"results": []}
+
+    result = MoveItCandidateQualifier(
+        rpc,
+        qualification_profile="fast_v3",
+        compile_candidate=lambda *args: {
+            "qualification_stages": [{"name": "contact"}]
+        },
+    ).qualify_result(
+        ToolResult(True, "ok", {"grasp_candidates": [{"id": "g0"}]}),
+        purpose="grasp",
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    evidence = result.details["qualification_evidence"]
+    assert calls == 2
+    assert evidence["rpc_attempt_count"] == 2
+    assert evidence["stop_reason"] == "infrastructure_error"
+    assert evidence["infrastructure_error"] is True
+    assert evidence["results"][0]["verdict"] == "UNKNOWN"
+    assert evidence["results"][0]["infrastructure_error"] is True
 
 
 @pytest.mark.parametrize(
@@ -341,6 +416,11 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
         engine = _engine()
         response = engine.qualify(request)
         response["results"][1].update({"verdict": "FAIL", "reason": "plan_only_failed"})
+        response["search_exhaustion"] = {
+            "fast_pool_exhausted": True,
+            "recovery_pool_exhausted": True,
+            "redundancy_degraded": True,
+        }
         return response
 
     def compile_candidate(candidate, purpose, source, epoch, revision):
@@ -388,6 +468,14 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
         )
     )
     assert len(stored["results"]) == 2
+    assert stored["search_exhaustion"] == {
+        "fast_pool_exhausted": True,
+        "recovery_pool_exhausted": True,
+        "redundancy_degraded": True,
+    }
+    assert result.details["qualification_evidence"]["search_exhaustion"] == stored[
+        "search_exhaustion"
+    ]
 
 
 def test_scene_revision_drift_is_unknown():

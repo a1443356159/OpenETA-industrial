@@ -24,6 +24,68 @@ class GazeboObservationError(RuntimeError):
     """Raised when a ROS observation cannot satisfy the OpenETA contract."""
 
 
+# Gazebo camera links use +X forward, +Y left and +Z up. OpenETA's numeric
+# camera extrinsics use OpenCV (+Z forward, +X right, +Y down). This fixed
+# rotation maps an OpenCV camera vector into the Gazebo sensor-link frame.
+_GAZEBO_FROM_OPENCV_QUAT_XYZW = (0.5, -0.5, 0.5, -0.5)
+
+
+def _quaternion_product_xyzw(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    lx, ly, lz, lw = left
+    rx, ry, rz, rw = right
+    result = (
+        lw * rx + lx * rw + ly * rz - lz * ry,
+        lw * ry - lx * rz + ly * rw + lz * rx,
+        lw * rz + lx * ry - ly * rx + lz * rw,
+        lw * rw - lx * rx - ly * ry - lz * rz,
+    )
+    norm = math.sqrt(sum(value * value for value in result))
+    if not math.isfinite(norm) or norm <= 1e-12:
+        raise GazeboObservationError("dynamic camera TF has an invalid rotation")
+    return tuple(value / norm for value in result)
+
+
+def _tf_camera_to_world_extrinsics(
+    transform: Any,
+    *,
+    reference_frame: str,
+    sensor_frame: str,
+    timestamp_s: float,
+) -> dict[str, Any]:
+    """Convert one measured Gazebo sensor TF into numeric OpenCV extrinsics."""
+
+    value = getattr(transform, "transform", transform)
+    translation = getattr(value, "translation", None)
+    rotation = getattr(value, "rotation", None)
+    if translation is None or rotation is None:
+        raise GazeboObservationError("dynamic camera TF is incomplete")
+    position = [
+        float(getattr(translation, axis)) for axis in ("x", "y", "z")
+    ]
+    sensor_quaternion = tuple(
+        float(getattr(rotation, axis)) for axis in ("x", "y", "z", "w")
+    )
+    if not all(math.isfinite(value) for value in (*position, *sensor_quaternion)):
+        raise GazeboObservationError("dynamic camera TF contains non-finite values")
+    camera_quaternion = _quaternion_product_xyzw(
+        sensor_quaternion,
+        _GAZEBO_FROM_OPENCV_QUAT_XYZW,
+    )
+    return {
+        "frame_transform": "camera_to_world",
+        "camera_frame": "opencv",
+        "pos": position,
+        "quat_xyzw": list(camera_quaternion),
+        "reference_frame": reference_frame,
+        "sensor_frame": sensor_frame,
+        "calibration_source": "tf2_at_rgb_timestamp",
+        "timestamp_s": float(timestamp_s),
+    }
+
+
 def _message_stamp(message: Any) -> float | None:
     stamp = getattr(getattr(message, "header", None), "stamp", None)
     if stamp is None:
@@ -148,6 +210,8 @@ class RosRgbdCameraSource:
         # Keep explicit references for the lifetime of the node. This also
         # makes the intended camera QoS visible to tests.
         self._subscriptions: list[Any] = []
+        self._tf_buffer: Any | None = None
+        self._tf_listener: Any | None = None
 
     def _rgb_callback(self, message: Any) -> None:
         with self._lock:
@@ -179,6 +243,36 @@ class RosRgbdCameraSource:
             rclpy.init()
             self._owns_context = True
         self._node = rclpy.create_node(self.node_name, context=self._context)
+        if self.config.extrinsics.get("frame_transform") == "tf_dynamic":
+            try:
+                from tf2_ros import Buffer, TransformListener
+            except ImportError as exc:
+                raise GazeboObservationError(
+                    "tf2_ros is required for a dynamic RGB-D camera"
+                ) from exc
+            reference_frame = str(
+                self.config.extrinsics.get("reference_frame") or ""
+            ).strip()
+            sensor_frame = str(
+                self.config.extrinsics.get("sensor_frame") or self.config.frame_id
+            ).strip()
+            if (
+                not reference_frame
+                or not sensor_frame
+                or self.config.extrinsics.get("camera_frame") != "opencv"
+                or self.config.extrinsics.get("sensor_frame_convention")
+                != "gazebo_camera"
+            ):
+                raise GazeboObservationError(
+                    "dynamic RGB-D camera requires explicit reference/sensor frames "
+                    "and the gazebo_camera-to-opencv convention"
+                )
+            self._tf_buffer = Buffer(node=self._node)
+            self._tf_listener = TransformListener(
+                self._tf_buffer,
+                self._node,
+                spin_thread=False,
+            )
         # Gazebo's camera bridge offers sensor-data (best-effort) QoS. The
         # integer ``10`` shorthand is reliable and can be incompatible with
         # it, leaving a live world with no deliverable frames. This changes
@@ -199,6 +293,31 @@ class RosRgbdCameraSource:
         ]
         if self._executor is not None:
             self._executor.add_node(self._node)
+
+    def _frame_extrinsics(self, rgb: Any, *, timestamp_s: float) -> dict[str, Any]:
+        configured = dict(self.config.extrinsics)
+        if configured.get("frame_transform") != "tf_dynamic":
+            return configured
+        if self._tf_buffer is None:
+            raise GazeboObservationError("dynamic camera TF listener is not started")
+        try:
+            from rclpy.time import Time
+
+            transform = self._tf_buffer.lookup_transform(
+                str(configured["reference_frame"]),
+                str(configured.get("sensor_frame") or self.config.frame_id),
+                Time.from_msg(rgb.header.stamp),
+            )
+        except Exception as exc:
+            raise GazeboObservationError(
+                "dynamic camera TF is unavailable at the RGB timestamp"
+            ) from exc
+        return _tf_camera_to_world_extrinsics(
+            transform,
+            reference_frame=str(configured["reference_frame"]),
+            sensor_frame=str(configured.get("sensor_frame") or self.config.frame_id),
+            timestamp_s=timestamp_s,
+        )
 
     def capture(
         self,
@@ -255,6 +374,16 @@ class RosRgbdCameraSource:
                 or depth_received <= min_received_monotonic_s
             ):
                 continue
+            try:
+                extrinsics = self._frame_extrinsics(
+                    rgb,
+                    timestamp_s=rgb_stamp,
+                )
+            except GazeboObservationError:
+                # TF and image topics are independent. A just-arrived image
+                # may briefly lead its matching transform; retain the same
+                # bounded capture deadline and fail closed if it never lands.
+                continue
             frame = CameraFrame(
                 frame_id=self.config.frame_id,
                 role=self.config.role,
@@ -263,7 +392,7 @@ class RosRgbdCameraSource:
                     depth, units_per_metre=self.config.depth_units_per_metre
                 ).tolist(),
                 intrinsics=camera_info_intrinsics(info),
-                extrinsics=dict(self.config.extrinsics),
+                extrinsics=extrinsics,
                 # Use the older member of the pair.  A consumer comparing this
                 # value with an action barrier then knows *both* images are new.
                 timestamp_s=min(rgb_stamp, depth_stamp),
@@ -284,6 +413,8 @@ class RosRgbdCameraSource:
             self._node.destroy_node()
             self._node = None
         self._subscriptions = []
+        self._tf_listener = None
+        self._tf_buffer = None
         if self._owns_context:
             import rclpy
             if rclpy.ok():

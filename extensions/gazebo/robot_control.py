@@ -16,6 +16,10 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 
 from adapter.protocol import RobotState
+from .robotiq_kinematics import (
+    DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD,
+    minimum_feasible_active_position,
+)
 
 GAZEBO_CONTROL_ENV_ID = "openeta/gazebo_rm75_robotiq2f85-v0"
 MODEL_ID = "rm75_robotiq_2f85_sim_v1"
@@ -38,6 +42,15 @@ ARM_JOINT_BOUNDS = (
     ("joint_6", -2.234, 2.234),
     ("joint_7", -6.28, 6.28),
 )
+ARM_HOME_JOINT_POSITIONS = (
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    math.pi,
+)
 START_STATE_RECOVERY_SCHEMA_VERSION = "openeta.gazebo.start_state_recovery.v1"
 START_STATE_BOUNDS_TOLERANCE_RAD = 1e-6
 START_STATE_RECOVERY_INSET_RAD = 1e-3
@@ -45,6 +58,18 @@ START_STATE_RECOVERY_TRAJECTORY_S = 1.0
 START_STATE_RECOVERY_TIMEOUT_S = 5.0
 MOTION_SETTLE_RECHECK_TIMEOUT_S = 1.0
 MOTION_SETTLE_RECHECK_INTERVAL_S = 0.1
+# Bound the numerical allowance around the nominal post-motion TF tolerance.
+# This covers sub-millimetre sampling/rounding noise without changing the
+# requested MoveIt goal or accepting a materially incomplete trajectory.
+MOTION_VERIFICATION_NUMERIC_MARGIN_M = 0.0001
+# FollowJointTrajectory can report CONTROL_FAILED after the arm has already
+# reached and settled at the requested pose (for example, a final controller
+# path-tolerance sample arriving just outside its time window).  Reconcile
+# only that exact MoveIt outcome, and only from a fresh terminal robot state
+# whose seven arm joints are effectively stationary.  This does not relax the
+# existing Cartesian terminal tolerances.
+MOVEIT_CONTROL_FAILED = -4
+MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S = 0.001
 # These targets are relative to the first fresh mount pose after a reset, not
 # absolute world coordinates.  They are the small, validated neutral motions
 # available in the empty motion-control profile.  Publishing the relation in the existing
@@ -296,11 +321,21 @@ class GazeboControlConfig:
     closed_position_m: float = 0.0
     active_open_position_m: float = 0.0425
     maximum_aperture_m: float = 0.085
-    # The Robotiq mount frame is coincident with the RM75 terminal flange.
-    # Its vendor base frame remains 6 mm forward, as recorded by the grasp
-    # calibration; do not reintroduce a second adapter length here.
+    gripper_controller_boundary_inset_rad: float = (
+        DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD
+    )
+    # The Robotiq mount frame is position-coincident with the RM75 terminal
+    # flange.  Its jaws are rotated 90 degrees about tool Z so the native RM75
+    # wrist-camera datum lies in the two-finger symmetry plane.  The vendor
+    # base frame remains 6 mm forward, as recorded by the grasp calibration;
+    # do not reintroduce a second adapter length here.
     mount_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    mount_quat_xyzw: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+    mount_quat_xyzw: tuple[float, float, float, float] = (
+        0.0,
+        0.0,
+        0.7071067811865475,
+        0.7071067811865476,
+    )
     asset_root_override: str | None = None
     calibration: "Robotiq2F85Calibration" = field(
         default_factory=lambda: Robotiq2F85Calibration()
@@ -313,11 +348,21 @@ class GazeboControlConfig:
             raise ValueError("invalid fixed mount or gripper joint mapping")
         if len(self.mount_xyz) != 3 or len(self.mount_quat_xyzw) != 4:
             raise ValueError("mount transform has invalid dimensions")
+        if not 0.0 < self.gripper_controller_boundary_inset_rad < 0.4:
+            raise ValueError("invalid gripper controller boundary inset")
 
     def gripper_position(self, position: int) -> float:
         if type(position) is not int or position not in (0, 1):
             raise ValueError("gripper position must be exactly 0 or 1")
-        return self.calibration.angles_rad[-1] if position == 0 else self.calibration.angles_rad[0]
+        if position == 0:
+            return self.calibration.angles_rad[-1]
+        # The theoretical zero-angle pose provides the CAD maximum aperture,
+        # but its exact four-bar solution crosses the inner-knuckle URDF stop.
+        # Command the nearest physically realisable linkage pose instead of
+        # making six independent Gazebo controllers fight a clamped loop.
+        return minimum_feasible_active_position(
+            boundary_inset_rad=self.gripper_controller_boundary_inset_rad
+        )
 
     @property
     def asset_root(self) -> Path:
@@ -491,6 +536,25 @@ def make_move_group_goal(
     offset = _q_rotate(link_q, cfg.mount_xyz)
     link_xyz = [tool_xyz[i] - offset[i] for i in range(3)]
     tolerance_values = tolerances or {}
+    loaded_motion = str(target_pose.get("placement_stage") or "") in {
+        "release",
+        "transport",
+    } or str(target_pose.get("purpose") or "") == "placement"
+    motion_profile = "loaded" if loaded_motion else "unloaded"
+    default_velocity_scaling = float(
+        getattr(
+            cfg,
+            f"{motion_profile}_velocity_scaling",
+            0.3,
+        )
+    )
+    default_acceleration_scaling = float(
+        getattr(
+            cfg,
+            f"{motion_profile}_acceleration_scaling",
+            0.3,
+        )
+    )
     goal = {
         "group_name": cfg.move_group,
         "base_frame": cfg.base_link,
@@ -504,6 +568,8 @@ def make_move_group_goal(
             key: target_pose[key]
             for key in (
                 "purpose",
+                "compiled_grasp_id",
+                "grasp_stage",
                 "placement_candidate_id",
                 "compiled_placement_id",
                 "placement_stage",
@@ -525,11 +591,22 @@ def make_move_group_goal(
         ),
         # Carrying moves may request gentler trajectory scaling; the default
         # preserves the long-standing motion-control/native-grasp motion contract.
+        "motion_profile": motion_profile,
         "max_velocity_scaling_factor": float(
-            (tolerances or {}).get("max_velocity_scaling_factor", 0.3)
+            tolerance_values.get(
+                "max_velocity_scaling_factor",
+                tolerance_values.get(
+                    "velocity_scaling", default_velocity_scaling
+                ),
+            )
         ),
         "max_acceleration_scaling_factor": float(
-            (tolerances or {}).get("max_acceleration_scaling_factor", 0.3)
+            tolerance_values.get(
+                "max_acceleration_scaling_factor",
+                tolerance_values.get(
+                    "acceleration_scaling", default_acceleration_scaling
+                ),
+            )
         ),
     }
     qualified_joint_goal = _validated_qualified_joint_goal(target_pose)
@@ -544,6 +621,8 @@ def _validated_qualified_joint_goal(
     state_field = "qualification_goal_joint_state"
     hash_field = "qualification_goal_joint_state_sha256"
     binding_field = "qualification_binding_sha256"
+    allowed_field = "qualification_allowed_collisions"
+    allowed_hash_field = "qualification_allowed_collisions_sha256"
     if not any(
         field in target_pose for field in (state_field, hash_field, binding_field)
     ):
@@ -599,11 +678,50 @@ def _validated_qualified_joint_goal(
         char not in "0123456789abcdef" for char in binding
     ):
         raise ValueError("qualification binding hash is invalid")
-    return {
+    result = {
         state_field: normalized_state,
         hash_field: supplied_hash,
         binding_field: binding,
     }
+    raw_allowed = target_pose.get(allowed_field)
+    supplied_allowed_hash = target_pose.get(allowed_hash_field)
+    if raw_allowed is None and supplied_allowed_hash is None:
+        return result
+    if target_pose.get("grasp_stage") != "contact" or not str(
+        target_pose.get("compiled_grasp_id") or ""
+    ):
+        raise ValueError(
+            "qualified collision policy is only valid for a compiled grasp contact"
+        )
+    if not isinstance(raw_allowed, Mapping) or len(raw_allowed) != 1:
+        raise ValueError(
+            "qualified collision policy must name exactly one target object"
+        )
+    normalized_allowed: dict[str, list[str]] = {}
+    for raw_object_id, raw_links in raw_allowed.items():
+        object_id = str(raw_object_id).strip()
+        if (
+            not object_id
+            or not isinstance(raw_links, Sequence)
+            or isinstance(raw_links, (str, bytes))
+        ):
+            raise ValueError("qualified collision policy is malformed")
+        links = sorted({str(link).strip() for link in raw_links if str(link).strip()})
+        if not links:
+            raise ValueError("qualified collision policy is malformed")
+        normalized_allowed[object_id] = links
+    expected_allowed_hash = hashlib.sha256(
+        json.dumps(
+            normalized_allowed, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    if str(supplied_allowed_hash or "") != expected_allowed_hash:
+        raise ValueError(
+            "qualified collision policy hash does not match its policy"
+        )
+    result[allowed_field] = normalized_allowed
+    result[allowed_hash_field] = expected_allowed_hash
+    return result
 
 
 def _q_normalize(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
@@ -676,6 +794,15 @@ def motion_request_fingerprint(
         "position_tolerance_m": goal.get("position_tolerance_m"),
         "orientation_tolerance_rad": goal.get("orientation_tolerance_rad"),
         "scene_revision": int(scene_revision),
+        "qualification_goal_joint_state_sha256": goal.get(
+            "qualification_goal_joint_state_sha256"
+        ),
+        "qualification_binding_sha256": goal.get(
+            "qualification_binding_sha256"
+        ),
+        "qualification_allowed_collisions_sha256": goal.get(
+            "qualification_allowed_collisions_sha256"
+        ),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -783,6 +910,15 @@ class GazeboController:
                     action["target_pose"], config=self.config, tolerances=action
                 )
                 scene_revision = int(self.scene_revision_provider())
+                goal["model_id"] = self.config.model_id
+                goal["planning_scene_revision"] = scene_revision
+                goal["live_start_joint_state"] = {
+                    "names": list(ARM_JOINTS),
+                    "positions": [
+                        float(value)
+                        for value in start.joint_positions[: len(ARM_JOINTS)]
+                    ],
+                }
                 request_fingerprint = motion_request_fingerprint(
                     start=start,
                     goal=goal,
@@ -885,6 +1021,13 @@ class GazeboController:
                                 ),
                             },
                         )
+                if (
+                    isinstance(recovery_evidence, Mapping)
+                    and recovery_evidence.get("attempted") is True
+                ):
+                    # Recovery changed the arm after L5 observed its start.
+                    # Withhold the live-start proof and use normal replanning.
+                    goal.pop("live_start_joint_state", None)
                 try:
                     result = dict(self.move_action(goal, timeout_s))
                 except TimeoutError:
@@ -998,6 +1141,19 @@ class GazeboController:
                         "moveit_error_code",
                         "planned_point_count",
                         "execution_started",
+                        "motion_profile",
+                        "max_velocity_scaling_factor",
+                        "max_acceleration_scaling_factor",
+                        "l5_trajectory_reused",
+                        "l5_trajectory_cache_key",
+                        "l5_trajectory_scene_sha256",
+                        "l5_trajectory_cache_status",
+                        "l5_trajectory_cache_reason",
+                        "l5_trajectory_cache_entry_count",
+                        "l5_trajectory_cache_requested_scene_revision",
+                        "l5_trajectory_cache_current_scene_revision",
+                        "l5_trajectory_cache_requested_start_max_delta_rad",
+                        "l5_trajectory_cache_measured_start_max_delta_rad",
                     )
                     if key in result
                 }
@@ -1016,6 +1172,10 @@ class GazeboController:
                 # from the requested tool pose.
                 position_verification_tolerance_m = max(
                     0.0005, 2.0 * float(goal["position_tolerance_m"])
+                )
+                effective_position_verification_tolerance_m = (
+                    position_verification_tolerance_m
+                    + MOTION_VERIFICATION_NUMERIC_MARGIN_M
                 )
                 orientation_verification_tolerance_rad = max(
                     0.005, 2.0 * float(goal["orientation_tolerance_rad"])
@@ -1042,7 +1202,7 @@ class GazeboController:
                     sample_vertical_error_m = sample_xyz[2] - target_xyz[2]
                     sample_verified = (
                         sample_position_error_m
-                        <= position_verification_tolerance_m
+                        <= effective_position_verification_tolerance_m
                         and sample_orientation_error_rad
                         <= orientation_verification_tolerance_rad
                     )
@@ -1061,7 +1221,69 @@ class GazeboController:
                     vertical_error_m,
                     target_verified,
                 ) = verification_metrics(end)
-                position_verification_policy = "exact_terminal_euclidean"
+                position_verification_policy = (
+                    "exact_terminal_euclidean_with_bounded_numeric_margin"
+                )
+                terminal_reconciliation: dict[str, Any] | None = None
+                joint_names = end.metadata.get("joint_names")
+                joint_index = (
+                    {str(name): index for index, name in enumerate(joint_names)}
+                    if isinstance(joint_names, (list, tuple))
+                    else {}
+                )
+                arm_velocities = [
+                    float(end.joint_velocities[joint_index[name]])
+                    for name in ARM_JOINTS
+                    if name in joint_index
+                    and joint_index[name] < len(end.joint_velocities)
+                    and math.isfinite(
+                        float(end.joint_velocities[joint_index[name]])
+                    )
+                ]
+                max_arm_velocity_rad_s = (
+                    max(abs(value) for value in arm_velocities)
+                    if len(arm_velocities) == len(ARM_JOINTS)
+                    else None
+                )
+                control_failed_at_verified_terminal = (
+                    not ok
+                    and result.get("execution_started") is True
+                    and int(result.get("planned_point_count") or 0) > 0
+                    and result.get("moveit_error_code") == MOVEIT_CONTROL_FAILED
+                    and target_verified
+                    and max_arm_velocity_rad_s is not None
+                    and max_arm_velocity_rad_s
+                    <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
+                )
+                if control_failed_at_verified_terminal:
+                    original_error = str(error or "MOTION_EXECUTION_FAILED")
+                    ok = True
+                    error = None
+                    terminal_reconciliation = {
+                        "schema_version": (
+                            "openeta.gazebo.motion_terminal_reconciliation.v1"
+                        ),
+                        "status": "PASS",
+                        "reason_code": (
+                            "CONTROL_FAILED_AFTER_EXACT_TARGET_REACHED"
+                        ),
+                        "proof_boundary": (
+                            "fresh_terminal_tf_and_stationary_arm_joint_state"
+                        ),
+                        "original_error_code": original_error,
+                        "moveit_error_code": MOVEIT_CONTROL_FAILED,
+                        "execution_started": True,
+                        "planned_point_count": int(
+                            result.get("planned_point_count") or 0
+                        ),
+                        "target_verified": True,
+                        "max_arm_velocity_rad_s": max_arm_velocity_rad_s,
+                        "max_arm_velocity_tolerance_rad_s": (
+                            MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
+                        ),
+                        "position_error_m": position_error_m,
+                        "orientation_error_rad": orientation_error_rad,
+                    }
                 settling_recheck: dict[str, Any] | None = None
                 if (
                     ok
@@ -1147,10 +1369,15 @@ class GazeboController:
                         "terminated": False,
                         "truncated": False,
                         "motion_outcome": (
-                            "failed"
-                            if error == "MOTION_TARGET_NOT_REACHED"
-                            else result.get(
-                                "motion_outcome", "completed" if ok else "failed"
+                            "completed"
+                            if terminal_reconciliation is not None
+                            else (
+                                "failed"
+                                if error == "MOTION_TARGET_NOT_REACHED"
+                                else result.get(
+                                    "motion_outcome",
+                                    "completed" if ok else "failed",
+                                )
                             )
                         ),
                         "position_error_m": position_error_m,
@@ -1163,12 +1390,23 @@ class GazeboController:
                         "position_verification_tolerance_m": (
                             position_verification_tolerance_m
                         ),
+                        "position_verification_numeric_margin_m": (
+                            MOTION_VERIFICATION_NUMERIC_MARGIN_M
+                        ),
+                        "position_verification_effective_tolerance_m": (
+                            effective_position_verification_tolerance_m
+                        ),
                         "orientation_verification_tolerance_rad": (
                             orientation_verification_tolerance_rad
                         ),
                         **(
                             {"settling_recheck": settling_recheck}
                             if settling_recheck is not None
+                            else {}
+                        ),
+                        **(
+                            {"terminal_reconciliation": terminal_reconciliation}
+                            if terminal_reconciliation is not None
                             else {}
                         ),
                         "observation": {"robot": end.to_dict()},
@@ -1206,7 +1444,10 @@ class GazeboController:
                 # as an input to its independent native-contact gate.  motion-control's
                 # default profile never credits a stalled or unreached action,
                 # even if a lower adapter incorrectly labels it ``ok``.
-                if bool(getattr(self.config, "allow_stalling", False)):
+                if (
+                    kind == "gripper_close"
+                    and bool(getattr(self.config, "allow_stalling", False))
+                ):
                     # FollowJointTrajectory reports a load-stalled Robotiq close
                     # as ABORTED even though the terminal state and stalled bit
                     # are known.  In the native-grasp profile this admits only
@@ -1243,6 +1484,8 @@ class GazeboController:
                             for key in (
                                 "terminal_status",
                                 "terminal_status_code",
+                                "terminal_gripper_joint_state",
+                                "stall_accepted_for_command",
                                 "wall_elapsed_ms",
                             )
                             if key in result

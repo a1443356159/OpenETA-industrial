@@ -33,6 +33,9 @@ from agent.runtime.planner import (
     _host_parameter_binding_sha256,
     _host_obligation_decision,
     _hydrate_host_bound_parameters,
+    _validate_grasp_recovery_obligation,
+    _validate_placement_release_obligation,
+    _validate_semantic_perception_obligation,
     _validate_anyplace_parameters,
     _matching_depth_enhancement,
     _grasp_sensor_safety_obligation,
@@ -100,9 +103,34 @@ def test_text_sam3_canonicalizes_semantic_alias_to_visual_prompt() -> None:
 
     assert decision.parameters["semantic_target"] == "red rectangular block"
     assert any(
-        item["reason"] == "bind_text_semantics_to_exact_visual_prompt"
-        for item in canonicalizations
+        item["reason"] == "bind_text_semantics_to_exact_visual_prompt" for item in canonicalizations
     )
+
+
+def test_exhausted_semantic_perception_rejects_repeated_observe() -> None:
+    context = {
+        "semantic_perception_obligation": {
+            "status": "exhausted",
+            "semantic_role": "grasp_target",
+            "failure_code": "grasp_target_localization_exhausted",
+        }
+    }
+    observe = PlannerDecision(
+        action_type="tool_call",
+        action="observe",
+        parameters={"reason": "try_the_same_scene_again"},
+    )
+    escalation = PlannerDecision(
+        action_type="response",
+        action="ask_human",
+        parameters={"question": "请确认目标现在的位置。"},
+    )
+
+    errors = _validate_semantic_perception_obligation(observe, tool_context=context)
+
+    assert len(errors) == 1
+    assert "Do not repeat observe" in errors[0]
+    assert _validate_semantic_perception_obligation(escalation, tool_context=context) == []
 
 
 def _rgbd_observation(
@@ -359,9 +387,7 @@ def test_agentic_anyplace_hydrates_frozen_parameters_in_one_model_call(
     hydration = decision.metadata["host_parameter_hydrations"][0]
     assert hydration["source"] == "placement_obligation"
     assert hydration["hydration_mode"] == "empty_parameters"
-    assert hydration["parameter_binding_sha256"] == obligation[
-        "parameter_binding_sha256"
-    ]
+    assert hydration["parameter_binding_sha256"] == obligation["parameter_binding_sha256"]
 
 
 def test_agentic_anyplace_hydrates_frozen_reuse_in_one_model_call(
@@ -465,10 +491,7 @@ def test_host_parameter_hydration_rejects_altered_nonempty_payload() -> None:
 
 def test_anyplace_validator_accepts_host_bound_frozen_goal_reuse() -> None:
     assert (
-        _validate_anyplace_parameters(
-            {"reuse_frozen_goal_pool": True, "scene_revision": 2}
-        )
-        == []
+        _validate_anyplace_parameters({"reuse_frozen_goal_pool": True, "scene_revision": 2}) == []
     )
     assert (
         _validate_anyplace_parameters(
@@ -492,8 +515,7 @@ def test_anyplace_validator_rejects_invalid_frozen_goal_scene_revision(
     )
 
     assert errors == [
-        "anyplace frozen-goal reuse requires `parameters.scene_revision` as a "
-        "non-negative integer."
+        "anyplace frozen-goal reuse requires `parameters.scene_revision` as a non-negative integer."
     ]
 
 
@@ -561,6 +583,74 @@ def test_host_parameter_ref_selects_one_of_two_moveit_bindings() -> None:
     assert decision.parameters == release
     assert hydrations[0]["source"] == "placement_motion_guidance"
     assert hydrations[0]["hydration_mode"] == "obligation_ref"
+
+
+def test_ready_placement_release_suppresses_motion_and_exclusively_requires_open() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "grasp_execution",
+        {"status": "completed", "stage": "attached", "candidate_id": "grasp-1"},
+        source="test",
+    )
+    memory.save_fact(
+        "attachment_gate",
+        {"status": "resolved", "verdict": "PASS", "candidate_id": "grasp-1"},
+        source="test",
+    )
+    memory.save_fact(
+        "placement_candidate_policy",
+        {
+            "status": "active",
+            "active_candidate_id": "place-1",
+            "compiled_placement": {
+                "release_pose": {
+                    "frame": "world",
+                    "purpose": "placement",
+                    "placement_stage": "release",
+                    "placement_candidate_id": "place-1",
+                    "xyz": [0.2, -0.1, 0.4],
+                }
+            },
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "placement_release",
+        {
+            "schema_version": "openeta.placement_release.v1",
+            "status": "ready",
+            "candidate_id": "place-1",
+            "release_pose": {"frame": "world", "xyz": [0.2, -0.1, 0.4]},
+        },
+        source="test",
+    )
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=build_default_tool_registry(),
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["placement_motion_guidance"] is None
+    obligation = context["placement_release_obligation"]
+    assert obligation["required_action"] == {
+        "name": "gripper_control",
+        "parameters": {"position": 1},
+    }
+    repeated_motion = PlannerDecision(
+        "tool_call",
+        "move_to",
+        {"target_pose": {"frame": "world", "xyz": [0.2, -0.1, 0.4]}},
+    )
+    assert _validate_placement_release_obligation(
+        repeated_motion,
+        tool_context=context,
+    )
+    assert not _validate_placement_release_obligation(
+        PlannerDecision("tool_call", "gripper_control", {"position": 1}),
+        tool_context=context,
+    )
 
 
 def test_host_macro_profile_fails_closed_without_calling_model() -> None:
@@ -635,12 +725,114 @@ def test_frozen_grasp_frontier_is_a_model_visible_no_inference_obligation() -> N
     }
 
 
+def test_host_macro_resumes_frozen_grasp_frontier_without_model_turn() -> None:
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "[automation=scripted_tui; planner_mode=host_macro; "
+            "execution_profile=smoke_normal] continue the frozen normal run"
+        )
+    )
+    memory.save_fact(
+        "grasp_candidate_policy",
+        {
+            "status": "frozen_frontier_required",
+            "frozen_grasp_frontier_remaining_count": 17,
+            "frozen_grasp_frontier_generation": 2,
+            "planning_scene_revision": 4,
+        },
+        source="test",
+    )
+    backend_requests = []
+
+    def decide(request):
+        backend_requests.append(request)
+        raise AssertionError("host frozen-frontier continuation must not call the VLM")
+
+    decision = ToolCallingPlanner(CallablePlannerBackend(decide)).plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert backend_requests == []
+    assert decision.action_type == "tool_call"
+    assert decision.action == "grasp_pose_estimate"
+    assert decision.parameters == {
+        "mode": "frozen_frontier",
+        "model_inference": False,
+        "scene_revision": 4,
+    }
+    assert decision.metadata["host_obligation"] == {
+        "schema_version": "openeta.frozen_grasp_frontier_obligation.v1",
+        "tool": "grasp_pose_estimate",
+        "stage": "frozen_grasp_frontier_continuation",
+        "generation": 2,
+        "remaining_candidate_count": 17,
+        "model_inference_invoked": False,
+    }
+
+
+def test_pending_gripper_reopen_hides_and_blocks_frozen_frontier() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "grasp_candidate_policy",
+        {
+            "status": "frozen_frontier_required",
+            "frozen_grasp_frontier_remaining_count": 102,
+            "frozen_grasp_frontier_generation": 1,
+            "planning_scene_revision": 4,
+        },
+        source="test",
+    )
+    recovery = {
+        "schema_version": "openeta.grasp_recovery.v1",
+        "status": "required",
+        "stage": "reopen",
+        "required_action": {
+            "name": "gripper_control",
+            "parameters": {"position": 1},
+        },
+    }
+    memory.save_fact("grasp_recovery", recovery, source="test")
+    context = build_tool_context(
+        observation=_observation(),
+        memory=memory,
+        tools=_tools_with_handlers("gripper_control", "grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["grasp_frontier_obligation"] is None
+    assert context["grasp_recovery"] == recovery
+    assert _validate_grasp_recovery_obligation(
+        PlannerDecision(
+            action_type="tool_call",
+            action="grasp_pose_estimate",
+            parameters={
+                "mode": "frozen_frontier",
+                "model_inference": False,
+                "scene_revision": 4,
+            },
+        ),
+        tool_context=context,
+    )
+    assert not _validate_grasp_recovery_obligation(
+        PlannerDecision(
+            action_type="tool_call",
+            action="gripper_control",
+            parameters={"position": 1},
+        ),
+        tool_context=context,
+    )
+
+
 def test_environment_id_in_ordinary_prose_does_not_trigger_host_creation() -> None:
     memory = AgentMemory()
     memory.start_session(
         task=(
-            "Please inspect environment_id=openeta/gazebo_rm75_robotiq2f85-v0 "
-            "without creating it."
+            "Please inspect environment_id=openeta/gazebo_rm75_robotiq2f85-v0 without creating it."
         )
     )
 
@@ -657,11 +849,11 @@ def test_environment_id_in_ordinary_prose_does_not_trigger_host_creation() -> No
 def test_exhausted_placement_pool_hands_off_without_new_inference() -> None:
     decision = _host_obligation_decision(
         {
-                "placement_candidate_policy": {
-                    "status": "stopped_requires_human",
-                    "stop_reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
-                    "recovery": {"stage": "manual_intervention", "required_action": None},
-                }
+            "placement_candidate_policy": {
+                "status": "stopped_requires_human",
+                "stop_reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
+                "recovery": {"stage": "manual_intervention", "required_action": None},
+            }
         },
         tools=_tools_with_handlers("observe"),
     )
@@ -670,6 +862,53 @@ def test_exhausted_placement_pool_hands_off_without_new_inference() -> None:
     assert decision.action_type == "response"
     assert decision.action == "ask_human"
     assert decision.parameters["failure_code"] == "CURRENT_GRASP_PLACE_INFEASIBLE"
+
+
+def test_failed_placement_release_forces_observation_before_new_inference() -> None:
+    decision = _host_obligation_decision(
+        {
+            "placement_release": {
+                "status": "failed",
+                "failure_code": "PLACEMENT_RELEASE_VERIFICATION_FAILED",
+                "reobservation_required": True,
+            }
+        },
+        tools=_tools_with_handlers("observe", "grasp_pose_estimate"),
+    )
+
+    assert decision is not None
+    assert decision.action_type == "tool_call"
+    assert decision.action == "observe"
+    assert decision.parameters == {"reason": "refresh_after_failed_placement_release"}
+    assert decision.metadata["host_obligation"]["schema_version"] == (
+        "openeta.placement_release_reobservation.v1"
+    )
+
+
+def test_host_macro_stops_after_irreversible_release_failure() -> None:
+    decision = _host_obligation_decision(
+        {
+            "planner_mode": "host_macro",
+            "placement_release": {
+                "status": "failed",
+                "failure_code": "PLACEMENT_RELEASE_POST_DETACH_VERIFICATION_FAILED",
+                # The action response itself may already have supplied the
+                # first fresh view.  That must not start a second smoke chain.
+                "reobservation_required": False,
+            },
+        },
+        tools=_tools_with_handlers("observe", "sam3", "grasp_pose_estimate"),
+    )
+
+    assert decision is not None
+    assert decision.action_type == "response"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == (
+        "PLACEMENT_RELEASE_POST_DETACH_VERIFICATION_FAILED"
+    )
+    assert decision.metadata["host_obligation"]["schema_version"] == (
+        "openeta.smoke_normal_release_stop.v1"
+    )
 
 
 def test_exhausted_frozen_grasp_pool_hands_off_without_model_rerun() -> None:
@@ -687,12 +926,8 @@ def test_exhausted_frozen_grasp_pool_hands_off_without_model_rerun() -> None:
 
     assert decision is not None
     assert decision.action == "ask_human"
-    assert decision.parameters["failure_code"] == (
-        "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE"
-    )
-    assert decision.metadata["host_obligation"]["status"] == (
-        "stopped_requires_human"
-    )
+    assert decision.parameters["failure_code"] == ("CURRENT_FROZEN_MODEL_POOL_INFEASIBLE")
+    assert decision.metadata["host_obligation"]["status"] == ("stopped_requires_human")
 
 
 def test_terminal_gripper_recovery_hands_off_without_vlm_fallthrough() -> None:
@@ -710,12 +945,8 @@ def test_terminal_gripper_recovery_hands_off_without_vlm_fallthrough() -> None:
 
     assert decision is not None
     assert decision.action == "ask_human"
-    assert decision.parameters["failure_code"] == (
-        "gripper_reopen_reconciliation_failed"
-    )
-    assert decision.metadata["host_obligation"]["status"] == (
-        "stopped_requires_human"
-    )
+    assert decision.parameters["failure_code"] == ("gripper_reopen_reconciliation_failed")
+    assert decision.metadata["host_obligation"]["status"] == ("stopped_requires_human")
 
 
 def test_zero_pass_grasp_reestimate_dispatches_fresh_observation() -> None:
@@ -1013,8 +1244,7 @@ def test_failed_grasp_retry_view_advances_without_reusing_pixels(tmp_path: Path)
     )
     assert context["vision_image_paths"] == [str(wrist_rgb)]
     assert [
-        view["rgb_path"]
-        for view in context["grasp_view_selection_obligation"]["candidate_views"]
+        view["rgb_path"] for view in context["grasp_view_selection_obligation"]["candidate_views"]
     ] == [str(wrist_rgb)]
     assert context["target_reference_obligation"] is None
 
@@ -1625,7 +1855,9 @@ def test_default_planner_prompt_preserves_generic_lifecycle_boundaries() -> None
     assert "never use it as a generic final status" in prompt
     assert "finish with task_complete" in prompt
     assert "skills are editable text guidance, not executable macros" in prompt.lower()
-    assert all(term not in prompt.lower() for term in ("sam3", "anygrasp", "anyplace", "molmopoint"))
+    assert all(
+        term not in prompt.lower() for term in ("sam3", "anygrasp", "anyplace", "molmopoint")
+    )
 
 
 def test_planner_enforces_reference_guided_sam3_roi_obligation() -> None:
@@ -2215,14 +2447,24 @@ def test_anyplace_validation_rejects_placeholders_then_accepts_structured_handof
     extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
     valid_parameters = {
         "object_observation": {
-            "rgb": "tmp/object-rgb.png", "depth": "tmp/object-depth.png",
-            "object_mask": {"mask_ref": "tmp/object-mask.png", "source_image": "tmp/object-rgb.png"},
-            "intrinsics": valid_intrinsics, "camera_extrinsics": extrinsics,
+            "rgb": "tmp/object-rgb.png",
+            "depth": "tmp/object-depth.png",
+            "object_mask": {
+                "mask_ref": "tmp/object-mask.png",
+                "source_image": "tmp/object-rgb.png",
+            },
+            "intrinsics": valid_intrinsics,
+            "camera_extrinsics": extrinsics,
         },
         "placement_observation": {
-            "rgb": "tmp/place-rgb.png", "depth": "tmp/place-depth.png",
-            "placement_region_mask": {"mask_ref": "tmp/place-mask.png", "source_image": "tmp/place-rgb.png"},
-            "intrinsics": valid_intrinsics, "camera_extrinsics": extrinsics,
+            "rgb": "tmp/place-rgb.png",
+            "depth": "tmp/place-depth.png",
+            "placement_region_mask": {
+                "mask_ref": "tmp/place-mask.png",
+                "source_image": "tmp/place-rgb.png",
+            },
+            "intrinsics": valid_intrinsics,
+            "camera_extrinsics": extrinsics,
         },
     }
     planner = ToolCallingPlanner(
@@ -2232,8 +2474,8 @@ def test_anyplace_validation_rejects_placeholders_then_accepts_structured_handof
                     "kind": "tool_call",
                     "name": "anyplace",
                     "parameters": {
-                            "object_observation": {},
-                            "placement_observation": {},
+                        "object_observation": {},
+                        "placement_observation": {},
                     },
                 },
                 {"kind": "tool_call", "name": "anyplace", "parameters": valid_parameters},
@@ -2260,8 +2502,20 @@ def test_anyplace_validation_accepts_independent_observations_without_grasp() ->
     intrinsics = {"fx": 1.0, "fy": 1.0, "cx": 0.5, "cy": 0.5, "scale": 1000.0}
     extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
     parameters = {
-        "object_observation": {"rgb": "tmp/o.png", "depth": "tmp/od.png", "object_mask": {"mask_ref": "tmp/om.png", "source_image": "tmp/o.png"}, "intrinsics": intrinsics, "camera_extrinsics": extrinsics},
-        "placement_observation": {"rgb": "tmp/p.png", "depth": "tmp/pd.png", "placement_region_mask": {"mask_ref": "tmp/pm.png", "source_image": "tmp/p.png"}, "intrinsics": intrinsics, "camera_extrinsics": extrinsics},
+        "object_observation": {
+            "rgb": "tmp/o.png",
+            "depth": "tmp/od.png",
+            "object_mask": {"mask_ref": "tmp/om.png", "source_image": "tmp/o.png"},
+            "intrinsics": intrinsics,
+            "camera_extrinsics": extrinsics,
+        },
+        "placement_observation": {
+            "rgb": "tmp/p.png",
+            "depth": "tmp/pd.png",
+            "placement_region_mask": {"mask_ref": "tmp/pm.png", "source_image": "tmp/p.png"},
+            "intrinsics": intrinsics,
+            "camera_extrinsics": extrinsics,
+        },
     }
     planner = ToolCallingPlanner(
         StaticPlannerBackend({"kind": "tool_call", "name": "anyplace", "parameters": parameters})
@@ -2928,17 +3182,14 @@ def test_planner_context_preserves_bounded_control_contract_values() -> None:
 
     expected_targets = control_spec["validated_relative_motion"]["targets"]
     assert (
-        context["observation"]["metadata"]["control_spec"]
-        ["validated_relative_motion"]["targets"]
+        context["observation"]["metadata"]["control_spec"]["validated_relative_motion"]["targets"]
         == expected_targets
     )
-    action = next(
-        item for item in context["memory"]["recent_events"] if item["type"] == "action"
-    )
+    action = next(item for item in context["memory"]["recent_events"] if item["type"] == "action")
     assert (
-        action["payload"]["command"]["tool_calls"][0]["result"]["details"]
-        ["state_delta"]["simulator_environment"]["control_spec"]
-        ["validated_relative_motion"]["targets"]
+        action["payload"]["command"]["tool_calls"][0]["result"]["details"]["state_delta"][
+            "simulator_environment"
+        ]["control_spec"]["validated_relative_motion"]["targets"]
         == expected_targets
     )
 
@@ -4101,13 +4352,18 @@ def test_planner_context_preserves_anyplace_candidates_for_post_pick_motion() ->
                                 "result_type": "planning",
                                 "outputs": {
                                     "candidate_count": 1,
-                                        "placement_candidates": [
-                                            {
-                                                "id": "placement_000",
-                                                "object_placement_transform": {
-                                                    "frame": "placement_camera",
-                                                    "transform_matrix": [[1, 0, 0, 0.1], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-                                                },
+                                    "placement_candidates": [
+                                        {
+                                            "id": "placement_000",
+                                            "object_placement_transform": {
+                                                "frame": "placement_camera",
+                                                "transform_matrix": [
+                                                    [1, 0, 0, 0.1],
+                                                    [0, 1, 0, 0],
+                                                    [0, 0, 1, 0],
+                                                    [0, 0, 0, 1],
+                                                ],
+                                            },
                                         }
                                     ],
                                 },
@@ -4131,7 +4387,10 @@ def test_planner_context_preserves_anyplace_candidates_for_post_pick_motion() ->
         "anyplace_placement_candidates_latest"
     ]
     assert "selected_grasp_id" not in artifact
-    assert artifact["placement_candidates"][0]["object_placement_transform"]["frame"] == "placement_camera"
+    assert (
+        artifact["placement_candidates"][0]["object_placement_transform"]["frame"]
+        == "placement_camera"
+    )
     assert "host-owned compilation event" in artifact["next_tool_hint"]
     assert "compile_placement_seed" not in artifact["next_tool_hint"]
 
@@ -4171,8 +4430,20 @@ def test_anyplace_requires_the_host_frozen_goal_pool_obligation() -> None:
     retained = memory.retained_targeted_grasp()
     extrinsics = {"camera_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
     anyplace_parameters = {
-        "object_observation": {"rgb": "tmp/o.png", "depth": "tmp/od.png", "object_mask": {"mask_ref": "tmp/om.png", "source_image": "tmp/o.png"}, "intrinsics": retained["source"]["intrinsics"], "camera_extrinsics": extrinsics},
-        "placement_observation": {"rgb": "tmp/p.png", "depth": "tmp/pd.png", "placement_region_mask": {"mask_ref": "tmp/pm.png", "source_image": "tmp/p.png"}, "intrinsics": retained["source"]["intrinsics"], "camera_extrinsics": extrinsics},
+        "object_observation": {
+            "rgb": "tmp/o.png",
+            "depth": "tmp/od.png",
+            "object_mask": {"mask_ref": "tmp/om.png", "source_image": "tmp/o.png"},
+            "intrinsics": retained["source"]["intrinsics"],
+            "camera_extrinsics": extrinsics,
+        },
+        "placement_observation": {
+            "rgb": "tmp/p.png",
+            "depth": "tmp/pd.png",
+            "placement_region_mask": {"mask_ref": "tmp/pm.png", "source_image": "tmp/p.png"},
+            "intrinsics": retained["source"]["intrinsics"],
+            "camera_extrinsics": extrinsics,
+        },
     }
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
@@ -4615,10 +4886,7 @@ def test_targeted_grasp_obligation_prefers_usable_enhanced_depth(
     assert required["hints"]["depth_enhancement"]["provenance_mask_png"] == str(
         tmp_path / "provenance.png"
     )
-    assert (
-        required["hints"]["depth_enhancement"]["quality"]["use_for_collision_clearance"]
-        is False
-    )
+    assert required["hints"]["depth_enhancement"]["quality"]["use_for_collision_clearance"] is False
     assert required["hints"]["collision_check"] is False
     assert required["hints"]["depth_enhancement"]["requires_sensor_safety_check"] is True
 
@@ -4746,10 +5014,6 @@ def test_overwidth_grasps_retry_same_target_on_alternate_camera(tmp_path: Path) 
     assert "excluded_backends" not in fallback["required_parameters"]["hints"]
 
 
-
-
-
-
 def test_overwidth_grasps_switch_backend_after_all_camera_views(tmp_path: Path) -> None:
     agent_rgb = tmp_path / "agentview.rgb.png"
     agent_depth = tmp_path / "agentview.depth.png"
@@ -4800,9 +5064,7 @@ def test_overwidth_grasps_switch_backend_after_all_camera_views(tmp_path: Path) 
     fallback = context["grasp_estimation_fallback_obligation"]
     assert fallback["stage"] == "alternate_backend"
     assert fallback["excluded_backends"] == ["anygrasp"]
-    assert fallback["required_parameters"]["hints"]["excluded_backends"] == [
-        "anygrasp"
-    ]
+    assert fallback["required_parameters"]["hints"]["excluded_backends"] == ["anygrasp"]
     decision = ToolCallingPlanner(StaticPlannerBackend([])).plan(
         observation,
         memory=memory,
@@ -5024,13 +5286,16 @@ def test_enhanced_grasp_requires_matching_sensor_safety_evidence(
     )
     assert obligation is not None
     assert obligation["required_tool"] == "obstacle_avoidance"
-    assert _grasp_sensor_safety_obligation(
-        grasp_policy=policy,
-        retained=retained,
-        execution={"status": "required", "stage": "open"},
-        scene_epoch=3,
-        working_artifacts={},
-    ) is not None
+    assert (
+        _grasp_sensor_safety_obligation(
+            grasp_policy=policy,
+            retained=retained,
+            execution={"status": "required", "stage": "open"},
+            scene_epoch=3,
+            working_artifacts={},
+        )
+        is not None
+    )
 
     request = obligation["required_parameters"]["path"]
     evidence = {
@@ -5160,10 +5425,7 @@ def test_grasp_compilation_state_is_not_exposed_as_a_planner_obligation() -> Non
     )
 
     assert "grasp_compile_obligation" not in context
-    assert all(
-        tool["name"] != "compile_grasp_seed"
-        for tool in context["tool_references"]
-    )
+    assert all(tool["name"] != "compile_grasp_seed" for tool in context["tool_references"])
 
 
 def test_fallback_grasp_candidate_reuses_semantics_via_host_compile() -> None:
@@ -5191,10 +5453,7 @@ def test_fallback_grasp_candidate_reuses_semantics_via_host_compile() -> None:
         "pregrasp_distance_m": 0.08,
     }
     assert "grasp_compile_obligation" not in context
-    assert all(
-        tool["name"] != "compile_grasp_seed"
-        for tool in context["tool_references"]
-    )
+    assert all(tool["name"] != "compile_grasp_seed" for tool in context["tool_references"])
 
 
 def test_articulated_handle_compile_mode_is_host_owned() -> None:
@@ -5224,10 +5483,7 @@ def test_articulated_handle_compile_mode_is_host_owned() -> None:
         "strategy_id": "native-front-articulated-handle-panda-p8",
     }
     assert "grasp_compile_obligation" not in context
-    assert all(
-        tool["name"] != "compile_grasp_seed"
-        for tool in context["tool_references"]
-    )
+    assert all(tool["name"] != "compile_grasp_seed" for tool in context["tool_references"])
 
 
 def test_verified_reference_geometry_is_not_exposed_as_compile_obligation() -> None:
@@ -5255,14 +5511,12 @@ def test_verified_reference_geometry_is_not_exposed_as_compile_obligation() -> N
         skills=build_default_skill_registry(),
     )
 
-    assert memory.target_asset_reference()["exact_instance_verification"][
-        "grasp_geometry_family"
-    ] == "upright_can"
-    assert "grasp_compile_obligation" not in context
-    assert all(
-        tool["name"] != "compile_grasp_seed"
-        for tool in context["tool_references"]
+    assert (
+        memory.target_asset_reference()["exact_instance_verification"]["grasp_geometry_family"]
+        == "upright_can"
     )
+    assert "grasp_compile_obligation" not in context
+    assert all(tool["name"] != "compile_grasp_seed" for tool in context["tool_references"])
 
 
 def test_grasp_open_precedes_stale_reference_recovery_obligation() -> None:
@@ -5313,9 +5567,7 @@ def test_grasp_open_precedes_stale_reference_recovery_obligation() -> None:
         tools=tools,
         skills=build_default_skill_registry(),
     )
-    assert context["target_reference_obligation"]["required_tool"] == (
-        "retrieve_asset_reference"
-    )
+    assert context["target_reference_obligation"]["required_tool"] == ("retrieve_asset_reference")
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
             {"kind": "response", "name": "ask_human", "parameters": {"message": "unused"}}
@@ -5527,12 +5779,6 @@ def test_exact_gripper_grasp_stages_use_host_dispatch(stage: str, position: int)
     assert decision.metadata["host_obligation"]["stage"] == stage
 
 
-
-
-
-
-
-
 def test_exact_model_contact_uses_host_dispatch_without_pose_editing() -> None:
     contact_pose = {
         "frame": "world",
@@ -5680,9 +5926,7 @@ def test_articulated_probe_and_assessment_budget_use_host_dispatch() -> None:
         skills=build_default_skill_registry(),
     )
     assert decision.action == "ask_human"
-    assert decision.parameters["failure_code"] == (
-        "articulated_attachment_verification_unknown"
-    )
+    assert decision.parameters["failure_code"] == ("articulated_attachment_verification_unknown")
 
 
 def test_articulated_assessment_fail_dispatches_exact_recovery_open() -> None:
@@ -5722,8 +5966,6 @@ def test_articulated_assessment_fail_dispatches_exact_recovery_open() -> None:
     assert decision.action == "gripper_control"
     assert decision.parameters == {"position": 1}
     assert decision.metadata["host_obligation"]["stage"] == "attachment_recovery"
-
-
 
 
 def test_unknown_native_attachment_allows_immediate_human_stop() -> None:
@@ -5976,7 +6218,7 @@ def test_unified_no_candidates_retries_same_verified_mask_once_with_dense_sampli
     assert memory.sam3_no_detection()["bbox_xyxy"] == [205, 227, 225, 253]
 
 
-def test_unified_grasp_backend_failure_retries_once_then_opens_circuit(
+def test_unified_grasp_backend_failure_opens_circuit_without_repeating_inference(
     tmp_path: Path,
 ) -> None:
     selected_rgb = tmp_path / "selected" / "agentview.rgb.png"
@@ -6002,7 +6244,8 @@ def test_unified_grasp_backend_failure_retries_once_then_opens_circuit(
             "success": False,
             "details": {
                 "outputs": {
-                    "reason": "all_backends_failed",
+                    "reason": "model_inference_failed",
+                    "retryable": False,
                     "backend_attempts": [
                         {
                             "backend": "anygrasp",
@@ -6061,29 +6304,22 @@ def test_unified_grasp_backend_failure_retries_once_then_opens_circuit(
         },
     )
 
+    initial_context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+    blocked_parameters = dict(initial_context["targeted_grasp_obligation"]["required_parameters"])
     record_failure()
     first = memory.selected_sam3_detection()["grasp_estimator_backend_failure"]
     assert first == {
         "reason": "model_inference_failed",
         "error_type": None,
         "attempt_count": 1,
-        "max_attempts": 2,
-        "status": "retry_required",
+        "max_attempts": 1,
+        "status": "exhausted",
     }
-    planner = ToolCallingPlanner(StaticPlannerBackend([]))
-    decision = planner.plan(
-        observation,
-        memory=memory,
-        tools=_tools_with_handlers("grasp_pose_estimate"),
-        skills=build_default_skill_registry(),
-    )
-    assert decision.action == "grasp_pose_estimate"
-    retry_parameters = dict(decision.parameters)
-
-    record_failure()
-    second = memory.selected_sam3_detection()["grasp_estimator_backend_failure"]
-    assert second["attempt_count"] == 2
-    assert second["status"] == "exhausted"
     context = build_tool_context(
         observation=observation,
         memory=memory,
@@ -6098,7 +6334,7 @@ def test_unified_grasp_backend_failure_retries_once_then_opens_circuit(
                 {
                     "kind": "tool_call",
                     "name": "grasp_pose_estimate",
-                    "parameters": retry_parameters,
+                    "parameters": blocked_parameters,
                 },
                 {
                     "kind": "response",
@@ -6117,7 +6353,7 @@ def test_unified_grasp_backend_failure_retries_once_then_opens_circuit(
     )
     assert decision.action == "talk"
     errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
-    assert any("exhausted its bounded retry budget" in error for error in errors)
+    assert any("exhausted its bounded retry budget" in error for error in errors), errors
 
 
 @pytest.mark.parametrize(
@@ -6223,9 +6459,7 @@ def test_sparse_point_mask_uses_selected_bbox_for_roi_retry(tmp_path: Path) -> N
     observation.task = "pick up alphabet soup and place it into basket."
     observation.metadata = {
         "env_id": "libero-env",
-        "image_artifacts": [
-            {"kind": "rgb", "frame_id": "agentview", "path": str(current_scene)}
-        ],
+        "image_artifacts": [{"kind": "rgb", "frame_id": "agentview", "path": str(current_scene)}],
     }
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
@@ -6246,11 +6480,7 @@ def test_sparse_point_mask_uses_selected_bbox_for_roi_retry(tmp_path: Path) -> N
         "prompt": "alphabet soup",
         "roi_bbox_xyxy": bbox_xyxy,
     }
-    assert decision.metadata["host_obligation"]["retry_mode"] == (
-        "roi_after_no_grasp_candidates"
-    )
-
-
+    assert decision.metadata["host_obligation"]["retry_mode"] == ("roi_after_no_grasp_candidates")
 
 
 def test_new_placement_selection_clears_other_detection_from_stale_image() -> None:
@@ -6278,9 +6508,7 @@ def test_new_placement_selection_clears_other_detection_from_stale_image() -> No
             "frame_id": "placement",
             "target_prompt": "red cube",
             "segmentation_mode": "point_prompt",
-            "candidates": [
-                {"id": "detection_000", "mask_ref": "tmp/post-attach-object.png"}
-            ],
+            "candidates": [{"id": "detection_000", "mask_ref": "tmp/post-attach-object.png"}],
         },
         source="test",
     )
@@ -6353,22 +6581,7 @@ def test_placement_selection_is_not_a_public_planner_obligation() -> None:
         skills=build_default_skill_registry(),
     )
     assert "placement_transform_obligation" not in context
-    assert all(
-        tool["name"] != "compile_placement_seed"
-        for tool in context["tool_references"]
-    )
-
-
-
-
-
-
-
-
-
-
-
-
+    assert all(tool["name"] != "compile_placement_seed" for tool in context["tool_references"])
 
 
 @pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])
@@ -6464,18 +6677,6 @@ def test_motion_reconciliation_preempts_pending_host_grasp_move() -> None:
     assert decision.parameters == {}
     assert decision.metadata["execution_model"] == "host_obligation_dispatch"
     assert decision.metadata["host_obligation"]["unknown_tool"] == "move_to"
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_empty_initial_sam3_requires_exact_task_reference_before_prompt_broadening(
@@ -6778,9 +6979,7 @@ def test_molmopoint_fallback_budget_survives_successful_wrong_point_cycle(
         EnvAction(
             action_type="tool_call",
             command={
-                "tool_calls": [
-                    {"name": "molmopoint", "result": {"success": True, "details": {}}}
-                ]
+                "tool_calls": [{"name": "molmopoint", "result": {"success": True, "details": {}}}]
             },
         )
     )
@@ -6874,9 +7073,7 @@ def test_molmopoint_fallback_budget_uses_scene_epoch_not_render_path(
         EnvAction(
             action_type="tool_call",
             command={
-                "tool_calls": [
-                    {"name": "molmopoint", "result": {"success": True, "details": {}}}
-                ]
+                "tool_calls": [{"name": "molmopoint", "result": {"success": True, "details": {}}}]
             },
         )
     )
@@ -6921,12 +7118,6 @@ def test_molmopoint_fallback_budget_uses_scene_epoch_not_render_path(
     assert failure["molmopoint_attempts"] == 1
 
 
-
-
-
-
-
-
 def test_anyplace_host_dispatches_exact_independent_observation_packet() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube and place it in basket")
@@ -6951,8 +7142,26 @@ def test_anyplace_host_dispatches_exact_independent_observation_packet() -> None
         },
         source="test",
     )
-    memory.save_fact("placement_object_detection", {"id": "object", "mask_ref": "tmp/object-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
-    memory.save_fact("placement_region_detection", {"id": "region", "mask_ref": "tmp/region-mask.png", "source_image": "tmp/place-rgb.png", "source_frame_id": "placement"}, source="test")
+    memory.save_fact(
+        "placement_object_detection",
+        {
+            "id": "object",
+            "mask_ref": "tmp/object-mask.png",
+            "source_image": "tmp/place-rgb.png",
+            "source_frame_id": "placement",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "placement_region_detection",
+        {
+            "id": "region",
+            "mask_ref": "tmp/region-mask.png",
+            "source_image": "tmp/place-rgb.png",
+            "source_frame_id": "placement",
+        },
+        source="test",
+    )
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
             {"kind": "response", "name": "talk", "parameters": {"message": "unused"}}
@@ -6964,8 +7173,10 @@ def test_anyplace_host_dispatches_exact_independent_observation_packet() -> None
         with_extrinsics=True,
     )
     exact = build_tool_context(
-        observation=observation, memory=memory,
-        tools=_tools_with_handlers("anyplace"), skills=build_default_skill_registry(),
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("anyplace"),
+        skills=build_default_skill_registry(),
     )["placement_obligation"]["required_parameters"]
 
     decision = planner.plan(
@@ -7453,8 +7664,6 @@ def test_failed_pre_safety_check_advances_anygrasp_candidate() -> None:
     assert policy["rejected_candidates"][0]["source"] == "safety_check_rejected"
 
 
-
-
 def test_structured_uncertain_review_exhaustion_triggers_refinement() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick alphabet soup")
@@ -7520,8 +7729,6 @@ def test_structured_uncertain_review_exhaustion_triggers_refinement() -> None:
     recovery = memory.grasp_estimation_recovery()
     assert recovery["status"] == "required"
     assert recovery["trigger_class"] == "uncertain_review"
-
-
 
 
 def test_host_close_review_rejection_is_attributed_to_active_candidate() -> None:
@@ -7759,6 +7966,77 @@ def test_host_qualified_compile_failure_blocks_model_reinference() -> None:
     assert decision.parameters["failure_code"] == "grasp_compile_terminal_failure"
 
 
+def test_qualification_infrastructure_failure_blocks_model_reinference() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick cylinder")
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {
+                    "kind": "tool_call",
+                    "name": "grasp_pose_estimate",
+                    "parameters": {"mode": "targeted"},
+                },
+                "status": "failed",
+                "tool_calls": [
+                    {
+                        "name": "grasp_pose_estimate",
+                        "status": "failed",
+                        "result": {
+                            "success": False,
+                            "content": "MoveIt qualification infrastructure failed",
+                            "details": {
+                                "outputs": {
+                                    "reason": "qualification_infrastructure_error",
+                                    "infrastructure_error": True,
+                                    "qualification_infrastructure_reason": (
+                                        "plan_only_service_error"
+                                    ),
+                                    "execution_started": False,
+                                }
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "blocked"
+    assert policy["blocked_tool"] == "moveit_candidate_qualification"
+    assert policy["model_inference_retry_allowed"] is False
+    assert policy["failure_code"] == "QUALIFICATION_INFRASTRUCTURE_FAILED"
+    decision = _host_obligation_decision(
+        {"grasp_candidate_policy": policy},
+        tools=build_default_tool_registry(),
+    )
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == ("qualification_infrastructure_failure")
+
+
+def test_native_grasp_infrastructure_failure_stops_without_visual_retry() -> None:
+    policy = {
+        "status": "blocked",
+        "blocked_tool": "gazebo_native_grasp",
+        "failure_code": "GRASP_RUNTIME_INFRASTRUCTURE_FAILED",
+        "terminal_failure": "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE",
+        "model_inference_retry_allowed": False,
+    }
+
+    decision = _host_obligation_decision(
+        {"grasp_candidate_policy": policy},
+        tools=build_default_tool_registry(),
+    )
+
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == ("grasp_runtime_infrastructure_failure")
+    assert decision.metadata["host_obligation"]["schema_version"] == (
+        "openeta.grasp_runtime_infrastructure_stop.v1"
+    )
+
+
 def test_structured_strategy_filter_exhaustion_triggers_perception_refinement() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick bowl")
@@ -7799,12 +8077,8 @@ def test_structured_strategy_filter_exhaustion_triggers_perception_refinement() 
                                             "code": "grasp_seed_candidate_rejected",
                                             "candidate_rejection": True,
                                             "candidate_id": active["id"],
-                                            "message": (
-                                                "native approach below strategy minimum"
-                                            ),
-                                            "rejection_code": (
-                                                "strategy_alignment_rejected"
-                                            ),
+                                            "message": ("native approach below strategy minimum"),
+                                            "rejection_code": ("strategy_alignment_rejected"),
                                             "recovery_class": "perception_refinable",
                                         }
                                     ],
@@ -7826,9 +8100,7 @@ def test_structured_strategy_filter_exhaustion_triggers_perception_refinement() 
     policy = memory.anygrasp_candidate_policy()
     assert policy["status"] == "exhausted"
     assert policy["fallback_required"] is True
-    assert policy["rejected_candidates"][0]["source"] == (
-        "grasp_seed_geometry_rejected"
-    )
+    assert policy["rejected_candidates"][0]["source"] == ("grasp_seed_geometry_rejected")
     assert policy["rejected_candidates"][0]["recovery_class"] == "perception_refinable"
     recovery = memory.grasp_estimation_recovery()
     assert recovery["status"] == "required"
@@ -7959,6 +8231,7 @@ def test_motion_rejection_requires_fresh_observation_for_alternate_view_reestima
     assert memory.anygrasp_candidate_policy()["active_candidate"]["id"] == "grasp_001"
     return
 
+
 def test_unclassified_motion_collision_keeps_active_anygrasp_candidate() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick cube")
@@ -8036,14 +8309,6 @@ def test_successful_motion_accepts_policy_and_releases_later_motion_gate() -> No
         )
         is None
     )
-
-
-
-
-
-
-
-
 
 
 def test_structured_target_not_reached_advances_candidate_despite_success_envelope() -> None:

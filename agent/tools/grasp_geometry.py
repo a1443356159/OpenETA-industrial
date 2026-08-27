@@ -27,6 +27,10 @@ _OPENCV_TO_OPENGL = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
 _ARTICULATED_HANDLE_APPROACH_MODES = {"top_down", "front", "side"}
 _QUALIFIED_JOINT_STATE_FIELD = "qualification_goal_joint_state"
 _QUALIFIED_JOINT_STATE_HASH_FIELD = "qualification_goal_joint_state_sha256"
+_QUALIFIED_ALLOWED_COLLISIONS_FIELD = "qualification_allowed_collisions"
+_QUALIFIED_ALLOWED_COLLISIONS_HASH_FIELD = (
+    "qualification_allowed_collisions_sha256"
+)
 
 
 class GraspGeometryError(ValueError):
@@ -448,13 +452,65 @@ def _bind_qualified_joint_goal(
             state, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
     ).hexdigest()
-    terminal_pose.update(
-        {
-            _QUALIFIED_JOINT_STATE_FIELD: state,
-            _QUALIFIED_JOINT_STATE_HASH_FIELD: state_sha256,
-            "qualification_binding_sha256": binding,
-        }
+    execution_proof: JsonDict = {
+        _QUALIFIED_JOINT_STATE_FIELD: state,
+        _QUALIFIED_JOINT_STATE_HASH_FIELD: state_sha256,
+        "qualification_binding_sha256": binding,
+    }
+    proof_target = final_stage.get("target_pose")
+    raw_allowed_collisions = (
+        proof_target.get(_QUALIFIED_ALLOWED_COLLISIONS_FIELD)
+        if isinstance(proof_target, Mapping)
+        else None
     )
+    if raw_allowed_collisions is not None:
+        if (
+            terminal_pose.get("grasp_stage") != "contact"
+            or not isinstance(proof_target, Mapping)
+            or proof_target.get("grasp_stage") != "contact"
+        ):
+            raise GraspGeometryError(
+                "qualified collision policy is only valid for exact grasp contact"
+            )
+        allowed_collisions = _normalized_allowed_collisions(
+            raw_allowed_collisions
+        )
+        execution_proof[_QUALIFIED_ALLOWED_COLLISIONS_FIELD] = (
+            allowed_collisions
+        )
+        execution_proof[_QUALIFIED_ALLOWED_COLLISIONS_HASH_FIELD] = (
+            hashlib.sha256(
+                json.dumps(
+                    allowed_collisions,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+    terminal_pose.update(execution_proof)
+
+
+def _normalized_allowed_collisions(value: object) -> JsonDict:
+    """Normalize a qualification-owned, non-empty collision exception."""
+
+    if not isinstance(value, Mapping) or len(value) != 1:
+        raise GraspGeometryError(
+            "qualified collision policy must name exactly one target object"
+        )
+    normalized: JsonDict = {}
+    for raw_object_id, raw_links in value.items():
+        object_id = str(raw_object_id).strip()
+        if (
+            not object_id
+            or not isinstance(raw_links, Sequence)
+            or isinstance(raw_links, (str, bytes))
+        ):
+            raise GraspGeometryError("qualified collision policy is malformed")
+        links = sorted({str(link).strip() for link in raw_links if str(link).strip()})
+        if not links:
+            raise GraspGeometryError("qualified collision policy is malformed")
+        normalized[object_id] = links
+    return normalized
 
 
 def compile_grasp_seed(
@@ -819,6 +875,78 @@ def predicted_attachment_from_grasp(
     }
 
 
+def rebase_camera_grasp_candidate_for_object_motion(
+    candidate: Mapping[str, Any],
+    *,
+    camera_extrinsics: Mapping[str, Any],
+    source_object_pose: Mapping[str, Any],
+    target_object_pose: Mapping[str, Any],
+) -> JsonDict:
+    """Preserve a frozen grasp relative to one rigidly moved object.
+
+    Grasp providers return poses in the camera frame captured by their source
+    RGB-D packet.  A rejected physical close may move the detached object while
+    that provider output remains useful.  Apply the measured object transform
+    in world coordinates, then express the grasp back in the *original* camera
+    frame.  The candidate identity is retained for auditability; every motion
+    proof is necessarily regenerated under the new PlanningScene revision.
+    """
+
+    if str(candidate.get("frame") or "") != "camera":
+        raise GraspGeometryError("frozen grasp candidate must use the camera frame")
+    if str(candidate.get("camera_frame") or "opencv").lower() != "opencv":
+        raise GraspGeometryError("frozen grasp candidate must use OpenCV camera axes")
+
+    r_world_camera, p_world_camera = _opencv_camera_to_world(camera_extrinsics)
+    t_world_camera = _transform_matrix(r_world_camera, p_world_camera)
+    t_camera_grasp = _pose_transform(candidate, "frozen_grasp_candidate")
+    t_world_object_source = _pose_transform(
+        source_object_pose, "source_object_pose"
+    )
+    t_world_object_target = _pose_transform(
+        target_object_pose, "target_object_pose"
+    )
+    t_world_delta = _matmul4(
+        t_world_object_target,
+        _inverse_rigid_transform(t_world_object_source),
+    )
+    t_camera_delta = _matmul4(
+        _matmul4(_inverse_rigid_transform(t_world_camera), t_world_delta),
+        t_world_camera,
+    )
+    t_camera_grasp_target = _matmul4(t_camera_delta, t_camera_grasp)
+
+    rebased = json.loads(json.dumps(candidate))
+    translation = _round_vector(
+        [t_camera_grasp_target[row][3] for row in range(3)]
+    )
+    rotation = _round_matrix(
+        [row[:3] for row in t_camera_grasp_target[:3]]
+    )
+    rebased["translation_xyz"] = translation
+    rebased["rotation_matrix"] = rotation
+    rebased["transform_matrix"] = _round_matrix(t_camera_grasp_target)
+
+    tip = candidate.get("gripper_tip_position_xyz")
+    if isinstance(tip, Sequence) and not isinstance(tip, (str, bytes)):
+        tip_xyz = _vector(tip, 3, "frozen_grasp_candidate.gripper_tip_position_xyz")
+        homogeneous_tip = [*tip_xyz, 1.0]
+        rebased["gripper_tip_position_xyz"] = _round_vector(
+            [
+                sum(t_camera_delta[row][column] * homogeneous_tip[column] for column in range(4))
+                for row in range(3)
+            ]
+        )
+    rebased["frozen_object_motion_rebase"] = {
+        "schema_version": "openeta.frozen_object_motion_rebase.v1",
+        "source": "planning_scene_measured_rigid_object_motion",
+        "model_inference_invoked": False,
+        "source_object_pose": json.loads(json.dumps(source_object_pose)),
+        "target_object_pose": json.loads(json.dumps(target_object_pose)),
+    }
+    return rebased
+
+
 def _rotation_matrix_quat_xyzw(rotation: Sequence[Sequence[float]]) -> list[float]:
     m = [[float(value) for value in row] for row in rotation]
     trace = m[0][0] + m[1][1] + m[2][2]
@@ -864,6 +992,32 @@ def camera_optical_forward_world(camera_extrinsics: Mapping[str, Any]) -> list[f
 
     r_world_cv, _ = _opencv_camera_to_world(camera_extrinsics)
     return _normalise([r_world_cv[row][2] for row in range(3)], "camera optical forward")
+
+
+def world_direction_camera(
+    camera_extrinsics: Mapping[str, Any],
+    direction_world: Sequence[float],
+) -> list[float]:
+    """Express one world-frame direction in OpenCV camera coordinates.
+
+    Eye-in-hand cameras move with the robot, so a fixed camera-space gravity
+    or up vector is invalid as soon as the wrist pose changes.  The numeric
+    camera-to-world transform captured with the RGB-D packet is the authority;
+    translation intentionally has no effect on this direction transform.
+    """
+
+    r_world_cv, _ = _opencv_camera_to_world(camera_extrinsics)
+    world = _normalise(
+        _vector(direction_world, 3, "direction_world"),
+        "direction_world",
+    )
+    return _normalise(
+        [
+            sum(r_world_cv[row][column] * world[row] for row in range(3))
+            for column in range(3)
+        ],
+        "camera direction",
+    )
 
 
 def project_attached_object_center_to_image(

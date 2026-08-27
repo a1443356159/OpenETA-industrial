@@ -137,11 +137,11 @@ def test_backend_returns_structured_depth_scale_diagnostics() -> None:
     assert "for uint16 millimeter depth, use scale=1000" in result["content"]
 
 
-def test_backend_prioritises_empty_point_cloud_input_diagnostics() -> None:
+def test_backend_prioritises_empty_point_cloud_input_diagnostics_at_working_limit() -> None:
     backend = AnyGraspBackend(sdk_root=".", checkpoint_path=".")
     result = backend.detect_grasps(
         rgb=_png_payload(np.zeros((2, 2, 3), dtype=np.uint8)),
-        depth=_png_payload(np.full((2, 2), 1500, dtype=np.uint16)),
+        depth=_png_payload(np.full((2, 2), 2000, dtype=np.uint16)),
         intrinsics=_intrinsics(),
         mode="scene",
     )
@@ -149,10 +149,10 @@ def test_backend_prioritises_empty_point_cloud_input_diagnostics() -> None:
     assert result["success"] is False
     assert result["details"]["reason"] == "empty_point_cloud_after_depth_filter"
     assert result["details"]["metadata"]["valid_point_count"] == 0
-    assert result["details"]["metadata"]["depth_raw_min"] == 1500
-    assert result["details"]["metadata"]["depth_raw_max"] == 1500
-    assert result["details"]["metadata"]["depth_metric_min"] == 1.5
-    assert result["details"]["metadata"]["depth_metric_max"] == 1.5
+    assert result["details"]["metadata"]["depth_raw_min"] == 2000
+    assert result["details"]["metadata"]["depth_raw_max"] == 2000
+    assert result["details"]["metadata"]["depth_metric_min"] == 2.0
+    assert result["details"]["metadata"]["depth_metric_max"] == 2.0
     assert result["details"]["metadata"]["intrinsics"] == _intrinsics()
     assert "for uint16 millimeter depth, use scale=1000" in result["content"]
 
@@ -190,7 +190,7 @@ def test_backend_success_metadata_describes_depth_conversion() -> None:
     assert metadata["depth_metric_min"] == pytest.approx(0.1)
     assert metadata["depth_metric_max"] == pytest.approx(0.1)
     assert metadata["intrinsics"] == _intrinsics()
-    assert metadata["depth_truncation"] == 1.0
+    assert metadata["depth_truncation"] == 2.0
     assert metadata["valid_point_count"] == 4
     assert metadata["point_count"] == 4
 

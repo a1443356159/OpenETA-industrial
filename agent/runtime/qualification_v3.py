@@ -23,6 +23,8 @@ FAST_ARTIFACT_SCHEMA = "openeta.moveit_candidate_qualification.v3"
 POSITION_CLUSTER_M = 0.01
 ORIENTATION_CLUSTER_DEG = 10.0
 JOINT_SOLUTION_DEDUP_DISTANCE = 0.05
+PARALLEL_GRIPPER_CENTERING_RISK_RATIO = 0.10
+PARALLEL_GRIPPER_CENTERING_MIN_SPAN_M = 0.02
 
 
 def grasp_symmetry_family_id(candidate: Mapping[str, Any]) -> str:
@@ -50,6 +52,306 @@ def generator_score(candidate: Mapping[str, Any]) -> float:
             if math.isfinite(parsed):
                 return parsed
     return 0.0
+
+
+def parallel_gripper_centering_evidence(
+    value: Mapping[str, Any],
+) -> JsonDict | None:
+    """Return copied provider evidence from either raw or compiled candidates."""
+
+    sources: list[Mapping[str, Any]] = [value]
+    camera_pose = value.get("camera_pose")
+    if isinstance(camera_pose, Mapping):
+        sources.append(camera_pose)
+    compile_parameters = value.get("compile_parameters")
+    if isinstance(compile_parameters, Mapping):
+        compiled_camera_pose = compile_parameters.get("camera_pose")
+        if isinstance(compiled_camera_pose, Mapping):
+            sources.append(compiled_camera_pose)
+    alignment = next(
+        (
+            source.get("target_closing_alignment")
+            for source in sources
+            if isinstance(source.get("target_closing_alignment"), Mapping)
+        ),
+        None,
+    )
+    return dict(alignment) if isinstance(alignment, Mapping) else None
+
+
+def parallel_gripper_centering_quality(
+    value: Mapping[str, Any],
+) -> tuple[int, float]:
+    """Return an ordering-only risk tier for an unchanged model pose.
+
+    GraspGenX candidates may carry an RGB-D measurement of how far the model's
+    closing midplane is from the selected object's midplane.  The host must not
+    apply that correction to the model terminal pose, but it can prefer a pose
+    whose jaws already straddle the object.  Missing evidence is neutral so
+    other providers retain their existing ordering, and every candidate stays
+    in the eventual exhaustive waves.
+    """
+
+    alignment = parallel_gripper_centering_evidence(value)
+    if not isinstance(alignment, Mapping):
+        return (0, PARALLEL_GRIPPER_CENTERING_RISK_RATIO)
+    correction = alignment.get("correction_m")
+    span = alignment.get("target_span_m")
+    if any(
+        not isinstance(item, (int, float))
+        or isinstance(item, bool)
+        or not math.isfinite(float(item))
+        for item in (correction, span)
+    ):
+        return (0, PARALLEL_GRIPPER_CENTERING_RISK_RATIO)
+    denominator = max(abs(float(span)), PARALLEL_GRIPPER_CENTERING_MIN_SPAN_M)
+    ratio = abs(float(correction)) / denominator
+    return (
+        1 if ratio > PARALLEL_GRIPPER_CENTERING_RISK_RATIO else 0,
+        ratio,
+    )
+
+
+def parallel_gripper_target_span_quality(value: Mapping[str, Any]) -> float:
+    """Prefer a wider observed pinch section without rejecting narrow ones."""
+
+    alignment = parallel_gripper_centering_evidence(value)
+    span = alignment.get("target_span_m") if isinstance(alignment, Mapping) else None
+    if (
+        not isinstance(span, (int, float))
+        or isinstance(span, bool)
+        or not math.isfinite(float(span))
+        or float(span) <= 0.0
+    ):
+        return 0.0
+    return -float(span)
+
+
+def placement_clearance_quality(value: Mapping[str, Any]) -> tuple[int, float]:
+    """Prefer post-settle footprint clearance without pruning any goal."""
+
+    margin = value.get("placement_robust_clearance_m")
+    if margin is None:
+        legality = value.get("goal_legality")
+        checks = legality.get("checks") if isinstance(legality, Mapping) else None
+        region = checks.get("placement_region") if isinstance(checks, Mapping) else None
+        if isinstance(region, Mapping):
+            margin = region.get(
+                "conservative_minimum_margin_m",
+                region.get("minimum_margin_m"),
+            )
+    if (
+        not isinstance(margin, (int, float))
+        or isinstance(margin, bool)
+        or not math.isfinite(float(margin))
+    ):
+        return (1, 0.0)
+    return (0, -float(margin))
+
+
+def placement_clearance_risk_tier(value: Mapping[str, Any]) -> int:
+    """Classify geometric settling clearance before comparing its magnitude.
+
+    A strictly positive projected margin is qualitatively different from a
+    negative circumscribed-body margin.  Once two goals are on the same side
+    of that exact geometric boundary, a millimetre of additional empty space
+    must not outweigh support stability or robot joint quality.  Missing
+    evidence remains schedulable at the lowest-confidence tier.
+    """
+
+    status, negative_margin = placement_clearance_quality(value)
+    if status != 0:
+        return 2
+    margin = -negative_margin
+    return 0 if margin >= 0.0 else 1
+
+
+def placement_settling_sweep_clearance_quality(
+    value: Mapping[str, Any],
+) -> tuple[int, float]:
+    """Prefer clearance that survives the pose's predicted support settling."""
+
+    margin = value.get("placement_settling_sweep_clearance_m")
+    if margin is None:
+        legality = value.get("goal_legality")
+        checks = legality.get("checks") if isinstance(legality, Mapping) else None
+        support = checks.get("support") if isinstance(checks, Mapping) else None
+        region = checks.get("placement_region") if isinstance(checks, Mapping) else None
+        if isinstance(support, Mapping):
+            margin = support.get("settling_sweep_clearance_m")
+        if margin is None and isinstance(region, Mapping):
+            margin = region.get("settling_sweep_clearance_m")
+    if (
+        not isinstance(margin, (int, float))
+        or isinstance(margin, bool)
+        or not math.isfinite(float(margin))
+    ):
+        return (1, 0.0)
+    return (0, -float(margin))
+
+
+def placement_settling_quality(value: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Order release poses by the kind of settling evidence available.
+
+    The strongest tier has non-negative clearance even after subtracting the
+    exact radius-chord bound for settling onto the nearest support face. A
+    nominally in-zone goal whose predicted settling sweep crosses the region
+    boundary remains schedulable in the next tier. Negative nominal clearance
+    and missing evidence remain later ordering tiers; neither is pruned.
+    """
+
+    nominal_tier = placement_clearance_risk_tier(value)
+    clearance = placement_clearance_quality(value)
+    sweep_clearance = placement_settling_sweep_clearance_quality(value)
+    stability = placement_support_stability_quality(value)
+    if sweep_clearance[0] == 0:
+        sweep_margin = -sweep_clearance[1]
+        if sweep_margin >= 0.0:
+            return (0, *stability, *sweep_clearance, *clearance)
+        if nominal_tier == 0:
+            return (1, *sweep_clearance, *stability, *clearance)
+        return (2, *clearance, *sweep_clearance, *stability)
+    if nominal_tier == 0:
+        return (1, *stability, *clearance, *sweep_clearance)
+    if nominal_tier == 1:
+        return (2, *clearance, *stability, *sweep_clearance)
+    return (3, *stability, *clearance, *sweep_clearance)
+
+
+def placement_support_stability_quality(value: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Prefer low-energy, face-aligned support poses without pruning goals.
+
+    When exact compound collision geometry is available, its volume centroid
+    is the deterministic uniform-density centre-of-mass proxy. Support-face
+    alignment is compared first because an unaligned model target must move
+    under gravity; energy is then bucketed at the scene's own support-height
+    resolution. The oriented vertical extent remains the compatibility
+    fallback for older v3 artifacts. Every signal here is ordering-only.
+    """
+
+    legality = value.get("goal_legality")
+    checks = legality.get("checks") if isinstance(legality, Mapping) else None
+    support = checks.get("support") if isinstance(checks, Mapping) else None
+
+    support_energy = value.get("placement_support_energy_m")
+    if support_energy is None and isinstance(support, Mapping):
+        support_energy = support.get("geometry_volume_centroid_height_m")
+    energy_resolution = value.get("placement_support_energy_resolution_m")
+    if energy_resolution is None and isinstance(support, Mapping):
+        energy_resolution = support.get("support_energy_resolution_m")
+    alignment_error = value.get("placement_support_face_alignment_error_rad")
+    if alignment_error is None and isinstance(support, Mapping):
+        alignment_error = support.get("support_face_alignment_error_rad")
+    if alignment_error is None:
+        alignment_cosine = value.get("placement_support_face_alignment_cosine")
+        if alignment_cosine is None and isinstance(support, Mapping):
+            alignment_cosine = support.get("support_face_alignment_cosine")
+        if (
+            isinstance(alignment_cosine, (int, float))
+            and not isinstance(alignment_cosine, bool)
+            and math.isfinite(float(alignment_cosine))
+        ):
+            alignment_error = math.acos(
+                min(1.0, max(0.0, float(alignment_cosine)))
+            )
+    if (
+        isinstance(support_energy, (int, float))
+        and not isinstance(support_energy, bool)
+        and math.isfinite(float(support_energy))
+        and float(support_energy) >= 0.0
+    ):
+        energy = float(support_energy)
+        resolution = (
+            float(energy_resolution)
+            if isinstance(energy_resolution, (int, float))
+            and not isinstance(energy_resolution, bool)
+            and math.isfinite(float(energy_resolution))
+            and float(energy_resolution) > 0.0
+            else 0.0
+        )
+        energy_bucket = math.floor(energy / resolution + 1e-12) if resolution else energy
+        alignment_status = 0
+        alignment = 0.0
+        if (
+            not isinstance(alignment_error, (int, float))
+            or isinstance(alignment_error, bool)
+            or not math.isfinite(float(alignment_error))
+            or float(alignment_error) < 0.0
+        ):
+            alignment_status = 1
+        else:
+            alignment = float(alignment_error)
+        return (0, alignment_status, alignment, energy_bucket, energy)
+
+    vertical_extent = value.get("placement_vertical_extent_m")
+    if vertical_extent is None:
+        object_bbox = checks.get("object_bbox") if isinstance(checks, Mapping) else None
+        if isinstance(object_bbox, Mapping):
+            minimum_z = object_bbox.get("minimum_z_m")
+            maximum_z = object_bbox.get("maximum_z_m")
+            if all(
+                isinstance(item, (int, float))
+                and not isinstance(item, bool)
+                and math.isfinite(float(item))
+                for item in (minimum_z, maximum_z)
+            ):
+                vertical_extent = float(maximum_z) - float(minimum_z)
+    if (
+        not isinstance(vertical_extent, (int, float))
+        or isinstance(vertical_extent, bool)
+        or not math.isfinite(float(vertical_extent))
+        or float(vertical_extent) < 0.0
+    ):
+        return (2, 0.0, 1, 0.0, 0.0)
+    extent = float(vertical_extent)
+    return (1, extent, 1, 0.0, extent)
+
+
+def frozen_frontier_parent_priority(value: Mapping[str, Any]) -> int:
+    """Prefer a model-native sibling of the physically failed parent mode."""
+
+    sources: list[Mapping[str, Any]] = [value]
+    camera_pose = value.get("camera_pose")
+    if isinstance(camera_pose, Mapping):
+        sources.append(camera_pose)
+    compile_parameters = value.get("compile_parameters")
+    if isinstance(compile_parameters, Mapping):
+        compiled_camera_pose = compile_parameters.get("camera_pose")
+        if isinstance(compiled_camera_pose, Mapping):
+            sources.append(compiled_camera_pose)
+    return (
+        0 if any(source.get("frozen_frontier_parent_priority") is True for source in sources) else 1
+    )
+
+
+def parallel_gripper_centering_variant_priority(
+    value: Mapping[str, Any],
+) -> int:
+    """Prefer an unchanged model sibling that repairs a risky source mode.
+
+    This signal never changes or removes a pose.  It only moves a bounded
+    provider reserve, already proven to share the failed/high-score parent's
+    approach neighborhood, into the early deep waves where IK and state
+    validity can decide it cheaply.
+    """
+
+    sources: list[Mapping[str, Any]] = [value]
+    camera_pose = value.get("camera_pose")
+    if isinstance(camera_pose, Mapping):
+        sources.append(camera_pose)
+    compile_parameters = value.get("compile_parameters")
+    if isinstance(compile_parameters, Mapping):
+        compiled_camera_pose = compile_parameters.get("camera_pose")
+        if isinstance(compiled_camera_pose, Mapping):
+            sources.append(compiled_camera_pose)
+    for source in sources:
+        alignment = source.get("target_closing_alignment")
+        if (
+            isinstance(alignment, Mapping)
+            and alignment.get("variant_role") == "same_approach_centering_reserve"
+        ):
+            return 0
+    return 1
 
 
 def final_target(descriptor: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -126,7 +428,23 @@ def _descriptor_priority(descriptor: Mapping[str, Any]) -> tuple[Any, ...]:
     score = score if isinstance(score, Mapping) else {}
     candidate = descriptor.get("candidate")
     candidate = candidate if isinstance(candidate, Mapping) else {}
+    centering_risk, centering_ratio = parallel_gripper_centering_quality(candidate)
+    parent_priority = frozen_frontier_parent_priority(candidate)
+    span_quality = parallel_gripper_target_span_quality(candidate)
+    # The initial pool keeps the measured centering order that has the best
+    # early IK recall.  After a physical failure, candidates explicitly linked
+    # to that frozen parent are already within one approach neighbourhood; in
+    # that bounded recovery set, a wider observed pinch section is the more
+    # useful bilateral-contact discriminator.
+    centering_order = (
+        (span_quality, centering_ratio) if parent_priority == 0 else (centering_ratio, span_quality)
+    )
     return (
+        parent_priority,
+        centering_risk,
+        *centering_order,
+        parallel_gripper_centering_variant_priority(candidate),
+        *placement_settling_quality(descriptor),
         -float(score.get("confidence", 0.0)),
         -float(score.get("reachable_density", 0.0)),
         -float(score.get("joint_margin", 0.0)),
@@ -166,12 +484,20 @@ def _descriptor_diversity_distance(left: Mapping[str, Any], right: Mapping[str, 
 def _quality_seeded_farthest_first(
     descriptors: Sequence[Mapping[str, Any]],
 ) -> list[JsonDict]:
-    """Start with the best head, then cover distinct pose modes early."""
+    """Start with the best head, then cover distinct pose modes early.
+
+    Keep each remaining descriptor's minimum distance to the selected set and
+    update it once per newly selected pose.  This is order-equivalent to
+    rescanning every selected/remaining pair on every iteration, but reduces
+    the scheduler from cubic repeated SE(3) work to quadratic work for the
+    full grasp pool.
+    """
 
     remaining = sorted((dict(item) for item in descriptors), key=_descriptor_priority)
     if not remaining:
         return []
     selected = [remaining.pop(0)]
+    minimum_distances = [_descriptor_diversity_distance(item, selected[0]) for item in remaining]
     while remaining:
         # Alternate exploitation and exploration. A pure farthest-first walk
         # can postpone the second-best reachable mode until a later wave;
@@ -182,10 +508,7 @@ def _quality_seeded_farthest_first(
             min(
                 range(len(remaining)),
                 key=lambda candidate_index: (
-                    -min(
-                        _descriptor_diversity_distance(remaining[candidate_index], prior)
-                        for prior in selected
-                    ),
+                    -minimum_distances[candidate_index],
                     _descriptor_priority(remaining[candidate_index]),
                     str(remaining[candidate_index].get("se3_cluster_id") or ""),
                 ),
@@ -193,7 +516,14 @@ def _quality_seeded_farthest_first(
             if choose_farthest
             else 0
         )
-        selected.append(remaining.pop(index))
+        newly_selected = remaining.pop(index)
+        minimum_distances.pop(index)
+        selected.append(newly_selected)
+        for remaining_index, descriptor in enumerate(remaining):
+            minimum_distances[remaining_index] = min(
+                minimum_distances[remaining_index],
+                _descriptor_diversity_distance(descriptor, newly_selected),
+            )
     return selected
 
 
@@ -208,6 +538,39 @@ def _cluster_round_robin(
         clusters[cluster] = deque(sorted(clusters[cluster], key=_descriptor_priority))
     cluster_heads = _quality_seeded_farthest_first([clusters[cluster][0] for cluster in clusters])
     cluster_order = [str(head.get("se3_cluster_id") or "") for head in cluster_heads]
+    ordered: list[JsonDict] = []
+    while any(clusters[cluster] for cluster in cluster_order):
+        for cluster in cluster_order:
+            if clusters[cluster]:
+                ordered.append(clusters[cluster].popleft())
+    return ordered
+
+
+def _quality_ordered_cluster_round_robin(
+    descriptors: Sequence[Mapping[str, Any]],
+) -> list[JsonDict]:
+    """Round-robin placement clusters with the safest geometry first.
+
+    Grasp search benefits from alternating quality and farthest-pose
+    exploration. Placement goals have a different physical asymmetry: for the
+    same rigid body, a low supported oriented box is a better one-shot release
+    than an upright high-energy pose. Order cluster heads by that measured
+    geometry, then round-robin without deleting any cluster or model goal.
+    """
+
+    clusters: dict[str, deque[JsonDict]] = {}
+    for descriptor in descriptors:
+        cluster = str(descriptor.get("se3_cluster_id") or "")
+        clusters.setdefault(cluster, deque()).append(dict(descriptor))
+    for cluster in clusters:
+        clusters[cluster] = deque(sorted(clusters[cluster], key=_descriptor_priority))
+    cluster_order = sorted(
+        clusters,
+        key=lambda cluster: (
+            _descriptor_priority(clusters[cluster][0]),
+            cluster,
+        ),
+    )
     ordered: list[JsonDict] = []
     while any(clusters[cluster] for cluster in cluster_order):
         for cluster in cluster_order:
@@ -231,6 +594,7 @@ def schedule_candidate_waves(
     purpose: str,
     grasp_waves: Sequence[int] = (4, 8, 16, 32, 64),
     placement_waves: Sequence[int] = (4, 8, 16, 32, 96),
+    observation_waves: Sequence[int] = (4, 8, 16, 24),
     capability_map: SparseCapabilityMap | None = None,
 ) -> list[CandidateWave]:
     """Build cumulative waves without deleting any structurally valid candidate."""
@@ -238,10 +602,11 @@ def schedule_candidate_waves(
     annotated = assign_se3_clusters(descriptors)
     for descriptor in annotated:
         descriptor["capability_score"] = _capability_score(descriptor, capability_map).to_dict()
-    if purpose == "grasp":
+    if purpose in {"grasp", "observation"}:
         ordered = _cluster_round_robin(annotated)
+        configured_waves = grasp_waves if purpose == "grasp" else observation_waves
         cumulative = sorted(
-            set([value for value in grasp_waves if value < len(ordered)] + [len(ordered)])
+            set([value for value in configured_waves if value < len(ordered)] + [len(ordered)])
         )
         waves: list[CandidateWave] = []
         previous = 0
@@ -269,7 +634,10 @@ def schedule_candidate_waves(
                 else 0
             )
         branches[branch].append(descriptor)
-    ordered_branches = {branch: _cluster_round_robin(branches[branch]) for branch in branch_order}
+    ordered_branches = {
+        branch: _quality_ordered_cluster_round_robin(branches[branch])
+        for branch in branch_order
+    }
     waves: list[CandidateWave] = []
     for batch_index in sorted(set(branch_batch.values())):
         current_branches = [
@@ -431,8 +799,20 @@ def beam_solution_quality_key(solution: Mapping[str, Any]) -> tuple[Any, ...]:
 def candidate_physical_quality_key(result: Mapping[str, Any]) -> tuple[Any, ...]:
     stages = result.get("stages")
     stages = stages if isinstance(stages, list) else []
+    centering_risk, centering_ratio = parallel_gripper_centering_quality(result)
+    parent_priority = frozen_frontier_parent_priority(result)
+    span_quality = parallel_gripper_target_span_quality(result)
+    centering_order = (
+        (span_quality, centering_ratio) if parent_priority == 0 else (centering_ratio, span_quality)
+    )
     return (
         0 if result.get("endpoint_pass") is True else 1,
+        centering_risk,
+        # Exact positive clearance is a feasibility-quality boundary. Within
+        # the same tier, low support energy and the Beam physical metrics are
+        # stronger evidence than sub-resolution differences in perception-
+        # derived centering or surplus bin space.
+        *placement_settling_quality(result),
         -min((float(stage.get("joint_margin", 0.0)) for stage in stages), default=0.0),
         -min(
             (float(stage.get("min_singular_value", 0.0)) for stage in stages),
@@ -440,6 +820,7 @@ def candidate_physical_quality_key(result: Mapping[str, Any]) -> tuple[Any, ...]
         ),
         sum(float(stage.get("joint_travel", 0.0)) for stage in stages),
         sum(int(stage.get("collision_rescues", 0)) for stage in stages),
+        *centering_order,
         -float(result.get("generator_score", 0.0)),
         int(result.get("fixed_candidate_index", 0)),
     )

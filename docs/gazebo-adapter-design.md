@@ -26,13 +26,6 @@ following, geometric/TF/distance admission, or alternate physics path. A
 missing state ACK or invalid attachment state reports an explicit native-grasp
 error and stops the chain.
 
-## Oracle boundary
-
-`oracle_perceive` remains simulator-truth projection, marked
-`perception_source="gazebo_oracle"`. M4's fake grasp candidate is contractual
-input-shape evidence only; it does not claim visual reasoning and cannot
-bypass native-contact, ACK, or child-link proof gates.
-
 Motion-control gripper safeguards and articulated-handle assets are independent
 of native grasping. The registered profile names are `rgbd_observation`,
 `rm75_robotiq2f85_control`, and `rm75_robotiq2f85_pickplace`; the native-grasp
@@ -40,7 +33,7 @@ receipt schema is `openeta.gazebo.native_grasp.v1`.
 
 ## Acceptance status
 
-Formal M0–M4 evidence must be captured through the real PTY TUI → MCP/SSE →
+Formal normal evidence must be captured through the real PTY TUI → MCP/SSE →
 Gazebo chain. Scripted approvals are labelled `scripted_tui`; they are never
 reported as human approval. A final pass additionally requires the remote
 clean-clone run and its isolation/cleanup evidence. No such remote result is

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
+import math
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from agent.runtime import qualification_v3 as qualification_v3_module
 from agent.runtime.moveit_qualification import (
     QUALIFICATION_SCHEMA_V3,
     MoveItCandidateQualifier,
@@ -21,7 +24,13 @@ from agent.runtime.qualification_legality import (
     evaluate_grasp_placement_pair_legality,
     evaluate_placement_goal_legality,
 )
-from agent.runtime.qualification_v3 import schedule_candidate_waves
+from agent.runtime.qualification_v3 import (
+    candidate_physical_quality_key,
+    frozen_frontier_parent_priority,
+    parallel_gripper_centering_variant_priority,
+    schedule_candidate_waves,
+    select_grasp_branches,
+)
 from agent.tools.registry import ToolResult
 
 
@@ -44,6 +53,236 @@ def _candidate(index: int, *, stages: int = 1, score: float = 0.0):
             for stage in range(stages)
         ],
     }
+
+
+def test_frozen_frontier_parent_priority_reads_compiled_camera_pose() -> None:
+    assert frozen_frontier_parent_priority({}) == 1
+    assert (
+        frozen_frontier_parent_priority(
+            {"compile_parameters": {"camera_pose": {"frozen_frontier_parent_priority": True}}}
+        )
+        == 0
+    )
+
+
+def test_centering_reserve_variant_enters_the_first_deep_wave_without_deletion() -> None:
+    descriptors = []
+    for index in range(8):
+        candidate = _candidate(index, score=100.0 - index)
+        candidate["qualification_stages"][0]["xyz"] = [
+            0.4 + index * 0.012,
+            0.0,
+            0.5,
+        ]
+        if index == 7:
+            candidate["target_closing_alignment"] = {
+                "correction_m": 0.001,
+                "target_span_m": 0.04,
+                "variant_role": "same_approach_centering_reserve",
+                "compatible_parent_backend_indices": [10],
+            }
+        descriptors.append(
+            {
+                "candidate_id": candidate["id"],
+                "candidate": candidate,
+                "candidate_pose_sha256": _hash(candidate),
+            }
+        )
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="grasp",
+        grasp_waves=[4, 8],
+    )
+
+    assert parallel_gripper_centering_variant_priority(descriptors[7]["candidate"]) == 0
+    assert "c7" in [row["candidate_id"] for row in waves[0].candidates]
+    assert sorted(row["candidate_id"] for wave in waves for row in wave.candidates) == [
+        f"c{index}" for index in range(8)
+    ]
+
+
+def test_measured_centering_quality_precedes_weaker_reserve_labels() -> None:
+    descriptors = []
+    for index in range(12):
+        candidate = _candidate(index, score=100.0 - index)
+        candidate["qualification_stages"][0]["xyz"] = [
+            0.35 + index * 0.015,
+            0.0,
+            0.5,
+        ]
+        candidate["target_closing_alignment"] = {
+            "correction_m": 0.0032,
+            "target_span_m": 0.04,
+            "variant_role": "same_approach_centering_reserve",
+        }
+        if index == 11:
+            candidate["target_closing_alignment"] = {
+                "correction_m": 0.0002,
+                "target_span_m": 0.04,
+            }
+        descriptors.append(
+            {
+                "candidate_id": candidate["id"],
+                "candidate": candidate,
+                "candidate_pose_sha256": _hash(candidate),
+            }
+        )
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="grasp",
+        grasp_waves=[4, 12],
+    )
+
+    assert "c11" in [row["candidate_id"] for row in waves[0].candidates]
+
+
+def test_deep_quality_prefers_joint_margin_before_safe_span_tie_breakers() -> None:
+    narrow = {
+        "endpoint_pass": True,
+        "target_closing_alignment": {
+            "correction_m": 0.001,
+            "target_span_m": 0.02,
+        },
+        "stages": [{"joint_margin": 0.8, "min_singular_value": 0.8}],
+    }
+    broad = {
+        "endpoint_pass": True,
+        "target_closing_alignment": {
+            "correction_m": 0.002,
+            "target_span_m": 0.04,
+        },
+        "stages": [{"joint_margin": 0.2, "min_singular_value": 0.2}],
+    }
+
+    assert candidate_physical_quality_key(narrow) < candidate_physical_quality_key(broad)
+
+
+def test_recovery_deep_quality_prefers_joint_margin_before_safe_span_difference() -> None:
+    narrow = {
+        "endpoint_pass": True,
+        "frozen_frontier_parent_priority": True,
+        "target_closing_alignment": {
+            "correction_m": 0.0002,
+            "target_span_m": 0.02,
+        },
+        "stages": [{"joint_margin": 0.8, "min_singular_value": 0.8}],
+    }
+    broad = {
+        "endpoint_pass": True,
+        "frozen_frontier_parent_priority": True,
+        "target_closing_alignment": {
+            "correction_m": 0.002,
+            "target_span_m": 0.04,
+        },
+        "stages": [{"joint_margin": 0.2, "min_singular_value": 0.2}],
+    }
+
+    # Both ratios are below the 0.10 risk boundary and both candidates have
+    # already passed the bilateral terminal-state check.  Joint robustness is
+    # therefore stronger deep-funnel evidence than another span heuristic.
+    assert candidate_physical_quality_key(narrow) < candidate_physical_quality_key(broad)
+
+
+def test_scheduler_prefers_wider_span_within_safe_centering_tier() -> None:
+    narrow = _candidate(0, score=100.0)
+    narrow["frozen_frontier_parent_priority"] = True
+    narrow["target_closing_alignment"] = {
+        "correction_m": 0.0002,
+        "target_span_m": 0.02,
+    }
+    broad = _candidate(1, score=1.0)
+    broad["frozen_frontier_parent_priority"] = True
+    broad["target_closing_alignment"] = {
+        "correction_m": 0.002,
+        "target_span_m": 0.04,
+    }
+    descriptors = [
+        {
+            "candidate_id": candidate["id"],
+            "candidate": candidate,
+            "candidate_pose_sha256": _hash(candidate),
+        }
+        for candidate in (narrow, broad)
+    ]
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="grasp",
+        grasp_waves=[1, 2],
+    )
+
+    assert [row["candidate_id"] for row in waves[0].candidates] == ["c1"]
+
+
+def test_initial_scheduler_keeps_centering_before_span() -> None:
+    narrow = _candidate(0, score=1.0)
+    narrow["target_closing_alignment"] = {
+        "correction_m": 0.0002,
+        "target_span_m": 0.02,
+    }
+    broad = _candidate(1, score=100.0)
+    broad["target_closing_alignment"] = {
+        "correction_m": 0.002,
+        "target_span_m": 0.04,
+    }
+    descriptors = [
+        {
+            "candidate_id": candidate["id"],
+            "candidate": candidate,
+            "candidate_pose_sha256": _hash(candidate),
+        }
+        for candidate in (narrow, broad)
+    ]
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="grasp",
+        grasp_waves=[1, 2],
+    )
+
+    assert [row["candidate_id"] for row in waves[0].candidates] == ["c0"]
+
+
+def test_pose_diversity_scheduler_caches_pairwise_distances(monkeypatch) -> None:
+    descriptors = []
+    for index in range(32):
+        candidate = _candidate(index, score=32.0 - index)
+        candidate["qualification_stages"][0]["xyz"] = [
+            0.2 + index * 0.007,
+            (index % 4) * 0.013,
+            0.5,
+        ]
+        descriptors.append(
+            {
+                "candidate_id": candidate["id"],
+                "candidate": candidate,
+                "candidate_pose_sha256": _hash(candidate),
+            }
+        )
+    calls = 0
+    original = qualification_v3_module._descriptor_diversity_distance
+
+    def counted(left, right):
+        nonlocal calls
+        calls += 1
+        return original(left, right)
+
+    monkeypatch.setattr(
+        qualification_v3_module,
+        "_descriptor_diversity_distance",
+        counted,
+    )
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="grasp",
+        grasp_waves=[4, 8, 16, 32],
+    )
+
+    assert sum(len(wave.candidates) for wave in waves) == 32
+    assert calls <= 32 * 31 // 2
 
 
 def _request(candidates, *, purpose="placement", overrides=None):
@@ -142,6 +381,56 @@ def test_frozen_pair_retains_two_diverse_l5_passes_without_early_cutoff():
     assert response["metrics"]["l5_pass_count"] == 2
     assert response["selected_candidate_ids"] == ["c0", "c1"]
     assert response["results"][2]["verdict"] == "NOT_EVALUATED"
+
+
+def test_l5_rank_preserves_safe_centering_evidence_but_prefers_joint_margin():
+    candidates = [_candidate(0), _candidate(1)]
+    candidates[0]["target_closing_alignment"] = {
+        "correction_m": 0.0036,
+        "target_span_m": 0.04,
+    }
+    candidates[1]["target_closing_alignment"] = {
+        "correction_m": 0.0004,
+        "target_span_m": 0.04,
+    }
+    planned: list[str] = []
+
+    def compute_ik(target, seed, collision):
+        del seed, collision
+        # The better-centered c1 deliberately has the worse joint margin.
+        position = 0.8 if str(target["name"]).startswith("c1_") else 0.0
+        return {
+            "ok": True,
+            "joint_state": {"names": ["j1"], "positions": [position]},
+            "min_singular_value": 0.3,
+        }
+
+    def plan_only(target, start, timeout, attempts):
+        del start, timeout, attempts
+        planned.append(str(target["name"]))
+        position = 0.8 if str(target["name"]).startswith("c1_") else 0.0
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [position]}],
+            "end_joint_state": {"names": ["j1"], "positions": [position]},
+        }
+
+    response = _engine(compute_ik=compute_ik, plan_only=plan_only).qualify(
+        _request(
+            candidates,
+            purpose="grasp",
+            overrides={"grasp_waves": [2], "l5_pass_target": 1},
+        )
+    )
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert planned == ["c0_stage0"]
+    result = next(row for row in response["results"] if row["candidate_id"] == "c0")
+    assert result["target_closing_alignment"] == {
+        "correction_m": 0.0036,
+        "target_span_m": 0.04,
+    }
 
 
 def test_frozen_pair_l5_order_prefers_distinct_grasp_and_goal_cluster():
@@ -286,6 +575,342 @@ def _placement_scene():
     }
 
 
+def test_goal_legality_projects_offset_compound_body_instead_of_centered_outer_box():
+    scene = _placement_scene()
+    scene["world_specs"]["target"] = {
+        "id": "target",
+        "shape": "compound",
+        "size_xyz": [0.22, 0.062, 0.03],
+        "pose_xyz": [0.29, -0.105, 0.015],
+        "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "primitives": [
+            {
+                "shape": "box",
+                "size_xyz": [0.165, 0.025, 0.026],
+                "pose_xyz": [-0.025, 0.0, -0.002],
+                "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+            {
+                "shape": "box",
+                "size_xyz": [0.055, 0.062, 0.03],
+                "pose_xyz": [0.08, 0.0, 0.0],
+                "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        ],
+    }
+    scene["placement_region"].update(
+        {
+            "center_xy": [0.7, 0.18],
+            "size_xy_m": [0.285, 0.275],
+            "support_z_m": 0.02,
+        }
+    )
+    candidate = {
+        "id": "placement_compound",
+        "object_goal_pose": {
+            "translation_xyz": [
+                0.66628256313311,
+                0.16635623309923503,
+                0.05537536084996851,
+            ],
+            "rotation_matrix": [
+                [0.9370705755214195, 0.29557532788619456, 0.185833290219],
+                [-0.3181968095037969, 0.942066089145608, 0.106123954058],
+                [-0.14369966754420774, -0.158577187005505, 0.976833641529],
+            ],
+        },
+    }
+
+    compound = evaluate_placement_goal_legality(
+        {"candidate_id": "placement_compound", "candidate": candidate},
+        scene=scene,
+    )
+    centered_scene = deepcopy(scene)
+    centered_scene["world_specs"]["target"].pop("primitives")
+    centered = evaluate_placement_goal_legality(
+        {"candidate_id": "placement_centered", "candidate": candidate},
+        scene=centered_scene,
+    )
+
+    assert compound["verdict"] == "PASS"
+    assert compound["checks"]["object_bbox"]["geometry_source"] == (
+        "compound_collision_primitives"
+    )
+    assert compound["checks"]["placement_region"]["minimum_margin_m"] == (
+        pytest.approx(0.0015652853126949529)
+    )
+    support = compound["checks"]["support"]
+    region = compound["checks"]["placement_region"]
+    expected_sweep = 2.0 * region["conservative_footprint_radius_m"] * math.sin(
+        support["support_face_alignment_error_rad"] / 2.0
+    )
+    assert support["settling_sweep_translation_bound_m"] == pytest.approx(
+        expected_sweep
+    )
+    assert support["settling_sweep_clearance_m"] == pytest.approx(
+        region["conservative_minimum_margin_m"] - expected_sweep
+    )
+    assert support["settling_sweep_role"] == "ordering_only"
+    assert centered["reason"] == "goal_footprint_outside_placement_region"
+
+
+def test_container_goal_legality_keeps_edge_goal_when_geometry_centroid_is_inside():
+    scene = _placement_scene()
+    scene["placement_region"]["acceptance_semantics"] = (
+        "stable_geometry_centroid_inside"
+    )
+    candidate = {
+        "id": "container_edge",
+        "object_goal_pose": {
+            "translation_xyz": [0.53, -0.1, 0.43],
+            "rotation_matrix": [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        },
+    }
+
+    result = evaluate_placement_goal_legality(
+        {"candidate_id": "container_edge", "candidate": candidate},
+        scene=scene,
+    )
+
+    region = result["checks"]["placement_region"]
+    assert result["verdict"] == "PASS"
+    assert region["complete_footprint_inside"] is False
+    assert region["geometry_centroid_inside"] is True
+    assert region["complete_footprint_margin_role"] == "ordering_only"
+
+
+def test_placement_clearance_orders_l5_without_deleting_edge_goals() -> None:
+    candidates = [_candidate(0, score=10.0), _candidate(1, score=1.0)]
+    for index, candidate in enumerate(candidates):
+        candidate.update(
+            {
+                "source_grasp_id": "g0",
+                "source_grasp_equivalence_id": "g0",
+                "source_object_goal_id": f"p{index}",
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [0.515 if index == 0 else 0.48, -0.1, 0.43],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                },
+            }
+        )
+    planned: list[str] = []
+
+    def plan_only(target, start, timeout, attempts):
+        del start, timeout, attempts
+        planned.append(str(target["name"]))
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [0.2]}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(
+        clone_scene=_placement_scene,
+        plan_only=plan_only,
+    ).qualify(
+        _request(
+            candidates,
+            overrides={"placement_waves": [2], "l5_pass_target": 1},
+        )
+    )
+
+    assert response["selected_candidate_ids"] == ["c1"]
+    assert planned == ["c1_stage0"]
+    results = {row["candidate_id"]: row for row in response["results"]}
+    assert (
+        results["c1"]["placement_robust_clearance_m"]
+        > results["c0"]["placement_robust_clearance_m"]
+    )
+    assert results["c0"]["goal_legality"]["verdict"] == "PASS"
+    assert sorted(results) == ["c0", "c1"]
+
+
+def test_supported_object_height_orders_l5_without_deleting_model_goals() -> None:
+    candidates = [_candidate(0, score=100.0), _candidate(1, score=1.0)]
+    rotations = [
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]],
+    ]
+    for index, candidate in enumerate(candidates):
+        candidate.update(
+            {
+                "source_grasp_id": "g0",
+                "source_grasp_equivalence_id": "g0",
+                "source_object_goal_id": f"p{index}",
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [0.48, -0.1, 0.43 if index == 0 else 0.42],
+                    "rotation_matrix": rotations[index],
+                },
+            }
+        )
+    planned: list[str] = []
+
+    def plan_only(target, start, timeout, attempts):
+        del start, timeout, attempts
+        planned.append(str(target["name"]))
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [0.2]}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(
+        clone_scene=_placement_scene,
+        plan_only=plan_only,
+    ).qualify(
+        _request(
+            candidates,
+            overrides={"placement_waves": [2], "l5_pass_target": 1},
+        )
+    )
+
+    assert response["selected_candidate_ids"] == ["c1"]
+    assert planned == ["c1_stage0"]
+    results = {row["candidate_id"]: row for row in response["results"]}
+    assert results["c1"]["placement_vertical_extent_m"] == pytest.approx(0.04)
+    assert results["c0"]["placement_vertical_extent_m"] == pytest.approx(0.06)
+    assert results["c0"]["goal_legality"]["verdict"] == "PASS"
+    assert sorted(results) == ["c0", "c1"]
+
+
+def test_l4_pass_prefers_positive_settling_clearance_before_height() -> None:
+    near_wall = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": -0.005,
+        "placement_vertical_extent_m": 0.216,
+        "stages": [{"joint_margin": 0.8, "min_singular_value": 0.8}],
+    }
+    centered = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.003,
+        "placement_vertical_extent_m": 0.220,
+        "stages": [{"joint_margin": 0.2, "min_singular_value": 0.2}],
+    }
+
+    assert candidate_physical_quality_key(centered) < candidate_physical_quality_key(near_wall)
+
+
+def test_l4_pass_prefers_low_support_energy_within_positive_clearance_tier() -> None:
+    low_supported = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.001,
+        "placement_vertical_extent_m": 0.03,
+        "stages": [{"joint_margin": 0.4, "min_singular_value": 0.4}],
+    }
+    tall_supported = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.003,
+        "placement_vertical_extent_m": 0.22,
+        "stages": [{"joint_margin": 0.4, "min_singular_value": 0.4}],
+    }
+
+    assert candidate_physical_quality_key(low_supported) < candidate_physical_quality_key(
+        tall_supported
+    )
+
+
+def test_subresolution_support_energy_uses_face_alignment_before_float_noise() -> None:
+    less_settled = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.007,
+        "placement_support_energy_m": 0.1080,
+        "placement_support_energy_resolution_m": 0.01,
+        "placement_support_face_alignment_error_rad": math.radians(5.0),
+        "stages": [{"joint_margin": 0.8, "min_singular_value": 0.8}],
+    }
+    face_aligned = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.007,
+        "placement_support_energy_m": 0.1085,
+        "placement_support_energy_resolution_m": 0.01,
+        "placement_support_face_alignment_error_rad": math.radians(2.0),
+        "stages": [{"joint_margin": 0.4, "min_singular_value": 0.4}],
+    }
+
+    assert candidate_physical_quality_key(face_aligned) < candidate_physical_quality_key(
+        less_settled
+    )
+
+
+def test_face_alignment_precedes_resolved_support_energy() -> None:
+    low_energy = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.007,
+        "placement_support_energy_m": 0.055,
+        "placement_support_energy_resolution_m": 0.01,
+        "placement_support_face_alignment_error_rad": math.radians(20.0),
+        "stages": [{"joint_margin": 0.4, "min_singular_value": 0.4}],
+    }
+    high_energy = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.007,
+        "placement_support_energy_m": 0.115,
+        "placement_support_energy_resolution_m": 0.01,
+        "placement_support_face_alignment_error_rad": 0.0,
+        "stages": [{"joint_margin": 0.8, "min_singular_value": 0.8}],
+    }
+
+    assert candidate_physical_quality_key(high_energy) < candidate_physical_quality_key(
+        low_energy
+    )
+
+
+def test_settling_sweep_clearance_precedes_lower_nominal_energy() -> None:
+    moves_outside = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.003,
+        "placement_settling_sweep_clearance_m": -0.045,
+        "placement_support_energy_m": 0.08,
+        "placement_support_energy_resolution_m": 0.01,
+        "placement_support_face_alignment_error_rad": math.radians(25.0),
+        "stages": [{"joint_margin": 0.8, "min_singular_value": 0.8}],
+    }
+    remains_inside = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": 0.011,
+        "placement_settling_sweep_clearance_m": 0.004,
+        "placement_support_energy_m": 0.13,
+        "placement_support_energy_resolution_m": 0.01,
+        "placement_support_face_alignment_error_rad": math.radians(3.0),
+        "stages": [{"joint_margin": 0.4, "min_singular_value": 0.4}],
+    }
+
+    assert candidate_physical_quality_key(remains_inside) < candidate_physical_quality_key(
+        moves_outside
+    )
+
+
+def test_l4_pass_prefers_safer_margin_within_uncertain_clearance_tier() -> None:
+    less_exposed = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": -0.003,
+        "placement_vertical_extent_m": 0.22,
+        "stages": [{"joint_margin": 0.4, "min_singular_value": 0.4}],
+    }
+    more_exposed = {
+        "endpoint_pass": True,
+        "placement_robust_clearance_m": -0.015,
+        "placement_vertical_extent_m": 0.03,
+        "stages": [{"joint_margin": 0.4, "min_singular_value": 0.4}],
+    }
+
+    assert candidate_physical_quality_key(less_exposed) < candidate_physical_quality_key(
+        more_exposed
+    )
+
+
 def test_joint_scheduler_covers_two_complete_anyplace_branches():
     descriptors = []
     for placement_index in range(96):
@@ -310,6 +935,38 @@ def test_joint_scheduler_covers_two_complete_anyplace_branches():
         waves[0].candidates[0]["candidate"]["source_grasp_id"],
         waves[0].candidates[1]["candidate"]["source_grasp_id"],
     ] == ["g0", "g1"]
+
+
+def test_placement_first_wave_prioritizes_supported_geometry_before_pose_extremes() -> None:
+    descriptors = []
+    vertical_extents = [0.03, 0.04, 0.05, 0.08, 0.12, 0.22]
+    for index, vertical_extent in enumerate(vertical_extents):
+        candidate = _candidate(index, score=100.0 if index == 5 else 1.0)
+        candidate["source_grasp_id"] = "g0"
+        candidate["qualification_stages"][0]["xyz"] = [
+            0.35 + index * 0.03,
+            0.0,
+            0.5,
+        ]
+        descriptors.append(
+            {
+                "candidate_id": candidate["id"],
+                "candidate": candidate,
+                "candidate_pose_sha256": _hash(candidate),
+                "placement_vertical_extent_m": vertical_extent,
+            }
+        )
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="placement",
+        placement_waves=[2, 6],
+    )
+
+    assert [row["candidate_id"] for row in waves[0].candidates] == ["c0", "c1"]
+    assert sorted(
+        row["candidate_id"] for wave in waves for row in wave.candidates
+    ) == [f"c{index}" for index in range(6)]
 
 
 def test_grasp_first_wave_is_quality_seeded_but_pose_diverse_without_deletion():
@@ -341,6 +998,71 @@ def test_grasp_first_wave_is_quality_seeded_but_pose_diverse_without_deletion():
     assert "c7" in first_ids
     assert len(set(first_ids)) == 4
     assert sorted(all_ids) == [f"c{index}" for index in range(8)]
+
+
+def test_grasp_quality_prefers_centered_model_pose_without_applying_offset():
+    centered = {
+        "candidate_id": "centered",
+        "endpoint_pass": True,
+        "generator_score": 0.6,
+        "fixed_candidate_index": 1,
+        "se3_cluster_id": "se3_0001",
+        "grasp_symmetry_family_id": "centered",
+        "compile_parameters": {
+            "camera_pose": {
+                "target_closing_alignment": {
+                    "correction_m": 0.003,
+                    "target_span_m": 0.04,
+                }
+            }
+        },
+        "stages": [
+            {
+                "joint_margin": 0.05,
+                "min_singular_value": 0.02,
+                "joint_travel": 0.5,
+                "collision_rescues": 0,
+            }
+        ],
+    }
+    off_center = {
+        "candidate_id": "off-center",
+        "endpoint_pass": True,
+        "generator_score": 0.9,
+        "fixed_candidate_index": 0,
+        "se3_cluster_id": "se3_0000",
+        "grasp_symmetry_family_id": "off-center",
+        "compile_parameters": {
+            "camera_pose": {
+                "target_closing_alignment": {
+                    "correction_m": -0.006,
+                    "target_span_m": 0.04,
+                }
+            }
+        },
+        "stages": [
+            {
+                "joint_margin": 0.10,
+                "min_singular_value": 0.15,
+                "joint_travel": 0.4,
+                "collision_rescues": 0,
+            }
+        ],
+    }
+
+    selected = select_grasp_branches(
+        [off_center, centered],
+        source={"joint_limits": {"lower": [-1.0], "upper": [1.0]}},
+        limit=2,
+    )
+
+    assert selected == ["centered", "off-center"]
+    assert centered["compile_parameters"]["camera_pose"] == {
+        "target_closing_alignment": {
+            "correction_m": 0.003,
+            "target_span_m": 0.04,
+        }
+    }
 
 
 def test_joint_scheduler_defers_frozen_reserve_branches_until_primary_exhausts():
@@ -713,22 +1435,14 @@ def test_partial_pointcloud_goal_is_bound_to_exact_physical_support_before_pair_
     reconciliation = binding["support_contact_reconciliation"]
     assert reconciliation["applied"] is True
     assert reconciliation["required_translation_z_m"] == pytest.approx(0.0115)
-    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
-        [0.48, -0.1, 0.43]
-    )
-    assert binding["pointcloud_goal_translation_xyz"] == pytest.approx(
-        [0.48, -0.1, 0.443]
-    )
+    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx([0.48, -0.1, 0.43])
+    assert binding["pointcloud_goal_translation_xyz"] == pytest.approx([0.48, -0.1, 0.443])
 
     bind_qualified_placement_goal(descriptor, legality)
 
     bound = descriptor["candidate"]
-    assert bound["qualification_stages"][0]["xyz"] == pytest.approx(
-        [0.5, 0.0, 0.5]
-    )
-    assert bound["object_motion_world_transform"]["transform_matrix"][2][3] == (
-        pytest.approx(0.0)
-    )
+    assert bound["qualification_stages"][0]["xyz"] == pytest.approx([0.5, 0.0, 0.5])
+    assert bound["object_motion_world_transform"]["transform_matrix"][2][3] == (pytest.approx(0.0))
     assert bound["physical_scene_attachment_required"] is True
     pair = evaluate_grasp_placement_pair_legality(
         descriptor,
@@ -892,6 +1606,60 @@ def test_attached_pair_chain_derives_eef_goal_from_measured_attachment():
     assert response["results"][0]["pair_legality"]["checks"]["stage_se3"]["stage_count"] == 1
 
 
+def test_rebased_pair_uses_qualified_object_goal_instead_of_stale_motion():
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "frozen_contact_pose": {
+                "xyz": [0.2, 0.1, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+            },
+            # This transform belonged to the object pose before a failed close
+            # moved it and must not override the newly bound physical goal.
+            "object_motion_world_transform": {
+                "transform_matrix": [
+                    [1, 0, 0, 0.2],
+                    [0, 1, 0, 0.0],
+                    [0, 0, 1, 0.0],
+                    [0, 0, 0, 1],
+                ]
+            },
+            "qualified_world_collision_object_goal_pose": {
+                "xyz": [0.48, -0.1, 0.43],
+                "quat_xyzw": [0, 0, 0, 1],
+            },
+            "frozen_object_motion_rebase": {
+                "schema_version": "openeta.frozen_object_motion_rebase.v1",
+                "model_inference_invoked": False,
+            },
+            "compile_parameters": {
+                "attachment_transform": {
+                    "xyz": [0.0, 0.0, -0.1],
+                    "quat_xyzw": [0, 0, 0, 1],
+                }
+            },
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.48, -0.1, 0.53],
+                    "quat_xyzw": [0, 0, 0, 1],
+                }
+            ],
+        }
+    )
+
+    evidence = evaluate_grasp_placement_pair_legality(
+        {"candidate_id": "c0", "candidate": candidate},
+        scene={},
+        workspace_filter=None,
+    )
+
+    assert evidence["verdict"] == "PASS"
+    assert evidence["checks"]["eef_chain"]["translation_error_m"] == pytest.approx(0.0)
+
+
 def test_object_goal_static_collision_is_rejected_by_target_gate():
     scene = _placement_scene()
     scene["world_specs"]["distractor"] = {
@@ -934,9 +1702,12 @@ def test_object_goal_static_collision_is_rejected_by_target_gate():
         "collision_ids"
     ]
     assert collisions == ["distractor"]
-    assert "distractor" in response["results"][0]["goal_legality"]["checks"][
-        "static_scene_collision"
-    ]["evaluated_obstacle_ids"]
+    assert (
+        "distractor"
+        in response["results"][0]["goal_legality"]["checks"]["static_scene_collision"][
+            "evaluated_obstacle_ids"
+        ]
+    )
     assert response["metrics"]["screening_attempt_count"] == 0
 
 
@@ -991,9 +1762,12 @@ def test_exact_gripper_collision_primitive_is_rejected_by_pair_gate():
     ][0]
     assert collision["body"] == "mount_plate"
     assert collision["obstacle"] == "table"
-    assert "table" in response["results"][0]["pair_legality"]["checks"][
-        "static_scene_collision"
-    ]["evaluated_obstacle_ids"]
+    assert (
+        "table"
+        in response["results"][0]["pair_legality"]["checks"]["static_scene_collision"][
+            "evaluated_obstacle_ids"
+        ]
+    )
 
 
 def test_symmetry_twin_does_not_consume_second_grasp_branch_slot():
@@ -1010,12 +1784,71 @@ def test_symmetry_twin_does_not_consume_second_grasp_branch_slot():
     assert response["stop_reason"] == "complete_l5_pass_found"
 
 
-def test_grasp_profile_does_not_publish_only_one_qualified_branch():
+def test_grasp_profile_publishes_one_l5_pose_only_after_search_exhaustion():
     response = _engine().qualify(_request([_candidate(0)], purpose="grasp"))
 
     assert response["results"][0]["verdict"] == "PASS"
-    assert response["selected_candidate_ids"] == []
-    assert response["stop_reason"] == "candidate_and_recovery_exhausted"
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert response["stop_reason"] == ("complete_l5_pass_found_single_branch_exhaustive_fallback")
+    assert response["metrics"]["l5_pass_count"] == 1
+    assert response["metrics"]["l5_joint_branch_pass_count"] == 1
+    assert response["search_exhaustion"] == {
+        "fast_wave_count_expected": 1,
+        "fast_wave_count_completed": 1,
+        "fast_pool_exhausted": True,
+        "recovery_wave_count_expected": 0,
+        "recovery_wave_count_completed": 0,
+        "recovery_pool_exhausted": True,
+        "preferred_grasp_branch_target": 2,
+        "published_grasp_branch_count": 1,
+        "redundancy_degraded": True,
+    }
+
+
+def test_grasp_profile_proves_farthest_second_beam_branch_after_pool_exhaustion():
+    planned_states = []
+
+    def compute_ik(target, seed, collision):
+        del target, collision
+        position = -0.2 if seed.get("seed_source") == "named_home" else 0.2
+        return {
+            "ok": True,
+            "joint_state": {"names": ["j1"], "positions": [position]},
+            "min_singular_value": 0.3,
+        }
+
+    def plan_only(target, start, timeout, attempts):
+        del start, timeout, attempts
+        state = target["qualification_goal_joint_state"]
+        planned_states.append(state["positions"][0])
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": list(state["positions"])}],
+            "end_joint_state": dict(state),
+        }
+
+    response = _engine(compute_ik=compute_ik, plan_only=plan_only).qualify(
+        _request([_candidate(0)], purpose="grasp")
+    )
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert response["stop_reason"] == "complete_l5_pass_found_joint_branch_fallback"
+    assert response["metrics"]["l5_pass_count"] == 1
+    assert response["metrics"]["l5_joint_branch_pass_count"] == 2
+    assert planned_states == [0.2, -0.2]
+    assert [attempt["joint_branch_index"] for attempt in response["l5_attempts"]] == [0, 1]
+    assert response["l5_attempts"][1]["joint_branch_normalized_distance"] >= 0.05
+    assert {proof["joint_branch_index"] for proof in response["selected_joint_branches"]} == {0, 1}
+    assert (
+        len(
+            {
+                proof["selected_ik_joint_state_sha256"]
+                for proof in response["selected_joint_branches"]
+            }
+        )
+        == 2
+    )
 
 
 def test_grasp_branch_selection_preserves_screen_quality_if_plan_omits_margin():
@@ -1077,6 +1910,295 @@ def test_staged_virtual_transition_clones_scene_before_contact():
         ("virtual_attach", "c0_stage0"),
     ]
     assert response["results"][0]["stages"][0]["scene_transition"]["ok"] is True
+
+
+def test_post_detach_open_hand_collision_is_rejected_before_l5() -> None:
+    candidate = _candidate(0)
+    candidate["qualification_stages"][0].update(
+        {
+            "scene_transition": "virtual_detach",
+            "qualification_post_transition_gripper_state": "open",
+        }
+    )
+    planned = []
+    validity_requests = []
+
+    def validity(state):
+        validity_requests.append(dict(state))
+        open_hand = state.get("qualification_gripper_state") == "open"
+        return {
+            "valid": not open_hand,
+            "collision_pairs": (
+                [["green_bin_wall_left", "robotiq_85_left_finger_tip_link"]] if open_hand else []
+            ),
+        }
+
+    response = _engine(
+        clone_scene=lambda: {"revision": 4, "transitions": []},
+        apply_scene_transition=lambda scene, transition, target: {
+            "ok": True,
+            "planning_scene_diff": {"remove_attached_ids": ["target"]},
+        },
+        check_state_validity=validity,
+        plan_only=lambda *args: planned.append(args),
+    ).qualify(_request([candidate]))
+
+    result = response["results"][0]
+    assert result["verdict"] == "FAIL"
+    assert result["reason"] == "post_transition_gripper_state_invalid"
+    assert planned == []
+    assert any(
+        request.get("qualification_gripper_state") == "open"
+        and request.get("qualification_scene_diff") == {"remove_attached_ids": ["target"]}
+        for request in validity_requests
+    )
+    post_checks = result["stages"][0]["post_transition_gripper_state_checks"]
+    assert post_checks[0]["collision_pairs"] == [
+        ["green_bin_wall_left", "robotiq_85_left_finger_tip_link"]
+    ]
+
+
+def test_l5_rechecks_open_hand_at_actual_planned_endpoint() -> None:
+    candidate = _candidate(0)
+    candidate["qualification_stages"][0].update(
+        {
+            "scene_transition": "virtual_detach",
+            "qualification_post_transition_gripper_state": "open",
+        }
+    )
+    open_checks = 0
+
+    def validity(state):
+        nonlocal open_checks
+        if state.get("qualification_gripper_state") != "open":
+            return {"valid": True, "collision_pairs": []}
+        open_checks += 1
+        return {
+            # Screen Beam endpoint passes, but the exact L5 trajectory endpoint
+            # exposes a terminal collision and must still fail closed.
+            "valid": open_checks % 2 == 1,
+            "collision_pairs": ([] if open_checks % 2 == 1 else [["bin_wall", "right_finger_tip"]]),
+        }
+
+    response = _engine(
+        clone_scene=lambda: {"revision": 4, "transitions": []},
+        apply_scene_transition=lambda scene, transition, target: {
+            "ok": True,
+            "planning_scene_diff": {"remove_attached_ids": ["target"]},
+        },
+        check_state_validity=validity,
+    ).qualify(_request([candidate]))
+
+    result = response["results"][0]
+    # The primary and fixed-seed recovery layers both prove their screen
+    # endpoint and independently reject their actual L5 endpoint.
+    assert open_checks == 4
+    assert result["verdict"] == "FAIL"
+    assert result["reason"] == "post_transition_gripper_state_invalid"
+    l5_open = result["stages"][0]["post_transition_gripper_state_validity"]
+    assert l5_open["requested_gripper_state"] == "open"
+    assert l5_open["joint_state_sha256"] == _hash({"names": ["j1"], "positions": [0.2]})
+    assert l5_open["valid"] is False
+    assert l5_open["retry_count"] == 0
+    assert l5_open["elapsed_s"] >= 0.0
+    assert l5_open["collision_pairs"] == [["bin_wall", "right_finger_tip"]]
+
+
+def test_grasp_contact_allows_only_request_local_target_touch_links():
+    candidate = _candidate(0)
+    candidate["qualification_stages"][0].update(
+        {
+            "grasp_stage": "contact",
+            "scene_transition": "virtual_attach",
+        }
+    )
+    expected = {"target_object": ["left_tip", "right_tip"]}
+    validity_policies = []
+    planning_policies = []
+
+    def clone_scene():
+        return {
+            "revision": 4,
+            "target_id": "target_object",
+            "target_touch_links": ["right_tip", "left_tip"],
+            "transitions": [],
+        }
+
+    def validity(state):
+        validity_policies.append(state.get("qualification_allowed_collisions"))
+        return {"valid": state.get("qualification_allowed_collisions") == expected}
+
+    def plan_only(target, start, timeout, attempts):
+        planning_policies.append(target.get("qualification_allowed_collisions"))
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [0.2]}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(
+        clone_scene=clone_scene,
+        apply_scene_transition=lambda scene, transition, target: {"ok": True},
+        check_state_validity=validity,
+        plan_only=plan_only,
+    ).qualify(_request([candidate], purpose="grasp"))
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert validity_policies and all(policy == expected for policy in validity_policies)
+    assert planning_policies == [expected]
+
+
+def test_grasp_contact_rejects_static_collision_during_l5_close_sweep() -> None:
+    candidate = _candidate(0)
+    candidate["qualification_stages"][0].update(
+        {
+            "grasp_stage": "contact",
+            "scene_transition": "virtual_attach",
+            "qualification_terminal_gripper_state": "closing_sweep",
+        }
+    )
+    planned = []
+    sweep_requests = []
+
+    def validity(state):
+        if state.get("qualification_gripper_state") == "closing_sweep":
+            sweep_requests.append(dict(state))
+            return {
+                "valid": False,
+                "collision_pairs": [
+                    ["robotiq_85_left_finger_tip_link", "work_table"]
+                ],
+                "qualification_gripper_sweep_checks": [
+                    {
+                        "sample": "near_open",
+                        "active_joint_position_rad": 0.05,
+                        "valid": False,
+                        "collision_pairs": [
+                            [
+                                "robotiq_85_left_finger_tip_link",
+                                "work_table",
+                            ]
+                        ],
+                    }
+                ],
+                "qualification_seed_independent_static_collision": True,
+            }
+        return {"valid": True, "collision_pairs": []}
+
+    def plan_only(target, start, timeout, attempts):
+        planned.append(target)
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [0.2]}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(
+        clone_scene=lambda: {
+            "revision": 4,
+            "target_id": "target_object",
+            "target_touch_links": ["left_tip", "right_tip"],
+            "transitions": [],
+        },
+        apply_scene_transition=lambda scene, transition, target: {"ok": True},
+        check_state_validity=validity,
+        plan_only=plan_only,
+    ).qualify(_request([candidate], purpose="grasp"))
+
+    result = response["results"][0]
+    assert result["verdict"] == "FAIL"
+    assert result["reason"] == "terminal_gripper_state_invalid"
+    assert planned == []
+    assert sweep_requests
+    assert sweep_requests[0]["qualification_allowed_collisions"] == {
+        "target_object": ["left_tip", "right_tip"]
+    }
+    terminal = result["stages"][0]["terminal_gripper_state_validity"]
+    assert terminal["requested_gripper_state"] == "closing_sweep"
+    assert terminal["preplan_endpoint_check"] is True
+    assert terminal["seed_independent_static_collision"] is True
+    assert terminal["collision_pairs"] == [
+        ["robotiq_85_left_finger_tip_link", "work_table"]
+    ]
+
+
+def test_grasp_contact_rejects_seed_independent_one_sided_contact_geometry() -> None:
+    candidate = _candidate(0)
+    candidate["qualification_stages"][0].update(
+        {
+            "grasp_stage": "contact",
+            "scene_transition": "virtual_attach",
+            "qualification_terminal_gripper_state": "closing_sweep",
+        }
+    )
+    planned = []
+
+    def validity(state):
+        if state.get("qualification_gripper_state") == "closing_sweep":
+            return {
+                "valid": False,
+                "reason": "qualification_bilateral_target_contact_not_predicted",
+                "collision_pairs": [
+                    ["robotiq_85_left_finger_tip_link", "target_object"]
+                ],
+                "qualification_gripper_sweep_checks": [
+                    {
+                        "sample": "close_2",
+                        "active_joint_position_rad": 0.4,
+                        "valid": True,
+                        "collision_pairs": [
+                            [
+                                "robotiq_85_left_finger_tip_link",
+                                "target_object",
+                            ]
+                        ],
+                        "target_contact_links": [
+                            "robotiq_85_left_finger_tip_link"
+                        ],
+                        "bilateral_target_contact": False,
+                    }
+                ],
+                "qualification_seed_independent_static_collision": False,
+                "qualification_bilateral_target_contact_required": True,
+                "qualification_bilateral_target_contact_predicted": False,
+                "qualification_seed_independent_contact_geometry_failure": True,
+            }
+        return {"valid": True, "collision_pairs": []}
+
+    def plan_only(target, start, timeout, attempts):
+        planned.append(target)
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": [0.2]}],
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(
+        clone_scene=lambda: {
+            "revision": 4,
+            "target_id": "target_object",
+            "target_touch_links": ["left_tip", "right_tip"],
+            "transitions": [],
+        },
+        apply_scene_transition=lambda scene, transition, target: {"ok": True},
+        check_state_validity=validity,
+        plan_only=plan_only,
+    ).qualify(_request([candidate], purpose="grasp"))
+
+    result = response["results"][0]
+    assert result["verdict"] == "FAIL"
+    assert result["reason"] == "terminal_gripper_state_invalid"
+    assert planned == []
+    terminal = result["stages"][0]["terminal_gripper_state_validity"]
+    assert terminal["bilateral_target_contact_required"] is True
+    assert terminal["bilateral_target_contact_predicted"] is False
+    assert terminal["seed_independent_contact_geometry_failure"] is True
+    assert terminal["reason"] == (
+        "qualification_bilateral_target_contact_not_predicted"
+    )
 
 
 def test_nonfinite_transform_is_hard_rejected_before_ik():
@@ -1561,4 +2683,4 @@ def test_fast_qualifier_writes_v3_artifact_and_selected_candidate(tmp_path: Path
     assert artifact["l5_attempts"]
     assert artifact["legality_screening"]["goal_legality_unique_count"] == 1
     assert artifact["legality_screening"]["pair_legality_evaluation_count"] == 1
-    assert artifact["stop_reason"] == "complete_l5_pass_found"
+    assert artifact["stop_reason"] == "complete_l5_pass_found_minimum_lookahead"

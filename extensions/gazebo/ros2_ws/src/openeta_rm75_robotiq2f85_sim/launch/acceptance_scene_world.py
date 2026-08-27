@@ -155,7 +155,10 @@ def _replace_placement_regions(
     marker = world.find("model[@name='placement_zone_marker']")
     if marker is None:
         raise RuntimeError("canonical placement marker is invalid")
-    world.remove(marker)
+    for marker_name in ("placement_zone_marker", "blue_destination_marker"):
+        existing_marker = world.find(f"model[@name='{marker_name}']")
+        if existing_marker is not None:
+            world.remove(existing_marker)
     for raw_region in regions:
         if not isinstance(raw_region, Mapping):
             raise RuntimeError("acceptance scene placement region is invalid")
@@ -165,6 +168,12 @@ def _replace_placement_regions(
         rgba = _numbers(raw_region.get("rgba"), 4)
         if not region_id:
             raise RuntimeError("acceptance scene placement region identity is invalid")
+        # The canonical industrial world contains physical green/blue bins.
+        # A generated legacy scene may reuse either semantic ID for a flat
+        # region, so replace that model instead of emitting duplicate SDF IDs.
+        existing_region = world.find(f"model[@name='{region_id}']")
+        if existing_region is not None:
+            world.remove(existing_region)
         model = ET.SubElement(world, "model", {"name": region_id})
         ET.SubElement(model, "static").text = "true"
         ET.SubElement(model, "pose").text = _text(
@@ -208,6 +217,8 @@ def render_acceptance_world(
     obstacles = scene.get("static_obstacles")
     if not world_scene or not isinstance(obstacles, list):
         raise RuntimeError("acceptance scene definition is invalid")
+    if scene.get("canonical_world_complete") is True:
+        return base_world, world_scene
     destination_value = scene.get("destination_center_xy")
     target_value = scene.get("target_object")
     placement_regions = scene.get("placement_regions")

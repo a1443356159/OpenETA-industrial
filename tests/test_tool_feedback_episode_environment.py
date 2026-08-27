@@ -359,6 +359,47 @@ def test_reset_failure_cleanup_does_not_latch_episode_terminal_state() -> None:
 
     assert step.terminated is False
     assert step.truncated is False
+    assert environment.simulator_session_id == ""
+    assert environment.handle == ""
+
+    successful_retry = EnvAction(
+        action_type="tool_call",
+        command={
+            "request": {
+                "kind": "tool_call",
+                "name": "create_simulator_env",
+                "parameters": {},
+            },
+            "tool_calls": [
+                {
+                    "name": "create_simulator_env",
+                    "result": {
+                        "success": True,
+                        "details": {
+                            "host_provenance": {"authority": "environment"},
+                            "environment_receipt": {
+                                "schema_version": "openeta.environment_receipt.v1",
+                                "execution_id": "episode-1",
+                                "agent_session_id": "agent-1",
+                                "simulator_session_id": "replacement-session",
+                                "handle": "replacement-env",
+                                "reward_present": False,
+                                "observation_fresh": False,
+                                "environment_closed": False,
+                            },
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    retry_step = environment.step(successful_retry)
+
+    assert retry_step.info["environment_receipt_trusted"] is True
+    assert "rejected_environment_receipts" not in retry_step.info
+    assert environment.simulator_session_id == "replacement-session"
+    assert environment.handle == "replacement-env"
 
 
 def test_libero_success_requires_same_execution_trusted_receipt(

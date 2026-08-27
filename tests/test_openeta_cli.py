@@ -633,16 +633,21 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
     urls = {
         "openeta-sam3": "http://sam3.example/sse",
         "openeta-anygrasp": "http://anygrasp.example/sse",
+        "openeta-graspgenx": "http://graspgenx.example/sse",
         "openeta-anyplace": "http://anyplace.example/sse",
         "openeta-contact-graspnet": "http://contact.example/sse",
     }
     calls = {
         "sam3_urls": [],
         "anygrasp_urls": [],
+        "graspgenx_urls": [],
+        "graspgenx_list_urls": [],
         "anyplace_urls": [],
         "contact_urls": [],
         "sam3": [],
         "anygrasp": [],
+        "graspgenx": [],
+        "graspgenx_list": [],
         "anyplace": [],
         "contact": [],
     }
@@ -720,6 +725,100 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
             }
 
         return detect_grasps
+
+    def fake_graspgenx_predictor(*, url, tool_name="predict_grasps", timeout_seconds=600.0):
+        calls["graspgenx_urls"].append((url, tool_name, timeout_seconds))
+
+        def predict_grasps(request):
+            calls["graspgenx"].append(request)
+            gripper_name = request["gripper_name"]
+            transform = [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.5],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+            candidate = {
+                "id": "graspgenx_000",
+                "rank": 0,
+                "backend_index": 0,
+                "source_model": "graspgenx",
+                "gripper_name": gripper_name,
+                "candidate_source": "diffusion",
+                "frame": "camera",
+                "camera_frame": "opencv",
+                "grasp_frame": "graspnet",
+                "convention": "p_camera = R @ p_grasp + t",
+                "score": 0.8,
+                "translation_xyz": [0.0, 0.0, 0.5],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                "transform_matrix": transform,
+                "gripper_tip_position_xyz": [0.0, 0.0, 0.6],
+                "depth": 0.1,
+                "width": 0.06,
+                "height": 0.04,
+            }
+            return {
+                "success": True,
+                "content": "GraspGenX grasp prediction completed.",
+                "details": {
+                    "tool": "predict_grasps",
+                    "backend": "graspgenx_mcp",
+                    "model": "graspgenx",
+                    "planner": "graspmoe",
+                    "deterministic": True,
+                    "frame": "camera",
+                    "camera_frame": "opencv",
+                    "grasp_frame": "graspnet",
+                    "gripper_name": gripper_name,
+                    "raw_candidate_count": 1,
+                    "generated_candidate_count": 1,
+                    "candidate_count": 1,
+                    "grasp_candidates": [candidate],
+                    "ranking": "score_descending",
+                    "artifacts": [],
+                    "metadata": {},
+                },
+            }
+
+        return predict_grasps
+
+    def fake_graspgenx_lister(*, url, tool_name="list_grippers", timeout_seconds=600.0):
+        calls["graspgenx_list_urls"].append((url, tool_name, timeout_seconds))
+
+        def list_grippers():
+            calls["graspgenx_list"].append({})
+            return {
+                "success": True,
+                "content": "GraspGenX gripper listing completed.",
+                "details": {
+                    "tool": "list_grippers",
+                    "gripper_count": 1,
+                    "grippers": [
+                        {
+                            "name": "robotiq_2f_85",
+                            "gripper_type": "parallel_jaw",
+                            "fingertip_depth": 0.1,
+                            "sweep_volume_open": {
+                                "extents_xyz": [0.085, 0.04, 0.12],
+                                "offset_xyz": [0.0, 0.0, 0.06],
+                            },
+                            "sweep_volume_mid": {
+                                "extents_xyz": [0.04, 0.04, 0.12],
+                                "offset_xyz": [0.0, 0.0, 0.06],
+                            },
+                            "asset_family": "x_grippers",
+                        }
+                    ],
+                    "model_loaded": True,
+                },
+            }
+
+        return list_grippers
 
     def fake_anyplace_placer(*, url, tool_name="predict_placement", timeout_seconds=600.0):
         calls["anyplace_urls"].append((url, tool_name, timeout_seconds))
@@ -826,6 +925,16 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
     )
     monkeypatch.setattr(
         runtime_assembly,
+        "build_sse_graspgenx_mcp_predictor",
+        fake_graspgenx_predictor,
+    )
+    monkeypatch.setattr(
+        runtime_assembly,
+        "build_sse_graspgenx_mcp_gripper_lister",
+        fake_graspgenx_lister,
+    )
+    monkeypatch.setattr(
+        runtime_assembly,
         "build_sse_anyplace_mcp_placer",
         fake_anyplace_placer,
     )
@@ -908,10 +1017,18 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
         ("http://sam3.example/sse", "segment_points", 600.0),
     ]
     assert calls["anygrasp_urls"] == [("http://anygrasp.example/sse", "detect_grasps", 600.0)]
+    assert calls["graspgenx_urls"] == [
+        ("http://graspgenx.example/sse", "predict_grasps", 600.0)
+    ]
+    assert calls["graspgenx_list_urls"] == [
+        ("http://graspgenx.example/sse", "list_grippers", 600.0)
+    ]
     assert calls["anyplace_urls"] == [("http://anyplace.example/sse", "predict_placement", 600.0)]
     assert calls["contact_urls"] == [("http://contact.example/sse", "predict_grasps", 600.0)]
     assert calls["sam3"][0]["prompt"] == "cube"
-    assert calls["anygrasp"][0]["mode"] == "targeted"
+    assert calls["anygrasp"] == []
+    assert calls["graspgenx"][0]["gripper_name"] == "robotiq_2f_85"
+    assert calls["graspgenx_list"] == [{}]
     assert sam3.success is True
     assert grasp.success is True
     assert runtime.tools.can_execute("anygrasp") is False

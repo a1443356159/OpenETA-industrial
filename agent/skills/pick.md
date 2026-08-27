@@ -18,6 +18,7 @@ allowed_tools:
   - estimate_depth_prior
   - enhance_depth
   - grasp_pose_estimate
+  - active_observe
   - reject_sam3_detections
   - activate_final_grasp_candidate
   - camera_pose_to_world
@@ -44,6 +45,10 @@ the planner.
    one grasp later fails. In combined pick-place, first let the host create the
    private 96-goal AnyPlace pool for look-ahead; those object goals are not
    executable motions.
+   If the selected target packet is too small, depth-sparse, border-clipped, or
+   occluded, call `active_observe` once with its exact SAM3 result ID before
+   grasp generation. A normal top view that already passes quality needs no
+   active-vision call or wrist motion.
 3. Call `grasp_pose_estimate` only with
    `targeted_grasp_obligation.required_parameters`. Backend choice and fallback
    are host-owned. A provider pose is the exact terminal EEF contact pose after

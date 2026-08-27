@@ -20,6 +20,7 @@ from agent.runtime.runtime_assembly import (
     _compile_qualified_queue,
     _prepare_postattachment_frozen_goals,
     _qualifying_handler,
+    _restore_frozen_model_motion_for_predicted_pair,
 )
 from agent.tools.handlers import build_anyplace_handler
 from agent.tools.registry import ToolExecutionContext, ToolResult, build_default_tool_registry
@@ -42,6 +43,90 @@ def _pass_stage() -> dict[str, Any]:
         ],
         "trajectory": {"point_count": 2},
     }
+
+
+def test_frozen_physical_goal_retires_active_model_motion_transform() -> None:
+    goal = {
+        "id": "p0",
+        "object_goal_pose": {
+            "translation_xyz": [0.45, 0.0, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "object_motion_world_transform": {
+            "transform_matrix": [
+                [1.0, 0.0, 0.0, 0.17],
+                [0.0, 1.0, 0.0, -0.04],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        },
+    }
+    physical_goal = {
+        "translation_xyz": [0.48, -0.1, 0.43],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+
+    frozen = _FrozenGoalPairCoordinator._bind_physical_collision_goal(
+        goal,
+        goal_id="p0",
+        collision_goal=physical_goal,
+    )
+
+    assert frozen["object_goal_pose"] == physical_goal
+    assert frozen["world_object_goal_pose"] == physical_goal
+    assert "object_motion_world_transform" not in frozen
+    assert frozen["model_object_motion_world_transform"] == (
+        goal["object_motion_world_transform"]
+    )
+    assert frozen["frozen_goal_frame_binding"]["physical_collision_goal"] is True
+
+
+def test_new_grasp_pair_replays_cached_model_motion_only_for_predicted_attachment() -> None:
+    model_motion = {
+        "frame": "world",
+        "convention": "T_world_motion_applied_left",
+        "transform_matrix": [
+            [0.980066578, -0.198669331, 0.0, 0.17],
+            [0.198669331, 0.980066578, 0.0, -0.04],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+    }
+    pair = {
+        "id": "frozen_pair_g1_p0",
+        "model_object_motion_world_transform": model_motion,
+        "frozen_goal_frame_binding": {"physical_collision_goal": True},
+        "frozen_contact_pose": {
+            "frame": "world",
+            "xyz": [0.3, 0.0, 0.45],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "predicted_attachment_transform": {
+            "parent_frame": "eef",
+            "child_frame": "object",
+            "translation_xyz": [0.0, 0.0, -0.1],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+    }
+
+    _restore_frozen_model_motion_for_predicted_pair(pair)
+
+    assert pair["object_motion_world_transform"] == model_motion
+    assert pair["object_motion_world_transform"] is not model_motion
+    assert pair["physical_scene_attachment_required"] is True
+    assert pair["physical_scene_attachment_source"] == (
+        "cached_collision_goal_with_replayed_model_motion"
+    )
+
+    rebased = {
+        **pair,
+        "frozen_object_motion_rebase": {
+            "schema_version": "openeta.frozen_object_motion_rebase.v1"
+        },
+    }
+    rebased.pop("object_motion_world_transform")
+    _restore_frozen_model_motion_for_predicted_pair(rebased)
+    assert "object_motion_world_transform" not in rebased
 
 
 def test_host_compiles_every_full_plan_pass_into_one_equal_status_queue() -> None:
@@ -168,6 +253,12 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
     assert predicted["qualification_stages"][0]["xyz"] == pytest.approx(
         [0.48, -0.1, 0.343]
     )
+    assert predicted["qualification_stages"][0]["scene_transition"] == (
+        "virtual_detach"
+    )
+    assert predicted["qualification_stages"][0][
+        "qualification_post_transition_gripper_state"
+    ] == "open"
     assert predicted["compile_parameters"]["placement_candidate"][
         "object_goal_pose"
     ] == model_goal
@@ -181,6 +272,23 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
         "object_goal_pose"
     ] == physical_goal
     assert measured["compile_parameters"]["placement_candidate"][
+        "qualification_object_goal_source"
+    ] == "physical_goal_with_measured_attachment"
+
+    rebased_candidate = dict(candidate)
+    rebased_candidate["frozen_object_motion_rebase"] = {
+        "schema_version": "openeta.frozen_object_motion_rebase.v1",
+        "model_inference_invoked": False,
+    }
+    rebased = compiler(rebased_candidate, "placement", {}, 3, 8)
+
+    assert rebased["qualification_stages"][0]["xyz"] == pytest.approx(
+        [0.475, -0.101, 0.331]
+    )
+    assert rebased["compile_parameters"]["placement_candidate"][
+        "object_goal_pose"
+    ] == physical_goal
+    assert rebased["compile_parameters"]["placement_candidate"][
         "qualification_object_goal_source"
     ] == "physical_goal_with_measured_attachment"
 
@@ -326,7 +434,8 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
         "progressive_until_full_plan_capacity"
     )
     assert captured["funnel"]["endpoint_pass_target"] == 2
-    assert captured["funnel"]["l5_pass_target"] == 1
+    assert captured["funnel"]["l5_pass_target"] == 2
+    assert captured["funnel"]["l5_min_pass_target"] == 1
     assert "l5_submission_limit" not in captured["funnel"]
     assert captured["funnel"]["qualification_mode"] == "frozen_pair"
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0"]
@@ -589,7 +698,7 @@ def test_fast_pair_search_returns_first_complete_pair_and_defers_backup(
         call["funnel"]["l5_pass_target"]
         for call in calls
         if call["purpose"] == "placement"
-    ] == [1]
+    ] == [2]
     assert [
         call["funnel"]["l5_pass_target"]
         for call in calls
@@ -616,6 +725,99 @@ def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:
     )
 
     assert returned.details["grasp_candidates"] == [{"id": "g0"}]
+
+
+def test_frozen_grasp_frontier_rebases_only_with_static_scene_and_detach_proof() -> None:
+    coordinator = _FrozenGoalPairCoordinator(
+        MoveItCandidateQualifier(lambda *_args: {}),
+        object_goals=[{"id": "p0", "object_goal_pose": {"frame": "world"}}],
+        object_current_pose={
+            "frame": "world",
+            "translation_xyz": [0.28, -0.1, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        scene_epoch=1,
+        planning_scene_revision=1,
+        grasp_frontier_candidates=[
+            {
+                "id": "g1",
+                "frame": "camera",
+                "camera_frame": "opencv",
+                "translation_xyz": [0.1, 0.2, 0.3],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            }
+        ],
+        grasp_frontier_template={
+            "source": {
+                "camera_extrinsics": {
+                    "camera_frame": "opencv",
+                    "pos": [0.0, 0.0, 0.0],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            }
+        },
+        grasp_frontier_scene_epoch=1,
+        grasp_frontier_planning_scene_revision=1,
+    )
+    sync = {
+        "schema_version": "openeta.planning_scene_target_pose_sync.v1",
+        "operation": "update_world_target",
+        "source_revision": 1,
+        "revision": 2,
+        "source_target_pose": {
+            "frame": "world",
+            "translation_xyz": [0.28, -0.1, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "target_pose": {
+            "frame": "world",
+            "translation_xyz": [0.29, -0.1, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "world_ids_before": ["table", "target_object"],
+        "world_ids_after": ["table", "target_object"],
+        "attached_ids_before": [],
+        "attached_ids_after": [],
+        "topology_unchanged": True,
+        "static_world_unchanged": True,
+        "static_world_sha256_after": "static-scene",
+        "translation_delta_m": 0.01,
+        "rotation_delta_rad": 0.0,
+    }
+    receipt = {
+        "planning_scene_target_pose_sync": sync,
+        "detachable_joint": {"state": "detached"},
+    }
+
+    result = coordinator.rebase_grasp_frontier_from_target_pose_sync(
+        receipt,
+        scene_epoch=4,
+        planning_scene_revision=2,
+    )
+
+    assert result.success is True
+    assert coordinator.grasp_frontier_candidates[0][
+        "translation_xyz"
+    ] == pytest.approx([0.11, 0.2, 0.3])
+    assert coordinator.grasp_frontier_candidates[0][
+        "frozen_object_motion_rebase"
+    ] == coordinator.grasp_frontier_template["frozen_object_motion_rebase"]
+    assert coordinator.grasp_frontier_candidates[0][
+        "frozen_object_motion_rebase"
+    ]["planning_scene_revision"] == 2
+    assert coordinator.object_current_pose["translation_xyz"] == [0.29, -0.1, 0.43]
+    assert coordinator.planning_scene_revision == 2
+    assert coordinator.grasp_frontier_planning_scene_revision == 2
+
+    unsafe = dict(receipt)
+    unsafe["detachable_joint"] = {"state": "attached"}
+    rejected = coordinator.rebase_grasp_frontier_from_target_pose_sync(
+        unsafe,
+        scene_epoch=5,
+        planning_scene_revision=3,
+    )
+    assert rejected.success is False
+    assert rejected.details["reason"] == "frozen_grasp_frontier_rebase_proof_missing"
 
 
 def test_complete_goal_rejection_never_leaks_a_grasp_only_frontier_candidate() -> None:

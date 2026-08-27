@@ -14,7 +14,7 @@ def test_gazebo_env_uses_existing_worker_resolution_and_registry() -> None:
     assert spec is not None and spec.env_type == "gazebo"
 
 
-def test_m1_registration_resolves_the_single_direct_env_profile() -> None:
+def test_live_rgbd_registration_resolves_the_single_direct_env_profile() -> None:
     profile = gazebo_profile("rgbd_observation")
     assert profile.name == "rgbd_observation"
     assert profile.launch_package == "openeta_rm75_robotiq2f85_sim"
@@ -25,7 +25,7 @@ def test_m1_registration_resolves_the_single_direct_env_profile() -> None:
     assert "authoritative_camera" in profile.capabilities
 
 
-def test_m1_launch_is_server_only_and_uses_official_rgbd_bridges() -> None:
+def test_live_rgbd_launch_is_server_only_and_uses_official_rgbd_bridges() -> None:
     root = Path(__file__).parents[1]
     launch = root / "extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/launch/gazebo_rgbd.launch.py"
     text = launch.read_text(encoding="utf-8")
@@ -36,7 +36,7 @@ def test_m1_launch_is_server_only_and_uses_official_rgbd_bridges() -> None:
 
 
 def test_gazebo_unified_env_reports_the_established_backend_name() -> None:
-    # The MCP wire contract and M2 diagnostics expect the historical
+    # The MCP wire contract and robot-control diagnostics expect the historical
     # "gazebo" backend string from the pre-UnifiedEnv workers.
     import gymnasium as gym
 

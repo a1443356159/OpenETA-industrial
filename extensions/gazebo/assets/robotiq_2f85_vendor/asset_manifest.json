@@ -11,7 +11,7 @@
     {"path":"LICENSE","sha256":"a47544ef0ad645c587e46348dc10e68b89c3e74732bd124c005cfcd8ede3b3b8"},
     {"path":"NOTICE","sha256":"16543c16e234687404b7830c37aaf630fb9e0db91957c2499b3d6894e1e6467a"},
     {"path":"urdf/2f_85.ros2_control.xacro","sha256":"d6db556ca1f7ec88dc3f18641ac6908efab04157e738c9587e4a02840c2b76d7"},
-    {"path":"urdf/rm75_robotiq2f85.urdf.xacro","sha256":"88c8124ad972030212b26de0aa548953f4e9b5de4844925955c66615142e321a"},
+    {"path":"urdf/rm75_robotiq2f85.urdf.xacro","sha256":"a3b9fa2cdb46e3fc9f81ea70c0ce1a9cd7d7838d8b34580abbd47afb1b5e571d"},
     {"path":"urdf/robotiq_2f_85_macro.urdf.xacro","sha256":"6ea24b9c0f99d1ca0d9140b2657e04dce62eb6af8991be2725cef14eacb4da40"},
     {"path":"meshes/collision/2f_85/left_finger.stl","sha256":"f39a50be121122fc1c53c588a762ad1da8a0f64d39bc6f299cbe9b0597e7257b"},
     {"path":"meshes/collision/2f_85/left_finger_tip.stl","sha256":"9d90031cd99106a8be63609f8ff78580638d91cc4167bf66c09198329f2e65cf"},

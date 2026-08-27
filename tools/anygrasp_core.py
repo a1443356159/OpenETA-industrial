@@ -17,6 +17,9 @@ from tools.candidate_config import (
 )
 
 
+DEFAULT_DEPTH_TRUNCATION = 2.0
+
+
 class AnyGraspInputError(Exception):
     """Input or normalized-output data cannot satisfy the AnyGrasp contract."""
 
@@ -46,7 +49,7 @@ class AnyGraspBackend:
         checkpoint_path: str | Path,
         max_gripper_width: float = 0.1,
         gripper_height: float = 0.03,
-        depth_truncation: float = 1.0,
+        depth_truncation: float = DEFAULT_DEPTH_TRUNCATION,
         raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
     ) -> None:
         self.sdk_root = Path(sdk_root)

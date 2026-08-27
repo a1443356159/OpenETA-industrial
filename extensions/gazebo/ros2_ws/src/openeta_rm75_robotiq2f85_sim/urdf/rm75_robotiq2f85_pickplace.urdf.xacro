@@ -7,32 +7,43 @@
   <xacro:rm75_robotiq2f85 parent="link_7" mount_z="0.0"/>
   <xacro:openeta_robotiq_ros2_control controller_config="$(arg controller_config)"/>
 
-  <xacro:macro name="gz_gripper_position_controller" params="joint topic">
+  <xacro:macro name="gz_gripper_position_controller" params="joint topic p_gain d_gain">
     <gazebo><plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
       <joint_name>${joint}</joint_name><topic>${topic}</topic>
-      <p_gain>12.0</p_gain><i_gain>0.0</i_gain><d_gain>0.4</d_gain>
+      <!-- The finger-link inertias range from 1e-5 to 1e-4 kg m^2, and Gazebo updates
+           at 500 Hz.  The former high derivative gain toggled the PID across
+           its target every physics tick, leaving every joint at its 0.5 rad/s
+           velocity limit.  This lower, proportionally damped force loop still
+           rejects gravity error well inside the 0.02 rad action band while
+           allowing a measured stationary terminal state. -->
+      <p_gain>${p_gain}</p_gain><i_gain>0.0</i_gain><d_gain>${d_gain}</d_gain>
       <cmd_max>30.0</cmd_max><cmd_min>-30.0</cmd_min>
     </plugin></gazebo>
   </xacro:macro>
-  <xacro:gz_gripper_position_controller joint="gripper_left_finger_joint" topic="/openeta/gripper/left_outer"/>
-  <xacro:gz_gripper_position_controller joint="gripper_right_finger_joint" topic="/openeta/gripper/right_outer"/>
-  <xacro:gz_gripper_position_controller joint="gripper_left_inner_knuckle_joint" topic="/openeta/gripper/left_inner"/>
-  <xacro:gz_gripper_position_controller joint="gripper_right_inner_knuckle_joint" topic="/openeta/gripper/right_inner"/>
-  <xacro:gz_gripper_position_controller joint="gripper_left_finger_tip_joint" topic="/openeta/gripper/left_tip"/>
-  <xacro:gz_gripper_position_controller joint="gripper_right_finger_tip_joint" topic="/openeta/gripper/right_tip"/>
+  <!-- Outer joints carry the fixed knuckle and finger bodies; the passive
+       inner/tip links have roughly one order of magnitude less effective
+       inertia and therefore use proportionally lower force-loop gains. -->
+  <xacro:gz_gripper_position_controller joint="gripper_left_finger_joint" topic="/openeta/gripper/left_outer" p_gain="4.0" d_gain="0.04"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_finger_joint" topic="/openeta/gripper/right_outer" p_gain="4.0" d_gain="0.04"/>
+  <xacro:gz_gripper_position_controller joint="gripper_left_inner_knuckle_joint" topic="/openeta/gripper/left_inner" p_gain="0.5" d_gain="0.005"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_inner_knuckle_joint" topic="/openeta/gripper/right_inner" p_gain="0.5" d_gain="0.005"/>
+  <xacro:gz_gripper_position_controller joint="gripper_left_finger_tip_joint" topic="/openeta/gripper/left_tip" p_gain="0.5" d_gain="0.005"/>
+  <xacro:gz_gripper_position_controller joint="gripper_right_finger_tip_joint" topic="/openeta/gripper/right_tip" p_gain="0.5" d_gain="0.005"/>
 
   <!-- These are the only grasp-admission inputs: native Gazebo contact data
        from the real vendor fingertip collision meshes. -->
   <gazebo reference="robotiq_85_left_finger_tip_link">
     <sensor name="openeta_native_grasp_left_pad_contact" type="contact">
-      <always_on>true</always_on><update_rate>1000</update_rate>
+      <!-- 250 Hz retains 25 samples in the 100 ms bilateral proof window,
+           far above the three-sample gate, without saturating the bridge. -->
+      <always_on>true</always_on><update_rate>250</update_rate>
       <topic>/openeta/native_grasp/contacts/left_pad</topic>
       <contact><collision>robotiq_85_left_finger_tip_link_collision</collision></contact>
     </sensor>
   </gazebo>
   <gazebo reference="robotiq_85_right_finger_tip_link">
     <sensor name="openeta_native_grasp_right_pad_contact" type="contact">
-      <always_on>true</always_on><update_rate>1000</update_rate>
+      <always_on>true</always_on><update_rate>250</update_rate>
       <topic>/openeta/native_grasp/contacts/right_pad</topic>
       <contact><collision>robotiq_85_right_finger_tip_link_collision</collision></contact>
     </sensor>

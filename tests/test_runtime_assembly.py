@@ -153,6 +153,78 @@ def test_frozen_grasp_frontier_retains_only_not_evaluated_provider_tail(
     assert coordinator.scene_epoch == 2
 
 
+def test_authoritative_fully_evaluated_artifact_does_not_requeue_failures(
+    tmp_path,
+) -> None:
+    artifact = tmp_path / "qualification.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {"candidate_id": "g0", "verdict": "PASS"},
+                    {"candidate_id": "g1", "verdict": "FAIL"},
+                    {"candidate_id": "g2", "verdict": "FAIL"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    coordinator = _FrozenGoalPairCoordinator(qualifier=SimpleNamespace())
+    provider_result = ToolResult(
+        True,
+        "provider output",
+        {"grasp_candidates": [{"id": f"g{index}"} for index in range(3)]},
+    )
+    qualified_result = ToolResult(
+        True,
+        "qualified",
+        {
+            "qualification_profile": "fast_v3",
+            "qualification_stop_reason": "complete_l5_pass_found",
+            "qualification_artifact": {"path": str(artifact)},
+            "grasp_candidates": [{"id": "g0"}],
+        },
+    )
+
+    coordinator.update_grasp_frontier(
+        provider_result,
+        qualified_result,
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    assert coordinator.grasp_frontier_candidates == []
+    assert qualified_result.details["frozen_grasp_frontier_remaining_count"] == 0
+
+
+def test_frozen_frontier_prioritizes_centered_sibling_of_failed_parent() -> None:
+    coordinator = _FrozenGoalPairCoordinator(qualifier=SimpleNamespace())
+    coordinator.grasp_candidate_catalog = {
+        "failed": {"id": "failed", "backend_index": 118}
+    }
+    coordinator.grasp_frontier_candidates = [
+        {"id": "other", "backend_index": 7},
+        {
+            "id": "sibling",
+            "backend_index": 1062,
+            "target_closing_alignment": {
+                "compatible_parent_backend_indices": [118, 2290]
+            },
+        },
+    ]
+
+    count = coordinator.prioritize_grasp_frontier_for_parent("failed")
+
+    assert count == 1
+    assert [item["id"] for item in coordinator.grasp_frontier_candidates] == [
+        "sibling",
+        "other",
+    ]
+    assert coordinator.grasp_frontier_candidates[0][
+        "frozen_frontier_parent_priority"
+    ] is True
+
+
 def test_frozen_grasp_frontier_expansion_bypasses_provider_inference() -> None:
     provider_calls: list[dict] = []
     qualifier_calls: list[dict] = []
@@ -389,6 +461,57 @@ def test_tui_and_batch_profiles_share_runtime_contracts(monkeypatch, tmp_path) -
     assert batch.runtime.memory.store.session_path("batch") == batch_workspace.root / "trace.jsonl"
 
 
+def test_industrial_tool_profile_assembles_with_prebound_hidden_handlers(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Profile visibility must not make Runtime rebind production handlers."""
+
+    monkeypatch.setattr(
+        "agent.runtime.runtime_assembly.load_configured_object_memory_bank",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "agent.runtime.runtime_assembly.load_configured_asset_reference_catalog",
+        lambda: None,
+    )
+    assembly = assemble_runtime(
+        RuntimeAssemblyConfig(
+            workspace=SessionWorkspace.create("industrial", root=tmp_path),
+            provider=PlannerProviderConfig(
+                model="fixture",
+                api_base="http://provider.example/v1",
+                api_key="test",
+            ),
+            backend_factory=_backend_factory,
+            supervision_policy=SupervisionPolicy.for_profile("standard"),
+            simulator_transport=FakeSimulatorTransport(),
+            web_access_config=WebAccessConfig(),
+            tool_profile="gazebo_industrial",
+        )
+    )
+
+    tools = assembly.runtime.tools
+    assert tools.can_execute("active_observe") is True
+    assert tools.can_execute("python_exec") is False
+    assert tools.bound_handler("python_exec") is not None
+    assert {spec.name for spec in tools.list()} == {
+        "active_observe",
+        "activate_final_grasp_candidate",
+        "anyplace",
+        "camera_pose_to_world",
+        "close_simulator_env",
+        "create_simulator_env",
+        "grasp_pose_estimate",
+        "gripper_control",
+        "move_to",
+        "observe",
+        "reject_sam3_detections",
+        "sam3",
+        "select_sam3_detection",
+    }
+
+
 def test_shared_runtime_fails_closed_without_remote_backends(
     monkeypatch,
     tmp_path,
@@ -446,6 +569,9 @@ def test_shared_endpoint_resolution_owns_names_aliases_and_overrides() -> None:
 
 def test_runtime_grasp_backend_policy_can_select_either_backend(monkeypatch) -> None:
     monkeypatch.delenv(GRASP_BACKEND_ENV_VAR, raising=False)
+    assert runtime_grasp_backend_order_from_env() == ("graspgenx",)
+
+    monkeypatch.setenv(GRASP_BACKEND_ENV_VAR, "auto")
     assert runtime_grasp_backend_order_from_env() == (
         "anygrasp",
         "contact_graspnet",

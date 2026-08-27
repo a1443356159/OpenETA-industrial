@@ -1,6 +1,6 @@
 # Gazebo SAM3 资产与服务部署
 
-本文记录 M5 使用的第三方模型资产、隔离运行环境和可复现校验方式。它是部署清单，
+本文记录 normal 验收使用的第三方模型资产、隔离运行环境和可复现校验方式。它是部署清单，
 不把 checkpoint 纳入 Git，也不改变 OpenETA 的 Tool API、环境路由或验收门禁。
 
 ## 已验证资产
@@ -40,7 +40,7 @@ CUDA 12.8 和 RTX 4090；模型可在 `cuda:0` 加载并完成真实文本分割
 
 ## 下载与校验
 
-只拉取 M5 所需的 `sam3.pt`，避免同时下载内容重复的 `model.safetensors`：
+只拉取运行所需的 `sam3.pt`，避免同时下载内容重复的 `model.safetensors`：
 
 ```bash
 export SAM3_SERVICE_ROOT=/root/autodl-tmp/openeta-services/sam3
@@ -134,29 +134,9 @@ export OPENETA_SAM3_URL=http://127.0.0.1:8773/sse
   --state-dir "$SAM3_SERVICE_ROOT/state"
 ```
 
-服务同时提供首选的 Streamable HTTP `/mcp` 和 M5 当前使用的 legacy SSE `/sse`。
+服务同时提供首选的 Streamable HTTP `/mcp` 和兼容验收链使用的 legacy SSE `/sse`。
 health/smoke 只证明服务与工具目录可达；至少一次真实 `segment` 推理成功，才能证明
 模型资产、CUDA 和 processor 已经拉通。
 
-## 2026-08-18 控制层复验
-
-OpenETA commit `10a56e1cd10a6208505f8c0369d2b00a193c3331` 在上述资产上完成了
-M0–M5 串行 control-only 运行。报告位于远端：
-
-```text
-/root/autodl-tmp/openeta-services/acceptance-runs/
-  10a56e1-m0-m5-control-20260818/control-acceptance-report.json
-```
-
-报告为 `overall_status=passed`，scope 为
-`control_only_real_sam3_no_planner_not_formal_tui`；未调用 Planner Provider，
-`formal_tui_acceptance=not_run`。M5 使用文本 `red rectangular block`，SAM3 返回唯一
-候选（score `0.50390625`），随后完成当时的选择、双垫原生接触、attach、旧式
-lift 诊断、open 和 detach。该 lift 数值是历史遥测，不是当前抓取验收门槛。所有
-M0–M5 case 均记录空 ROS graph、空 Gazebo
-partition、释放端口和无 owned process residual。
-
-该结果证明真实 SAM3 MCP 感知到 Gazebo 原子控制的链路和回执，不是正式 PTY/TUI
-验收，也不证明通用视觉精度。正式范围和证据要求见
-[M5 感知闭环](gazebo-m5-sam3-perception.md)与
-[统一运行时验收](gazebo-unified-runtime-acceptance.md)。
+正式范围和证据要求见 [normal 验收](gazebo-normal-acceptance.md)与
+[统一运行时验收](gazebo-unified-runtime-acceptance.md)。历史开发报告不作为发行门槛。

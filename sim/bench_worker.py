@@ -17,7 +17,6 @@ The worker exposes a subset of the REST API:
     POST /env/{handle}/reset   {seed?}
     POST /env/{handle}/step    {action?, num_steps?}
     POST /env/{handle}/observe
-    POST /env/{handle}/oracle_perceive   {image_base64, prompt}
     POST /env/{handle}/render
 """
 
@@ -577,89 +576,6 @@ def _render_to_mcp(env) -> dict:
     return {"error": "No render frame"}
 
 
-def _oracle_perceive_frame(env, handle: str, body: dict) -> dict:
-    """SAM3-contract oracle perception from the cached ground-truth observation.
-
-    Matches the caller's image against the cached camera frames of the last
-    observation (pixel-exact first, unique-size fallback), then projects the
-    same snapshot's object poses through that frame's intrinsics/extrinsics.
-    Structured failures keep the SAM3 failure shape (``success == False`` +
-    ``details.reason``) so the agent-side handler can treat oracle and SAM3
-    uniformly.
-    """
-    from PIL import Image
-
-    from extensions.gazebo import oracle_perception as oracle
-
-    prompt = str(body.get("prompt") or "")
-    image_base64 = str(body.get("image_base64") or "")
-    if not image_base64:
-        return oracle.oracle_failure_result(
-            prompt=prompt, reason="missing_image",
-            content="Oracle perception failed: missing image.")
-    if not prompt:
-        return oracle.oracle_failure_result(
-            prompt=prompt, reason="missing_prompt",
-            content="Oracle perception failed: missing prompt.")
-    try:
-        image_bytes = base64.b64decode(image_base64, validate=True)
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    except Exception as exc:
-        return oracle.oracle_failure_result(
-            prompt=prompt, reason="image_decode_failed",
-            content=f"Oracle perception failed: image decode failed: {exc}")
-    query = np.asarray(image, dtype=np.uint8)
-
-    # UnifiedEnv wraps the profile-owning GazeboDirectEnv; unwrap like the
-    # create_env control_spec path does.
-    direct_env = getattr(env, "_env", env)
-    registry = oracle.oracle_registry_from_model_config(
-        getattr(getattr(direct_env, "profile", None), "model_config", None))
-    if not registry:
-        return oracle.oracle_failure_result(
-            prompt=prompt, reason="oracle_unsupported_env",
-            content="Oracle perception failed: env profile declares no oracle object registry.")
-
-    with _obs_lock_for(handle):
-        obs = _last_obs.get(handle) or {}
-        cameras = obs.get("cameras")
-        if not isinstance(cameras, dict) or not cameras:
-            return oracle.oracle_failure_result(
-                prompt=prompt, reason="observation_unavailable",
-                content="Oracle perception failed: no cached observation — call reset/observe first.")
-        frame_id, camera, match_status = oracle.match_camera_frame(query, cameras)
-        if camera is None:
-            return oracle.oracle_failure_result(
-                prompt=prompt, reason=match_status,
-                content=f"Oracle perception failed: no cached camera frame matches the image ({match_status}).")
-        # Copy under the obs lock; the cached obs dict is mutated in place by
-        # concurrent render paths (see the _obs_locks note above).
-        intrinsics = dict(camera.get("intrinsics") or {})
-        extrinsics = dict(camera.get("extrinsics") or {})
-        snapshot_objects = [
-            dict(item) for item in (obs.get("objects") or []) if isinstance(item, dict)
-        ]
-
-    if extrinsics.get("frame_transform") != "camera_to_world":
-        # Wrist frames carry a tf_dynamic placeholder that is never
-        # numerically resolved — fail explicitly instead of guessing.
-        return oracle.oracle_failure_result(
-            prompt=prompt, reason="ORACLE_FRAME_UNSUPPORTED",
-            content=(
-                f"Oracle perception failed: camera frame {frame_id} has no numeric "
-                f"camera_to_world extrinsics (got {extrinsics.get('frame_transform')!r})."),
-            metadata={"camera_frame_id": frame_id, "frame_match": match_status})
-
-    posed = oracle.posed_oracle_objects(registry, snapshot_objects)
-    return oracle.oracle_segment_prompt(
-        prompt=prompt,
-        objects=posed,
-        intrinsics=intrinsics,
-        extrinsics=extrinsics,
-        extra_metadata={"camera_frame_id": frame_id, "frame_match": match_status},
-    )
-
-
 # ══════════════════════════════════════════════════════════════════════
 # Starlette app
 # ══════════════════════════════════════════════════════════════════════
@@ -995,15 +911,6 @@ async def observe_env(request):
     return _json_response(await _run_sim_call(_observe_with_image, env, handle=h))
 
 
-async def oracle_perceive(request):
-    h = request.path_params.get("handle", "")
-    env = _envs.get(h)
-    if env is None:
-        return _json_response({"error": f"Unknown handle: {h}"}, 400)
-    body = _safe_json_body(await request.body()) if request.method == "POST" else {}
-    return _json_response(await _run_sim_call(_oracle_perceive_frame, env, h, body))
-
-
 async def render_env(request):
     h = request.path_params.get("handle", "")
     env = _envs.get(h)
@@ -1076,7 +983,6 @@ app = Starlette(routes=[
     Route("/env/{handle}/reset", reset_env, methods=["POST"]),
     Route("/env/{handle}/step", step_env, methods=["POST"]),
     Route("/env/{handle}/observe", observe_env, methods=["POST"]),
-    Route("/env/{handle}/oracle_perceive", oracle_perceive, methods=["POST"]),
     Route("/env/{handle}/render", render_env, methods=["POST"]),
     Route("/render_all", render_all_envs, methods=["POST"]),
 ])

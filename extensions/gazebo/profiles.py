@@ -65,7 +65,13 @@ def _camera(
         camera_info_topic=f"{prefix}/camera_info",
         frame_id="wrist_camera_optical_frame" if wrist else "top_camera_optical_frame",
         extrinsics=(
-            {"frame_transform": "tf_dynamic", "camera_frame": "opencv"}
+            {
+                "frame_transform": "tf_dynamic",
+                "camera_frame": "opencv",
+                "reference_frame": "base_link",
+                "sensor_frame": "wrist_camera_optical_frame",
+                "sensor_frame_convention": "gazebo_camera",
+            }
             if wrist
             else {
                 **_TOP_EXTRINSICS,
@@ -99,7 +105,7 @@ _PROFILES: Mapping[str, GazeboProfile] = MappingProxyType({
     "rm75_robotiq2f85_pickplace": GazeboProfile(
         name="rm75_robotiq2f85_pickplace", launch_package="openeta_rm75_robotiq2f85_sim",
         launch_file="gazebo_pickplace.launch.py", world_name="rm75_robotiq2f85_pickplace",
-        cameras=(_camera(top_x_m=0.35, top_height_m=1.3), _camera(wrist=True)),
+        cameras=(_camera(top_x_m=0.38, top_height_m=1.35), _camera(wrist=True)),
         capabilities=_BASE | {CONTROL, STRUCTURED_RECEIPT, PHYSICS}, model_config=NativePickPlaceConfig(),
     ),
 })

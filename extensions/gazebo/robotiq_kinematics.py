@@ -53,6 +53,21 @@ BD_M: float = _closure_length()
 _ACTIVE_MIN_RAD = 0.0
 _ACTIVE_MAX_RAD = 0.8
 
+GRIPPER_JOINT_BOUNDS_RAD: Mapping[str, tuple[float, float]] = {
+    "gripper_left_finger_joint": (0.0, 0.8),
+    "gripper_right_finger_joint": (-0.8, 0.0),
+    "gripper_left_inner_knuckle_joint": (0.0, 0.8),
+    "gripper_right_inner_knuckle_joint": (-0.8, 0.0),
+    "gripper_left_finger_tip_joint": (-0.8, 0.0),
+    "gripper_right_finger_tip_joint": (0.0, 0.8),
+}
+
+# Position controllers must not servo an independently modelled linkage joint
+# onto a hard stop.  Half the adapter's 0.02 rad terminal band leaves room for
+# both state-estimation noise and the terminal settle proof.  This is a robot
+# control invariant, not an object- or scene-dependent tuning value.
+DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD: float = 0.01
+
 
 def _rot(alpha: float, v: tuple[float, float]) -> tuple[float, float]:
     c, s = math.cos(alpha), math.sin(alpha)
@@ -91,6 +106,47 @@ def solve_four_bar(active_rad: float) -> Mapping[str, float]:
     return {"tip_rad": gamma - theta, "inner_knuckle_rad": phi}
 
 
+def minimum_feasible_active_position(*, boundary_inset_rad: float) -> float:
+    """Return the nearest physically realisable open driver angle.
+
+    At the nominal ``active=0`` endpoint the exact vendor four-bar solution
+    asks the inner knuckle for roughly -0.03 rad, outside its URDF [0, 0.8]
+    limit.  Clamping that one link to zero makes the six independently driven
+    Gazebo joints fight each other.  The inner-knuckle solution is monotonic
+    over the stroke, so a deterministic bisection finds the first driver angle
+    whose exact linkage stays ``boundary_inset_rad`` inside the lower stop.
+    """
+
+    inset = float(boundary_inset_rad)
+    if not math.isfinite(inset) or inset <= 0.0:
+        raise ValueError("controller boundary inset must be positive and finite")
+    if inset >= (_ACTIVE_MAX_RAD - _ACTIVE_MIN_RAD) / 2.0:
+        raise ValueError("controller boundary inset exceeds active joint span")
+
+    lower = _ACTIVE_MIN_RAD
+    upper = _ACTIVE_MAX_RAD
+    if solve_four_bar(upper)["inner_knuckle_rad"] < inset:
+        raise ValueError("no four-bar open endpoint satisfies the requested inset")
+    # 64 iterations are deterministic and resolve far below floating-point
+    # precision at this scale without introducing a tuned angular epsilon.
+    for _ in range(64):
+        midpoint = (lower + upper) / 2.0
+        if solve_four_bar(midpoint)["inner_knuckle_rad"] >= inset:
+            upper = midpoint
+        else:
+            lower = midpoint
+
+    solved = solve_four_bar(upper)
+    driver = upper
+    inner = solved["inner_knuckle_rad"]
+    tip_magnitude = -solved["tip_rad"]
+    if min(driver, inner, tip_magnitude) < inset - 1e-12:
+        raise ValueError("computed four-bar open endpoint violates lower joint margin")
+    if max(driver, inner, tip_magnitude) > _ACTIVE_MAX_RAD + 1e-12:
+        raise ValueError("computed four-bar open endpoint violates upper joint bound")
+    return upper
+
+
 def six_joint_positions(active_rad: float) -> Mapping[str, float]:
     """Map the standard active-joint command to all six gripper joints.
 
@@ -112,6 +168,77 @@ def six_joint_positions(active_rad: float) -> Mapping[str, float]:
         "gripper_left_finger_tip_joint": -min(max(-tip, 0.0), 0.8),
         "gripper_right_finger_tip_joint": min(max(-tip, 0.0), 0.8),
     }
+
+
+def linkage_terminal_metrics(
+    targets: Mapping[str, float],
+    positions: Mapping[str, float],
+    velocities: Mapping[str, float],
+) -> tuple[float, float]:
+    """Return the worst six-link position error and speed.
+
+    The Gazebo gripper is six independently controlled joints even though its
+    public action has one degree of freedom.  A terminal decision therefore
+    cannot be made from the active finger alone.  Missing or non-finite state
+    is rejected so a stale/partial ``JointState`` can never look settled.
+    """
+
+    names = tuple(targets)
+    if not names or not set(names).issubset(positions) or not set(names).issubset(
+        velocities
+    ):
+        raise ValueError("complete gripper linkage state is required")
+    target_values = [float(targets[name]) for name in names]
+    position_values = [float(positions[name]) for name in names]
+    velocity_values = [float(velocities[name]) for name in names]
+    if not all(
+        math.isfinite(value)
+        for value in (*target_values, *position_values, *velocity_values)
+    ):
+        raise ValueError("gripper linkage state must be finite")
+    return (
+        max(
+            abs(position - target)
+            for position, target in zip(position_values, target_values, strict=True)
+        ),
+        max(abs(velocity) for velocity in velocity_values),
+    )
+
+
+def controller_safe_targets(
+    requested: Mapping[str, float],
+    *,
+    boundary_inset_rad: float,
+) -> dict[str, float]:
+    """Inset controller targets that coincide with a hard joint limit.
+
+    DART's saturated position controller can alternate at its velocity limit
+    when asked to hold a revolute joint exactly on a hard stop.  The public
+    gripper result is still checked against the original request; this helper
+    only chooses an equivalent controller target inside that request's
+    tolerance band.  The rule is joint-limit driven and applies to either end
+    of every linkage joint, independent of object or scene identity.
+    """
+
+    inset = float(boundary_inset_rad)
+    if not math.isfinite(inset) or inset <= 0.0:
+        raise ValueError("controller boundary inset must be positive and finite")
+    safe: dict[str, float] = {}
+    for name, raw_target in requested.items():
+        if name not in GRIPPER_JOINT_BOUNDS_RAD:
+            raise ValueError(f"unknown gripper linkage joint: {name}")
+        lower, upper = GRIPPER_JOINT_BOUNDS_RAD[name]
+        if inset * 2.0 >= upper - lower:
+            raise ValueError("controller boundary inset exceeds joint span")
+        target = float(raw_target)
+        if not math.isfinite(target) or target < lower - 1e-9 or target > upper + 1e-9:
+            raise ValueError(f"gripper target outside joint bounds: {name}")
+        if math.isclose(target, lower, rel_tol=0.0, abs_tol=1e-9):
+            target = lower + inset
+        elif math.isclose(target, upper, rel_tol=0.0, abs_tol=1e-9):
+            target = upper - inset
+        safe[name] = target
+    return safe
 
 
 def left_pad_position_xz(active_rad: float) -> tuple[float, float]:

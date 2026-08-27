@@ -1,4 +1,4 @@
-"""Wire-level transport coverage for the M0--M4 simulator MCP server."""
+"""Wire-level transport coverage for the simulator MCP server."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ async def _list_and_call_streamable_http(url: str) -> tuple[set[str], dict]:
 def test_simulator_mcp_supports_standard_http_and_legacy_sse_read_only_lifecycle() -> None:
     """Both advertised paths complete initialize → tools/list → a read-only call.
 
-    The M0--M4 scripted TUI continues to use `/sse`; `/mcp` is exercised here
+    The normal scripted TUI continues to use `/sse`; `/mcp` is exercised here
     as the preferred Streamable HTTP endpoint without creating an environment
     or starting Gazebo.
     """

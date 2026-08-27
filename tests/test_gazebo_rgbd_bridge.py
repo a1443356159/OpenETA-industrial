@@ -9,7 +9,7 @@ import pytest
 from extensions.gazebo import GazeboProcess, RosGzBridgeProcess
 
 
-def test_m1_rgbd_bridge_process_contract() -> None:
+def test_live_rgbd_rgbd_bridge_process_contract() -> None:
     # A bare vendor binary is not a live Gazebo runtime: its plugin/resource
     # paths are exported only by Jazzy's setup script.  Without this gate an
     # ordinary unit-test shell waits for topics that can never be advertised.

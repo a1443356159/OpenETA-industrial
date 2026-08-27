@@ -1,8 +1,8 @@
-"""Gazebo perception-bridge perception bridge: selected SAM3 detection → 3D object summary.
+"""Gazebo perception bridge: selected SAM3 detection → 3D object summary.
 
-Pure-Python geometry core for the perception-bridge perception bridge.  SAM3 (and the oracle-fixture
-oracle, which shares its contract) produces pixel-level outputs — a mask and a
-bbox — while the planner consumes plan.md §17 object summaries with a
+Pure-Python geometry core for the perception bridge. SAM3 produces
+pixel-level outputs — a mask and a bbox — while the planner consumes compact
+metric object summaries with a
 world-frame ``position``.  This module closes that gap: it takes one selected
 detection (``mask_ref`` + ``source_image``, or an inline PNG ``mask``) and the
 :class:`adapter.protocol.CameraFrame` it was produced from, and back-projects
@@ -14,11 +14,10 @@ the pinhole model yields the camera-frame point, which the
 ``camera_to_world`` extrinsics (OpenCV camera convention) then move into the
 world frame.  Depth is never invented: missing depth, an empty mask, or
 unsupported extrinsics (e.g. the wrist camera's ``tf_dynamic``) yield
-``position = None`` with a ``position_error`` reason, per plan.md §17
-("Use ``unknown`` / missing fields where appropriate").
+``position = None`` with an explicit ``position_error`` reason.
 
 The module imports neither ROS nor Gazebo; numpy/PIL are imported lazily,
-mirroring ``extensions/gazebo/oracle_perception.py``.
+without importing ROS or Gazebo.
 """
 
 from __future__ import annotations
@@ -79,17 +78,17 @@ def summarize_detection(
     camera_frame: Any,
     provenance: str = PROVENANCE_SAM3,
 ) -> dict[str, Any]:
-    """Build one plan.md §17 object-summary entry from a selected detection.
+    """Build one compact object-summary entry from a selected detection.
 
     Parameters
     ----------
     detection:
-        Selected SAM3/oracle detection.  The mask comes from ``mask_ref``
+        Selected SAM3 detection. The mask comes from ``mask_ref``
         (path to a single-channel PNG, foreground > 0) or an inline
         ``mask`` mapping (``{"format": "png", "base64": ...}``).
         ``source_image`` is accepted as part of the selection contract but
         not re-verified: frame correspondence (detection ↔ camera frame) is
-        the caller's responsibility, same as the oracle-fixture worker-side frame
+        the caller's responsibility, same as the worker-side frame
         matching.  ``id`` / ``label`` / ``score`` map to ``id`` / ``label``
         / ``confidence``.
     camera_frame:
@@ -132,7 +131,7 @@ def build_object_summary(
     camera_frame: Any,
     provenance: str = PROVENANCE_SAM3,
 ) -> dict[str, Any]:
-    """Summarise several detections into the plan.md §17 ``{"objects": [...]}`` shape."""
+    """Summarise detections into the planner-facing ``{"objects": [...]}`` shape."""
 
     return {
         "objects": [
@@ -389,7 +388,7 @@ def _resize_mask(mask: Any, shape: tuple[int, int]) -> Any:
 
 
 def _validate_extrinsics(extrinsics: Mapping[str, Any]) -> str | None:
-    """Same acceptance rule as the oracle-fixture oracle: numeric ``camera_to_world``."""
+    """Require numeric ``camera_to_world`` extrinsics."""
 
     if extrinsics.get("frame_transform") != "camera_to_world":
         return ERR_EXTRINSICS

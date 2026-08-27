@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,7 @@ from agent.tools.grasp_geometry import (
     predicted_attachment_from_grasp,
     project_attached_object_center_to_image,
     qualification_grasp_pose_chain,
+    rebase_camera_grasp_candidate_for_object_motion,
 )
 from agent.tools.registry import ToolExecutionContext, ToolSpec
 
@@ -58,6 +60,46 @@ def _grasp_parameters() -> dict:
         "target_class": "upright_can",
         "scene_epoch": 0,
     }
+
+
+def test_frozen_camera_grasp_rebases_with_measured_rigid_object_motion() -> None:
+    candidate = {
+        **_candidate(),
+        "transform_matrix": [
+            [1.0, 0.0, 0.0, 0.1],
+            [0.0, 1.0, 0.0, 0.2],
+            [0.0, 0.0, 1.0, 0.3],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        "gripper_tip_position_xyz": [0.15, 0.2, 0.3],
+    }
+
+    rebased = rebase_camera_grasp_candidate_for_object_motion(
+        candidate,
+        camera_extrinsics={
+            "camera_frame": "opencv",
+            "pos": [0.0, 0.0, 0.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        source_object_pose={
+            "frame": "world",
+            "translation_xyz": [0.25, -0.1, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        target_object_pose={
+            "frame": "world",
+            "translation_xyz": [0.26, -0.12, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+    )
+
+    assert rebased["id"] == candidate["id"]
+    assert rebased["translation_xyz"] == pytest.approx([0.11, 0.18, 0.3])
+    assert rebased["gripper_tip_position_xyz"] == pytest.approx(
+        [0.16, 0.18, 0.3]
+    )
+    assert rebased["frozen_object_motion_rebase"]["model_inference_invoked"] is False
+    assert candidate["translation_xyz"] == [0.1, 0.2, 0.3]
 
 
 def test_project_attached_object_center_uses_native_ack_geometry() -> None:
@@ -172,6 +214,57 @@ def test_grasp_compiler_preserves_model_terminal_after_frame_and_tcp_transform()
     assert forbidden.isdisjoint(compiled)
 
 
+def test_rm75_robotiq_profile_registers_physical_and_model_collision_envelopes() -> None:
+    profile_path = (
+        Path(__file__).parents[2]
+        / "agent/calibrations/candidate/graspnet-eef-rm75-robotiq2f85.json"
+    )
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    provenance = profile["provenance"]
+    physical_leading_extent = (
+        provenance["gazebo_native_open_collision_extent_m"]
+        + provenance["link7_to_gazebo_native_base_m"]
+        - provenance["model_base_to_link7_m"]
+    )
+    assert (
+        provenance["model_native_open_collision_extent_m"]
+        - physical_leading_extent
+    ) == pytest.approx(provenance["registered_leading_envelope_reserve_m"])
+    assert provenance["registered_leading_envelope_reserve_m"] > 0.0
+
+    candidate = {
+        **_candidate(),
+        "translation_xyz": [0.3, 0.0, 0.149],
+        # GraspNet +X is a vertical downward approach in this identity-world
+        # fixture.  The compiler may apply only the declared rigid frame/TCP
+        # transform; it must not invent a pregrasp or task-family offset.
+        "rotation_matrix": [
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+        ],
+    }
+    compiled = compile_grasp_seed(
+        {
+            **_grasp_parameters(),
+            "camera_pose": candidate,
+            "camera_extrinsics": {
+                "camera_frame": "opencv",
+                "pos": [0.0, 0.0, 0.0],
+                "mat": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            },
+        },
+        profile=profile,
+        profile_sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest(),
+    )
+
+    assert candidate["translation_xyz"] == [0.3, 0.0, 0.149]
+    assert compiled["contact_pose"]["xyz"] == pytest.approx(
+        [0.3, 0.0, 0.1555]
+    )
+    assert qualification_grasp_pose_chain(compiled) == [compiled["contact_pose"]]
+
+
 def test_semantic_strategy_fields_cannot_change_model_contact() -> None:
     baseline = compile_grasp_seed(
         _grasp_parameters(), profile=_profile(), profile_sha256="sha"
@@ -233,9 +326,16 @@ def test_qualified_grasp_hash_binds_only_exact_contact() -> None:
             public_candidate = _candidate()
             public_candidate["moveit_physical_quality_rank"] = 0
             public_candidate["moveit_l5_qualified"] = True
+            proof = _qualified_proof(proof_parameters)
+            proof["stages"][-1]["target_pose"] = {
+                "grasp_stage": "contact",
+                "qualification_allowed_collisions": {
+                    "target_object": ["right_tip", "left_tip"]
+                },
+            }
             return {
                 "candidate": public_candidate,
-                "proof": _qualified_proof(proof_parameters),
+                "proof": proof,
                 "scene_epoch": 0,
                 "planning_scene_revision": 0,
             }
@@ -269,6 +369,10 @@ def test_qualified_grasp_hash_binds_only_exact_contact() -> None:
     }
     assert len(contact_pose["qualification_goal_joint_state_sha256"]) == 64
     assert contact_pose["qualification_binding_sha256"] == "a" * 64
+    assert contact_pose["qualification_allowed_collisions"] == {
+        "target_object": ["left_tip", "right_tip"]
+    }
+    assert len(contact_pose["qualification_allowed_collisions_sha256"]) == 64
 
 
 def _placement_candidate() -> dict:

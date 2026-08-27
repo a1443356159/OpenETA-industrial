@@ -9,6 +9,7 @@ from tools.anygrasp_core import AnyGraspBackend
 from tools.anyplace_core import AnyPlaceBackend
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
+    DEFAULT_GRASPGENX_RAW_POOL_SIZE,
     DEFAULT_GRASP_RAW_POOL_SIZE,
     DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
     DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT,
@@ -26,7 +27,8 @@ def test_candidate_services_have_only_reserve_defaults(tmp_path):
     assert AnyPlaceBackend(
         anyplace_root=tmp_path, config_path=tmp_path
     ).raw_pool_size == 96
-    assert inspect.signature(GraspGenXBackend).parameters["raw_pool_size"].default == 200
+    assert DEFAULT_GRASPGENX_RAW_POOL_SIZE == 256
+    assert inspect.signature(GraspGenXBackend).parameters["raw_pool_size"].default == 256
     assert DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT == 4
     assert DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT == 2
     assert not hasattr(CandidateFunnelConfig(), "graspgenx_exposure_limit")

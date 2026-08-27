@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import time
 import urllib.parse
@@ -160,9 +161,12 @@ class PlannerContextConfig:
     approx_chars_per_token: int = 4
     token_estimator_model: str | None = None
     model_context_projection_enabled: bool = True
-    model_context_soft_limit_tokens: int = 24_000
-    model_context_hard_limit_tokens: int = 32_000
-    max_model_conversation_messages: int = 5
+    model_context_soft_limit_tokens: int = 12_000
+    model_context_hard_limit_tokens: int = 18_000
+    # Runtime state and the latest host result are authoritative.  Replaying
+    # earlier path-heavy action/result pairs on every embodied turn duplicates
+    # evidence and grows linearly, so retain only the most recent feedback.
+    max_model_conversation_messages: int = 1
     max_model_tool_references: int = 8
     max_model_skill_content_chars: int = 3_000
 
@@ -361,6 +365,13 @@ class ToolCallingPlanner(BasePlanner):
             )
             if canonicalizations:
                 decision.metadata["host_parameter_canonicalizations"] = canonicalizations
+            if not validation_errors:
+                validation_errors.extend(
+                    _validate_semantic_perception_obligation(
+                        decision,
+                        tool_context=tool_context,
+                    )
+                )
             required_skill = ""
             if not validation_errors:
                 required_skill = _required_skill_inspection_name(
@@ -415,6 +426,13 @@ class ToolCallingPlanner(BasePlanner):
                 )
             if not validation_errors:
                 validation_errors.extend(
+                    _validate_grasp_recovery_obligation(
+                        decision,
+                        tool_context=tool_context,
+                    )
+                )
+            if not validation_errors:
+                validation_errors.extend(
                     _validate_anygrasp_candidate_policy(
                         decision,
                         tool_context=tool_context,
@@ -423,6 +441,13 @@ class ToolCallingPlanner(BasePlanner):
             if not validation_errors:
                 validation_errors.extend(
                     _validate_grasp_execution_obligation(
+                        decision,
+                        tool_context=tool_context,
+                    )
+                )
+            if not validation_errors:
+                validation_errors.extend(
+                    _validate_placement_release_obligation(
                         decision,
                         tool_context=tool_context,
                     )
@@ -553,9 +578,7 @@ class ToolCallingPlanner(BasePlanner):
 
         failures: list[JsonDict] = []
         embedded_review = selection.get("selection_review")
-        embedded_review = (
-            dict(embedded_review) if isinstance(embedded_review, Mapping) else {}
-        )
+        embedded_review = dict(embedded_review) if isinstance(embedded_review, Mapping) else {}
         retry_exhausted = (
             embedded_review.get("decision") == "deferred"
             and embedded_review.get("infrastructure_retry_exhausted") is True
@@ -575,15 +598,14 @@ class ToolCallingPlanner(BasePlanner):
                 ]
             )
         else:
-            reviewer = self.sam3_selection_reviewer or BackendSam3SelectionReviewer(
-                self.backend
-            ).review
+            reviewer = (
+                self.sam3_selection_reviewer or BackendSam3SelectionReviewer(self.backend).review
+            )
             try:
                 review = reviewer(
                     {
                         "result_id": selection.get("result_id"),
-                        "semantic_role": selection.get("semantic_role")
-                        or "grasp_target",
+                        "semantic_role": selection.get("semantic_role") or "grasp_target",
                         "target_prompt": selection.get("target_prompt"),
                         "source_image": selection.get("source_image"),
                         "candidates": selection.get("candidates") or [],
@@ -606,14 +628,10 @@ class ToolCallingPlanner(BasePlanner):
         if review is not None:
             provider_details = review.get("provider_details")
             provider_details = (
-                dict(provider_details)
-                if isinstance(provider_details, Mapping)
-                else {}
+                dict(provider_details) if isinstance(provider_details, Mapping) else {}
             )
             provider_usage = provider_details.get("usage")
-            provider_usage = (
-                dict(provider_usage) if isinstance(provider_usage, Mapping) else {}
-            )
+            provider_usage = dict(provider_usage) if isinstance(provider_usage, Mapping) else {}
             usage_source = str(provider_details.get("usage_source") or "unknown")
             planner_metadata = _planner_metadata(
                 planner=self,
@@ -643,9 +661,7 @@ class ToolCallingPlanner(BasePlanner):
                     {
                         "detection_id": str(review.get("detection_id") or ""),
                         "selection_confidence": review.get("confidence"),
-                        "target_geometry_family": review.get(
-                            "target_geometry_family"
-                        ),
+                        "target_geometry_family": review.get("target_geometry_family"),
                     }
                 )
             return PlannerDecision(
@@ -660,9 +676,7 @@ class ToolCallingPlanner(BasePlanner):
                     **planner_metadata,
                     "execution_model": "isolated_semantic_selection",
                     "selection_review": review,
-                    "infrastructure_retry_count": review.get(
-                        "infrastructure_retry_count", 0
-                    ),
+                    "infrastructure_retry_count": review.get("infrastructure_retry_count", 0),
                 },
             )
         return PlannerDecision(
@@ -758,24 +772,64 @@ def _host_obligation_decision(
 
     grasp_policy = tool_context.get("grasp_candidate_policy")
     if isinstance(grasp_policy, dict) and grasp_policy.get("status") == "blocked":
+        qualification_infrastructure_failed = (
+            grasp_policy.get("failure_code") == "QUALIFICATION_INFRASTRUCTURE_FAILED"
+        )
+        runtime_infrastructure_failed = (
+            grasp_policy.get("failure_code") == "GRASP_RUNTIME_INFRASTRUCTURE_FAILED"
+        )
         return PlannerDecision(
             action_type="response",
             action="ask_human",
             parameters={
                 "question": (
-                    "Grasp proof compilation failed deterministically; inspect the "
-                    "host qualification binding or embodiment calibration before retrying."
+                    "MoveIt qualification infrastructure failed after its bounded "
+                    "health retry; inspect the ROS services before restarting acceptance."
+                    if qualification_infrastructure_failed
+                    else (
+                        "Gazebo native-grasp infrastructure failed after its bounded "
+                        "state retry and safe rollback; inspect the simulator transport "
+                        "before restarting acceptance."
+                        if runtime_infrastructure_failed
+                        else "Grasp proof compilation failed deterministically; inspect the "
+                        "host qualification binding or embodiment calibration before retrying."
+                    )
                 ),
-                "failure_code": "grasp_compile_terminal_failure",
+                "failure_code": (
+                    "qualification_infrastructure_failure"
+                    if qualification_infrastructure_failed
+                    else (
+                        "grasp_runtime_infrastructure_failure"
+                        if runtime_infrastructure_failed
+                        else "grasp_compile_terminal_failure"
+                    )
+                ),
                 "reason": grasp_policy.get("terminal_failure"),
             },
             reasoning=(
-                "The same retained candidate cannot be recompiled after a terminal "
-                "host proof failure; stop instead of repeating model inference."
+                "Qualification already performed its one bounded infrastructure retry; "
+                "stop instead of repeating model inference."
+                if qualification_infrastructure_failed
+                else (
+                    "The simulator already performed its one bounded state retry and "
+                    "rolled back the attachment; stop instead of consuming candidates "
+                    "or repeating perception."
+                    if runtime_infrastructure_failed
+                    else "The same retained candidate cannot be recompiled after a terminal "
+                    "host proof failure; stop instead of repeating model inference."
+                )
             ),
             metadata={
                 "host_obligation": {
-                    "schema_version": "openeta.grasp_compile_stop.v1",
+                    "schema_version": (
+                        "openeta.qualification_infrastructure_stop.v1"
+                        if qualification_infrastructure_failed
+                        else (
+                            "openeta.grasp_runtime_infrastructure_stop.v1"
+                            if runtime_infrastructure_failed
+                            else "openeta.grasp_compile_stop.v1"
+                        )
+                    ),
                     "status": "blocked",
                 }
             },
@@ -812,6 +866,79 @@ def _host_obligation_decision(
                     "stop_reason": grasp_policy.get("stop_reason"),
                 }
             },
+        )
+
+    placement_release = tool_context.get("placement_release")
+    if (
+        str(tool_context.get("planner_mode") or "") == "host_macro"
+        and isinstance(placement_release, dict)
+        and placement_release.get("status") == "failed"
+    ):
+        # ``smoke_normal`` measures one deterministic control chain.  Once a
+        # release has physically detached/opened, starting semantic perception
+        # again only obscures that chain's failure and pays for inference that
+        # cannot repair it.  The normal agentic profile remains unrestricted
+        # and may observe/reason about the changed scene below.
+        return PlannerDecision(
+            action_type="response",
+            action="ask_human",
+            parameters={
+                "question": (
+                    "The no-VLM smoke failed after its irreversible release; "
+                    "inspect the release receipt before starting a new run."
+                ),
+                "failure_code": str(
+                    placement_release.get("failure_code")
+                    or "SMOKE_NORMAL_IRREVERSIBLE_RELEASE_FAILED"
+                ),
+            },
+            reasoning=(
+                "A smoke acceptance run stops at its first irreversible release "
+                "failure instead of beginning another perception/model cycle."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": "openeta.smoke_normal_release_stop.v1",
+                    "status": "failed",
+                }
+            },
+        )
+    if (
+        isinstance(placement_release, dict)
+        and placement_release.get("status") == "failed"
+        and placement_release.get("reobservation_required") is True
+    ):
+        if tools.can_execute("observe"):
+            return PlannerDecision(
+                action_type="tool_call",
+                action="observe",
+                parameters={"reason": "refresh_after_failed_placement_release"},
+                reasoning=(
+                    "The object was released but did not pass settled-placement "
+                    "verification. Refresh the changed scene before a new agentic "
+                    "grasp cycle."
+                ),
+                metadata={
+                    "host_obligation": {
+                        "schema_version": ("openeta.placement_release_reobservation.v1"),
+                        "tool": "observe",
+                        "failure_code": placement_release.get("failure_code"),
+                    }
+                },
+            )
+        return PlannerDecision(
+            action_type="response",
+            action="ask_human",
+            parameters={
+                "question": (
+                    "Placement verification failed after release, but this runtime "
+                    "has no observation tool to establish the new scene."
+                ),
+                "failure_code": str(
+                    placement_release.get("failure_code") or "PLACEMENT_RELEASE_VERIFICATION_FAILED"
+                ),
+            },
+            reasoning="A fresh scene is required before any new model inference.",
         )
 
     refresh = tool_context.get("fresh_observation_obligation")
@@ -861,13 +988,8 @@ def _host_obligation_decision(
         )
 
     recovery = tool_context.get("grasp_recovery")
-    if (
-        isinstance(recovery, dict)
-        and recovery.get("status") == "stopped_requires_human"
-    ):
-        stop_reason = str(
-            recovery.get("stop_reason") or "grasp_recovery_not_completed"
-        )
+    if isinstance(recovery, dict) and recovery.get("status") == "stopped_requires_human":
+        stop_reason = str(recovery.get("stop_reason") or "grasp_recovery_not_completed")
         return PlannerDecision(
             action_type="response",
             action="ask_human",
@@ -910,8 +1032,7 @@ def _host_obligation_decision(
                     "inspect the cell before authorizing another recovery attempt."
                 ),
                 "failure_code": str(
-                    placement_policy.get("stop_reason")
-                    or "CURRENT_GRASP_PLACE_INFEASIBLE"
+                    placement_policy.get("stop_reason") or "CURRENT_GRASP_PLACE_INFEASIBLE"
                 ),
             },
             reasoning=(
@@ -969,6 +1090,37 @@ def _host_obligation_decision(
                     }
                 },
             )
+
+    grasp_frontier = tool_context.get("grasp_frontier_obligation")
+    if (
+        isinstance(grasp_frontier, dict)
+        and grasp_frontier.get("status") == "required"
+        and grasp_frontier.get("required_tool") == "grasp_pose_estimate"
+        and isinstance(grasp_frontier.get("required_parameters"), dict)
+        and tools.can_execute("grasp_pose_estimate")
+    ):
+        return PlannerDecision(
+            action_type="tool_call",
+            action="grasp_pose_estimate",
+            parameters=dict(grasp_frontier["required_parameters"]),
+            reasoning=(
+                "The failed physical close was rolled back safely; continue the next "
+                "small qualification wave from the frozen provider frontier without "
+                "rerunning semantic perception or grasp-model inference."
+            ),
+            metadata={
+                "host_obligation": {
+                    "schema_version": grasp_frontier.get("schema_version"),
+                    "tool": "grasp_pose_estimate",
+                    "stage": "frozen_grasp_frontier_continuation",
+                    "generation": grasp_frontier.get("generation"),
+                    "remaining_candidate_count": grasp_frontier.get(
+                        "remaining_candidate_count"
+                    ),
+                    "model_inference_invoked": False,
+                }
+            },
+        )
 
     reestimate = tool_context.get("grasp_reestimation")
     if (
@@ -1056,9 +1208,7 @@ def _host_obligation_decision(
                         "sam3_result_id": str(selection.get("result_id") or ""),
                         "detection_id": str(ranked[0].get("id") or ""),
                         "selection_confidence": min(1.0, max(0.0, top_score)),
-                        "target_geometry_family": verification.get(
-                            "grasp_geometry_family"
-                        ),
+                        "target_geometry_family": verification.get("grasp_geometry_family"),
                         "reason": (
                             "Exact-instance reference verification fixed the target "
                             "point; rank 0 has a decisive SAM3 score margin and is "
@@ -1309,17 +1459,13 @@ def _host_obligation_decision(
         articulated_attachment = execution.get("attachment_mode") == "articulated_handle"
         if articulated_attachment and stage == "attachment":
             assessment_count = (
-                int(attachment.get("assessment_count") or 0)
-                if isinstance(attachment, dict)
-                else 0
+                int(attachment.get("assessment_count") or 0) if isinstance(attachment, dict) else 0
             )
             refresh_required = (
-                isinstance(attachment, dict)
-                and attachment.get("refresh_required") is True
+                isinstance(attachment, dict) and attachment.get("refresh_required") is True
             )
             refresh_completed = (
-                isinstance(attachment, dict)
-                and attachment.get("unknown_refresh_completed") is True
+                isinstance(attachment, dict) and attachment.get("unknown_refresh_completed") is True
             )
             if attachment_verdict == "UNKNOWN" and assessment_count == 0:
                 return PlannerDecision(
@@ -1466,9 +1612,7 @@ def _host_obligation_decision(
                         {
                             "semantic_role": reference.get("semantic_role"),
                             "semantic_target": reference.get("target_object"),
-                            "perception_bundle_id": reference.get(
-                                "perception_bundle_id"
-                            ),
+                            "perception_bundle_id": reference.get("perception_bundle_id"),
                             "observation_id": reference.get("observation_id"),
                             "scene_epoch": reference.get("scene_epoch"),
                         }
@@ -1490,9 +1634,7 @@ def _host_obligation_decision(
     semantic_perception = tool_context.get("semantic_perception_obligation")
     if isinstance(semantic_perception, dict):
         if semantic_perception.get("status") == "exhausted":
-            semantic_role = str(
-                semantic_perception.get("semantic_role") or "target"
-            )
+            semantic_role = str(semantic_perception.get("semantic_role") or "target")
             return PlannerDecision(
                 action_type="response",
                 action="ask_human",
@@ -1536,9 +1678,7 @@ def _host_obligation_decision(
                         "schema_version": semantic_perception.get("schema_version"),
                         "tool": tool_name,
                         "semantic_role": semantic_perception.get("semantic_role"),
-                        "perception_bundle_id": semantic_perception.get(
-                            "perception_bundle_id"
-                        ),
+                        "perception_bundle_id": semantic_perception.get("perception_bundle_id"),
                         "observation_id": semantic_perception.get("observation_id"),
                         "scene_epoch": semantic_perception.get("scene_epoch"),
                         "semantic_target": semantic_perception.get("semantic_target"),
@@ -1625,7 +1765,8 @@ def _host_obligation_decision(
         required_name = str(required.get("name") or "") if isinstance(required, dict) else ""
         if (
             isinstance(required, dict)
-            and required_name in {
+            and required_name
+            in {
                 "gripper_control",
                 "move_to",
                 "close_simulator_env",
@@ -1682,11 +1823,7 @@ def _host_obligation_decision(
     if isinstance(placement_motion, dict):
         stage = str(placement_motion.get("stage") or "")
         parameters = placement_motion.get("required_parameters")
-        if (
-            stage == "release"
-            and isinstance(parameters, dict)
-            and tools.can_execute("move_to")
-        ):
+        if stage == "release" and isinstance(parameters, dict) and tools.can_execute("move_to"):
             return PlannerDecision(
                 action_type="tool_call",
                 action="move_to",
@@ -2204,9 +2341,7 @@ def _validate_sam3_parameters(parameters: JsonDict) -> list[str]:
             errors.append("sam3 text mode must not include non-empty `parameters.points`.")
         return errors
     semantic_target = parameters.get("semantic_target")
-    if semantic_role and (
-        not isinstance(semantic_target, str) or not semantic_target.strip()
-    ):
+    if semantic_role and (not isinstance(semantic_target, str) or not semantic_target.strip()):
         errors.append(
             "sam3 points mode requires `parameters.semantic_target` to preserve "
             "the semantic role across text-to-point fallback."
@@ -2289,20 +2424,13 @@ def _validate_grasp_pose_estimate_parameters(parameters: JsonDict) -> list[str]:
                 "grasp_pose_estimate frozen_frontier mode requires model_inference=false."
             )
         revision = parameters.get("scene_revision")
-        if (
-            isinstance(revision, bool)
-            or not isinstance(revision, int)
-            or revision < 0
-        ):
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
             errors.append(
-                "grasp_pose_estimate frozen_frontier mode requires a non-negative "
-                "scene_revision."
+                "grasp_pose_estimate frozen_frontier mode requires a non-negative scene_revision."
             )
         return errors
     if mode not in {"targeted", "scene"}:
-        errors.append(
-            "grasp_pose_estimate mode must be targeted, scene, or frozen_frontier."
-        )
+        errors.append("grasp_pose_estimate mode must be targeted, scene, or frozen_frontier.")
     for key in ("rgb", "depth"):
         value = parameters.get(key)
         if not isinstance(value, str) or not value.strip() or _looks_like_placeholder_path(value):
@@ -2507,10 +2635,7 @@ def _validate_anyplace_parameters(parameters: JsonDict) -> list[str]:
         valid_exclusions = (
             isinstance(exclusions, list)
             and bool(exclusions)
-            and all(
-                isinstance(goal_id, str) and bool(goal_id.strip())
-                for goal_id in exclusions
-            )
+            and all(isinstance(goal_id, str) and bool(goal_id.strip()) for goal_id in exclusions)
             and len(exclusions) == len(set(exclusions))
         )
         if resume_frontier is True and not valid_exclusions:
@@ -2542,7 +2667,11 @@ def _validate_anyplace_parameters(parameters: JsonDict) -> list[str]:
             continue
         for key in ("rgb", "depth"):
             value = packet.get(key)
-            if not isinstance(value, str) or not value.strip() or _looks_like_placeholder_path(value):
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or _looks_like_placeholder_path(value)
+            ):
                 errors.append(f"anyplace {packet_name}.{key} must be a concrete local path.")
         mask = packet.get(mask_name)
         if not isinstance(mask, dict) or any(
@@ -2687,7 +2816,7 @@ def _default_tool_planner_system_prompt() -> str:
         "when parameter_mode=host_hydrated return parameters={} so the host can inject "
         "the immutable payload bound by parameter_binding_sha256. If more than one "
         "binding exists for the chosen tool, return only "
-        "parameters={\"obligation_ref\": \"<parameter_binding_sha256>\"}. Never invent "
+        'parameters={"obligation_ref": "<parameter_binding_sha256>"}. Never invent '
         "or reconstruct host-owned paths, poses, or calibration. tool_context.state is the "
         "single current state summary. Runtime-discovered catalogs, docstrings, schemas, "
         "receipts, and errors are authoritative over examples and skill text. Selected "
@@ -2870,9 +2999,7 @@ def _validate_detection_selection_obligation(
             return ["reject_sam3_detections requested without a pending SAM3 selection."]
         result_id = str(decision.parameters.get("sam3_result_id") or "")
         if result_id != str(pending.get("result_id") or ""):
-            return [
-                "reject_sam3_detections must use the exact pending sam3_result_id."
-            ]
+            return ["reject_sam3_detections must use the exact pending sam3_result_id."]
         if not str(decision.parameters.get("reason") or "").strip():
             return ["reject_sam3_detections requires a visual reason."]
         return []
@@ -2897,9 +3024,7 @@ def _validate_detection_selection_obligation(
                 "select_sam3_detection detection_id must identify one candidate from "
                 "the pending SAM3 result."
             ]
-        geometry_family = str(
-            decision.parameters.get("target_geometry_family") or ""
-        ).strip()
+        geometry_family = str(decision.parameters.get("target_geometry_family") or "").strip()
         if geometry_family and geometry_family not in {
             "upright_can",
             "upright_bottle",
@@ -3187,9 +3312,7 @@ def _validate_grasp_execution_obligation(
             and decision.parameters == required_action.get("parameters")
         ):
             return []
-        return [
-            "The articulated attachment probe must exactly copy its frozen required_action."
-        ]
+        return ["The articulated attachment probe must exactly copy its frozen required_action."]
     if stage == "prepare_probe":
         if decision.action == "prepare_attachment_probe":
             return []
@@ -3206,22 +3329,17 @@ def _validate_grasp_execution_obligation(
                 else "UNKNOWN"
             )
             assessment_count = (
-                int(attachment.get("assessment_count") or 0)
-                if isinstance(attachment, dict)
-                else 0
+                int(attachment.get("assessment_count") or 0) if isinstance(attachment, dict) else 0
             )
             refresh_required = (
-                isinstance(attachment, dict)
-                and attachment.get("refresh_required") is True
+                isinstance(attachment, dict) and attachment.get("refresh_required") is True
             )
             refresh_completed = (
-                isinstance(attachment, dict)
-                and attachment.get("unknown_refresh_completed") is True
+                isinstance(attachment, dict) and attachment.get("unknown_refresh_completed") is True
             )
             if verdict == "UNKNOWN":
                 if decision.action == "assess_attachment_probe" and (
-                    assessment_count == 0
-                    or (assessment_count == 1 and refresh_completed)
+                    assessment_count == 0 or (assessment_count == 1 and refresh_completed)
                 ):
                     return []
                 if (
@@ -3333,18 +3451,13 @@ def _validate_pick_place_anyplace_obligation(
             "follow placement_obligation."
         ]
     placement = tool_context.get("placement_obligation")
-    frozen_goal_pool = (
-        isinstance(placement, dict)
-        and placement.get("phase") == "frozen_goal_pool"
-    )
+    frozen_goal_pool = isinstance(placement, dict) and placement.get("phase") == "frozen_goal_pool"
     if decision.action == "anyplace" and not attachment_passed and not frozen_goal_pool:
         return [
             "AnyPlace requires either the host-built frozen goal-pool obligation or "
             "a verified attachment for executable placement qualification."
         ]
-    if decision.action == "camera_pose_to_world" and _planner_is_anyplace_pose(
-        decision.parameters
-    ):
+    if decision.action == "camera_pose_to_world" and _planner_is_anyplace_pose(decision.parameters):
         return [
             "Raw AnyPlace poses cannot be transformed or executed directly. Use only "
             "the host-generated placement compilation event."
@@ -3573,15 +3686,9 @@ def _project_host_bound_parameters(
     """Replace private exact payloads with compact, verifiable model bindings."""
 
     if isinstance(value, list):
-        return [
-            _project_host_bound_parameters(item, source=source, root=False)
-            for item in value
-        ]
+        return [_project_host_bound_parameters(item, source=source, root=False) for item in value]
     if isinstance(value, tuple):
-        return [
-            _project_host_bound_parameters(item, source=source, root=False)
-            for item in value
-        ]
+        return [_project_host_bound_parameters(item, source=source, root=False) for item in value]
     if not isinstance(value, Mapping):
         return value
 
@@ -3631,9 +3738,7 @@ def _project_host_bound_parameters(
         )
     if inferred_tool and isinstance(required_parameters, Mapping):
         projected.setdefault("required_tool", inferred_tool)
-        projected.update(
-            _host_parameter_binding_descriptor(inferred_tool, required_parameters)
-        )
+        projected.update(_host_parameter_binding_descriptor(inferred_tool, required_parameters))
     return projected
 
 
@@ -3655,9 +3760,7 @@ def _canonicalize_host_parameters(
             and isinstance(artifact.get("path"), str)
         ]
         no_detection = tool_context.get("sam3_no_detection")
-        source_image = (
-            no_detection.get("source_image") if isinstance(no_detection, dict) else None
-        )
+        source_image = no_detection.get("source_image") if isinstance(no_detection, dict) else None
         source_name = Path(source_image).name if isinstance(source_image, str) else ""
         matching = next(
             (
@@ -3705,17 +3808,17 @@ def _canonicalize_host_parameters(
                 "canonical": semantic_role,
             }
         )
-    mode = str(
-        parameters.get("mode")
-        or ("points" if parameters.get("positive_points") is not None else "text")
-    ).strip().lower()
+    mode = (
+        str(
+            parameters.get("mode")
+            or ("points" if parameters.get("positive_points") is not None else "text")
+        )
+        .strip()
+        .lower()
+    )
     prompt = str(parameters.get("prompt") or "").strip()
     semantic_target = str(
-        (
-            prompt
-            if mode == "text" and prompt
-            else parameters.get("semantic_target")
-        )
+        (prompt if mode == "text" and prompt else parameters.get("semantic_target"))
         or obligation.get("semantic_target")
         or ""
     ).strip()
@@ -3735,9 +3838,13 @@ def _canonicalize_host_parameters(
         )
     preferred_image = str(obligation.get("preferred_image") or "")
     supplied_image = str(parameters.get("image") or "")
-    if semantic_role in {"placement_object", "placement_region"} and preferred_image and not _same_local_artifact(
-        supplied_image,
-        preferred_image,
+    if (
+        semantic_role in {"placement_object", "placement_region"}
+        and preferred_image
+        and not _same_local_artifact(
+            supplied_image,
+            preferred_image,
+        )
     ):
         parameters["image"] = preferred_image
         canonicalizations.append(
@@ -3777,6 +3884,60 @@ def _canonicalize_host_parameters(
     return canonicalizations
 
 
+def _validate_grasp_recovery_obligation(
+    decision: PlannerDecision,
+    *,
+    tool_context: JsonDict,
+) -> list[str]:
+    """Keep physical gripper recovery ahead of every frozen-pool action."""
+
+    recovery = tool_context.get("grasp_recovery")
+    if not isinstance(recovery, dict) or recovery.get("status") != "required":
+        return []
+    required = recovery.get("required_action")
+    if not (
+        isinstance(required, dict)
+        and isinstance(required.get("name"), str)
+        and isinstance(required.get("parameters"), dict)
+    ):
+        return ["The required grasp recovery action is malformed; do not continue."]
+    if (
+        decision.action_type.lower().strip() == "tool_call"
+        and decision.action == required["name"]
+        and decision.parameters == required["parameters"]
+    ):
+        return []
+    return [
+        "A failed grasp left a physical recovery action pending. Execute the exact "
+        "grasp_recovery.required_action before switching candidates, expanding the "
+        "frozen frontier, observing, or ending the task."
+    ]
+
+
+def _validate_semantic_perception_obligation(
+    decision: PlannerDecision,
+    *,
+    tool_context: JsonDict,
+) -> list[str]:
+    """End a bounded localization search instead of accepting no-op observes."""
+
+    obligation = tool_context.get("semantic_perception_obligation")
+    if not isinstance(obligation, dict) or obligation.get("status") != "exhausted":
+        return []
+    if (
+        decision.action_type.lower().strip() == "response"
+        and decision.action == "ask_human"
+    ):
+        return []
+    semantic_role = str(obligation.get("semantic_role") or "target")
+    failure_code = str(obligation.get("failure_code") or "localization_exhausted")
+    return [
+        f"Bounded localization for {semantic_role!r} is exhausted "
+        f"({failure_code}). Do not repeat observe or perception on the unchanged "
+        "scene; ask for human visual guidance or wait for an external scene change."
+    ]
+
+
 def _validate_closed_gripper_recovery(
     decision: PlannerDecision,
     *,
@@ -3811,7 +3972,9 @@ def _validate_placement_motion_guidance(
     if not isinstance(guidance, dict) or guidance.get("status") != "required":
         return []
     if decision.action_type.lower().strip() != "tool_call":
-        return ["A verified attachment is awaiting its exact model-derived release target; do not end the task."]
+        return [
+            "A verified attachment is awaiting its exact model-derived release target; do not end the task."
+        ]
     if decision.action == "observe":
         return []
     stage = str(guidance.get("stage") or "")
@@ -3835,10 +3998,47 @@ def _validate_placement_motion_guidance(
         required = guidance.get("required_parameters")
         if decision.parameters != required:
             return [
-                "Placement motion must use the exact compiled EEF target, full rotation, "
-                "0.002 m / 0.05 rad tolerances, and 0.1 velocity/acceleration scaling."
+                "Placement motion must copy the exact host-provided loaded-motion "
+                "parameters, including the compiled EEF target, full rotation, "
+                "terminal tolerances, and collision checking."
             ]
     return []
+
+
+def _validate_placement_release_obligation(
+    decision: PlannerDecision,
+    *,
+    tool_context: JsonDict,
+) -> list[str]:
+    """Make a reached release terminal an exclusive state-machine edge.
+
+    Agentic episodes still ask the model to choose the next AtomAction, but a
+    model must not be allowed to replay the already-completed placement motion
+    when the host has proved arrival at the exact release terminal.
+    """
+
+    obligation = tool_context.get("placement_release_obligation")
+    if not isinstance(obligation, dict) or obligation.get("status") != "required":
+        return []
+    required = obligation.get("required_action")
+    if not (
+        isinstance(required, dict)
+        and isinstance(required.get("name"), str)
+        and isinstance(required.get("parameters"), dict)
+    ):
+        return ["The placement release obligation is malformed; stop safely."]
+    if (
+        decision.action_type.lower().strip() == "tool_call"
+        and decision.action == required["name"]
+        and decision.parameters == required["parameters"]
+    ):
+        return []
+    stage = str(obligation.get("stage") or "release")
+    return [
+        "The exact placement release terminal has already been reached. Execute "
+        f"only placement_release_obligation.required_action for stage {stage!r}; "
+        "do not replay move_to, re-run perception, or select another placement."
+    ]
 
 
 def _looks_like_placement_region_prompt(value: object) -> bool:
@@ -4040,14 +4240,12 @@ def _model_request_context(
     tool_references = [
         _compact_tool_reference_for_model(reference)
         for reference in full_context.get("tool_references", [])
-        if isinstance(reference, dict)
-        and str(reference.get("name") or "") in legal_tool_names
+        if isinstance(reference, dict) and str(reference.get("name") or "") in legal_tool_names
     ]
     obligation_keys = {
         key
         for key, value in full_context.items()
-        if (key.endswith("_obligation") or key == "placement_motion_guidance")
-        and value is not None
+        if (key.endswith("_obligation") or key == "placement_motion_guidance") and value is not None
     }
     obligations = {
         key: _compact_model_value(
@@ -4057,6 +4255,10 @@ def _model_request_context(
         for key in sorted(obligation_keys)
     }
     exact_obligation = _model_has_exact_obligation(obligations)
+    if exact_obligation:
+        tool_references = [
+            _compact_tool_reference_for_model(reference, hard=True) for reference in tool_references
+        ]
     state_keys = (
         "active_environment_task",
         "task_completion_evidence",
@@ -4080,9 +4282,9 @@ def _model_request_context(
         "motion_reconciliation",
     )
     state = {
-        key: _compact_model_value(
+        key: _compact_model_state(
+            key,
             _project_host_bound_parameters(full_context.get(key), source=key),
-            depth=0,
         )
         for key in state_keys
         if full_context.get(key) is not None
@@ -4153,7 +4355,9 @@ def _model_request_context(
             _compact_model_value(item, depth=0)
             for item in (full_context.get("current_rgbd_views") or [])[:4]
             if isinstance(item, dict)
-        ] if visual_context_required else [],
+        ]
+        if visual_context_required
+        else [],
         "obligations": obligations,
         "state": state,
         "scene_epoch": full_context.get("scene_epoch"),
@@ -4166,9 +4370,7 @@ def _model_request_context(
                 memory_context.get("latest_human_interaction")
             ),
         },
-        "task_playbook": _compact_model_value(
-            full_context.get("task_playbook"), depth=0
-        ),
+        "task_playbook": _compact_model_value(full_context.get("task_playbook"), depth=0),
         "tool_references": tool_references,
         "selected_skill_guidance": selected_skills,
         "skill_usage": _compact_skill_usage_for_model(
@@ -4222,12 +4424,10 @@ def _model_request_context(
             projected.get("latest_environment_receipt")
         )
         projected["state"] = {
-            key: _hard_model_state_summary(value)
-            for key, value in projected["state"].items()
+            key: _hard_model_state_summary(value) for key, value in projected["state"].items()
         }
         projected["obligations"] = {
-            key: _hard_model_obligation(value)
-            for key, value in projected["obligations"].items()
+            key: _hard_model_obligation(value) for key, value in projected["obligations"].items()
         }
         projected["tool_references"] = [
             _compact_tool_reference_for_model(reference, hard=True)
@@ -4256,8 +4456,7 @@ def _model_request_context(
             "current_rgbd_views": projected["current_rgbd_views"][:2],
             "obligations": projected["obligations"],
             "state": {
-                key: _hard_model_state_summary(value)
-                for key, value in projected["state"].items()
+                key: _hard_model_state_summary(value) for key, value in projected["state"].items()
             },
             "tool_references": projected["tool_references"],
             "selected_skill_guidance": projected["selected_skill_guidance"],
@@ -4318,15 +4517,11 @@ def _phase_selected_skill_guidance(
     """Select one phase-relevant skill instead of always sending rank zero."""
 
     skills = [
-        skill
-        for skill in context.get("selected_skill_guidance", [])
-        if isinstance(skill, dict)
+        skill for skill in context.get("selected_skill_guidance", []) if isinstance(skill, dict)
     ]
     execution = context.get("grasp_execution")
     execution_stage = (
-        str(execution.get("stage") or "").strip().lower()
-        if isinstance(execution, dict)
-        else ""
+        str(execution.get("stage") or "").strip().lower() if isinstance(execution, dict) else ""
     )
     attachment = context.get("attachment_gate")
     attached = isinstance(attachment, dict) and str(
@@ -4434,6 +4629,12 @@ def _model_phase_and_legal_tools(
     selected = context.get("selected_sam3_detection")
     phase = "general"
     preferred: list[str] = []
+    if isinstance(semantic, dict) and semantic.get("status") == "exhausted":
+        # No tool can create new semantic evidence in the unchanged scene once
+        # the bounded exact-view/simplified-view frontier is exhausted.  Keep
+        # the terminal response agentic, but do not advertise another no-op
+        # observe call as a legal escape hatch.
+        return "semantic_perception_exhausted", []
     if isinstance(semantic, dict) and semantic.get("status") == "semantic_decision_required":
         phase = "semantic_perception"
         preferred = ["sam3", "observe"]
@@ -4512,6 +4713,252 @@ _MODEL_CONTEXT_DROP_KEYS = {
 }
 
 
+_MODEL_STATE_COMMON_FIELDS = (
+    "schema_version",
+    "status",
+    "stage",
+    "verdict",
+    "reason",
+    "failure_code",
+    "stop_reason",
+    "scene_epoch",
+    "planning_scene_revision",
+    "candidate_id",
+    "result_id",
+    "required_tool",
+    "required_action",
+    "model_inference_invoked",
+    "model_inference_retry_allowed",
+)
+
+_MODEL_DETECTION_FIELDS = (
+    "id",
+    "result_id",
+    "observation_id",
+    "label",
+    "score",
+    "bbox_xyxy",
+    "area_px",
+    "semantic_role",
+    "semantic_target",
+    "target_prompt",
+    "source_camera_role",
+    "source_frame_id",
+    "source_image",
+    "mask_ref",
+    "scene_epoch",
+    "selection_source",
+    "selection_reason",
+    "selection_confidence",
+)
+
+_MODEL_GRASP_POLICY_FIELDS = (
+    *_MODEL_STATE_COMMON_FIELDS,
+    "active_rank",
+    "candidate_attempt_count",
+    "candidate_count",
+    "generated_candidate_count",
+    "raw_candidate_count",
+    "full_plan_pass_count",
+    "frozen_grasp_frontier_generation",
+    "frozen_grasp_frontier_remaining_count",
+    "frozen_pair_full_plan_pass_count",
+    "frozen_pair_lookahead_grasp_count",
+    "ranking",
+    "last_rejection",
+    "last_candidate_attempt",
+    "terminal_failure",
+)
+
+
+def _compact_model_state(key: str, value: object) -> object:
+    """Project one durable fact without replaying its private evidence graph."""
+
+    if not isinstance(value, dict):
+        return _compact_model_value(value, depth=0)
+    if key in {
+        "selected_sam3_detection",
+        "placement_object_detection",
+        "placement_region_detection",
+    }:
+        return _bounded_model_value(
+            {name: value[name] for name in _MODEL_DETECTION_FIELDS if name in value},
+            text_limit=800,
+            item_limit=24,
+            depth=0,
+        )
+    if key == "sam3_semantic_state":
+        roles = value.get("roles")
+        role_summary = {
+            str(role): _bounded_model_value(
+                {
+                    name: state[name]
+                    for name in (
+                        "status",
+                        "semantic_role",
+                        "canonical_prompt",
+                        "target_prompt",
+                        "result_id",
+                        "detection_id",
+                        "attempt_id",
+                        "scene_epoch",
+                    )
+                    if isinstance(state, dict) and name in state
+                },
+                text_limit=500,
+                item_limit=12,
+                depth=0,
+            )
+            for role, state in (roles.items() if isinstance(roles, dict) else [])
+        }
+        attempts = value.get("attempts")
+        return {
+            "schema_version": value.get("schema_version"),
+            "roles": role_summary,
+            "attempt_count": len(attempts) if isinstance(attempts, list) else 0,
+        }
+    if key == "grasp_candidate_policy":
+        compact = {name: value[name] for name in _MODEL_GRASP_POLICY_FIELDS if name in value}
+        for name in ("active_candidate", "accepted_candidate"):
+            candidate = value.get(name)
+            if isinstance(candidate, dict):
+                compact[name] = _compact_model_candidate(candidate)
+        return _bounded_model_value(
+            compact,
+            text_limit=800,
+            item_limit=32,
+            depth=0,
+        )
+    if key == "retained_targeted_grasp":
+        compact = {
+            name: value[name] for name in ("status", "result_id", "artifact_key") if name in value
+        }
+        candidate = value.get("candidate")
+        if isinstance(candidate, dict):
+            compact["candidate"] = _compact_model_candidate(candidate)
+        source = value.get("source")
+        if isinstance(source, dict):
+            compact["source"] = {
+                name: source[name]
+                for name in (
+                    "source_backend",
+                    "camera_frame_id",
+                    "scene_epoch",
+                    "target_closing_alignment_candidate_count",
+                )
+                if name in source
+            }
+        return _bounded_model_value(
+            compact,
+            text_limit=800,
+            item_limit=24,
+            depth=0,
+        )
+    if key in {
+        "grasp_execution",
+        "grasp_recovery",
+        "grasp_estimation_recovery",
+        "grasp_reestimation",
+        "attachment_gate",
+        "placement_release",
+        "motion_reconciliation",
+    }:
+        retained = {
+            name: value[name]
+            for name in (
+                *_MODEL_STATE_COMMON_FIELDS,
+                "purpose",
+                "rejection_reason",
+                "rejection_source",
+                "reestimate_strategy",
+                "reopen_required",
+                "observe_after_reopen",
+                "attachment_mode",
+                "target_id",
+            )
+            if name in value
+        }
+        return _bounded_model_value(
+            retained,
+            text_limit=800,
+            item_limit=28,
+            depth=0,
+        )
+    if key == "gripper_command_state":
+        return {
+            name: _compact_model_value(value[name], depth=0)
+            for name in (
+                "schema_version",
+                "state",
+                "position",
+                "open",
+                "latched",
+                "scene_epoch",
+            )
+            if name in value
+        }
+    if key == "placement_candidate_policy":
+        retained = {
+            name: value[name]
+            for name in (
+                *_MODEL_STATE_COMMON_FIELDS,
+                "candidate_count",
+                "remaining_candidate_count",
+                "full_plan_pass_count",
+                "active_rank",
+                "candidate_attempt_count",
+                "last_rejection",
+                "release_sequence",
+            )
+            if name in value
+        }
+        return _bounded_model_value(
+            retained,
+            text_limit=800,
+            item_limit=28,
+            depth=0,
+        )
+    return _bounded_model_value(
+        {name: value[name] for name in _MODEL_STATE_COMMON_FIELDS if name in value} or value,
+        text_limit=800,
+        item_limit=24,
+        depth=0,
+    )
+
+
+def _compact_model_candidate(value: Mapping[str, object]) -> JsonDict:
+    compact = {
+        name: value[name]
+        for name in (
+            "id",
+            "candidate_id",
+            "backend_candidate_id",
+            "backend_index",
+            "candidate_source",
+            "source_backend",
+            "score",
+            "rank",
+            "grasp_place_joint_qualified",
+            "moveit_qualified",
+            "compiled_grasp_id",
+        )
+        if name in value
+    }
+    alignment = value.get("target_closing_alignment")
+    if isinstance(alignment, Mapping):
+        compact["target_closing_alignment"] = {
+            name: alignment[name]
+            for name in (
+                "correction_m",
+                "target_span_m",
+                "centering_ratio",
+                "variant_role",
+            )
+            if name in alignment
+        }
+    return compact
+
+
 def _compact_model_value(value: object, *, depth: int) -> object:
     if value is None or isinstance(value, bool | int | float):
         return value
@@ -4531,9 +4978,7 @@ def _compact_model_value(value: object, *, depth: int) -> object:
             compact[str(key)] = _compact_model_value(item, depth=depth + 1)
         return compact
     if isinstance(value, (list, tuple)):
-        return [
-            _compact_model_value(item, depth=depth + 1) for item in list(value)[:6]
-        ]
+        return [_compact_model_value(item, depth=depth + 1) for item in list(value)[:6]]
     return str(value)[:500]
 
 
@@ -4756,8 +5201,8 @@ def _build_tool_context_payload(
     skill_usage = _skill_usage_guidance(selected_skill_guidance, memory, config=config)
     memory_context = memory.planning_context(max_events=config.max_memory_events)
     effective_task = _effective_task_text(observation, memory)
-    scripted_task = str(
-        memory_context.get("current_user_request") or effective_task or ""
+    scripted_task = _scripted_control_task(
+        str(memory_context.get("current_user_request") or effective_task or "")
     )
     task_playbook = _matched_task_playbook(
         observation=observation,
@@ -4775,9 +5220,7 @@ def _build_tool_context_payload(
     )
     execution = memory_context.get("grasp_execution")
     selected_skill_names = {
-        str(skill.get("name") or "")
-        for skill in selected_skill_guidance
-        if isinstance(skill, dict)
+        str(skill.get("name") or "") for skill in selected_skill_guidance if isinstance(skill, dict)
     }
     frozen_pool_required = (
         {"pick", "place"}.issubset(selected_skill_names)
@@ -4785,9 +5228,7 @@ def _build_tool_context_payload(
         and not isinstance(execution, dict)
     )
     reestimate = memory.grasp_reestimation()
-    reestimate_status = (
-        str(reestimate.get("status") or "") if isinstance(reestimate, dict) else ""
-    )
+    reestimate_status = str(reestimate.get("status") or "") if isinstance(reestimate, dict) else ""
     grasp_view_selection = _grasp_view_selection_obligation(
         reestimate,
         current_rgbd_views=current_rgbd_views,
@@ -4826,9 +5267,7 @@ def _build_tool_context_payload(
         ):
             if isinstance(live_target_selection.get(failure_field), dict):
                 grasp_target_selection = dict(grasp_target_selection)
-                grasp_target_selection[failure_field] = dict(
-                    live_target_selection[failure_field]
-                )
+                grasp_target_selection[failure_field] = dict(live_target_selection[failure_field])
                 break
     grasp_visual_stage = _grasp_visual_stage_for_context(execution)
     initial_pick_perception = (
@@ -4843,26 +5282,17 @@ def _build_tool_context_payload(
             for view in (offered_views if isinstance(offered_views, list) else [])
             if isinstance(view, dict) and isinstance(view.get("rgb_path"), str)
         ][:4]
-    elif (
-        grasp_visual_stage
-        or frozen_pool_required
-        or initial_pick_perception
-    ):
+    elif grasp_visual_stage or frozen_pool_required or initial_pick_perception:
         vision_image_paths = [
-            str(view["rgb_path"])
-            for view in current_rgbd_views
-            if view.get("primary") is True
+            str(view["rgb_path"]) for view in current_rgbd_views if view.get("primary") is True
         ][:4]
         if not vision_image_paths:
-            vision_image_paths = [
-                str(view["rgb_path"]) for view in current_rgbd_views
-            ][:4]
+            vision_image_paths = [str(view["rgb_path"]) for view in current_rgbd_views][:4]
         if not vision_image_paths and grasp_visual_stage:
             vision_image_paths = [
                 str(artifact["path"])
                 for artifact in camera_artifacts
-                if artifact.get("kind") == "rgb"
-                and _is_primary_planner_camera(artifact)
+                if artifact.get("kind") == "rgb" and _is_primary_planner_camera(artifact)
             ][:4]
         if not vision_image_paths:
             vision_image_paths = [
@@ -4881,11 +5311,7 @@ def _build_tool_context_payload(
         )
         if primary_rgb is None:
             primary_rgb = next(
-                (
-                    artifact["path"]
-                    for artifact in camera_artifacts
-                    if artifact["kind"] == "rgb"
-                ),
+                (artifact["path"] for artifact in camera_artifacts if artifact["kind"] == "rgb"),
                 None,
             )
         vision_image_paths = [primary_rgb] if primary_rgb else []
@@ -4920,9 +5346,7 @@ def _build_tool_context_payload(
         "selected_sam3_detection": memory_context.get("selected_sam3_detection"),
         "placement_object_detection": memory_context.get("placement_object_detection"),
         "placement_region_detection": memory_context.get("placement_region_detection"),
-        "frozen_placement_goal_pool": memory_context.get(
-            "frozen_placement_goal_pool"
-        ),
+        "frozen_placement_goal_pool": memory_context.get("frozen_placement_goal_pool"),
         "sam3_no_detection": memory_context.get("sam3_no_detection"),
         "sam3_semantic_state": memory_context.get("sam3_semantic_state"),
         "semantic_perception_obligation": _semantic_perception_obligation(
@@ -4937,12 +5361,7 @@ def _build_tool_context_payload(
                     {
                         **view,
                         **(
-                            {
-                                "vision_image_index": vision_image_paths.index(
-                                    view["rgb_path"]
-                                )
-                                + 1
-                            }
+                            {"vision_image_index": vision_image_paths.index(view["rgb_path"]) + 1}
                             if view.get("rgb_path") in vision_image_paths
                             else {}
                         ),
@@ -4965,13 +5384,12 @@ def _build_tool_context_payload(
             working_artifacts=working_artifacts,
         ),
         "grasp_frontier_obligation": _frozen_grasp_frontier_obligation(
-            memory_context.get("grasp_candidate_policy")
+            memory_context.get("grasp_candidate_policy"),
+            recovery=memory_context.get("grasp_recovery"),
         ),
         "molmopoint_fallback_obligation": _molmopoint_fallback_obligation(
             no_detection=(
-                None
-                if reestimate_status == "ready"
-                else memory_context.get("sam3_no_detection")
+                None if reestimate_status == "ready" else memory_context.get("sam3_no_detection")
             ),
             reference_failure=memory_context.get("reference_localization_failure"),
             pending_selection=memory_context.get("selection_obligation"),
@@ -4981,9 +5399,7 @@ def _build_tool_context_payload(
             observation,
             camera_artifacts=camera_artifacts,
             no_detection=(
-                None
-                if reestimate_status == "ready"
-                else memory_context.get("sam3_no_detection")
+                None if reestimate_status == "ready" else memory_context.get("sam3_no_detection")
             ),
             pending_selection=memory_context.get("selection_obligation"),
             selected=memory_context.get("selected_sam3_detection"),
@@ -5035,17 +5451,13 @@ def _build_tool_context_payload(
         "grasp_candidate_policy": memory_context.get("grasp_candidate_policy"),
         "grasp_reestimation": memory.grasp_reestimation(),
         "retained_targeted_grasp": memory_context.get("retained_targeted_grasp"),
-        "articulated_attachment_probe": memory_context.get(
-            "articulated_attachment_probe"
-        ),
+        "articulated_attachment_probe": memory_context.get("articulated_attachment_probe"),
         "grasp_execution": memory_context.get("grasp_execution"),
         "grasp_recovery": memory_context.get("grasp_recovery"),
         "grasp_estimation_recovery": memory_context.get("grasp_estimation_recovery"),
         "gripper_command_state": memory_context.get("gripper_command_state"),
         "attachment_gate": memory_context.get("attachment_gate"),
-        "placement_candidate_policy": memory_context.get(
-            "placement_candidate_policy"
-        ),
+        "placement_candidate_policy": memory_context.get("placement_candidate_policy"),
         "placement_release": memory_context.get("placement_release"),
         "placement_release_obligation": _placement_release_obligation(
             observation,
@@ -5096,7 +5508,12 @@ def _matched_task_playbook(
     environment_id = str(metadata.get("env_id") or memory.metadata.get("env_id") or "")
     suite = str(metadata.get("suite") or memory.metadata.get("suite") or "")
     task_index = metadata.get("task_index", memory.metadata.get("task_index"))
-    if not environment_id or not suite or isinstance(task_index, bool) or not isinstance(task_index, int):
+    if (
+        not environment_id
+        or not suite
+        or isinstance(task_index, bool)
+        or not isinstance(task_index, int)
+    ):
         return None
     workspace = memory.metadata.get("workspace")
     workspace = workspace if isinstance(workspace, dict) else {}
@@ -5166,6 +5583,160 @@ def _current_camera_artifacts(observation: EnvObservation) -> list[JsonDict]:
     for artifact in artifacts:
         artifact.pop("_sort_key", None)
     return artifacts
+
+
+def _semantic_camera_view_identity(
+    *,
+    observation: EnvObservation,
+    artifact: Mapping[str, object],
+) -> str:
+    """Return a stable identity for one physical camera view.
+
+    Observation image paths are materialisation ids, not viewpoint ids.  A
+    passive ``observe`` therefore must not create a new semantic retry merely
+    because the same pixels were saved under a new filename.  The identity is
+    based on the camera frame, calibrated pose and image geometry.  Pose values
+    are quantised to a millimetre-scale view cell so timestamp-level TF noise
+    does not manufacture fresh views; an intentional eye-in-hand move remains
+    many cells away.
+    """
+
+    frame_id = _camera_item_frame_id(artifact)
+    camera = next(
+        (candidate for candidate in observation.cameras if candidate.frame_id == frame_id),
+        None,
+    )
+    payload: JsonDict = {"frame_id": frame_id}
+    role = _camera_item_role(artifact) or (camera.role if camera is not None else "")
+    if role:
+        payload["role"] = role
+
+    pose: JsonDict = {}
+    if camera is not None and isinstance(camera.extrinsics, Mapping):
+        pose = _canonical_semantic_view_pose(camera.extrinsics)
+    if not pose and _is_wrist_camera(artifact):
+        end_effector_pose = observation.robot.end_effector_pose
+        if isinstance(end_effector_pose, Mapping):
+            pose = _canonical_semantic_view_pose(end_effector_pose)
+            if pose:
+                pose["source"] = "end_effector_pose"
+    if pose:
+        payload["pose"] = pose
+
+    image_geometry: JsonDict = {}
+    intrinsics = camera.intrinsics if camera is not None else {}
+    if isinstance(intrinsics, Mapping):
+        for key in ("width", "height", "fx", "fy", "cx", "cy"):
+            value = intrinsics.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            numeric = float(value)
+            if math.isfinite(numeric):
+                image_geometry[key] = round(numeric, 4)
+    for key in ("width", "height"):
+        if key in image_geometry:
+            continue
+        value = artifact.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            image_geometry[key] = value
+    if image_geometry:
+        payload["image_geometry"] = image_geometry
+
+    # A frame id is still the safest fail-closed identity when calibration is
+    # unavailable.  Only a frameless legacy artifact falls back to its path.
+    if not frame_id:
+        payload["legacy_artifact"] = str(artifact.get("path") or "")
+    digest = sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"camera-view-{digest[:20]}"
+
+
+def _canonical_semantic_view_pose(value: Mapping[str, object]) -> JsonDict:
+    """Extract only spatial transform fields, excluding timestamps/provenance."""
+
+    position: list[float] | None = None
+    for key in ("pos", "xyz", "translation", "position"):
+        position = _finite_rounded_vector(value.get(key), length=3, decimals=3)
+        if position is not None:
+            break
+
+    orientation: list[float] | None = None
+    quaternion = _finite_rounded_vector(
+        value.get("quat_xyzw") or value.get("quaternion_xyzw"),
+        length=4,
+        decimals=12,
+    )
+    if quaternion is not None:
+        norm = math.sqrt(sum(component * component for component in quaternion))
+        if norm > 1e-12:
+            quaternion = [component / norm for component in quaternion]
+            first_nonzero = next(
+                (component for component in quaternion if abs(component) > 1e-12),
+                0.0,
+            )
+            if first_nonzero < 0.0:
+                quaternion = [-component for component in quaternion]
+            orientation = [round(component, 4) for component in quaternion]
+    if orientation is None:
+        for key in ("mat", "rotation_matrix", "rotation"):
+            orientation = _finite_rounded_vector(value.get(key), length=9, decimals=4)
+            if orientation is not None:
+                break
+
+    pose: JsonDict = {}
+    if position is not None:
+        pose["position_m"] = position
+    if orientation is not None:
+        pose["orientation"] = orientation
+    for key in ("reference_frame", "frame_transform", "camera_frame"):
+        text = str(value.get(key) or "").strip()
+        if text:
+            pose[key] = text
+    return pose
+
+
+def _finite_rounded_vector(
+    value: object,
+    *,
+    length: int,
+    decimals: int,
+) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        return None
+    parsed: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        numeric = float(item)
+        if not math.isfinite(numeric):
+            return None
+        parsed.append(round(numeric, decimals))
+    return parsed
+
+
+def _semantic_view_identity_for_source(
+    *,
+    observation: EnvObservation,
+    camera_artifacts: list[JsonDict],
+    source_image: str,
+) -> str:
+    artifact = next(
+        (
+            candidate
+            for candidate in camera_artifacts
+            if _same_local_artifact(candidate.get("path"), source_image)
+        ),
+        None,
+    )
+    if isinstance(artifact, Mapping):
+        return _semantic_camera_view_identity(observation=observation, artifact=artifact)
+    return ""
 
 
 def _current_complete_rgbd_views(
@@ -5340,11 +5911,7 @@ def _frame_is_wrist_camera(
     camera_artifacts: list[JsonDict],
 ) -> bool:
     artifact = next(
-        (
-            value
-            for value in camera_artifacts
-            if _camera_item_frame_id(value) == frame_id
-        ),
+        (value for value in camera_artifacts if _camera_item_frame_id(value) == frame_id),
         None,
     )
     if artifact is not None:
@@ -5356,12 +5923,22 @@ def _frame_is_wrist_camera(
     return camera is not None and _is_wrist_camera(camera)
 
 
-def _frozen_grasp_frontier_obligation(grasp_policy: object) -> JsonDict | None:
+def _frozen_grasp_frontier_obligation(
+    grasp_policy: object,
+    *,
+    recovery: object = None,
+) -> JsonDict | None:
     """Expose a frozen-provider expansion as an explicit agent decision."""
 
-    if not isinstance(grasp_policy, Mapping) or grasp_policy.get(
-        "status"
-    ) != "frozen_frontier_required":
+    if isinstance(recovery, Mapping) and recovery.get("status") in {
+        "required",
+        "reconciling",
+    }:
+        return None
+    if (
+        not isinstance(grasp_policy, Mapping)
+        or grasp_policy.get("status") != "frozen_frontier_required"
+    ):
         return None
     remaining = grasp_policy.get("frozen_grasp_frontier_remaining_count")
     revision = grasp_policy.get("planning_scene_revision")
@@ -5474,8 +6051,7 @@ def _targeted_grasp_obligation(
     )
     if enhanced_depth is not None:
         selected_depth_path = str(
-            enhanced_depth.get("candidate_depth_png")
-            or enhanced_depth["fused_depth_png"]
+            enhanced_depth.get("candidate_depth_png") or enhanced_depth["fused_depth_png"]
         )
         hints["depth_source"] = "enhanced_depth"
         hints["collision_check"] = False
@@ -5484,9 +6060,7 @@ def _targeted_grasp_obligation(
             "provenance_mask_png": enhanced_depth.get("provenance_mask_png"),
             "point_cloud_npz": enhanced_depth.get("point_cloud_npz"),
             "safety_depth_png": enhanced_depth.get("safety_depth_png"),
-            "safety_point_cloud_npz": enhanced_depth.get(
-                "safety_point_cloud_npz"
-            ),
+            "safety_point_cloud_npz": enhanced_depth.get("safety_point_cloud_npz"),
             "quality": enhanced_depth.get("quality"),
             "candidate_generation_only": True,
             "requires_sensor_safety_check": True,
@@ -5502,10 +6076,7 @@ def _targeted_grasp_obligation(
         "rgb": rgb["path"],
         "depth": selected_depth_path,
         "intrinsics": (
-            dict(
-                enhanced_depth.get("candidate_intrinsics")
-                or camera.intrinsics
-            )
+            dict(enhanced_depth.get("candidate_intrinsics") or camera.intrinsics)
             if enhanced_depth is not None
             else dict(camera.intrinsics)
         ),
@@ -5657,9 +6228,7 @@ def _grasp_estimation_fallback_obligation(
                 }
 
     complete_views = _complete_rgbd_views(observation, camera_artifacts)
-    passive_views = [
-        view for view in complete_views if not _is_wrist_camera(view)
-    ]
+    passive_views = [view for view in complete_views if not _is_wrist_camera(view)]
     next_view = next(
         (
             view
@@ -5767,8 +6336,7 @@ def _target_camera_frame(
         (
             value
             for value in camera_artifacts
-            if value.get("kind") == "rgb"
-            and _same_local_artifact(value.get("path"), source_image)
+            if value.get("kind") == "rgb" and _same_local_artifact(value.get("path"), source_image)
         ),
         None,
     )
@@ -6105,13 +6673,17 @@ def _placement_obligation(
         excluded_goal_ids: list[str] = []
         if resume_frontier:
             rejected = placement_policy.get("rejected_candidates")
-            excluded_goal_ids = sorted(
-                {
-                    str(item.get("candidate_id") or "")
-                    for item in rejected
-                    if isinstance(item, dict) and str(item.get("candidate_id") or "")
-                }
-            ) if isinstance(rejected, list) else []
+            excluded_goal_ids = (
+                sorted(
+                    {
+                        str(item.get("candidate_id") or "")
+                        for item in rejected
+                        if isinstance(item, dict) and str(item.get("candidate_id") or "")
+                    }
+                )
+                if isinstance(rejected, list)
+                else []
+            )
             if not excluded_goal_ids:
                 return None
             required_parameters.update(
@@ -6138,6 +6710,7 @@ def _placement_obligation(
         return None
     if not isinstance(object_detection, dict) or not isinstance(region_detection, dict):
         return None
+
     def packet(detection: JsonDict, mask_name: str) -> JsonDict | None:
         source_image = detection.get("source_image")
         mask_ref = detection.get("mask_ref")
@@ -6200,9 +6773,7 @@ def _placement_obligation(
             if attached and isinstance(attachment.get("planning_scene_revision"), int)
             else (
                 observation.metadata.get("planning_scene_revision")
-                if isinstance(
-                    observation.metadata.get("planning_scene_revision"), int
-                )
+                if isinstance(observation.metadata.get("planning_scene_revision"), int)
                 else int(memory_context.get("scene_epoch") or 0)
             )
         ),
@@ -6308,17 +6879,13 @@ def _semantic_perception_obligation(
     else:
         return None
 
-    if semantic_role == "grasp_target" and _explicit_post_create_observe_required(
-        memory_context
-    ):
+    if semantic_role == "grasp_target" and _explicit_post_create_observe_required(memory_context):
         return {
             "schema_version": "openeta.semantic_perception_obligation.v1",
             "status": "required",
             "semantic_role": semantic_role,
             "required_tool": "observe",
-            "required_parameters": {
-                "reason": "explicit_post_create_observation_required"
-            },
+            "required_parameters": {"reason": "explicit_post_create_observation_required"},
             "rule": (
                 "The task explicitly excludes create_simulator_env.initial_observation; "
                 "acquire one observe receipt before target perception."
@@ -6332,29 +6899,19 @@ def _semantic_perception_obligation(
     role_state = roles.get(semantic_role) if isinstance(roles, dict) else None
     role_state = role_state if isinstance(role_state, dict) else {}
     scripted_prompts = _scripted_semantic_prompts(
-        str(
-            memory_context.get("current_user_request")
-            or memory_context.get("task")
-            or ""
+        _scripted_control_task(
+            str(memory_context.get("current_user_request") or memory_context.get("task") or "")
         )
     )
     prompt = str(
-        role_state.get("canonical_prompt")
-        or scripted_prompts.get(semantic_role)
-        or ""
+        role_state.get("canonical_prompt") or scripted_prompts.get(semantic_role) or ""
     ).strip()
     if not prompt and semantic_role in {"grasp_target", "placement_object"}:
         policy_target = (
-            grasp_policy.get("target_detection")
-            if isinstance(grasp_policy, dict)
-            else None
+            grasp_policy.get("target_detection") if isinstance(grasp_policy, dict) else None
         )
         prompt = str(
-            (
-                policy_target.get("target_prompt")
-                if isinstance(policy_target, dict)
-                else None
-            )
+            (policy_target.get("target_prompt") if isinstance(policy_target, dict) else None)
             or (selected.get("target_prompt") if isinstance(selected, dict) else None)
             or ""
         ).strip()
@@ -6363,50 +6920,80 @@ def _semantic_perception_obligation(
         for attempt in (semantic_state.get("attempts") or [])
         if isinstance(attempt, dict)
         and str(attempt.get("semantic_role") or "") == semantic_role
-        and _coerce_nonnegative_int(attempt.get("scene_epoch"), default=-1)
-        == scene_epoch
+        and _coerce_nonnegative_int(attempt.get("scene_epoch"), default=-1) == scene_epoch
     ]
-    failed_text_paths = [
-        str(attempt.get("source_image") or "")
+    failed_text_attempts = [
+        attempt
         for attempt in role_attempts
         if str(attempt.get("status") or "") in {"no_detection", "rejected"}
         and str(attempt.get("mode") or "") != "point_prompt"
         and (
             not str(attempt.get("target_prompt") or "").strip()
-            or str(attempt.get("target_prompt") or "").strip().lower()
-            == prompt.lower()
+            or str(attempt.get("target_prompt") or "").strip().lower() == prompt.lower()
         )
-        and str(attempt.get("source_image") or "")
     ]
+    failed_text_paths = [
+        str(attempt.get("source_image") or "")
+        for attempt in failed_text_attempts
+        if str(attempt.get("source_image") or "")
+    ]
+    failed_text_view_identities = {
+        str(attempt.get("view_identity") or "")
+        for attempt in failed_text_attempts
+        if str(attempt.get("view_identity") or "")
+    }
     text_fallback_required = False
     if semantic_role in {"grasp_target", "placement_object"} and prompt:
-        ordered_sources = [str(preferred_rgb.get("path") or "")]
-        ordered_sources.extend(
-            str(artifact.get("path") or "")
+        ordered_views = [preferred_rgb]
+        ordered_views.extend(
+            artifact
             for artifact in current_rgb
-            if str(artifact.get("path") or "") not in ordered_sources
+            if artifact is not preferred_rgb
         )
-        untried_sources = [
-            candidate
-            for candidate in ordered_sources
-            if candidate
-            and not any(
-                _same_local_artifact(candidate, attempted)
-                for attempted in failed_text_paths
+        untried_views: list[JsonDict] = []
+        for candidate in ordered_views:
+            candidate_path = str(candidate.get("path") or "")
+            if not candidate_path:
+                continue
+            candidate_view_identity = _semantic_camera_view_identity(
+                observation=observation,
+                artifact=candidate,
             )
-        ]
-        if untried_sources:
-            source_image = untried_sources[0]
-        elif failed_text_paths:
+            if candidate_view_identity in failed_text_view_identities:
+                continue
+            # Old v1 artifacts did not persist view identity.  Preserve their
+            # exact-path retry semantics while new artifacts use physical pose.
+            if any(
+                _same_local_artifact(candidate_path, attempted)
+                for attempted in failed_text_paths
+            ):
+                continue
+            untried_views.append(candidate)
+        if untried_views:
+            source_image = str(untried_views[0].get("path") or source_image)
+        elif failed_text_attempts:
             # Every exact text/view pair has completed. Any role-specific bounded
             # fallback receives one deterministic primary scene image.
             source_image = str(preferred_rgb.get("path") or source_image)
             text_fallback_required = True
     elif semantic_role == "placement_region" and prompt:
-        text_fallback_required = any(
-            _same_local_artifact(source_image, attempted)
-            for attempted in failed_text_paths
+        source_view_identity = _semantic_view_identity_for_source(
+            observation=observation,
+            camera_artifacts=current_rgb,
+            source_image=source_image,
         )
+        text_fallback_required = (
+            bool(source_view_identity and source_view_identity in failed_text_view_identities)
+            or any(
+                _same_local_artifact(source_image, attempted)
+                for attempted in failed_text_paths
+            )
+        )
+    source_view_identity = _semantic_view_identity_for_source(
+        observation=observation,
+        camera_artifacts=current_rgb,
+        source_image=source_image,
+    )
     identity = _sam3_request_identity(
         observation=observation,
         scene_epoch=scene_epoch,
@@ -6417,6 +7004,7 @@ def _semantic_perception_obligation(
         prompt=prompt,
         points=[],
         roi_bbox_xyxy=None,
+        view_identity=source_view_identity,
     )
     base: JsonDict = {
         "schema_version": "openeta.semantic_perception_obligation.v1",
@@ -6427,6 +7015,7 @@ def _semantic_perception_obligation(
         "perception_bundle_id": identity["perception_bundle_id"],
         "observation_id": identity["observation_id"],
         "preferred_image": source_image,
+        "preferred_view_identity": source_view_identity or None,
         "allowed_images": [
             str(artifact["path"])
             for artifact in current_rgb
@@ -6448,7 +7037,8 @@ def _semantic_perception_obligation(
                 str(attempt.get("attempt_id") or attempt.get("attempt_fingerprint") or "")
                 for attempt in role_attempts
                 if str(attempt.get("mode") or "") == "point_prompt"
-                and str(attempt.get("status") or "") in {
+                and str(attempt.get("status") or "")
+                in {
                     "no_detection",
                     "rejected",
                 }
@@ -6480,11 +7070,17 @@ def _semantic_perception_obligation(
                 prompt="",
                 points=points,
                 roi_bbox_xyxy=None,
+                view_identity=_semantic_view_identity_for_source(
+                    observation=observation,
+                    camera_artifacts=current_rgb,
+                    source_image=projected_source,
+                ),
             )
             return {
                 **base,
                 "status": "required",
                 "preferred_image": projected_source,
+                "preferred_view_identity": projected_identity.get("view_identity"),
                 "perception_bundle_id": projected_identity["perception_bundle_id"],
                 "observation_id": projected_identity["observation_id"],
                 "required_tool": "sam3",
@@ -6507,8 +7103,7 @@ def _semantic_perception_obligation(
             else ""
         )
         simplified_attempted = any(
-            str(attempt.get("target_prompt") or "").strip().lower()
-            == simplified_prompt.lower()
+            str(attempt.get("target_prompt") or "").strip().lower() == simplified_prompt.lower()
             for attempt in role_attempts
         )
         if simplified_prompt and not simplified_attempted:
@@ -6523,12 +7118,18 @@ def _semantic_perception_obligation(
                 prompt=simplified_prompt,
                 points=[],
                 roi_bbox_xyxy=None,
+                view_identity=_semantic_view_identity_for_source(
+                    observation=observation,
+                    camera_artifacts=current_rgb,
+                    source_image=simplified_source,
+                ),
             )
             return {
                 **base,
                 "status": "required",
                 "semantic_target": simplified_prompt,
                 "preferred_image": simplified_source,
+                "preferred_view_identity": simplified_identity.get("view_identity"),
                 "perception_bundle_id": simplified_identity["perception_bundle_id"],
                 "observation_id": simplified_identity["observation_id"],
                 "required_tool": "sam3",
@@ -6580,10 +7181,7 @@ def _semantic_perception_obligation(
             "required_tool": "molmopoint",
             "required_parameters": {
                 "images": [source_image],
-                "prompt": (
-                    "Point to the interior center of the complete "
-                    f"{point_target}"
-                ),
+                "prompt": (f"Point to the interior center of the complete {point_target}"),
             },
             "fallback": "point_localization_after_bounded_text_views",
             "attempt": point_attempts + 1,
@@ -6645,6 +7243,21 @@ def _scripted_environment_start_obligation(
     }
 
 
+def _scripted_control_task(task: str) -> str:
+    """Keep automation contracts separate from the human-facing TUI task.
+
+    Formal runners may provide the structured opt-in marker out of band. The
+    ordinary user request then remains natural language while the same planner
+    safety and determinism contracts stay explicit. Inline markers remain a
+    backwards-compatible fallback for older artifacts and tests.
+    """
+
+    metadata = os.environ.get("OPENETA_SCRIPTED_TASK_METADATA", "").strip()
+    if _SCRIPTED_AUTOMATION_MARKER_RE.search(metadata):
+        return metadata
+    return task
+
+
 def _scripted_semantic_prompts(task: str) -> dict[str, str]:
     """Read opt-in fixed visual phrases from the scripted acceptance marker."""
 
@@ -6670,11 +7283,16 @@ def _scripted_planner_mode(task: str) -> str:
     if match is None:
         return ""
     value = match.group("value").strip().lower()
-    return "agentic_closed_loop" if value in {
-        "agentic",
-        "agentic_closed_loop",
-        "model_closed_loop",
-    } else value
+    return (
+        "agentic_closed_loop"
+        if value
+        in {
+            "agentic",
+            "agentic_closed_loop",
+            "model_closed_loop",
+        }
+        else value
+    )
 
 
 def _agentic_closed_loop_enabled(tool_context: Mapping[str, object]) -> bool:
@@ -6686,7 +7304,7 @@ def _agentic_closed_loop_enabled(tool_context: Mapping[str, object]) -> bool:
     task = str(tool_context.get("task") or "")
     memory = tool_context.get("memory")
     if isinstance(memory, Mapping):
-        task = str(memory.get("current_user_request") or task)
+        task = _scripted_control_task(str(memory.get("current_user_request") or task))
     return _scripted_planner_mode(task) == "agentic_closed_loop"
 
 
@@ -6761,8 +7379,7 @@ def _simplify_semantic_text_prompt(prompt: str) -> str:
     simplified = [
         token
         for token in tokens
-        if token.lower().strip(".,;:()[]{}")
-        not in _SEMANTIC_PROMPT_REDUNDANT_SHAPE_WORDS
+        if token.lower().strip(".,;:()[]{}") not in _SEMANTIC_PROMPT_REDUNDANT_SHAPE_WORDS
     ]
     if len(simplified) < 2 or simplified == tokens:
         return ""
@@ -6782,28 +7399,28 @@ def _semantic_detection_is_current(
         return False
     if (
         detection.get("scene_epoch") is not None
-        and _coerce_nonnegative_int(detection.get("scene_epoch"), default=-1)
-        != scene_epoch
+        and _coerce_nonnegative_int(detection.get("scene_epoch"), default=-1) != scene_epoch
     ):
         return False
     return any(
-        _same_local_artifact(artifact.get("path"), source_image)
-        for artifact in camera_artifacts
+        _same_local_artifact(artifact.get("path"), source_image) for artifact in camera_artifacts
     )
 
 
 def _explicit_post_create_observe_required(memory_context: JsonDict) -> bool:
     task = str(
-        memory_context.get("current_user_request")
-        or memory_context.get("task")
-        or ""
-    ).lower()
+        memory_context.get("current_user_request") or memory_context.get("task") or ""
+    )
+    control_task = _scripted_control_task(task).lower()
     explicitly_requested = (
-        "先 observe" in task
-        or "first observe" in task
+        "initial_observe=required" in control_task
+        or "先 observe" in control_task
+        or "first observe" in control_task
         or (
-            "initial observation" in task
-            and any(token in task for token in ("不计", "does not count", "excluded"))
+            "initial observation" in control_task
+            and any(
+                token in control_task for token in ("不计", "does not count", "excluded")
+            )
         )
     )
     if not explicitly_requested:
@@ -6812,9 +7429,7 @@ def _explicit_post_create_observe_required(memory_context: JsonDict) -> bool:
     info = receipt.get("info") if isinstance(receipt, dict) else None
     previous_action = info.get("previous_action") if isinstance(info, dict) else None
     request_name = (
-        str(previous_action.get("request_name") or "")
-        if isinstance(previous_action, dict)
-        else ""
+        str(previous_action.get("request_name") or "") if isinstance(previous_action, dict) else ""
     )
     return request_name == "create_simulator_env"
 
@@ -6840,20 +7455,23 @@ def _sam3_request_identity(
     prompt: str,
     points: list[JsonDict],
     roi_bbox_xyxy: object,
+    view_identity: str = "",
 ) -> JsonDict:
-    raw_observation_id = (
-        observation.metadata.get("observation_id")
-        or observation.metadata.get("capture_id")
+    raw_observation_id = observation.metadata.get("observation_id") or observation.metadata.get(
+        "capture_id"
     )
     observation_identity = str(raw_observation_id or "").strip()
     if not observation_identity:
-        observation_identity = sha256(
-            f"{scene_epoch}\0{source_image}".encode("utf-8")
-        ).hexdigest()[:16]
+        observation_identity = sha256(f"{scene_epoch}\0{source_image}".encode("utf-8")).hexdigest()[
+            :16
+        ]
     observation_id = f"observation-{observation_identity}"
-    perception_bundle_id = "perception-" + sha256(
-        f"{scene_epoch}\0{observation_id}\0{source_image}".encode("utf-8")
-    ).hexdigest()[:16]
+    perception_bundle_id = (
+        "perception-"
+        + sha256(f"{scene_epoch}\0{observation_id}\0{source_image}".encode("utf-8")).hexdigest()[
+            :16
+        ]
+    )
     fingerprint_payload = {
         "perception_bundle_id": perception_bundle_id,
         "semantic_role": semantic_role,
@@ -6862,6 +7480,7 @@ def _sam3_request_identity(
         "prompt": prompt,
         "points": points,
         "roi_bbox_xyxy": roi_bbox_xyxy,
+        "view_identity": view_identity,
     }
     fingerprint = sha256(
         json.dumps(
@@ -6871,13 +7490,16 @@ def _sam3_request_identity(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    return {
+    identity: JsonDict = {
         "scene_epoch": scene_epoch,
         "observation_id": observation_id,
         "perception_bundle_id": perception_bundle_id,
         "attempt_id": f"sam3-attempt-{fingerprint[:16]}",
         "attempt_fingerprint": fingerprint,
     }
+    if view_identity:
+        identity["view_identity"] = view_identity
+    return identity
 
 
 def _sam3_identity_from_parameters(
@@ -6890,16 +7512,20 @@ def _sam3_identity_from_parameters(
     parameters: JsonDict,
 ) -> JsonDict:
     normalized_observation_id = observation_id or (
-        "observation-"
-        + sha256(f"{scene_epoch}\0{source_image}".encode("utf-8")).hexdigest()[:16]
+        "observation-" + sha256(f"{scene_epoch}\0{source_image}".encode("utf-8")).hexdigest()[:16]
     )
-    perception_bundle_id = "perception-" + sha256(
-        f"{scene_epoch}\0{normalized_observation_id}\0{source_image}".encode("utf-8")
-    ).hexdigest()[:16]
+    perception_bundle_id = (
+        "perception-"
+        + sha256(
+            f"{scene_epoch}\0{normalized_observation_id}\0{source_image}".encode("utf-8")
+        ).hexdigest()[:16]
+    )
     legacy_points = parameters.get("positive_points")
-    mode = str(
-        parameters.get("mode") or ("points" if legacy_points is not None else "text")
-    ).strip().lower()
+    mode = (
+        str(parameters.get("mode") or ("points" if legacy_points is not None else "text"))
+        .strip()
+        .lower()
+    )
     points = parameters.get("points")
     if points is None and legacy_points is not None:
         points = legacy_points
@@ -6984,6 +7610,16 @@ def _placement_motion_guidance(
         or attachment.get("verdict") != "PASS"
     ):
         return None
+    release = memory.placement_release()
+    if isinstance(release, dict) and str(release.get("status") or "") in {
+        "ready",
+        "released",
+    }:
+        # Arrival at the exact terminal hands ownership to the ordered
+        # detach/open transition.  Publishing the old move obligation beside
+        # that transition makes both actions appear legal to an agentic
+        # planner and can cause an unbounded replay of the same MoveIt target.
+        return None
     gripper_state = observation.robot.gripper_state
     openness = gripper_state.get("openness") if isinstance(gripper_state, dict) else None
     try:
@@ -7040,8 +7676,11 @@ def _placement_motion_guidance(
         "target_pose": next_pose,
         "tolerance": 0.002,
         "ori_tolerance": 0.05,
-        "velocity_scaling": 0.1,
-        "acceleration_scaling": 0.1,
+        # Load-state profile: faster than the legacy 0.2/0.1 setting while
+        # remaining below the unloaded contact move. MoveIt still owns time
+        # parameterization and the runtime proves the exact terminal state.
+        "velocity_scaling": 0.25,
+        "acceleration_scaling": 0.15,
         "enable_collision_check": True,
     }
     return {
@@ -7213,9 +7852,7 @@ def _target_reference_obligation(
                         {
                             "semantic_role": semantic_role or "grasp_target",
                             "semantic_target": target_object,
-                            "perception_bundle_id": no_detection.get(
-                                "perception_bundle_id"
-                            ),
+                            "perception_bundle_id": no_detection.get("perception_bundle_id"),
                             "observation_id": no_detection.get("observation_id"),
                             "scene_epoch": no_detection.get("scene_epoch"),
                         }
@@ -7887,7 +8524,9 @@ def _skill_relevance_score(
 ) -> int:
     environment_identity = _skill_environment_identity_text(observation, memory)
     current_query = " ".join(
-        value for value in (_effective_task_text(observation, memory), environment_identity) if value
+        value
+        for value in (_effective_task_text(observation, memory), environment_identity)
+        if value
     ).lower()
     supporting_query = _skill_query_text(observation, memory, include_current_task=False)
     current_score = _skill_text_relevance_score(skill, current_query)

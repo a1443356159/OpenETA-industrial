@@ -1,4 +1,4 @@
-"""Hand-computed geometry and contract tests for the M5 perception summary core."""
+"""Hand-computed geometry and contract tests for the perception summary core."""
 
 from __future__ import annotations
 
@@ -155,8 +155,8 @@ def test_mask_without_valid_depth_yields_null_position(tmp_path) -> None:
 
 
 def test_wrist_tf_dynamic_extrinsics_are_rejected(tmp_path) -> None:
-    # Wrist camera extrinsics are not yet numeric (plan.md §8 follow-up, same
-    # restriction as the M4 oracle): refuse rather than invent a position.
+    # Wrist-camera extrinsics are dynamic TF values rather than fixed numeric
+    # extrinsics: refuse rather than invent a position.
     mask = np.zeros((100, 100), dtype=bool)
     mask[50, 50] = True
     depth = np.full((100, 100), 2.0)
@@ -248,7 +248,7 @@ def test_build_object_summary_wraps_entries(tmp_path) -> None:
     assert summary["objects"][1]["position"] is None
 
 
-def test_m5_bridge_requires_current_case_local_rgbd_and_selected_frame(tmp_path) -> None:
+def test_perception_bridge_requires_current_case_local_rgbd_and_selected_frame(tmp_path) -> None:
     root = tmp_path / "case"
     root.mkdir()
     rgb_path = root / "rgb.png"
@@ -285,7 +285,7 @@ def test_m5_bridge_requires_current_case_local_rgbd_and_selected_frame(tmp_path)
     assert summary["source_frame_id"] == "top_camera_optical_frame"
 
 
-def test_m5_bridge_refuses_stale_rgb_or_resized_mask(tmp_path) -> None:
+def test_perception_bridge_refuses_stale_rgb_or_resized_mask(tmp_path) -> None:
     root = tmp_path / "case"
     root.mkdir()
     rgb_path = root / "rgb.png"

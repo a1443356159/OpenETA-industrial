@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from mcp.server.fastmcp import FastMCP
 
-from tools.anygrasp_core import AnyGraspBackend
+from tools.anygrasp_core import DEFAULT_DEPTH_TRUNCATION, AnyGraspBackend
 from tools.candidate_config import (
     DEFAULT_GRASP_RAW_POOL_SIZE,
     argparse_raw_pool_size,
@@ -144,7 +144,12 @@ def main() -> int:
     parser.add_argument("--checkpoint-path", required=True)
     parser.add_argument("--max-gripper-width", type=float, default=0.1)
     parser.add_argument("--gripper-height", type=float, default=0.03)
-    parser.add_argument("--depth-truncation", type=float, default=1.0)
+    parser.add_argument(
+        "--depth-truncation",
+        type=float,
+        default=DEFAULT_DEPTH_TRUNCATION,
+        help="Maximum calibrated RGB-D working distance in metres.",
+    )
     parser.add_argument(
         "--raw-pool-size",
         type=argparse_raw_pool_size(),

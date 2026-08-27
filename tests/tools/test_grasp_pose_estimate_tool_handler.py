@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from adapter.protocol import CameraFrame, EnvObservation, RobotState
 from agent.tools.handlers import build_grasp_pose_estimate_handler
 from agent.tools.registry import (
     ToolEffect,
@@ -48,12 +49,17 @@ def _parameters(tmp_path: Path, *, mode: str = "targeted") -> dict[str, Any]:
     return parameters
 
 
-def _context(parameters: dict[str, Any]) -> ToolExecutionContext:
+def _context(
+    parameters: dict[str, Any],
+    *,
+    observation: EnvObservation | None = None,
+) -> ToolExecutionContext:
     spec = build_default_tool_registry().get("grasp_pose_estimate")
     return ToolExecutionContext(
         name="grasp_pose_estimate",
         spec=spec,
         parameters=parameters,
+        observation=observation,
         metadata={"session_id": "session-a"},
     )
 
@@ -178,6 +184,10 @@ def test_parallel_gripper_candidates_receive_mask_depth_closing_alignment(
         {
             "translation_xyz": [0.0, 0.02, 0.97],
             "gripper_tip_position_xyz": [0.03, 0.02, 0.97],
+            "target_closing_alignment": {
+                "variant_role": "same_approach_centering_reserve",
+                "compatible_parent_backend_indices": [118, 2290],
+            },
         }
     )
 
@@ -199,7 +209,48 @@ def test_parallel_gripper_candidates_receive_mask_depth_closing_alignment(
     assert evidence["target_span_m"] == pytest.approx(0.08)
     assert evidence["correction_m"] == pytest.approx(-0.02)
     assert evidence["correction_camera_xyz"] == pytest.approx([0.0, -0.02, 0.0])
+    assert evidence["variant_role"] == "same_approach_centering_reserve"
+    assert evidence["compatible_parent_backend_indices"] == [118, 2290]
     assert result.details["source"]["target_closing_alignment_candidate_count"] == 1
+
+
+def test_graspgenx_uses_observed_camera_space_world_up(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def backend(context: ToolExecutionContext) -> ToolResult:
+        calls.append(dict(context.parameters))
+        return _success(_candidate("graspgenx-0", score=0.9))
+
+    parameters = _parameters(tmp_path)
+    parameters["camera_frame_id"] = "wrist_camera_optical_frame"
+    observation = EnvObservation(
+        task="pick and place",
+        cameras=[
+            CameraFrame(
+                frame_id="wrist_camera_optical_frame",
+                role="wrist_primary",
+                rgb=[],
+                extrinsics={
+                    "frame_transform": "camera_to_world",
+                    "camera_frame": "opencv",
+                    "pos": [0.0, -0.05, 0.996],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                    "calibration_source": "tf2_at_rgb_timestamp",
+                },
+            )
+        ],
+        robot=RobotState(),
+    )
+
+    result = build_grasp_pose_estimate_handler(
+        {"graspgenx": backend},
+        backend_order=("graspgenx",),
+        graspgenx_gripper_name="robotiq_2f_85",
+        graspgenx_up_direction_camera=(0.0, 0.0, -1.0),
+    )(_context(parameters, observation=observation))
+
+    assert result.success is True
+    assert calls[0]["up_direction_camera"] == pytest.approx([0.0, 0.0, 1.0])
 
 
 def test_host_excluded_backend_is_skipped(tmp_path: Path) -> None:
@@ -376,7 +427,7 @@ def test_malformed_success_falls_back_to_next_backend(tmp_path: Path) -> None:
     )
 
 
-def test_spent_malformed_backend_chain_opens_bounded_model_failure_circuit(
+def test_spent_malformed_backend_chain_is_not_repeated_for_same_frozen_input(
     tmp_path: Path,
 ) -> None:
     result = build_grasp_pose_estimate_handler(
@@ -386,7 +437,7 @@ def test_spent_malformed_backend_chain_opens_bounded_model_failure_circuit(
 
     assert result.success is False
     assert result.details["reason"] == "model_inference_failed"
-    assert result.details["retryable"] is True
+    assert result.details["retryable"] is False
     assert result.details["backend_attempts"][0]["reason"] == (
         "inconsistent_grasp_outputs"
     )

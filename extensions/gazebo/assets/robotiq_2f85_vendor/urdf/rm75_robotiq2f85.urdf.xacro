@@ -11,7 +11,11 @@
     <!-- The RM75 terminal mesh ends at its z=0 flange.  The previous 25 mm
          simulation-only gap made the Robotiq base visibly float in front of
          the arm and also lengthened every compiled contact pose. -->
-    <joint name="rm75_to_gripper_mount" type="fixed"><parent link="${parent}"/><child link="gripper_mount_link"/><origin xyz="0 0 ${mount_z}"/></joint>
+    <!-- The RM75 camera shoe occupies the terminal -X radial datum.  Rotate
+         the parallel jaws by 90 degrees about the unchanged tool axis so the
+         camera lies in the two-finger symmetry plane instead of behind one
+         finger.  TCP position and approach direction are unchanged. -->
+    <joint name="rm75_to_gripper_mount" type="fixed"><parent link="${parent}"/><child link="gripper_mount_link"/><origin xyz="0 0 ${mount_z}" rpy="0 0 1.57079632679"/></joint>
     <xacro:robotiq_gripper name="robotiq_2f85" prefix="" parent="gripper_mount_link" sim_gazebo="true" include_ros2_control="false"><origin xyz="0 0 0.006"/></xacro:robotiq_gripper>
     <!-- ros2_control is supplied by the repository-local RM75 simulation
          adapter so the arm and gripper share one Gazebo hardware system. -->

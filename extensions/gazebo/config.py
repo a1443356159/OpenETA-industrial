@@ -8,7 +8,7 @@ import math
 
 @dataclass(frozen=True, slots=True)
 class GazeboObject:
-    """Deterministic oracle object summary (SI units, world frame)."""
+    """Deterministic fixture object summary (SI units, world frame)."""
 
     name: str
     label: str

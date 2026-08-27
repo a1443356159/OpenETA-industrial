@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from adapter.protocol import EnvAction
 from agent.runtime.memory import AgentMemory
 
@@ -204,7 +206,13 @@ def test_started_or_unknown_placement_motion_stops_without_switching_candidate()
         assert policy["rejected_candidates"] == []
 
 
-def test_known_terminal_miss_with_retained_attachment_resumes_frozen_frontier() -> None:
+@pytest.mark.parametrize(
+    "terminal_error_code",
+    ["MOTION_TARGET_NOT_REACHED", "MOTION_EXECUTION_FAILED"],
+)
+def test_known_terminal_miss_with_retained_attachment_resumes_frozen_frontier(
+    terminal_error_code: str,
+) -> None:
     memory = AgentMemory()
     policy = _policy(["placement_006"])
     policy.update(
@@ -271,7 +279,7 @@ def test_known_terminal_miss_with_retained_attachment_resumes_frozen_frontier() 
             "placement_006",
             "terminal-miss-006",
             execution_started=True,
-            error_code="MOTION_TARGET_NOT_REACHED",
+            error_code=terminal_error_code,
             motion_outcome="failed",
             receipt_overrides=retained_receipt,
         )
@@ -286,7 +294,7 @@ def test_known_terminal_miss_with_retained_attachment_resumes_frozen_frontier() 
         {
             "candidate_id": "placement_006",
             "request_fingerprint": "terminal-miss-006",
-            "error_code": "MOTION_TARGET_NOT_REACHED",
+            "error_code": terminal_error_code,
             "execution_started": True,
             "motion_outcome": "failed",
             "planned_point_count": 47,

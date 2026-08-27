@@ -1,21 +1,38 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
+import math
 from types import SimpleNamespace
 import time
 
 import pytest
 
-from extensions.gazebo.robot_control import JOINT_NAMES, GazeboControlConfig, robot_state_from_sources
+from extensions.gazebo.robot_control import (
+    ARM_JOINTS,
+    JOINT_NAMES,
+    GazeboControlConfig,
+    make_move_group_goal,
+    robot_state_from_sources,
+)
 from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.ros_control import (
+    L5_TRAJECTORY_START_TOLERANCE_RAD,
+    QUALIFIED_JOINT_GOAL_TOLERANCE_RAD,
     RosGazeboStateSource,
     _RosRuntime,
     _configured_qualification_solver_profile,
     _qualification_ik_response_timeout_s,
     _moveit_scene_frame,
+    _move_group_failure_result,
     _merged_allowed_collision_rows,
+    _state_valid_with_allowed_collision_pairs,
     _load_qualification_capability_map,
+    _joint_states_within_l5_start_tolerance,
+    _l5_trajectory_cache_key,
+    _qualification_joint_state_with_sha256,
+    _trajectory_end_joint_state_with_sha256,
     _populate_recovery_trajectory_goal,
     _populate_state_validity_request,
     _qualification_robot_model_sha256,
@@ -39,6 +56,274 @@ def test_fast_ik_solver_budget_does_not_shorten_ros_response_deadline() -> None:
     # bounded queue to drain without classifying a reachable pose as infra loss.
     assert _qualification_ik_response_timeout_s(0.05) == pytest.approx(2.0)
     assert _qualification_ik_response_timeout_s(0.05) > 8 * 0.05
+
+
+def test_plan_only_rejected_trajectory_never_claims_execution() -> None:
+    result = _move_group_failure_result(
+        99999,
+        41,
+        plan_only=True,
+        planning_failure_codes=set(),
+        timed_out_code=-6,
+        generic_failure_code=99999,
+    )
+
+    assert result["ok"] is False
+    assert result["error_code"] == "MOTION_PLAN_FAILED"
+    assert result["planned_point_count"] == 41
+    assert result["execution_started"] is False
+
+
+def test_qualified_joint_branch_uses_a_tight_terminal_tolerance() -> None:
+    assert QUALIFIED_JOINT_GOAL_TOLERANCE_RAD == pytest.approx(0.001)
+
+
+def test_l5_trajectory_cache_requires_same_start_scene_and_proof_binding() -> None:
+    planned = {
+        "names": [f"joint_{index}" for index in range(1, 8)],
+        "positions": [0.0] * 7,
+    }
+    reordered_live = {
+        "names": list(reversed(planned["names"])),
+        "positions": list(
+            reversed([L5_TRAJECTORY_START_TOLERANCE_RAD * 0.5] * 7)
+        ),
+    }
+    drifted = dict(reordered_live)
+    drifted["positions"] = list(drifted["positions"])
+    drifted["positions"][0] = L5_TRAJECTORY_START_TOLERANCE_RAD * 2.0
+
+    assert _joint_states_within_l5_start_tolerance(planned, reordered_live)
+    assert not _joint_states_within_l5_start_tolerance(planned, drifted)
+
+    base_goal = {
+        "qualification_cache_binding_sha256": "a" * 64,
+        "group_name": "rm_group",
+        "link_name": "link_7",
+        "requested_tool_pose": {"xyz": [0.4, 0.0, 0.5]},
+        "target_pose": {"xyz": [0.4, 0.0, 0.5]},
+        "motion_profile": "unloaded",
+        "max_velocity_scaling_factor": 0.3,
+        "max_acceleration_scaling_factor": 0.2,
+    }
+    private_key = _l5_trajectory_cache_key(
+        base_goal,
+        scene_revision=7,
+        scene_sha256="scene-a",
+    )
+    public_goal = dict(base_goal)
+    public_goal["qualification_binding_sha256"] = public_goal.pop(
+        "qualification_cache_binding_sha256"
+    )
+    public_key = _l5_trajectory_cache_key(
+        public_goal,
+        scene_revision=7,
+        scene_sha256="scene-a",
+    )
+
+    assert private_key == public_key
+    assert private_key is not None
+    assert _l5_trajectory_cache_key(
+        public_goal,
+        scene_revision=8,
+        scene_sha256="scene-a",
+    ) != private_key
+    assert _l5_trajectory_cache_key(
+        public_goal,
+        scene_revision=7,
+        scene_sha256="scene-b",
+    ) != private_key
+    virtual_goal = dict(public_goal)
+    virtual_goal["qualification_scene_diff"] = {"remove_world_ids": ["target"]}
+    assert _l5_trajectory_cache_key(
+        virtual_goal,
+        scene_revision=7,
+        scene_sha256="scene-a",
+    ) != private_key
+
+
+def test_l5_trajectory_cache_accepts_euler_roundtrip_pose_noise_only() -> None:
+    private_goal = {
+        "qualification_cache_binding_sha256": "b" * 64,
+        "qualification_goal_joint_state_sha256": "c" * 64,
+        "compiled_grasp_id": "grasp_0042",
+        "compiled_placement_id": "placement_0018",
+        "placement_candidate_id": "placement_0018",
+        "group_name": "rm_group",
+        "link_name": "link_7",
+        "requested_tool_pose": {
+            "xyz": [0.62000004, 0.17999997, 0.17000002],
+            "quat_xyzw": [
+                -0.5177379270,
+                0.5351307377,
+                0.4898047062,
+                0.4536402756,
+            ],
+        },
+        "target_pose": {
+            "xyz": [0.62000004, 0.17999997, 0.17000002],
+            "quat_xyzw": [
+                -0.5177379270,
+                0.5351307377,
+                0.4898047062,
+                0.4536402756,
+            ],
+        },
+        "motion_profile": "loaded",
+        "max_velocity_scaling_factor": 0.25,
+        "max_acceleration_scaling_factor": 0.15,
+    }
+    public_goal = json.loads(json.dumps(private_goal))
+    public_goal["qualification_binding_sha256"] = public_goal.pop(
+        "qualification_cache_binding_sha256"
+    )
+    for pose_name in ("requested_tool_pose", "target_pose"):
+        public_goal[pose_name]["xyz"] = [0.62, 0.18, 0.17]
+        public_goal[pose_name]["quat_xyzw"] = [
+            -0.5177378617,
+            0.5351306600,
+            0.4898047901,
+            0.4536402918,
+        ]
+
+    private_key = _l5_trajectory_cache_key(
+        private_goal, scene_revision=2, scene_sha256="scene"
+    )
+    public_key = _l5_trajectory_cache_key(
+        public_goal, scene_revision=2, scene_sha256="scene"
+    )
+    assert private_key == public_key
+
+    different_candidate = dict(public_goal, compiled_placement_id="placement_0019")
+    assert _l5_trajectory_cache_key(
+        different_candidate, scene_revision=2, scene_sha256="scene"
+    ) != private_key
+
+
+def test_private_l5_goal_matches_public_joint_digest_and_candidate_identity() -> None:
+    runtime = object.__new__(_RosRuntime)
+    runtime.config = GazeboControlConfig()
+    runtime.planning_scene = SimpleNamespace(revision=5)
+    runtime.move = lambda goal, _timeout_s: goal
+    joint_state = {
+        "names": list(ARM_JOINTS),
+        "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+    }
+    target = {
+        "xyz": [0.42, -0.03, 0.31],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "compiled_grasp_id": "grasp_0042",
+        "grasp_stage": "contact",
+        "compiled_placement_id": "placement_0018",
+        "placement_candidate_id": "placement_0018",
+        "placement_stage": "release",
+        "qualification_goal_joint_state": joint_state,
+        "_qualification_cache_binding_sha256": "d" * 64,
+    }
+
+    private_goal = runtime.qualification_plan_only(
+        target, joint_state, planning_time_s=1.0, planning_attempts=1
+    )
+    expected_state_hash = hashlib.sha256(
+        json.dumps(
+            joint_state, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    public_target = dict(target)
+    public_target.pop("_qualification_cache_binding_sha256")
+    public_target["qualification_goal_joint_state_sha256"] = expected_state_hash
+    public_target["qualification_binding_sha256"] = "d" * 64
+    public_goal = make_move_group_goal(public_target, config=runtime.config)
+    public_goal.update(
+        {
+            "model_id": runtime.config.model_id,
+            "planning_scene_revision": 5,
+        }
+    )
+
+    assert private_goal["qualification_goal_joint_state"] == joint_state
+    assert (
+        private_goal["qualification_goal_joint_state_sha256"]
+        == expected_state_hash
+    )
+    assert private_goal["compiled_grasp_id"] == "grasp_0042"
+    assert private_goal["grasp_stage"] == "contact"
+    assert _l5_trajectory_cache_key(
+        private_goal, scene_revision=5, scene_sha256="scene"
+    ) == _l5_trajectory_cache_key(
+        public_goal, scene_revision=5, scene_sha256="scene"
+    )
+
+
+def test_l5_cache_binds_to_time_parameterized_trajectory_endpoint() -> None:
+    ik_state = {
+        "names": list(ARM_JOINTS),
+        "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+    }
+    planned_endpoint = [
+        0.1004,
+        -0.2002,
+        0.3003,
+        -0.4001,
+        0.5004,
+        -0.6003,
+        0.7002,
+    ]
+    trajectory = SimpleNamespace(
+        joint_names=list(ARM_JOINTS),
+        points=[SimpleNamespace(positions=planned_endpoint)],
+    )
+    endpoint = _trajectory_end_joint_state_with_sha256(trajectory)
+
+    assert endpoint is not None
+    end_state, end_hash = endpoint
+    assert end_state == {
+        "names": list(ARM_JOINTS),
+        "positions": planned_endpoint,
+    }
+    assert end_hash != _qualification_joint_state_with_sha256(ik_state)[1]
+
+    runtime = object.__new__(_RosRuntime)
+    runtime.planning_scene = SimpleNamespace(revision=5)
+    runtime._l5_trajectory_cache = {}
+    runtime._l5_scene_sha256 = lambda: "scene"
+    goal = {
+        "qualification_cache_binding_sha256": "a" * 64,
+        "qualification_goal_joint_state_sha256": (
+            _qualification_joint_state_with_sha256(ik_state)[1]
+        ),
+        "start_joint_state": ik_state,
+        "planning_scene_revision": 5,
+        "group_name": "rm_group",
+        "link_name": "link_7",
+        "requested_tool_pose": {"xyz": [0.4, 0.0, 0.5]},
+        "target_pose": {"xyz": [0.4, 0.0, 0.5]},
+        "motion_profile": "unloaded",
+        "max_velocity_scaling_factor": 0.3,
+        "max_acceleration_scaling_factor": 0.2,
+    }
+
+    stored_key = runtime._store_l5_trajectory(
+        goal=goal, trajectory=trajectory, point_count=1
+    )
+    public_goal = dict(goal)
+    public_goal["qualification_goal_joint_state_sha256"] = end_hash
+    public_key = _l5_trajectory_cache_key(
+        public_goal, scene_revision=5, scene_sha256="scene"
+    )
+
+    assert stored_key == public_key
+    assert runtime._l5_trajectory_cache[stored_key][
+        "end_joint_state_sha256"
+    ] == end_hash
+
+
+def test_move_initializes_cache_diagnostic_before_any_finish_path() -> None:
+    source = inspect.getsource(_RosRuntime.move)
+
+    assert source.index("cache_lookup: dict[str, Any]") < source.index(
+        "def finish"
+    )
 
 
 def test_runtime_capability_hash_matches_offline_generator_contract() -> None:
@@ -91,8 +376,13 @@ def test_ros_loads_content_addressed_capability_map_from_explicit_path(
 
 def test_allowed_collision_merge_preserves_srdf_rows_and_adds_target_links() -> None:
     names, rows = _merged_allowed_collision_rows(
-        ["base_link", "link_1"],
-        [[False, True], [True, False]],
+        ["base_link", "link_1", "target_object", "stale_gripper_link"],
+        [
+            [False, True, False, False],
+            [True, False, False, False],
+            [False, False, False, True],
+            [False, False, True, False],
+        ],
         {"target_object": ["left_tip", "right_tip"]},
     )
     matrix = {
@@ -107,6 +397,42 @@ def test_allowed_collision_merge_preserves_srdf_rows_and_adds_target_links() -> 
     assert matrix["left_tip", "target_object"] is True
     assert matrix["target_object", "right_tip"] is True
     assert matrix["base_link", "target_object"] is False
+    assert matrix["target_object", "stale_gripper_link"] is False
+
+
+def test_request_local_allowed_collision_merge_is_additive() -> None:
+    names, rows = _merged_allowed_collision_rows(
+        ["target_object", "work_table"],
+        [[False, True], [True, False]],
+        {"target_object": ["left_tip"]},
+        replace_owned=False,
+    )
+    matrix = {
+        (row_name, column_name): rows[row_index][column_index]
+        for row_index, row_name in enumerate(names)
+        for column_index, column_name in enumerate(names)
+    }
+
+    assert matrix["target_object", "work_table"] is True
+    assert matrix["target_object", "left_tip"] is True
+
+
+def test_state_validity_override_accepts_only_declared_contact_pairs() -> None:
+    allowed = {"target_object": ["left_tip", "right_tip"]}
+
+    assert _state_valid_with_allowed_collision_pairs(
+        response_valid=False,
+        collision_pairs=[["left_tip", "target_object"]],
+        allowed_collisions=allowed,
+    ) == (True, True)
+    assert _state_valid_with_allowed_collision_pairs(
+        response_valid=False,
+        collision_pairs=[
+            ["left_tip", "target_object"],
+            ["left_tip", "work_table"],
+        ],
+        allowed_collisions=allowed,
+    ) == (False, False)
 
 
 def test_moveit_scene_maps_gazebo_world_to_fixed_robot_root_only() -> None:
@@ -229,6 +555,316 @@ def test_recovery_ros_messages_preserve_all_seven_measured_joint_positions() -> 
     assert goal.trajectory.joint_names == validity.robot_state.joint_state.name
     assert goal.trajectory.points[0].positions == candidate
     assert goal.trajectory.points[0].time_from_start is duration
+
+
+def test_qualification_open_state_adds_active_gripper_joint_to_moveit_diff() -> None:
+    captured = []
+
+    class Request:
+        def __init__(self):
+            self.group_name = ""
+            self.robot_state = SimpleNamespace(
+                is_diff=False,
+                joint_state=SimpleNamespace(name=[], position=[]),
+                attached_collision_objects=[],
+            )
+
+    response = SimpleNamespace(valid=True, contacts=[])
+
+    class Client:
+        def call_async(self, request):
+            captured.append(request)
+            return response
+
+    config = GazeboControlConfig()
+    runtime = _RosRuntime(
+        state_validity_service_type=SimpleNamespace(Request=Request),
+        state_validity_client=Client(),
+        config=config,
+        planning_scene=SimpleNamespace(world_ids={"work_table", "target_object"}),
+    )
+    runtime._await = lambda future, timeout: future
+
+    result = runtime.qualification_state_validity(
+        {
+            "names": [f"joint_{index}" for index in range(1, 8)],
+            "positions": [0.0] * 7,
+            "qualification_gripper_state": "open",
+        }
+    )
+
+    assert result == {
+        "valid": True,
+        "collision_pairs": [],
+        "contact_collision_override": False,
+    }
+    assert captured[0].robot_state.joint_state.name == [
+        *[f"joint_{index}" for index in range(1, 8)],
+        config.active_joint,
+    ]
+    assert captured[0].robot_state.joint_state.position == [
+        *([0.0] * 7),
+        config.gripper_position(1),
+    ]
+
+
+def test_post_detach_open_state_keeps_released_object_as_collision_probe() -> None:
+    captured = []
+
+    class Request:
+        def __init__(self):
+            self.group_name = ""
+            self.robot_state = SimpleNamespace(
+                is_diff=False,
+                joint_state=SimpleNamespace(name=[], position=[]),
+                attached_collision_objects=[],
+            )
+
+    class AttachedCollisionObject:
+        def __init__(self):
+            self.link_name = ""
+            self.touch_links = []
+            self.object = None
+
+    class Contact:
+        contact_body_1 = "robotiq_85_base_link"
+        contact_body_2 = "target_object__openeta_detached_probe"
+
+    class Client:
+        def call_async(self, request):
+            captured.append(request)
+            return SimpleNamespace(valid=False, contacts=[Contact()])
+
+    config = GazeboControlConfig()
+    runtime = _RosRuntime(
+        state_validity_service_type=SimpleNamespace(Request=Request),
+        state_validity_client=Client(),
+        attached_collision_object_type=AttachedCollisionObject,
+        config=config,
+        planning_scene=SimpleNamespace(
+            world_ids={"work_table"}, attached_ids={"target_object"}
+        ),
+    )
+    runtime._await = lambda future, timeout: future
+    removed = AttachedCollisionObject()
+    removed.object = SimpleNamespace(id="target_object", operation="REMOVE")
+    runtime._qualification_scene_diff_message = lambda _diff: SimpleNamespace(
+        robot_state=SimpleNamespace(attached_collision_objects=[removed])
+    )
+    runtime._collision_object_from_spec = lambda spec: SimpleNamespace(
+        id=spec["id"], frame=spec["frame"], operation="ADD"
+    )
+
+    result = runtime.qualification_state_validity(
+        {
+            "names": list(ARM_JOINTS),
+            "positions": [0.0] * len(ARM_JOINTS),
+            "qualification_gripper_state": "open",
+            "qualification_scene_diff": {
+                "remove_attached_ids": ["target_object"],
+                "world_objects": [
+                    {
+                        "id": "target_object",
+                        "frame": config.base_link,
+                        "link_name": config.mount_child,
+                    }
+                ],
+                "detached_collision_probe_objects": [
+                    {
+                        "id": "target_object",
+                        "frame": config.base_link,
+                        "link_name": config.mount_child,
+                    }
+                ],
+            },
+        }
+    )
+
+    attached = captured[0].robot_state.attached_collision_objects
+    assert len(attached) == 2
+    assert attached[0].object.operation == "REMOVE"
+    assert attached[1].object.id == "target_object__openeta_detached_probe"
+    assert attached[1].link_name == config.mount_child
+    assert attached[1].touch_links == []
+    assert result["valid"] is False
+    assert result["collision_pairs"] == [
+        [
+            "robotiq_85_base_link",
+            "target_object__openeta_detached_probe",
+        ]
+    ]
+    assert result["qualification_detached_collision_probe_count"] == 1
+
+
+def test_qualification_state_validity_stops_close_sweep_on_static_collision() -> None:
+    captured = []
+
+    class Request:
+        def __init__(self):
+            self.group_name = ""
+            self.robot_state = SimpleNamespace(
+                is_diff=False,
+                joint_state=SimpleNamespace(name=[], position=[]),
+                attached_collision_objects=[],
+            )
+
+    class Contact:
+        contact_body_1 = "robotiq_85_left_finger_tip_link"
+        contact_body_2 = "work_table"
+
+    class Client:
+        def call_async(self, request):
+            captured.append(request)
+            angle = request.robot_state.joint_state.position[-1]
+            return SimpleNamespace(
+                valid=not math.isclose(angle, 0.05),
+                contacts=([Contact()] if math.isclose(angle, 0.05) else []),
+            )
+
+    config = GazeboControlConfig()
+    runtime = _RosRuntime(
+        state_validity_service_type=SimpleNamespace(Request=Request),
+        state_validity_client=Client(),
+        config=config,
+        planning_scene=SimpleNamespace(world_ids={"work_table", "target_object"}),
+    )
+    runtime._await = lambda future, timeout: future
+
+    result = runtime.qualification_state_validity(
+        {
+            "names": [f"joint_{index}" for index in range(1, 8)],
+            "positions": [0.0] * 7,
+            "qualification_gripper_state": "closing_sweep",
+            "qualification_allowed_collisions": {
+                "target_object": ["robotiq_85_left_finger_tip_link"]
+            },
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["collision_pairs"] == [
+        ["robotiq_85_left_finger_tip_link", "work_table"]
+    ]
+    assert [
+        request.robot_state.joint_state.position[-1] for request in captured
+    ] == [0.05]
+    assert result["qualification_gripper_sweep_checks"][0]["sample"] == (
+        "near_open"
+    )
+    assert (
+        result["qualification_seed_independent_static_collision"] is True
+    )
+
+
+def test_close_sweep_rejects_one_sided_target_contact_geometry() -> None:
+    class Request:
+        def __init__(self):
+            self.group_name = ""
+            self.robot_state = SimpleNamespace(
+                is_diff=False,
+                joint_state=SimpleNamespace(name=[], position=[]),
+                attached_collision_objects=[],
+            )
+
+    class Contact:
+        contact_body_1 = "robotiq_85_left_finger_tip_link"
+        contact_body_2 = "target_object"
+
+    class Client:
+        def call_async(self, _request):
+            return SimpleNamespace(valid=False, contacts=[Contact()])
+
+    config = GazeboControlConfig()
+    runtime = _RosRuntime(
+        state_validity_service_type=SimpleNamespace(Request=Request),
+        state_validity_client=Client(),
+        config=config,
+        planning_scene=SimpleNamespace(world_ids={"work_table", "target_object"}),
+    )
+    runtime._await = lambda future, timeout: future
+
+    result = runtime.qualification_state_validity(
+        {
+            "names": [f"joint_{index}" for index in range(1, 8)],
+            "positions": [0.0] * 7,
+            "qualification_gripper_state": "closing_sweep",
+            "qualification_allowed_collisions": {
+                "target_object": [
+                    "robotiq_85_left_finger_tip_link",
+                    "robotiq_85_right_finger_tip_link",
+                ]
+            },
+        }
+    )
+
+    assert result["valid"] is False
+    assert result["qualification_bilateral_target_contact_required"] is True
+    assert result["qualification_bilateral_target_contact_predicted"] is False
+    assert result["qualification_seed_independent_contact_geometry_failure"] is True
+    assert result["reason"] == "qualification_bilateral_target_contact_not_predicted"
+    assert all(
+        check["target_contact_links"]
+        == ["robotiq_85_left_finger_tip_link"]
+        for check in result["qualification_gripper_sweep_checks"]
+    )
+
+
+def test_close_sweep_accepts_simultaneous_bilateral_target_contact_geometry() -> None:
+    class Request:
+        def __init__(self):
+            self.group_name = ""
+            self.robot_state = SimpleNamespace(
+                is_diff=False,
+                joint_state=SimpleNamespace(name=[], position=[]),
+                attached_collision_objects=[],
+            )
+
+    class Contact:
+        def __init__(self, link):
+            self.contact_body_1 = link
+            self.contact_body_2 = "target_object"
+
+    class Client:
+        def call_async(self, request):
+            angle = request.robot_state.joint_state.position[-1]
+            links = ["robotiq_85_left_finger_tip_link"]
+            if angle >= 0.4:
+                links.append("robotiq_85_right_finger_tip_link")
+            return SimpleNamespace(
+                valid=False,
+                contacts=[Contact(link) for link in links],
+            )
+
+    config = GazeboControlConfig()
+    runtime = _RosRuntime(
+        state_validity_service_type=SimpleNamespace(Request=Request),
+        state_validity_client=Client(),
+        config=config,
+        planning_scene=SimpleNamespace(world_ids={"work_table", "target_object"}),
+    )
+    runtime._await = lambda future, timeout: future
+
+    result = runtime.qualification_state_validity(
+        {
+            "names": [f"joint_{index}" for index in range(1, 8)],
+            "positions": [0.0] * 7,
+            "qualification_gripper_state": "closing_sweep",
+            "qualification_allowed_collisions": {
+                "target_object": [
+                    "robotiq_85_left_finger_tip_link",
+                    "robotiq_85_right_finger_tip_link",
+                ]
+            },
+        }
+    )
+
+    assert result["valid"] is True
+    assert result["qualification_bilateral_target_contact_predicted"] is True
+    assert result["qualification_seed_independent_contact_geometry_failure"] is False
+    assert any(
+        check["bilateral_target_contact"] is True
+        for check in result["qualification_gripper_sweep_checks"]
+    )
 
 
 class _ReadyActionClient:

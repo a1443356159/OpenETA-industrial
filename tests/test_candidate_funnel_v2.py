@@ -13,7 +13,10 @@ from agent.runtime.moveit_qualification import (
     MoveItQualificationEngine,
 )
 from agent.tools.registry import ToolResult
-from tools.candidate_config import CandidateFunnelConfig
+from tools.candidate_config import (
+    DEFAULT_GRASPGENX_RAW_POOL_SIZE,
+    CandidateFunnelConfig,
+)
 from extensions.gazebo.planning_scene import CollisionBox, PlanningSceneSynchronizer
 from extensions.gazebo.robot_control import GazeboControlConfig
 from extensions.gazebo.ros_control import RosGazeboController, _RosRuntime
@@ -76,7 +79,7 @@ def test_v2_defaults_and_cross_field_constraints():
         config.graspgenx_raw_pool_size,
         config.anygrasp_raw_pool_size,
         config.anyplace_raw_pool_size,
-    ) == (200, 200, 96)
+    ) == (DEFAULT_GRASPGENX_RAW_POOL_SIZE, 200, 96)
     assert (config.grasp_diversity_pool_size, config.anyplace_diversity_pool_size) == (64, 96)
     assert (config.grasp_full_plan_limit, config.anyplace_full_plan_limit) == (2, 2)
     assert config.moveit_ik_seed_count == 8

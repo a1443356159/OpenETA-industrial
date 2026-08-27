@@ -8,13 +8,11 @@ import json
 import math
 import os
 from pathlib import Path
-import time
 from typing import Callable, Mapping, Sequence
-from uuid import uuid4
+
+from tools.candidate_config import DEFAULT_GRASPGENX_RAW_POOL_SIZE
 
 from adapter.protocol import JsonDict
-from agent.runtime.artifact_paths import artifact_session_id
-from agent.runtime.response_artifacts import materialize_json_response
 from agent.backends.planner import PlannerBackend
 from agent.backends.provider_config import PlannerProviderConfig
 from agent.runtime.calibration import (
@@ -31,7 +29,10 @@ from agent.runtime.moveit_qualification import (
     SAME_RUN_QUALIFICATION_SEED_FIELD,
     private_qualification_rpc,
 )
-from agent.runtime.qualification_v3 import grasp_symmetry_family_id
+from agent.runtime.qualification_v3 import (
+    grasp_symmetry_family_id,
+    parallel_gripper_centering_quality,
+)
 from agent.runtime.memory_store import JsonMemoryStore
 from agent.runtime.pipeline import ActionPipeline
 from agent.runtime.planner import PlannerContextConfig, ToolCallingPlanner
@@ -77,6 +78,7 @@ from agent.tools.attachment_probe import (
     build_assess_attachment_probe_handler,
     build_prepare_attachment_probe_handler,
 )
+from agent.tools.active_vision import build_active_observe_handler
 from agent.tools.coding import PythonExecConfig, PythonExecRuntime
 from agent.tools.depth_prefetch import DepthPriorPrefetchCoordinator
 from agent.tools.handlers import (
@@ -88,7 +90,6 @@ from agent.tools.handlers import (
     build_grasp_pose_estimate_handler,
     build_graspgenx_handler,
     build_molmopoint_handler,
-    build_oracle_perceive_segmenter,
     build_sam3_handler,
     build_sse_anygrasp_mcp_grasper,
     build_sse_anyplace_mcp_placer,
@@ -108,6 +109,7 @@ from agent.tools.grasp_geometry import (
     materialize_world_object_goal_from_current_pose,
     predicted_attachment_from_grasp,
     qualification_grasp_pose_chain,
+    rebase_camera_grasp_candidate_for_object_motion,
 )
 from agent.tools.mcp_registry import load_mcp_server_url
 from agent.tools.object_memory import (
@@ -116,18 +118,20 @@ from agent.tools.object_memory import (
     load_configured_object_memory_bank,
 )
 from agent.tools.registry import (
+    ENVIRONMENT_AUTHORITY,
     ToolEventListener,
     ToolExecutionContext,
     ToolHandler,
     ToolRegistry,
     ToolResult,
     ToolSpec,
+    apply_tool_profile,
     build_default_tool_registry,
-    perception_segmenter_tool_name,
-    resolve_perception_profile,
+    resolve_tool_profile,
 )
 from agent.tools.sim_mcp import (
     SimulatorMcpResponseCallback,
+    SimulatorMcpToolProxy,
     SimulatorMcpToolProxyConfig,
     SimulatorMcpTransport,
     bind_simulator_mcp_tool_handlers,
@@ -141,136 +145,6 @@ McpUrlLoader = Callable[..., str]
 ApprovalCallback = Callable[[ToolExecutionContext], bool]
 PublicationApproval = Callable[[JsonDict], bool]
 SkillApproval = Callable[[str], bool]
-
-CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR = "OPENETA_CONTRACTUAL_FAKE_CANDIDATE"
-CONTRACTUAL_FAKE_CANDIDATE_SCHEMA = "openeta.contractual_fake_grasp_candidate.v1"
-
-
-@dataclass(slots=True)
-class _OracleMcpEvidence:
-    """One-use correlated evidence record for the Oracle simulator MCP RPC."""
-
-    proxy_config: SimulatorMcpToolProxyConfig
-    response_output_root: Path
-    pending: tuple[str, JsonDict, JsonDict] | None = None
-
-    def record(self, remote_tool: str, arguments: JsonDict, response: JsonDict) -> None:
-        descriptor_arguments = dict(arguments)
-        image_base64 = descriptor_arguments.pop("image_base64", None)
-        if isinstance(image_base64, str):
-            descriptor_arguments["image_base64_sha256"] = hashlib.sha256(
-                image_base64.encode("ascii", errors="ignore")
-            ).hexdigest()
-            descriptor_arguments["image_base64_chars"] = len(image_base64)
-        self.pending = (remote_tool, descriptor_arguments, dict(response))
-
-    def attach(self, result: ToolResult, context: ToolExecutionContext) -> ToolResult:
-        pending = self.pending
-        self.pending = None
-        if pending is None:
-            return result
-        remote_tool, arguments, response_payload = pending
-        request_id = uuid4().hex
-        session_id = str(self.proxy_config.session_id or "")
-        handle = str(self.proxy_config.handle or "")
-        artifact = materialize_json_response(
-            response_payload,
-            output_root=self.response_output_root,
-            bundle_id=f"oracle-{request_id}",
-            name=f"{remote_tool}-response",
-            session_id=artifact_session_id(context.metadata),
-        )
-        response: JsonDict = {
-            "response_path": artifact.path,
-            "response_chars": artifact.chars,
-            "response_omitted": True,
-            "grep_hint": artifact.grep_hint,
-            "request_id": request_id,
-            "tool": remote_tool,
-            "session_id": session_id,
-            "handle": handle,
-        }
-        request: JsonDict = {
-            "request_id": request_id,
-            "tool": remote_tool,
-            "arguments": arguments,
-        }
-        receipt: JsonDict = {
-            "schema_version": "openeta.environment_receipt.v1",
-            "receipt_id": uuid4().hex,
-            "backend": "simulator_mcp",
-            "agent_tool": "oracle_perceive",
-            "remote_tool": remote_tool,
-            "mcp_request_id": request_id,
-            "execution_id": str(context.metadata.get("execution_id") or ""),
-            "agent_session_id": str(context.metadata.get("session_id") or ""),
-            "simulator_session_id": session_id,
-            "handle": handle,
-            "timestamp_s": time.time(),
-            "reward_present": "reward" in response_payload,
-            "observation_fresh": False,
-        }
-        details = dict(result.details)
-        artifacts = details.get("artifacts")
-        details["artifacts"] = [
-            *(artifacts if isinstance(artifacts, list) else []),
-            artifact.to_dict(),
-        ]
-        details["mcp"] = {
-            "tool": remote_tool,
-            "agent_tool": "oracle_perceive",
-            "session_id": session_id,
-            "handle": handle,
-            "request": request,
-            "response": response,
-        }
-        details["response"] = response
-        details["mcp_calls"] = [
-            {
-                "request": request,
-                "response": response,
-                "environment_receipt": receipt,
-            }
-        ]
-        result.details = details
-        return result
-
-
-def _with_contractual_fake_candidate(
-    handler: Callable[[ToolExecutionContext], ToolResult],
-    *,
-    mcp_evidence: _OracleMcpEvidence | None = None,
-) -> Callable[[ToolExecutionContext], ToolResult]:
-    """Add the oracle-fixture fixture marker to a successful *Oracle* tool result only.
-
-    This is deliberately data-only: no pose is inferred or acted upon and the
-    marker is never read by the native-grasp attachment path.  It records that the oracle-fixture
-    candidate is a contractual fake rather than a visual-model prediction.
-    """
-
-    def wrapped(context: ToolExecutionContext) -> ToolResult:
-        result = handler(context)
-        if not result.success:
-            return result
-        if mcp_evidence is not None:
-            result = mcp_evidence.attach(result, context)
-        details = dict(result.details)
-        result_id = str(details.get("result_id") or "oracle-result")
-        details["perception_source"] = "gazebo_oracle"
-        details["fake_grasp_candidate"] = {
-            "schema_version": CONTRACTUAL_FAKE_CANDIDATE_SCHEMA,
-            "kind": "contractual_fake_grasp_candidate",
-            "candidate_id": f"contractual-{result_id}",
-            "perception_source": "gazebo_oracle",
-            "is_model_prediction": False,
-            "provenance": "oracle_contract_fixture",
-            "oracle_result_id": result_id,
-        }
-        result.details = details
-        return result
-
-    return wrapped
-
 
 REMOTE_PLACEHOLDER_TOOLS = (
     "scene_detector",
@@ -316,7 +190,13 @@ DEFAULT_PERCEPTION_RPC_TIMEOUT_S = 600.0
 def runtime_grasp_backend_order_from_env() -> tuple[str, ...]:
     """Resolve the configured facade order; concrete modes never cross-fallback."""
 
-    mode = os.environ.get(GRASP_BACKEND_ENV_VAR, "auto").strip().lower() or "auto"
+    # GraspGenX is the conservative deployment default.  ``auto`` remains an
+    # explicit operator choice, but must not silently probe a licensed
+    # AnyGrasp installation before the selected backend is known healthy.
+    mode = (
+        os.environ.get(GRASP_BACKEND_ENV_VAR, "graspgenx").strip().lower()
+        or "graspgenx"
+    )
     if mode == "auto":
         return tuple(DEFAULT_GRASP_POSE_BACKEND_ORDER)
     if mode in GRASP_BACKEND_MODES:
@@ -349,7 +229,7 @@ def runtime_perception_rpc_timeout_s_from_env() -> float:
 class RuntimeCandidateCounts:
     """Host registration values that must match remote service metadata."""
 
-    graspgenx_raw_pool_size: int = 200
+    graspgenx_raw_pool_size: int = DEFAULT_GRASPGENX_RAW_POOL_SIZE
     anygrasp_raw_pool_size: int = 200
     anyplace_raw_pool_size: int = 96
     grasp_diversity_pool_size: int = 64
@@ -413,7 +293,9 @@ class RuntimeCandidateCounts:
 
 def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
     return RuntimeCandidateCounts(
-        graspgenx_raw_pool_size=os.environ.get("OPENETA_GRASPGENX_RAW_POOL_SIZE", 200),
+        graspgenx_raw_pool_size=os.environ.get(
+            "OPENETA_GRASPGENX_RAW_POOL_SIZE", DEFAULT_GRASPGENX_RAW_POOL_SIZE
+        ),
         anygrasp_raw_pool_size=os.environ.get("OPENETA_ANYGRASP_RAW_POOL_SIZE", 200),
         anyplace_raw_pool_size=os.environ.get("OPENETA_ANYPLACE_RAW_POOL_SIZE", 96),
         grasp_diversity_pool_size=os.environ.get("OPENETA_GRASP_DIVERSITY_POOL_SIZE", 64),
@@ -478,6 +360,7 @@ class RuntimeAssemblyConfig:
     pre_safety_checks: dict[str, str] = field(default_factory=dict)
     tool_listeners: tuple[ToolEventListener, ...] = ()
     max_validation_retries: int = 2
+    tool_profile: str = field(default_factory=resolve_tool_profile)
 
 
 @dataclass(frozen=True, slots=True)
@@ -643,7 +526,31 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
         candidate_counts=config.candidate_counts,
         grasp_backend_order=config.grasp_backend_order,
         internal_candidate_compilers=internal_candidate_compilers,
+        selection_reviewer=sam3_selection_reviewer,
     )
+    active_proxy = (
+        SimulatorMcpToolProxy(
+            transport=config.simulator_transport,
+            config=simulator_proxy_config,
+        )
+        if config.simulator_transport is not None
+        else None
+    )
+    tools.bind_handler(
+        "active_observe",
+        build_active_observe_handler(
+            artifact_root=artifact_root,
+            candidate_qualifier=qualifier,
+            simulator_proxy=active_proxy,
+            sam3_handler=tools.bound_handler("sam3"),
+            move_spec=tools.get("move_to"),
+            observe_spec=tools.get("observe"),
+            sam3_spec=tools.get("sam3"),
+        ),
+        replace=True,
+        authority=ENVIRONMENT_AUTHORITY,
+    )
+    apply_tool_profile(tools, config.tool_profile)
 
     planner = ToolCallingPlanner(
         config.backend_factory(),
@@ -791,11 +698,6 @@ def bind_runtime_perception_tools(
         if candidate_qualifier is not None
         else None
     )
-    segmenter_tool = perception_segmenter_tool_name(
-        resolve_perception_profile()
-        if perception_profile is None
-        else perception_profile
-    )
     object_memory_configuration_error = ""
     try:
         object_memory_config = load_configured_object_memory_bank()
@@ -854,39 +756,7 @@ def bind_runtime_perception_tools(
             depth_prefetch.handler,
             replace=True,
         )
-    if segmenter_tool == "oracle_perceive":
-        # Simulator-only oracle (Gazebo ground truth) reuses the SAM3 handler
-        # pipeline over the existing simulator MCP transport; it is exposed
-        # instead of sam3, never alongside it.
-        if simulator_transport is not None:
-            proxy_config = simulator_proxy_config or SimulatorMcpToolProxyConfig()
-            oracle_mcp_evidence = _OracleMcpEvidence(
-                proxy_config=proxy_config,
-                response_output_root=Path(proxy_config.response_output_root),
-            )
-            oracle_handler = build_sam3_handler(
-                build_oracle_perceive_segmenter(
-                    simulator_transport,
-                    handle_provider=lambda: proxy_config.handle,
-                    session_id_provider=lambda: proxy_config.session_id,
-                    response_callback=oracle_mcp_evidence.record,
-                ),
-                selection_reviewer=selection_reviewer,
-                tool_name="oracle_perceive",
-                output_root=artifact_root / "oracle_perceive_images",
-                result_output_root=artifact_root / "oracle_perceive_results",
-            )
-            if os.environ.get(CONTRACTUAL_FAKE_CANDIDATE_ENV_VAR) == "1":
-                oracle_handler = _with_contractual_fake_candidate(
-                    oracle_handler,
-                    mcp_evidence=oracle_mcp_evidence,
-                )
-            tools.bind_handler(
-                "oracle_perceive",
-                oracle_handler,
-                replace=True,
-            )
-    elif endpoints.sam3_url:
+    if endpoints.sam3_url:
         tools.bind_handler(
             "sam3",
             build_sam3_handler(
@@ -1088,7 +958,10 @@ def _candidate_qualification_compiler(
     ) -> JsonDict:
         if purpose == "placement":
             predicted_attachment = candidate.get("predicted_attachment_transform")
-            if isinstance(predicted_attachment, Mapping):
+            physical_rebase = candidate.get("frozen_object_motion_rebase")
+            if isinstance(predicted_attachment, Mapping) and not isinstance(
+                physical_rebase, Mapping
+            ):
                 # Before the gripper has closed, the attachment is derived
                 # from the model contact and the measured point-cloud object
                 # frame.  A frozen goal may also carry a scene-bound physical
@@ -1125,7 +998,11 @@ def _candidate_qualification_compiler(
                     compiled_candidate["qualification_object_goal_source"] = (
                         "physical_goal_with_measured_attachment"
                     )
-                attachment_transform = source.get("attachment_transform")
+                attachment_transform = (
+                    dict(predicted_attachment)
+                    if isinstance(predicted_attachment, Mapping)
+                    else source.get("attachment_transform")
+                )
             if not isinstance(attachment_transform, dict):
                 raise ValueError("measured attachment transform unavailable")
             start_joint_state = candidate.get(
@@ -1166,6 +1043,12 @@ def _candidate_qualification_compiler(
                 {
                     **_qualification_pose("release", compiled["release_pose"]),
                     "scene_transition": "virtual_detach",
+                    # Releasing changes both the planning scene and the hand
+                    # geometry.  Validate the exact planned arm endpoint with
+                    # the gripper fully open after the virtual detach so that
+                    # a goal next to a bin wall cannot pass qualification and
+                    # then fail during the irreversible physical release.
+                    "qualification_post_transition_gripper_state": "open",
                 },
             ]
         else:
@@ -1189,6 +1072,13 @@ def _candidate_qualification_compiler(
                 _qualification_pose("contact", compiled_pose_chain[0])
             ]
             stages[0]["scene_transition"] = "virtual_attach"
+            # A contact pose is executable only if the complete Robotiq close
+            # sweep clears the static workcell at the exact arm endpoint.
+            # Target/touch-link contact remains request-locally allowed; table,
+            # fixture, camera, and arm collisions still reject the candidate.
+            stages[0]["qualification_terminal_gripper_state"] = (
+                "closing_sweep"
+            )
         return {
             "qualification_stages": stages,
             "compile_parameters": {
@@ -1331,6 +1221,40 @@ def _qualification_infrastructure_failure(result: ToolResult) -> ToolResult:
     )
 
 
+def _restore_frozen_model_motion_for_predicted_pair(pair: JsonDict) -> None:
+    """Rebind one cached physical goal to a new predicted grasp attachment.
+
+    The goal-legality cache stores the PlanningScene collision-body pose and
+    retires the active point-cloud motion so post-attachment execution cannot
+    accidentally apply it twice.  A *new* grasp branch is different: its
+    predicted ``T_eef_object`` is expressed in the original point-cloud object
+    frame, so pair qualification must temporarily replay the original rigid
+    world motion.  The legality binder then applies that same motion to the
+    physical collision body and attaches the actual PlanningScene object.
+
+    A frontier rebased after real object motion already uses the physical
+    frame end-to-end and must never restore this stale model transform.
+    """
+
+    if isinstance(pair.get("frozen_object_motion_rebase"), Mapping):
+        return
+    binding = pair.get("frozen_goal_frame_binding")
+    model_motion = pair.get("model_object_motion_world_transform")
+    if not (
+        isinstance(binding, Mapping)
+        and binding.get("physical_collision_goal") is True
+        and isinstance(model_motion, Mapping)
+        and isinstance(pair.get("predicted_attachment_transform"), Mapping)
+        and isinstance(pair.get("frozen_contact_pose"), Mapping)
+    ):
+        return
+    pair["object_motion_world_transform"] = json.loads(json.dumps(model_motion))
+    pair["physical_scene_attachment_required"] = True
+    pair["physical_scene_attachment_source"] = (
+        "cached_collision_goal_with_replayed_model_motion"
+    )
+
+
 @dataclass(slots=True)
 class _FrozenGoalPairCoordinator:
     """Host-private bounded look-ahead used only to rank executable grasps."""
@@ -1354,6 +1278,7 @@ class _FrozenGoalPairCoordinator:
     source_candidate_artifacts: list[JsonDict] = field(default_factory=list)
     source_binding: JsonDict = field(default_factory=dict)
     grasp_frontier_candidates: list[JsonDict] = field(default_factory=list)
+    grasp_candidate_catalog: dict[str, JsonDict] = field(default_factory=dict)
     grasp_frontier_template: JsonDict = field(default_factory=dict)
     grasp_frontier_scene_epoch: int = -1
     grasp_frontier_planning_scene_revision: int = -1
@@ -1412,6 +1337,7 @@ class _FrozenGoalPairCoordinator:
         self.attachment_frontier_generations.clear()
         self.active_attachment_binding = ""
         self.grasp_frontier_candidates.clear()
+        self.grasp_candidate_catalog.clear()
         self.grasp_frontier_template.clear()
         self.grasp_frontier_scene_epoch = -1
         self.grasp_frontier_planning_scene_revision = -1
@@ -1474,7 +1400,9 @@ class _FrozenGoalPairCoordinator:
             for candidate in raw
             if isinstance(candidate, Mapping) and str(candidate.get("id") or "")
         }
+        self.grasp_candidate_catalog.update(raw_by_id)
         frontier_ids: list[str] = []
+        artifact_rows_authoritative = False
         artifact = qualified_result.details.get("qualification_artifact")
         artifact_path = (
             artifact.get("path") if isinstance(artifact, Mapping) else None
@@ -1486,6 +1414,7 @@ class _FrozenGoalPairCoordinator:
                 payload = {}
             rows = payload.get("results") if isinstance(payload, Mapping) else None
             if isinstance(rows, list):
+                artifact_rows_authoritative = True
                 frontier_ids = [
                     str(row.get("candidate_id") or "")
                     for row in rows
@@ -1493,7 +1422,7 @@ class _FrozenGoalPairCoordinator:
                     and row.get("verdict") == "NOT_EVALUATED"
                     and str(row.get("candidate_id") or "") in raw_by_id
                 ]
-        if not frontier_ids and qualified_result.details.get(
+        if not artifact_rows_authoritative and qualified_result.details.get(
             "qualification_profile"
         ) == "fast_v3" and str(
             qualified_result.details.get("qualification_stop_reason") or ""
@@ -1534,6 +1463,42 @@ class _FrozenGoalPairCoordinator:
                 "frozen_grasp_frontier_model_inference_invoked": False,
             }
         )
+
+    def prioritize_grasp_frontier_for_parent(self, candidate_id: str) -> int:
+        """Move unchanged centered siblings of one failed grasp to the front."""
+
+        parent = self.grasp_candidate_catalog.get(str(candidate_id))
+        parent_backend_index = (
+            parent.get("backend_index") if isinstance(parent, Mapping) else None
+        )
+        if (
+            isinstance(parent_backend_index, bool)
+            or not isinstance(parent_backend_index, int)
+            or parent_backend_index < 0
+        ):
+            return 0
+        preferred: list[JsonDict] = []
+        remaining: list[JsonDict] = []
+        for raw_candidate in self.grasp_frontier_candidates:
+            candidate = json.loads(json.dumps(raw_candidate))
+            alignment = candidate.get("target_closing_alignment")
+            parents = (
+                alignment.get("compatible_parent_backend_indices")
+                if isinstance(alignment, Mapping)
+                else None
+            )
+            if isinstance(parents, list) and parent_backend_index in parents:
+                candidate["frozen_frontier_parent_priority"] = True
+                candidate["frozen_frontier_parent_candidate_id"] = str(
+                    candidate_id
+                )
+                preferred.append(candidate)
+            else:
+                candidate.pop("frozen_frontier_parent_priority", None)
+                candidate.pop("frozen_frontier_parent_candidate_id", None)
+                remaining.append(candidate)
+        self.grasp_frontier_candidates = [*preferred, *remaining]
+        return len(preferred)
 
     def prepare_grasp_frontier_expansion(
         self,
@@ -1598,6 +1563,119 @@ class _FrozenGoalPairCoordinator:
             details,
         )
 
+    def rebase_grasp_frontier_from_target_pose_sync(
+        self,
+        receipt: Mapping[str, object],
+        *,
+        scene_epoch: int,
+        planning_scene_revision: int,
+    ) -> ToolResult:
+        """Rebind frozen camera grasps after one proven rigid target motion."""
+
+        sync = receipt.get("planning_scene_target_pose_sync")
+        sync = sync if isinstance(sync, Mapping) else {}
+        detachable = receipt.get("detachable_joint")
+        detachable = detachable if isinstance(detachable, Mapping) else {}
+        world_before = sync.get("world_ids_before")
+        world_after = sync.get("world_ids_after")
+        attached_before = sync.get("attached_ids_before")
+        attached_after = sync.get("attached_ids_after")
+        source_revision = sync.get("source_revision")
+        target_revision = sync.get("revision")
+        source_pose = sync.get("source_target_pose")
+        target_pose = sync.get("target_pose")
+        source = self.grasp_frontier_template.get("source")
+        source = source if isinstance(source, Mapping) else {}
+        camera_extrinsics = source.get("camera_extrinsics")
+        safe_binding = (
+            sync.get("schema_version")
+            == "openeta.planning_scene_target_pose_sync.v1"
+            and sync.get("operation") == "update_world_target"
+            and sync.get("topology_unchanged") is True
+            and sync.get("static_world_unchanged") is True
+            and isinstance(world_before, list)
+            and world_before == world_after
+            and attached_before == attached_after == []
+            and detachable.get("state") == "detached"
+            and isinstance(source_revision, int)
+            and not isinstance(source_revision, bool)
+            and source_revision == self.grasp_frontier_planning_scene_revision
+            and isinstance(target_revision, int)
+            and not isinstance(target_revision, bool)
+            and target_revision == planning_scene_revision
+            and isinstance(source_pose, Mapping)
+            and isinstance(target_pose, Mapping)
+            and isinstance(camera_extrinsics, Mapping)
+        )
+        if not safe_binding:
+            return ToolResult(
+                False,
+                "Frozen grasp rebind lacks an unchanged static-scene proof.",
+                {
+                    "reason": "frozen_grasp_frontier_rebase_proof_missing",
+                    "model_inference_invoked": False,
+                    "execution_started": False,
+                },
+            )
+        try:
+            rebased = [
+                rebase_camera_grasp_candidate_for_object_motion(
+                    candidate,
+                    camera_extrinsics=camera_extrinsics,
+                    source_object_pose=source_pose,
+                    target_object_pose=target_pose,
+                )
+                for candidate in self.grasp_frontier_candidates
+            ]
+        except (TypeError, ValueError) as exc:
+            return ToolResult(
+                False,
+                f"Frozen grasp rebind failed: {exc}",
+                {
+                    "reason": "frozen_grasp_frontier_rebase_invalid",
+                    "model_inference_invoked": False,
+                    "execution_started": False,
+                },
+            )
+
+        rebase_evidence = {
+            "schema_version": "openeta.frozen_object_motion_rebase.v1",
+            "source_planning_scene_revision": source_revision,
+            "planning_scene_revision": planning_scene_revision,
+            "translation_delta_m": sync.get("translation_delta_m"),
+            "rotation_delta_rad": sync.get("rotation_delta_rad"),
+            "candidate_count": len(rebased),
+            "model_inference_invoked": False,
+            "static_world_sha256": sync.get("static_world_sha256_after"),
+        }
+        for candidate in rebased:
+            candidate["frozen_object_motion_rebase"] = json.loads(
+                json.dumps(rebase_evidence)
+            )
+        self.grasp_frontier_candidates = rebased
+        self.grasp_frontier_scene_epoch = scene_epoch
+        self.grasp_frontier_planning_scene_revision = planning_scene_revision
+        self.scene_epoch = scene_epoch
+        self.planning_scene_revision = planning_scene_revision
+        self.object_current_pose = json.loads(json.dumps(target_pose))
+        self.qualified_goals_by_grasp.clear()
+        self.grasp_frontier_template["source"] = json.loads(json.dumps(source))
+        self.grasp_frontier_template["frozen_object_motion_rebase"] = json.loads(
+            json.dumps(rebase_evidence)
+        )
+        return ToolResult(
+            True,
+            "Rebased the frozen grasp frontier from measured rigid object motion.",
+            {
+                "frozen_grasp_frontier_rebased": True,
+                "candidate_count": len(rebased),
+                "source_planning_scene_revision": source_revision,
+                "planning_scene_revision": planning_scene_revision,
+                "model_inference_invoked": False,
+                "execution_started": False,
+            },
+        )
+
     @staticmethod
     def _qualification_result_rows(result: ToolResult) -> list[JsonDict]:
         """Load host-private rows needed to cache goal-legality bindings."""
@@ -1635,6 +1713,14 @@ class _FrozenGoalPairCoordinator:
         )
         if isinstance(model_goal, Mapping):
             frozen_goal["model_pointcloud_object_goal_pose"] = dict(model_goal)
+        model_motion = frozen_goal.pop("object_motion_world_transform", None)
+        if (
+            isinstance(model_motion, Mapping)
+            and not isinstance(
+                frozen_goal.get("model_object_motion_world_transform"), Mapping
+            )
+        ):
+            frozen_goal["model_object_motion_world_transform"] = dict(model_motion)
         frozen_goal["world_object_goal_pose"] = dict(collision_goal)
         frozen_goal["object_goal_pose"] = dict(collision_goal)
         frozen_goal["frozen_goal_frame_binding"] = {
@@ -1744,6 +1830,10 @@ class _FrozenGoalPairCoordinator:
         fast_frontier = (
             getattr(self.qualifier, "qualification_profile", "legacy") == "fast_v3"
         )
+        # The grasp qualifier supplies a two-branch outer beam. Pair
+        # qualification may execute the first complete branch immediately;
+        # the other branch returns to the frozen frontier instead of allowing
+        # one bad grasp to consume all AnyPlace goals by itself.
         target = 1
         if matching_goal_pool and not self.object_goals:
             result.details.update(
@@ -2111,6 +2201,20 @@ class _FrozenGoalPairCoordinator:
                 pair["source_object_goal_id"] = goal_id
                 pair["frozen_contact_pose"] = dict(contact)
                 pair["predicted_attachment_transform"] = dict(predicted_attachment)
+                _restore_frozen_model_motion_for_predicted_pair(pair)
+                alignment = grasp.get("target_closing_alignment")
+                if isinstance(alignment, Mapping):
+                    pair["target_closing_alignment"] = json.loads(
+                        json.dumps(alignment)
+                    )
+                score = grasp.get("score")
+                if isinstance(score, (int, float)) and not isinstance(score, bool):
+                    pair["score"] = float(score)
+                physical_rebase = grasp.get("frozen_object_motion_rebase")
+                if isinstance(physical_rebase, Mapping):
+                    pair["frozen_object_motion_rebase"] = json.loads(
+                        json.dumps(physical_rebase)
+                    )
                 pair["qualification_start_joint_state"] = dict(contact_state)
                 pair["initial_scene_transition"] = "virtual_attach"
                 pair["initial_scene_transition_pose"] = dict(contact)
@@ -2144,8 +2248,8 @@ class _FrozenGoalPairCoordinator:
             source=source,
             cache_result=False,
             qualification_mode="frozen_pair",
-            l5_pass_target=l5_pass_target,
-            l5_min_pass_target=l5_pass_target,
+            l5_pass_target=max(2, l5_pass_target or 1),
+            l5_min_pass_target=l5_pass_target or 1,
         )
         if _qualification_infrastructure_reason(joint):
             return _qualification_infrastructure_failure(joint)
@@ -2258,11 +2362,18 @@ class _FrozenGoalPairCoordinator:
         )
         if retained:
             retained.sort(
-                key=lambda grasp: int(
-                    grasp.get("grasp_place_physical_quality_rank", 1_000_000)
+                key=lambda grasp: (
+                    *parallel_gripper_centering_quality(grasp),
+                    int(
+                        grasp.get(
+                            "grasp_place_physical_quality_rank", 1_000_000
+                        )
+                    ),
                 )
             )
-            result.details["ranking"] = "grasp_place_physical_quality"
+            result.details["ranking"] = (
+                "parallel_gripper_centering_then_grasp_place_physical_quality"
+            )
         if joint.details.get("qualification_artifact"):
             result.details["frozen_pair_qualification_artifact"] = joint.details[
                 "qualification_artifact"
@@ -2676,20 +2787,55 @@ def _qualifying_handler(
                 and not isinstance(frontier_revision, bool)
                 and observed_revision != frontier_revision
             ):
-                return ToolResult(
-                    False,
-                    (
-                        "The frozen grasp frontier no longer matches the "
-                        "observed PlanningScene revision."
-                    ),
-                    {
-                        "reason": "frozen_grasp_frontier_scene_revision_changed",
-                        "source_planning_scene_revision": frontier_revision,
-                        "planning_scene_revision": observed_revision,
-                        "model_inference_invoked": False,
-                        "execution_started": False,
-                    },
+                latest_receipt = (
+                    memory.get("planning_scene_target_pose_sync")
+                    if isinstance(memory, Mapping)
+                    else None
                 )
+                rebase = frozen_pair_coordinator.rebase_grasp_frontier_from_target_pose_sync(
+                    latest_receipt if isinstance(latest_receipt, Mapping) else {},
+                    scene_epoch=(
+                        frontier_scene_epoch
+                        if isinstance(frontier_scene_epoch, int)
+                        and not isinstance(frontier_scene_epoch, bool)
+                        else 0
+                    ),
+                    planning_scene_revision=observed_revision,
+                )
+                if not rebase.success:
+                    return ToolResult(
+                        False,
+                        (
+                            "The frozen grasp frontier no longer matches the "
+                            "observed PlanningScene revision."
+                        ),
+                        {
+                            "reason": "frozen_grasp_frontier_scene_revision_changed",
+                            "source_planning_scene_revision": frontier_revision,
+                            "planning_scene_revision": observed_revision,
+                            "rebase_reason": rebase.details.get("reason"),
+                            "model_inference_invoked": False,
+                            "execution_started": False,
+                        },
+                    )
+                frontier_revision = observed_revision
+            recovery = (
+                memory.get("grasp_recovery")
+                if isinstance(memory, Mapping)
+                else None
+            )
+            failed_candidate_id = (
+                str(recovery.get("candidate_id") or "")
+                if isinstance(recovery, Mapping)
+                else ""
+            )
+            preferred_parent_count = (
+                frozen_pair_coordinator.prioritize_grasp_frontier_for_parent(
+                    failed_candidate_id
+                )
+                if failed_candidate_id
+                else 0
+            )
             result = frozen_pair_coordinator.prepare_grasp_frontier_expansion(
                 scene_epoch=(
                     frontier_scene_epoch
@@ -2704,6 +2850,17 @@ def _qualifying_handler(
                     else 0
                 ),
             )
+            if result.success:
+                result.details.update(
+                    {
+                        "frozen_frontier_failed_parent_candidate_id": (
+                            failed_candidate_id
+                        ),
+                        "frozen_frontier_preferred_parent_variant_count": (
+                            preferred_parent_count
+                        ),
+                    }
+                )
         else:
             result = handler(context)
         if not result.success:
@@ -2777,7 +2934,11 @@ def _qualifying_handler(
             )
             if camera is not None:
                 source["camera_frame_id"] = camera.frame_id
-                source["camera_extrinsics"] = dict(camera.extrinsics)
+                # A moving wrist camera must retain the exact extrinsics of the
+                # RGB-D packet used by the model.  Frozen-frontier retries update
+                # only the robot start state; replacing these extrinsics with the
+                # post-contact wrist transform would move every raw candidate.
+                source.setdefault("camera_extrinsics", dict(camera.extrinsics))
         if purpose == "placement":
             attachment_gate = memory.get("attachment_gate") if isinstance(memory, dict) else None
             attachment_proof = (
@@ -2867,14 +3028,14 @@ def _qualifying_handler(
             if isinstance(compiled_source_grasp, dict):
                 source["source_grasp_compiled"] = dict(compiled_source_grasp)
         grasp_lookahead_target = (
-            min(2, frozen_pair_coordinator.grasp_branch_limit)
+            2
             if purpose == "grasp"
             and frozen_pair_coordinator is not None
             and frozen_pair_coordinator.object_goals
             else None
         )
         grasp_minimum_target = (
-            min(2, grasp_lookahead_target)
+            2
             if grasp_lookahead_target is not None
             else None
         )
@@ -2899,6 +3060,9 @@ def _qualifying_handler(
             )
         if purpose == "grasp" and frozen_pair_coordinator is not None:
             if provider_result_snapshot is not None:
+                provider_result_snapshot.details["source"] = json.loads(
+                    json.dumps(source)
+                )
                 frozen_pair_coordinator.update_grasp_frontier(
                     provider_result_snapshot,
                     qualified_result,

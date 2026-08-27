@@ -20,6 +20,7 @@ from uuid import uuid4
 from adapter.protocol import JsonDict
 from agent.runtime.artifact_paths import artifact_session_id, artifact_session_root
 from agent.tools.attachment_probe import build_prepare_attachment_probe_handler
+from agent.tools.grasp_geometry import GraspGeometryError, world_direction_camera
 from agent.tools.registry import (
     ToolExecutionContext,
     ToolHandler,
@@ -28,12 +29,12 @@ from agent.tools.registry import (
     make_tool_result,
 )
 from agent.tools.sim_mcp import (
-    SimulatorMcpTransport,
     SseSimulatorMcpTransport,
     call_read_only_mcp_tool_with_retry,
 )
 from tools.candidate_config import (
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
+    DEFAULT_GRASPGENX_RAW_POOL_SIZE,
     DEFAULT_GRASP_RAW_POOL_SIZE,
     raw_pool_size,
 )
@@ -73,6 +74,17 @@ ANYPLACE_OBJECT_MASK_MIN_DEPTH_TAIL_GAP_M = 0.03
 ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_FRACTION = 0.02
 ANYPLACE_OBJECT_MASK_MAX_SPARSE_TAIL_POINTS = 32
 ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS = 128
+ANYPLACE_PLACEMENT_SUPPORT_MASK_SCHEMA = (
+    "openeta.anyplace.placement_support_surface_mask.v1"
+)
+# AnyPlace expects the parent point cloud to describe the surface that supports
+# the child object.  A semantic "inside the bin" mask also covers side walls
+# and the rim, so isolate a statistically dominant horizontal depth layer in
+# calibrated world coordinates before inference.  Four depth quanta form the
+# histogram resolution; the retained band is widened from measured plane noise
+# rather than from a workcell-specific height threshold.
+ANYPLACE_PLACEMENT_SUPPORT_HISTOGRAM_DEPTH_QUANTA = 4.0
+ANYPLACE_PLACEMENT_SUPPORT_OUTLIER_SIGMA = 3.0
 DEFAULT_MOLMOPOINT_OUTPUT_ROOT = Path("tmp") / "tool_result" / "molmopoint"
 DEFAULT_GRASPGENX_OUTPUT_ROOT = Path("tmp") / "tool_result" / "graspgenx"
 DEFAULT_DEPTH_PRIOR_OUTPUT_ROOT = Path("tmp") / "tool_result" / "depth_prior"
@@ -82,6 +94,7 @@ PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA = (
 )
 PARALLEL_GRIPPER_ALIGNMENT_QUANTILES = (0.02, 0.98)
 PARALLEL_GRIPPER_ALIGNMENT_MAX_POINTS = 4096
+PARALLEL_GRIPPER_ALIGNMENT_MIN_SPAN_M = 0.02
 DEFAULT_GRASP_POSE_BACKEND_ORDER = (
     "anygrasp",
     "contact_graspnet",
@@ -190,9 +203,8 @@ def build_sam3_handler(
 ) -> ToolHandler:
     """Build a SAM3 handler backed by text and optional point MCP callables.
 
-    ``tool_name`` relabels result/artifact provenance when the same handler
-    pipeline serves an interchangeable segmentation backend (for example the
-    simulator-only ``oracle_perceive`` tool).
+    ``tool_name`` relabels result/artifact provenance for a configured SAM3
+    service implementation.
     """
 
     image_output_root = (
@@ -804,6 +816,7 @@ def _sam3_semantic_metadata(
             f"{scene_epoch}\0{observation_id}\0{source_image}".encode("utf-8")
         ).hexdigest()[:16]
     )
+    view_identity = _string_param(parameters.get("view_identity"))
     attempt_payload = {
         "perception_bundle_id": perception_bundle_id,
         "semantic_role": role,
@@ -812,6 +825,7 @@ def _sam3_semantic_metadata(
         "prompt": prompt,
         "points": raw_points if isinstance(raw_points, list) else [],
         "roi_bbox_xyxy": parameters.get("roi_bbox_xyxy"),
+        "view_identity": view_identity,
     }
     fingerprint = hashlib.sha256(
         json.dumps(
@@ -833,6 +847,7 @@ def _sam3_semantic_metadata(
         "scene_epoch": scene_epoch,
         "attempt_id": attempt_id,
         "attempt_fingerprint": fingerprint,
+        **({"view_identity": view_identity} if view_identity else {}),
         **(
             {
                 "point_prompt_source": "attachment_ack_projection",
@@ -988,43 +1003,6 @@ def build_sse_sam3_mcp_segmenter(
             request,
             timeout_s=timeout_seconds,
         )
-
-    return segment
-
-
-def build_oracle_perceive_segmenter(
-    transport: SimulatorMcpTransport,
-    *,
-    tool_name: str = "oracle_perceive",
-    timeout_seconds: float = 600.0,
-    handle_provider: Callable[[], str] | None = None,
-    session_id_provider: Callable[[], str] | None = None,
-    response_callback: Callable[[str, JsonDict, JsonDict], None] | None = None,
-) -> Sam3SegmentCallable:
-    """Build a simulator-oracle segmenter over the existing simulator MCP transport.
-
-    The SAM3 handler pipeline already encodes the source image, so the oracle
-    MCP tool receives the ``{image_base64, prompt}`` contract directly and
-    returns the same response shape as the SAM3 MCP server.
-    """
-
-    def segment(request: JsonDict) -> JsonDict:
-        arguments: JsonDict = {
-            "image_base64": request.get("image_base64"),
-            "prompt": _string_param(request.get("prompt")),
-        }
-        handle = str(handle_provider() if handle_provider is not None else "").strip()
-        session_id = str(
-            session_id_provider() if session_id_provider is not None else ""
-        ).strip()
-        if handle:
-            arguments["handle"] = handle
-        if session_id:
-            arguments["session_id"] = session_id
-        response = transport.call_tool(tool_name, arguments, timeout_s=timeout_seconds)
-        if response_callback is not None:
-            response_callback(tool_name, arguments, response)
-        return response
 
     return segment
 
@@ -1434,7 +1412,11 @@ def build_grasp_pose_estimate_handler(
                 intrinsics=intrinsics,
                 hints=hints,
                 graspgenx_gripper_name=graspgenx_gripper_name,
-                graspgenx_up_direction_camera=graspgenx_up_direction_camera,
+                graspgenx_up_direction_camera=_graspgenx_up_direction_for_frame(
+                    context,
+                    camera_frame_id=camera_frame_id,
+                    fallback=graspgenx_up_direction_camera,
+                ),
             )
             if backend_parameters is None:
                 attempts.append(
@@ -1624,7 +1606,7 @@ def build_graspgenx_handler(
     list_grippers: GraspGenXListCallable,
     *,
     output_root: str | Path = DEFAULT_GRASPGENX_OUTPUT_ROOT,
-    expected_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
+    expected_raw_pool_size: int = DEFAULT_GRASPGENX_RAW_POOL_SIZE,
 ) -> ToolHandler:
     """Build a targeted GraspGenX handler backed by MCP callables."""
 
@@ -2117,7 +2099,14 @@ def build_anyplace_handler(
                     artifact_session_root(output_root, session_id) / "preprocessing"
                 ),
             )
+            placement_packet = _clean_anyplace_placement_support_surface_mask(
+                placement_packet,
+                artifact_root=(
+                    artifact_session_root(output_root, session_id) / "preprocessing"
+                ),
+            )
             request["object_observation"] = object_packet
+            request["placement_observation"] = placement_packet
             mcp_request = {
                 "object_observation": _encode_anyplace_observation(
                     object_packet, mask_key="object_mask"
@@ -4126,6 +4115,39 @@ def _grasp_pose_backend_parameters(
     return None
 
 
+def _graspgenx_up_direction_for_frame(
+    context: ToolExecutionContext,
+    *,
+    camera_frame_id: str,
+    fallback: Sequence[float],
+) -> list[float]:
+    """Resolve world +Z in the selected camera at this RGB-D observation.
+
+    Static top-view deployments retain their configured fallback.  A camera
+    packet with numeric OpenCV extrinsics, especially an eye-in-hand camera,
+    takes precedence so GraspGenX never receives a stale wrist orientation.
+    """
+
+    observation = context.observation
+    if observation is not None:
+        camera = next(
+            (
+                candidate
+                for candidate in observation.cameras
+                if candidate.frame_id == camera_frame_id
+            ),
+            None,
+        )
+        if camera is not None and isinstance(camera.extrinsics, Mapping):
+            try:
+                return world_direction_camera(camera.extrinsics, (0.0, 0.0, 1.0))
+            except (GraspGeometryError, TypeError, ValueError):
+                # The backend parameter validator below still fail-closes if
+                # the deployment fallback itself is malformed.
+                pass
+    return list(fallback)
+
+
 def _grasp_backend_failure_reason(result: ToolResult) -> str:
     details = result.details if isinstance(result.details, dict) else {}
     outputs = details.get("outputs")
@@ -4170,9 +4192,12 @@ def _aggregate_grasp_backend_failure(
         "unknown_error",
     }
     if failed_reasons.issubset(model_or_transport_failure):
-        # Memory owns a one-retry health circuit for this aggregate class;
-        # exact backend reasons remain in backend_attempts for diagnosis.
-        return "model_inference_failed", True
+        # Every compatible backend has already been attempted once inside this
+        # unified call.  Reissuing the same frozen RGB-D fingerprint repeats
+        # expensive model inference and cannot add a grasp mode.  Preserve the
+        # exact backend reasons in ``backend_attempts`` and let the controller
+        # terminate this unchanged-scene infrastructure failure immediately.
+        return "model_inference_failed", False
     return "all_backends_failed", False
 
 
@@ -4284,7 +4309,8 @@ def _annotate_parallel_gripper_closing_alignment(
             or not np.isfinite(correction_camera).all()
         ):
             continue
-        candidate["target_closing_alignment"] = {
+        previous_alignment = candidate.get("target_closing_alignment")
+        alignment = {
             "schema_version": PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA,
             "source": "aligned_selected_mask_depth",
             "depth_provenance": depth_provenance,
@@ -4296,6 +4322,26 @@ def _annotate_parallel_gripper_closing_alignment(
             "correction_m": correction,
             "correction_camera_xyz": correction_camera.tolist(),
         }
+        if isinstance(previous_alignment, Mapping) and (
+            previous_alignment.get("variant_role")
+            == "same_approach_centering_reserve"
+        ):
+            parents = previous_alignment.get(
+                "compatible_parent_backend_indices"
+            )
+            if isinstance(parents, list) and parents and all(
+                isinstance(parent, int)
+                and not isinstance(parent, bool)
+                and parent >= 0
+                for parent in parents
+            ):
+                alignment.update(
+                    {
+                        "variant_role": "same_approach_centering_reserve",
+                        "compatible_parent_backend_indices": list(parents),
+                    }
+                )
+        candidate["target_closing_alignment"] = alignment
         annotated += 1
     return annotated
 
@@ -4747,7 +4793,7 @@ def _normalise_graspgenx_response(
     intrinsics: JsonDict,
     gripper_name: str,
     up_direction_camera: list[float],
-    expected_raw_pool_size: int = DEFAULT_GRASP_RAW_POOL_SIZE,
+    expected_raw_pool_size: int = DEFAULT_GRASPGENX_RAW_POOL_SIZE,
 ) -> ToolResult:
     if not isinstance(response, Mapping):
         return _graspgenx_failure("mcp_call_failed")
@@ -4784,6 +4830,14 @@ def _normalise_graspgenx_response(
         not in {
             "score_descending",
             "source_aware_se3_mmr_with_minimum_se3_separation",
+            (
+                "source_aware_se3_mmr_with_target_centering_quality_"
+                "and_minimum_se3_separation"
+            ),
+            (
+                "source_aware_se3_mmr_recall_base_with_target_centering_"
+                "reserve_and_minimum_se3_separation"
+            ),
         }
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
@@ -4961,7 +5015,7 @@ def _normalise_graspgenx_candidate(
                 abs_tol=1e-6,
             ):
                 return None
-    return {
+    normalized = {
         "id": f"graspgenx_{expected_rank:03d}",
         "rank": expected_rank,
         "backend_index": backend_index,
@@ -4981,6 +5035,91 @@ def _normalise_graspgenx_candidate(
         "width": width,
         "height": height,
     }
+    alignment_value = value.get("target_closing_alignment")
+    if alignment_value is not None:
+        if not isinstance(alignment_value, Mapping):
+            return None
+        correction = _finite_float(alignment_value.get("correction_m"))
+        span = _finite_float(alignment_value.get("target_span_m"))
+        ratio = _finite_float(alignment_value.get("centering_ratio"))
+        correction_camera = _finite_vector(
+            alignment_value.get("correction_camera_xyz"), length=3
+        )
+        quantiles = _finite_vector(
+            alignment_value.get("quantile_bounds"), length=2
+        )
+        if (
+            alignment_value.get("schema_version")
+            != PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA
+            or alignment_value.get("source") != "aligned_selected_mask_depth"
+            or alignment_value.get("depth_provenance") != "sensor_depth"
+            or alignment_value.get("closing_axis") != "graspnet_local_y"
+            or alignment_value.get("ordering_only") is not True
+            or alignment_value.get("pose_modified") is not False
+            or correction is None
+            or span is None
+            or span <= 0.0
+            or ratio is None
+            or ratio < 0.0
+            or correction_camera is None
+            or quantiles is None
+            or not 0.0 <= quantiles[0] < quantiles[1] <= 1.0
+        ):
+            return None
+        expected_ratio = abs(correction) / max(
+            span, PARALLEL_GRIPPER_ALIGNMENT_MIN_SPAN_M
+        )
+        expected_correction = [
+            rotation[row][1] * correction for row in range(3)
+        ]
+        if not math.isclose(ratio, expected_ratio, rel_tol=0.0, abs_tol=1e-6) or any(
+            not math.isclose(
+                correction_camera[row],
+                expected_correction[row],
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            for row in range(3)
+        ):
+            return None
+        normalized["target_closing_alignment"] = {
+            "schema_version": PARALLEL_GRIPPER_TARGET_ALIGNMENT_SCHEMA,
+            "source": "aligned_selected_mask_depth",
+            "depth_provenance": "sensor_depth",
+            "closing_axis": "graspnet_local_y",
+            "quantile_bounds": quantiles,
+            "target_span_m": span,
+            "correction_m": correction,
+            "correction_camera_xyz": correction_camera,
+            "centering_ratio": ratio,
+            "ordering_only": True,
+            "pose_modified": False,
+        }
+        variant_role = alignment_value.get("variant_role")
+        parent_indices = alignment_value.get(
+            "compatible_parent_backend_indices"
+        )
+        if variant_role is not None or parent_indices is not None:
+            if (
+                variant_role != "same_approach_centering_reserve"
+                or not isinstance(parent_indices, list)
+                or not parent_indices
+                or any(
+                    isinstance(parent, bool)
+                    or not isinstance(parent, int)
+                    or parent < 0
+                    for parent in parent_indices
+                )
+                or len(set(parent_indices)) != len(parent_indices)
+            ):
+                return None
+            normalized["target_closing_alignment"].update(
+                {
+                    "variant_role": variant_role,
+                    "compatible_parent_backend_indices": list(parent_indices),
+                }
+            )
+    return normalized
 
 
 def _graspgenx_failure(
@@ -5759,6 +5898,9 @@ def _normalise_anyplace_response(
     object_preprocessing = _dict_or_empty(
         request["object_observation"].get("object_mask_depth_cleanup")
     )
+    placement_preprocessing = _dict_or_empty(
+        request["placement_observation"].get("placement_support_surface_mask")
+    )
     artifacts: list[JsonDict] = [
         {
             "type": "placement_candidate_image",
@@ -5775,6 +5917,19 @@ def _normalise_anyplace_response(
             artifacts.append(
                 {
                     "type": "object_mask_depth_cleanup",
+                    "kind": "image",
+                    "tool": "anyplace",
+                    "path": filtered_mask_ref,
+                }
+            )
+    if placement_preprocessing.get("applied") is True:
+        filtered_mask_ref = _string_param(
+            placement_preprocessing.get("filtered_mask_ref")
+        )
+        if filtered_mask_ref:
+            artifacts.append(
+                {
+                    "type": "placement_support_surface_mask",
                     "kind": "image",
                     "tool": "anyplace",
                     "path": filtered_mask_ref,
@@ -5815,6 +5970,11 @@ def _normalise_anyplace_response(
             **(
                 {"object_mask_preprocessing": object_preprocessing}
                 if object_preprocessing
+                else {}
+            ),
+            **(
+                {"placement_mask_preprocessing": placement_preprocessing}
+                if placement_preprocessing
                 else {}
             ),
             "artifacts": artifacts,
@@ -6575,6 +6735,205 @@ def _clean_anyplace_object_mask_sparse_depth_tail(
         "source_image": str(packet["rgb"]),
     }
     normalized["object_mask_depth_cleanup"] = cleanup
+    return normalized
+
+
+def _clean_anyplace_placement_support_surface_mask(
+    packet: Mapping[str, Any],
+    *,
+    artifact_root: Path,
+) -> JsonDict:
+    """Keep the dominant horizontal support layer inside a placement mask.
+
+    Text segmentation of a receptacle commonly includes its floor, vertical
+    walls, and rim. Feeding all three surfaces to AnyPlace makes a wall look
+    like a valid parent surface and can produce upright, high-energy object
+    goals. Calibrated RGB-D supplies a stronger invariant: points on one
+    horizontal support plane share world Z, whereas wall points are spread
+    over height. This filter applies only when the world-Z histogram contains
+    a statistically dominant layer; otherwise it preserves the semantic mask.
+    """
+
+    import numpy as np
+    from PIL import Image
+
+    normalized = dict(packet)
+    depth_path = Path(str(packet["depth"])).expanduser()
+    mask_path = Path(str(packet["mask"])).expanduser()
+    with Image.open(depth_path) as loaded_depth:
+        depth = np.asarray(loaded_depth, dtype=np.float64)
+    with Image.open(mask_path) as loaded_mask:
+        mask = np.asarray(loaded_mask.convert("L"), dtype=np.uint8) > 0
+    if depth.ndim != 2 or mask.shape != depth.shape:
+        return normalized
+
+    intrinsics = packet.get("intrinsics")
+    if not isinstance(intrinsics, Mapping):
+        return normalized
+    try:
+        fx = float(intrinsics["fx"])
+        fy = float(intrinsics["fy"])
+        cx = float(intrinsics["cx"])
+        cy = float(intrinsics["cy"])
+        scale = float(intrinsics["scale"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("placement observation intrinsics are invalid") from exc
+    if not all(math.isfinite(value) and value > 0.0 for value in (fx, fy, scale)):
+        raise ValueError("placement observation intrinsics are invalid")
+    if not all(math.isfinite(value) for value in (cx, cy)):
+        raise ValueError("placement observation intrinsics are invalid")
+
+    extrinsics = packet.get("camera_extrinsics")
+    if not isinstance(extrinsics, Mapping):
+        return normalized
+    camera_to_world = _camera_to_world_opencv_transform(extrinsics)
+    rotation_z = camera_to_world[2][:3]
+    translation_z = float(camera_to_world[2][3])
+
+    metric_depth = depth / scale
+    valid = mask & np.isfinite(metric_depth) & (metric_depth > 0.0)
+    point_count = int(np.count_nonzero(valid))
+    if point_count <= ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS:
+        return normalized
+
+    height, width = depth.shape
+    u, v = np.meshgrid(
+        np.arange(width, dtype=np.float64),
+        np.arange(height, dtype=np.float64),
+    )
+    ray_x = (u - cx) / fx
+    ray_y = (v - cy) / fy
+    world_z_coefficient = (
+        float(rotation_z[0]) * ray_x
+        + float(rotation_z[1]) * ray_y
+        + float(rotation_z[2])
+    )
+    world_z = metric_depth * world_z_coefficient + translation_z
+    values = world_z[valid]
+    quantization = np.abs(world_z_coefficient[valid]) / scale
+    finite_quantization = quantization[np.isfinite(quantization)]
+    depth_quantum_m = float(np.median(finite_quantization))
+    if not math.isfinite(depth_quantum_m) or depth_quantum_m <= 0.0:
+        return normalized
+    bin_width_m = (
+        ANYPLACE_PLACEMENT_SUPPORT_HISTOGRAM_DEPTH_QUANTA * depth_quantum_m
+    )
+    value_min = float(np.min(values))
+    value_max = float(np.max(values))
+    if value_max - value_min <= bin_width_m:
+        return normalized
+    bin_count = max(2, int(math.ceil((value_max - value_min) / bin_width_m)))
+    counts, edges = np.histogram(values, bins=bin_count, range=(value_min, value_max))
+    mode_count = int(np.max(counts))
+    lower_quartile, upper_quartile = np.percentile(
+        counts.astype(np.float64), [25, 75]
+    )
+    interquartile_range = float(upper_quartile - lower_quartile)
+    counting_noise = max(
+        interquartile_range,
+        math.sqrt(max(1.0, float(upper_quartile))),
+    )
+    dominant_threshold = float(upper_quartile) + (
+        ANYPLACE_PLACEMENT_SUPPORT_OUTLIER_SIGMA * counting_noise
+    )
+    if (
+        mode_count < ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
+        or float(mode_count) <= dominant_threshold
+    ):
+        return normalized
+
+    # ``argmax`` is deterministic and selects the lower world-Z layer when
+    # equally populated modes occur because histogram bins are ascending.
+    mode_index = int(np.argmax(counts))
+    mode_lower = float(edges[mode_index])
+    mode_upper = float(edges[mode_index + 1])
+    mode_neighbourhood = values[
+        (values >= mode_lower - bin_width_m)
+        & (values <= mode_upper + bin_width_m)
+    ]
+    if mode_neighbourhood.size == 0:
+        return normalized
+    support_z_m = float(np.median(mode_neighbourhood))
+    median_absolute_deviation = float(
+        np.median(np.abs(mode_neighbourhood - support_z_m))
+    )
+    robust_sigma_m = 1.4826 * median_absolute_deviation
+    band_half_width_m = max(
+        bin_width_m,
+        ANYPLACE_PLACEMENT_SUPPORT_OUTLIER_SIGMA * robust_sigma_m,
+    )
+    support_pixels = valid & (
+        np.abs(world_z - support_z_m) <= band_half_width_m
+    )
+    retained_count = int(np.count_nonzero(support_pixels))
+    if (
+        retained_count < ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
+        or retained_count >= point_count
+    ):
+        return normalized
+
+    filtered_mask = mask & support_pixels
+    digest = hashlib.sha256()
+    digest.update(mask_path.resolve().as_posix().encode("utf-8"))
+    digest.update(mask_path.read_bytes())
+    digest.update(depth_path.resolve().as_posix().encode("utf-8"))
+    digest.update(depth_path.read_bytes())
+    digest.update(
+        json.dumps(
+            packet.get("camera_extrinsics"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    digest.update(ANYPLACE_PLACEMENT_SUPPORT_MASK_SCHEMA.encode("ascii"))
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    filtered_ref = artifact_root / (
+        f"placement-support-mask-{digest.hexdigest()[:16]}.png"
+    )
+    if not filtered_ref.is_file():
+        temporary_ref = filtered_ref.with_name(
+            f".{filtered_ref.name}.{uuid4().hex}.tmp.png"
+        )
+        Image.fromarray(filtered_mask.astype(np.uint8) * 255, mode="L").save(
+            temporary_ref
+        )
+        temporary_ref.replace(filtered_ref)
+
+    cleanup = {
+        "schema": ANYPLACE_PLACEMENT_SUPPORT_MASK_SCHEMA,
+        "applied": True,
+        "source_mask_ref": str(packet["mask"]),
+        "filtered_mask_ref": str(filtered_ref),
+        "valid_depth_points_before": point_count,
+        "valid_depth_points_after": retained_count,
+        "removed_non_support_points": point_count - retained_count,
+        "support_plane_world_z_m": round(support_z_m, 6),
+        "support_band_half_width_m": round(band_half_width_m, 6),
+        "selection": "dominant_horizontal_world_z_layer",
+        "statistics": {
+            "histogram_bin_width_m": round(bin_width_m, 6),
+            "mode_points": mode_count,
+            "dominant_threshold_points": round(dominant_threshold, 3),
+            "plane_median_absolute_deviation_m": round(
+                median_absolute_deviation, 6
+            ),
+        },
+        "limits": {
+            "minimum_retained_points": (
+                ANYPLACE_OBJECT_MASK_MIN_RETAINED_DEPTH_POINTS
+            ),
+            "histogram_depth_quanta": (
+                ANYPLACE_PLACEMENT_SUPPORT_HISTOGRAM_DEPTH_QUANTA
+            ),
+            "outlier_sigma": ANYPLACE_PLACEMENT_SUPPORT_OUTLIER_SIGMA,
+        },
+    }
+    normalized["mask"] = str(filtered_ref)
+    normalized["mask_artifact"] = {
+        "mask_ref": str(filtered_ref),
+        "source_image": str(packet["rgb"]),
+    }
+    normalized["placement_support_surface_mask"] = cleanup
     return normalized
 
 
