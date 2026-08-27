@@ -1072,7 +1072,7 @@ def test_cli_reuses_simulator_mcp_state_for_stable_control_tools(monkeypatch) ->
         return transport
 
     monkeypatch.setattr("agent.cli.openeta_cli._load_sim_mcp_url", lambda: "http://sim/mcp")
-    monkeypatch.setattr("agent.cli.openeta_cli.SseSimulatorMcpTransport", fake_transport)
+    monkeypatch.setattr("agent.cli.openeta_cli.simulator_mcp_transport_for_url", fake_transport)
     cli = OpenEtaCli()
     cli._sync_simulator_mcp_response(
         "create_env",
@@ -1240,7 +1240,9 @@ def test_cli_caches_simulator_mcp_tool_catalog(monkeypatch) -> None:
             return {"success": True}
 
     monkeypatch.setattr("agent.cli.openeta_cli._load_sim_mcp_url", lambda: "http://sim/mcp")
-    monkeypatch.setattr("agent.cli.openeta_cli.SseSimulatorMcpTransport", FakeTransport)
+    monkeypatch.setattr(
+        "agent.cli.openeta_cli.simulator_mcp_transport_for_url", FakeTransport
+    )
 
     cli = OpenEtaCli()
 

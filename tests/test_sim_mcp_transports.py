@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+from agent.tools.sim_mcp import StreamableHttpSimulatorMcpTransport
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,9 +71,9 @@ async def _list_and_call_streamable_http(url: str) -> tuple[set[str], dict]:
 def test_simulator_mcp_supports_standard_http_and_legacy_sse_read_only_lifecycle() -> None:
     """Both advertised paths complete initialize → tools/list → a read-only call.
 
-    The normal scripted TUI continues to use `/sse`; `/mcp` is exercised here
-    as the preferred Streamable HTTP endpoint without creating an environment
-    or starting Gazebo.
+    The normal scripted TUI uses the preferred `/mcp` endpoint. Legacy `/sse`
+    remains covered for compatible deployments, without creating an
+    environment or starting Gazebo.
     """
 
     port = _free_port()
@@ -99,10 +101,19 @@ def test_simulator_mcp_supports_standard_http_and_legacy_sse_read_only_lifecycle
         modern_tools, modern_payload = asyncio.run(
             _list_and_call_streamable_http(f"{base_url}/mcp")
         )
+        transport = StreamableHttpSimulatorMcpTransport(f"{base_url}/mcp")
+        transport_tools = transport.list_tools(timeout_s=10.0)
+        transport_payload = transport.call_tool(
+            "list_active_envs",
+            {},
+            timeout_s=10.0,
+        )
         assert "list_active_envs" in legacy_tools
         assert modern_tools == legacy_tools
+        assert {item["name"] for item in transport_tools["tools"]} == modern_tools
         assert legacy_payload["count"] == 0
         assert modern_payload["count"] == 0
+        assert transport_payload["count"] == 0
     finally:
         process.terminate()
         try:

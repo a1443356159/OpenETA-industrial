@@ -45,6 +45,7 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
         "openeta-graspgenx",
         "openeta-anyplace",
     }
+    assert config["openeta-sim"]["url"] == "http://127.0.0.1:18765/mcp"
     prompt = paths.instructions.read_text(encoding="utf-8")
     assert "黄色活动扳手" in prompt
     assert "绿色零件箱" in prompt

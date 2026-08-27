@@ -497,7 +497,7 @@ def prepare_case(
         paths.mcp_config,
         {
             "mcpServers": {
-                "openeta-sim": {"url": f"http://127.0.0.1:{allocation.port}/sse"},
+                "openeta-sim": {"url": f"http://127.0.0.1:{allocation.port}/mcp"},
                 **{name: {"url": url} for name, url in services.items()},
             }
         },

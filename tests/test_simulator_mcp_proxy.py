@@ -19,6 +19,7 @@ from agent.tools.sim_mcp import (
     SimulatorMcpEpisodeEnvironment,
     SimulatorMcpToolProxyConfig,
     SseSimulatorMcpTransport,
+    StreamableHttpSimulatorMcpTransport,
     bind_simulator_mcp_tool_handlers,
     call_read_only_mcp_tool_with_retry,
     close_simulator_mcp_env,
@@ -302,6 +303,70 @@ def test_sse_transport_temporarily_bypasses_proxy_for_mcp_host(monkeypatch) -> N
         assert record["NO_PROXY"] == record["no_proxy"]
     assert os.environ["NO_PROXY"] == "localhost"
     assert "no_proxy" not in os.environ
+
+
+def test_streamable_http_transport_uses_standard_endpoint_and_proxy_bypass(
+    monkeypatch,
+) -> None:
+    observed: dict[str, JsonDict] = {}
+
+    async def fake_list_tools(*, url: str, timeout_s: float | None) -> JsonDict:
+        observed["list_tools"] = {
+            "url": url,
+            "timeout_s": timeout_s,
+            "NO_PROXY": os.environ.get("NO_PROXY", ""),
+        }
+        return {"tools": [], "tool_count": 0}
+
+    async def fake_call_tool(
+        *,
+        url: str,
+        tool_name: str,
+        arguments: JsonDict,
+        timeout_s: float | None,
+    ) -> JsonDict:
+        observed["call_tool"] = {
+            "url": url,
+            "tool_name": tool_name,
+            "arguments": dict(arguments),
+            "timeout_s": timeout_s,
+            "NO_PROXY": os.environ.get("NO_PROXY", ""),
+        }
+        return {"success": True}
+
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    monkeypatch.setattr(
+        sim_mcp,
+        "_list_streamable_http_mcp_tools",
+        fake_list_tools,
+    )
+    monkeypatch.setattr(
+        sim_mcp,
+        "_call_streamable_http_mcp_tool",
+        fake_call_tool,
+    )
+
+    transport = StreamableHttpSimulatorMcpTransport("http://127.0.0.1:8773/mcp")
+
+    assert transport.list_tools(timeout_s=3.0)["tool_count"] == 0
+    assert transport.call_tool("observe", {"handle": "env-1"}, timeout_s=4.0) == {
+        "success": True
+    }
+    assert observed["list_tools"]["url"] == "http://127.0.0.1:8773/mcp"
+    assert observed["call_tool"]["tool_name"] == "observe"
+    for record in observed.values():
+        assert "127.0.0.1" in record["NO_PROXY"]
+        assert "127.0.0.1:8773" in record["NO_PROXY"]
+
+
+def test_simulator_transport_factory_and_server_url_follow_endpoint_protocol() -> None:
+    modern = sim_mcp.simulator_mcp_transport_for_url("http://sim.example/mcp")
+    legacy = sim_mcp.simulator_mcp_transport_for_url("http://sim.example/sse")
+
+    assert isinstance(modern, StreamableHttpSimulatorMcpTransport)
+    assert isinstance(legacy, SseSimulatorMcpTransport)
+    assert sim_mcp.mcp_server_url_from_endpoint(modern.url) == "http://sim.example"
+    assert sim_mcp.mcp_server_url_from_endpoint(legacy.url) == "http://sim.example"
 
 
 def test_sse_read_timeout_covers_long_tool_deadline() -> None:

@@ -12,7 +12,10 @@ from adapter.openeta_agent import OpenEtaAgentAdapter
 from agent.backends.planner import StaticPlannerBackend
 from agent.tools.coding import PythonExecRuntime
 from agent.tools.registry import ToolRegistry, build_default_tool_registry
-from agent.tools.sim_mcp import SseSimulatorMcpTransport
+from agent.tools.sim_mcp import (
+    SseSimulatorMcpTransport,
+    StreamableHttpSimulatorMcpTransport,
+)
 
 
 def test_agent_backend_and_tool_packages_are_primary_import_paths() -> None:
@@ -24,6 +27,10 @@ def test_agent_backend_and_tool_packages_are_primary_import_paths() -> None:
     )
     assert PythonExecRuntime.__name__ == "PythonExecRuntime"
     assert SseSimulatorMcpTransport.__name__ == "SseSimulatorMcpTransport"
+    assert (
+        StreamableHttpSimulatorMcpTransport.__name__
+        == "StreamableHttpSimulatorMcpTransport"
+    )
 
 
 def test_dummy_adapter_uses_current_response_schema() -> None:

@@ -84,7 +84,7 @@ def test_fast_ik_solver_budget_does_not_shorten_ros_response_deadline() -> None:
     # Eight short IK requests may queue behind one MoveGroup service callback.
     # The IK request still carries 50 ms, while its transport may wait for the
     # bounded queue to drain without classifying a reachable pose as infra loss.
-    assert _qualification_ik_response_timeout_s(0.05) == pytest.approx(2.0)
+    assert _qualification_ik_response_timeout_s(0.05) == pytest.approx(5.0)
     assert _qualification_ik_response_timeout_s(0.05) > 8 * 0.05
 
 

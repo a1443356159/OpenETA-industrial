@@ -293,9 +293,16 @@ def _move_group_failure_result(
 def _qualification_ik_response_timeout_s(seed_timeout_s: float) -> float:
     """Keep a short solver budget without timing out behind concurrent RPCs."""
 
-    from agent.runtime.moveit_qualification import KINEMATIC_IK_TIMEOUT_S
+    from agent.runtime.moveit_qualification import (
+        KINEMATIC_IK_TIMEOUT_S,
+        STATE_VALIDITY_TIMEOUT_S,
+    )
 
-    return max(KINEMATIC_IK_TIMEOUT_S, float(seed_timeout_s) + 0.1)
+    return max(
+        KINEMATIC_IK_TIMEOUT_S,
+        STATE_VALIDITY_TIMEOUT_S,
+        float(seed_timeout_s) + 0.1,
+    )
 
 
 def _urdf_reach_upper_bound_m(config: GazeboControlConfig) -> float:

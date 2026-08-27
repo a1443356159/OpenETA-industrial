@@ -135,11 +135,12 @@ DEFAULT_SIMULATOR_MCP_TOOL_MAP = {
 
 
 def mcp_server_url_from_endpoint(url: str) -> str:
-    """Return the browser/API base URL for an MCP SSE endpoint."""
+    """Return the browser/API base URL for an MCP HTTP endpoint."""
 
     endpoint = str(url or "").strip().rstrip("/")
-    if endpoint.endswith("/sse"):
-        return endpoint[: -len("/sse")]
+    for suffix in ("/sse", "/mcp"):
+        if endpoint.endswith(suffix):
+            return endpoint[: -len(suffix)]
     return endpoint
 
 
@@ -1730,6 +1731,64 @@ class SseSimulatorMcpTransport:
             raise SimulatorMcpTransportError(f"call_tool:{name}", exc) from exc
 
 
+@dataclass(slots=True)
+class StreamableHttpSimulatorMcpTransport:
+    """Synchronous Streamable HTTP transport for a simulator MCP server."""
+
+    url: str = "http://localhost:8765/mcp"
+
+    def list_tools(self, *, timeout_s: float | None = None) -> JsonDict:
+        try:
+            with _temporary_no_proxy_for_url(self.url):
+                return asyncio.run(
+                    _with_optional_timeout(
+                        _list_streamable_http_mcp_tools(
+                            url=self.url,
+                            timeout_s=timeout_s,
+                        ),
+                        timeout_s=timeout_s,
+                    )
+                )
+        except SimulatorMcpTransportError:
+            raise
+        except Exception as exc:
+            raise SimulatorMcpTransportError("list_tools", exc) from exc
+
+    def call_tool(
+        self,
+        name: str,
+        arguments: JsonDict,
+        *,
+        timeout_s: float | None = None,
+    ) -> JsonDict:
+        try:
+            with _temporary_no_proxy_for_url(self.url):
+                return asyncio.run(
+                    _with_optional_timeout(
+                        _call_streamable_http_mcp_tool(
+                            url=self.url,
+                            tool_name=name,
+                            arguments=arguments,
+                            timeout_s=timeout_s,
+                        ),
+                        timeout_s=timeout_s,
+                    )
+                )
+        except SimulatorMcpTransportError:
+            raise
+        except Exception as exc:
+            raise SimulatorMcpTransportError(f"call_tool:{name}", exc) from exc
+
+
+def simulator_mcp_transport_for_url(url: str) -> SimulatorMcpTransport:
+    """Select the standard transport encoded by one MCP endpoint URL."""
+
+    endpoint_path = urlparse(str(url or "")).path.rstrip("/")
+    if endpoint_path.endswith("/mcp"):
+        return StreamableHttpSimulatorMcpTransport(url)
+    return SseSimulatorMcpTransport(url)
+
+
 def bind_simulator_mcp_tool_handlers(
     tools: ToolRegistry,
     *,
@@ -1911,6 +1970,66 @@ async def _list_sse_mcp_tools(
             await session.initialize()
             result = await session.list_tools()
     return _parse_mcp_tools_result(result)
+
+
+async def _call_streamable_http_mcp_tool(
+    *,
+    url: str,
+    tool_name: str,
+    arguments: JsonDict,
+    timeout_s: float | None,
+) -> JsonDict:
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=_streamable_http_timeout(timeout_s)
+    ) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
+            read,
+            write,
+            _get_session_id,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    tool_name,
+                    arguments,
+                    read_timeout_seconds=_timeout_delta(timeout_s),
+                )
+    return _parse_mcp_tool_result(result)
+
+
+async def _list_streamable_http_mcp_tools(
+    *,
+    url: str,
+    timeout_s: float | None,
+) -> JsonDict:
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=_streamable_http_timeout(timeout_s)
+    ) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
+            read,
+            write,
+            _get_session_id,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.list_tools()
+    return _parse_mcp_tools_result(result)
+
+
+def _streamable_http_timeout(timeout_s: float | None) -> Any:
+    import httpx
+
+    return httpx.Timeout(30.0, read=_sse_read_timeout_s(timeout_s))
 
 
 async def _with_optional_timeout(coro: Any, *, timeout_s: float | None) -> Any:

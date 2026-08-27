@@ -80,11 +80,12 @@ from agent.tools.registry import (
     ToolRegistry,
 )
 from agent.tools.sim_mcp import (
+    SimulatorMcpTransport,
     SimulatorMcpToolProxyConfig,
-    SseSimulatorMcpTransport,
     close_environment_mcp_env,
     mcp_dashboard_url,
     mcp_server_url_from_endpoint,
+    simulator_mcp_transport_for_url,
 )
 
 
@@ -278,7 +279,7 @@ class ConsoleState:
     step_idx: int = 0
     continue_after_human: bool = False
     simulator_mcp_url: str = ""
-    simulator_mcp_transport: SseSimulatorMcpTransport | None = None
+    simulator_mcp_transport: SimulatorMcpTransport | None = None
     simulator_mcp_config: SimulatorMcpToolProxyConfig = field(
         default_factory=SimulatorMcpToolProxyConfig
     )
@@ -1820,13 +1821,13 @@ def _configured_pre_safety_checks() -> dict[str, str]:
     return checks
 
 
-def _ensure_simulator_mcp_transport(cli: OpenEtaCli) -> SseSimulatorMcpTransport | None:
+def _ensure_simulator_mcp_transport(cli: OpenEtaCli) -> SimulatorMcpTransport | None:
     url = _load_sim_mcp_url()
     if not url:
         return None
     if cli.state.simulator_mcp_transport is None or cli.state.simulator_mcp_url != url:
         cli.state.simulator_mcp_url = url
-        cli.state.simulator_mcp_transport = SseSimulatorMcpTransport(url)
+        cli.state.simulator_mcp_transport = simulator_mcp_transport_for_url(url)
         _refresh_simulator_mcp_tool_catalog(cli)
     elif not cli.state.simulator_mcp_tool_catalog:
         _refresh_simulator_mcp_tool_catalog(cli)
