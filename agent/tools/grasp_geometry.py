@@ -788,6 +788,11 @@ def compile_placement_seed(
     t_world_eef = _matmul4(t_world_object, _inverse_rigid_transform(t_eef_object))
     r_world_eef = [row[:3] for row in t_world_eef[:3]]
     p_world_eef = [row[3] for row in t_world_eef[:3]]
+    terminal_pose_source = (
+        "anyplace_xy_with_container_drop_orientation"
+        if candidate.get("container_drop_release_prebound") is True
+        else "anyplace_object_goal_with_measured_attachment"
+    )
     identity = {
         "purpose": "placement",
         "placement_candidate_id": candidate_id,
@@ -810,6 +815,7 @@ def compile_placement_seed(
         "scene_revision": scene_revision,
         "compiled_eef_pose": True,
         "purpose": "placement",
+        "terminal_pose_source": terminal_pose_source,
     }
     return {
         "schema_version": COMPILED_PLACEMENT_SCHEMA,
@@ -828,7 +834,7 @@ def compile_placement_seed(
         "profile_sha256": profile_sha256,
         "calibration_id": str(profile.get("calibration_id") or ""),
         "orientation_clamped": False,
-        "terminal_pose_source": "anyplace_object_goal_with_measured_attachment",
+        "terminal_pose_source": terminal_pose_source,
         "path_owner": "moveit",
         "release_pose": {
             **common,

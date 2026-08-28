@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,6 +25,7 @@ from agent.runtime.runtime_assembly import (
     _restore_frozen_model_motion_for_predicted_pair,
 )
 from agent.tools.handlers import build_anyplace_handler
+from agent.tools.grasp_geometry import compile_placement_seed
 from agent.tools.registry import ToolExecutionContext, ToolResult, build_default_tool_registry
 
 
@@ -380,6 +383,22 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
     assert measured_container["compile_parameters"]["placement_candidate"][
         "qualification_object_goal_source"
     ] == "container_release_physical_goal_with_measured_attachment"
+    profile_bytes = profile_path.read_bytes()
+    recompiled = compile_placement_seed(
+        measured_container["compile_parameters"],
+        profile=json.loads(profile_bytes.decode("utf-8")),
+        profile_sha256=hashlib.sha256(profile_bytes).hexdigest(),
+    )
+    recompiled_hash = hashlib.sha256(
+        json.dumps(
+            [recompiled["release_pose"]],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert recompiled_hash == measured_container["compile_parameters"][
+        "qualified_compiled_pose_sha256"
+    ]
 
 
 def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasps() -> None:

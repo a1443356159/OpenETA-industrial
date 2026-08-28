@@ -423,6 +423,31 @@ def test_placement_compiler_derives_one_exact_release_from_model_goal() -> None:
     }.isdisjoint(compiled)
 
 
+def test_placement_compiler_owns_container_drop_terminal_identity() -> None:
+    candidate = {
+        **_placement_candidate(),
+        "container_drop_release_prebound": True,
+    }
+    compiled = compile_placement_seed(
+        {
+            "placement_candidate_id": "placement_002",
+            "placement_candidate": candidate,
+            "attachment_transform": _attachment(),
+            "scene_epoch": 4,
+            "scene_revision": 7,
+        },
+        profile=_profile(),
+        profile_sha256="profile-sha",
+    )
+
+    assert compiled["terminal_pose_source"] == (
+        "anyplace_xy_with_container_drop_orientation"
+    )
+    assert compiled["release_pose"]["terminal_pose_source"] == (
+        "anyplace_xy_with_container_drop_orientation"
+    )
+
+
 def test_placement_handler_rejects_stale_attachment_and_accepts_frozen_proof() -> None:
     robot = RobotState(
         joint_positions=[0.1, 0.2],

@@ -1045,10 +1045,6 @@ def _candidate_qualification_compiler(
                 profile=profile,
                 profile_sha256=profile_sha256,
             )
-            if candidate.get("container_drop_release_prebound") is True:
-                compiled["release_pose"]["terminal_pose_source"] = (
-                    "anyplace_xy_with_container_drop_orientation"
-                )
             compiled_pose_chain = [dict(compiled["release_pose"])]
             stages = [
                 {
