@@ -17,7 +17,7 @@ from pathlib import Path
 from PIL import Image
 
 from adapter.protocol import EnvObservation, JsonDict
-from agent.runtime.actions import CommandKind
+from agent.runtime.actions import CommandKind, PipelineStatus
 from agent.backends.code_policy import (
     CodePolicyBackend,
     CodePolicyGenerationRequest,
@@ -353,6 +353,43 @@ class ToolCallingPlanner(BasePlanner):
             backend_usage_sources[usage_source] = (
                 int(backend_usage_sources.get(usage_source) or 0) + 1
             )
+            if last_result.status is not PipelineStatus.PLANNED:
+                # Provider/deployment failures have already consumed the
+                # backend's bounded transport retry budget. They are not bad
+                # action JSON, so do not run the whole provider batch again as
+                # a schema-validation retry.
+                decision = _planner_backend_failure_decision(last_result)
+                if self.rollout_recorder is not None:
+                    self.rollout_recorder.record_model_call(
+                        request=request,
+                        result=last_result,
+                        decision=decision,
+                        validation_errors=[],
+                        backend=self.backend.descriptor(),
+                        started_at_s=model_started_at_s,
+                        completed_at_s=model_completed_at_s,
+                    )
+                validation_attempt_history.append(
+                    _planner_validation_attempt_record(
+                        attempt=attempt,
+                        result=last_result,
+                        decision=decision,
+                        validation_errors=[],
+                    )
+                )
+                decision.metadata.update(
+                    _planner_metadata(
+                        planner=self,
+                        tool_context=tool_context,
+                        backend=self.backend,
+                        backend_result=last_result,
+                        backend_usage=backend_usage,
+                        backend_usage_sources=backend_usage_sources,
+                        validation_attempts=attempt,
+                        validation_attempt_history=validation_attempt_history,
+                    )
+                )
+                return decision
             decision, validation_errors = _decision_from_backend_result(
                 last_result,
                 tools=tools,
@@ -1988,6 +2025,35 @@ class RuleBasedPlanner(BasePlanner):
             parameters={"message": "No bootstrap rule matched the task."},
             reasoning="No bootstrap rule matched the task.",
         )
+
+
+def _planner_backend_failure_decision(result: PlannerBackendResult) -> PlannerDecision:
+    """Stop one turn cleanly after the backend's bounded retries are exhausted."""
+
+    details = result.details if isinstance(result.details, dict) else {}
+    error_type = str(details.get("error_type") or "PlannerBackendUnavailable")
+    provider_attempts = max(1, int(details.get("provider_attempts") or 1))
+    backend_status = result.status.value
+    code = (
+        "planner_backend_failed"
+        if result.status is PipelineStatus.FAILED
+        else "planner_backend_unavailable"
+    )
+    return PlannerDecision(
+        action_type="response",
+        action="talk",
+        parameters={
+            "message": "Planner provider is unavailable after bounded retries.",
+            "code": code,
+            "backend_status": backend_status,
+            "error_type": error_type,
+            "provider_attempts": provider_attempts,
+        },
+        reasoning=(
+            "Planner backend infrastructure failed after its bounded retry budget; "
+            "stop without treating the failure as invalid action JSON."
+        ),
+    )
 
 
 def _decision_from_backend_result(

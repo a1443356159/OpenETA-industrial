@@ -85,19 +85,18 @@ EXECUTION_PROFILE_SCOPES = {
     "smoke_normal": "control_only_no_vlm_smoke_normal_not_agentic_acceptance",
 }
 
-# Normal decisions have stayed below 200 completion tokens in live evidence.
-# A 512-token ceiling leaves ample structured-JSON headroom while avoiding the
-# provider's much larger deployment setting.  Live replay selected Luna as the
-# same-endpoint timeout fallback: 21/21 representative decisions matched the
-# required action, with a measured 3.8--8.9 second range.  Every switch remains
-# explicit in rollout evidence; no provider, endpoint, or credential changes.
+# Normal decisions stay below 200 completion tokens, so 512 tokens leaves ample
+# structured-JSON headroom. Under shared endpoint load, a healthy decision can
+# exceed 12 seconds; give each model one useful 30-second attempt instead of
+# cycling through four short attempts. Terra then Luna remain explicit in
+# rollout evidence, with no provider, endpoint, or credential change.
 AGENTIC_PROVIDER_RESILIENCE_ENV = {
-    "OPENETA_LLM_TIMEOUT_S": "12",
-    "OPENETA_LLM_MAX_ATTEMPTS": "4",
+    "OPENETA_LLM_TIMEOUT_S": "30",
+    "OPENETA_LLM_MAX_ATTEMPTS": "2",
     "OPENETA_LLM_RETRY_BACKOFF_S": "0.5",
     "OPENETA_LLM_MAX_TOKENS": "512",
     "OPENETA_LLM_FALLBACK_MODEL": "gpt-5.6-luna",
-    "OPENETA_LLM_FALLBACK_TIMEOUT_S": "12",
+    "OPENETA_LLM_FALLBACK_TIMEOUT_S": "30",
 }
 
 

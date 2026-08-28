@@ -13,11 +13,13 @@ from agent.backends.planner import (
     CallablePlannerBackend,
     OpenAICompatiblePlannerBackend,
     OpenAICompatiblePlannerBackendConfig,
+    PlannerBackendResult,
     PlannerBackendRequest,
     ProviderHttpError,
     StaticPlannerBackend,
     extract_context_window_tokens,
 )
+from agent.runtime.actions import PipelineStatus
 from agent.backends.provider_config import PlannerProviderConfig, read_apikey_file
 from agent.runtime.checkers import CHECKER_RESULT_SCHEMA_VERSION, CheckerSubagentConfig
 from agent.runtime.episode import DummyEpisodeEnvironment, OpenEtaEpisodeRunner
@@ -1748,6 +1750,55 @@ def test_planner_backend_validation_retries_until_valid_payload() -> None:
     ] == ["missing_tool", "talk"]
     assert decision.metadata["validation_attempt_history"][0]["validation_errors"]
     assert decision.metadata["validation_attempt_history"][1]["validation_errors"] == []
+
+
+def test_planner_backend_failure_does_not_repeat_as_schema_validation() -> None:
+    calls = 0
+
+    def fail_backend(_request: PlannerBackendRequest) -> PlannerBackendResult:
+        nonlocal calls
+        calls += 1
+        return PlannerBackendResult(
+            payload={
+                "kind": "response",
+                "name": "ask_human",
+                "parameters": {"message": "provider timed out"},
+            },
+            status=PipelineStatus.FAILED,
+            provider="fixture-provider",
+            model="fixture-model",
+            details={
+                "error_type": "TimeoutError",
+                "provider_attempts": 2,
+            },
+        )
+
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(fail_backend),
+        max_validation_retries=3,
+    )
+    memory = AgentMemory()
+    memory.start_session(task="find the cube")
+
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("sam3"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert calls == 1
+    assert decision.action_type == "response"
+    assert decision.action == "talk"
+    assert decision.parameters == {
+        "message": "Planner provider is unavailable after bounded retries.",
+        "code": "planner_backend_failed",
+        "backend_status": "failed",
+        "error_type": "TimeoutError",
+        "provider_attempts": 2,
+    }
+    assert decision.metadata["validation_attempts"] == 1
+    assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
 
 
 def test_planner_context_uses_environment_assigned_task_as_active_objective() -> None:
