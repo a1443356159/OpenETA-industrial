@@ -532,6 +532,72 @@ def _non_support_obbs(
     return tuple(barriers), support_count
 
 
+def _effective_release_z_offset(
+    *,
+    configured_minimum_m: float,
+    support_object_id: str,
+    support_z_m: float | None,
+    support_spec: object,
+    clearance_m: float,
+) -> tuple[float, JsonDict]:
+    """Raise a release terminal above the selected support's collision rim.
+
+    ``support_z_m`` is the surface on which AnyPlace predicts the settled body.
+    A compound physical support may also contain walls above that surface.  The
+    model goal remains the settled pose; only the terminal used while the body
+    is still attached is lifted far enough for its lower face to clear the
+    highest authoritative support primitive.  Flat supports retain the
+    configured minimum unchanged.
+    """
+
+    evidence: JsonDict = {
+        "source": "configured_minimum",
+        "configured_minimum_m": configured_minimum_m,
+        "geometry_minimum_m": 0.0,
+        "effective_offset_m": configured_minimum_m,
+        "support_object_id": support_object_id,
+        "support_geometry_available": False,
+    }
+    if support_z_m is None or not support_object_id:
+        return configured_minimum_m, evidence
+    geometry = _spec_projected_geometry(support_spec)
+    if not geometry:
+        return configured_minimum_m, evidence
+
+    maximum_z = max(
+        primitive.center_xyz[2] + primitive.axis_half_extent(2)
+        for primitive in geometry
+    )
+    height_above_support = max(0.0, maximum_z - support_z_m)
+    numeric_band = 64.0 * math.ulp(
+        max(1.0, abs(maximum_z), abs(support_z_m))
+    )
+    geometry_minimum = (
+        height_above_support + clearance_m
+        if height_above_support > numeric_band
+        else 0.0
+    )
+    effective = max(configured_minimum_m, geometry_minimum)
+    evidence.update(
+        {
+            "source": (
+                "authoritative_support_collision_geometry"
+                if geometry_minimum > configured_minimum_m
+                else "configured_minimum"
+            ),
+            "geometry_minimum_m": geometry_minimum,
+            "effective_offset_m": effective,
+            "support_geometry_available": True,
+            "support_primitive_count": len(geometry),
+            "support_z_m": support_z_m,
+            "support_collision_maximum_z_m": maximum_z,
+            "support_collision_height_above_surface_m": height_above_support,
+            "clearance_m": clearance_m,
+        }
+    )
+    return effective, evidence
+
+
 def _obb_penetrates(left: Obb, right: Obb, *, tolerance_m: float) -> bool:
     """Exact box/box SAT; touching within tolerance is not penetration."""
 
@@ -692,7 +758,14 @@ def evaluate_placement_goal_legality(
             elapsed_s=time.monotonic() - started,
         )
         return result
-    release_z_offset = float(release_z_offset_value)
+    configured_release_z_offset = float(release_z_offset_value)
+    release_z_offset, release_offset_evidence = _effective_release_z_offset(
+        configured_minimum_m=configured_release_z_offset,
+        support_object_id=support_object_id,
+        support_z_m=support_z,
+        support_spec=world_specs.get(support_object_id),
+        clearance_m=release_clearance,
+    )
     static_penetration_tolerance = float(
         region.get(
             "static_penetration_tolerance_m",
@@ -858,6 +931,8 @@ def evaluate_placement_goal_legality(
             "placement_release_translation_xyz": release_translation,
             "release_target_translation_correction_xyz": release_correction,
             "release_z_offset_m": release_z_offset,
+            "configured_release_z_offset_m": configured_release_z_offset,
+            "release_offset_selection": release_offset_evidence,
             "support_contact_reconciliation": support_reconciliation,
         }
     else:
@@ -891,6 +966,8 @@ def evaluate_placement_goal_legality(
             "placement_release_translation_xyz": [0.0, 0.0, release_z_offset],
             "release_target_translation_correction_xyz": [0.0, 0.0, release_z_offset],
             "release_z_offset_m": release_z_offset,
+            "configured_release_z_offset_m": configured_release_z_offset,
+            "release_offset_selection": release_offset_evidence,
         }
     goal_geometry = _projected_body_geometry(target_spec, collision_goal)
     if not goal_geometry:
@@ -929,6 +1006,8 @@ def evaluate_placement_goal_legality(
             "height_tolerance_m": support_tolerance,
             "penetration_tolerance_m": support_penetration_tolerance,
             "release_z_offset_m": release_z_offset,
+            "configured_release_z_offset_m": configured_release_z_offset,
+            "release_offset_selection": release_offset_evidence,
             "tolerance_basis": "sensor_and_model_support_contact_uncertainty",
             "geometry_volume_centroid_xyz": list(volume_centroid),
             "geometry_volume_centroid_height_m": volume_centroid[2] - support_z,

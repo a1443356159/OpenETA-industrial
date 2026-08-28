@@ -660,6 +660,45 @@ def _placement_scene():
     }
 
 
+def _physical_bin_placement_scene():
+    scene = _placement_scene()
+    scene["world_specs"]["parts_bin"] = {
+        "id": "parts_bin",
+        "shape": "box",
+        "size_xyz": [0.32, 0.36, 0.18],
+        "pose_xyz": [0.48, -0.1, 0.0],
+        "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "primitives": [
+            {
+                "shape": "box",
+                "size_xyz": [0.32, 0.36, 0.02],
+                "pose_xyz": [0.0, 0.0, 0.01],
+                "pose_rpy": [0.0, 0.0, 0.0],
+            },
+            {
+                "shape": "box",
+                "size_xyz": [0.027, 0.36, 0.18],
+                "pose_xyz": [-0.1465, 0.0, 0.09],
+                "pose_rpy": [0.0, 0.0, 0.0],
+            },
+            {
+                "shape": "box",
+                "size_xyz": [0.027, 0.36, 0.18],
+                "pose_xyz": [0.1465, 0.0, 0.09],
+                "pose_rpy": [0.0, 0.0, 0.0],
+            },
+        ],
+    }
+    scene["placement_region"].update(
+        {
+            "support_object_id": "parts_bin",
+            "support_z_m": 0.02,
+            "release_z_offset_m": 0.05,
+        }
+    )
+    return scene
+
+
 def _scene_aligned_grasp_candidate(
     index: int,
     *,
@@ -1678,6 +1717,86 @@ def test_release_z_offset_translates_only_the_terminal_not_the_settled_goal():
     stage = descriptor["candidate"]["qualification_stages"][0]
     assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.63])
     assert stage["placement_release_z_offset_m"] == pytest.approx(0.20)
+
+
+def test_release_offset_clears_compound_support_rim_without_moving_settled_goal():
+    scene = _physical_bin_placement_scene()
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, -0.1, 0.05],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.48, -0.1, 0.25],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            ],
+        }
+    )
+    descriptor = {"candidate_id": "c0", "candidate": candidate}
+
+    legality = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, legality)
+
+    assert legality["verdict"] == "PASS"
+    binding = legality["checks"]["object_frame_binding"]
+    selection = binding["release_offset_selection"]
+    assert selection["source"] == "authoritative_support_collision_geometry"
+    assert selection["configured_minimum_m"] == pytest.approx(0.05)
+    assert selection["support_collision_maximum_z_m"] == pytest.approx(0.18)
+    assert selection["geometry_minimum_m"] == pytest.approx(0.165)
+    assert selection["effective_offset_m"] == pytest.approx(0.165)
+    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.05]
+    )
+    assert binding["release_collision_goal_pose"]["translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.215]
+    )
+    stage = descriptor["candidate"]["qualification_stages"][0]
+    assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.415])
+    assert stage["placement_release_z_offset_m"] == pytest.approx(0.165)
+
+
+def test_flat_support_keeps_configured_release_minimum():
+    scene = _placement_scene()
+    scene["placement_region"]["release_z_offset_m"] = 0.05
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, -0.1, 0.43],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+        }
+    )
+
+    legality = evaluate_placement_goal_legality(
+        {"candidate_id": "c0", "candidate": candidate},
+        scene=scene,
+    )
+
+    selection = legality["checks"]["object_frame_binding"]["release_offset_selection"]
+    assert legality["verdict"] == "PASS"
+    assert selection["support_geometry_available"] is True
+    assert selection["source"] == "configured_minimum"
+    assert selection["geometry_minimum_m"] == pytest.approx(0.0)
+    assert selection["effective_offset_m"] == pytest.approx(0.05)
 
 
 def test_artificial_placement_waypoints_are_rejected_before_ik():
