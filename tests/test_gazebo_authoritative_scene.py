@@ -179,7 +179,7 @@ def test_authoritative_compiler_rejects_overlapping_physical_placement_supports(
     )
     assert blue_pose is not None
     pose_values = (blue_pose.text or "").split()
-    pose_values[:2] = ["0.43", "-0.300"]
+    pose_values[:2] = ["0.62", "0.180"]
     blue_pose.text = " ".join(pose_values)
     world_path = tmp_path / "overlapping.sdf"
     tree.write(world_path, encoding="utf-8", xml_declaration=True)
@@ -192,7 +192,7 @@ def test_authoritative_compiler_rejects_overlapping_physical_placement_supports(
         for region in payload["scenes"]["normal"]["placement_regions"]
         if region["id"] == "blue_parts_bin"
     )
-    blue_region["center_xy"] = [0.43, -0.300]
+    blue_region["center_xy"] = [0.62, 0.180]
     catalog_path = tmp_path / "acceptance_scenes.json"
     catalog_path.write_text(json.dumps(payload), encoding="utf-8")
 
