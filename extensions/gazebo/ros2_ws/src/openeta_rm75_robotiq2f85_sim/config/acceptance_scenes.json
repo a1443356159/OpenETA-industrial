@@ -31,6 +31,7 @@
           "size_xy_m": [0.285, 0.260],
           "support_z_m": 0.020,
           "acceptance_semantics": "stable_geometry_centroid_inside",
+          "require_empty_at_start": true,
           "rgba": [0.035, 0.70, 0.16, 1.0],
           "selected": true
         },
@@ -41,6 +42,7 @@
           "size_xy_m": [0.285, 0.260],
           "support_z_m": 0.020,
           "acceptance_semantics": "stable_geometry_centroid_inside",
+          "require_empty_at_start": true,
           "rgba": [0.035, 0.25, 0.88, 1.0],
           "selected": false
         }

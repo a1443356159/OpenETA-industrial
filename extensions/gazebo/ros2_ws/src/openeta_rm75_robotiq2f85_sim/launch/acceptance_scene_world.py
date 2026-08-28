@@ -793,7 +793,7 @@ def _validate_catalog_bindings(
 
     regions = scene.get("placement_regions")
     if isinstance(regions, list):
-        physical_supports: list[AuthoritativeObject] = []
+        physical_supports: list[tuple[AuthoritativeObject, Mapping[str, Any]]] = []
         for raw in regions:
             if not isinstance(raw, Mapping):
                 raise RuntimeError("authoritative placement region is invalid")
@@ -802,7 +802,7 @@ def _validate_catalog_bindings(
                 # Legacy flat-region scenes are supported by the work table;
                 # their generated marker intentionally has no collision.
                 continue
-            physical_supports.append(support)
+            physical_supports.append((support, raw))
             center = _numbers(raw.get("center_xy"), 2)
             if not _same_numbers(support.pose_xyz[:2], center):
                 raise RuntimeError(
@@ -827,9 +827,27 @@ def _validate_catalog_bindings(
                     raise RuntimeError(
                         "authoritative placement support height differs from its task region"
                     )
-        for index, left in enumerate(physical_supports):
+        for support, raw in physical_supports:
+            if raw.get("require_empty_at_start") is not True:
+                continue
+            support_lower, support_upper = support.world_bounds()
+            for item in objects:
+                if item.gazebo_static:
+                    continue
+                item_lower, item_upper = item.world_bounds()
+                penetration = tuple(
+                    min(support_upper[axis], item_upper[axis])
+                    - max(support_lower[axis], item_lower[axis])
+                    for axis in range(3)
+                )
+                if all(value > 1e-9 for value in penetration):
+                    raise RuntimeError(
+                        "authoritative initially-empty placement support is occupied: "
+                        f"{support.object_id}/{item.object_id}"
+                    )
+        for index, (left, _) in enumerate(physical_supports):
             left_lower, left_upper = left.world_bounds()
-            for right in physical_supports[index + 1 :]:
+            for right, _ in physical_supports[index + 1 :]:
                 right_lower, right_upper = right.world_bounds()
                 penetration = tuple(
                     min(left_upper[axis], right_upper[axis])

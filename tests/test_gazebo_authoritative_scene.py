@@ -207,6 +207,35 @@ def test_authoritative_compiler_rejects_overlapping_physical_placement_supports(
         )
 
 
+def test_authoritative_compiler_rejects_an_occupied_initially_empty_bin(
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    tree = ET.parse(package / "worlds/rm75_robotiq2f85_pickplace.sdf")
+    orange_pose = tree.getroot().find(
+        "world/model[@name='orange_m20_socket_bolt']/pose"
+    )
+    assert orange_pose is not None
+    pose_values = (orange_pose.text or "").split()
+    pose_values[:2] = ["0.62", "-0.180"]
+    orange_pose.text = " ".join(pose_values)
+    world_path = tmp_path / "occupied-bin.sdf"
+    tree.write(world_path, encoding="utf-8", xml_declaration=True)
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "authoritative initially-empty placement support is occupied: "
+            "blue_parts_bin/orange_m20_socket_bolt"
+        ),
+    ):
+        compile_authoritative_scene(
+            base_world=world_path,
+            catalog_path=package / "config/acceptance_scenes.json",
+            scene_id="normal",
+        )
+
+
 def test_acceptance_catalog_cannot_reintroduce_a_second_moveit_geometry_source(
     tmp_path: Path,
 ) -> None:
