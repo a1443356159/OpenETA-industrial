@@ -800,11 +800,12 @@ def _assignment_execution_token(
     if name == "anyplace":
         if call in _anyplace_model_inference_calls([call]):
             return "anyplace_model"
-        if (
-            _call_outputs(call).get("anyplace_model_inference_invoked") is False
-            and assignment_id
-        ):
-            return f"placement_qualification:{assignment_id}"
+        if _call_outputs(call).get("anyplace_model_inference_invoked") is False:
+            # Frozen-goal requalification is performed against the currently
+            # attached PlanningScene state.  Older traces did not repeat the
+            # work-order binding on this call, so correlate it by requiring it
+            # between assignment-bound attach and placement transitions.
+            return "placement_qualification"
     if name == backend and parameters.get("mode") != "frozen_frontier":
         return "grasp_model"
     if name == "move_to" and pose.get("grasp_stage") == "contact":
@@ -854,7 +855,7 @@ def _ordered_assignment_execution(
                 "grasp_model",
                 "grasp_contact",
                 f"attach:{assignment_id}",
-                f"placement_qualification:{assignment_id}",
+                "placement_qualification",
                 f"placement_move:{assignment_id}",
                 f"release:{assignment_id}",
             )

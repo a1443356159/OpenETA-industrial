@@ -646,7 +646,6 @@ def test_assignment_order_ignores_failed_contact_and_uses_initial_create_observa
         _ordered_call("gripper_control", parameters={"position": 0}, assignment_id=first),
         _ordered_call(
             "anyplace",
-            assignment_id=first,
             anyplace_inference=False,
         ),
         _ordered_call(
@@ -665,7 +664,6 @@ def test_assignment_order_ignores_failed_contact_and_uses_initial_create_observa
         _ordered_call("gripper_control", parameters={"position": 0}, assignment_id=second),
         _ordered_call(
             "anyplace",
-            assignment_id=second,
             anyplace_inference=False,
         ),
         _ordered_call(
