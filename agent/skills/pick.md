@@ -61,12 +61,12 @@ the planner.
    model pose.
 5. Qualification runs the complete cheap structural/workspace breadth check
    once, then expands the frozen model pool in deterministic incremental
-   `4 -> 8 -> 16 -> 32 -> 64 -> all` waves. Each wave takes its candidates
+   `4 -> 8 -> 16 -> 32 -> 64 -> 128 -> 256 -> all` waves. Each wave takes its candidates
    straight through Beam-2, state validity, and L5 plan-only before the next
-   wave begins. Stop as soon as two qualified grasps from different SE(3) and
-   physical symmetry families are available. Beam-2 propagates at most two
-   joint solutions for each exact contact target; the planner never copies or
-   edits the pose.
+   wave begins. In combined pick-place, expose the first grasp that also passes
+   the paired placement proof and retain the untouched provider tail for
+   recovery. Beam-2 propagates at most two joint solutions for each exact
+   contact target; the planner never copies or edits the pose.
 6. Explicitly choose each constrained execution edge after inspecting the
    latest receipt: open only if needed, one `move_to` to the exact contact
    pose, then `gripper_control position=0`. There is no pregrasp, hover, precontact,
@@ -76,10 +76,12 @@ the planner.
    image, or a lift displacement is not proof. Attached transport is rechecked
    for relative-pose drift on every MoveIt receipt.
 8. If contact motion or close fails with a known candidate-linked outcome,
-   consume only that candidate. Reopen once, use an already-qualified distinct
-   backup first, then explicitly request the host's `frozen_frontier`
-   obligation when it is offered. That request has `model_inference=false` and
-   qualifies the next unvisited wave from the original provider output. Do not rerun SAM3 or grasp inference while that queue remains; do not rerun AnyPlace while either frozen queue remains. Only a
+   consume only that candidate. Reopen once, then explicitly request the host's
+   `frozen_frontier` obligation when it is offered. That request has
+   `model_inference=false` and qualifies the next unvisited wave from the
+   original provider output.
+   Do not rerun SAM3 or grasp inference while that queue remains; do not rerun
+   AnyPlace while either frozen queue remains. Only a
    genuinely changed scene or complete frozen-pool exhaustion permits fresh
    perception/model inference.
 9. A timeout, service exception, missing calibration, OOM, or unavailable model

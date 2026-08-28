@@ -42,13 +42,13 @@ the host proves exact geometry and MoveIt owns robot paths.
    scene, and strict analytic reach bounds. This relatively expensive geometry
    is not computed for the untouched tail. Parallel-gripper-equivalent evidence
    may share a result but both candidate records remain.
-4. Qualification alternates the two grasp branches and covers placement goals
-   per branch in deterministic incremental `4 -> 8 -> 16 -> 32 -> 96` waves.
+4. Qualification covers placement goals for the current grasp branch in
+   deterministic incremental `4 -> 8 -> 16 -> 32 -> 96` waves.
    A candidate that enters a wave proceeds immediately through pair legality,
    Beam-2, state validity, and L5 plan-only. Wave results merge at a stable
-   barrier. Stop when a primary and distinct-grasp backup are proven; otherwise
-   advance the frozen frontier without rerunning AnyPlace. No host waypoint is
-   inserted.
+   barrier. Execute the first complete pair. If physical execution fails,
+   advance the frozen grasp frontier and prove the next pair without rerunning
+   AnyPlace or the grasp model. No host waypoint is inserted.
 5. After native contact+attach PASS, reuse the frozen AnyPlace goals and
    recompile them with the measured attachment and current PlanningScene
    revision. Do not rerun AnyPlace simply because a pair or later L5 plan fails.

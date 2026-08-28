@@ -304,7 +304,7 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
             for item in request["candidates"][:4]
         ]
         assert first_ids == ["g0", "g1", "g2", "g3"]
-        passed_grasps = {"g0", "g2"}
+        passed_grasps = {"g0"}
         submitted = [
             item["candidate"]["source_grasp_id"] in passed_grasps and index < 3
             for index, item in enumerate(request["candidates"])
@@ -434,27 +434,25 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
         "progressive_until_full_plan_capacity"
     )
     assert captured["funnel"]["endpoint_pass_target"] == 2
-    assert captured["funnel"]["l5_pass_target"] == 2
+    assert captured["funnel"]["l5_pass_target"] == 1
     assert captured["funnel"]["l5_min_pass_target"] == 1
     assert "l5_submission_limit" not in captured["funnel"]
     assert captured["funnel"]["qualification_mode"] == "frozen_pair"
-    assert [item["id"] for item in result.details["grasp_candidates"]] == [
-        "g0",
-        "g2",
-    ]
+    assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0"]
     assert result.details["ranking"] == "grasp_place_physical_quality"
     assert [
         item["grasp_place_physical_quality_rank"]
         for item in result.details["grasp_candidates"]
-    ] == [0, 1]
+    ] == [0]
     assert [item["id"] for item in coordinator.grasp_frontier_candidates] == [
         "g1",
+        "g2",
         "g3",
     ]
     assert cache.resolve(purpose="grasp", candidate_id="g1") is None
     retained_cache = cache.resolve(purpose="grasp", candidate_id="g0")
     assert retained_cache is not None
-    assert cache.resolve(purpose="grasp", candidate_id="g2") is not None
+    assert cache.resolve(purpose="grasp", candidate_id="g2") is None
     assert "grasp_place_joint_qualified" not in retained_cache["candidate"]
     coordinator.source_model_raw_candidate_count = 96
     coordinator.source_candidate_image_ref = "/frozen-goals/candidates.png"
@@ -524,7 +522,7 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     ) is None
 
 
-def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
+def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(
     tmp_path: Path,
 ) -> None:
     calls: list[dict[str, Any]] = []
@@ -563,6 +561,11 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
     def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
         calls.append(request)
         purpose = request["purpose"]
+        first_grasp_id = (
+            request["candidates"][0]["candidate_id"]
+            if purpose == "grasp" and request["candidates"]
+            else ""
+        )
         passing_ids: list[str] = []
         results: list[dict[str, Any]] = []
         for item in request["candidates"]:
@@ -570,10 +573,11 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
             candidate_id = item["candidate_id"]
             source_grasp_id = str(candidate.get("source_grasp_id") or "")
             passed = (
-                candidate_id == "g2"
+                candidate_id == first_grasp_id
                 if purpose == "grasp"
-                else source_grasp_id in {"g0", "g2"}
+                else source_grasp_id in {"g2", "g3"}
             )
+            not_evaluated = purpose == "grasp" and candidate_id != first_grasp_id
             if passed:
                 passing_ids.append(candidate_id)
             result = {
@@ -583,8 +587,16 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
                     "qualification_binding_sha256"
                 ],
                 "execution_started": False,
-                "verdict": "PASS" if passed else "FAIL",
-                "reason": "qualified" if passed else "no_pair_solution",
+                "verdict": (
+                    "PASS" if passed else "NOT_EVALUATED" if not_evaluated else "FAIL"
+                ),
+                "reason": (
+                    "qualified"
+                    if passed
+                    else "complete_l5_pass_found"
+                    if not_evaluated
+                    else "no_pair_solution"
+                ),
                 "stages": [
                     pass_stage(
                         contact=purpose == "grasp",
@@ -690,7 +702,10 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
     ]
     coordinator.scene_epoch = 3
     coordinator.planning_scene_revision = 7
-    coordinator.grasp_frontier_candidates = [{"id": "g2", "score": 0.7}]
+    coordinator.grasp_frontier_candidates = [
+        {"id": "g2", "score": 0.7},
+        {"id": "g3", "score": 0.6},
+    ]
     coordinator.grasp_frontier_template = {
         "backend": "graspgenx_mcp",
         "model_raw_candidate_count": 3,
@@ -706,31 +721,26 @@ def test_fast_pair_search_returns_primary_and_distinct_grasp_backup(
         source={},
     )
 
-    assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == [
-        "g2",
-        "g0",
-    ]
+    assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == ["g2"]
     assert result.details["frozen_pair_execution_target"] == 1
-    assert result.details["frozen_pair_backup_target"] == 1
-    assert result.details["frozen_pair_backup_required"] is True
-    assert result.details["frozen_pair_backup_ready"] is True
+    assert result.details["frozen_pair_stop_reason"] == "complete_pair_found"
     assert result.details["frozen_pair_deferred_grasp_count"] == 0
     assert result.details["frozen_pair_frontier_expansion_count"] == 1
-    assert result.details["frozen_grasp_frontier_remaining_count"] == 0
+    assert result.details["frozen_grasp_frontier_remaining_count"] == 1
     assert result.details["frozen_grasp_frontier_model_inference_invoked"] is False
-    assert coordinator.grasp_frontier_candidates == []
+    assert [candidate["id"] for candidate in coordinator.grasp_frontier_candidates] == ["g3"]
     assert result.details["ranking"] == "grasp_place_physical_quality"
     assert [
         candidate["grasp_place_frontier_quality_rank"]
         for candidate in result.details["grasp_candidates"]
-    ] == [0, 1]
+    ] == [0]
     assert len(result.details["frozen_pair_qualification_artifacts"]) == 2
     assert len(result.details["frozen_grasp_frontier_qualification_artifacts"]) == 1
     assert [
         call["funnel"]["l5_pass_target"]
         for call in calls
         if call["purpose"] == "placement"
-    ] == [2, 2]
+    ] == [1, 1]
     assert [
         call["funnel"]["l5_pass_target"]
         for call in calls
@@ -760,6 +770,13 @@ def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:
 
 
 def test_frozen_grasp_frontier_rebases_only_with_static_scene_and_detach_proof() -> None:
+    raw_grasp = {
+        "id": "g1",
+        "frame": "camera",
+        "camera_frame": "opencv",
+        "translation_xyz": [0.1, 0.2, 0.3],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
     coordinator = _FrozenGoalPairCoordinator(
         MoveItCandidateQualifier(lambda *_args: {}),
         object_goals=[{"id": "p0", "object_goal_pose": {"frame": "world"}}],
@@ -770,15 +787,8 @@ def test_frozen_grasp_frontier_rebases_only_with_static_scene_and_detach_proof()
         },
         scene_epoch=1,
         planning_scene_revision=1,
-        grasp_frontier_candidates=[
-            {
-                "id": "g1",
-                "frame": "camera",
-                "camera_frame": "opencv",
-                "translation_xyz": [0.1, 0.2, 0.3],
-                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-            }
-        ],
+        grasp_frontier_candidates=[raw_grasp],
+        grasp_candidate_catalog={"g1": raw_grasp},
         grasp_frontier_template={
             "source": {
                 "camera_extrinsics": {

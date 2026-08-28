@@ -17,6 +17,7 @@ from scripts import gazebo_acceptance_runtime as base
 from agent.runtime.calibration_registry import RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE
 from agent.runtime.qualification_v3 import JOINT_SOLUTION_DEDUP_DISTANCE
 from agent.runtime.release_evidence import ordered_native_release_proof
+from agent.runtime.runtime_assembly import DEFAULT_PERCEPTION_RPC_TIMEOUT_S
 from extensions.gazebo.native_grasp import load_acceptance_scene_contract
 from tools.candidate_config import (
     DEFAULT_GRASPGENX_RAW_POOL_SIZE,
@@ -944,10 +945,6 @@ def _has_v3_grasp_diversity_evidence(call: Mapping[str, Any], *, artifact_root: 
                 )
                 and any(
                     value is False
-                    for value in base._values(call, "frozen_pair_backup_required")
-                )
-                and any(
-                    value is False
                     for value in base._values(
                         call, "frozen_grasp_frontier_model_inference_invoked"
                     )
@@ -1114,8 +1111,8 @@ def _has_bounded_grasp_l5_evidence(call: Mapping[str, Any], *, artifact_root: Pa
     return legacy_bound or _has_v3_grasp_diversity_evidence(call, artifact_root=artifact_root)
 
 
-def _has_frozen_pair_backup_evidence(call: Mapping[str, Any]) -> bool:
-    """Require the fast-v3 public queue to contain a proven backup grasp."""
+def _has_resumable_frozen_pair_evidence(call: Mapping[str, Any]) -> bool:
+    """Require one complete pair plus a model-free physical-failure frontier."""
 
     outputs = _call_outputs(call)
     grasps = outputs.get("grasp_candidates")
@@ -1126,15 +1123,15 @@ def _has_frozen_pair_backup_evidence(call: Mapping[str, Any]) -> bool:
     ] if isinstance(grasps, list) else []
     return bool(
         outputs.get("frozen_pair_execution_target") == 1
-        and outputs.get("frozen_pair_backup_target") == 1
-        and outputs.get("frozen_pair_backup_required") is True
-        and outputs.get("frozen_pair_backup_ready") is True
-        and outputs.get("frozen_pair_stop_reason")
-        == "complete_pair_with_backup_found"
-        and outputs.get("frozen_pair_qualified_grasp_count") == 2
-        and outputs.get("candidate_count") == 2
-        and len(grasp_ids) == 2
-        and len(set(grasp_ids)) == 2
+        and outputs.get("frozen_pair_stop_reason") == "complete_pair_found"
+        and outputs.get("frozen_pair_recovery_policy")
+        == "resume_frozen_frontier_after_execution_failure"
+        and outputs.get("frozen_pair_qualified_grasp_count") == 1
+        and outputs.get("candidate_count") == 1
+        and len(grasp_ids) == 1
+        and isinstance(outputs.get("frozen_grasp_frontier_remaining_count"), int)
+        and not isinstance(outputs.get("frozen_grasp_frontier_remaining_count"), bool)
+        and outputs.get("frozen_grasp_frontier_remaining_count") > 0
         and outputs.get("frozen_grasp_frontier_model_inference_invoked") is False
     )
 
@@ -1291,11 +1288,11 @@ def verify_case(
         ):
             errors.append(f"{backend_label} L5 diversity evidence is missing")
         if funnel_profile == "fast_v3" and not any(
-            _has_frozen_pair_backup_evidence(grasp_call)
+            _has_resumable_frozen_pair_evidence(grasp_call)
             for grasp_call in provider_inference_calls
         ):
             errors.append(
-                f"{backend_label} fast-v3 grasp/place backup evidence is missing"
+                f"{backend_label} fast-v3 resumable grasp/place evidence is missing"
             )
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
@@ -1706,10 +1703,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             # service is discoverable.  This affects startup only; motion,
             # planning, execution, and verification deadlines stay unchanged.
             "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": "90",
-            # Model inference is read-only and normally completes well below
-            # this bound.  A broken legacy SSE return channel is retried once
-            # inside the host, without adding a TUI/model-planner turn.
-            "OPENETA_PERCEPTION_RPC_TIMEOUT_S": "90",
+            # Share the deployment runtime's bounded perception budget.  GPU
+            # contention may make a healthy cold inference much slower than
+            # its usual latency; qualification, IK, planning, and execution
+            # retain their own independent deadlines.
+            "OPENETA_PERCEPTION_RPC_TIMEOUT_S": f"{DEFAULT_PERCEPTION_RPC_TIMEOUT_S:g}",
             **_scenario_environment(args.scenario),
         },
     )

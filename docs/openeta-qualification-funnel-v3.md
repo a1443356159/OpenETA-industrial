@@ -8,8 +8,8 @@ the replay and shadow gates below pass.
 ## Candidate and scheduling contract
 
 - AnyPlace's returned pool is already model-filtered. v3 does not apply a
-  second hard Top-K. Two surviving grasp branches produce the complete
-  `2 × 96 = 192` frozen grasp-goal pair pool.
+  second hard Top-K. Each frozen grasp branch may pair with all 96 goals, but
+  those pairs are materialized lazily and the first complete pair is executed.
 - Before IK, placement qualification executes one complete cheap deterministic
   barrier. It evaluates each unique AnyPlace object goal exactly once:
   proper finite SE(3), complete footprint inside the declared placement
@@ -19,18 +19,18 @@ the replay and shadow gates below pass.
   exact model-derived release
   consistency, terminal analytic reach, attached-object collision, and exact
   URDF primitive collision for the gripper mount. Untouched pairs remain
-  explicitly `NOT_EVALUATED`, so an early solution does not pay for all 192
-  pair checks. No hover, lift, descent
+  explicitly `NOT_EVALUATED`, so an early solution does not pay for all pair
+  checks. No hover, lift, descent
   offset, clearance pose, or retreat is compiled. These analytic proofs are
   prefilters only; every selected state still requires MoveIt state validity
   and L5 plan-only proof.
 - A parallel-jaw 180-degree roll twin keeps its own candidate/result evidence,
   but reuses the pair-legality proof of its explicitly marked physical family.
-  Such a twin cannot consume the second grasp-diversity slot while an
-  independent family remains available.
+  Equivalence changes ordering and evidence reuse, never the retained model
+  candidate set.
 - GraspGenX freezes 512 model candidates once. Grasp waves are incremental
   slices with cumulative limits `4 → 8 → 16 → 32 → 64 → 128 → 256`; only if
-  those waves cannot produce the required complete L5 branches does the
+  those waves cannot produce a complete grasp/place branch does the
   deterministic implicit exhaustion wave visit the remaining frozen pool.
   Placement waves use cumulative limits
   `4 → 8 → 16 → 32 → 96` per grasp branch. Candidate IDs, branch IDs,
@@ -70,11 +70,10 @@ joint branch with a geometric Jacobian parsed from the same expanded URDF. A
 missing or malformed runtime chain is a configuration error; it is never
 silently replaced by a reachability verdict.
 
-The first two distinct grasp/physical-family L5 passes form the primary and
-backup and stop grasp expansion; v3 never continues merely to fill a third or
-fourth reserve slot. A candidate-linked execution failure consumes the proven
-backup first, then resumes the unvisited tail of the same frozen provider
-result through an explicit `model_inference=false` frontier request. SAM3,
+The first grasp that completes its paired placement L5 proof is executed.
+Untouched candidates remain in the same frozen provider frontier. A
+candidate-linked execution failure resumes that frontier through an explicit
+`model_inference=false` request and proves the next complete pair. SAM3,
 AnyPlace, and the grasp model are not rerun unless the scene actually changed
 or the frozen pool was exhausted.
 

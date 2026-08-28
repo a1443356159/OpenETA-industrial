@@ -948,7 +948,6 @@ def test_normal_accepts_single_primary_with_a_diverse_model_frozen_recovery_fron
         "diversity_selected_count": 16,
         "qualification_artifact": {"kind": "json", "path": artifact.name},
         "frozen_pair_execution_target": 1,
-        "frozen_pair_backup_required": False,
         "frozen_pair_recovery_policy": (
             "resume_frozen_frontier_after_execution_failure"
         ),
@@ -972,37 +971,38 @@ def test_normal_accepts_single_primary_with_a_diverse_model_frozen_recovery_fron
         call[field] = original
 
 
-def test_fast_v3_pair_backup_evidence_requires_two_public_distinct_grasps() -> None:
+def test_fast_v3_pair_evidence_requires_one_primary_and_frozen_recovery_tail() -> None:
     call = {
         "result": {"details": {"outputs": {
-            "candidate_count": 2,
-            "grasp_candidates": [{"id": "g0"}, {"id": "g1"}],
+            "candidate_count": 1,
+            "grasp_candidates": [{"id": "g0"}],
             "frozen_pair_execution_target": 1,
-            "frozen_pair_backup_target": 1,
-            "frozen_pair_backup_required": True,
-            "frozen_pair_backup_ready": True,
-            "frozen_pair_qualified_grasp_count": 2,
-            "frozen_pair_stop_reason": "complete_pair_with_backup_found",
+            "frozen_pair_qualified_grasp_count": 1,
+            "frozen_pair_stop_reason": "complete_pair_found",
+            "frozen_pair_recovery_policy": (
+                "resume_frozen_frontier_after_execution_failure"
+            ),
+            "frozen_grasp_frontier_remaining_count": 17,
             "frozen_grasp_frontier_model_inference_invoked": False,
         }}}
     }
     outputs = call["result"]["details"]["outputs"]
 
-    assert acceptance._has_frozen_pair_backup_evidence(call)
+    assert acceptance._has_resumable_frozen_pair_evidence(call)
 
     for field, invalid in (
-        ("candidate_count", 1),
-        ("frozen_pair_backup_ready", False),
-        ("frozen_pair_stop_reason", "complete_pair_found_redundancy_degraded"),
+        ("candidate_count", 2),
+        ("frozen_grasp_frontier_remaining_count", 0),
+        ("frozen_pair_recovery_policy", "rerun_model"),
         ("frozen_grasp_frontier_model_inference_invoked", True),
     ):
         original = outputs[field]
         outputs[field] = invalid
-        assert not acceptance._has_frozen_pair_backup_evidence(call)
+        assert not acceptance._has_resumable_frozen_pair_evidence(call)
         outputs[field] = original
 
-    outputs["grasp_candidates"][1]["id"] = "g0"
-    assert not acceptance._has_frozen_pair_backup_evidence(call)
+    outputs["grasp_candidates"] = []
+    assert not acceptance._has_resumable_frozen_pair_evidence(call)
 
 
 def test_normal_rejects_obsolete_four_branch_lookahead(tmp_path) -> None:

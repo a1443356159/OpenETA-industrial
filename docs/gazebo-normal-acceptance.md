@@ -39,13 +39,12 @@ Parallel-jaw symmetric equivalents may share the physical legality
 calculation, while retaining separate candidate evidence. No empirical score,
 capability-map hole, or heuristic can permanently reject a candidate.
 
-The host freezes 512 GraspGenX candidates, retains a primary and a diverse
-backup grasp, and schedules incremental grasp slices at cumulative limits
+The host freezes 512 GraspGenX candidates and schedules incremental grasp slices at cumulative limits
 `4 → 8 → 16 → 32 → 64 → 128 → 256`. The untouched remainder is visited only
-as the implicit exhaustive tail when the configured waves cannot fill the L5
-target. Each branch
-covers AnyPlace waves at cumulative limits `4 → 8 → 16 → 32 → 96`, giving a
-complete `2 × 96 = 192` pair search when needed.
+as the implicit exhaustive tail when the configured waves cannot produce a
+complete pair. Each grasp branch covers AnyPlace waves at cumulative limits
+`4 → 8 → 16 → 32 → 96`; a physical failure resumes the next frozen grasp
+branch rather than rerunning a model.
 Different candidates run concurrently, but each candidate's dependent stages
 remain ordered and wave results merge by fixed candidate ID.
 
@@ -54,9 +53,9 @@ success is checked once with MoveIt state validity. A colliding solution gets
 at most one collision-aware rescue; a pure no-solution gets no random fast-path
 retry. L5 plan-only attempts are serialized in deterministic physical-quality
 order. A candidate L5 failure advances to the next candidate and then the next
-wave; the search stops as soon as a primary and distinct backup are proven. A
-later candidate-linked execution failure uses that backup, then resumes the
-unvisited frozen provider frontier with `model_inference=false`.
+wave; the search stops at the first complete grasp/place proof. A later
+candidate-linked execution failure resumes the unvisited frozen provider
+frontier with `model_inference=false`.
 Infrastructure timeout/error is health-checked and retried once, then
 terminates the run as infrastructure failure rather than “unreachable”.
 

@@ -1881,15 +1881,13 @@ class _FrozenGoalPairCoordinator:
         planning_scene_revision: int,
         source: Mapping[str, object],
     ) -> ToolResult:
-        """Find a complete primary and distinct-grasp backup when available.
+        """Return the first complete pair and retain the frozen recovery tail.
 
-        Grasp inference is immutable by this point.  ``fast_v3`` may stop its
-        first grasp wave after two diverse L5 passes, yet attachment-aware
-        grasp/place qualification can still reject either branch.  Retain one
-        complete primary plus one distinct-grasp backup before execution when
-        the frozen pool can prove both.  If the complete pool cannot supply a
-        backup, preserve the proven primary as an explicit redundancy-degraded
-        fallback.  Model inference is never repeated while this search runs.
+        Grasp inference is immutable by this point.  Each newly qualified
+        grasp is paired with the cached AnyPlace goal frontier immediately.
+        The first complete grasp/place proof is exposed for execution; every
+        untouched model candidate remains frozen so a physical failure can
+        resume at the next branch without repeating perception or inference.
         """
 
         matching_goal_pool = (
@@ -1899,13 +1897,8 @@ class _FrozenGoalPairCoordinator:
         )
         valid_goal_pool = bool(self.object_goals) and matching_goal_pool
         fast_frontier = getattr(self.qualifier, "qualification_profile", "legacy") == "fast_v3"
-        # The grasp qualifier supplies a two-branch outer beam.  Pair
-        # qualification must preserve a distinct-grasp backup so one
-        # stochastic physical contact failure advances the already-proven
-        # queue instead of triggering a 192-pair recovery qualification.
         primary_target = 1
-        backup_target = 1
-        target = primary_target + backup_target
+        target = primary_target
         if matching_goal_pool and not self.object_goals:
             result.details.update(
                 {
@@ -1951,7 +1944,6 @@ class _FrozenGoalPairCoordinator:
         reserve_activated = False
         deferred_count = 0
         goal_pool_exhausted = False
-        backup_parent_priority_count = 0
 
         def retained_quality_order() -> list[str]:
             """Rank complete branches across every frozen-frontier batch."""
@@ -1973,19 +1965,11 @@ class _FrozenGoalPairCoordinator:
                 if isinstance(batch_input_grasps, list)
                 else []
             )
-            needed = max(1, target - len(retained))
             filtered = self._filter_grasp_batch(
                 current,
                 scene_epoch=scene_epoch,
                 planning_scene_revision=planning_scene_revision,
                 source=source,
-                # Each grasp batch may opportunistically prove two different
-                # branches inside its current wave, but one complete pair is
-                # enough to advance the outer best-first frontier.  Requiring
-                # two from the same batch made an unplaceable secondary grasp
-                # exhaust all 96 goals before the next model-native sibling
-                # could be tried.
-                l5_pass_target=1,
             )
             if not filtered.success:
                 return filtered
@@ -2057,12 +2041,6 @@ class _FrozenGoalPairCoordinator:
                     ]
                     deferred_count += len(deferred)
                 break
-            if retained:
-                primary_id = next(iter(retained))
-                backup_parent_priority_count = max(
-                    backup_parent_priority_count,
-                    self.prioritize_grasp_frontier_for_parent(primary_id),
-                )
             if not self.grasp_frontier_candidates:
                 break
 
@@ -2082,15 +2060,16 @@ class _FrozenGoalPairCoordinator:
                 expansion.content,
                 json.loads(json.dumps(expansion.details)),
             )
-            needed = max(1, target - len(retained))
             current = self.qualifier.qualify_result(
                 expansion,
                 purpose="grasp",
                 scene_epoch=scene_epoch,
                 planning_scene_revision=planning_scene_revision,
                 source=source,
-                l5_pass_target=needed,
-                l5_min_pass_target=needed,
+                # Advance one model-native grasp branch and test it through
+                # placement before spending work on the next branch.
+                l5_pass_target=1,
+                l5_min_pass_target=1,
             )
             if _qualification_infrastructure_reason(current):
                 return _qualification_infrastructure_failure(current)
@@ -2138,23 +2117,17 @@ class _FrozenGoalPairCoordinator:
                 "frozen_pair_reserve_grasp_count": max(0, len(final_grasps) - primary_target),
                 "frozen_pair_reserve_activated": reserve_activated,
                 "frozen_pair_execution_target": primary_target,
-                "frozen_pair_backup_target": backup_target,
-                "frozen_pair_backup_required": True,
-                "frozen_pair_backup_ready": len(final_grasps) >= target,
                 "frozen_pair_deferred_grasp_count": deferred_count,
                 "frozen_pair_recovery_policy": ("resume_frozen_frontier_after_execution_failure"),
                 "frozen_pair_frontier_expansion_count": expansion_count,
-                "frozen_pair_backup_parent_priority_count": (backup_parent_priority_count),
                 "frozen_grasp_frontier_remaining_count": len(self.grasp_frontier_candidates),
                 "frozen_grasp_frontier_generation": self.grasp_frontier_generation,
                 "frozen_grasp_frontier_model_inference_invoked": False,
                 "frozen_pair_stop_reason": (
                     "frozen_goal_pool_exhausted"
                     if goal_pool_exhausted
-                    else "complete_pair_with_backup_found"
+                    else "complete_pair_found"
                     if len(final_grasps) >= target
-                    else "complete_pair_found_redundancy_degraded"
-                    if final_grasps
                     else "frozen_grasp_frontier_exhausted"
                 ),
                 "ranking": "grasp_place_physical_quality",
@@ -2197,7 +2170,6 @@ class _FrozenGoalPairCoordinator:
         scene_epoch: int,
         planning_scene_revision: int,
         source: Mapping[str, object],
-        l5_pass_target: int | None = None,
     ) -> ToolResult:
         grasps = result.details.get("grasp_candidates")
         if not isinstance(grasps, list) or not grasps:
@@ -2233,7 +2205,7 @@ class _FrozenGoalPairCoordinator:
         # farthest-first SE(3) overrepresents extreme object rotations and can
         # discard every attachment-aware reachable goal before MoveIt sees it.
         # L3/L4 then traverse the round-robin pair order progressively until
-        # the two-slot plan-only capacity is filled or the batch is exhausted.
+        # the first complete pair is proven or the batch is exhausted.
         current_goals = [dict(goal) for goal in self.object_goals]
         for grasp_index, grasp in enumerate(grasps[: self.grasp_branch_limit]):
             if not isinstance(grasp, Mapping):
@@ -2328,8 +2300,8 @@ class _FrozenGoalPairCoordinator:
             source=source,
             cache_result=False,
             qualification_mode="frozen_pair",
-            l5_pass_target=max(2, l5_pass_target or 1),
-            l5_min_pass_target=l5_pass_target or 1,
+            l5_pass_target=1,
+            l5_min_pass_target=1,
         )
         if _qualification_infrastructure_reason(joint):
             return _qualification_infrastructure_failure(joint)
@@ -3065,13 +3037,13 @@ def _qualifying_handler(
             if isinstance(compiled_source_grasp, dict):
                 source["source_grasp_compiled"] = dict(compiled_source_grasp)
         grasp_lookahead_target = (
-            2
+            1
             if purpose == "grasp"
             and frozen_pair_coordinator is not None
             and frozen_pair_coordinator.object_goals
             else None
         )
-        grasp_minimum_target = 2 if grasp_lookahead_target is not None else None
+        grasp_minimum_target = 1 if grasp_lookahead_target is not None else None
         qualified_result = qualifier.qualify_result(
             result,
             purpose=purpose,

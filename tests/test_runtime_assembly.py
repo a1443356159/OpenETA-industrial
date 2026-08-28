@@ -462,8 +462,8 @@ def test_frozen_grasp_frontier_expansion_bypasses_provider_inference() -> None:
         ("update", 3, 7),
         ("filter", 3, 7),
     ]
-    assert qualifier_calls[0]["l5_pass_target"] == 2
-    assert qualifier_calls[0]["l5_min_pass_target"] == 2
+    assert qualifier_calls[0]["l5_pass_target"] == 1
+    assert qualifier_calls[0]["l5_min_pass_target"] == 1
 
 
 def test_qualification_infrastructure_error_is_not_reported_as_unreachable() -> None:
