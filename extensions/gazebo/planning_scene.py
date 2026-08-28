@@ -307,30 +307,35 @@ class PlanningSceneSynchronizer:
         support = str(support_object_id).strip()
         if not support or support not in self.world_ids:
             return self._fail("next sort support is missing from the world scene")
+        previous_target_id = self.target_id
         target_spec = target.to_dict()
         existing = self.world_specs.get(target.object_id)
-        if not (
+        geometry_changed = not (
             isinstance(existing, Mapping)
             and _same_collision_geometry_pose(existing, target_spec)
-        ):
-            revision = self._commit(
-                {
-                    "operation": "activate_target",
-                    "world_objects": [target_spec],
-                },
-                expected_world=set(self.world_ids),
-                expected_attached=set(),
-            )
+        )
+        allowed_collisions = {
+            target.object_id: [support],
+            **(
+                {previous_target_id: []}
+                if previous_target_id and previous_target_id != target.object_id
+                else {}
+            ),
+        }
+        revision = self._commit(
+            {
+                "operation": "activate_target",
+                **({"world_objects": [target_spec]} if geometry_changed else {}),
+                # The active object starts in measured support contact. Replace
+                # the prior target's owned ACM row so a same-session sort does
+                # not mistake the next object's ordinary support for a crash.
+                "allowed_collisions": allowed_collisions,
+            },
+            expected_world=set(self.world_ids),
+            expected_attached=set(),
+        )
+        if geometry_changed:
             self.world_specs[target.object_id] = target_spec
-        else:
-            # The geometry is unchanged in MoveIt, but the OpenETA scene
-            # identity now has a different target and destination. Advance
-            # the wrapper-owned revision so no qualification/cache evidence
-            # from the prior assignment can be rebound to this one.
-            self.revision += 1
-            self.ready = True
-            self.last_error = ""
-            revision = self.revision
         self.target_id = target.object_id
         self.support_contact_object_id = support
         self.support_contact_reference_target_spec = target_spec

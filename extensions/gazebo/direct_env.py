@@ -402,6 +402,7 @@ class GazeboDirectEnv(Env):
                 gate = None
                 attach_acked = False
                 attached_transport_hold: dict[str, Any] | None = None
+                rollback_pose_sync_source: dict[str, Any] | None = None
                 pose_snapshot_attempt_count = 0
                 baseline_pose_snapshot_attempt_count = 0
                 self._native_grasp_transport_locked = True
@@ -416,6 +417,15 @@ class GazeboDirectEnv(Env):
                         record = self._native_grasp_verifier.close_result(gate, attach_acked=False)
                         receipt.update({"ok": False, "error_code": record.reason_code.value, "native_contact_gate": gate.to_dict()})
                     else:
+                        try:
+                            rollback_pose_sync_source = (
+                                self._planning_scene_target_pose_sync_source()
+                            )
+                        except Exception:
+                            # Recovery evidence must never change a valid close.
+                            # If unavailable, a later retry simply fails closed
+                            # and requests fresh model evidence.
+                            rollback_pose_sync_source = None
                         attachment.attach()
                         attach_acked = True
                         collision_filter = self._collision_filter_evidence(
@@ -653,6 +663,18 @@ class GazeboDirectEnv(Env):
                                 "state": "detached",
                                 "revision": scene_revision,
                             }
+                            if rollback_pose_sync_source is not None:
+                                receipt["planning_scene_target_pose_sync"] = (
+                                    self._planning_scene_target_pose_sync_evidence(
+                                        rollback_pose_sync_source,
+                                        target_xyz=rollback_target_pose.xyz,
+                                        target_quat_xyzw=(
+                                            rollback_target_pose.quat_xyzw
+                                        ),
+                                        revision=int(scene_revision),
+                                        execution_started=True,
+                                    )
+                                )
                             raw.setdefault("metadata", {})[
                                 "planning_scene_revision"
                             ] = scene_revision
@@ -977,6 +999,30 @@ class GazeboDirectEnv(Env):
         attachment = getattr(self.runtime, "attachment", None)
         if attachment is None or getattr(attachment, "state", None) == "attached":
             raise GazeboProcessError("NATIVE_GRASP_TARGET_POSE_UNAVAILABLE")
+        source = self._planning_scene_target_pose_sync_source()
+        target_pose, _ = attachment.native_target_mount_poses()
+        sync_target_pose = getattr(
+            self.controller, "sync_planning_scene_target_pose", None
+        )
+        if not callable(sync_target_pose):
+            raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+        revision = sync_target_pose(
+            self._native_grasp_config,
+            target_xyz=target_pose.xyz,
+            target_quat_xyzw=target_pose.quat_xyzw,
+            allow_target_touch=True,
+        )
+        return self._planning_scene_target_pose_sync_evidence(
+            source,
+            target_xyz=target_pose.xyz,
+            target_quat_xyzw=target_pose.quat_xyzw,
+            revision=int(revision),
+            execution_started=False,
+        )
+
+    def _planning_scene_target_pose_sync_source(self) -> dict[str, Any]:
+        """Capture the exact detached scene boundary before target motion."""
+
         planning_scene = getattr(self.controller, "planning_scene", None)
         target_id = self._native_grasp_config.target_id
         source_spec = (
@@ -1003,23 +1049,48 @@ class GazeboDirectEnv(Env):
         static_world_sha256_before = _static_world_sha256(
             planning_scene, target_id=target_id
         )
-        target_pose, _ = attachment.native_target_mount_poses()
+        return {
+            "target_id": target_id,
+            "source_revision": source_revision,
+            "source_target_pose": source_pose,
+            "world_ids_before": source_world_ids,
+            "attached_ids_before": source_attached_ids,
+            "static_world_sha256_before": static_world_sha256_before,
+        }
+
+    def _planning_scene_target_pose_sync_evidence(
+        self,
+        source: Mapping[str, Any],
+        *,
+        target_xyz: tuple[float, float, float],
+        target_quat_xyzw: tuple[float, float, float, float],
+        revision: int,
+        execution_started: bool,
+    ) -> dict[str, Any]:
+        """Prove one source-to-current detached target pose transition."""
+
+        planning_scene = getattr(self.controller, "planning_scene", None)
+        target_id = str(source.get("target_id") or "")
+        source_revision = source.get("source_revision")
+        source_pose = source.get("source_target_pose")
+        source_world_ids = source.get("world_ids_before")
+        source_attached_ids = source.get("attached_ids_before")
+        static_world_sha256_before = source.get("static_world_sha256_before")
+        if not (
+            target_id == self._native_grasp_config.target_id
+            and isinstance(source_revision, int)
+            and not isinstance(source_revision, bool)
+            and isinstance(source_pose, Mapping)
+            and isinstance(source_world_ids, list)
+            and isinstance(source_attached_ids, list)
+            and isinstance(static_world_sha256_before, str)
+        ):
+            raise GazeboProcessError("PLANNING_SCENE_TARGET_SOURCE_POSE_UNAVAILABLE")
         measured_pose = {
             "frame": "world",
-            "translation_xyz": list(target_pose.xyz),
-            "quat_xyzw": list(target_pose.quat_xyzw),
+            "translation_xyz": list(target_xyz),
+            "quat_xyzw": list(target_quat_xyzw),
         }
-        sync_target_pose = getattr(
-            self.controller, "sync_planning_scene_target_pose", None
-        )
-        if not callable(sync_target_pose):
-            raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
-        revision = sync_target_pose(
-            self._native_grasp_config,
-            target_xyz=target_pose.xyz,
-            target_quat_xyzw=target_pose.quat_xyzw,
-            allow_target_touch=True,
-        )
         target_world_ids = sorted(getattr(planning_scene, "world_ids", set()))
         target_attached_ids = sorted(
             getattr(planning_scene, "attached_ids", set())
@@ -1061,7 +1132,7 @@ class GazeboDirectEnv(Env):
             "static_world_unchanged": (
                 static_world_sha256_before == static_world_sha256_after
             ),
-            "execution_started": False,
+            "execution_started": execution_started,
         }
 
     def render(self):

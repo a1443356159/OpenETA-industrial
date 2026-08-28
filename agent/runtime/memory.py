@@ -5639,10 +5639,22 @@ class AgentMemory:
     def _capture_planning_scene_target_pose_sync(self, action: EnvAction) -> bool:
         """Retain the bounded proof needed to rebase a frozen grasp frontier."""
 
-        call = _successful_tool_call(action, "gripper_control")
+        call = _tool_call(action, "gripper_control")
         if call is None:
             return False
         receipt = _environment_receipt(call)
+        if not _call_result_success(call):
+            rollback = receipt.get("planning_scene_rollback")
+            detachable = receipt.get("detachable_joint")
+            if not (
+                receipt.get("candidate_rejection") is True
+                and receipt.get("infrastructure_error") is False
+                and isinstance(rollback, dict)
+                and rollback.get("state") == "detached"
+                and isinstance(detachable, dict)
+                and detachable.get("state") == "detached"
+            ):
+                return False
         sync = receipt.get("planning_scene_target_pose_sync")
         if not (
             isinstance(sync, dict)
@@ -5650,6 +5662,49 @@ class AgentMemory:
             and sync.get("operation") == "update_world_target"
         ):
             return False
+        previous = self.planning_scene_target_pose_sync()
+        previous_sync = (
+            previous.get("planning_scene_target_pose_sync")
+            if isinstance(previous, dict)
+            else None
+        )
+        pending = (self.grasp_candidate_policy() or {}).get(
+            "frozen_grasp_frontier_rebase_pending"
+        )
+        recovery = self.grasp_recovery()
+        preserve_recovery_lineage = (
+            _call_result_success(call)
+            and isinstance(previous_sync, dict)
+            and isinstance(pending, dict)
+            and pending.get("schema_version")
+            == "openeta.frozen_grasp_frontier_rebase_pending.v1"
+            and isinstance(recovery, dict)
+            and recovery.get("status") == "required"
+            and recovery.get("stage") == "reopen"
+            and str(recovery.get("candidate_id") or "")
+            == str(pending.get("physically_rejected_candidate_id") or "")
+            and previous_sync.get("source_revision")
+            == pending.get("source_planning_scene_revision")
+            and previous_sync.get("revision") == sync.get("revision")
+            and sync.get("source_revision") == sync.get("revision")
+            and previous_sync.get("target_id") == sync.get("target_id")
+            and sync.get("topology_unchanged") is True
+            and sync.get("static_world_unchanged") is True
+            and (receipt.get("detachable_joint") or {}).get("state") == "detached"
+        )
+        if preserve_recovery_lineage:
+            payload = {
+                **dict(previous),
+                "detachable_joint": dict(receipt.get("detachable_joint") or {}),
+                "planning_scene_revision": receipt.get("planning_scene_revision"),
+                "confirmed_at_s": time.time(),
+            }
+            self.facts[PLANNING_SCENE_TARGET_POSE_SYNC_KEY] = _memory_fact_entry(
+                payload,
+                source="native_target_pose_sync_lineage_confirmed",
+            )
+            self.record("planning_scene_target_pose_sync_lineage_confirmed", dict(payload))
+            return True
         payload = {
             "planning_scene_target_pose_sync": dict(sync),
             "detachable_joint": dict(receipt.get("detachable_joint") or {}),

@@ -2626,6 +2626,105 @@ def test_native_target_pose_sync_is_retained_for_host_frozen_frontier_rebase() -
     assert memory.planning_context()["planning_scene_target_pose_sync"] == retained
 
 
+def test_failed_close_pose_sync_lineage_survives_idempotent_reopen_sync() -> None:
+    memory = _memory_with_candidates()
+    policy = memory.grasp_candidate_policy()
+    failed_candidate_id = str(policy["active_candidate"]["id"])
+    policy.update(
+        {
+            "status": "frozen_frontier_required",
+            "active_candidate": None,
+            "active_rank": None,
+            "remaining_candidate_ids": [],
+            "planning_scene_revision": 5,
+            "frozen_grasp_frontier_rebase_pending": {
+                "schema_version": "openeta.frozen_grasp_frontier_rebase_pending.v1",
+                "source_planning_scene_revision": 5,
+                "physically_rejected_candidate_id": failed_candidate_id,
+            },
+        }
+    )
+    memory.save_fact("grasp_candidate_policy", policy, source="test")
+    memory.save_fact(
+        "grasp_recovery",
+        {
+            "schema_version": "openeta.grasp_recovery.v2",
+            "status": "required",
+            "stage": "reopen",
+            "candidate_id": failed_candidate_id,
+            "restore_required": False,
+            "observe_after_reopen": False,
+            "required_action": {
+                "name": "gripper_control",
+                "parameters": {"position": 1},
+            },
+        },
+        source="test",
+    )
+    moved_sync = {
+        "schema_version": "openeta.planning_scene_target_pose_sync.v1",
+        "operation": "update_world_target",
+        "source_revision": 5,
+        "revision": 7,
+        "target_id": "target_object",
+        "source_target_pose": {
+            "frame": "world",
+            "translation_xyz": [0.28, -0.1, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "target_pose": {
+            "frame": "world",
+            "translation_xyz": [0.281, -0.1, 0.43],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        "world_ids_before": ["table", "target_object"],
+        "world_ids_after": ["table", "target_object"],
+        "attached_ids_before": [],
+        "attached_ids_after": [],
+        "topology_unchanged": True,
+        "static_world_unchanged": True,
+    }
+    failed_receipt = {
+        "candidate_rejection": True,
+        "infrastructure_error": False,
+        "planning_scene_revision": 7,
+        "planning_scene_rollback": {"state": "detached", "revision": 7},
+        "planning_scene_target_pose_sync": moved_sync,
+        "detachable_joint": {"state": "detached"},
+    }
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 0},
+            success=False,
+            outputs={"motion_outcome": "failed"},
+            environment_receipt=failed_receipt,
+        )
+    )
+
+    no_op_sync = {
+        **moved_sync,
+        "source_revision": 7,
+        "source_target_pose": moved_sync["target_pose"],
+    }
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 1},
+            environment_receipt={
+                "planning_scene_revision": 7,
+                "planning_scene_target_pose_sync": no_op_sync,
+                "detachable_joint": {"state": "detached"},
+            },
+        )
+    )
+
+    retained = memory.planning_scene_target_pose_sync()
+    assert retained["planning_scene_target_pose_sync"] == moved_sync
+    assert retained["planning_scene_revision"] == 7
+    assert "confirmed_at_s" in retained
+
+
 def test_acknowledged_binary_gripper_state_is_latched_and_skips_redundant_open() -> None:
     memory = _memory_with_candidates()
     memory.add_action(_tool_action("gripper_control", {"position": 1}))

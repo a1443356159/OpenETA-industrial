@@ -1491,7 +1491,7 @@ class RosGazeboController(GazeboController):
                 pose_xyz=target_xyz,
                 pose_quat_xyzw=target_quat_xyzw,
             ),
-            support_object_id=str(config.selected_placement_region_id),
+            support_object_id=str(config.source_support_object_id),
         )
         self.config = config
         self.runtime.config = config

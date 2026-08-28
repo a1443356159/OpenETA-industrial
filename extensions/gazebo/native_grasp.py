@@ -274,6 +274,7 @@ def load_acceptance_scene_contract(
                 "target_link",
                 "target_prompt",
                 "placement_object_prompt",
+                "source_support_object_id",
                 "placement_region_id",
                 "placement_region_prompt",
             )
@@ -713,6 +714,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "placement_object_prompt": str(
                     task.get("placement_object_prompt") or "target object"
                 ),
+                "source_support_object_id": self.table_id,
                 "placement_region_id": str(
                     contract.get("selected_placement_region_id") or self.table_id
                 ),
@@ -770,6 +772,10 @@ class NativePickPlaceConfig(GazeboControlConfig):
     @property
     def selected_placement_region_id(self) -> str:
         return str(self.active_sort_assignment["placement_region_id"])
+
+    @property
+    def source_support_object_id(self) -> str:
+        return str(self.active_sort_assignment["source_support_object_id"])
 
     @property
     def static_obstacle_specs(self) -> tuple[dict[str, Any], ...]:

@@ -91,7 +91,17 @@ def test_motion_only_scene_clears_authoritative_support_identity() -> None:
 
 
 def test_planning_scene_switches_sort_target_without_rebuilding_world_geometry() -> None:
-    scene = PlanningSceneSynchronizer()
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        return {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
     table, next_target, first_target = _boxes()
     scene.reset(table=table, distractor=next_target, target=first_target)
     world_before = set(scene.world_ids)
@@ -106,6 +116,13 @@ def test_planning_scene_switches_sort_target_without_rebuilding_world_geometry()
     assert scene.attached_ids == set()
     assert scene.target_id == next_target.object_id
     assert scene.support_contact_object_id == table.object_id
+    assert calls[1] == {
+        "operation": "activate_target",
+        "allowed_collisions": {
+            next_target.object_id: [table.object_id],
+            first_target.object_id: [],
+        },
+    }
 
 
 def test_planning_scene_allows_only_the_fixed_robot_support_contact() -> None:

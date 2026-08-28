@@ -557,6 +557,13 @@ def test_measured_attachment_collision_is_candidate_rejection_then_pose_sync(
         "state": "detached",
         "revision": 9,
     }
+    rollback_sync = close_receipt["planning_scene_target_pose_sync"]
+    assert rollback_sync["source_revision"] == 7
+    assert rollback_sync["revision"] == 9
+    assert rollback_sync["target_id"] == "target_object"
+    assert rollback_sync["topology_unchanged"] is True
+    assert rollback_sync["static_world_unchanged"] is True
+    assert rollback_sync["execution_started"] is True
     assert close_receipt["physical_verification"]["reason_code"] == (
         ReasonCode.ATTACHMENT_STATE_INVALID.value
     )

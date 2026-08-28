@@ -65,6 +65,7 @@
           "target_link": "target_link",
           "target_prompt": "yellow wrench",
           "placement_object_prompt": "yellow wrench",
+          "source_support_object_id": "work_table",
           "placement_region_id": "green_parts_bin",
           "placement_region_prompt": "green parts bin"
         },
@@ -74,6 +75,7 @@
           "target_link": "red_m24_hex_bolt_link",
           "target_prompt": "red hex bolt",
           "placement_object_prompt": "red hex bolt",
+          "source_support_object_id": "work_table",
           "placement_region_id": "blue_parts_bin",
           "placement_region_prompt": "blue square area inside bin"
         }
