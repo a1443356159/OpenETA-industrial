@@ -120,8 +120,8 @@ exact contact. Portable attachment requires native bilateral contact plus attach
 ACK, and every attached transport receipt rechecks relative drift. On a flat
 support, an AnyPlace goal produces the exact EEF release pose from the measured
 attachment. In a collision-backed container, AnyPlace owns the destination and
-settled-state evidence; the host compiles one rim-clearing terminal at that XY
-while preserving carried orientation. The agent must not add a carry hover,
+settled-state evidence; the host applies its configured gravity-drop Z at that
+XY while preserving carried orientation. The agent must not add a carry hover,
 release offset, or retreat. Host-classified articulated
 handles alone retain their frozen 5 cm linear/arc attachment probe. Close remains
 latched until binary `position=1` at the exact host-qualified release pose.

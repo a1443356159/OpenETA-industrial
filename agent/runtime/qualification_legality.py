@@ -552,14 +552,11 @@ def _effective_release_z_offset(
 ) -> tuple[float, JsonDict]:
     """Select a release height from support geometry, without moving the goal.
 
-    A flat support keeps the configured gravity-drop height.  A compound
-    support with collision walls is a container: AnyPlace still owns the
-    in-plane destination and settled-state evidence, but the rigidly attached
-    payload must clear the highest collision-backed rim before detach.  Select
-    the larger of the configured drop and the authoritative barrier height;
-    the caller adds its calibrated collision clearance to the resulting
-    bottom height.  Pair legality plus MoveIt then prove the gripper, payload,
-    and complete path against every wall.
+    Both flat supports and collision-backed containers keep the configured
+    gravity-drop height.  Container geometry classifies the terminal and stays
+    available as evidence, but must not silently shrink the configured drop or
+    force the wrist above the highest side wall.  Pair legality plus MoveIt
+    prove the gripper, payload, and complete path against every wall.
     """
 
     evidence: JsonDict = {
@@ -585,16 +582,11 @@ def _effective_release_z_offset(
         primitive.center_xyz[2] + primitive.axis_half_extent(2)
         for primitive in geometry
     )
-    barrier_height = max(0.0, maximum_z - support_z_m)
-    effective_offset = (
-        max(configured_drop_height_m, barrier_height)
-        if barriers
-        else configured_drop_height_m
-    )
+    effective_offset = configured_drop_height_m
     evidence.update(
         {
             "source": (
-                "container_rim_clearance"
+                "configured_container_drop_height"
                 if barriers
                 else "configured_drop_height"
             ),
