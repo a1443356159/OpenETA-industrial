@@ -553,12 +553,13 @@ def _effective_release_z_offset(
     """Select a release height from support geometry, without moving the goal.
 
     A flat support keeps the configured gravity-drop height.  A compound
-    support with collision walls is a container: the AnyPlace goal is already
-    inside its opening, so lifting the terminal above the highest wall both
-    changes the intended interior release and needlessly consumes directional
-    arm reach.  For containers, retain only the scene-derived contact
-    clearance and let pair legality plus MoveIt prove the gripper, payload, and
-    complete path against every wall.
+    support with collision walls is a container: AnyPlace still owns the
+    in-plane destination and settled-state evidence, but the rigidly attached
+    payload must clear the highest collision-backed rim before detach.  Select
+    the larger of the configured drop and the authoritative barrier height;
+    the caller adds its calibrated collision clearance to the resulting
+    bottom height.  Pair legality plus MoveIt then prove the gripper, payload,
+    and complete path against every wall.
     """
 
     evidence: JsonDict = {
@@ -584,20 +585,21 @@ def _effective_release_z_offset(
         primitive.center_xyz[2] + primitive.axis_half_extent(2)
         for primitive in geometry
     )
-    container_clearance = (
-        min(configured_drop_height_m, max(0.0, clearance_m))
+    barrier_height = max(0.0, maximum_z - support_z_m)
+    effective_offset = (
+        max(configured_drop_height_m, barrier_height)
         if barriers
         else configured_drop_height_m
     )
     evidence.update(
         {
             "source": (
-                "container_interior_clearance"
+                "container_rim_clearance"
                 if barriers
                 else "configured_drop_height"
             ),
-            "container_clearance_m": container_clearance if barriers else 0.0,
-            "effective_offset_m": container_clearance,
+            "container_clearance_m": max(0.0, clearance_m) if barriers else 0.0,
+            "effective_offset_m": effective_offset,
             "support_geometry_available": True,
             "support_primitive_count": len(geometry),
             "support_surface_primitive_count": support_primitive_count,
@@ -610,7 +612,7 @@ def _effective_release_z_offset(
             "clearance_m": clearance_m,
         }
     )
-    return container_clearance, evidence
+    return effective_offset, evidence
 
 
 def _obb_penetrates(left: Obb, right: Obb, *, tolerance_m: float) -> bool:

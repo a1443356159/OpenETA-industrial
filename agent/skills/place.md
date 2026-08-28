@@ -35,16 +35,18 @@ and MoveIt owns complete robot paths.
 3. For a flat support, derive the exact release EEF pose as
    `object_goal * inverse(measured_attachment)`. For a collision-backed
    container, AnyPlace still selects the destination and proves a settled pose,
-   while the host derives a short-drop terminal at that destination that keeps
-   the carried orientation; gravity owns settling after detach. Pair legality,
-   Beam-2, state validity, and L5 plan-only must all pass in either case. Stable
-   wave barriers preserve deterministic order; use the first complete pair.
+   while the host derives a single rim-clearing gravity-drop terminal at that
+   destination that keeps the carried orientation. Its Z comes from the
+   authoritative container collision geometry, not an agent waypoint; gravity
+   owns settling after detach. Pair legality, Beam-2, state validity, and L5
+   plan-only must all pass in either case. Stable wave barriers preserve
+   deterministic order; use the first complete pair.
 4. After native attach PASS, recompile the frozen AnyPlace pool from the
    measured attachment and current PlanningScene. Do not rerun AnyPlace or the
    grasp model because one pair fails; continue the frozen pair/grasp frontiers.
 5. Execute one `move_to` to the exact host-qualified release EEF pose with its
    full compiled orientation.
-   There is no carry lift, hover, descend offset, rim-clearance waypoint,
+   There is no carry lift, hover, descent waypoint, agent-authored offset,
    near-target shortcut, or retreat. Every receipt must retain attachment and
    satisfy the native drift bound.
 6. At the qualified release terminal, call `gripper_control position=1` once. PASS requires
