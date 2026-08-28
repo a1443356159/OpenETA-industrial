@@ -374,12 +374,12 @@ def test_industrial_scene_prompts_bind_one_target_to_one_of_multiple_bins() -> N
 
 def test_agentic_profile_uses_short_bounded_provider_retries() -> None:
     assert acceptance.AGENTIC_PROVIDER_RESILIENCE_ENV == {
-        "OPENETA_LLM_TIMEOUT_S": "30",
+        "OPENETA_LLM_TIMEOUT_S": "60",
         "OPENETA_LLM_MAX_ATTEMPTS": "2",
         "OPENETA_LLM_RETRY_BACKOFF_S": "0.5",
         "OPENETA_LLM_MAX_TOKENS": "512",
         "OPENETA_LLM_FALLBACK_MODEL": "gpt-5.6-luna",
-        "OPENETA_LLM_FALLBACK_TIMEOUT_S": "30",
+        "OPENETA_LLM_FALLBACK_TIMEOUT_S": "60",
     }
 
 
@@ -411,7 +411,7 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
     assert environment["OPENETA_LLM_PROVIDER"] == "configured-provider"
     assert environment["OPENETA_LLM_MODEL"] == "configured-model"
     assert environment["OPENETA_LLM_API_KEY"] == "configured-secret"
-    assert environment["OPENETA_LLM_TIMEOUT_S"] == "30"
+    assert environment["OPENETA_LLM_TIMEOUT_S"] == "60"
     assert environment["OPENETA_LLM_MAX_ATTEMPTS"] == "2"
     assert environment["OPENETA_LLM_RETRY_BACKOFF_S"] == "0.5"
     assert environment["OPENETA_LLM_MAX_TOKENS"] == "512"
@@ -421,7 +421,7 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
         "https://configured.invalid/v1"
     )
     assert environment["OPENETA_LLM_FALLBACK_API_KEY"] == "configured-secret"
-    assert environment["OPENETA_LLM_FALLBACK_TIMEOUT_S"] == "30"
+    assert environment["OPENETA_LLM_FALLBACK_TIMEOUT_S"] == "60"
     assert "OPENETA_UNRELATED" not in environment
 
 

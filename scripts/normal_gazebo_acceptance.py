@@ -139,16 +139,17 @@ EXECUTION_PROFILE_SCOPES = {
 
 # Normal decisions stay below 200 completion tokens, so 512 tokens leaves ample
 # structured-JSON headroom. Under shared endpoint load, a healthy decision can
-# exceed 12 seconds; give each model one useful 30-second attempt instead of
+# exceed 30 seconds under shared GPU/provider load; give each model one useful
+# 60-second attempt instead of
 # cycling through four short attempts. Terra then Luna remain explicit in
 # rollout evidence, with no provider, endpoint, or credential change.
 AGENTIC_PROVIDER_RESILIENCE_ENV = {
-    "OPENETA_LLM_TIMEOUT_S": "30",
+    "OPENETA_LLM_TIMEOUT_S": "60",
     "OPENETA_LLM_MAX_ATTEMPTS": "2",
     "OPENETA_LLM_RETRY_BACKOFF_S": "0.5",
     "OPENETA_LLM_MAX_TOKENS": "512",
     "OPENETA_LLM_FALLBACK_MODEL": "gpt-5.6-luna",
-    "OPENETA_LLM_FALLBACK_TIMEOUT_S": "30",
+    "OPENETA_LLM_FALLBACK_TIMEOUT_S": "60",
 }
 
 
