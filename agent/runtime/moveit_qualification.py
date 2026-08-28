@@ -104,8 +104,11 @@ def _with_qualification_state_policy(
     *,
     target: Mapping[str, Any],
     scene_diff: Mapping[str, Any] | None,
+    queue_depth: int | None = None,
 ) -> JsonDict:
     result = dict(state)
+    if queue_depth is not None:
+        result["qualification_state_validity_queue_depth"] = int(queue_depth)
     if scene_diff is not None:
         result["qualification_scene_diff"] = dict(scene_diff)
     allowed = target.get("qualification_allowed_collisions")
@@ -2757,6 +2760,7 @@ class MoveItQualificationEngine:
                         pure_state,
                         target=target,
                         scene_diff=active_scene_diff,
+                        queue_depth=validity_gate.limit,
                     )
                     validity, validity_retry, validity_elapsed = self._call_fast_service(
                         lambda validity_state=validity_state: self.check_state_validity(
@@ -2813,6 +2817,7 @@ class MoveItQualificationEngine:
                             rescued_state,
                             target=target,
                             scene_diff=active_scene_diff,
+                            queue_depth=validity_gate.limit,
                         )
                         rescued_validity, rescued_retry, rescued_elapsed = self._call_fast_service(
                             lambda rescued_validity_state=rescued_validity_state: (
@@ -2964,6 +2969,7 @@ class MoveItQualificationEngine:
                                 solution["joint_state"],
                                 target={},
                                 scene_diff=active_scene_diff,
+                                queue_depth=validity_gate.limit,
                             )
                             post_state["qualification_gripper_state"] = "open"
                             post_result, post_retry, post_elapsed = self._call_fast_service(

@@ -356,6 +356,27 @@ def _qualification_ik_response_timeout_s(
     )
 
 
+def _qualification_state_validity_response_timeout_s(
+    *,
+    queue_depth: int = 1,
+) -> float:
+    """Cover a bounded concurrent wave without changing its validity policy.
+
+    MoveGroup may serialize ``/check_state_validity`` callbacks.  Each
+    request therefore retains the existing five-second service allowance,
+    while the client response deadline also covers every request admitted by
+    the deterministic concurrency gate.  The extra half second per slot is
+    the same executor-scheduling margin used by queued IK responses.
+    """
+
+    from agent.runtime.moveit_qualification import STATE_VALIDITY_TIMEOUT_S
+
+    depth = int(queue_depth)
+    if isinstance(queue_depth, bool) or depth <= 0:
+        raise ValueError("qualification state-validity response deadline input is invalid")
+    return depth * (STATE_VALIDITY_TIMEOUT_S + 0.5)
+
+
 def _urdf_reach_upper_bound_m(config: GazeboControlConfig) -> float:
     """Return the unique base-to-tip chain bound, plus the fixed tool mount."""
 
@@ -2410,8 +2431,6 @@ class _RosRuntime:
         }
 
     def qualification_state_validity(self, joint_state: Mapping[str, Any]) -> Mapping[str, Any]:
-        from agent.runtime.moveit_qualification import STATE_VALIDITY_TIMEOUT_S
-
         names = list(ARM_JOINTS)
         positions = [float(value) for value in joint_state.get("positions") or []]
         requested_gripper_state = joint_state.get("qualification_gripper_state")
@@ -2513,7 +2532,12 @@ class _RosRuntime:
                     detached_collision_probe_count += 1
             response = self._await(
                 self.state_validity_client.call_async(request),
-                STATE_VALIDITY_TIMEOUT_S,
+                _qualification_state_validity_response_timeout_s(
+                    queue_depth=joint_state.get(
+                        "qualification_state_validity_queue_depth",
+                        1,
+                    )
+                ),
             )
             pairs = sorted(
                 {

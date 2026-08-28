@@ -26,6 +26,7 @@ from extensions.gazebo.ros_control import (
     _collision_message_geometry_record,
     _configured_qualification_solver_profile,
     _qualification_ik_response_timeout_s,
+    _qualification_state_validity_response_timeout_s,
     _moveit_scene_frame,
     _move_group_failure_result,
     _merged_allowed_collision_rows,
@@ -283,6 +284,18 @@ def test_fast_ik_solver_budget_does_not_shorten_ros_response_deadline() -> None:
 def test_fast_ik_response_deadline_rejects_invalid_queue_depth(queue_depth) -> None:
     with pytest.raises(ValueError, match="response deadline inputs are invalid"):
         _qualification_ik_response_timeout_s(0.05, queue_depth=queue_depth)
+
+
+def test_state_validity_response_deadline_covers_the_bounded_queue() -> None:
+    assert _qualification_state_validity_response_timeout_s(
+        queue_depth=8,
+    ) == pytest.approx(44.0)
+
+
+@pytest.mark.parametrize("queue_depth", [0, -1, True])
+def test_state_validity_response_deadline_rejects_invalid_queue_depth(queue_depth) -> None:
+    with pytest.raises(ValueError, match="response deadline input is invalid"):
+        _qualification_state_validity_response_timeout_s(queue_depth=queue_depth)
 
 
 def test_plan_only_rejected_trajectory_never_claims_execution() -> None:
@@ -854,6 +867,7 @@ def test_recovery_ros_messages_preserve_all_seven_measured_joint_positions() -> 
 
 def test_qualification_open_state_adds_active_gripper_joint_to_moveit_diff() -> None:
     captured = []
+    response_timeouts = []
 
     class Request:
         def __init__(self):
@@ -878,13 +892,14 @@ def test_qualification_open_state_adds_active_gripper_joint_to_moveit_diff() -> 
         config=config,
         planning_scene=SimpleNamespace(world_ids={"work_table", "target_object"}),
     )
-    runtime._await = lambda future, timeout: future
+    runtime._await = lambda future, timeout: response_timeouts.append(timeout) or future
 
     result = runtime.qualification_state_validity(
         {
             "names": [f"joint_{index}" for index in range(1, 8)],
             "positions": [0.0] * 7,
             "qualification_gripper_state": "open",
+            "qualification_state_validity_queue_depth": 8,
         }
     )
 
@@ -901,6 +916,7 @@ def test_qualification_open_state_adds_active_gripper_joint_to_moveit_diff() -> 
         *([0.0] * 7),
         config.gripper_position(1),
     ]
+    assert response_timeouts == pytest.approx([44.0])
 
 
 def test_post_detach_open_state_keeps_released_object_as_collision_probe() -> None:

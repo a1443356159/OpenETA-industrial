@@ -400,6 +400,7 @@ def _engine(**overrides):
 
 def test_fast_ik_request_carries_the_wave_queue_depth_separately_from_solver_budget():
     seen: list[tuple[float, int]] = []
+    validity_depths: list[int] = []
 
     def compute_ik(target, seed, collision):
         seen.append(
@@ -414,7 +415,16 @@ def test_fast_ik_request_carries_the_wave_queue_depth_separately_from_solver_bud
             "min_singular_value": 0.3,
         }
 
-    response = _engine(compute_ik=compute_ik).qualify(
+    def check_state_validity(state):
+        validity_depths.append(
+            int(state["qualification_state_validity_queue_depth"])
+        )
+        return {"valid": True, "collision_pairs": []}
+
+    response = _engine(
+        compute_ik=compute_ik,
+        check_state_validity=check_state_validity,
+    ).qualify(
         _request(
             [_candidate(0)],
             overrides={"max_ik_concurrency": 4, "l5_pass_target": 1},
@@ -424,6 +434,8 @@ def test_fast_ik_request_carries_the_wave_queue_depth_separately_from_solver_bud
     assert response["selected_candidate_ids"] == ["c0"]
     assert seen
     assert set(seen) == {(0.05, 4)}
+    assert validity_depths
+    assert set(validity_depths) == {8}
 
 
 def test_frozen_pair_retains_two_diverse_l5_passes_without_early_cutoff():
