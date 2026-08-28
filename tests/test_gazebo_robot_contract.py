@@ -1080,9 +1080,12 @@ def test_controller_accepts_stationary_action_ordered_terminal_after_success() -
     )
 
     assert result.ok is True
-    assert barriers == [12.5]
+    assert barriers == [14.0]
     assert result.payload["terminal_state_source"] == (
         "barrier_ordered_action_terminal_sample"
+    )
+    assert result.payload["terminal_state_action_barrier_source"] == (
+        "action_completed_ros_time_s"
     )
     assert result.payload["terminal_state_stationary_verified"] is True
 

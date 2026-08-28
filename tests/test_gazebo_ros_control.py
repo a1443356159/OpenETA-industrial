@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import math
+import threading
 from types import SimpleNamespace
 import time
 
@@ -853,6 +854,28 @@ def test_ros_state_source_retains_action_ordered_terminal_under_slow_wall_time()
     assert terminal.metadata["joint_state_freshness_policy"] == (
         "barrier_ordered_action_terminal"
     )
+
+
+def test_ros_state_source_waits_for_sample_after_completion_barrier() -> None:
+    tf = _Tf(stamp_s=9.9)
+    source = RosGazeboStateSource(
+        _Node(), tf, config=GazeboControlConfig(), freshness_s=0.2
+    )
+    source.joint_state_callback(_joint_message(9.9))
+
+    def publish_terminal() -> None:
+        tf.stamp_s = 10.1
+        source.joint_state_callback(_joint_message(10.1))
+
+    timer = threading.Timer(0.02, publish_terminal)
+    timer.start()
+    try:
+        terminal = source.latest_after_action(10.0)
+    finally:
+        timer.join()
+
+    assert terminal.metadata["joint_state_timestamp_s"] == pytest.approx(10.1)
+    assert terminal.metadata["tf_timestamp_s"] == pytest.approx(10.1)
 
 
 def test_ros_state_source_fails_closed_without_tf() -> None:

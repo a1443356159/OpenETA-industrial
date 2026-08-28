@@ -1478,17 +1478,29 @@ class RosGazeboStateSource:
         A successful trajectory action is the completion ACK.  If rendering or
         physics makes JointState wall-time cadence slower than the ordinary
         freshness window, retain the latest sample only when both its ROS stamp
-        and the latest TF are newer than the action-start barrier.  The caller
-        still has to prove the exact Cartesian terminal and a stationary arm.
+        and the latest TF are newer than the action-completion barrier.  Wait up
+        to the source freshness budget for that causally later sample; the
+        caller still has to prove the exact Cartesian terminal and a stationary
+        arm.
         """
 
         minimum = float(minimum_ros_timestamp_s)
         if not math.isfinite(minimum):
             raise RuntimeError("POST_ACTION_STATE_NOT_FRESH")
-        return self.state(
-            allow_barrier_ordered_stale=True,
-            minimum_ros_timestamp_s=minimum,
-        )
+        deadline = time.monotonic() + self.freshness_s
+        last_error: RuntimeError | None = None
+        while True:
+            try:
+                return self.state(
+                    allow_barrier_ordered_stale=True,
+                    minimum_ros_timestamp_s=minimum,
+                )
+            except RuntimeError as exc:
+                last_error = exc
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0.0:
+                    raise last_error
+                time.sleep(min(0.01, remaining_s))
 
     def wait_fresh(self, timeout_s: float = 15.0):
         deadline = time.monotonic() + timeout_s
