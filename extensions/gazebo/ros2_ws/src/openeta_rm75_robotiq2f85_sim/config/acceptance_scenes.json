@@ -53,8 +53,8 @@
       "description": "Continuous industrial sorting in one world session: yellow adjustable wrench to the green bin, then red M24 hex bolt to the blue bin.",
       "canonical_world_complete": true,
       "task": {
-        "target_prompt": "yellow adjustable wrench",
-        "placement_object_prompt": "yellow adjustable wrench",
+        "target_prompt": "yellow wrench",
+        "placement_object_prompt": "yellow wrench",
         "placement_region_prompt": "green parts bin",
         "operator_instruction": "请先把黄色活动扳手放进绿色零件箱，再把红色六角螺栓放进蓝色零件箱。其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
       },
@@ -63,8 +63,8 @@
           "id": "yellow_wrench_to_green",
           "target_object_id": "target_object",
           "target_link": "target_link",
-          "target_prompt": "yellow adjustable wrench",
-          "placement_object_prompt": "yellow adjustable wrench",
+          "target_prompt": "yellow wrench",
+          "placement_object_prompt": "yellow wrench",
           "placement_region_id": "green_parts_bin",
           "placement_region_prompt": "green parts bin"
         },
@@ -75,7 +75,7 @@
           "target_prompt": "red hex bolt",
           "placement_object_prompt": "red hex bolt",
           "placement_region_id": "blue_parts_bin",
-          "placement_region_prompt": "blue parts bin"
+          "placement_region_prompt": "blue square area inside bin"
         }
       ],
       "placement_regions": [
@@ -91,7 +91,7 @@
         },
         {
           "id": "blue_parts_bin",
-          "prompt": "blue parts bin",
+          "prompt": "blue square area inside bin",
           "center_xy": [0.62, -0.180],
           "size_xy_m": [0.285, 0.260],
           "support_z_m": 0.020,

@@ -1428,6 +1428,8 @@ def test_initial_grasp_target_prefers_scene_camera_even_with_calibrated_wrist() 
 
 def _grasp_target_retry_obligation(
     attempts: list[dict[str, object]],
+    *,
+    prompt: str = "red rectangular block",
 ) -> dict[str, object]:
     obligation = _semantic_perception_obligation(
         observation=EnvObservation(
@@ -1445,7 +1447,7 @@ def _grasp_target_retry_obligation(
             "sam3_semantic_state": {
                 "roles": {
                     "grasp_target": {
-                        "canonical_prompt": "red rectangular block",
+                        "canonical_prompt": prompt,
                         "scene_epoch": 4,
                     }
                 },
@@ -1511,6 +1513,29 @@ def test_grasp_target_exact_views_advance_to_one_simplified_prompt() -> None:
     assert obligation["required_parameters"]["image"] == "/tmp/top.png"
     assert obligation["required_parameters"]["prompt"] == "red block"
     assert obligation["canonical_semantic_target"] == "red rectangular block"
+
+
+def test_grasp_target_long_subtype_prompt_backs_off_to_attribute_and_head() -> None:
+    exact_attempts = [
+        _failed_grasp_target_attempt(
+            source_image=source,
+            prompt="yellow adjustable wrench",
+            attempt_id=attempt_id,
+        )
+        for source, attempt_id in (
+            ("/tmp/top.png", "top-exact"),
+            ("/tmp/wrist.png", "wrist-exact"),
+        )
+    ]
+
+    obligation = _grasp_target_retry_obligation(
+        exact_attempts,
+        prompt="yellow adjustable wrench",
+    )
+
+    assert obligation["fallback"] == "simplified_text_after_bounded_exact_views"
+    assert obligation["required_parameters"]["prompt"] == "yellow wrench"
+    assert obligation["canonical_semantic_target"] == "yellow adjustable wrench"
 
 
 def test_grasp_target_retry_budget_exhausts_without_repeating_sam3() -> None:

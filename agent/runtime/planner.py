@@ -7479,7 +7479,14 @@ def _positive_image_extent(*values: object) -> int | None:
 
 
 def _simplify_semantic_text_prompt(prompt: str) -> str:
-    """Return one conservative equivalent phrase for a failed text query."""
+    """Return one conservative broader phrase for a failed text query.
+
+    Shape adjectives are known to be redundant.  For a longer phrase with no
+    such adjective, retain its leading visual attribute and head noun while
+    dropping intermediate subtype modifiers.  The result is only a bounded
+    segmentation fallback; the normal semantic mask reviewer still proves the
+    selected instance before any grasp inference.
+    """
 
     tokens = prompt.split()
     simplified = [
@@ -7487,9 +7494,11 @@ def _simplify_semantic_text_prompt(prompt: str) -> str:
         for token in tokens
         if token.lower().strip(".,;:()[]{}") not in _SEMANTIC_PROMPT_REDUNDANT_SHAPE_WORDS
     ]
-    if len(simplified) < 2 or simplified == tokens:
-        return ""
-    return " ".join(simplified)
+    if len(simplified) >= 2 and simplified != tokens:
+        return " ".join(simplified)
+    if len(tokens) >= 3:
+        return f"{tokens[0]} {tokens[-1]}"
+    return ""
 
 
 def _semantic_detection_is_current(

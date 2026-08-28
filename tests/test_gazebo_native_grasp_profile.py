@@ -623,7 +623,11 @@ def test_multi_normal_configs_bind_each_object_to_its_own_bin() -> None:
         (0.62, 0.18),
         (0.62, -0.18),
     ]
+    assert assignments[0].active_sort_assignment["target_prompt"] == "yellow wrench"
     assert assignments[1].active_sort_assignment["target_prompt"] == "red hex bolt"
+    assert assignments[1].active_sort_assignment["placement_region_prompt"] == (
+        "blue square area inside bin"
+    )
 
 
 def test_native_grasp_sdf_renderer_rejects_a_conflicting_robot_collision_mask() -> None:
