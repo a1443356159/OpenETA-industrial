@@ -125,7 +125,7 @@ def test_arm_controller_proves_loaded_terminal_tracking() -> None:
     control_xacro = (ROBOTIQ_PACKAGE / "urdf/ros2_control.xacro").read_text(encoding="utf-8")
 
     assert controllers["action_monitor_rate"] == 50.0
-    assert constraints["goal_time"] == 2.0
+    assert constraints["goal_time"] == 4.0
     assert constraints["stopped_velocity_tolerance"] == 0.01
     assert {name: constraints[name] for name in ARM_JOINTS} == {
         name: {"trajectory": 0.06, "goal": 0.002} for name in ARM_JOINTS

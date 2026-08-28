@@ -68,6 +68,10 @@ GRIPPER_JOINT_BOUNDS_RAD: Mapping[str, tuple[float, float]] = {
 # the ROS adapter and the host-side attachment transition cannot drift apart.
 GRIPPER_GOAL_TOLERANCE_RAD: float = 0.02
 
+
+class AttachedTransportReliefUnavailable(ValueError):
+    """The measured grasp cannot retain one proven pad-relief band."""
+
 # Position controllers must not servo an independently modelled linkage joint
 # onto a hard stop.  Half the public terminal band leaves room for both state-
 # estimation noise and the terminal settle proof.  This is a robot-control
@@ -272,7 +276,9 @@ def attached_transport_relief_position(
         raise ValueError("attached transport terminal tolerance is invalid")
     required_travel = 2.0 * tolerance
     if measured - minimum < required_travel:
-        raise ValueError("insufficient common-driver travel for attached transport relief")
+        raise AttachedTransportReliefUnavailable(
+            "insufficient common-driver travel for attached transport relief"
+        )
     return measured - required_travel
 
 

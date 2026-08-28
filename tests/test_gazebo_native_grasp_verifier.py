@@ -19,6 +19,7 @@ from extensions.gazebo.native_grasp import (
 )
 from extensions.gazebo.profiles import STRUCTURED_RECEIPT
 from extensions.gazebo.planning_scene import PlanningSceneError
+from extensions.gazebo.robotiq_kinematics import AttachedTransportReliefUnavailable
 
 
 def _sample(side: str, stamp: float) -> NativeContactSample:
@@ -42,6 +43,45 @@ def _accepted_gate():
         verification_window_started_sim_time_s=10.0,
         now_monotonic_s=20.1,
     )
+
+
+@pytest.mark.parametrize(
+    ("error", "attach_acked", "candidate_rejection", "infrastructure_error", "failure_class"),
+    [
+        (
+            AttachedTransportReliefUnavailable("insufficient relief"),
+            True,
+            True,
+            False,
+            "attached_transport_relief_unavailable",
+        ),
+        (
+            RuntimeError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"),
+            True,
+            False,
+            True,
+            "post_attach_infrastructure_failure",
+        ),
+        (
+            RuntimeError("ATTACH_FAILED"),
+            False,
+            False,
+            False,
+            "native_attach_unacknowledged",
+        ),
+    ],
+)
+def test_native_close_failure_classification_distinguishes_candidate_geometry(
+    error: Exception,
+    attach_acked: bool,
+    candidate_rejection: bool,
+    infrastructure_error: bool,
+    failure_class: str,
+) -> None:
+    assert gazebo_direct_env._native_close_failure_classification(
+        error,
+        attach_acked=attach_acked,
+    ) == (candidate_rejection, infrastructure_error, failure_class)
 
 
 def test_native_contact_and_attach_ack_directly_prove_grasp() -> None:

@@ -25,8 +25,41 @@ from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazeb
 from .process import GazeboProcessError
 from .process import GazeboNativeContactWindow
 from .planning_scene import PlanningSceneError
+from .robotiq_kinematics import AttachedTransportReliefUnavailable
 from .runtime import GazeboRuntime
 from .ros_control import _relative_pose
+
+
+def _native_close_failure_classification(
+    exc: Exception,
+    *,
+    attach_acked: bool,
+) -> tuple[bool, bool, str]:
+    """Classify only deterministic candidate failures as queue rejections."""
+
+    detail = str(exc) or type(exc).__name__
+    measured_collision = bool(
+        attach_acked
+        and isinstance(exc, PlanningSceneError)
+        and detail.startswith(
+            "planning-scene current state is invalid; collision_pairs="
+        )
+    )
+    relief_unavailable = bool(
+        attach_acked and isinstance(exc, AttachedTransportReliefUnavailable)
+    )
+    candidate_rejection = measured_collision or relief_unavailable
+    infrastructure_error = bool(attach_acked and not candidate_rejection)
+    failure_class = (
+        "measured_attachment_collision"
+        if measured_collision
+        else "attached_transport_relief_unavailable"
+        if relief_unavailable
+        else "post_attach_infrastructure_failure"
+        if infrastructure_error
+        else "native_attach_unacknowledged"
+    )
+    return candidate_rejection, infrastructure_error, failure_class
 
 
 def build_gazebo_control_spec(profile: GazeboProfile) -> dict[str, Any]:
@@ -602,15 +635,13 @@ class GazeboDirectEnv(Env):
                                 "detail": str(rollback_exc),
                             }
                     original_error = str(exc) or type(exc).__name__
-                    measured_attachment_collision = bool(
-                        attach_acked
-                        and isinstance(exc, PlanningSceneError)
-                        and original_error.startswith(
-                            "planning-scene current state is invalid; collision_pairs="
-                        )
-                    )
-                    post_attach_infrastructure_failure = bool(
-                        attach_acked and not measured_attachment_collision
+                    (
+                        candidate_attachment_failure,
+                        post_attach_infrastructure_failure,
+                        failure_class,
+                    ) = _native_close_failure_classification(
+                        exc,
+                        attach_acked=attach_acked,
                     )
                     terminal_gate = (
                         gate
@@ -622,7 +653,7 @@ class GazeboDirectEnv(Env):
                             terminal_gate,
                             detail=original_error,
                         )
-                        if measured_attachment_collision
+                        if candidate_attachment_failure
                         else self._native_grasp_verifier.close_result(
                             terminal_gate,
                             attach_acked=False,
@@ -639,16 +670,8 @@ class GazeboDirectEnv(Env):
                         "detail": original_error,
                         "attach_acked_before_rollback": attach_acked,
                         "infrastructure_error": post_attach_infrastructure_failure,
-                        "candidate_rejection": measured_attachment_collision,
-                        "failure_class": (
-                            "measured_attachment_collision"
-                            if measured_attachment_collision
-                            else (
-                                "post_attach_infrastructure_failure"
-                                if post_attach_infrastructure_failure
-                                else "native_attach_unacknowledged"
-                            )
-                        ),
+                        "candidate_rejection": candidate_attachment_failure,
+                        "failure_class": failure_class,
                         "motion_outcome": "failed",
                         "execution_started": True,
                         **(

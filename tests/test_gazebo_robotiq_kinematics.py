@@ -8,6 +8,7 @@ import pytest
 
 from extensions.gazebo.robot_control import Robotiq2F85Calibration
 from extensions.gazebo.robotiq_kinematics import (
+    AttachedTransportReliefUnavailable,
     attached_transport_relief_position,
     bounded_contact_hold_position,
     BD_M,
@@ -38,7 +39,10 @@ def test_attached_transport_relief_proves_one_terminal_band_after_action_error()
 
 
 def test_attached_transport_relief_fails_near_open_boundary() -> None:
-    with pytest.raises(ValueError, match="insufficient common-driver travel"):
+    with pytest.raises(
+        AttachedTransportReliefUnavailable,
+        match="insufficient common-driver travel",
+    ):
         attached_transport_relief_position(
             measured_common_active_rad=0.07,
             minimum_active_rad=0.04,

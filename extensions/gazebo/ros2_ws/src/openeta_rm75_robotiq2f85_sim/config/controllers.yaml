@@ -12,7 +12,7 @@ rm_group_controller:
     state_interfaces: [position, velocity]
     action_monitor_rate: 50.0
     constraints:
-      goal_time: 2.0
+      goal_time: 4.0
       stopped_velocity_tolerance: 0.01
       joint_1: {trajectory: 0.06, goal: 0.002}
       joint_2: {trajectory: 0.06, goal: 0.002}
