@@ -32,6 +32,49 @@ ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC = (
 )
 
 
+def resolve_scene_definition(
+    payload: Mapping[str, object],
+    scene_id: str,
+) -> dict[str, object]:
+    """Resolve one catalog scene, including optional task-only inheritance."""
+
+    scenes = payload.get("scenes")
+    if payload.get("schema_version") != SCHEMA_VERSION or not isinstance(
+        scenes, Mapping
+    ):
+        raise RuntimeError("acceptance scene catalog is invalid")
+
+    def merge(
+        base: Mapping[str, object],
+        override: Mapping[str, object],
+    ) -> dict[str, object]:
+        result = json.loads(json.dumps(base))
+        for key, value in override.items():
+            if key == "extends":
+                continue
+            current = result.get(key)
+            if isinstance(current, Mapping) and isinstance(value, Mapping):
+                result[key] = merge(current, value)
+            else:
+                result[key] = json.loads(json.dumps(value))
+        return result
+
+    def resolve(current_id: str, lineage: tuple[str, ...]) -> dict[str, object]:
+        if current_id in lineage:
+            raise RuntimeError("acceptance scene inheritance cycle is invalid")
+        raw = scenes.get(current_id)
+        if not isinstance(raw, Mapping):
+            raise RuntimeError(f"unsupported acceptance scene: {current_id}")
+        parent = raw.get("extends")
+        if parent is None:
+            return merge({}, raw)
+        if not isinstance(parent, str) or not parent.strip():
+            raise RuntimeError("acceptance scene parent identity is invalid")
+        return merge(resolve(parent.strip(), (*lineage, current_id)), raw)
+
+    return resolve(str(scene_id).strip(), ())
+
+
 def _native_target_topic_namespace(target_model: str) -> str:
     """Return a stable transport namespace for one detachable world body."""
 
@@ -555,16 +598,13 @@ def _render_scene_tree(
     """Compile the selected catalog variant into one final Gazebo tree."""
 
     payload = json.loads(catalog_path.read_text(encoding="utf-8"))
-    scenes = payload.get("scenes") if isinstance(payload, Mapping) else None
     if (
         not isinstance(payload, Mapping)
         or payload.get("schema_version") != SCHEMA_VERSION
-        or not isinstance(scenes, Mapping)
+        or not isinstance(payload.get("scenes"), Mapping)
     ):
         raise RuntimeError("acceptance scene catalog is invalid")
-    scene = scenes.get(scene_id)
-    if not isinstance(scene, Mapping):
-        raise RuntimeError(f"unsupported acceptance scene: {scene_id}")
+    scene = resolve_scene_definition(payload, scene_id)
     world_scene = str(scene.get("world_scene") or "")
     obstacles = scene.get("static_obstacles")
     if not world_scene or not isinstance(obstacles, list):
@@ -866,9 +906,9 @@ def _validate_catalog_bindings(
     """Reject semantic catalog data that drifted from the compiled world."""
 
     payload = json.loads(catalog_path.read_text(encoding="utf-8"))
-    scene = payload.get("scenes", {}).get(scene_id) if isinstance(payload, Mapping) else None
-    if not isinstance(scene, Mapping):
+    if not isinstance(payload, Mapping):
         raise RuntimeError("authoritative scene catalog binding is invalid")
+    scene = resolve_scene_definition(payload, scene_id)
     by_id = {item.object_id: item for item in objects}
     bindings = scene_target_bindings(scene)
     regions_by_id = {
@@ -1053,9 +1093,9 @@ def compile_authoritative_scene(
     if world is None:
         raise RuntimeError("authoritative scene world is invalid")
     payload = json.loads(catalog_path.read_text(encoding="utf-8"))
-    raw_scene = payload.get("scenes", {}).get(selected) if isinstance(payload, Mapping) else None
-    if not isinstance(raw_scene, Mapping):
+    if not isinstance(payload, Mapping):
         raise RuntimeError("authoritative scene catalog binding is invalid")
+    raw_scene = resolve_scene_definition(payload, selected)
     target_bindings = scene_target_bindings(raw_scene)
     for binding in target_bindings:
         target_model = world.find(f"model[@name='{binding.target_model}']")

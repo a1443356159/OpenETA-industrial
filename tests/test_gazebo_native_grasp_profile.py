@@ -630,6 +630,42 @@ def test_multi_normal_configs_bind_each_object_to_its_own_bin() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("scene_id", "target_ids", "region_ids"),
+    [
+        (
+            "multi_normal1",
+            ["target_object", "red_m24_hex_bolt"],
+            ["blue_parts_bin", "green_parts_bin"],
+        ),
+        (
+            "multi_normal2",
+            ["red_m24_hex_bolt", "target_object"],
+            ["blue_parts_bin", "green_parts_bin"],
+        ),
+        (
+            "multi_normal3",
+            ["red_m24_hex_bolt", "target_object"],
+            ["green_parts_bin", "blue_parts_bin"],
+        ),
+    ],
+)
+def test_multi_normal_task_variants_only_change_order_and_bin_binding(
+    scene_id: str,
+    target_ids: list[str],
+    region_ids: list[str],
+) -> None:
+    contract = load_acceptance_scene_contract(scene_id)
+    configs = NativePickPlaceConfig(
+        acceptance_scene_id=scene_id
+    ).sort_assignment_configs
+
+    assert contract["world_scene"] == "multi_normal"
+    assert [item.target_id for item in configs] == target_ids
+    assert [item.selected_placement_region_id for item in configs] == region_ids
+    assert contract["selected_placement_region_id"] == region_ids[0]
+
+
 def test_native_grasp_sdf_renderer_rejects_a_conflicting_robot_collision_mask() -> None:
     root = ET.fromstring(
         """<sdf><model name="robot"><link name="base_link">

@@ -54,16 +54,22 @@ REQUIRED_REAL_PICK_PLACE_TOOLS = (
     "anyplace",
     "close_simulator_env",
 )
+MULTI_NORMAL_SCENARIOS = (
+    "multi_normal",
+    "multi_normal1",
+    "multi_normal2",
+    "multi_normal3",
+)
 SCENARIOS = (
     "normal",
-    "multi_normal",
+    *MULTI_NORMAL_SCENARIOS,
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
     "tool-bin-sort",
 )
 COMPLEX_PHYSICAL_SCENARIOS = (
-    "multi_normal",
+    *MULTI_NORMAL_SCENARIOS,
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
@@ -116,10 +122,13 @@ TASK_INSTRUCTIONS = """
 
 SCENARIO_INSTRUCTIONS = {
     "normal": "桌上还有几件外观相近的工具，拿之前请确认没有拿错。",
-    "multi_normal": (
-        "这是同一工作单元内的连续分拣；放好第一件后不要关闭环境，"
-        "重新看清当前场景并继续第二件。"
-    ),
+    **{
+        scenario: (
+            "这是同一工作单元内的连续分拣；放好第一件后不要关闭环境，"
+            "重新看清当前场景并继续第二件。"
+        )
+        for scenario in MULTI_NORMAL_SCENARIOS
+    },
     "narrow-pick": "目标旁边有两个橙色护栏，夹取时请别碰到它们。",
     "barrier-transfer": "目标和料箱之间有一块黄色挡板，移动时请别碰到它。",
     "fastener-bin-sort": (
@@ -209,7 +218,7 @@ def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
     sort_assignments = scene.get("sort_assignments")
     return {
         "schema_version": "openeta.gazebo_acceptance_scene_receipt.v2",
-        "scene_id": str(scene["world_scene"]),
+        "scene_id": str(scene["scene_id"]),
         "seed": int(scene["seed"]),
         "contract_sha256": str(scene["contract_sha256"]),
         "static_obstacle_ids": [
@@ -258,7 +267,7 @@ def _scenario_environment(scenario: str) -> dict[str, str]:
     """Bind one physical scene for the complete worker lifetime."""
 
     scene = _scene_contract(scenario)
-    return {"OPENETA_ACCEPTANCE_SCENE": str(scene["world_scene"])}
+    return {"OPENETA_ACCEPTANCE_SCENE": str(scene["scene_id"])}
 
 
 def _validated_grasp_backend(value: str) -> str:
@@ -304,7 +313,7 @@ def _automation_metadata_for_backend(
         "initial_observe=required; "
         f"environment_id={ENV_ID}; environment_task=normal_pick_and_place; "
         f"environment_seed={int(scene['seed'])}; "
-        f"acceptance_scene={str(scene['world_scene'])}; "
+        f"acceptance_scene={str(scene['scene_id'])}; "
         f"grasp_target={_metadata_semantic(task['target_prompt'])}; "
         f"placement_object={_metadata_semantic(task['placement_object_prompt'])}; "
         f"placement_region={_metadata_semantic(task['placement_region_prompt'])}]"

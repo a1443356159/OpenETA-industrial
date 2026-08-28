@@ -35,6 +35,7 @@ from .ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptance_scene_world imp
     DETACHED_TARGET_COLLISION_FILTER_MASK,
     ROBOT_COLLISION_FILTER_MASK,
     compile_authoritative_scene,
+    resolve_scene_definition,
     scene_target_bindings,
 )
 
@@ -82,9 +83,10 @@ def load_acceptance_scene_contract(
         or not isinstance(payload.get("scenes"), Mapping)
     ):
         raise ValueError("acceptance scene catalog is invalid")
-    raw = payload["scenes"].get(scene_id)
-    if not isinstance(raw, Mapping):
-        raise ValueError(f"unsupported acceptance scene: {scene_id}")
+    try:
+        raw = resolve_scene_definition(payload, scene_id)
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
     scene = json.loads(json.dumps(raw))
     if not isinstance(scene.get("world_scene"), str) or not scene["world_scene"]:
         raise ValueError("acceptance scene world identity is invalid")
@@ -206,7 +208,26 @@ def load_acceptance_scene_contract(
         ):
             raise ValueError("acceptance scene target mass is invalid")
         validate_primitives(target)
+    sort_assignments = scene.get("sort_assignments")
     placement_regions = scene.get("placement_regions")
+
+    def bind_destination(region: Mapping[str, Any]) -> None:
+        scene["destination_center_xy"] = [
+            float(value) for value in region["center_xy"]
+        ]
+        scene["destination_size_xy_m"] = [
+            float(value) for value in region["size_xy_m"]
+        ]
+        if region.get("support_z_m") is not None:
+            scene["destination_support_z_m"] = float(region["support_z_m"])
+        scene["placement_acceptance_semantics"] = str(
+            region.get(
+                "acceptance_semantics",
+                PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
+            )
+        )
+        scene["selected_placement_region_id"] = str(region["id"])
+
     if placement_regions is not None:
         if not isinstance(placement_regions, list) or len(placement_regions) < 2:
             raise ValueError("acceptance scene placement regions are invalid")
@@ -243,20 +264,11 @@ def load_acceptance_scene_contract(
         if len(selected) != 1:
             raise ValueError("acceptance scene needs exactly one selected placement region")
         chosen = selected[0]
-        if task is None or task["placement_region_prompt"] != chosen["prompt"]:
+        if sort_assignments is None and (
+            task is None or task["placement_region_prompt"] != chosen["prompt"]
+        ):
             raise ValueError("acceptance scene task/bin semantic binding is invalid")
-        scene["destination_center_xy"] = [float(value) for value in chosen["center_xy"]]
-        scene["destination_size_xy_m"] = [float(value) for value in chosen["size_xy_m"]]
-        if chosen.get("support_z_m") is not None:
-            scene["destination_support_z_m"] = float(chosen["support_z_m"])
-        scene["placement_acceptance_semantics"] = str(
-            chosen.get(
-                "acceptance_semantics",
-                PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
-            )
-        )
-        scene["selected_placement_region_id"] = str(chosen["id"])
-    sort_assignments = scene.get("sort_assignments")
+        bind_destination(chosen)
     if sort_assignments is not None:
         if not isinstance(sort_assignments, list) or len(sort_assignments) < 2:
             raise ValueError("acceptance scene sort assignments are invalid")
@@ -305,6 +317,7 @@ def load_acceptance_scene_contract(
             )
         ):
             raise ValueError("acceptance scene initial sort semantics are invalid")
+        bind_destination(region_by_id[str(first_assignment["placement_region_id"])])
     destination = scene.get("destination_center_xy")
     if destination is not None and (
         not isinstance(destination, list)

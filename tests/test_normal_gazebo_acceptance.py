@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 from types import SimpleNamespace
 
+import pytest
+
 from scripts import normal_gazebo_acceptance as acceptance
 
 
@@ -242,6 +244,67 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
             second_requalification,
         ]
     ) == [first_model, second_model]
+
+
+@pytest.mark.parametrize(
+    ("scenario", "ordered_assignment_ids", "first_destination"),
+    [
+        (
+            "multi_normal1",
+            ["yellow_wrench_to_blue", "red_bolt_to_green"],
+            "blue_parts_bin",
+        ),
+        (
+            "multi_normal2",
+            ["red_bolt_to_blue", "yellow_wrench_to_green"],
+            "blue_parts_bin",
+        ),
+        (
+            "multi_normal3",
+            ["red_bolt_to_green", "yellow_wrench_to_blue"],
+            "green_parts_bin",
+        ),
+    ],
+)
+def test_multi_normal_task_variants_prepare_distinct_tasks_in_the_same_world(
+    tmp_path,
+    monkeypatch,
+    scenario: str,
+    ordered_assignment_ids: list[str],
+    first_destination: str,
+) -> None:
+    allocation = acceptance.base.Allocation(82, scenario, 18766, "run-id")
+    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        acceptance.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    paths = acceptance.prepare_case(
+        tmp_path,
+        tmp_path / scenario,
+        allocation,
+        dict(acceptance.DEFAULT_SERVICES),
+        scenario=scenario,
+        grasp_backend="graspgenx",
+    )
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assignments = receipt["acceptance_scene"]["sort_assignments"]
+
+    assert receipt["acceptance_scenario"] == scenario
+    assert receipt["acceptance_scene"]["scene_id"] == scenario
+    assert [item["id"] for item in assignments] == ordered_assignment_ids
+    assert assignments[0]["placement_region_id"] == first_destination
+    assert acceptance._scenario_environment(scenario) == {
+        "OPENETA_ACCEPTANCE_SCENE": scenario
+    }
+    assert "放好第一件后不要关闭环境" in paths.instructions.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
