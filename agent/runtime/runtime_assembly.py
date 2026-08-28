@@ -10,7 +10,10 @@ import os
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
-from tools.candidate_config import DEFAULT_GRASPGENX_RAW_POOL_SIZE
+from tools.candidate_config import (
+    DEFAULT_GRASPGENX_RAW_POOL_SIZE,
+    DEFAULT_GRASP_WAVES,
+)
 
 from adapter.protocol import JsonDict
 from agent.backends.planner import PlannerBackend
@@ -238,7 +241,7 @@ class RuntimeCandidateCounts:
     qualification_profile: str = "legacy"
     solver_profile: str = "auto"
     fast_beam_width: int = 2
-    grasp_waves: tuple[int, ...] | str = (4, 8, 16, 32, 64)
+    grasp_waves: tuple[int, ...] | str = DEFAULT_GRASP_WAVES
     placement_waves: tuple[int, ...] | str = (4, 8, 16, 32, 96)
     max_ik_concurrency: int = 8
     max_state_validity_concurrency: int = 8
@@ -317,7 +320,10 @@ def runtime_candidate_counts_from_env() -> RuntimeCandidateCounts:
         qualification_profile=os.environ.get("OPENETA_QUALIFICATION_PROFILE", "legacy"),
         solver_profile=os.environ.get("OPENETA_QUALIFICATION_SOLVER_PROFILE", "auto"),
         fast_beam_width=os.environ.get("OPENETA_QUALIFICATION_BEAM_WIDTH", 2),
-        grasp_waves=os.environ.get("OPENETA_QUALIFICATION_GRASP_WAVES", "4,8,16,32,64"),
+        grasp_waves=os.environ.get(
+            "OPENETA_QUALIFICATION_GRASP_WAVES",
+            ",".join(str(value) for value in DEFAULT_GRASP_WAVES),
+        ),
         placement_waves=os.environ.get("OPENETA_QUALIFICATION_PLACEMENT_WAVES", "4,8,16,32,96"),
         max_ik_concurrency=os.environ.get("OPENETA_QUALIFICATION_MAX_IK_CONCURRENCY", 8),
         max_state_validity_concurrency=os.environ.get(

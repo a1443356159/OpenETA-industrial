@@ -16,6 +16,7 @@ from agent.runtime.capability_map import (
     quaternion_angle_rad,
     target_pose,
 )
+from tools.candidate_config import DEFAULT_GRASP_WAVES
 
 
 FAST_QUALIFICATION_SCHEMA = "openeta.moveit_candidate_funnel.v3"
@@ -617,7 +618,7 @@ def schedule_candidate_waves(
     descriptors: Sequence[Mapping[str, Any]],
     *,
     purpose: str,
-    grasp_waves: Sequence[int] = (4, 8, 16, 32, 64),
+    grasp_waves: Sequence[int] = DEFAULT_GRASP_WAVES,
     placement_waves: Sequence[int] = (4, 8, 16, 32, 96),
     observation_waves: Sequence[int] = (4, 8, 16, 24),
     capability_map: SparseCapabilityMap | None = None,

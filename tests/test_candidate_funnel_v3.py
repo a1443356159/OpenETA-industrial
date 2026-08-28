@@ -34,6 +34,7 @@ from agent.runtime.qualification_v3 import (
     select_grasp_branches,
 )
 from agent.tools.registry import ToolResult
+from tools.candidate_config import DEFAULT_GRASP_WAVES
 
 
 def _hash(value):
@@ -285,6 +286,44 @@ def test_pose_diversity_scheduler_caches_pairwise_distances(monkeypatch) -> None
 
     assert sum(len(wave.candidates) for wave in waves) == 32
     assert calls <= 32 * 31 // 2
+
+
+def test_default_grasp_ladder_reaches_256_before_implicit_pool_exhaustion() -> None:
+    descriptors = []
+    for index in range(512):
+        candidate = _candidate(index, score=512.0 - index)
+        candidate["qualification_stages"][0]["xyz"] = [0.4, 0.0, 0.5]
+        descriptors.append(
+            {
+                "candidate_id": candidate["id"],
+                "candidate": candidate,
+                "candidate_pose_sha256": _hash(candidate),
+            }
+        )
+
+    waves = schedule_candidate_waves(descriptors, purpose="grasp")
+
+    assert DEFAULT_GRASP_WAVES == (4, 8, 16, 32, 64, 128, 256)
+    assert [wave.cumulative_per_branch for wave in waves] == [
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+    ]
+    assert [len(wave.candidates) for wave in waves] == [
+        4,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+    ]
 
 
 def _request(candidates, *, purpose="placement", overrides=None):

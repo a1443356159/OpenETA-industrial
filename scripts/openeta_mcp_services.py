@@ -20,6 +20,7 @@ from typing import Any, Iterable
 from tools.candidate_config import (
     CandidateFunnelConfig,
     DEFAULT_GRASPGENX_RAW_POOL_SIZE,
+    DEFAULT_GRASP_WAVES,
     argparse_raw_pool_size,
 )
 
@@ -582,7 +583,7 @@ def _startup_funnel_config(args: argparse.Namespace) -> CandidateFunnelConfig:
                 args,
                 "qualification_grasp_waves",
                 "OPENETA_QUALIFICATION_GRASP_WAVES",
-                "4,8,16,32,64",
+                ",".join(str(value) for value in DEFAULT_GRASP_WAVES),
             ),
             placement_waves=_startup_value(
                 args,

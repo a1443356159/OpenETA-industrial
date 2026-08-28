@@ -52,6 +52,7 @@ from tools.candidate_config import (
     DEFAULT_ANYPLACE_FULL_PLAN_LIMIT,
     DEFAULT_GRASP_DIVERSITY_POOL_SIZE,
     DEFAULT_GRASP_FULL_PLAN_LIMIT,
+    DEFAULT_GRASP_WAVES,
     DEFAULT_MOVEIT_IK_SEED_COUNT,
     DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
 )
@@ -347,7 +348,7 @@ class MoveItCandidateQualifier:
         qualification_profile: str = "legacy",
         solver_profile: str = "auto",
         beam_width: int = 2,
-        grasp_waves: Sequence[int] = (4, 8, 16, 32, 64),
+        grasp_waves: Sequence[int] = DEFAULT_GRASP_WAVES,
         placement_waves: Sequence[int] = (4, 8, 16, 32, 96),
         observation_waves: Sequence[int] = (4, 8, 16, 24),
         max_ik_concurrency: int = 8,
@@ -1648,7 +1649,9 @@ class MoveItQualificationEngine:
             != int(funnel.get("ik_seed_count", DEFAULT_MOVEIT_IK_SEED_COUNT))
         ):
             raise ValueError("invalid fast_v3 Beam/seed budget")
-        grasp_waves = self._integer_waves(funnel.get("grasp_waves"), (4, 8, 16, 32, 64))
+        grasp_waves = self._integer_waves(
+            funnel.get("grasp_waves"), DEFAULT_GRASP_WAVES
+        )
         placement_waves = self._integer_waves(funnel.get("placement_waves"), (4, 8, 16, 32, 96))
         observation_waves = self._integer_waves(funnel.get("observation_waves"), (4, 8, 16, 24))
         max_ik = max(1, int(funnel.get("max_ik_concurrency", 8)))

@@ -8,11 +8,11 @@ from typing import Any, Iterable
 
 
 DEFAULT_GRASP_RAW_POOL_SIZE = 200
-# GraspGenX keeps the complete legacy 200-representative pool and adds a
-# bounded, model-native centering/support reserve.  The extra entries come
-# from deterministic model draws, never host-generated pose variants.
-# AnyGrasp retains its existing 200-candidate contract.
-DEFAULT_GRASPGENX_RAW_POOL_SIZE = 256
+# GraspGenX freezes a broad deterministic model pool once.  The fast funnel
+# reaches into that pool through small cumulative waves; these are model
+# candidates, never host-generated pose variants.  AnyGrasp retains its
+# independent existing 200-candidate contract.
+DEFAULT_GRASPGENX_RAW_POOL_SIZE = 512
 DEFAULT_ANYPLACE_RAW_POOL_SIZE = 96
 DEFAULT_GRASP_DIVERSITY_POOL_SIZE = 64
 DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE = 96
@@ -34,7 +34,7 @@ SOLVER_PROFILES = (
 DEFAULT_QUALIFICATION_PROFILE = "legacy"
 DEFAULT_SOLVER_PROFILE = "auto"
 DEFAULT_FAST_BEAM_WIDTH = 2
-DEFAULT_GRASP_WAVES = (4, 8, 16, 32, 64)
+DEFAULT_GRASP_WAVES = (4, 8, 16, 32, 64, 128, 256)
 DEFAULT_PLACEMENT_WAVES = (4, 8, 16, 32, 96)
 DEFAULT_QUALIFICATION_MAX_CONCURRENCY = 8
 DEFAULT_FAST_IK_SEED_COUNT = 2

@@ -28,8 +28,11 @@ the replay and shadow gates below pass.
   but reuses the pair-legality proof of its explicitly marked physical family.
   Such a twin cannot consume the second grasp-diversity slot while an
   independent family remains available.
-- Grasp waves are incremental slices with cumulative limits
-  `4 → 8 → 16 → 32 → 64 → all`. Placement waves use cumulative limits
+- GraspGenX freezes 512 model candidates once. Grasp waves are incremental
+  slices with cumulative limits `4 → 8 → 16 → 32 → 64 → 128 → 256`; only if
+  those waves cannot produce the required complete L5 branches does the
+  deterministic implicit exhaustion wave visit the remaining frozen pool.
+  Placement waves use cumulative limits
   `4 → 8 → 16 → 32 → 96` per grasp branch. Candidate IDs, branch IDs,
   and 10 mm / 10 degree SE(3) cluster IDs determine a stable round-robin order.
 - Capability-map density, joint margin, singular value, and generator score

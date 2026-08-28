@@ -39,8 +39,11 @@ Parallel-jaw symmetric equivalents may share the physical legality
 calculation, while retaining separate candidate evidence. No empirical score,
 capability-map hole, or heuristic can permanently reject a candidate.
 
-The host retains a primary and a diverse backup grasp and schedules incremental
-grasp slices at cumulative limits `4 → 8 → 16 → 32 → 64 → all`. Each branch
+The host freezes 512 GraspGenX candidates, retains a primary and a diverse
+backup grasp, and schedules incremental grasp slices at cumulative limits
+`4 → 8 → 16 → 32 → 64 → 128 → 256`. The untouched remainder is visited only
+as the implicit exhaustive tail when the configured waves cannot fill the L5
+target. Each branch
 covers AnyPlace waves at cumulative limits `4 → 8 → 16 → 32 → 96`, giving a
 complete `2 × 96 = 192` pair search when needed.
 Different candidates run concurrently, but each candidate's dependent stages

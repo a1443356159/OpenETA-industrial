@@ -11,6 +11,7 @@ from tools.candidate_config import (
     DEFAULT_ANYPLACE_RAW_POOL_SIZE,
     DEFAULT_GRASPGENX_RAW_POOL_SIZE,
     DEFAULT_GRASP_RAW_POOL_SIZE,
+    DEFAULT_GRASP_WAVES,
     DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
     DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT,
     CandidateFunnelConfig,
@@ -27,8 +28,10 @@ def test_candidate_services_have_only_reserve_defaults(tmp_path):
     assert AnyPlaceBackend(
         anyplace_root=tmp_path, config_path=tmp_path
     ).raw_pool_size == 96
-    assert DEFAULT_GRASPGENX_RAW_POOL_SIZE == 256
-    assert inspect.signature(GraspGenXBackend).parameters["raw_pool_size"].default == 256
+    assert DEFAULT_GRASPGENX_RAW_POOL_SIZE == 512
+    assert inspect.signature(GraspGenXBackend).parameters["raw_pool_size"].default == 512
+    assert DEFAULT_GRASP_WAVES == (4, 8, 16, 32, 64, 128, 256)
+    assert CandidateFunnelConfig().grasp_waves == DEFAULT_GRASP_WAVES
     assert DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT == 4
     assert DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT == 2
     assert not hasattr(CandidateFunnelConfig(), "graspgenx_exposure_limit")

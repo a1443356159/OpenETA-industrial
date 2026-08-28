@@ -264,11 +264,11 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
 def test_service_preflight_pool_expectations_follow_runtime_environment(
     monkeypatch,
 ) -> None:
-    assert acceptance._expected_service_raw_pool_size("openeta-graspgenx") == 256
+    assert acceptance._expected_service_raw_pool_size("openeta-graspgenx") == 512
     assert acceptance._expected_service_raw_pool_size("openeta-anyplace") == 96
 
-    monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", "512")
-    assert acceptance._expected_service_raw_pool_size("openeta-graspgenx") == 512
+    monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", "384")
+    assert acceptance._expected_service_raw_pool_size("openeta-graspgenx") == 384
 
     monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", "invalid")
     assert acceptance._expected_service_raw_pool_size("openeta-graspgenx") == -1
