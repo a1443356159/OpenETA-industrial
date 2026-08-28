@@ -405,9 +405,16 @@ def _qualification_model_paths(config: GazeboControlConfig) -> tuple[Path, Path]
     return urdf, srdf
 
 
-@lru_cache(maxsize=8)
 def _expanded_qualification_urdf(config: GazeboControlConfig) -> bytes:
     urdf, _ = _qualification_model_paths(config)
+    return _expanded_qualification_urdf_at_path(str(urdf))
+
+
+@lru_cache(maxsize=8)
+def _expanded_qualification_urdf_at_path(urdf_path: str) -> bytes:
+    """Expand one immutable robot model without caching mutable run metadata."""
+
+    urdf = Path(urdf_path)
     try:
         import xacro
 
@@ -424,14 +431,28 @@ def _expanded_qualification_urdf(config: GazeboControlConfig) -> bytes:
             return b"<missing-urdf>"
 
 
-@lru_cache(maxsize=8)
 def _qualification_serial_chain(config: GazeboControlConfig):
+    return _qualification_serial_chain_from_model(
+        _expanded_qualification_urdf(config),
+        config.base_link,
+        config.arm_tip,
+    )
+
+
+@lru_cache(maxsize=8)
+def _qualification_serial_chain_from_model(
+    expanded_urdf: bytes,
+    base_link: str,
+    tip_link: str,
+):
+    """Cache kinematics only by the bytes and frames that define it."""
+
     from agent.runtime.urdf_jacobian import UrdfSerialChain
 
     return UrdfSerialChain.from_urdf(
-        _expanded_qualification_urdf(config),
-        base_link=config.base_link,
-        tip_link=config.arm_tip,
+        expanded_urdf,
+        base_link=base_link,
+        tip_link=tip_link,
     )
 
 

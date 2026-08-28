@@ -410,7 +410,7 @@ def _automation_metadata_for_backend(
         f"[automation=scripted_tui; planner_mode={planner_mode}; "
         f"execution_profile={profile}; qualification_profile={funnel_profile}; "
         "initial_observe=required; "
-        f"environment_id={ENV_ID}; environment_task=normal_pick_and_place; "
+        f"environment_id={ENV_ID}; "
         f"environment_seed={int(scene['seed'])}; "
         f"acceptance_scene={str(scene['scene_id'])}; "
         f"{semantic_metadata}]"

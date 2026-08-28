@@ -83,6 +83,7 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
     assert "planner_mode=agentic_closed_loop" in metadata
     assert f"environment_id={acceptance.ENV_ID}" in metadata
     assert "initial_observe=required" in metadata
+    assert "environment_task=" not in metadata
 
 
 def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
@@ -220,6 +221,7 @@ def test_multi_normal_prepares_one_human_request_with_private_verification_oracl
         "graspgenx", scenario="multi_normal"
     )
     assert "work_order_source=vlm_conversation" in metadata
+    assert "environment_task=" not in metadata
     assert "grasp_target=" not in metadata
     assert "placement_region=" not in metadata
 

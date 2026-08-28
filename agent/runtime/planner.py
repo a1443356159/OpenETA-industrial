@@ -8835,7 +8835,12 @@ def _effective_task_text(observation: EnvObservation, memory: AgentMemory) -> st
             return user_request
     active = memory.active_environment_task()
     task = active.get("task") if isinstance(active, dict) else None
-    return task.strip() if isinstance(task, str) and task.strip() else observation.task
+    if isinstance(task, str) and task.strip():
+        return task.strip()
+    observed = str(observation.task or "").strip()
+    if observed:
+        return observed
+    return str(memory.current_user_request or memory.task or "").strip()
 
 
 def _word_tokens(text: str) -> list[str]:

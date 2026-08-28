@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import logging
 import math
 from pathlib import Path
 import time
@@ -1006,6 +1007,7 @@ class GazeboController:
                     # the caller can validate the evidence, but never collapse
                     # an engine/service defect into INVALID_CONTROL_ACTION (or
                     # worse, an unreachable candidate).
+                    logging.exception("MoveIt candidate qualification infrastructure failure")
                     binding = str(action.get("qualification_binding_sha256") or "")
                     candidates = action.get("candidates")
                     candidates = candidates if isinstance(candidates, list) else []

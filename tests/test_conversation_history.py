@@ -154,6 +154,21 @@ def test_environment_assigned_task_survives_many_tool_calls() -> None:
     assert assigned_task not in json.dumps(context["recent_events"])
 
 
+def test_task_neutral_environment_keeps_identity_without_injecting_a_task() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="把扳手放入与我对话中指定的料箱。")
+    action = _environment_action("")
+
+    memory.add_action(action)
+
+    active = memory.active_environment_task()
+    assert active is not None
+    assert "task" not in active
+    assert active["env_id"] == "openeta/libero-task0-v0"
+    assert active["handle"] == "env-1"
+    assert active["source_field"] == "outputs.environment"
+
+
 def test_environment_assigned_task_replaces_and_clears_with_environment_lifecycle() -> None:
     memory = AgentMemory()
     memory.start_session(task="Run simulator tasks.")

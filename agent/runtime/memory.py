@@ -1629,25 +1629,40 @@ class AgentMemory:
         if call is None:
             return False
 
-        extracted = _assigned_task_from_tool_call(call)
-        if extracted is None:
-            if str(call.get("name") or "") != "create_simulator_env":
-                return False
-            removed = self.facts.pop(ACTIVE_ENVIRONMENT_TASK_KEY, None)
-            self.record(
-                "active_environment_task_missing",
-                {"source_tool": "create_simulator_env"},
-            )
-            return removed is not None or gripper_removed
-
-        task, source_field = extracted
         outputs = _tool_call_outputs(call)
         environment = outputs.get("environment")
         environment = environment if isinstance(environment, dict) else {}
         mcp = outputs.get("mcp")
         mcp = mcp if isinstance(mcp, dict) else {}
         previous = self.active_environment_task() or {}
-        if str(call.get("name") or "") == "observe" and previous.get("task") == task:
+        source_tool = str(call.get("name") or "")
+        extracted = _assigned_task_from_tool_call(call)
+        if extracted is None:
+            if source_tool != "create_simulator_env":
+                return False
+            # Task-neutral workcells keep only their lifecycle
+            # identity here; the user request stays in conversation memory and
+            # the VLM-authored structured work order has its own fact.
+            value = {
+                "env_id": environment.get("env_id"),
+                "handle": environment.get("handle") or mcp.get("handle"),
+                "session_id": environment.get("session_id") or mcp.get("session_id"),
+                "source_tool": source_tool,
+                "source_field": "outputs.environment",
+                "scene_epoch": self.scene_epoch(),
+                "updated_at_s": time.time(),
+            }
+            value = {key: item for key, item in value.items() if item not in (None, "")}
+            self.facts[ACTIVE_ENVIRONMENT_TASK_KEY] = _memory_fact_entry(
+                value,
+                source="simulator_tool_result",
+            )
+            if previous != value:
+                self.record("active_environment_updated", value)
+            return previous != value or gripper_removed
+
+        task, source_field = extracted
+        if source_tool == "observe" and previous.get("task") == task:
             return False
         value = {
             "task": task,
@@ -1656,7 +1671,7 @@ class AgentMemory:
             "session_id": (
                 environment.get("session_id") or mcp.get("session_id") or previous.get("session_id")
             ),
-            "source_tool": str(call.get("name") or ""),
+            "source_tool": source_tool,
             "source_field": source_field,
             "scene_epoch": self.scene_epoch(),
             "updated_at_s": time.time(),

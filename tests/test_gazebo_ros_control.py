@@ -41,6 +41,7 @@ from extensions.gazebo.ros_control import (
     _populate_recovery_trajectory_goal,
     _populate_state_validity_request,
     _qualification_robot_model_sha256,
+    _urdf_reach_upper_bound_m,
 )
 from agent.runtime.capability_map import generate_sparse_capability_map, robot_model_hash
 
@@ -264,6 +265,22 @@ def test_qualification_solver_auto_matches_launch_profile(monkeypatch) -> None:
     assert _configured_qualification_solver_profile() == "kdl_fast"
     monkeypatch.setenv("OPENETA_QUALIFICATION_SOLVER_PROFILE", "trac_ik_speed")
     assert _configured_qualification_solver_profile() == "trac_ik_speed"
+
+
+def test_qualification_kinematics_cache_ignores_dynamic_work_order_metadata() -> None:
+    config = NativePickPlaceConfig(
+        acceptance_scene_id="multi_normal",
+        work_order_item={
+            "target_object_id": "target_object",
+            "placement_region_id": "blue_parts_bin",
+        },
+    )
+
+    # The work order is intentionally a dict and therefore not hashable.  It
+    # does not define robot kinematics and must never become part of that cache
+    # key.  Non-ROS test hosts may conservatively return infinity when xacro is
+    # unavailable; either result proves model lookup reached its normal path.
+    assert _urdf_reach_upper_bound_m(config) > 0.0
 
 
 def test_fast_ik_solver_budget_does_not_shorten_ros_response_deadline() -> None:

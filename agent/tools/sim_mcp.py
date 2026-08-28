@@ -1381,8 +1381,6 @@ class SimulatorEnvironmentCreator:
             ),
         }
         task = parameters.get("task")
-        if not task and context.observation is not None:
-            task = context.observation.task
         if isinstance(task, str) and task:
             args["task"] = task
         session_id = parameters.get("session_id") or self.config.session_id

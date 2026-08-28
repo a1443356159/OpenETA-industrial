@@ -12,7 +12,7 @@ import pytest
 
 import agent.tools.sim_mcp as sim_mcp
 from sim.mcp_server.worker_mgr import _attach_control_spec
-from adapter.protocol import EnvAction, JsonDict
+from adapter.protocol import EnvAction, EnvObservation, JsonDict, RobotState
 from agent.tools.sim_mcp import (
     DEFAULT_SIMULATOR_MCP_TOOL_NAMES,
     SimulatorMcpEpisodeConfig,
@@ -601,6 +601,11 @@ def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Pa
             "session_id": "session-1",
             "include_objects": True,
         },
+        observation=EnvObservation(
+            task="user-authored task stays in agent memory",
+            cameras=[],
+            robot=RobotState(),
+        ),
         metadata={"session_id": "agent-session-1"},
     )
 
