@@ -24,6 +24,8 @@ from adapter.protocol import JsonDict
 from agent.tools.registry import ToolResult
 from agent.runtime.capability_map import SparseCapabilityMap, target_pose
 from agent.runtime.qualification_legality import (
+    CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+    RELEASE_HEIGHT_VARIANT_FIELD,
     bind_qualified_placement_goal,
     evaluate_grasp_target_closing_alignment,
     evaluate_grasp_placement_pair_legality,
@@ -399,6 +401,7 @@ class MoveItCandidateQualifier:
         scene_epoch: int,
         planning_scene_revision: int,
         source: Mapping[str, Any] | None = None,
+        release_height_variant: str | None = None,
     ) -> tuple[list[JsonDict], JsonDict]:
         """Run the cheap complete goal barrier before compiling any pair.
 
@@ -409,14 +412,27 @@ class MoveItCandidateQualifier:
         from changing a pose identity after IK/L5 compilation.
         """
 
-        descriptors = [
-            {
-                "candidate_id": str(goal.get("id") or f"placement_{index:03d}"),
-                "candidate_pose_sha256": _hash(goal),
-                "candidate": json.loads(json.dumps(goal)),
-            }
-            for index, goal in enumerate(goals)
-        ]
+        if release_height_variant not in {
+            None,
+            CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+        }:
+            raise ValueError("placement release-height variant is invalid")
+        descriptors = []
+        for index, goal in enumerate(goals):
+            candidate = json.loads(json.dumps(goal))
+            # Provider output cannot select a host-private recovery policy.
+            candidate.pop(RELEASE_HEIGHT_VARIANT_FIELD, None)
+            if release_height_variant is not None:
+                candidate[RELEASE_HEIGHT_VARIANT_FIELD] = release_height_variant
+            descriptors.append(
+                {
+                    "candidate_id": str(
+                        goal.get("id") or f"placement_{index:03d}"
+                    ),
+                    "candidate_pose_sha256": _hash(candidate),
+                    "candidate": candidate,
+                }
+            )
         request: JsonDict = {
             "schema_version": QUALIFICATION_SCHEMA_V3,
             "purpose": "placement",
@@ -430,6 +446,9 @@ class MoveItCandidateQualifier:
             "funnel": {
                 "qualification_profile": "fast_v3",
                 "qualification_mode": "goal_prebind",
+                "release_height_variant": (
+                    release_height_variant or "geometry_primary"
+                ),
             },
             "source": dict(source or {}),
             "candidates": descriptors,
@@ -499,6 +518,9 @@ class MoveItCandidateQualifier:
             "frozen_goal_legality_pass_count": len(bound),
             "frozen_goal_legality_reject_count": len(rows) - len(bound),
             "frozen_goal_legality_frontier_count": len(bound),
+            "frozen_goal_release_height_variant": (
+                release_height_variant or "geometry_primary"
+            ),
         }
 
     def qualify_result(

@@ -35,11 +35,12 @@ and MoveIt owns complete robot paths.
 3. For a flat support, derive the exact release EEF pose as
    `object_goal * inverse(measured_attachment)`. For a collision-backed
    container, AnyPlace still selects the destination and proves a settled pose,
-   while the host derives one geometry-backed gravity-drop terminal at that
+   while the host derives a geometry-backed gravity-drop terminal at that
    destination that keeps the carried orientation. A flat support uses the
-   configured drop; a compound container uses at least its lowest
-   collision-backed entry height plus the calibrated collision clearance,
-   without lifting over unrelated higher walls.
+   configured drop. A container may prefer its lowest geometry-proven full
+   exterior entry edge plus clearance; internal or suspended obstacles do not
+   qualify. If that batch exhausts IK/L5, the host retries configured height
+   under the same gates before expanding the frozen grasp frontier.
    Its Z is host evidence, not an agent waypoint; gravity owns settling after detach.
    Pair legality, Beam-2, state validity, and L5 plan-only must all pass in
    either case. Stable wave barriers preserve deterministic order; use the

@@ -1731,8 +1731,19 @@ def test_release_z_offset_translates_only_the_terminal_not_the_settled_goal():
     assert stage["placement_release_z_offset_m"] == pytest.approx(0.20)
 
 
-def test_container_release_clears_lowest_entry_without_moving_settled_goal():
+@pytest.mark.parametrize(
+    "container_quat",
+    [
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)],
+    ],
+    ids=["axis_aligned", "yaw_rotated"],
+)
+def test_container_release_clears_lowest_entry_without_moving_settled_goal(
+    container_quat,
+):
     scene = _physical_bin_placement_scene()
+    scene["world_specs"]["parts_bin"]["pose_quat_xyzw"] = container_quat
     candidate = _candidate(0)
     candidate.update(
         {
@@ -1764,7 +1775,7 @@ def test_container_release_clears_lowest_entry_without_moving_settled_goal():
     assert legality["verdict"] == "PASS"
     binding = legality["checks"]["object_frame_binding"]
     selection = binding["release_offset_selection"]
-    assert selection["source"] == "container_entry_clearance"
+    assert selection["source"] == "container_exterior_entry_clearance"
     assert selection["configured_drop_height_m"] == pytest.approx(0.05)
     assert selection["support_collision_maximum_z_m"] == pytest.approx(0.18)
     assert selection["support_collision_height_above_surface_m"] == pytest.approx(0.16)
@@ -1772,6 +1783,9 @@ def test_container_release_clears_lowest_entry_without_moving_settled_goal():
     assert selection["support_entry_height_above_surface_m"] == pytest.approx(0.07)
     assert selection["entry_clearance_above_edge_m"] == pytest.approx(0.005)
     assert selection["support_barrier_count"] == 4
+    assert selection["support_exterior_entry_barrier_count"] == 4
+    assert selection["support_unclassified_barrier_count"] == 0
+    assert selection["support_entry_geometry_proven"] is True
     assert selection["container_clearance_m"] == pytest.approx(0.005)
     assert selection["effective_offset_m"] == pytest.approx(0.075)
     assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
@@ -1783,6 +1797,100 @@ def test_container_release_clears_lowest_entry_without_moving_settled_goal():
     stage = descriptor["candidate"]["qualification_stages"][0]
     assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.325])
     assert stage["placement_release_z_offset_m"] == pytest.approx(0.075)
+
+
+@pytest.mark.parametrize(
+    "extra_primitive",
+    [
+        {
+            "shape": "box",
+            "size_xyz": [0.02, 0.30, 0.04],
+            "pose_xyz": [0.08, 0.0, 0.04],
+            "pose_rpy": [0.0, 0.0, 0.0],
+        },
+        {
+            "shape": "box",
+            "size_xyz": [0.32, 0.02, 0.02],
+            "pose_xyz": [0.0, -0.18, 0.06],
+            "pose_rpy": [0.0, 0.0, 0.0],
+        },
+    ],
+    ids=["internal_divider", "suspended_edge_ledge"],
+)
+def test_container_entry_height_ignores_unproven_obstacles(extra_primitive):
+    scene = _physical_bin_placement_scene()
+    scene["world_specs"]["parts_bin"]["primitives"].append(extra_primitive)
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, -0.1, 0.05],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+        }
+    )
+
+    legality = evaluate_placement_goal_legality(
+        {"candidate_id": "c0", "candidate": candidate},
+        scene=scene,
+    )
+
+    selection = legality["checks"]["object_frame_binding"][
+        "release_offset_selection"
+    ]
+    assert legality["verdict"] == "PASS"
+    assert selection["support_entry_minimum_z_m"] == pytest.approx(0.09)
+    assert selection["effective_offset_m"] == pytest.approx(0.075)
+    assert selection["support_exterior_entry_barrier_count"] == 4
+    assert selection["support_unclassified_barrier_count"] == 1
+
+
+def test_unclassified_compound_obstacles_do_not_override_configured_drop_height():
+    scene = _physical_bin_placement_scene()
+    base = scene["world_specs"]["parts_bin"]["primitives"][0]
+    scene["world_specs"]["parts_bin"]["primitives"] = [
+        base,
+        {
+            "shape": "box",
+            "size_xyz": [0.02, 0.30, 0.12],
+            "pose_xyz": [0.08, 0.0, 0.06],
+            "pose_rpy": [0.0, 0.0, 0.0],
+        },
+    ]
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, -0.1, 0.05],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+        }
+    )
+
+    legality = evaluate_placement_goal_legality(
+        {"candidate_id": "c0", "candidate": candidate},
+        scene=scene,
+    )
+
+    selection = legality["checks"]["object_frame_binding"][
+        "release_offset_selection"
+    ]
+    assert legality["verdict"] == "PASS"
+    assert selection["source"] == "configured_drop_height"
+    assert selection["support_entry_geometry_proven"] is False
+    assert selection["support_exterior_entry_barrier_count"] == 0
+    assert selection["support_unclassified_barrier_count"] == 1
+    assert selection["effective_offset_m"] == pytest.approx(0.05)
 
 
 def _rotated_container_goal() -> tuple[dict, dict]:
@@ -1889,6 +1997,45 @@ def test_goal_prebind_rpc_freezes_container_release_before_pair_compilation():
         [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
     ]
+
+
+def test_goal_prebind_can_materialize_configured_height_recovery_variant():
+    scene, candidate = _rotated_container_goal()
+    engine = _engine(clone_scene=lambda: scene)
+    qualifier = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: engine.qualify(request),
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+
+    primary, _ = qualifier.prebind_placement_goals(
+        [candidate],
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+    fallback, summary = qualifier.prebind_placement_goals(
+        primary,
+        scene_epoch=1,
+        planning_scene_revision=4,
+        release_height_variant="configured_drop_height_fallback",
+    )
+
+    primary_selection = primary[0]["placement_release_offset_selection"]
+    fallback_selection = fallback[0]["placement_release_offset_selection"]
+    assert primary_selection["effective_offset_m"] == pytest.approx(0.075)
+    assert fallback_selection["source"] == "configured_drop_height_fallback"
+    assert fallback_selection["primary_effective_offset_m"] == pytest.approx(0.075)
+    assert fallback_selection["effective_offset_m"] == pytest.approx(0.05)
+    assert fallback_selection["fallback_activated"] is True
+    assert fallback[0]["qualified_release_object_goal_pose"]["translation_xyz"][
+        2
+    ] == pytest.approx(
+        primary[0]["qualified_release_object_goal_pose"]["translation_xyz"][2]
+        - 0.025
+    )
+    assert summary["frozen_goal_release_height_variant"] == (
+        "configured_drop_height_fallback"
+    )
 
 
 def test_container_goal_prebind_is_idempotent_after_pair_compilation():

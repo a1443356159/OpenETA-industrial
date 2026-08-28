@@ -26,6 +26,8 @@ from agent.runtime.collision_geometry import (
 GOAL_LEGALITY_SCHEMA = "openeta.placement_goal_legality.v1"
 PAIR_LEGALITY_SCHEMA = "openeta.grasp_placement_pair_legality.v1"
 GRASP_TARGET_CLOSING_SCHEMA = "openeta.grasp_target_closing_alignment.v1"
+RELEASE_HEIGHT_VARIANT_FIELD = "_openeta_release_height_variant"
+CONFIGURED_RELEASE_HEIGHT_FALLBACK = "configured_drop_height_fallback"
 _ROTATION_TOLERANCE = 1e-4
 _POSE_TOLERANCE_M = 1e-5
 _ORIENTATION_TOLERANCE = 1e-4
@@ -542,6 +544,115 @@ def _non_support_obbs(
     return tuple(barriers), support_count
 
 
+def _proven_exterior_entry_barrier_tops(
+    geometry: Sequence[ProjectedCollisionPrimitive],
+    *,
+    support_z_m: float,
+) -> tuple[tuple[float, ...], int]:
+    """Return tops of support-connected walls proven to span an outer edge.
+
+    A compound support may also contain dividers, handles, ribs, or suspended
+    geometry.  Their height says nothing about the route into the support, so
+    merely taking the lowest non-floor primitive is not a valid entry proof.
+    This classifier accepts only horizontal box support faces and vertical box
+    barriers which are connected to that face, intersect one of its exterior
+    boundaries, and cover the complete corresponding edge.  Everything else
+    remains a normal collision obstacle, but cannot raise the release target.
+    """
+
+    scale = max(
+        1.0,
+        abs(support_z_m),
+        *(abs(value) for primitive in geometry for value in primitive.center_xyz),
+    )
+    numeric_band = 64.0 * math.ulp(scale)
+    support_surfaces = [
+        primitive
+        for primitive in geometry
+        if primitive.shape == "box"
+        and primitive.size_xyz is not None
+        and abs(
+            primitive.center_xyz[2]
+            + primitive.axis_half_extent(2)
+            - support_z_m
+        )
+        <= numeric_band
+    ]
+    proven_indices: set[int] = set()
+    for support in support_surfaces:
+        support_axes = _columns(support.rotation_rows)
+        vertical_index = max(
+            range(3),
+            key=lambda index: abs(support_axes[index][2]),
+        )
+        if abs(abs(support_axes[vertical_index][2]) - 1.0) > _ROTATION_TOLERANCE:
+            continue
+        horizontal_axes = [
+            support_axes[index] for index in range(3) if index != vertical_index
+        ]
+        for barrier_index, barrier in enumerate(geometry):
+            if (
+                barrier.shape != "box"
+                or barrier.size_xyz is None
+                or barrier_index in proven_indices
+            ):
+                continue
+            barrier_bottom = barrier.center_xyz[2] - barrier.axis_half_extent(2)
+            barrier_top = barrier.center_xyz[2] + barrier.axis_half_extent(2)
+            if (
+                barrier_bottom > support_z_m + numeric_band
+                or barrier_top <= support_z_m + numeric_band
+            ):
+                continue
+            barrier_axes = _columns(barrier.rotation_rows)
+            barrier_vertical_alignment = max(abs(axis[2]) for axis in barrier_axes)
+            if abs(barrier_vertical_alignment - 1.0) > _ROTATION_TOLERANCE:
+                continue
+            delta = tuple(
+                barrier.center_xyz[index] - support.center_xyz[index]
+                for index in range(3)
+            )
+            for normal_index, tangent_index in ((0, 1), (1, 0)):
+                normal = horizontal_axes[normal_index]
+                tangent = horizontal_axes[tangent_index]
+                support_normal_half = _primitive_axis_half_extent(support, normal)
+                support_tangent_half = _primitive_axis_half_extent(support, tangent)
+                barrier_normal_half = _primitive_axis_half_extent(barrier, normal)
+                barrier_tangent_half = _primitive_axis_half_extent(barrier, tangent)
+                # A filled block is not a boundary wall, even if its outer
+                # faces happen to coincide with the support envelope.
+                if barrier_normal_half >= support_normal_half - numeric_band:
+                    continue
+                normal_center = abs(_dot(delta, normal))
+                near_face = normal_center - barrier_normal_half
+                far_face = normal_center + barrier_normal_half
+                crosses_boundary = (
+                    near_face - numeric_band
+                    <= support_normal_half
+                    <= far_face + numeric_band
+                )
+                tangent_center = _dot(delta, tangent)
+                covers_edge = (
+                    tangent_center - barrier_tangent_half
+                    <= -support_tangent_half + numeric_band
+                    and tangent_center + barrier_tangent_half
+                    >= support_tangent_half - numeric_band
+                )
+                if crosses_boundary and covers_edge:
+                    proven_indices.add(barrier_index)
+                    break
+    return (
+        tuple(
+            sorted(
+                geometry[index].center_xyz[2]
+                + geometry[index].axis_half_extent(2)
+                for index in proven_indices
+            )
+        ),
+        len(support_surfaces),
+    )
+
+
 def _effective_release_z_offset(
     *,
     configured_drop_height_m: float,
@@ -553,12 +664,11 @@ def _effective_release_z_offset(
     """Select a release height from support geometry, without moving the goal.
 
     A flat support keeps the configured gravity-drop height.  For a compound
-    container, the lowest collision-backed edge is the least restrictive
-    physical entry.  Select the larger of the configured drop and that entry
-    height plus the collision clearance, instead of forcing the wrist above
-    the highest side wall or asking MoveIt to descend below every rim while
-    the payload is still attached.  AnyPlace continues to own the settled goal,
-    and pair legality plus MoveIt prove the complete path against every wall.
+    container, only a support-connected wall which geometrically spans a full
+    exterior edge can prove an entry height.  Internal dividers, ribs and
+    floating protrusions remain collision obstacles but cannot raise the
+    release target.  AnyPlace continues to own the settled goal, and pair
+    legality plus MoveIt prove the complete path against every primitive.
     """
 
     evidence: JsonDict = {
@@ -583,20 +693,15 @@ def _effective_release_z_offset(
     maximum_z = max(
         primitive.center_xyz[2] + primitive.axis_half_extent(2) for primitive in geometry
     )
-    numeric_scale = max(
-        1.0,
-        abs(support_z_m),
-        *(abs(value) for primitive in geometry for value in primitive.center_xyz),
-    )
-    numeric_band = 64.0 * math.ulp(numeric_scale)
-    barrier_top_z_values = sorted(
-        primitive.center_xyz[2] + primitive.axis_half_extent(2)
-        for primitive in geometry
-        if primitive.center_xyz[2] + primitive.axis_half_extent(2) > support_z_m + numeric_band
+    exterior_entry_top_z_values, classified_support_count = (
+        _proven_exterior_entry_barrier_tops(
+            geometry,
+            support_z_m=support_z_m,
+        )
     )
     minimum_entry_height = (
-        max(0.0, barrier_top_z_values[0] - support_z_m)
-        if barriers and barrier_top_z_values
+        max(0.0, exterior_entry_top_z_values[0] - support_z_m)
+        if exterior_entry_top_z_values
         else 0.0
     )
     effective_offset = (
@@ -604,28 +709,46 @@ def _effective_release_z_offset(
             configured_drop_height_m,
             minimum_entry_height + max(0.0, clearance_m),
         )
-        if barriers
+        if exterior_entry_top_z_values
         else configured_drop_height_m
     )
+    entry_geometry_proven = bool(exterior_entry_top_z_values)
     evidence.update(
         {
-            "source": ("container_entry_clearance" if barriers else "configured_drop_height"),
-            "container_clearance_m": max(0.0, clearance_m) if barriers else 0.0,
+            "source": (
+                "container_exterior_entry_clearance"
+                if entry_geometry_proven
+                else "configured_drop_height"
+            ),
+            "container_clearance_m": (
+                max(0.0, clearance_m) if entry_geometry_proven else 0.0
+            ),
             "effective_offset_m": effective_offset,
             "support_geometry_available": True,
             "support_primitive_count": len(geometry),
             "support_surface_primitive_count": support_primitive_count,
+            "support_classified_surface_primitive_count": classified_support_count,
             "support_barrier_count": len(barriers),
+            "support_exterior_entry_barrier_count": len(
+                exterior_entry_top_z_values
+            ),
+            "support_unclassified_barrier_count": max(
+                0,
+                len(barriers) - len(exterior_entry_top_z_values),
+            ),
+            "support_entry_geometry_proven": entry_geometry_proven,
             "support_z_m": support_z_m,
             "support_collision_maximum_z_m": maximum_z,
             "support_collision_height_above_surface_m": max(0.0, maximum_z - support_z_m),
             "support_entry_minimum_z_m": (
-                barrier_top_z_values[0] if barrier_top_z_values else support_z_m
+                exterior_entry_top_z_values[0]
+                if exterior_entry_top_z_values
+                else support_z_m
             ),
             "support_entry_height_above_surface_m": minimum_entry_height,
             "entry_clearance_above_edge_m": (
                 max(0.0, effective_offset - minimum_entry_height)
-                if barriers
+                if entry_geometry_proven
                 else 0.0
             ),
             "clearance_m": clearance_m,
@@ -825,6 +948,35 @@ def evaluate_placement_goal_legality(
         support_spec=world_specs.get(support_object_id),
         clearance_m=release_clearance,
     )
+    release_height_variant = str(
+        candidate.get(RELEASE_HEIGHT_VARIANT_FIELD) or "geometry_primary"
+    )
+    if release_height_variant == CONFIGURED_RELEASE_HEIGHT_FALLBACK:
+        primary_offset = release_z_offset
+        release_z_offset = configured_release_z_offset
+        release_offset_evidence = {
+            **release_offset_evidence,
+            "source": "configured_drop_height_fallback",
+            "release_height_variant": release_height_variant,
+            "primary_effective_offset_m": primary_offset,
+            "effective_offset_m": release_z_offset,
+            "fallback_activated": primary_offset > release_z_offset + 1e-12,
+        }
+    elif release_height_variant != "geometry_primary":
+        result.update(
+            verdict="UNKNOWN",
+            reason="placement_release_height_variant_invalid",
+            geometry_available=False,
+            infrastructure_error=True,
+            elapsed_s=time.monotonic() - started,
+        )
+        return result
+    else:
+        release_offset_evidence = {
+            **release_offset_evidence,
+            "release_height_variant": release_height_variant,
+            "fallback_activated": False,
+        }
     static_penetration_tolerance = float(
         region.get(
             "static_penetration_tolerance_m",
@@ -1452,6 +1604,18 @@ def bind_qualified_placement_goal(
             release_pointcloud_goal
         )
     candidate["release_orientation_policy"] = release_orientation_policy
+    release_offset_selection = binding.get("release_offset_selection")
+    if isinstance(release_offset_selection, Mapping):
+        candidate["placement_release_offset_selection"] = dict(
+            release_offset_selection
+        )
+    release_z_offset = binding.get("release_z_offset_m")
+    if (
+        isinstance(release_z_offset, (int, float))
+        and not isinstance(release_z_offset, bool)
+        and math.isfinite(float(release_z_offset))
+    ):
+        candidate["placement_release_z_offset_m"] = float(release_z_offset)
     if release_orientation_policy == "preserve_current_orientation_for_container_drop":
         candidate["container_drop_release_prebound"] = True
     if isinstance(qualified_motion, Mapping):

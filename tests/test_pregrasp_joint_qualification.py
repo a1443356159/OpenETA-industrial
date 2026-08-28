@@ -632,6 +632,183 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     ) is None
 
 
+def test_frozen_pair_uses_configured_release_height_before_expanding_grasps() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        if _is_goal_prebind(request):
+            variant = request["funnel"]["release_height_variant"]
+            calls.append(("prebind", variant))
+            response = _goal_prebind_response(request)
+            for row in response["results"]:
+                candidate = row["prebound_candidate"]
+                candidate["placement_release_offset_selection"] = {
+                    "configured_drop_height_m": 0.05,
+                    "effective_offset_m": (
+                        0.05
+                        if variant == "configured_drop_height_fallback"
+                        else 0.075
+                    ),
+                    "source": (
+                        "configured_drop_height_fallback"
+                        if variant == "configured_drop_height_fallback"
+                        else "container_exterior_entry_clearance"
+                    ),
+                }
+            return response
+
+        variant = request["candidates"][0]["candidate"].get(
+            "frozen_pair_release_height_variant",
+            "geometry_primary",
+        )
+        calls.append(("pair", variant))
+        fallback = variant == "configured_drop_height_fallback"
+        rows = []
+        for index, item in enumerate(request["candidates"]):
+            passed = fallback and index == 0
+            rows.append(
+                {
+                    "candidate_id": item["candidate_id"],
+                    "candidate_pose_sha256": item["candidate_pose_sha256"],
+                    "qualification_binding_sha256": request[
+                        "qualification_binding_sha256"
+                    ],
+                    "execution_started": False,
+                    "verdict": "PASS" if passed else "FAIL",
+                    "reason": "qualified" if passed else "ik_no_solution",
+                    "stages": [_pass_stage()] if passed else [],
+                    "full_plan_submitted": passed,
+                    "goal_legality": {
+                        "verdict": "PASS",
+                        "checks": {
+                            "object_frame_binding": {
+                                "collision_goal_pose": {
+                                    "convention": "T_world_collision_object_goal",
+                                    "frame": "world",
+                                    "translation_xyz": [0.48, 0.0, 0.43],
+                                    "rotation_matrix": [
+                                        [1.0, 0.0, 0.0],
+                                        [0.0, 1.0, 0.0],
+                                        [0.0, 0.0, 1.0],
+                                    ],
+                                }
+                            }
+                        },
+                    },
+                }
+            )
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "selected_candidate_ids": (
+                [request["candidates"][0]["candidate_id"]] if fallback else []
+            ),
+            "results": rows,
+        }
+
+    cache = QualificationCache()
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        cache=cache,
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            ]
+        },
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+    grasp = {"id": "g0", "score": 0.9}
+    cache.replace(
+        purpose="grasp",
+        candidates=[grasp],
+        proofs={
+            "g0": {
+                "verdict": "PASS",
+                "stages": [
+                    {
+                        "name": "contact",
+                        "target_pose": {
+                            "xyz": [0.3, 0.0, 0.45],
+                            "rotation_matrix": [
+                                [1.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                                [0.0, 0.0, 1.0],
+                            ],
+                        },
+                        "end_joint_state": {
+                            "joint_names": ["j1"],
+                            "positions": [0.0],
+                        },
+                    }
+                ],
+            }
+        },
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+    coordinator = _FrozenGoalPairCoordinator(
+        qualifier,
+        object_goals=[
+            {
+                "id": "p0",
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [0.48, 0.0, 0.43],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                },
+            }
+        ],
+        object_current_pose={
+            "frame": "world",
+            "translation_xyz": [0.3, 0.0, 0.43],
+            "rotation_matrix": [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        },
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+
+    result = coordinator.filter_grasps(
+        ToolResult(True, "qualified", {"grasp_candidates": [grasp]}),
+        scene_epoch=3,
+        planning_scene_revision=7,
+        source={},
+    )
+
+    assert result.success is True
+    assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0"]
+    assert result.details["frozen_pair_release_height_fallback_activated"] is True
+    assert result.details["frozen_pair_count"] == 2
+    assert result.details["frozen_pair_frontier_expansion_count"] == 0
+    assert calls == [
+        ("prebind", "geometry_primary"),
+        ("pair", "geometry_primary"),
+        ("prebind", "configured_drop_height_fallback"),
+        ("pair", "configured_drop_height_fallback"),
+    ]
+    selected = coordinator.qualified_goals_by_grasp["g0"][0]
+    assert selected["placement_release_offset_selection"]["source"] == (
+        "configured_drop_height_fallback"
+    )
+
+
 def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(
     tmp_path: Path,
 ) -> None:

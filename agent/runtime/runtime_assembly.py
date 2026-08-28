@@ -32,6 +32,9 @@ from agent.runtime.moveit_qualification import (
     SAME_RUN_QUALIFICATION_SEED_FIELD,
     private_qualification_rpc,
 )
+from agent.runtime.qualification_legality import (
+    CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+)
 from agent.runtime.qualification_v3 import (
     candidate_physical_quality_key,
     grasp_symmetry_family_id,
@@ -1957,6 +1960,7 @@ class _FrozenGoalPairCoordinator:
             "frozen_pair_full_plan_pass_count": 0,
         }
         reserve_activated = False
+        release_height_fallback_activated = False
         deferred_count = 0
         goal_pool_exhausted = False
 
@@ -1995,9 +1999,28 @@ class _FrozenGoalPairCoordinator:
             reserve_activated = reserve_activated or (
                 filtered.details.get("frozen_pair_reserve_activated") is True
             )
-            pair_artifact = filtered.details.get("frozen_pair_qualification_artifact")
-            if isinstance(pair_artifact, Mapping):
-                pair_artifacts.append(json.loads(json.dumps(pair_artifact)))
+            release_height_fallback_activated = (
+                release_height_fallback_activated
+                or filtered.details.get(
+                    "frozen_pair_release_height_fallback_activated"
+                )
+                is True
+            )
+            batch_pair_artifacts = filtered.details.get(
+                "frozen_pair_qualification_artifacts"
+            )
+            if not isinstance(batch_pair_artifacts, list):
+                pair_artifact = filtered.details.get(
+                    "frozen_pair_qualification_artifact"
+                )
+                batch_pair_artifacts = (
+                    [pair_artifact] if isinstance(pair_artifact, Mapping) else []
+                )
+            pair_artifacts.extend(
+                json.loads(json.dumps(artifact))
+                for artifact in batch_pair_artifacts
+                if isinstance(artifact, Mapping)
+            )
 
             if (
                 filtered.details.get("frozen_goal_legality_screen_complete") is True
@@ -2131,6 +2154,9 @@ class _FrozenGoalPairCoordinator:
                 "frozen_pair_primary_grasp_count": min(primary_target, len(final_grasps)),
                 "frozen_pair_reserve_grasp_count": max(0, len(final_grasps) - primary_target),
                 "frozen_pair_reserve_activated": reserve_activated,
+                "frozen_pair_release_height_fallback_activated": (
+                    release_height_fallback_activated
+                ),
                 "frozen_pair_execution_target": primary_target,
                 "frozen_pair_deferred_grasp_count": deferred_count,
                 "frozen_pair_recovery_policy": ("resume_frozen_frontier_after_execution_failure"),
@@ -2262,7 +2288,7 @@ class _FrozenGoalPairCoordinator:
                 )
 
         retained_entries: dict[str, JsonDict] = {}
-        per_grasp_pairs: list[list[JsonDict]] = []
+        pair_contexts: list[JsonDict] = []
         # Preserve the complete current AnyPlace pool through compilation and
         # conservative structural screening.  Preselecting a handful by
         # farthest-first SE(3) overrepresents extreme object rotations and can
@@ -2307,74 +2333,194 @@ class _FrozenGoalPairCoordinator:
                 contact_pose=contact,
                 object_current_pose=self.object_current_pose,
             )
-            pairs: list[JsonDict] = []
-            for goal in current_goals:
-                pair = dict(goal)
-                goal_id = str(goal.get("id") or "goal")
-                pair["id"] = f"frozen_pair_{grasp_id}_{goal_id}"
-                pair["source_grasp_id"] = grasp_id
-                pair["source_grasp_equivalence_id"] = grasp_equivalence_id
-                pair["source_grasp_symmetry_equivalent"] = bool(grasp.get("symmetry_parent_id"))
-                pair["frozen_pair_batch_index"] = grasp_index // 2
-                pair["frozen_pair_batch_role"] = "primary" if grasp_index < 2 else "reserve"
-                pair["source_object_goal_id"] = goal_id
-                pair["frozen_contact_pose"] = dict(contact)
-                pair["predicted_attachment_transform"] = dict(predicted_attachment)
-                _restore_frozen_model_motion_for_predicted_pair(pair)
-                alignment = grasp.get("target_closing_alignment")
-                if isinstance(alignment, Mapping):
-                    pair["target_closing_alignment"] = json.loads(json.dumps(alignment))
-                score = grasp.get("score")
-                if isinstance(score, (int, float)) and not isinstance(score, bool):
-                    pair["score"] = float(score)
-                physical_rebase = grasp.get("frozen_object_motion_rebase")
-                if isinstance(physical_rebase, Mapping):
-                    pair["frozen_object_motion_rebase"] = json.loads(json.dumps(physical_rebase))
-                pair["qualification_start_joint_state"] = dict(contact_state)
-                pair["initial_scene_transition"] = "virtual_attach"
-                pair["initial_scene_transition_pose"] = dict(contact)
-                pairs.append(pair)
-            per_grasp_pairs.append(pairs)
+            pair_contexts.append(
+                {
+                    "grasp_index": grasp_index,
+                    "grasp": dict(grasp),
+                    "grasp_id": grasp_id,
+                    "grasp_equivalence_id": grasp_equivalence_id,
+                    "contact": dict(contact),
+                    "contact_state": dict(contact_state),
+                    "predicted_attachment": dict(predicted_attachment),
+                }
+            )
 
-        # Round-robin ordering ensures the global top-two plan-only tail does
-        # not get consumed by several goals from the first grasp alone.
-        pair_depth = max((len(group) for group in per_grasp_pairs), default=0)
-        pairs = [
-            group[index]
-            for index in range(pair_depth)
-            for group in per_grasp_pairs
-            if index < len(group)
-        ]
+        def build_pairs(
+            goals: Sequence[Mapping[str, object]],
+            *,
+            release_height_variant: str = "geometry_primary",
+        ) -> list[JsonDict]:
+            per_grasp_pairs: list[list[JsonDict]] = []
+            suffix = (
+                ""
+                if release_height_variant == "geometry_primary"
+                else f"_{release_height_variant}"
+            )
+            for context in pair_contexts:
+                grasp = context["grasp"]
+                grasp = grasp if isinstance(grasp, Mapping) else {}
+                grasp_id = str(context["grasp_id"])
+                grasp_index = int(context["grasp_index"])
+                group: list[JsonDict] = []
+                for goal in goals:
+                    pair = dict(goal)
+                    goal_id = str(goal.get("id") or "goal")
+                    pair["id"] = f"frozen_pair_{grasp_id}_{goal_id}{suffix}"
+                    pair["source_grasp_id"] = grasp_id
+                    pair["source_grasp_equivalence_id"] = str(
+                        context["grasp_equivalence_id"]
+                    )
+                    pair["source_grasp_symmetry_equivalent"] = bool(
+                        grasp.get("symmetry_parent_id")
+                    )
+                    pair["frozen_pair_batch_index"] = grasp_index // 2
+                    pair["frozen_pair_batch_role"] = (
+                        "primary" if grasp_index < 2 else "reserve"
+                    )
+                    pair["frozen_pair_release_height_variant"] = (
+                        release_height_variant
+                    )
+                    pair["source_object_goal_id"] = goal_id
+                    pair["frozen_contact_pose"] = dict(context["contact"])
+                    pair["predicted_attachment_transform"] = dict(
+                        context["predicted_attachment"]
+                    )
+                    _restore_frozen_model_motion_for_predicted_pair(pair)
+                    alignment = grasp.get("target_closing_alignment")
+                    if isinstance(alignment, Mapping):
+                        pair["target_closing_alignment"] = json.loads(
+                            json.dumps(alignment)
+                        )
+                    score = grasp.get("score")
+                    if isinstance(score, (int, float)) and not isinstance(score, bool):
+                        pair["score"] = float(score)
+                    physical_rebase = grasp.get("frozen_object_motion_rebase")
+                    if isinstance(physical_rebase, Mapping):
+                        pair["frozen_object_motion_rebase"] = json.loads(
+                            json.dumps(physical_rebase)
+                        )
+                    pair["qualification_start_joint_state"] = dict(
+                        context["contact_state"]
+                    )
+                    pair["initial_scene_transition"] = "virtual_attach"
+                    pair["initial_scene_transition_pose"] = dict(
+                        context["contact"]
+                    )
+                    group.append(pair)
+                per_grasp_pairs.append(group)
+            # Round-robin ordering ensures the global top-two plan-only tail
+            # is not consumed by several goals from the first grasp alone.
+            pair_depth = max(
+                (len(group) for group in per_grasp_pairs),
+                default=0,
+            )
+            return [
+                group[index]
+                for index in range(pair_depth)
+                for group in per_grasp_pairs
+                if index < len(group)
+            ]
+
+        pairs = build_pairs(current_goals)
         if not pairs:
             return self._replace_grasps(result, [], {}, scene_epoch, planning_scene_revision)
         if goal_prebind_summary:
             result.details.update(goal_prebind_summary)
-        joint = self.qualifier.qualify_result(
-            ToolResult(
-                True,
-                "bounded frozen grasp-goal pair qualification",
-                {
-                    "placement_candidates": pairs,
-                    "model_raw_candidate_count": len(pairs),
-                    "raw_candidate_count": len(pairs),
-                },
-            ),
-            purpose="placement",
-            scene_epoch=scene_epoch,
-            planning_scene_revision=planning_scene_revision,
-            source=source,
-            cache_result=False,
-            qualification_mode="frozen_pair",
-            l5_pass_target=1,
-            l5_min_pass_target=1,
-        )
+        def qualify_pairs(candidate_pairs: list[JsonDict]) -> ToolResult:
+            return self.qualifier.qualify_result(
+                ToolResult(
+                    True,
+                    "bounded frozen grasp-goal pair qualification",
+                    {
+                        "placement_candidates": candidate_pairs,
+                        "model_raw_candidate_count": len(candidate_pairs),
+                        "raw_candidate_count": len(candidate_pairs),
+                    },
+                ),
+                purpose="placement",
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+                source=source,
+                cache_result=False,
+                qualification_mode="frozen_pair",
+                l5_pass_target=1,
+                l5_min_pass_target=1,
+            )
+
+        primary_joint = qualify_pairs(pairs)
+        joint = primary_joint
         if _qualification_infrastructure_reason(joint):
             return _qualification_infrastructure_failure(joint)
         passed_pairs = joint.details.get("placement_candidates")
         passed_pairs = passed_pairs if isinstance(passed_pairs, list) else []
+        primary_artifact = joint.details.get("qualification_artifact")
+        fallback_pairs: list[JsonDict] = []
+        fallback_prebind_summary: JsonDict = {}
+        fallback_activated = False
+
+        def has_lower_configured_release(goal: Mapping[str, object]) -> bool:
+            selection = goal.get("placement_release_offset_selection")
+            if not isinstance(selection, Mapping):
+                return False
+            effective = selection.get("effective_offset_m")
+            configured = selection.get("configured_drop_height_m")
+            return (
+                isinstance(effective, (int, float))
+                and not isinstance(effective, bool)
+                and math.isfinite(float(effective))
+                and isinstance(configured, (int, float))
+                and not isinstance(configured, bool)
+                and math.isfinite(float(configured))
+                and float(effective) > float(configured) + 1e-12
+            )
+
+        fallback_goals_requested = [
+            goal for goal in current_goals if has_lower_configured_release(goal)
+        ]
+        if not passed_pairs and fallback_goals_requested and callable(prebind):
+            try:
+                fallback_goals, fallback_prebind_summary = prebind(
+                    fallback_goals_requested,
+                    scene_epoch=scene_epoch,
+                    planning_scene_revision=planning_scene_revision,
+                    source=source,
+                    release_height_variant=CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+                )
+            except Exception as exc:  # noqa: BLE001 - private scene boundary.
+                return ToolResult(
+                    False,
+                    f"Placement release-height fallback failed: {exc}",
+                    {
+                        "reason": "qualification_infrastructure_error",
+                        "infrastructure_error": True,
+                        "qualification_infrastructure_reason": (
+                            "placement_release_height_fallback_prebind_failed"
+                        ),
+                        "error_type": type(exc).__name__,
+                        "execution_started": False,
+                    },
+                )
+            fallback_pairs = build_pairs(
+                fallback_goals,
+                release_height_variant=CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+            )
+            if fallback_pairs:
+                fallback_activated = True
+                joint = qualify_pairs(fallback_pairs)
+                if _qualification_infrastructure_reason(joint):
+                    return _qualification_infrastructure_failure(joint)
+                passed_pairs = joint.details.get("placement_candidates")
+                passed_pairs = (
+                    passed_pairs if isinstance(passed_pairs, list) else []
+                )
+                if passed_pairs:
+                    self.object_goals = [
+                        json.loads(json.dumps(goal)) for goal in fallback_goals
+                    ]
+        evaluated_pairs = fallback_pairs if fallback_activated else pairs
         goal_legality_summary = self._cache_goal_legality_frontier(
             joint,
-            pairs=pairs,
+            pairs=evaluated_pairs,
         )
         result.details.update(goal_legality_summary)
         pass_count: dict[str, int] = {}
@@ -2437,35 +2583,93 @@ class _FrozenGoalPairCoordinator:
                 cache_grasps.append(dict(cached_candidate))
             if isinstance(entry.get("proof"), Mapping):
                 proofs[grasp_id] = entry["proof"]
-        result.details["frozen_pair_count"] = len(pairs)
+        qualification_joints = [primary_joint]
+        if fallback_activated:
+            qualification_joints.append(joint)
+        result.details["frozen_pair_count"] = len(pairs) + len(fallback_pairs)
         result.details["frozen_pair_grasp_branch_limit"] = self.grasp_branch_limit
         result.details["frozen_pair_lookahead_grasp_count"] = len(retained_entries)
         result.details["frozen_pair_primary_grasp_count"] = min(2, len(retained_entries))
         result.details["frozen_pair_reserve_grasp_count"] = max(0, len(retained_entries) - 2)
-        qualification_waves = joint.details.get("qualification_waves")
-        qualification_waves = qualification_waves if isinstance(qualification_waves, list) else []
+        qualification_waves = [
+            wave
+            for qualified in qualification_joints
+            for wave in (
+                qualified.details.get("qualification_waves")
+                if isinstance(
+                    qualified.details.get("qualification_waves"),
+                    list,
+                )
+                else []
+            )
+            if isinstance(wave, Mapping)
+        ]
         result.details["frozen_pair_reserve_activated"] = any(
             isinstance(wave, Mapping) and wave.get("frozen_pair_batch_index") == 1
             for wave in qualification_waves
         )
-        result.details["frozen_pair_workspace_pass_count"] = joint.details.get(
-            "workspace_pass_count", 0
+        result.details["frozen_pair_release_height_fallback_activated"] = (
+            fallback_activated
         )
-        result.details["frozen_pair_endpoint_evaluated_count"] = joint.details.get(
-            "endpoint_evaluated_count", 0
+        result.details["frozen_pair_release_height_primary_pair_count"] = len(
+            pairs
         )
-        result.details["frozen_pair_endpoint_not_evaluated_count"] = joint.details.get(
-            "endpoint_not_evaluated_count", 0
+        result.details["frozen_pair_release_height_fallback_pair_count"] = len(
+            fallback_pairs
         )
-        result.details["frozen_pair_endpoint_pass_count"] = joint.details.get(
-            "endpoint_pass_count", 0
-        )
-        result.details["frozen_pair_full_plan_submitted_count"] = joint.details.get(
-            "full_plan_submitted_count", 0
-        )
-        result.details["frozen_pair_full_plan_pass_count"] = joint.details.get(
-            "full_plan_pass_count", 0
-        )
+        if fallback_prebind_summary:
+            result.details["frozen_pair_release_height_fallback_goal_count"] = (
+                fallback_prebind_summary.get(
+                    "frozen_goal_legality_frontier_count",
+                    0,
+                )
+            )
+        for detail_key, source_key in (
+            ("frozen_pair_workspace_pass_count", "workspace_pass_count"),
+            (
+                "frozen_pair_endpoint_evaluated_count",
+                "endpoint_evaluated_count",
+            ),
+            (
+                "frozen_pair_endpoint_not_evaluated_count",
+                "endpoint_not_evaluated_count",
+            ),
+            ("frozen_pair_endpoint_pass_count", "endpoint_pass_count"),
+            (
+                "frozen_pair_full_plan_submitted_count",
+                "full_plan_submitted_count",
+            ),
+            ("frozen_pair_full_plan_pass_count", "full_plan_pass_count"),
+        ):
+            result.details[detail_key] = sum(
+                int(qualified.details.get(source_key, 0))
+                for qualified in qualification_joints
+                if isinstance(qualified.details.get(source_key, 0), int)
+                and not isinstance(qualified.details.get(source_key, 0), bool)
+            )
+        qualification_artifacts = [
+            json.loads(json.dumps(artifact))
+            for qualified in qualification_joints
+            for artifact in [qualified.details.get("qualification_artifact")]
+            if isinstance(artifact, Mapping)
+        ]
+        if isinstance(primary_artifact, Mapping):
+            result.details["frozen_pair_primary_qualification_artifact"] = (
+                json.loads(json.dumps(primary_artifact))
+            )
+        if fallback_activated and qualification_artifacts:
+            fallback_artifact = joint.details.get("qualification_artifact")
+            if isinstance(fallback_artifact, Mapping):
+                result.details["frozen_pair_release_height_fallback_artifact"] = (
+                    json.loads(json.dumps(fallback_artifact))
+                )
+        if qualification_artifacts:
+            result.details["frozen_pair_qualification_artifacts"] = (
+                qualification_artifacts
+            )
+            result.details["frozen_pair_qualification_artifact"] = (
+                qualification_artifacts[-1]
+            )
         if retained:
             retained.sort(
                 key=lambda grasp: (
@@ -2476,10 +2680,6 @@ class _FrozenGoalPairCoordinator:
             result.details["ranking"] = (
                 "parallel_gripper_centering_then_grasp_place_physical_quality"
             )
-        if joint.details.get("qualification_artifact"):
-            result.details["frozen_pair_qualification_artifact"] = joint.details[
-                "qualification_artifact"
-            ]
         return self._replace_grasps(
             result,
             retained,
