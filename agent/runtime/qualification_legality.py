@@ -554,11 +554,11 @@ def _effective_release_z_offset(
 
     A flat support keeps the configured gravity-drop height.  For a compound
     container, the lowest collision-backed edge is the least restrictive
-    physical entry.  Keep the configured drop as clearance above that entry,
-    instead of forcing the wrist above the highest side wall or asking MoveIt
-    to descend below every rim while the payload is still attached.  AnyPlace
-    continues to own the settled goal, and pair legality plus MoveIt prove the
-    gripper, payload, and complete path against every wall.
+    physical entry.  Select the larger of the configured drop and that entry
+    height plus the collision clearance, instead of forcing the wrist above
+    the highest side wall or asking MoveIt to descend below every rim while
+    the payload is still attached.  AnyPlace continues to own the settled goal,
+    and pair legality plus MoveIt prove the complete path against every wall.
     """
 
     evidence: JsonDict = {
@@ -600,11 +600,16 @@ def _effective_release_z_offset(
         else 0.0
     )
     effective_offset = (
-        minimum_entry_height + configured_drop_height_m if barriers else configured_drop_height_m
+        max(
+            configured_drop_height_m,
+            minimum_entry_height + max(0.0, clearance_m),
+        )
+        if barriers
+        else configured_drop_height_m
     )
     evidence.update(
         {
-            "source": ("container_entry_drop_clearance" if barriers else "configured_drop_height"),
+            "source": ("container_entry_clearance" if barriers else "configured_drop_height"),
             "container_clearance_m": max(0.0, clearance_m) if barriers else 0.0,
             "effective_offset_m": effective_offset,
             "support_geometry_available": True,
@@ -618,7 +623,11 @@ def _effective_release_z_offset(
                 barrier_top_z_values[0] if barrier_top_z_values else support_z_m
             ),
             "support_entry_height_above_surface_m": minimum_entry_height,
-            "entry_clearance_above_edge_m": (configured_drop_height_m if barriers else 0.0),
+            "entry_clearance_above_edge_m": (
+                max(0.0, effective_offset - minimum_entry_height)
+                if barriers
+                else 0.0
+            ),
             "clearance_m": clearance_m,
         }
     )

@@ -1764,25 +1764,25 @@ def test_container_release_clears_lowest_entry_without_moving_settled_goal():
     assert legality["verdict"] == "PASS"
     binding = legality["checks"]["object_frame_binding"]
     selection = binding["release_offset_selection"]
-    assert selection["source"] == "container_entry_drop_clearance"
+    assert selection["source"] == "container_entry_clearance"
     assert selection["configured_drop_height_m"] == pytest.approx(0.05)
     assert selection["support_collision_maximum_z_m"] == pytest.approx(0.18)
     assert selection["support_collision_height_above_surface_m"] == pytest.approx(0.16)
     assert selection["support_entry_minimum_z_m"] == pytest.approx(0.09)
     assert selection["support_entry_height_above_surface_m"] == pytest.approx(0.07)
-    assert selection["entry_clearance_above_edge_m"] == pytest.approx(0.05)
+    assert selection["entry_clearance_above_edge_m"] == pytest.approx(0.005)
     assert selection["support_barrier_count"] == 4
     assert selection["container_clearance_m"] == pytest.approx(0.005)
-    assert selection["effective_offset_m"] == pytest.approx(0.12)
+    assert selection["effective_offset_m"] == pytest.approx(0.075)
     assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
         [0.48, -0.1, 0.05]
     )
     assert binding["release_collision_goal_pose"]["translation_xyz"] == pytest.approx(
-        [0.48, -0.1, 0.17]
+        [0.48, -0.1, 0.125]
     )
     stage = descriptor["candidate"]["qualification_stages"][0]
-    assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.37])
-    assert stage["placement_release_z_offset_m"] == pytest.approx(0.12)
+    assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.325])
+    assert stage["placement_release_z_offset_m"] == pytest.approx(0.075)
 
 
 def _rotated_container_goal() -> tuple[dict, dict]:
