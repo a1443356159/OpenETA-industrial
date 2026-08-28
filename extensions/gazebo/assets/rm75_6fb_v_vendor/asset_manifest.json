@@ -19,6 +19,6 @@
     {"path":"meshes/link_6.STL","sha256":"f9d0216056f7e1512858033163b0415973e1db573a1fee5af1609171967c043f"},
     {"path":"meshes/link_7.STL","sha256":"825b4e75fe965c268d19cda2c563ffb5b1381a5e7ab4d5b6b1565bc910045c3b"},
     {"path":"urdf/arm_ros2_control.xacro","sha256":"0341991159768835fd9e35a5b3017c163b5c0567fd799914c5a9d026ae652055"},
-    {"path":"urdf/rm75_6fb_v.urdf.xacro","sha256":"9608b118e6072ed0a73d3f2beb2d73e792a3f7bbc296888500ad2bcfcd2d6cbb"}
+    {"path":"urdf/rm75_6fb_v.urdf.xacro","sha256":"636cc289850b74e8d69a155b9f58636131e960e04a23487720c119a3bbd7e3c7"}
   ]
 }
