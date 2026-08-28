@@ -63,10 +63,9 @@ def test_authoritative_compiler_emits_the_same_object_set_for_gazebo_and_moveit(
     assert compiled.evidence()["gazebo_collision_object_ids"] == compiled.evidence()[
         "moveit_collision_object_ids"
     ]
-    if scene_id == "normal":
-        assert {"green_parts_bin", "blue_parts_bin"} <= set(
-            compiled.evidence()["visual_collision_aligned_object_ids"]
-        )
+    assert compiled.evidence()["visual_policy"] == (
+        "independent_high_fidelity_gazebo_assets"
+    )
 
 
 def test_authoritative_normal_bin_is_one_exact_compound_body_with_base_and_four_walls() -> (
@@ -83,7 +82,7 @@ def test_authoritative_normal_bin_is_one_exact_compound_body_with_base_and_four_
             "front_wall",
             "rear_wall",
         ]
-        assert bin_object.mirrored_visual_count == len(bin_object.primitives) == 5
+        assert bin_object.visual_count == 1
         moveit = bin_object.moveit_spec()
         assert moveit["shape"] == "compound"
         assert len(moveit["primitives"]) == 5
@@ -131,29 +130,27 @@ def test_authoritative_scene_materializes_attachment_collision_masks_and_plugin(
     assert evidence["attached_target_environment_collision_enabled"] is True
 
 
-def test_authoritative_compiler_rejects_visible_placement_wall_drift(
+def test_authoritative_compiler_keeps_detailed_visual_independent_from_collision(
     tmp_path: Path,
 ) -> None:
     package = _package()
     tree = ET.parse(package / "worlds/rm75_robotiq2f85_pickplace.sdf")
-    visual_size = tree.getroot().find(
+    visual_uri = tree.getroot().find(
         "world/model[@name='green_parts_bin']/link/"
-        "visual[@name='left_wall_visual']/geometry/box/size"
+        "visual[@name='bin_mesh']/geometry/mesh/uri"
     )
-    assert visual_size is not None
-    visual_size.text = "0.026 0.36 0.18"
-    world_path = tmp_path / "visible-wall-drift.sdf"
+    assert visual_uri is not None
+    visual_uri.text = "model://presentation-only/revised-bin.glb"
+    world_path = tmp_path / "independent-detailed-visual.sdf"
     tree.write(world_path, encoding="utf-8", xml_declaration=True)
 
-    with pytest.raises(
-        RuntimeError,
-        match="placement support visual/collision geometry differs",
-    ):
-        compile_authoritative_scene(
-            base_world=world_path,
-            catalog_path=package / "config/acceptance_scenes.json",
-            scene_id="normal",
-        )
+    compiled = compile_authoritative_scene(
+        base_world=world_path,
+        catalog_path=package / "config/acceptance_scenes.json",
+        scene_id="normal",
+    )
+    assert len(compiled.object("green_parts_bin").primitives) == 5
+    assert compiled.object("green_parts_bin").visual_count == 1
 
 
 def test_authoritative_scene_hash_is_deterministic_and_covers_materialized_sdf() -> None:

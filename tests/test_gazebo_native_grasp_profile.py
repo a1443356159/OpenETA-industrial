@@ -384,9 +384,9 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
     target_length = float(contract["target_object"]["bounding_box_xyz"][0])
     complete_gripper_envelope = 0.149345541
 
-    # Visual, Gazebo physics and PlanningScene must describe the same closed
-    # bin.  Omitting the front wall made a visually impossible path appear
-    # collision-free to both physics and L5.
+    # Gazebo physics and PlanningScene must describe the same closed bin.
+    # The operator-facing visual remains the detailed mesh rather than an
+    # opaque rendering of these conservative collision primitives.
     assert {collision.get("name") for collision in green.findall("link/collision")} == {
         "base",
         "left_wall",
@@ -411,7 +411,7 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
             "front_wall",
             "rear_wall",
         ]
-        assert bin_object.mirrored_visual_count == len(bin_object.primitives)
+        assert bin_object.visual_count == 1
         assert len(bin_object.moveit_spec()["primitives"]) == len(
             world.find(f"model[@name='{prefix}_parts_bin']").findall(
                 "link/collision"
@@ -425,14 +425,9 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
     assert contract["destination_size_xy_m"][1] < clear_aperture
     assert clear_aperture >= target_length + 0.04
     assert clear_aperture >= complete_gripper_envelope + 0.05
-    for collision in green.findall("link/collision"):
-        name = str(collision.get("name"))
-        visual = green.find(f"link/visual[@name='{name}_visual']")
-        assert visual is not None
-        assert visual.findtext("pose") == collision.findtext("pose")
-        assert visual.findtext("geometry/box/size") == collision.findtext(
-            "geometry/box/size"
-        )
+    visuals = green.findall("link/visual")
+    assert [visual.get("name") for visual in visuals] == ["bin_mesh"]
+    assert visuals[0].find("geometry/mesh") is not None
     assert float(green.findtext("link/visual/geometry/mesh/scale").split()[0]) == 0.04
     assert float(blue.findtext("link/visual/geometry/mesh/scale").split()[0]) == 0.04
 

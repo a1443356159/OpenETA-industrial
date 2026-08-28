@@ -162,14 +162,18 @@ class AuthoritativePrimitive:
 
 @dataclass(frozen=True, slots=True)
 class AuthoritativeObject:
-    """One model shared by Gazebo physics and MoveIt PlanningScene."""
+    """One collision model shared by Gazebo physics and MoveIt PlanningScene.
+
+    Gazebo visuals are presentation assets and may use a detailed mesh.  The
+    authoritative contract is deliberately scoped to collision geometry: the
+    exact same primitives are materialized in Gazebo and published to MoveIt.
+    """
 
     object_id: str
     pose_xyz: tuple[float, float, float]
     pose_quat_xyzw: tuple[float, float, float, float]
     gazebo_static: bool
     visual_count: int
-    mirrored_visual_count: int
     primitives: tuple[AuthoritativePrimitive, ...]
     bounding_box_xyz: tuple[float, float, float]
 
@@ -239,11 +243,6 @@ class CompiledAuthoritativeScene:
         return tuple(item.object_id for item in self.objects if not item.gazebo_static)
 
     def evidence(self) -> dict[str, Any]:
-        aligned_objects = [
-            item.object_id
-            for item in self.objects
-            if item.mirrored_visual_count == len(item.primitives)
-        ]
         return {
             "schema_version": AUTHORITATIVE_SCENE_SCHEMA_VERSION,
             "scene_id": self.scene_id,
@@ -253,12 +252,9 @@ class CompiledAuthoritativeScene:
             "collision_manifest_sha256": self.collision_manifest_sha256,
             "gazebo_collision_object_ids": [item.object_id for item in self.objects],
             "moveit_collision_object_ids": [item.object_id for item in self.objects],
-            "visual_collision_aligned_object_ids": aligned_objects,
             "dynamic_object_ids": list(self.dynamic_object_ids),
             "primitive_count": sum(len(item.primitives) for item in self.objects),
-            "mirrored_visual_primitive_count": sum(
-                item.mirrored_visual_count for item in self.objects
-            ),
+            "visual_policy": "independent_high_fidelity_gazebo_assets",
             "attached_collision_filter": {
                 "schema_version": "openeta.attached_collision_filter.v1",
                 "state_topic": ATTACHED_COLLISION_FILTER_STATE_TOPIC,
@@ -572,81 +568,6 @@ def _primitive_from_collision(
     )
 
 
-def _primitive_geometry_signature(
-    element: ET.Element,
-    *,
-    owner: str,
-) -> tuple[str, tuple[float, ...]]:
-    """Return the supported primitive geometry without accepting a mesh proxy."""
-
-    geometry = element.find("geometry")
-    if geometry is None:
-        raise RuntimeError(f"authoritative geometry is missing: {owner}")
-    box = geometry.find("box")
-    cylinder = geometry.find("cylinder")
-    if box is not None and cylinder is None:
-        size = tuple(float(value) for value in box.findtext("size", "").split())
-        if len(size) != 3 or any(
-            not math.isfinite(value) or value <= 0.0 for value in size
-        ):
-            raise RuntimeError(f"authoritative visual box is invalid: {owner}")
-        return "box", size
-    if cylinder is not None and box is None:
-        try:
-            radius = float(cylinder.findtext("radius", ""))
-            length = float(cylinder.findtext("length", ""))
-        except ValueError as exc:
-            raise RuntimeError(
-                f"authoritative visual cylinder is invalid: {owner}"
-            ) from exc
-        if any(
-            not math.isfinite(value) or value <= 0.0
-            for value in (radius, length)
-        ):
-            raise RuntimeError(f"authoritative visual cylinder is invalid: {owner}")
-        return "cylinder", (radius, length)
-    raise RuntimeError(f"authoritative visual shape is unsupported: {owner}")
-
-
-def _collision_has_exact_visual_twin(
-    link: ET.Element,
-    collision: ET.Element,
-    *,
-    model_id: str,
-) -> bool:
-    """Prove one visible primitive is exactly the Gazebo/MoveIt primitive."""
-
-    collision_name = str(collision.get("name") or "")
-    visual = link.find(f"visual[@name='{collision_name}_visual']")
-    if visual is None:
-        return False
-    collision_xyz, collision_quat = _pose(
-        collision,
-        owner=f"{model_id}/{collision_name}",
-    )
-    visual_xyz, visual_quat = _pose(
-        visual,
-        owner=f"{model_id}/{collision_name}_visual",
-    )
-    if not _same_numbers(collision_xyz, visual_xyz) or not _same_numbers(
-        collision_quat,
-        visual_quat,
-    ):
-        return False
-    collision_geometry = _primitive_geometry_signature(
-        collision,
-        owner=f"{model_id}/{collision_name}",
-    )
-    visual_geometry = _primitive_geometry_signature(
-        visual,
-        owner=f"{model_id}/{collision_name}_visual",
-    )
-    return collision_geometry[0] == visual_geometry[0] and _same_numbers(
-        collision_geometry[1],
-        visual_geometry[1],
-    )
-
-
 def _set_collision_filter_mask(model: ET.Element, *, mask: int) -> None:
     """Materialize one explicit Gazebo Physics mask on every model shape."""
 
@@ -724,7 +645,6 @@ def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]
         model_xyz, model_quat = _pose(model, owner=model_id)
         primitives: list[AuthoritativePrimitive] = []
         visual_count = 0
-        mirrored_visual_count = 0
         collision_names: set[str] = set()
         for link in model.findall("link"):
             link_name = str(link.get("name") or "")
@@ -746,12 +666,6 @@ def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]
                     )
                 collision_names.add(primitive.name)
                 primitives.append(primitive)
-                if _collision_has_exact_visual_twin(
-                    link,
-                    collision,
-                    model_id=model_id,
-                ):
-                    mirrored_visual_count += 1
         if not primitives:
             continue
         if visual_count <= 0:
@@ -768,7 +682,6 @@ def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]
                 pose_quat_xyzw=model_quat,
                 gazebo_static=(model.findtext("static", "false").strip().lower() == "true"),
                 visual_count=visual_count,
-                mirrored_visual_count=mirrored_visual_count,
                 primitives=tuple(primitives),
                 bounding_box_xyz=tuple(
                     upper[axis] - lower[axis] for axis in range(3)
@@ -890,11 +803,6 @@ def _validate_catalog_bindings(
                 # their generated marker intentionally has no collision.
                 continue
             physical_supports.append(support)
-            if support.mirrored_visual_count != len(support.primitives):
-                raise RuntimeError(
-                    "authoritative placement support visual/collision geometry differs: "
-                    f"{support.object_id}"
-                )
             center = _numbers(raw.get("center_xy"), 2)
             if not _same_numbers(support.pose_xyz[:2], center):
                 raise RuntimeError(
