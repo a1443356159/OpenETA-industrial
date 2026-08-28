@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agent.runtime.moveit_qualification import (
+    GOAL_PREBIND_RPC_PER_CANDIDATE_S,
     KINEMATIC_IK_TIMEOUT_S,
     PLANNING_ATTEMPTS,
     PLANNING_TIME_S,
@@ -16,6 +17,7 @@ from agent.runtime.moveit_qualification import (
     MoveItCandidateQualifier,
     MoveItQualificationEngine,
     QualificationCache,
+    _goal_prebind_rpc_timeout_s,
     _qualification_rpc_timeout_s,
 )
 from agent.tools.registry import ToolResult
@@ -254,6 +256,22 @@ def test_fast_rpc_deadline_covers_exhaustive_l5_and_recovery_without_60s_cutoff(
     )
 
     assert timeout > 192 * 2 * 3 * PLANNING_TIME_S
+
+
+def test_goal_prebind_rpc_deadline_scales_with_complete_frozen_frontier():
+    one_goal = [{"candidate": {"id": "p0"}}]
+    full_frontier = [
+        {"candidate": {"id": f"p{index}"}}
+        for index in range(96)
+    ]
+
+    assert _goal_prebind_rpc_timeout_s(one_goal) == pytest.approx(
+        QUALIFICATION_RPC_GRACE_S + GOAL_PREBIND_RPC_PER_CANDIDATE_S
+    )
+    assert _goal_prebind_rpc_timeout_s(full_frontier) == pytest.approx(
+        QUALIFICATION_RPC_GRACE_S
+        + 96 * GOAL_PREBIND_RPC_PER_CANDIDATE_S
+    )
 
 
 def test_qualification_rpc_error_reason_is_preserved():

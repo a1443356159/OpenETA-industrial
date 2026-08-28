@@ -73,6 +73,12 @@ KINEMATIC_IK_TIMEOUT_S = 2.0
 # false candidate rejection.
 STATE_VALIDITY_TIMEOUT_S = 5.0
 QUALIFICATION_RPC_GRACE_S = 30.0
+# Goal prebinding returns one immutable legality record per provider goal.  The
+# simulator serializes that read-only call with live dashboard/control work, so
+# its transport envelope must also scale with the amount of evidence encoded
+# and returned.  This is deliberately an outer RPC allowance, not extra search
+# time and not a candidate-specific reachability heuristic.
+GOAL_PREBIND_RPC_PER_CANDIDATE_S = 0.5
 PROGRESSIVE_SCREENING_MODE = "progressive_until_full_plan_capacity"
 PROGRESSIVE_NOT_EVALUATED_REASON = "progressive_endpoint_capacity_reached"
 SAME_RUN_QUALIFICATION_SEED_FIELD = "_openeta_same_run_qualification_seed_evidence"
@@ -474,10 +480,11 @@ class MoveItCandidateQualifier:
                 ],
             }
         )
+        rpc_timeout_s = _goal_prebind_rpc_timeout_s(descriptors)
         response = self.rpc(
             PRIVATE_RPC_NAME,
             request,
-            QUALIFICATION_RPC_GRACE_S,
+            rpc_timeout_s,
         )
         if not isinstance(response, Mapping):
             raise RuntimeError("placement goal prebind returned no evidence")
@@ -512,12 +519,20 @@ class MoveItCandidateQualifier:
                 raise RuntimeError(
                     str(row.get("reason") or "placement goal prebind indeterminate")
                 )
+        response_metrics = response.get("metrics")
+        response_metrics = (
+            response_metrics if isinstance(response_metrics, Mapping) else {}
+        )
         return bound, {
             "frozen_goal_legality_screen_complete": True,
             "frozen_goal_legality_evidence_count": len(rows),
             "frozen_goal_legality_pass_count": len(bound),
             "frozen_goal_legality_reject_count": len(rows) - len(bound),
             "frozen_goal_legality_frontier_count": len(bound),
+            "frozen_goal_legality_elapsed_s": response_metrics.get(
+                "goal_legality_elapsed_s"
+            ),
+            "frozen_goal_legality_rpc_timeout_s": rpc_timeout_s,
             "frozen_goal_release_height_variant": (
                 release_height_variant or "geometry_primary"
             ),
@@ -1324,6 +1339,24 @@ def _qualification_rpc_timeout_s(
         )
         planning_budget_s = max(0, int(full_plan_limit)) * max_stage_count * PLANNING_TIME_S
     return screening_budget_s + planning_budget_s + QUALIFICATION_RPC_GRACE_S
+
+
+def _goal_prebind_rpc_timeout_s(
+    candidates: Sequence[Mapping[str, Any]],
+) -> float:
+    """Cover serialized worker latency and complete prebind evidence transfer.
+
+    Goal legality itself is cheap and performs no IK or L5 planning.  The
+    request still shares one serialized simulator worker with operator GUI
+    captures and returns a record for every frozen goal.  Scaling this outer
+    deadline by frontier size prevents load-dependent transport timeouts from
+    being mislabeled as reachability failures while retaining a finite bound.
+    """
+
+    return (
+        QUALIFICATION_RPC_GRACE_S
+        + len(candidates) * GOAL_PREBIND_RPC_PER_CANDIDATE_S
+    )
 
 
 def _deduplicate_se3_candidates(

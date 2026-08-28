@@ -1974,8 +1974,14 @@ def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation()
 def test_goal_prebind_rpc_freezes_container_release_before_pair_compilation():
     scene, candidate = _rotated_container_goal()
     engine = _engine(clone_scene=lambda: scene)
+    rpc_timeouts: list[float] = []
+
+    def rpc(_name, request, timeout):
+        rpc_timeouts.append(timeout)
+        return engine.qualify(request)
+
     qualifier = MoveItCandidateQualifier(
-        lambda _name, request, _timeout: engine.qualify(request),
+        rpc,
         qualification_profile="fast_v3",
         solver_profile="kdl_fast",
     )
@@ -1988,6 +1994,9 @@ def test_goal_prebind_rpc_freezes_container_release_before_pair_compilation():
 
     assert summary["frozen_goal_legality_screen_complete"] is True
     assert summary["frozen_goal_legality_pass_count"] == 1
+    assert summary["frozen_goal_legality_elapsed_s"] >= 0.0
+    assert summary["frozen_goal_legality_rpc_timeout_s"] == rpc_timeouts[0]
+    assert rpc_timeouts[0] > 30.0
     assert len(goals) == 1
     assert goals[0]["container_drop_release_prebound"] is True
     assert goals[0]["qualified_release_pointcloud_object_goal_pose"][
