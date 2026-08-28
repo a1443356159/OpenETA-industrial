@@ -457,15 +457,15 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # scene/object identity.  The unloaded contact move can use more of the
     # RM75 limits; a retained payload uses a gentler profile until release.
     # Keep both profiles inside the measured Gazebo tracking envelope without
-    # relaxing JointTrajectoryController's 0.05 rad path limit.  The faster
-    # 0.25/0.15 unloaded and 0.20/0.10 payload profiles crossed that unchanged
-    # limit on joints 4/5 under normal physics variance.  These conservative
-    # load-state profiles cost less wall time than rejecting a trajectory and
+    # relaxing JointTrajectoryController's 0.05 rad path limit. Under shared
+    # GPU/physics load, 0.20/0.10 unloaded and 0.15/0.08 payload trajectories
+    # reached 0.050045 and 0.050341 rad respectively on joint 5. A modest
+    # load-state slowdown is safer and cheaper than aborting mid-path and
     # requalifying another model goal.
-    unloaded_velocity_scaling: float = 0.20
-    unloaded_acceleration_scaling: float = 0.10
-    loaded_velocity_scaling: float = 0.15
-    loaded_acceleration_scaling: float = 0.08
+    unloaded_velocity_scaling: float = 0.18
+    unloaded_acceleration_scaling: float = 0.08
+    loaded_velocity_scaling: float = 0.12
+    loaded_acceleration_scaling: float = 0.06
 
     def __post_init__(self) -> None:
         GazeboControlConfig.__post_init__(self)

@@ -199,10 +199,10 @@ def test_pickplace_motion_profile_follows_verified_payload_state() -> None:
         "unloaded",
         "loaded",
     )
-    assert unloaded["max_velocity_scaling_factor"] == 0.20
-    assert unloaded["max_acceleration_scaling_factor"] == 0.10
-    assert loaded["max_velocity_scaling_factor"] == 0.15
-    assert loaded["max_acceleration_scaling_factor"] == 0.08
+    assert unloaded["max_velocity_scaling_factor"] == 0.18
+    assert unloaded["max_acceleration_scaling_factor"] == 0.08
+    assert loaded["max_velocity_scaling_factor"] == 0.12
+    assert loaded["max_acceleration_scaling_factor"] == 0.06
 
 
 def test_move_goal_preserves_a_hash_bound_qualified_joint_branch() -> None:
