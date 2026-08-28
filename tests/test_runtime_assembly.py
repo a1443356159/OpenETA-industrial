@@ -639,6 +639,7 @@ def test_industrial_tool_profile_assembles_with_prebound_hidden_handlers(
         "anyplace",
         "camera_pose_to_world",
         "close_simulator_env",
+        "configure_work_order",
         "create_simulator_env",
         "grasp_pose_estimate",
         "gripper_control",

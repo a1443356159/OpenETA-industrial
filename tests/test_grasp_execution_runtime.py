@@ -1594,6 +1594,15 @@ def test_multi_sort_release_is_cleared_only_by_fresh_next_assignment_view() -> N
     memory.start_session(task="sort two industrial parts")
     waiting = {
         "schema_version": "openeta.multi_sort_progress.v1",
+        "source": "vlm_work_order",
+        "work_order": {
+            "schema_version": "openeta.work_order.v1",
+            "source": "vlm_tool_call",
+            "items": [
+                {"id": "yellow_wrench_to_green"},
+                {"id": "red_bolt_to_blue"},
+            ],
+        },
         "assignment_count": 2,
         "completed_count": 1,
         "remaining_count": 1,
@@ -1640,6 +1649,7 @@ def test_multi_sort_release_is_cleared_only_by_fresh_next_assignment_view() -> N
     assert memory.planning_context()["multi_sort_progress"]["active_assignment"] == {
         "id": "red_bolt_to_blue"
     }
+    assert memory.planning_context()["work_order"] == waiting["work_order"]
 
 
 def test_release_uses_ordered_detach_revision_then_stops_reopening() -> None:

@@ -394,6 +394,7 @@ def test_gazebo_industrial_profile_hides_irrelevant_tools_without_deleting_specs
     visible = {spec.name for spec in registry.list()}
     complete = {spec.name for spec in registry.list(include_disabled=True)}
     assert "active_observe" in visible
+    assert "configure_work_order" in visible
     assert "web_search" not in visible
     assert "web_search" in complete
     assert registry.can_execute("web_search") is False

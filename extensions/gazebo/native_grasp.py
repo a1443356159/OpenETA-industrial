@@ -35,7 +35,6 @@ from .ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptance_scene_world imp
     DETACHED_TARGET_COLLISION_FILTER_MASK,
     ROBOT_COLLISION_FILTER_MASK,
     compile_authoritative_scene,
-    resolve_scene_definition,
     scene_target_bindings,
 )
 
@@ -83,10 +82,9 @@ def load_acceptance_scene_contract(
         or not isinstance(payload.get("scenes"), Mapping)
     ):
         raise ValueError("acceptance scene catalog is invalid")
-    try:
-        raw = resolve_scene_definition(payload, scene_id)
-    except RuntimeError as exc:
-        raise ValueError(str(exc)) from exc
+    raw = payload["scenes"].get(scene_id)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"unsupported acceptance scene: {scene_id}")
     scene = json.loads(json.dumps(raw))
     if not isinstance(scene.get("world_scene"), str) or not scene["world_scene"]:
         raise ValueError("acceptance scene world identity is invalid")
@@ -156,6 +154,18 @@ def load_acceptance_scene_contract(
             vector(primitive, "pose_rpy", 3)
             vector(primitive, "rgba", 4)
 
+    def validate_semantic_aliases(owner: Mapping[str, Any]) -> None:
+        aliases = owner.get("semantic_aliases")
+        if aliases is None:
+            return
+        if (
+            not isinstance(aliases, list)
+            or not aliases
+            or any(not isinstance(alias, str) or not alias.strip() for alias in aliases)
+            or len({alias.strip().casefold() for alias in aliases}) != len(aliases)
+        ):
+            raise ValueError("acceptance scene semantic aliases are invalid")
+
     seen: set[str] = {"work_table", "target_object", "distractor_object"}
     for obstacle in obstacles:
         if not isinstance(obstacle, Mapping):
@@ -208,7 +218,36 @@ def load_acceptance_scene_contract(
         ):
             raise ValueError("acceptance scene target mass is invalid")
         validate_primitives(target)
-    sort_assignments = scene.get("sort_assignments")
+    manipulation_targets = scene.get("manipulation_targets")
+    if manipulation_targets is not None:
+        if not isinstance(manipulation_targets, list) or len(manipulation_targets) < 2:
+            raise ValueError("acceptance scene manipulation targets are invalid")
+        catalog_ids: set[str] = set()
+        target_ids: set[str] = set()
+        for item in manipulation_targets:
+            required_fields = (
+                "id",
+                "target_object_id",
+                "target_link",
+                "target_prompt",
+                "source_support_object_id",
+            )
+            if not isinstance(item, Mapping) or any(
+                not isinstance(item.get(key), str) or not str(item[key]).strip()
+                for key in required_fields
+            ):
+                raise ValueError("acceptance scene manipulation target is invalid")
+            catalog_id = str(item["id"])
+            target_id = str(item["target_object_id"])
+            if catalog_id in catalog_ids or target_id in target_ids:
+                raise ValueError("acceptance scene manipulation target is duplicated")
+            catalog_ids.add(catalog_id)
+            target_ids.add(target_id)
+            validate_semantic_aliases(item)
+        if task is not None:
+            raise ValueError(
+                "task-neutral manipulation catalog cannot contain a static task"
+            )
     placement_regions = scene.get("placement_regions")
 
     def bind_destination(region: Mapping[str, Any]) -> None:
@@ -241,6 +280,7 @@ def load_acceptance_scene_contract(
             if not region_id or region_id in placement_ids or not prompt:
                 raise ValueError("acceptance scene placement region identity is invalid")
             placement_ids.add(region_id)
+            validate_semantic_aliases(region)
             vector(region, "center_xy", 2)
             vector(region, "size_xy_m", 2, positive=True)
             vector(region, "rgba", 4)
@@ -257,67 +297,24 @@ def load_acceptance_scene_contract(
             )
             if acceptance_semantics not in PLACEMENT_ACCEPTANCE_SEMANTICS:
                 raise ValueError("acceptance scene placement semantics are invalid")
-            if region.get("selected") is True:
+            if manipulation_targets is not None:
+                if "selected" in region:
+                    raise ValueError(
+                        "task-neutral placement catalog cannot select a destination"
+                    )
+            elif region.get("selected") is True:
                 selected.append(region)
             elif region.get("selected") is not False:
                 raise ValueError("acceptance scene placement selection is invalid")
-        if len(selected) != 1:
-            raise ValueError("acceptance scene needs exactly one selected placement region")
-        chosen = selected[0]
-        if sort_assignments is None and (
-            task is None or task["placement_region_prompt"] != chosen["prompt"]
-        ):
-            raise ValueError("acceptance scene task/bin semantic binding is invalid")
-        bind_destination(chosen)
-    if sort_assignments is not None:
-        if not isinstance(sort_assignments, list) or len(sort_assignments) < 2:
-            raise ValueError("acceptance scene sort assignments are invalid")
-        assignment_ids: set[str] = set()
-        target_ids: set[str] = set()
-        region_by_id = {
-            str(region["id"]): region
-            for region in (placement_regions or [])
-            if isinstance(region, Mapping)
-        }
-        for assignment in sort_assignments:
-            required_fields = (
-                "id",
-                "target_object_id",
-                "target_link",
-                "target_prompt",
-                "placement_object_prompt",
-                "source_support_object_id",
-                "placement_region_id",
-                "placement_region_prompt",
-            )
-            if not isinstance(assignment, Mapping) or any(
-                not isinstance(assignment.get(key), str)
-                or not str(assignment[key]).strip()
-                for key in required_fields
-            ):
-                raise ValueError("acceptance scene sort assignment is invalid")
-            assignment_id = str(assignment["id"])
-            target_id = str(assignment["target_object_id"])
-            if assignment_id in assignment_ids or target_id in target_ids:
-                raise ValueError("acceptance scene sort assignment identity is duplicated")
-            assignment_ids.add(assignment_id)
-            target_ids.add(target_id)
-            region = region_by_id.get(str(assignment["placement_region_id"]))
-            if region is None or str(region["prompt"]) != str(
-                assignment["placement_region_prompt"]
-            ):
-                raise ValueError("acceptance scene sort assignment/bin binding is invalid")
-        first_assignment = sort_assignments[0]
-        if task is None or any(
-            str(task[key]) != str(first_assignment[key])
-            for key in (
-                "target_prompt",
-                "placement_object_prompt",
-                "placement_region_prompt",
-            )
-        ):
-            raise ValueError("acceptance scene initial sort semantics are invalid")
-        bind_destination(region_by_id[str(first_assignment["placement_region_id"])])
+        if manipulation_targets is None:
+            if len(selected) != 1:
+                raise ValueError(
+                    "acceptance scene needs exactly one selected placement region"
+                )
+            chosen = selected[0]
+            if task is None or task["placement_region_prompt"] != chosen["prompt"]:
+                raise ValueError("acceptance scene task/bin semantic binding is invalid")
+            bind_destination(chosen)
     destination = scene.get("destination_center_xy")
     if destination is not None and (
         not isinstance(destination, list)
@@ -347,6 +344,37 @@ def load_acceptance_scene_contract(
 
 def _acceptance_scene_from_environment() -> str:
     return str(os.environ.get(ACCEPTANCE_SCENE_ENV) or "normal").strip()
+
+
+def _semantic_identity(value: object) -> str:
+    return "".join(
+        character
+        for character in str(value or "").strip().casefold()
+        if character.isalnum()
+    )
+
+
+def _resolve_semantic_catalog_item(
+    catalog: Sequence[Mapping[str, Any]],
+    *,
+    requested: str,
+    id_key: str,
+    prompt_key: str,
+) -> tuple[int, Mapping[str, Any]]:
+    identity = _semantic_identity(requested)
+    if not identity:
+        raise ValueError("work-order semantic prompt is required")
+    matches: list[tuple[int, Mapping[str, Any]]] = []
+    for index, item in enumerate(catalog):
+        aliases = item.get("semantic_aliases")
+        candidates = [item.get(id_key), item.get(prompt_key)]
+        if isinstance(aliases, list):
+            candidates.extend(aliases)
+        if identity in {_semantic_identity(candidate) for candidate in candidates}:
+            matches.append((index, item))
+    if len(matches) != 1:
+        raise ValueError("work-order semantic prompt does not resolve uniquely")
+    return matches[0]
 
 
 def _quaternion_from_rpy(values: Sequence[float]) -> tuple[float, float, float, float]:
@@ -445,7 +473,8 @@ class NativePickPlaceConfig(GazeboControlConfig):
     target_link: str = "target_link"
     parent_link: str = "gripper_mount_link"
     acceptance_scene_id: str = field(default_factory=_acceptance_scene_from_environment)
-    active_sort_assignment_index: int = 0
+    active_manipulation_target_index: int = 0
+    work_order_item: Mapping[str, str] | None = None
     left_contact_topic: str = "/openeta/native_grasp/contacts/left_pad"
     right_contact_topic: str = "/openeta/native_grasp/contacts/right_pad"
     attach_topic: str = "/openeta/native_grasp/detachable_joint/target/attach"
@@ -537,18 +566,22 @@ class NativePickPlaceConfig(GazeboControlConfig):
     def __post_init__(self) -> None:
         GazeboControlConfig.__post_init__(self)
         contract = self.acceptance_scene_contract
-        assignments = self.sort_assignments
+        targets = self.manipulation_targets
         if (
-            not isinstance(self.active_sort_assignment_index, int)
-            or isinstance(self.active_sort_assignment_index, bool)
-            or not 0 <= self.active_sort_assignment_index < len(assignments)
+            not isinstance(self.active_manipulation_target_index, int)
+            or isinstance(self.active_manipulation_target_index, bool)
+            or not 0 <= self.active_manipulation_target_index < len(targets)
         ):
-            raise ValueError("active sort assignment index is invalid")
-        assignment = assignments[self.active_sort_assignment_index]
+            raise ValueError("active manipulation target index is invalid")
+        active_target = targets[self.active_manipulation_target_index]
         bindings = scene_target_bindings(contract)
-        if len(bindings) != len(assignments):
-            raise ValueError("acceptance scene sort binding count is invalid")
-        binding = bindings[self.active_sort_assignment_index]
+        if len(bindings) != len(targets):
+            raise ValueError("acceptance scene target binding count is invalid")
+        binding = bindings[self.active_manipulation_target_index]
+        if self.work_order_item is not None and str(
+            self.work_order_item.get("target_object_id") or ""
+        ) != str(active_target["target_object_id"]):
+            raise ValueError("work-order item target binding is invalid")
         object.__setattr__(self, "target_id", binding.target_model)
         object.__setattr__(self, "target_link", binding.target_link)
         object.__setattr__(self, "attach_topic", binding.attach_topic)
@@ -570,13 +603,18 @@ class NativePickPlaceConfig(GazeboControlConfig):
             binding.collision_filter_state_ack_topic,
         )
         regions = contract.get("placement_regions")
+        selected_region_id = (
+            str(self.work_order_item.get("placement_region_id") or "")
+            if self.work_order_item is not None
+            else str(contract.get("selected_placement_region_id") or self.table_id)
+        )
         active_region = next(
             (
                 region
                 for region in (regions if isinstance(regions, list) else [])
                 if isinstance(region, Mapping)
                 and str(region.get("id") or "")
-                == str(assignment["placement_region_id"])
+                == selected_region_id
             ),
             None,
         )
@@ -670,7 +708,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
         ):
             raise ValueError("attached collision-filter contract is invalid")
         target = contract.get("target_object")
-        if isinstance(contract.get("sort_assignments"), list):
+        if isinstance(contract.get("manipulation_targets"), list):
             authoritative_target = self.authoritative_scene.object(self.target_id)
             object.__setattr__(
                 self,
@@ -711,9 +749,9 @@ class NativePickPlaceConfig(GazeboControlConfig):
         return load_acceptance_scene_contract(self.acceptance_scene_id)
 
     @property
-    def sort_assignments(self) -> tuple[Mapping[str, str], ...]:
+    def manipulation_targets(self) -> tuple[Mapping[str, Any], ...]:
         contract = self.acceptance_scene_contract
-        configured = contract.get("sort_assignments")
+        configured = contract.get("manipulation_targets")
         if isinstance(configured, list):
             return tuple(dict(item) for item in configured if isinstance(item, Mapping))
         task = contract.get("task")
@@ -724,32 +762,82 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "target_object_id": "target_object",
                 "target_link": "target_link",
                 "target_prompt": str(task.get("target_prompt") or "target object"),
-                "placement_object_prompt": str(
-                    task.get("placement_object_prompt") or "target object"
-                ),
                 "source_support_object_id": self.table_id,
-                "placement_region_id": str(
-                    contract.get("selected_placement_region_id") or self.table_id
-                ),
-                "placement_region_prompt": str(
-                    task.get("placement_region_prompt") or "placement region"
-                ),
             },
         )
 
     @property
-    def active_sort_assignment(self) -> Mapping[str, str]:
-        return self.sort_assignments[self.active_sort_assignment_index]
+    def active_manipulation_target(self) -> Mapping[str, Any]:
+        return self.manipulation_targets[self.active_manipulation_target_index]
 
     @property
-    def sort_assignment_configs(self) -> tuple["NativePickPlaceConfig", ...]:
+    def manipulation_target_configs(self) -> tuple["NativePickPlaceConfig", ...]:
         return tuple(
-            replace(self, active_sort_assignment_index=index)
-            for index in range(len(self.sort_assignments))
+            replace(
+                self,
+                active_manipulation_target_index=index,
+                work_order_item=None,
+            )
+            for index in range(len(self.manipulation_targets))
         )
 
-    def for_sort_assignment(self, index: int) -> "NativePickPlaceConfig":
-        return replace(self, active_sort_assignment_index=index)
+    def work_order_configs(
+        self,
+        items: Sequence[Mapping[str, Any]],
+    ) -> tuple["NativePickPlaceConfig", ...]:
+        """Resolve VLM-authored semantic work items against physical catalogs."""
+
+        if not isinstance(items, Sequence) or isinstance(items, (str, bytes)) or not items:
+            raise ValueError("work order requires at least one item")
+        targets = self.manipulation_targets
+        regions = self.acceptance_scene_contract.get("placement_regions")
+        region_catalog = (
+            tuple(dict(item) for item in regions if isinstance(item, Mapping))
+            if isinstance(regions, list)
+            else ()
+        )
+        resolved: list[NativePickPlaceConfig] = []
+        used_target_ids: set[str] = set()
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ValueError("work-order item is invalid")
+            target_prompt = str(item.get("target_prompt") or "").strip()
+            region_prompt = str(item.get("placement_region_prompt") or "").strip()
+            target_index, target = _resolve_semantic_catalog_item(
+                targets,
+                requested=target_prompt,
+                id_key="target_object_id",
+                prompt_key="target_prompt",
+            )
+            _region_index, region = _resolve_semantic_catalog_item(
+                region_catalog,
+                requested=region_prompt,
+                id_key="id",
+                prompt_key="prompt",
+            )
+            target_id = str(target["target_object_id"])
+            if target_id in used_target_ids:
+                raise ValueError("work order cannot select one physical target twice")
+            used_target_ids.add(target_id)
+            normalized = {
+                "id": f"{target['id']}_to_{region['id']}",
+                "target_object_id": target_id,
+                "target_link": str(target["target_link"]),
+                "target_prompt": str(target["target_prompt"]),
+                "placement_object_prompt": str(target["target_prompt"]),
+                "source_support_object_id": str(target["source_support_object_id"]),
+                "placement_region_id": str(region["id"]),
+                "placement_region_prompt": str(region["prompt"]),
+                "source": "vlm_work_order",
+            }
+            resolved.append(
+                replace(
+                    self,
+                    active_manipulation_target_index=target_index,
+                    work_order_item=normalized,
+                )
+            )
+        return tuple(resolved)
 
     @property
     def authoritative_scene(self) -> CompiledAuthoritativeScene:
@@ -784,11 +872,16 @@ class NativePickPlaceConfig(GazeboControlConfig):
 
     @property
     def selected_placement_region_id(self) -> str:
-        return str(self.active_sort_assignment["placement_region_id"])
+        if self.work_order_item is not None:
+            return str(self.work_order_item["placement_region_id"])
+        return str(
+            self.acceptance_scene_contract.get("selected_placement_region_id")
+            or self.table_id
+        )
 
     @property
     def source_support_object_id(self) -> str:
-        return str(self.active_sort_assignment["source_support_object_id"])
+        return str(self.active_manipulation_target["source_support_object_id"])
 
     @property
     def static_obstacle_specs(self) -> tuple[dict[str, Any], ...]:
@@ -812,6 +905,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
 
     def acceptance_scene_evidence(self) -> dict[str, Any]:
         contract = self.acceptance_scene_contract
+        dynamic_work_order = isinstance(contract.get("manipulation_targets"), list)
         evidence = {
             "schema_version": ACCEPTANCE_SCENE_SCHEMA_VERSION,
             "scene_id": self.acceptance_scene_id,
@@ -822,16 +916,20 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 str(obstacle["id"]) for obstacle in contract["static_obstacles"]
             ],
             "authoritative_world": self.authoritative_scene.evidence(),
-            "destination_center_xy": list(self.destination_center_xy),
-            "destination_size_xy_m": list(self.destination_size_xy_m),
-            "destination_support_z_m": self.destination_support_z_m,
             "placement_release_z_offset_m": self.placement_release_z_offset_m,
             "placement_acceptance_semantics": (self.placement_acceptance_semantics),
-            "sort_progress": {
-                "schema_version": "openeta.multi_sort_progress.v1",
-                "assignment_count": len(self.sort_assignments),
-                "active_assignment_index": self.active_sort_assignment_index,
-                "active_assignment": dict(self.active_sort_assignment),
+            "manipulation_catalog": {
+                "schema_version": "openeta.manipulation_catalog.v1",
+                "targets": [dict(item) for item in self.manipulation_targets],
+                "placement_regions": [
+                    {
+                        key: value
+                        for key, value in region.items()
+                        if key in {"id", "prompt", "semantic_aliases"}
+                    }
+                    for region in (contract.get("placement_regions") or [])
+                    if isinstance(region, Mapping)
+                ],
             },
             "attached_collision_filter": {
                 "schema_version": "openeta.attached_collision_filter.v1",
@@ -850,26 +948,36 @@ class NativePickPlaceConfig(GazeboControlConfig):
         task = contract.get("task")
         if isinstance(task, Mapping):
             evidence["task"] = dict(task)
-        target = contract.get("target_object")
-        collision_primitives = self.target_collision_primitives
-        evidence["target_object"] = {
-            "id": self.target_id,
-            "shape_class": str(
-                target.get("shape_class")
-                if isinstance(target, Mapping) and self.target_id == "target_object"
-                else self.active_sort_assignment.get("shape_class")
-                or self.target_id
-            ),
-            "bounding_box_xyz": list(self.target_size_m),
-            "collision_model": (
-                "compound_primitives" if collision_primitives else "bounding_box"
-            ),
-            "collision_primitive_count": len(collision_primitives),
-        }
         regions = contract.get("placement_regions")
         if isinstance(regions, list):
             evidence["placement_region_ids"] = [str(region["id"]) for region in regions]
-            evidence["selected_placement_region_id"] = self.selected_placement_region_id
+        if not dynamic_work_order or self.work_order_item is not None:
+            evidence.update(
+                {
+                    "destination_center_xy": list(self.destination_center_xy),
+                    "destination_size_xy_m": list(self.destination_size_xy_m),
+                    "destination_support_z_m": self.destination_support_z_m,
+                    "selected_placement_region_id": self.selected_placement_region_id,
+                }
+            )
+            target = contract.get("target_object")
+            collision_primitives = self.target_collision_primitives
+            evidence["target_object"] = {
+                "id": self.target_id,
+                "shape_class": str(
+                    target.get("shape_class")
+                    if isinstance(target, Mapping) and self.target_id == "target_object"
+                    else self.active_manipulation_target.get("shape_class")
+                    or self.target_id
+                ),
+                "bounding_box_xyz": list(self.target_size_m),
+                "collision_model": (
+                    "compound_primitives" if collision_primitives else "bounding_box"
+                ),
+                "collision_primitive_count": len(collision_primitives),
+            }
+        if dynamic_work_order and self.work_order_item is not None:
+            evidence["active_work_order_item"] = dict(self.work_order_item)
         return evidence
 
     @property

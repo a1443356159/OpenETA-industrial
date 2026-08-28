@@ -50,155 +50,49 @@
     "multi_normal": {
       "world_scene": "multi_normal",
       "seed": 0,
-      "description": "Continuous industrial sorting in one world session: yellow adjustable wrench to the green bin, then red M24 hex bolt to the blue bin.",
+      "description": "Task-neutral multi-object industrial workcell with two independently attachable parts and two physical destination bins.",
       "canonical_world_complete": true,
-      "task": {
-        "target_prompt": "yellow wrench",
-        "placement_object_prompt": "yellow wrench",
-        "placement_region_prompt": "green parts bin",
-        "operator_instruction": "请先把黄色活动扳手放进绿色零件箱，再把红色六角螺栓放进蓝色零件箱。其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
-      },
-      "sort_assignments": [
+      "manipulation_targets": [
         {
-          "id": "yellow_wrench_to_green",
+          "id": "yellow_wrench",
           "target_object_id": "target_object",
           "target_link": "target_link",
           "target_prompt": "yellow wrench",
-          "placement_object_prompt": "yellow wrench",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "green_parts_bin",
-          "placement_region_prompt": "green parts bin"
+          "semantic_aliases": ["yellow adjustable wrench", "黄色活动扳手"],
+          "source_support_object_id": "work_table"
         },
         {
-          "id": "red_bolt_to_blue",
+          "id": "red_bolt",
           "target_object_id": "red_m24_hex_bolt",
           "target_link": "red_m24_hex_bolt_link",
           "target_prompt": "red hex bolt",
-          "placement_object_prompt": "red hex bolt",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "blue_parts_bin",
-          "placement_region_prompt": "blue square area inside bin"
+          "semantic_aliases": ["red M24 hex bolt", "红色六角螺栓"],
+          "source_support_object_id": "work_table"
         }
       ],
       "placement_regions": [
         {
           "id": "green_parts_bin",
           "prompt": "green parts bin",
+          "semantic_aliases": ["green bin", "绿色零件箱"],
           "center_xy": [0.62, 0.180],
           "size_xy_m": [0.285, 0.260],
           "support_z_m": 0.020,
           "acceptance_semantics": "stable_geometry_centroid_inside",
-          "rgba": [0.035, 0.70, 0.16, 1.0],
-          "selected": true
+          "rgba": [0.035, 0.70, 0.16, 1.0]
         },
         {
           "id": "blue_parts_bin",
-          "prompt": "blue square area inside bin",
+          "prompt": "blue parts bin",
+          "semantic_aliases": ["blue square area inside bin", "blue bin", "蓝色零件箱"],
           "center_xy": [0.62, -0.180],
           "size_xy_m": [0.285, 0.260],
           "support_z_m": 0.020,
           "acceptance_semantics": "stable_geometry_centroid_inside",
-          "rgba": [0.035, 0.25, 0.88, 1.0],
-          "selected": false
+          "rgba": [0.035, 0.25, 0.88, 1.0]
         }
       ],
       "static_obstacles": []
-    },
-    "multi_normal1": {
-      "extends": "multi_normal",
-      "description": "Same industrial workcell, with the destination bins exchanged: yellow adjustable wrench to blue, then red M24 hex bolt to green.",
-      "task": {
-        "target_prompt": "yellow wrench",
-        "placement_object_prompt": "yellow wrench",
-        "placement_region_prompt": "blue square area inside bin",
-        "operator_instruction": "请先把黄色活动扳手放进蓝色零件箱，再把红色六角螺栓放进绿色零件箱。其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
-      },
-      "sort_assignments": [
-        {
-          "id": "yellow_wrench_to_blue",
-          "target_object_id": "target_object",
-          "target_link": "target_link",
-          "target_prompt": "yellow wrench",
-          "placement_object_prompt": "yellow wrench",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "blue_parts_bin",
-          "placement_region_prompt": "blue square area inside bin"
-        },
-        {
-          "id": "red_bolt_to_green",
-          "target_object_id": "red_m24_hex_bolt",
-          "target_link": "red_m24_hex_bolt_link",
-          "target_prompt": "red hex bolt",
-          "placement_object_prompt": "red hex bolt",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "green_parts_bin",
-          "placement_region_prompt": "green parts bin"
-        }
-      ]
-    },
-    "multi_normal2": {
-      "extends": "multi_normal",
-      "description": "Same industrial workcell and destinations as multi_normal, with the red bolt sorted before the yellow adjustable wrench.",
-      "task": {
-        "target_prompt": "red hex bolt",
-        "placement_object_prompt": "red hex bolt",
-        "placement_region_prompt": "blue square area inside bin",
-        "operator_instruction": "请先把红色六角螺栓放进蓝色零件箱，再把黄色活动扳手放进绿色零件箱。其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
-      },
-      "sort_assignments": [
-        {
-          "id": "red_bolt_to_blue",
-          "target_object_id": "red_m24_hex_bolt",
-          "target_link": "red_m24_hex_bolt_link",
-          "target_prompt": "red hex bolt",
-          "placement_object_prompt": "red hex bolt",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "blue_parts_bin",
-          "placement_region_prompt": "blue square area inside bin"
-        },
-        {
-          "id": "yellow_wrench_to_green",
-          "target_object_id": "target_object",
-          "target_link": "target_link",
-          "target_prompt": "yellow wrench",
-          "placement_object_prompt": "yellow wrench",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "green_parts_bin",
-          "placement_region_prompt": "green parts bin"
-        }
-      ]
-    },
-    "multi_normal3": {
-      "extends": "multi_normal",
-      "description": "Same industrial workcell, with both destination bins exchanged and the red bolt sorted first.",
-      "task": {
-        "target_prompt": "red hex bolt",
-        "placement_object_prompt": "red hex bolt",
-        "placement_region_prompt": "green parts bin",
-        "operator_instruction": "请先把红色六角螺栓放进绿色零件箱，再把黄色活动扳手放进蓝色零件箱。其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
-      },
-      "sort_assignments": [
-        {
-          "id": "red_bolt_to_green",
-          "target_object_id": "red_m24_hex_bolt",
-          "target_link": "red_m24_hex_bolt_link",
-          "target_prompt": "red hex bolt",
-          "placement_object_prompt": "red hex bolt",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "green_parts_bin",
-          "placement_region_prompt": "green parts bin"
-        },
-        {
-          "id": "yellow_wrench_to_blue",
-          "target_object_id": "target_object",
-          "target_link": "target_link",
-          "target_prompt": "yellow wrench",
-          "placement_object_prompt": "yellow wrench",
-          "source_support_object_id": "work_table",
-          "placement_region_id": "blue_parts_bin",
-          "placement_region_prompt": "blue square area inside bin"
-        }
-      ]
     },
     "narrow-pick": {
       "world_scene": "narrow-pick",

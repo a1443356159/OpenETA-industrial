@@ -50,6 +50,7 @@ DEFAULT_SIMULATOR_MCP_TOOL_NAMES = (
     "create_simulator_env",
     "close_simulator_env",
     "observe",
+    "configure_work_order",
     "move_to",
     "follow_eef_trajectory",
     "gripper_control",
@@ -101,6 +102,7 @@ CONTROL_RECEIPT_FIELDS = (
     # can associate each native release with its assignment and validate the
     # next target instead of falling back to the legacy singleton target.
     "native_target_binding",
+    "work_order",
     "multi_sort_progress",
     "next_assignment_planning_scene_revision",
     # A native attach can be acknowledged before a later controller-owned
@@ -137,6 +139,7 @@ DEFAULT_SIMULATOR_MCP_TOOL_MAP = {
     "create_simulator_env": "create_env",
     "close_simulator_env": "close_env",
     "observe": "render_env",
+    "configure_work_order": "configure_work_order",
     "move_to": "move_to",
 }
 

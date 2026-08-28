@@ -719,6 +719,31 @@ def qualify_motion_candidates(
 
 @_blocking_tool
 @_serialized_env_control
+def configure_work_order(
+    handle: str,
+    items: list[dict],
+    *,
+    session_id: str = "",
+) -> dict:
+    """Bind a VLM-authored ordered manipulation plan to the active workcell."""
+
+    sid = session_id or _current_session.get() or ""
+    _touch_session(sid)
+    meta = _session_envs.get(sid, {}).get(handle)
+    if not meta:
+        return {"ok": False, "error": f"Unknown: {handle}"}
+    control_spec = meta.get("control_spec")
+    if not isinstance(control_spec, dict) or not control_spec.get("motion_control"):
+        return {"ok": False, "error": "Work-order configuration is unavailable"}
+    return _proxy_step(
+        meta,
+        {"action_type": "configure_work_order", "items": items},
+        num_steps=1,
+    )
+
+
+@_blocking_tool
+@_serialized_env_control
 def move_to(handle: str, x: float, y: float, z: float, *,
             roll: float | None = None, pitch: float | None = None, yaw: float | None = None,
             num_steps: int = 100, tolerance: float = 0.002, ori_tolerance: float = 0.05,

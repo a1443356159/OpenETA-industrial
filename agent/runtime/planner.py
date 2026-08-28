@@ -4345,6 +4345,7 @@ def _model_request_context(
         ]
     state_keys = (
         "active_environment_task",
+        "work_order",
         "task_completion_evidence",
         "selected_sam3_detection",
         "placement_object_detection",
@@ -4708,18 +4709,24 @@ def _model_phase_and_legal_tools(
         if tool_name and tool_name not in required:
             required.append(tool_name)
     semantic = context.get("semantic_perception_obligation")
+    work_order = context.get("work_order_obligation")
     execution = context.get("grasp_execution")
     active_environment = context.get("active_environment_task")
     selected = context.get("selected_sam3_detection")
     phase = "general"
     preferred: list[str] = []
-    if isinstance(semantic, dict) and semantic.get("status") == "exhausted":
+    if isinstance(work_order, dict) and work_order.get("status") == (
+        "semantic_decision_required"
+    ):
+        phase = "work_order_configuration"
+        preferred = ["configure_work_order"]
+    elif isinstance(semantic, dict) and semantic.get("status") == "exhausted":
         # No tool can create new semantic evidence in the unchanged scene once
         # the bounded exact-view/simplified-view frontier is exhausted.  Keep
         # the terminal response agentic, but do not advertise another no-op
         # observe call as a legal escape hatch.
         return "semantic_perception_exhausted", []
-    if isinstance(semantic, dict) and semantic.get("status") == "semantic_decision_required":
+    elif isinstance(semantic, dict) and semantic.get("status") == "semantic_decision_required":
         phase = "semantic_perception"
         preferred = ["sam3", "observe"]
     elif isinstance(execution, dict):
@@ -5408,6 +5415,11 @@ def _build_tool_context_payload(
             task=scripted_task,
             active_environment_task=memory_context.get("active_environment_task"),
         ),
+        "work_order_obligation": _work_order_obligation(
+            observation,
+            memory_context=memory_context,
+        ),
+        "work_order": memory_context.get("work_order"),
         "task_completion_evidence": memory_context.get("task_completion_evidence"),
         "multi_sort_progress": memory_context.get("multi_sort_progress"),
         "task_playbook": task_playbook,
@@ -6881,6 +6893,33 @@ def _placement_obligation(
     }
 
 
+def _work_order_obligation(
+    observation: EnvObservation,
+    *,
+    memory_context: JsonDict,
+) -> JsonDict | None:
+    catalog = observation.metadata.get("manipulation_catalog")
+    if not (
+        observation.metadata.get("work_order_required") is True
+        and isinstance(catalog, dict)
+        and catalog.get("schema_version") == "openeta.manipulation_catalog.v1"
+        and not isinstance(memory_context.get("work_order"), dict)
+    ):
+        return None
+    return {
+        "schema_version": "openeta.work_order_obligation.v1",
+        "status": "semantic_decision_required",
+        "required_tool": "configure_work_order",
+        "manipulation_catalog": dict(catalog),
+        "required_item_fields": ["target_prompt", "placement_region_prompt"],
+        "rule": (
+            "Read the user's current request, preserve its requested item order, and "
+            "call configure_work_order with semantic target/destination prompts. The "
+            "environment may validate the catalog but must not choose the task."
+        ),
+    }
+
+
 def _semantic_perception_obligation(
     *,
     observation: EnvObservation,
@@ -6889,6 +6928,11 @@ def _semantic_perception_obligation(
 ) -> JsonDict | None:
     """Describe the one legal semantic role without asking the model to track phase."""
 
+    if (
+        observation.metadata.get("work_order_required") is True
+        and not isinstance(memory_context.get("work_order"), dict)
+    ):
+        return None
     if isinstance(memory_context.get("selection_obligation"), dict) or isinstance(
         memory_context.get("reference_localization_obligation"), dict
     ):
@@ -8772,6 +8816,14 @@ def _skill_environment_identity_text(observation: EnvObservation, memory: AgentM
 
 
 def _effective_task_text(observation: EnvObservation, memory: AgentMemory) -> str:
+    catalog = observation.metadata.get("manipulation_catalog")
+    if (
+        isinstance(catalog, dict)
+        and catalog.get("schema_version") == "openeta.manipulation_catalog.v1"
+    ):
+        user_request = str(memory.current_user_request or memory.task or "").strip()
+        if user_request:
+            return user_request
     active = memory.active_environment_task()
     task = active.get("task") if isinstance(active, dict) else None
     return task.strip() if isinstance(task, str) and task.strip() else observation.task

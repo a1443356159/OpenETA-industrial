@@ -60,6 +60,51 @@ MULTI_NORMAL_SCENARIOS = (
     "multi_normal2",
     "multi_normal3",
 )
+# Acceptance-only user requests. These are written to the TUI as ordinary
+# operator utterances and retained privately by the verifier. They are never
+# placed in the physical scene contract or planner context.
+MULTI_NORMAL_ACCEPTANCE_REQUESTS = {
+    "multi_normal": {
+        "operator_instruction": (
+            "请先把黄色活动扳手放进绿色零件箱，再把红色六角螺栓放进蓝色零件箱。"
+            "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
+        ),
+        "items": [
+            ("target_object", "target_link", "yellow wrench", "green_parts_bin", "green parts bin"),
+            ("red_m24_hex_bolt", "red_m24_hex_bolt_link", "red hex bolt", "blue_parts_bin", "blue parts bin"),
+        ],
+    },
+    "multi_normal1": {
+        "operator_instruction": (
+            "请先把黄色活动扳手放进蓝色零件箱，再把红色六角螺栓放进绿色零件箱。"
+            "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
+        ),
+        "items": [
+            ("target_object", "target_link", "yellow wrench", "blue_parts_bin", "blue parts bin"),
+            ("red_m24_hex_bolt", "red_m24_hex_bolt_link", "red hex bolt", "green_parts_bin", "green parts bin"),
+        ],
+    },
+    "multi_normal2": {
+        "operator_instruction": (
+            "请先把红色六角螺栓放进蓝色零件箱，再把黄色活动扳手放进绿色零件箱。"
+            "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
+        ),
+        "items": [
+            ("red_m24_hex_bolt", "red_m24_hex_bolt_link", "red hex bolt", "blue_parts_bin", "blue parts bin"),
+            ("target_object", "target_link", "yellow wrench", "green_parts_bin", "green parts bin"),
+        ],
+    },
+    "multi_normal3": {
+        "operator_instruction": (
+            "请先把红色六角螺栓放进绿色零件箱，再把黄色活动扳手放进蓝色零件箱。"
+            "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
+        ),
+        "items": [
+            ("red_m24_hex_bolt", "red_m24_hex_bolt_link", "red hex bolt", "green_parts_bin", "green parts bin"),
+            ("target_object", "target_link", "yellow wrench", "blue_parts_bin", "blue parts bin"),
+        ],
+    },
+}
 SCENARIOS = (
     "normal",
     *MULTI_NORMAL_SCENARIOS,
@@ -143,10 +188,20 @@ SCENARIO_INSTRUCTIONS = {
 def _scene_contract(scenario: str) -> dict[str, Any]:
     if scenario not in SCENARIOS:
         raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
-    return load_acceptance_scene_contract(scenario)
+    physical_scene = "multi_normal" if scenario in MULTI_NORMAL_SCENARIOS else scenario
+    return load_acceptance_scene_contract(physical_scene)
 
 
-def _scene_task(scene: Mapping[str, Any]) -> dict[str, str]:
+def _scene_task(scene: Mapping[str, Any], *, scenario: str) -> dict[str, str]:
+    variant = MULTI_NORMAL_ACCEPTANCE_REQUESTS.get(scenario)
+    if isinstance(variant, Mapping):
+        first = variant["items"][0]
+        return {
+            "target_prompt": str(first[2]),
+            "placement_object_prompt": str(first[2]),
+            "placement_region_prompt": str(first[4]),
+            "operator_instruction": str(variant["operator_instruction"]),
+        }
     raw = scene.get("task")
     if isinstance(raw, Mapping):
         return {
@@ -166,11 +221,29 @@ def _scene_task(scene: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
-def _scene_sort_assignments(scene: Mapping[str, Any]) -> list[dict[str, str]]:
-    configured = scene.get("sort_assignments")
-    if isinstance(configured, list):
-        return [dict(item) for item in configured if isinstance(item, Mapping)]
-    task = _scene_task(scene)
+def _expected_work_order(
+    scene: Mapping[str, Any],
+    *,
+    scenario: str,
+) -> list[dict[str, str]]:
+    variant = MULTI_NORMAL_ACCEPTANCE_REQUESTS.get(scenario)
+    if isinstance(variant, Mapping):
+        return [
+            {
+                "id": f"{('yellow_wrench' if target_id == 'target_object' else 'red_bolt')}_to_{region_id}",
+                "target_object_id": str(target_id),
+                "target_link": str(target_link),
+                "target_prompt": str(target_prompt),
+                "placement_object_prompt": str(target_prompt),
+                "source_support_object_id": "work_table",
+                "placement_region_id": str(region_id),
+                "placement_region_prompt": str(region_prompt),
+            }
+            for target_id, target_link, target_prompt, region_id, region_prompt in variant[
+                "items"
+            ]
+        ]
+    task = _scene_task(scene, scenario=scenario)
     return [
         {
             "id": "default",
@@ -178,6 +251,7 @@ def _scene_sort_assignments(scene: Mapping[str, Any]) -> list[dict[str, str]]:
             "target_link": "target_link",
             "target_prompt": task["target_prompt"],
             "placement_object_prompt": task["placement_object_prompt"],
+            "source_support_object_id": "work_table",
             "placement_region_id": str(
                 scene.get("selected_placement_region_id") or "placement_zone_marker"
             ),
@@ -190,8 +264,9 @@ def _metadata_semantic(value: str) -> str:
     return "_".join(str(value).strip().split())
 
 
-def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
-    task = _scene_task(scene)
+def _scene_receipt(scene: Mapping[str, Any], *, scenario: str) -> dict[str, Any]:
+    task = _scene_task(scene, scenario=scenario)
+    expected_work_order = _expected_work_order(scene, scenario=scenario)
     target = scene.get("target_object")
     target_evidence = {
         "id": "target_object",
@@ -215,9 +290,18 @@ def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(regions, list)
         else ["placement_zone_marker"]
     )
-    sort_assignments = scene.get("sort_assignments")
+    first_region_id = expected_work_order[0]["placement_region_id"]
+    first_region = next(
+        (
+            region
+            for region in (regions if isinstance(regions, list) else [])
+            if isinstance(region, Mapping) and str(region.get("id") or "") == first_region_id
+        ),
+        None,
+    )
     return {
         "schema_version": "openeta.gazebo_acceptance_scene_receipt.v2",
+        "acceptance_request_id": scenario,
         "scene_id": str(scene["scene_id"]),
         "seed": int(scene["seed"]),
         "contract_sha256": str(scene["contract_sha256"]),
@@ -226,7 +310,11 @@ def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
         ],
         "destination_center_xy": [
             float(value)
-            for value in scene.get("destination_center_xy", [0.48, -0.10])
+            for value in (
+                first_region.get("center_xy")
+                if isinstance(first_region, Mapping)
+                else scene.get("destination_center_xy", [0.48, -0.10])
+            )
         ],
         "destination_size_xy_m": [
             float(value)
@@ -236,30 +324,9 @@ def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
         "target_object": target_evidence,
         "placement_region_ids": region_ids,
         "selected_placement_region_id": str(
-            scene.get("selected_placement_region_id") or region_ids[0]
+            first_region_id
         ),
-        **(
-            {
-                "sort_assignments": [
-                    {
-                        key: str(assignment[key])
-                        for key in (
-                            "id",
-                            "target_object_id",
-                            "target_link",
-                            "target_prompt",
-                            "placement_object_prompt",
-                            "placement_region_id",
-                            "placement_region_prompt",
-                        )
-                    }
-                    for assignment in sort_assignments
-                    if isinstance(assignment, Mapping)
-                ]
-            }
-            if isinstance(sort_assignments, list)
-            else {}
-        ),
+        "expected_work_order": expected_work_order,
     }
 
 
@@ -305,8 +372,17 @@ def _automation_metadata_for_backend(
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
-    task = _scene_task(scene)
+    task = _scene_task(scene, scenario=scenario)
     planner_mode = EXECUTION_PROFILE_PLANNER_MODES[profile]
+    semantic_metadata = (
+        "work_order_source=vlm_conversation"
+        if scenario in MULTI_NORMAL_SCENARIOS
+        else (
+            f"grasp_target={_metadata_semantic(task['target_prompt'])}; "
+            f"placement_object={_metadata_semantic(task['placement_object_prompt'])}; "
+            f"placement_region={_metadata_semantic(task['placement_region_prompt'])}"
+        )
+    )
     return (
         f"[automation=scripted_tui; planner_mode={planner_mode}; "
         f"execution_profile={profile}; qualification_profile={funnel_profile}; "
@@ -314,9 +390,7 @@ def _automation_metadata_for_backend(
         f"environment_id={ENV_ID}; environment_task=normal_pick_and_place; "
         f"environment_seed={int(scene['seed'])}; "
         f"acceptance_scene={str(scene['scene_id'])}; "
-        f"grasp_target={_metadata_semantic(task['target_prompt'])}; "
-        f"placement_object={_metadata_semantic(task['placement_object_prompt'])}; "
-        f"placement_region={_metadata_semantic(task['placement_region_prompt'])}]"
+        f"{semantic_metadata}]"
     )
 
 
@@ -331,7 +405,7 @@ def _instructions_for_backend(
     profile = _validated_execution_profile(execution_profile)
     _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
-    task = _scene_task(scene)
+    task = _scene_task(scene, scenario=scenario)
     control = AGENTIC_CONTROL if profile == "agentic_normal" else SMOKE_CONTROL
     recovery = f"\n{TASK_INSTRUCTIONS}" if profile == "agentic_normal" else ""
     return (
@@ -342,12 +416,19 @@ def _instructions_for_backend(
     )
 
 
-def _required_tools_for_backend(grasp_backend: str) -> tuple[str, ...]:
+def _required_tools_for_backend(
+    grasp_backend: str,
+    *,
+    scenario: str = "normal",
+) -> tuple[str, ...]:
     backend = _validated_grasp_backend(grasp_backend)
-    return tuple(
+    required = tuple(
         backend if name == "grasp_pose_estimate" else name
         for name in REQUIRED_REAL_PICK_PLACE_TOOLS
     )
+    if scenario in MULTI_NORMAL_SCENARIOS:
+        return (*required[:2], "configure_work_order", *required[2:])
+    return required
 
 
 def _services_for_backend(
@@ -571,7 +652,7 @@ def prepare_case(
         before=base._process_snapshot(),
     )
     receipt["acceptance_scenario"] = scenario
-    receipt["acceptance_scene"] = _scene_receipt(scene)
+    receipt["acceptance_scene"] = _scene_receipt(scene, scenario=scenario)
     receipt["grasp_backend_mode"] = backend
     receipt["execution_profile"] = profile
     receipt["qualification_profile"] = funnel_profile
@@ -1221,7 +1302,7 @@ def verify_case(
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
-    assignments = _scene_sort_assignments(scene)
+    assignments = _expected_work_order(scene, scenario=scenario)
     assignment_count = len(assignments)
     backend_label = "GraspGenX" if backend == "graspgenx" else "AnyGrasp"
     errors: list[str] = []
@@ -1237,7 +1318,8 @@ def verify_case(
             str(obstacle["id"]) for obstacle in scene["static_obstacles"]
         ]
         if not isinstance(receipt_scene, Mapping) or receipt_scene != _scene_receipt(
-            scene
+            scene,
+            scenario=scenario,
         ):
             errors.append("acceptance scene receipt does not match the versioned contract")
         planner_evidence = _planner_evidence(
@@ -1253,9 +1335,36 @@ def verify_case(
         payloads, mcp_errors = base._mcp_response_payloads(calls, paths)
         errors.extend(mcp_errors)
         names = [_name(call) for call in calls]
-        for required in _required_tools_for_backend(backend):
+        for required in _required_tools_for_backend(backend, scenario=scenario):
             if required not in names:
                 errors.append(f"required real pick-place tool call missing: {required}")
+        if scenario in MULTI_NORMAL_SCENARIOS:
+            work_order_calls = [
+                call for call in calls if _name(call) == "configure_work_order"
+            ]
+            if len(work_order_calls) != 1:
+                errors.append("VLM must configure exactly one session work order")
+            normalized_orders = [
+                value
+                for call in work_order_calls
+                for value in base._values(call, "work_order")
+                if isinstance(value, Mapping)
+                and value.get("schema_version") == "openeta.work_order.v1"
+                and value.get("source") == "vlm_tool_call"
+            ]
+            expected_items = [
+                {**assignment, "source": "vlm_work_order"}
+                for assignment in assignments
+            ]
+            if not any(order.get("items") == expected_items for order in normalized_orders):
+                errors.append(
+                    "VLM-authored work order does not match the user-requested task"
+                )
+            if base._contains(create := next(
+                (call for call in calls if _name(call) == "create_simulator_env"),
+                {},
+            ), "sort_assignments"):
+                errors.append("physical scene injected a static sort assignment")
         if names.count("sam3") != 2 * assignment_count:
             errors.append(
                 "exactly one target-object and one placement-region SAM3 call "
@@ -1667,7 +1776,7 @@ def verify_case(
                 or planner_evidence["total_tokens"]
             ),
             "scenario": scenario,
-            "acceptance_scene": _scene_receipt(scene),
+            "acceptance_scene": _scene_receipt(scene, scenario=scenario),
             "grasp_backend": backend,
         }
     except Exception as exc:  # noqa: BLE001 - verifier must return a report.
@@ -1682,7 +1791,7 @@ def verify_case(
             "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
             "planner_provider_invoked": None,
             "scenario": scenario,
-            "acceptance_scene": _scene_receipt(scene),
+            "acceptance_scene": _scene_receipt(scene, scenario=scenario),
             "grasp_backend": backend,
         }
 

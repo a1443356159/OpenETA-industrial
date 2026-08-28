@@ -54,6 +54,7 @@ PLACEMENT_OBJECT_DETECTION_KEY = "placement_object_detection"
 PLACEMENT_REGION_DETECTION_KEY = "placement_region_detection"
 FROZEN_PLACEMENT_POOL_KEY = "frozen_placement_goal_pool"
 COMPLETED_PLACEMENT_SUBGOALS_KEY = "completed_placement_subgoals"
+WORK_ORDER_KEY = "work_order"
 MULTI_SORT_PROGRESS_KEY = "multi_sort_progress"
 MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
@@ -348,15 +349,30 @@ class AgentMemory:
         except (KeyError, TypeError, ValueError):
             return False
         if (
-            assignment_count < 2
+            assignment_count < 1
             or completed_count < 0
             or remaining_count < 0
             or completed_count + remaining_count != assignment_count
             or bool(progress.get("all_completed")) != (remaining_count == 0)
         ):
             return False
+        work_order = progress.get("work_order")
+        if not (
+            progress.get("source") == "vlm_work_order"
+            and isinstance(work_order, dict)
+            and work_order.get("schema_version") == "openeta.work_order.v1"
+            and work_order.get("source") == "vlm_tool_call"
+            and isinstance(work_order.get("items"), list)
+            and len(work_order["items"]) == assignment_count
+        ):
+            return False
         normalized = dict(progress)
         previous = _memory_fact_value(self.facts.get(MULTI_SORT_PROGRESS_KEY))
+        previous_work_order = _memory_fact_value(self.facts.get(WORK_ORDER_KEY))
+        self.facts[WORK_ORDER_KEY] = _memory_fact_entry(
+            dict(work_order),
+            source="vlm_configure_work_order",
+        )
         self.facts[MULTI_SORT_PROGRESS_KEY] = _memory_fact_entry(
             normalized,
             source="environment_multi_sort_progress",
@@ -389,7 +405,7 @@ class AgentMemory:
             )
         if previous != normalized:
             self.record("multi_sort_progress_updated", normalized)
-        return previous != normalized or advanced_release
+        return previous != normalized or previous_work_order != work_order or advanced_release
 
     def _capture_failed_placement_release_reobservation(self, observation: EnvObservation) -> bool:
         """Acknowledge the fresh scene required after an unsuccessful release."""
@@ -1589,6 +1605,7 @@ class AgentMemory:
             gripper_removed = self.facts.pop(GRIPPER_COMMAND_STATE_KEY, None)
             release_removed = self.facts.pop(PLACEMENT_RELEASE_KEY, None)
             multi_sort_removed = self.facts.pop(MULTI_SORT_PROGRESS_KEY, None)
+            work_order_removed = self.facts.pop(WORK_ORDER_KEY, None)
             self.record(
                 "active_environment_task_cleared",
                 {"reason": "simulator_environment_closed"},
@@ -1598,6 +1615,7 @@ class AgentMemory:
                 or gripper_removed is not None
                 or release_removed is not None
                 or multi_sort_removed is not None
+                or work_order_removed is not None
                 or completion_recorded
             )
 
@@ -7081,6 +7099,7 @@ class AgentMemory:
             "multi_sort_progress": _memory_fact_value(
                 self.facts.get(MULTI_SORT_PROGRESS_KEY)
             ),
+            "work_order": _memory_fact_value(self.facts.get(WORK_ORDER_KEY)),
             "conversation": self.conversation.planning_context(max_items=0),
             "metadata": self.metadata,
             "selection_obligation": self.pending_sam3_selection(),

@@ -32,49 +32,6 @@ ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC = (
 )
 
 
-def resolve_scene_definition(
-    payload: Mapping[str, object],
-    scene_id: str,
-) -> dict[str, object]:
-    """Resolve one catalog scene, including optional task-only inheritance."""
-
-    scenes = payload.get("scenes")
-    if payload.get("schema_version") != SCHEMA_VERSION or not isinstance(
-        scenes, Mapping
-    ):
-        raise RuntimeError("acceptance scene catalog is invalid")
-
-    def merge(
-        base: Mapping[str, object],
-        override: Mapping[str, object],
-    ) -> dict[str, object]:
-        result = json.loads(json.dumps(base))
-        for key, value in override.items():
-            if key == "extends":
-                continue
-            current = result.get(key)
-            if isinstance(current, Mapping) and isinstance(value, Mapping):
-                result[key] = merge(current, value)
-            else:
-                result[key] = json.loads(json.dumps(value))
-        return result
-
-    def resolve(current_id: str, lineage: tuple[str, ...]) -> dict[str, object]:
-        if current_id in lineage:
-            raise RuntimeError("acceptance scene inheritance cycle is invalid")
-        raw = scenes.get(current_id)
-        if not isinstance(raw, Mapping):
-            raise RuntimeError(f"unsupported acceptance scene: {current_id}")
-        parent = raw.get("extends")
-        if parent is None:
-            return merge({}, raw)
-        if not isinstance(parent, str) or not parent.strip():
-            raise RuntimeError("acceptance scene parent identity is invalid")
-        return merge(resolve(parent.strip(), (*lineage, current_id)), raw)
-
-    return resolve(str(scene_id).strip(), ())
-
-
 def _native_target_topic_namespace(target_model: str) -> str:
     """Return a stable transport namespace for one detachable world body."""
 
@@ -142,8 +99,8 @@ def native_target_binding(
 def scene_target_bindings(scene: Mapping[str, object]) -> tuple[NativeTargetBinding, ...]:
     """Resolve physical target bindings, synthesizing the legacy singleton."""
 
-    raw_assignments = scene.get("sort_assignments")
-    if raw_assignments is None:
+    raw_targets = scene.get("manipulation_targets")
+    if raw_targets is None:
         return (
             native_target_binding(
                 assignment_id="default",
@@ -151,12 +108,12 @@ def scene_target_bindings(scene: Mapping[str, object]) -> tuple[NativeTargetBind
                 target_link="target_link",
             ),
         )
-    if not isinstance(raw_assignments, list) or not raw_assignments:
-        raise RuntimeError("acceptance scene sort assignments are invalid")
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise RuntimeError("acceptance scene manipulation targets are invalid")
     bindings: list[NativeTargetBinding] = []
-    for raw in raw_assignments:
+    for raw in raw_targets:
         if not isinstance(raw, Mapping):
-            raise RuntimeError("acceptance scene sort assignment is invalid")
+            raise RuntimeError("acceptance scene manipulation target is invalid")
         bindings.append(
             native_target_binding(
                 assignment_id=str(raw.get("id") or ""),
@@ -165,9 +122,9 @@ def scene_target_bindings(scene: Mapping[str, object]) -> tuple[NativeTargetBind
             )
         )
     if len({item.assignment_id for item in bindings}) != len(bindings):
-        raise RuntimeError("acceptance scene sort assignment identity is duplicated")
+        raise RuntimeError("acceptance scene manipulation target identity is duplicated")
     if len({item.target_model for item in bindings}) != len(bindings):
-        raise RuntimeError("acceptance scene sort target identity is duplicated")
+        raise RuntimeError("acceptance scene manipulation target is duplicated")
     return tuple(bindings)
 
 
@@ -598,13 +555,16 @@ def _render_scene_tree(
     """Compile the selected catalog variant into one final Gazebo tree."""
 
     payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    scenes = payload.get("scenes") if isinstance(payload, Mapping) else None
     if (
         not isinstance(payload, Mapping)
         or payload.get("schema_version") != SCHEMA_VERSION
-        or not isinstance(payload.get("scenes"), Mapping)
+        or not isinstance(scenes, Mapping)
     ):
         raise RuntimeError("acceptance scene catalog is invalid")
-    scene = resolve_scene_definition(payload, scene_id)
+    scene = scenes.get(scene_id)
+    if not isinstance(scene, Mapping):
+        raise RuntimeError(f"unsupported acceptance scene: {scene_id}")
     world_scene = str(scene.get("world_scene") or "")
     obstacles = scene.get("static_obstacles")
     if not world_scene or not isinstance(obstacles, list):
@@ -906,22 +866,11 @@ def _validate_catalog_bindings(
     """Reject semantic catalog data that drifted from the compiled world."""
 
     payload = json.loads(catalog_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
+    scene = payload.get("scenes", {}).get(scene_id) if isinstance(payload, Mapping) else None
+    if not isinstance(scene, Mapping):
         raise RuntimeError("authoritative scene catalog binding is invalid")
-    scene = resolve_scene_definition(payload, scene_id)
     by_id = {item.object_id: item for item in objects}
     bindings = scene_target_bindings(scene)
-    regions_by_id = {
-        str(raw.get("id") or ""): raw
-        for raw in (scene.get("placement_regions") or [])
-        if isinstance(raw, Mapping)
-    }
-    assignments = scene.get("sort_assignments")
-    assignments_by_id = {
-        str(raw.get("id") or ""): raw
-        for raw in (assignments if isinstance(assignments, list) else [])
-        if isinstance(raw, Mapping)
-    }
     for binding in bindings:
         if binding.target_model not in by_id:
             raise RuntimeError(
@@ -933,16 +882,6 @@ def _validate_catalog_bindings(
                 f"authoritative sort target link is missing: "
                 f"{binding.target_model}/{binding.target_link}"
             )
-        raw_assignment = assignments_by_id.get(binding.assignment_id)
-        if raw_assignment is not None:
-            region_id = str(raw_assignment.get("placement_region_id") or "")
-            region = regions_by_id.get(region_id)
-            if region is None or str(region.get("prompt") or "") != str(
-                raw_assignment.get("placement_region_prompt") or ""
-            ):
-                raise RuntimeError(
-                    "authoritative sort assignment placement binding is invalid"
-                )
     target_raw = scene.get("target_object")
     if isinstance(target_raw, Mapping):
         target = by_id.get("target_object")
@@ -1093,9 +1032,9 @@ def compile_authoritative_scene(
     if world is None:
         raise RuntimeError("authoritative scene world is invalid")
     payload = json.loads(catalog_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, Mapping):
+    raw_scene = payload.get("scenes", {}).get(selected) if isinstance(payload, Mapping) else None
+    if not isinstance(raw_scene, Mapping):
         raise RuntimeError("authoritative scene catalog binding is invalid")
-    raw_scene = resolve_scene_definition(payload, selected)
     target_bindings = scene_target_bindings(raw_scene)
     for binding in target_bindings:
         target_model = world.find(f"model[@name='{binding.target_model}']")

@@ -484,6 +484,7 @@ def test_default_simulator_mcp_binding_uses_remote_stable_tools() -> None:
         "create_simulator_env",
         "close_simulator_env",
         "observe",
+        "configure_work_order",
         "move_to",
         "follow_eef_trajectory",
         "gripper_control",
@@ -491,9 +492,61 @@ def test_default_simulator_mcp_binding_uses_remote_stable_tools() -> None:
     assert tools.can_execute("create_simulator_env")
     assert tools.can_execute("close_simulator_env")
     assert tools.can_execute("observe")
+    assert tools.can_execute("configure_work_order")
     assert tools.can_execute("move_to")
     assert tools.can_execute("follow_eef_trajectory")
     assert tools.can_execute("gripper_control")
+
+
+def test_configure_work_order_proxy_forwards_only_vlm_items_and_session_binding() -> None:
+    work_order = {
+        "schema_version": "openeta.work_order.v1",
+        "source": "vlm_tool_call",
+        "items": [
+            {
+                "target_prompt": "red hex bolt",
+                "placement_region_prompt": "blue parts bin",
+            }
+        ],
+    }
+    transport = FakeSimulatorMcpTransport(
+        {
+            "success": True,
+            "work_order": work_order,
+            "observation": {"cameras": [], "robot": {}},
+        }
+    )
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-1",
+            handle="env-1",
+        ),
+        tool_names=("configure_work_order",),
+    )
+    requested_items = [
+        {
+            "target_prompt": "red hex bolt",
+            "placement_region_prompt": "blue parts bin",
+        }
+    ]
+
+    result = tools.call("configure_work_order", {"items": requested_items})
+
+    assert result.success is True
+    assert transport.calls == [
+        {
+            "name": "configure_work_order",
+            "arguments": {
+                "items": requested_items,
+                "handle": "env-1",
+                "session_id": "session-1",
+            },
+            "timeout_s": 120.0,
+        }
+    ]
+    assert result.details["environment_receipt"]["work_order"] == work_order
 
 
 def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Path) -> None:

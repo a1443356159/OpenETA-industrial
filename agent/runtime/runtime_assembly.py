@@ -166,6 +166,7 @@ REMOTE_PLACEHOLDER_TOOLS = (
 
 ENVIRONMENT_PLACEHOLDER_TOOLS = (
     "observe",
+    "configure_work_order",
     "move_to",
     "follow_eef_trajectory",
     "gripper_control",

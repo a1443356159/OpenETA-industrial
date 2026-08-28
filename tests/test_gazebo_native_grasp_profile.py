@@ -607,63 +607,115 @@ def test_multi_normal_materializes_two_independent_stock_detachable_joints() -> 
     ]
 
 
-def test_multi_normal_configs_bind_each_object_to_its_own_bin() -> None:
+def test_multi_normal_physical_catalog_does_not_preselect_a_task() -> None:
     config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
-    assignments = config.sort_assignment_configs
+    contract = load_acceptance_scene_contract("multi_normal")
+    evidence = config.acceptance_scene_evidence()
 
-    assert [item.target_id for item in assignments] == [
+    assert "task" not in contract
+    assert all("selected" not in region for region in contract["placement_regions"])
+    assert [item.target_id for item in config.manipulation_target_configs] == [
         "target_object",
         "red_m24_hex_bolt",
     ]
-    assert [item.selected_placement_region_id for item in assignments] == [
-        "green_parts_bin",
-        "blue_parts_bin",
-    ]
-    assert [item.destination_center_xy for item in assignments] == [
-        (0.62, 0.18),
-        (0.62, -0.18),
-    ]
-    assert assignments[0].active_sort_assignment["target_prompt"] == "yellow wrench"
-    assert assignments[1].active_sort_assignment["target_prompt"] == "red hex bolt"
-    assert assignments[1].active_sort_assignment["placement_region_prompt"] == (
-        "blue square area inside bin"
+    assert evidence["manipulation_catalog"]["targets"][0]["target_prompt"] == (
+        "yellow wrench"
     )
+    assert "target_object" not in evidence
+    assert "selected_placement_region_id" not in evidence
+    assert "destination_center_xy" not in evidence
 
 
 @pytest.mark.parametrize(
-    ("scene_id", "target_ids", "region_ids"),
+    ("items", "target_ids", "region_ids"),
     [
         (
-            "multi_normal1",
+            [
+                {
+                    "target_prompt": "yellow wrench",
+                    "placement_region_prompt": "blue bin",
+                },
+                {
+                    "target_prompt": "red hex bolt",
+                    "placement_region_prompt": "green parts bin",
+                },
+            ],
             ["target_object", "red_m24_hex_bolt"],
             ["blue_parts_bin", "green_parts_bin"],
         ),
         (
-            "multi_normal2",
+            [
+                {
+                    "target_prompt": "红色六角螺栓",
+                    "placement_region_prompt": "蓝色零件箱",
+                },
+                {
+                    "target_prompt": "黄色活动扳手",
+                    "placement_region_prompt": "绿色零件箱",
+                },
+            ],
             ["red_m24_hex_bolt", "target_object"],
             ["blue_parts_bin", "green_parts_bin"],
         ),
         (
-            "multi_normal3",
+            [
+                {
+                    "target_prompt": "red M24 hex bolt",
+                    "placement_region_prompt": "green bin",
+                },
+                {
+                    "target_prompt": "yellow adjustable wrench",
+                    "placement_region_prompt": "blue parts bin",
+                },
+            ],
             ["red_m24_hex_bolt", "target_object"],
             ["green_parts_bin", "blue_parts_bin"],
         ),
     ],
 )
-def test_multi_normal_task_variants_only_change_order_and_bin_binding(
-    scene_id: str,
+def test_vlm_work_order_selects_order_and_bin_binding(
+    items: list[dict[str, str]],
     target_ids: list[str],
     region_ids: list[str],
 ) -> None:
-    contract = load_acceptance_scene_contract(scene_id)
     configs = NativePickPlaceConfig(
-        acceptance_scene_id=scene_id
-    ).sort_assignment_configs
+        acceptance_scene_id="multi_normal"
+    ).work_order_configs(items)
 
-    assert contract["world_scene"] == "multi_normal"
     assert [item.target_id for item in configs] == target_ids
     assert [item.selected_placement_region_id for item in configs] == region_ids
-    assert contract["selected_placement_region_id"] == region_ids[0]
+    assert all(item.work_order_item["source"] == "vlm_work_order" for item in configs)
+    assert [item.destination_center_xy for item in configs] == [
+        (0.62, -0.18) if region_id == "blue_parts_bin" else (0.62, 0.18)
+        for region_id in region_ids
+    ]
+
+
+def test_vlm_work_order_rejects_duplicate_or_unknown_physical_targets() -> None:
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+
+    with pytest.raises(ValueError, match="cannot select one physical target twice"):
+        config.work_order_configs(
+            [
+                {
+                    "target_prompt": "yellow wrench",
+                    "placement_region_prompt": "green parts bin",
+                },
+                {
+                    "target_prompt": "黄色活动扳手",
+                    "placement_region_prompt": "blue parts bin",
+                },
+            ]
+        )
+    with pytest.raises(ValueError, match="does not resolve uniquely"):
+        config.work_order_configs(
+            [
+                {
+                    "target_prompt": "orange screwdriver",
+                    "placement_region_prompt": "green parts bin",
+                }
+            ]
+        )
 
 
 def test_native_grasp_sdf_renderer_rejects_a_conflicting_robot_collision_mask() -> None:

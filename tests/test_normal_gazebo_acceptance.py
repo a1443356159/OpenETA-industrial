@@ -168,7 +168,7 @@ def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
         assert len(receipt["acceptance_scene"]["contract_sha256"]) == 64
 
 
-def test_multi_normal_prepares_one_human_task_with_two_ordered_assignments(
+def test_multi_normal_prepares_one_human_request_with_private_verification_oracle(
     tmp_path, monkeypatch
 ) -> None:
     allocation = acceptance.base.Allocation(81, "openeta-multi-normal", 18765, "run-id")
@@ -193,14 +193,14 @@ def test_multi_normal_prepares_one_human_task_with_two_ordered_assignments(
 
     prompt = paths.instructions.read_text(encoding="utf-8")
     receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
-    assignments = receipt["acceptance_scene"]["sort_assignments"]
+    assignments = receipt["acceptance_scene"]["expected_work_order"]
 
     assert "黄色活动扳手" in prompt and "绿色零件箱" in prompt
     assert "红色六角螺栓" in prompt and "蓝色零件箱" in prompt
     assert "放好第一件后不要关闭环境" in prompt
     assert [item["id"] for item in assignments] == [
-        "yellow_wrench_to_green",
-        "red_bolt_to_blue",
+        "yellow_wrench_to_green_parts_bin",
+        "red_bolt_to_blue_parts_bin",
     ]
     assert [item["target_object_id"] for item in assignments] == [
         "target_object",
@@ -213,6 +213,12 @@ def test_multi_normal_prepares_one_human_task_with_two_ordered_assignments(
     assert acceptance._scenario_environment("multi_normal") == {
         "OPENETA_ACCEPTANCE_SCENE": "multi_normal"
     }
+    metadata = acceptance._automation_metadata_for_backend(
+        "graspgenx", scenario="multi_normal"
+    )
+    assert "work_order_source=vlm_conversation" in metadata
+    assert "grasp_target=" not in metadata
+    assert "placement_region=" not in metadata
 
 
 def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> None:
@@ -251,22 +257,31 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
     [
         (
             "multi_normal1",
-            ["yellow_wrench_to_blue", "red_bolt_to_green"],
+            [
+                "yellow_wrench_to_blue_parts_bin",
+                "red_bolt_to_green_parts_bin",
+            ],
             "blue_parts_bin",
         ),
         (
             "multi_normal2",
-            ["red_bolt_to_blue", "yellow_wrench_to_green"],
+            [
+                "red_bolt_to_blue_parts_bin",
+                "yellow_wrench_to_green_parts_bin",
+            ],
             "blue_parts_bin",
         ),
         (
             "multi_normal3",
-            ["red_bolt_to_green", "yellow_wrench_to_blue"],
+            [
+                "red_bolt_to_green_parts_bin",
+                "yellow_wrench_to_blue_parts_bin",
+            ],
             "green_parts_bin",
         ),
     ],
 )
-def test_multi_normal_task_variants_prepare_distinct_tasks_in_the_same_world(
+def test_multi_normal_requests_change_only_user_words_and_verification_oracle(
     tmp_path,
     monkeypatch,
     scenario: str,
@@ -293,14 +308,15 @@ def test_multi_normal_task_variants_prepare_distinct_tasks_in_the_same_world(
         grasp_backend="graspgenx",
     )
     receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
-    assignments = receipt["acceptance_scene"]["sort_assignments"]
+    assignments = receipt["acceptance_scene"]["expected_work_order"]
 
     assert receipt["acceptance_scenario"] == scenario
-    assert receipt["acceptance_scene"]["scene_id"] == scenario
+    assert receipt["acceptance_scene"]["acceptance_request_id"] == scenario
+    assert receipt["acceptance_scene"]["scene_id"] == "multi_normal"
     assert [item["id"] for item in assignments] == ordered_assignment_ids
     assert assignments[0]["placement_region_id"] == first_destination
     assert acceptance._scenario_environment(scenario) == {
-        "OPENETA_ACCEPTANCE_SCENE": scenario
+        "OPENETA_ACCEPTANCE_SCENE": "multi_normal"
     }
     assert "放好第一件后不要关闭环境" in paths.instructions.read_text(
         encoding="utf-8"

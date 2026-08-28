@@ -192,7 +192,7 @@ class _ResetController:
         return 1
 
 
-def test_multi_normal_advances_target_without_recreating_the_runtime() -> None:
+def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None:
     attachments = {}
 
     class Attachment:
@@ -231,15 +231,34 @@ def test_multi_normal_advances_target_without_recreating_the_runtime() -> None:
     runtime.started = True
     runtime.start_count = 1
 
-    progress = runtime.complete_active_sort_assignment(
+    configured = runtime.configure_work_order(
+        items=[
+            {
+                "target_prompt": "yellow wrench",
+                "placement_region_prompt": "green parts bin",
+            },
+            {
+                "target_prompt": "red hex bolt",
+                "placement_region_prompt": "blue parts bin",
+            },
+        ]
+    )
+    progress = runtime.complete_active_work_order_item(
         placement_verification={"placement_confirmed": True, "verdict": "PASS"}
     )
 
     assert runtime.start_count == 1
     assert runtime.active_pick_place_config.target_id == "red_m24_hex_bolt"
     assert runtime.attachment is attachments["red_m24_hex_bolt"]
-    assert activations[0][0].selected_placement_region_id == "blue_parts_bin"
-    assert progress["completed_assignment_ids"] == ["yellow_wrench_to_green"]
+    assert [item[0].selected_placement_region_id for item in activations] == [
+        "green_parts_bin",
+        "blue_parts_bin",
+    ]
+    assert configured["source"] == "vlm_work_order"
+    assert configured["transition"]["configured_by"] == "vlm_tool_call"
+    assert progress["completed_assignment_ids"] == [
+        "yellow_wrench_to_green_parts_bin"
+    ]
     assert progress["remaining_count"] == 1
     assert progress["fresh_observation_required"] is True
     assert progress["transition"]["world_recreated"] is False

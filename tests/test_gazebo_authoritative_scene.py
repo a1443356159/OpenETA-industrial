@@ -36,9 +36,6 @@ def _compile(scene_id: str = "normal"):
     [
         "normal",
         "multi_normal",
-        "multi_normal1",
-        "multi_normal2",
-        "multi_normal3",
         "narrow-pick",
         "barrier-transfer",
         "fastener-bin-sort",
@@ -162,20 +159,19 @@ def test_authoritative_multi_normal_owns_two_filtered_dynamic_targets() -> None:
         } == {"65535"}
 
 
-def test_multi_normal_task_variants_share_one_initial_physical_world() -> None:
-    baseline = _compile("multi_normal")
-    baseline_objects = [item.moveit_spec() for item in baseline.objects]
+def test_multi_normal_is_one_task_neutral_physical_world() -> None:
+    compiled = _compile("multi_normal")
+    contract = load_acceptance_scene_contract("multi_normal")
 
-    for scene_id in ("multi_normal1", "multi_normal2", "multi_normal3"):
-        compiled = _compile(scene_id)
-
-        assert compiled.world_scene == "multi_normal"
-        assert compiled.collision_manifest_sha256 == baseline.collision_manifest_sha256
-        assert [item.moveit_spec() for item in compiled.objects] == baseline_objects
-        assert {binding.target_model for binding in compiled.target_bindings} == {
-            "target_object",
-            "red_m24_hex_bolt",
-        }
+    assert compiled.world_scene == "multi_normal"
+    assert "task" not in contract
+    assert all("selected" not in region for region in contract["placement_regions"])
+    assert {binding.target_model for binding in compiled.target_bindings} == {
+        "target_object",
+        "red_m24_hex_bolt",
+    }
+    with pytest.raises(ValueError, match="unsupported acceptance scene"):
+        load_acceptance_scene_contract("multi_normal1")
 
 
 def test_authoritative_compiler_keeps_detailed_visual_independent_from_collision(

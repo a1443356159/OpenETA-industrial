@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from adapter.protocol import EnvObservation, RobotState
 
@@ -63,19 +63,45 @@ class GazeboRuntime:
         )
         self.attachments: dict[str, Any] = {}
         self.attachment: Any | None = None
-        self._sort_configs: tuple[Any, ...] = ()
-        self._active_sort_assignment_index = 0
-        self._completed_sort_assignment_ids: list[str] = []
+        self._target_configs: tuple[Any, ...] = ()
+        self._work_order_configs: tuple[Any, ...] = ()
+        self._active_work_order_index = 0
+        self._completed_work_order_item_ids: list[str] = []
         self._multi_sort_observation_required = False
+        self._manipulation_catalog: dict[str, Any] | None = None
         if PHYSICS in profile.capabilities:
             model_config = profile.model_config
-            configured = getattr(model_config, "sort_assignment_configs", ())
-            self._sort_configs = (
+            configured = getattr(model_config, "manipulation_target_configs", ())
+            self._target_configs = (
                 tuple(configured)
                 if isinstance(configured, tuple) and configured
                 else (model_config,)
             )
-            for target_config in self._sort_configs:
+            if len(self._target_configs) > 1:
+                contract = getattr(model_config, "acceptance_scene_contract", {})
+                regions = (
+                    contract.get("placement_regions")
+                    if isinstance(contract, Mapping)
+                    else None
+                )
+                self._manipulation_catalog = {
+                    "schema_version": "openeta.manipulation_catalog.v1",
+                    "targets": [
+                        dict(item)
+                        for item in getattr(model_config, "manipulation_targets", ())
+                        if isinstance(item, Mapping)
+                    ],
+                    "placement_regions": [
+                        {
+                            key: value
+                            for key, value in item.items()
+                            if key in {"id", "prompt", "semantic_aliases"}
+                        }
+                        for item in (regions if isinstance(regions, list) else [])
+                        if isinstance(item, Mapping)
+                    ],
+                }
+            for target_config in self._target_configs:
                 target_id = str(getattr(target_config, "target_id", "target_object"))
                 if target_id in self.attachments:
                     raise ValueError("native grasp target binding is duplicated")
@@ -134,7 +160,7 @@ class GazeboRuntime:
                         0x0002,
                     ),
                 )
-            first_target_id = str(getattr(self._sort_configs[0], "target_id", ""))
+            first_target_id = str(getattr(self._target_configs[0], "target_id", ""))
             self.attachment = self.attachments.get(first_target_id)
         self._launch: Any | None = None
         self._cameras: list[Any] = []
@@ -182,27 +208,44 @@ class GazeboRuntime:
 
     @property
     def active_pick_place_config(self) -> Any | None:
-        if not self._sort_configs:
+        if self._work_order_configs:
+            return self._work_order_configs[self._active_work_order_index]
+        if not self._target_configs:
             return self.profile.model_config
-        return self._sort_configs[self._active_sort_assignment_index]
+        return self._target_configs[0]
 
     def multi_sort_progress(self) -> dict[str, Any] | None:
-        if len(self._sort_configs) <= 1:
+        if not self._work_order_configs:
             return None
-        all_completed = len(self._completed_sort_assignment_ids) == len(self._sort_configs)
+        all_completed = len(self._completed_work_order_item_ids) == len(
+            self._work_order_configs
+        )
         active = None if all_completed else self.active_pick_place_config
-        assignment = getattr(active, "active_sort_assignment", None)
+        assignment = getattr(active, "work_order_item", None)
+        work_order_items = [
+            dict(config.work_order_item)
+            for config in self._work_order_configs
+            if isinstance(getattr(config, "work_order_item", None), Mapping)
+        ]
         return {
             "schema_version": "openeta.multi_sort_progress.v1",
-            "scene_id": str(getattr(self._sort_configs[0], "acceptance_scene_id", "")),
-            "assignment_count": len(self._sort_configs),
-            "completed_count": len(self._completed_sort_assignment_ids),
-            "completed_assignment_ids": list(self._completed_sort_assignment_ids),
-            "remaining_count": len(self._sort_configs)
-            - len(self._completed_sort_assignment_ids),
+            "source": "vlm_work_order",
+            "scene_id": str(
+                getattr(self._work_order_configs[0], "acceptance_scene_id", "")
+            ),
+            "work_order": {
+                "schema_version": "openeta.work_order.v1",
+                "source": "vlm_tool_call",
+                "items": work_order_items,
+            },
+            "assignment_count": len(self._work_order_configs),
+            "completed_count": len(self._completed_work_order_item_ids),
+            "completed_assignment_ids": list(self._completed_work_order_item_ids),
+            "remaining_count": len(self._work_order_configs)
+            - len(self._completed_work_order_item_ids),
             "all_completed": all_completed,
             "active_assignment_index": (
-                None if all_completed else self._active_sort_assignment_index
+                None if all_completed else self._active_work_order_index
             ),
             "active_assignment": (
                 dict(assignment) if isinstance(assignment, Mapping) else None
@@ -388,6 +431,14 @@ class GazeboRuntime:
                 "profile": self.profile.name,
                 "observation_provenance": "gazebo_ros_live",
                 "scene_epoch": self.scene_epoch,
+                **(
+                    {
+                        "manipulation_catalog": dict(self._manipulation_catalog),
+                        "work_order_required": not bool(self._work_order_configs),
+                    }
+                    if self._manipulation_catalog is not None
+                    else {}
+                ),
                 **({"multi_sort_progress": progress} if progress is not None else {}),
             },
         )
@@ -404,11 +455,12 @@ class GazeboRuntime:
         # This is intentionally not a soft attachment or an idempotent-ACK
         # assumption; inability to recreate and receive that ACK still fails
         # closed.
-        if self._sort_configs:
-            self._active_sort_assignment_index = 0
-            self._completed_sort_assignment_ids = []
+        if self._target_configs:
+            self._work_order_configs = ()
+            self._active_work_order_index = 0
+            self._completed_work_order_item_ids = []
             self._multi_sort_observation_required = False
-            first_target_id = str(getattr(self._sort_configs[0], "target_id", ""))
+            first_target_id = str(getattr(self._target_configs[0], "target_id", ""))
             self.attachment = self.attachments.get(first_target_id)
         if PHYSICS in self.profile.capabilities and self.started:
             self.close()
@@ -537,40 +589,106 @@ class GazeboRuntime:
             )
         return observation
 
-    def complete_active_sort_assignment(
+    def configure_work_order(
+        self,
+        *,
+        items: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Activate the ordered work plan authored by the VLM tool call."""
+
+        if self._manipulation_catalog is None:
+            raise GazeboProcessError("WORK_ORDER_CONFIGURATION_UNAVAILABLE")
+        if self._completed_work_order_item_ids:
+            raise GazeboProcessError("WORK_ORDER_ALREADY_IN_PROGRESS")
+        if any(
+            getattr(attachment, "state", None) != DetachableJointState.DETACHED
+            for attachment in self.attachments.values()
+        ):
+            raise GazeboProcessError("WORK_ORDER_TARGET_NOT_DETACHED")
+        model_config = self.profile.model_config
+        resolver = getattr(model_config, "work_order_configs", None)
+        if not callable(resolver):
+            raise GazeboProcessError("WORK_ORDER_RESOLVER_UNAVAILABLE")
+        try:
+            configs = tuple(resolver(items))
+        except ValueError as exc:
+            raise GazeboProcessError(f"WORK_ORDER_INVALID: {exc}") from exc
+        if not configs:
+            raise GazeboProcessError("WORK_ORDER_EMPTY")
+        first_config = configs[0]
+        first_target_id = str(getattr(first_config, "target_id", ""))
+        first_attachment = self.attachments.get(first_target_id)
+        if first_attachment is None:
+            raise GazeboProcessError("WORK_ORDER_TARGET_BINDING_UNAVAILABLE")
+        try:
+            target_pose, _mount_pose, pose_attempts = (
+                first_attachment.native_target_mount_poses_with_retry(max_attempts=2)
+            )
+        except Exception as exc:
+            raise GazeboProcessError(f"WORK_ORDER_TARGET_POSE_UNAVAILABLE: {exc}") from exc
+        activate = getattr(self.controller, "activate_pick_place_config", None)
+        if not callable(activate):
+            raise GazeboProcessError("WORK_ORDER_PLANNING_SCENE_SWITCH_UNAVAILABLE")
+        revision = activate(
+            first_config,
+            target_xyz=tuple(float(value) for value in target_pose.xyz),
+            target_quat_xyzw=tuple(float(value) for value in target_pose.quat_xyzw),
+        )
+        self._work_order_configs = configs
+        self._active_work_order_index = 0
+        self._completed_work_order_item_ids = []
+        self.attachment = first_attachment
+        self._last_observation = None
+        progress = self.multi_sort_progress()
+        if progress is None:
+            raise GazeboProcessError("WORK_ORDER_PROGRESS_UNAVAILABLE")
+        return {
+            **progress,
+            "transition": {
+                "configured_by": "vlm_tool_call",
+                "activated_assignment_index": 0,
+                "activated_target_id": first_target_id,
+                "planning_scene_revision": int(revision),
+                "target_pose_read_attempt_count": int(pose_attempts),
+                "world_recreated": False,
+                "model_inference_invoked": False,
+            },
+        }
+
+    def complete_active_work_order_item(
         self,
         *,
         placement_verification: Mapping[str, Any],
     ) -> dict[str, Any] | None:
-        """Advance a proven multi-sort task without recreating the world."""
+        """Advance a proven VLM-authored work order without recreating the world."""
 
-        if len(self._sort_configs) <= 1:
-            return None
+        if not self._work_order_configs:
+            raise GazeboProcessError("WORK_ORDER_NOT_CONFIGURED")
         if not (
             placement_verification.get("placement_confirmed") is True
             and str(placement_verification.get("verdict") or "").upper() == "PASS"
         ):
             raise GazeboProcessError("MULTI_SORT_PLACEMENT_NOT_PROVEN")
         current = self.active_pick_place_config
-        assignment = getattr(current, "active_sort_assignment", None)
+        assignment = getattr(current, "work_order_item", None)
         assignment_id = (
             str(assignment.get("id") or "") if isinstance(assignment, Mapping) else ""
         )
-        if not assignment_id or assignment_id in self._completed_sort_assignment_ids:
+        if not assignment_id or assignment_id in self._completed_work_order_item_ids:
             raise GazeboProcessError("MULTI_SORT_ASSIGNMENT_STATE_INVALID")
         if self.attachment is None or getattr(self.attachment, "state", None) != (
             DetachableJointState.DETACHED
         ):
             raise GazeboProcessError("MULTI_SORT_TARGET_NOT_DETACHED")
-        self._completed_sort_assignment_ids.append(assignment_id)
+        self._completed_work_order_item_ids.append(assignment_id)
         transition: dict[str, Any] = {
             "completed_assignment_id": assignment_id,
             "world_recreated": False,
             "model_inference_invoked": False,
         }
-        if len(self._completed_sort_assignment_ids) < len(self._sort_configs):
-            next_index = len(self._completed_sort_assignment_ids)
-            next_config = self._sort_configs[next_index]
+        if len(self._completed_work_order_item_ids) < len(self._work_order_configs):
+            next_index = len(self._completed_work_order_item_ids)
+            next_config = self._work_order_configs[next_index]
             next_target_id = str(getattr(next_config, "target_id", ""))
             next_attachment = self.attachments.get(next_target_id)
             if next_attachment is None or getattr(
@@ -595,7 +713,7 @@ class GazeboRuntime:
                     float(value) for value in target_pose.quat_xyzw
                 ),
             )
-            self._active_sort_assignment_index = next_index
+            self._active_work_order_index = next_index
             self.attachment = next_attachment
             self._last_observation = None
             self._multi_sort_observation_required = True

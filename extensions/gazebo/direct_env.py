@@ -189,11 +189,14 @@ class GazeboDirectEnv(Env):
                 "camera_frames": [item.frame_id for item in self.profile.cameras],
             })
         if self._native_grasp_config is not None:
-            raw.setdefault("metadata", {}).update({
+            native_metadata = {
                 "grasp_mechanism": "gazebo_sim8_detachable_joint",
                 "contact_provenance": "gazebo_native_contacts",
-                "attachment_target": self._native_grasp_config.target_id,
-            })
+            }
+            dynamic_catalog = len(self._native_grasp_config.manipulation_targets) > 1
+            if not dynamic_catalog or self._native_grasp_config.work_order_item is not None:
+                native_metadata["attachment_target"] = self._native_grasp_config.target_id
+            raw.setdefault("metadata", {}).update(native_metadata)
             progress = getattr(self.runtime, "multi_sort_progress", lambda: None)()
             if (
                 isinstance(progress, Mapping)
@@ -256,6 +259,55 @@ class GazeboDirectEnv(Env):
         action_type = str(raw_action.get("action_type") or "")
         contact_window: GazeboNativeContactWindow | None = None
         release_before_open: dict[str, Any] | None = None
+        if action_type == "configure_work_order":
+            if self._native_grasp_transport_locked:
+                raise GazeboProcessError("WORK_ORDER_RECONFIGURATION_DURING_TRANSPORT")
+            configure = getattr(self.runtime, "configure_work_order", None)
+            if not callable(configure):
+                raise GazeboProcessError("WORK_ORDER_CONFIGURATION_UNAVAILABLE")
+            items = raw_action.get("items")
+            if not isinstance(items, list):
+                raise GazeboProcessError("WORK_ORDER_ITEMS_INVALID")
+            progress = configure(items=items)
+            active_config = getattr(self.runtime, "active_pick_place_config", None)
+            if not isinstance(active_config, NativePickPlaceConfig):
+                raise GazeboProcessError("WORK_ORDER_ACTIVE_CONFIG_UNAVAILABLE")
+            self._native_grasp_config = active_config
+            self._native_grasp_verifier = NativeGraspVerifier(active_config)
+            self.openeta_control_spec["validated_pickplace_motion"] = (
+                validated_pickplace_motion_guidance(active_config)
+            )
+            observation = self.runtime.observe()
+            raw = self._decorate_robot(self._as_unified(observation))
+            raw.setdefault("metadata", {})["multi_sort_progress"] = dict(progress)
+            raw["metadata"]["work_order"] = dict(progress["work_order"])
+            revision = (progress.get("transition") or {}).get(
+                "planning_scene_revision"
+            )
+            if isinstance(revision, int) and not isinstance(revision, bool):
+                raw["metadata"]["planning_scene_revision"] = revision
+            receipt = {
+                "ok": True,
+                "work_order": dict(progress["work_order"]),
+                "multi_sort_progress": dict(progress),
+                "native_target_binding": {
+                    "target_id": active_config.target_id,
+                    "target_link": active_config.target_link,
+                    "assignment_id": active_config.work_order_item.get("id")
+                    if active_config.work_order_item is not None
+                    else None,
+                },
+                **(
+                    {"planning_scene_revision": revision}
+                    if isinstance(revision, int) and not isinstance(revision, bool)
+                    else {}
+                ),
+                "observation": raw,
+            }
+            self._latest = raw
+            return raw, 0.0, False, False, {
+                "_openeta_receipt": receipt
+            } if STRUCTURED_RECEIPT in self.profile.capabilities else {}
         if self._native_grasp_config is not None and action_type == "gripper_close":
             contact_window = GazeboNativeContactWindow(
                 gz_executable=self.deployment.gz_executable,
@@ -578,8 +630,10 @@ class GazeboDirectEnv(Env):
                             "native_target_binding": {
                                 "target_id": self._native_grasp_config.target_id,
                                 "target_link": self._native_grasp_config.target_link,
-                                "assignment_id": self._native_grasp_config.active_sort_assignment.get(
-                                    "id"
+                                "assignment_id": (
+                                    self._native_grasp_config.work_order_item.get("id")
+                                    if self._native_grasp_config.work_order_item is not None
+                                    else None
                                 ),
                             },
                             "detachable_joint": {
@@ -833,8 +887,10 @@ class GazeboDirectEnv(Env):
                         receipt["native_target_binding"] = {
                             "target_id": self._native_grasp_config.target_id,
                             "target_link": self._native_grasp_config.target_link,
-                            "assignment_id": self._native_grasp_config.active_sort_assignment.get(
-                                "id"
+                            "assignment_id": (
+                                self._native_grasp_config.work_order_item.get("id")
+                                if self._native_grasp_config.work_order_item is not None
+                                else None
                             ),
                         }
                         raw.setdefault("metadata", {})[
@@ -843,7 +899,7 @@ class GazeboDirectEnv(Env):
                         if placement.verdict.value == "PASS":
                             advance = getattr(
                                 self.runtime,
-                                "complete_active_sort_assignment",
+                                "complete_active_work_order_item",
                                 None,
                             )
                             progress = (
@@ -953,8 +1009,10 @@ class GazeboDirectEnv(Env):
                 receipt["native_target_binding"] = {
                     "target_id": self._native_grasp_config.target_id,
                     "target_link": self._native_grasp_config.target_link,
-                    "assignment_id": self._native_grasp_config.active_sort_assignment.get(
-                        "id"
+                    "assignment_id": (
+                        self._native_grasp_config.work_order_item.get("id")
+                        if self._native_grasp_config.work_order_item is not None
+                        else None
                     ),
                 }
                 collision_filter = self._collision_filter_evidence(

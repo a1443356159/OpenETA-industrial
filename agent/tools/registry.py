@@ -38,6 +38,7 @@ _GAZEBO_INDUSTRIAL_TOOL_NAMES = frozenset(
         "observe",
         "create_simulator_env",
         "close_simulator_env",
+        "configure_work_order",
         "sam3",
         "select_sam3_detection",
         "reject_sam3_detections",
@@ -882,6 +883,26 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             description="Request or retrieve the latest environment observation.",
             parameters={"reason": "why a fresh observation is needed"},
             effect=ToolEffect.READ_ONLY,
+        ),
+        ToolSpec(
+            name="configure_work_order",
+            category="planning",
+            description=(
+                "Write the ordered pick/place work order inferred from the user "
+                "conversation into session memory and bind it to the active physical "
+                "workcell. Call this only when the current observation reports "
+                "work_order_required=true. The environment validates each semantic "
+                "target and destination against its task-neutral manipulation catalog."
+            ),
+            parameters={
+                "items": (
+                    "ordered non-empty list of objects with target_prompt and "
+                    "placement_region_prompt; preserve the user's requested order"
+                ),
+            },
+            safe_by_default=True,
+            effect=ToolEffect.PLANNING,
+            batchable=False,
         ),
         ToolSpec(
             name="active_observe",

@@ -298,6 +298,123 @@ def test_agentic_acceptance_routes_exact_environment_choice_through_model() -> N
     assert decision.metadata["planner_mode"] == "agentic_closed_loop"
 
 
+def test_vlm_configures_task_neutral_workcell_from_user_conversation() -> None:
+    user_request = "请先把红色六角螺栓放进蓝色零件箱，再把黄色活动扳手放进绿色零件箱。"
+    catalog = {
+        "schema_version": "openeta.manipulation_catalog.v1",
+        "targets": [
+            {"target_prompt": "yellow wrench"},
+            {"target_prompt": "red hex bolt"},
+        ],
+        "placement_regions": [
+            {"prompt": "green parts bin"},
+            {"prompt": "blue parts bin"},
+        ],
+    }
+    observation = EnvObservation(
+        task="normal pick and place",
+        cameras=[],
+        robot=RobotState(),
+        metadata={
+            "manipulation_catalog": catalog,
+            "work_order_required": True,
+        },
+    )
+    memory = AgentMemory()
+    memory.start_session(task=user_request)
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        return {
+            "kind": "tool_call",
+            "name": "configure_work_order",
+            "parameters": {
+                "items": [
+                    {
+                        "target_prompt": "red hex bolt",
+                        "placement_region_prompt": "blue parts bin",
+                    },
+                    {
+                        "target_prompt": "yellow wrench",
+                        "placement_region_prompt": "green parts bin",
+                    },
+                ]
+            },
+        }
+
+    planner = ToolCallingPlanner(CallablePlannerBackend(decide))
+    decision = planner.plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert len(requests) == 1
+    model_context = requests[0].tool_context
+    assert model_context["task"] == user_request
+    assert model_context["controller"]["phase"] == "work_order_configuration"
+    assert model_context["controller"]["legal_tool_names"] == [
+        "configure_work_order"
+    ]
+    assert model_context["obligations"]["work_order_obligation"][
+        "manipulation_catalog"
+    ] == catalog
+    assert decision.action == "configure_work_order"
+    assert decision.parameters["items"][0] == {
+        "target_prompt": "red hex bolt",
+        "placement_region_prompt": "blue parts bin",
+    }
+
+
+def test_environment_normalized_work_order_is_persisted_in_memory() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="sort two parts")
+    items = [
+        {
+            "id": "red_bolt_to_blue_parts_bin",
+            "target_prompt": "red hex bolt",
+            "placement_region_prompt": "blue parts bin",
+            "source": "vlm_work_order",
+        },
+        {
+            "id": "yellow_wrench_to_green_parts_bin",
+            "target_prompt": "yellow wrench",
+            "placement_region_prompt": "green parts bin",
+            "source": "vlm_work_order",
+        },
+    ]
+    work_order = {
+        "schema_version": "openeta.work_order.v1",
+        "source": "vlm_tool_call",
+        "items": items,
+    }
+    memory.add_observation(
+        EnvObservation(
+            task="normal pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={
+                "work_order_required": False,
+                "multi_sort_progress": {
+                    "schema_version": "openeta.multi_sort_progress.v1",
+                    "source": "vlm_work_order",
+                    "work_order": work_order,
+                    "assignment_count": 2,
+                    "completed_count": 0,
+                    "remaining_count": 2,
+                    "all_completed": False,
+                    "active_assignment_index": 0,
+                    "active_assignment": items[0],
+                },
+            },
+        )
+    )
+
+    assert memory.planning_context()["work_order"] == work_order
+
+
 def test_agentic_anyplace_hydrates_frozen_parameters_in_one_model_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
