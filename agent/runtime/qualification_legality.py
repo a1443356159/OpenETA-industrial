@@ -179,6 +179,16 @@ def _transform_payload(transform: Transform, *, convention: str) -> JsonDict:
     }
 
 
+def _pose_payload(transform: Transform, *, convention: str) -> JsonDict:
+    rotation, xyz = transform
+    return {
+        "frame": "world",
+        "translation_xyz": list(xyz),
+        "rotation_matrix": [list(row) for row in rotation],
+        "convention": convention,
+    }
+
+
 def _inverse(transform: Transform) -> Transform:
     rotation, xyz = transform
     inverse_rotation = _transpose(rotation)
@@ -704,6 +714,29 @@ def evaluate_placement_goal_legality(
     target_spec = (
         attached_specs.get(target_id) if target_is_attached else world_specs.get(target_id)
     )
+    # Pair compilation replaces the public object goal with the host-qualified
+    # release goal used to derive the EEF terminal.  When the candidate also
+    # carries an immutable model motion, replay legality against the original
+    # AnyPlace settled goal instead of treating that release goal as fresh
+    # model output.  This keeps repeated frozen-frontier waves idempotent.
+    model_motion_value = candidate.get("model_object_motion_world_transform")
+    model_goal_value = candidate.get("model_pointcloud_object_goal_pose")
+    if (
+        not target_is_attached
+        and isinstance(model_motion_value, Mapping)
+        and isinstance(model_goal_value, Mapping)
+    ):
+        model_goal = rigid_pose(model_goal_value)
+        if model_goal is None:
+            result.update(
+                verdict="FAIL",
+                reason="model_goal_invalid_se3",
+                geometry_available=True,
+                elapsed_s=time.monotonic() - started,
+            )
+            return result
+        goal = model_goal
+        result["checks"]["se3"]["source"] = "immutable_model_pointcloud_goal"
     if not isinstance(target_spec, Mapping):
         result.update(
             verdict="PASS",
@@ -793,7 +826,9 @@ def evaluate_placement_goal_legality(
     # Post-attachment goals already carry the measured physical binding and
     # therefore legitimately fall back to their direct object_goal_pose.
     collision_goal = goal
-    motion_value = candidate.get("object_motion_world_transform")
+    motion_value = candidate.get("model_object_motion_world_transform")
+    if not isinstance(motion_value, Mapping):
+        motion_value = candidate.get("object_motion_world_transform")
     if isinstance(motion_value, Mapping) and not target_is_attached:
         motion = _transform_matrix(motion_value.get("transform_matrix"))
         current_collision = rigid_pose(
@@ -892,11 +927,90 @@ def evaluate_placement_goal_legality(
         )
         release_collision_goal = _compose(release_shift, collision_goal)
         release_motion = _compose(release_shift, qualified_motion)
+        current_pointcloud = _compose(_inverse(motion), goal)
+        release_pointcloud_goal = _compose(release_motion, current_pointcloud)
+        release_orientation_policy = "model_settled_orientation"
         binding_method = "world_motion_times_current_planning_scene_object"
         if support_reconciliation.get("applied") is True:
             binding_method = (
                 "support_contact_reconciled_world_motion_times_current_planning_scene_object"
             )
+        container_drop: JsonDict = {
+            "enabled": False,
+            "reason": "selected_support_has_no_collision_barriers",
+        }
+        if (
+            support_z is not None
+            and int(release_offset_evidence.get("support_barrier_count") or 0) > 0
+        ):
+            # A container task asks for a stable final state inside a region,
+            # not for the wrist to realize the model's post-gravity settled
+            # orientation while the object is still rigidly attached. Keep the
+            # model-selected in-plane destination, preserve the measured
+            # current object orientation during transport, and let the
+            # simulator settle the short final drop after detach. Pair
+            # legality and MoveIt still prove the complete gripper/payload
+            # state against every authoritative wall.
+            provisional_release: Transform = (
+                current_collision[0],
+                (collision_goal[1][0], collision_goal[1][1], 0.0),
+            )
+            provisional_geometry = _projected_body_geometry(
+                target_spec,
+                provisional_release,
+            )
+            if provisional_geometry:
+                provisional_bounds = compound_axis_aligned_bounds(
+                    provisional_geometry
+                )
+                desired_bottom_z = (
+                    support_z + release_clearance + release_z_offset
+                )
+                desired_release_collision: Transform = (
+                    current_collision[0],
+                    (
+                        collision_goal[1][0],
+                        collision_goal[1][1],
+                        desired_bottom_z - provisional_bounds.minimum_xyz[2],
+                    ),
+                )
+                release_delta = tuple(
+                    desired_release_collision[1][index]
+                    - current_collision[1][index]
+                    for index in range(3)
+                )
+                release_motion = (
+                    (
+                        (1.0, 0.0, 0.0),
+                        (0.0, 1.0, 0.0),
+                        (0.0, 0.0, 1.0),
+                    ),
+                    release_delta,
+                )
+                release_collision_goal = desired_release_collision
+                release_pointcloud_goal = _compose(
+                    release_motion,
+                    current_pointcloud,
+                )
+                release_correction = [0.0, 0.0, 0.0]
+                release_orientation_policy = (
+                    "preserve_current_orientation_for_container_drop"
+                )
+                binding_method = (
+                    "container_drop_translation_from_current_planning_scene_object"
+                )
+                container_drop = {
+                    "enabled": True,
+                    "reason": "authoritative_support_has_collision_barriers",
+                    "path_owner": "moveit",
+                    "settling_owner": "native_gravity",
+                    "model_destination_xy_preserved": True,
+                    "current_object_orientation_preserved": True,
+                    "release_bottom_z_m": desired_bottom_z,
+                    "support_barrier_count": int(
+                        release_offset_evidence.get("support_barrier_count") or 0
+                    ),
+                }
         result["checks"]["object_frame_binding"] = {
             "available": True,
             "method": binding_method,
@@ -920,6 +1034,12 @@ def evaluate_placement_goal_legality(
                 "translation_xyz": list(release_collision_goal[1]),
                 "rotation_matrix": [list(row) for row in release_collision_goal[0]],
             },
+            "release_pointcloud_object_goal_pose": _pose_payload(
+                release_pointcloud_goal,
+                convention="T_world_pointcloud_object_release",
+            ),
+            "release_orientation_policy": release_orientation_policy,
+            "container_drop": container_drop,
             "model_world_motion_transform": _transform_payload(
                 motion,
                 convention="T_world_motion_applied_left",
@@ -941,18 +1061,37 @@ def evaluate_placement_goal_legality(
             "support_contact_reconciliation": support_reconciliation,
         }
     else:
-        release_shift = (
-            (
-                (1.0, 0.0, 0.0),
-                (0.0, 1.0, 0.0),
-                (0.0, 0.0, 1.0),
-            ),
-            (0.0, 0.0, release_z_offset),
+        prebound_release_goal = rigid_pose(
+            candidate.get("qualified_release_object_goal_pose")
         )
-        release_collision_goal = _compose(release_shift, collision_goal)
+        prebound_container_drop = (
+            target_is_attached
+            and candidate.get("container_drop_release_prebound") is True
+            and prebound_release_goal is not None
+        )
+        if prebound_container_drop:
+            release_collision_goal = prebound_release_goal
+            release_correction = [0.0, 0.0, 0.0]
+            release_orientation_policy = (
+                "preserve_current_orientation_for_container_drop"
+            )
+            binding_method = "prebound_container_drop_physical_goal"
+        else:
+            release_shift = (
+                (
+                    (1.0, 0.0, 0.0),
+                    (0.0, 1.0, 0.0),
+                    (0.0, 0.0, 1.0),
+                ),
+                (0.0, 0.0, release_z_offset),
+            )
+            release_collision_goal = _compose(release_shift, collision_goal)
+            release_correction = [0.0, 0.0, release_z_offset]
+            release_orientation_policy = "model_settled_orientation"
+            binding_method = "direct_physical_object_goal"
         result["checks"]["object_frame_binding"] = {
             "available": True,
-            "method": "direct_physical_object_goal",
+            "method": binding_method,
             "target_is_attached": target_is_attached,
             "collision_goal_translation_xyz": list(collision_goal[1]),
             "collision_goal_pose": {
@@ -967,9 +1106,10 @@ def evaluate_placement_goal_legality(
                 "translation_xyz": list(release_collision_goal[1]),
                 "rotation_matrix": [list(row) for row in release_collision_goal[0]],
             },
+            "release_orientation_policy": release_orientation_policy,
             "support_contact_translation_correction_xyz": [0.0, 0.0, 0.0],
             "placement_release_translation_xyz": [0.0, 0.0, release_z_offset],
-            "release_target_translation_correction_xyz": [0.0, 0.0, release_z_offset],
+            "release_target_translation_correction_xyz": release_correction,
             "release_z_offset_m": release_z_offset,
             "configured_release_z_offset_m": configured_release_z_offset,
             "release_offset_selection": release_offset_evidence,
@@ -1269,21 +1409,41 @@ def bind_qualified_placement_goal(
     qualified_motion = binding.get("qualified_world_motion_transform")
     collision_goal = binding.get("collision_goal_pose")
     release_goal = binding.get("release_collision_goal_pose")
+    release_pointcloud_goal = binding.get("release_pointcloud_object_goal_pose")
+    release_orientation_policy = str(
+        binding.get("release_orientation_policy") or "model_settled_orientation"
+    )
     candidate_value = descriptor.get("candidate")
     if not isinstance(candidate_value, Mapping):
         return
     candidate = dict(candidate_value)
+    candidate["goal_legality_prebound"] = True
+    if not isinstance(candidate.get("model_pointcloud_object_goal_pose"), Mapping):
+        model_goal = _object_goal(candidate)
+        if isinstance(model_goal, Mapping):
+            candidate["model_pointcloud_object_goal_pose"] = dict(model_goal)
     if isinstance(collision_goal, Mapping):
         candidate["qualified_world_collision_object_goal_pose"] = dict(collision_goal)
     if isinstance(release_goal, Mapping):
         candidate["qualified_release_object_goal_pose"] = dict(release_goal)
+    if isinstance(release_pointcloud_goal, Mapping):
+        candidate["qualified_release_pointcloud_object_goal_pose"] = dict(
+            release_pointcloud_goal
+        )
+    candidate["release_orientation_policy"] = release_orientation_policy
+    if release_orientation_policy == "preserve_current_orientation_for_container_drop":
+        candidate["container_drop_release_prebound"] = True
     if isinstance(qualified_motion, Mapping):
         if _transform_matrix(qualified_motion.get("transform_matrix")) is None:
             return
-        model_motion = candidate.get("object_motion_world_transform")
-        if isinstance(model_motion, Mapping):
-            candidate["model_object_motion_world_transform"] = dict(model_motion)
+        if not isinstance(candidate.get("model_object_motion_world_transform"), Mapping):
+            model_motion = candidate.get("object_motion_world_transform")
+            if isinstance(model_motion, Mapping):
+                candidate["model_object_motion_world_transform"] = dict(model_motion)
         candidate["object_motion_world_transform"] = dict(qualified_motion)
+        candidate["qualified_release_world_motion_transform"] = dict(
+            qualified_motion
+        )
         # A virtual pre-attachment proof must attach the actual PlanningScene
         # collision body at the contact EEF, not the visible point-cloud centroid.
         candidate["physical_scene_attachment_required"] = True

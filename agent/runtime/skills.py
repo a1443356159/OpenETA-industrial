@@ -88,9 +88,11 @@ def build_default_skill_registry() -> SkillRegistry:
             ),
             content=(
                 "Use this skill as guidance only. Locate the receptacle or surface, "
-                "use the exact model-derived release pose, let MoveIt check and "
-                "plan the complete path, open there without an added offset or "
-                "retreat waypoint, and confirm native stable placement."
+                "use the exact host-qualified release pose, let MoveIt check and "
+                "plan the complete path, open there without an agent-authored "
+                "offset or retreat waypoint, and confirm native stable placement. "
+                "Flat supports retain the full model pose; container drops retain "
+                "the model destination while native gravity owns settling."
             ),
         ),
         SkillSpec(
@@ -149,7 +151,7 @@ def build_default_skill_registry() -> SkillRegistry:
             content=(
                 "Use this skill as guidance only. Combine pick and place guidance, "
                 "but add stability checks before release and verify the stack after "
-                "opening at the exact model-derived release terminal."
+                "opening at the exact host-qualified release terminal."
             ),
         ),
     ]:

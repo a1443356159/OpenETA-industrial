@@ -38,10 +38,11 @@ checks before release.
 6. Use `move_to` and `gripper_control` for placement as individual atomic tool
    calls. The simulator controller owns reachability and path-collision checks;
    inspect each structured result and observe after every world mutation.
-7. Use the exact AnyPlace object goal and measured attachment transform to
-   obtain the release EEF terminal. Do not hand-place the center or add a
-   clearance offset; legality and MoveIt must reject an invalid terminal.
-8. Open the gripper at the exact model-derived release pose and use native
+7. For surface stacking, use the full AnyPlace object goal and measured
+   attachment transform to obtain the release EEF terminal. Do not hand-place
+   the center or add an agent-authored clearance offset; legality and MoveIt
+   must reject an invalid terminal.
+8. Open the gripper at the exact host-qualified release pose and use native
    stability evidence to verify the stack. Do not add a retreat waypoint.
 
 ## Recovery Notes

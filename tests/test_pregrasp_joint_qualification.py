@@ -45,6 +45,50 @@ def _pass_stage() -> dict[str, Any]:
     }
 
 
+def _is_goal_prebind(request: dict[str, Any]) -> bool:
+    funnel = request.get("funnel")
+    return (
+        isinstance(funnel, dict)
+        and funnel.get("qualification_mode") == "goal_prebind"
+    )
+
+
+def _goal_prebind_response(
+    request: dict[str, Any],
+    *,
+    verdict: str = "PASS",
+    reason: str = "goal_legality_qualified",
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    selected: list[str] = []
+    for item in request["candidates"]:
+        candidate = dict(item["candidate"])
+        candidate["goal_legality_prebound"] = True
+        row = {
+            "candidate_id": item["candidate_id"],
+            "candidate_pose_sha256": item["candidate_pose_sha256"],
+            "qualification_binding_sha256": request[
+                "qualification_binding_sha256"
+            ],
+            "execution_started": False,
+            "verdict": verdict,
+            "reason": reason,
+        }
+        if verdict == "PASS":
+            row["prebound_candidate"] = candidate
+            selected.append(item["candidate_id"])
+        rows.append(row)
+    return {
+        "schema_version": request["schema_version"],
+        "planning_scene_revision": request["planning_scene_revision"],
+        "execution_started": False,
+        "qualification_profile": "fast_v3",
+        "stop_reason": "goal_legality_barrier_complete",
+        "selected_candidate_ids": selected,
+        "results": rows,
+    }
+
+
 def test_frozen_physical_goal_retires_active_model_motion_transform() -> None:
     goal = {
         "id": "p0",
@@ -292,11 +336,58 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
         "qualification_object_goal_source"
     ] == "physical_goal_with_measured_attachment"
 
+    container_release_pointcloud_goal = {
+        "frame": "world",
+        "translation_xyz": [0.50, -0.08, 0.41],
+        "rotation_matrix": [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+    }
+    container_release_physical_goal = {
+        "frame": "world",
+        "translation_xyz": [0.495, -0.081, 0.398],
+        "rotation_matrix": [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
+    }
+    container_candidate = {
+        **candidate,
+        "qualified_release_pointcloud_object_goal_pose": (
+            container_release_pointcloud_goal
+        ),
+        "qualified_release_object_goal_pose": container_release_physical_goal,
+        "container_drop_release_prebound": True,
+    }
+    predicted_container = compiler(container_candidate, "placement", {}, 2, 7)
+    measured_container_candidate = dict(container_candidate)
+    measured_container_candidate.pop("predicted_attachment_transform")
+    measured_container = compiler(
+        measured_container_candidate,
+        "placement",
+        {"attachment_transform": attachment},
+        2,
+        7,
+    )
+
+    assert predicted_container["compile_parameters"]["placement_candidate"][
+        "object_goal_pose"
+    ] == container_release_pointcloud_goal
+    assert predicted_container["compile_parameters"]["placement_candidate"][
+        "qualification_object_goal_source"
+    ] == "container_release_pointcloud_goal_with_predicted_attachment"
+    assert predicted_container["qualification_stages"][0][
+        "terminal_pose_source"
+    ] == "anyplace_xy_with_container_drop_orientation"
+    assert measured_container["compile_parameters"]["placement_candidate"][
+        "object_goal_pose"
+    ] == container_release_physical_goal
+    assert measured_container["compile_parameters"]["placement_candidate"][
+        "qualification_object_goal_source"
+    ] == "container_release_physical_goal_with_measured_attachment"
+
 
 def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasps() -> None:
     captured: dict[str, Any] = {}
 
     def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        if _is_goal_prebind(request):
+            return _goal_prebind_response(request)
         captured.update(request)
         # The first four descriptors must represent four different grasps.
         first_ids = [
@@ -560,6 +651,8 @@ def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(
 
     def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
         calls.append(request)
+        if _is_goal_prebind(request):
+            return _goal_prebind_response(request)
         purpose = request["purpose"]
         first_grasp_id = (
             request["candidates"][0]["candidate_id"]
@@ -739,8 +832,9 @@ def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(
     assert [
         call["funnel"]["l5_pass_target"]
         for call in calls
-        if call["purpose"] == "placement"
+        if call["purpose"] == "placement" and not _is_goal_prebind(call)
     ] == [1, 1]
+    assert sum(_is_goal_prebind(call) for call in calls) == 1
     assert [
         call["funnel"]["l5_pass_target"]
         for call in calls
@@ -867,6 +961,12 @@ def test_complete_goal_rejection_never_leaks_a_grasp_only_frontier_candidate() -
 
     def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
         calls.append(request["purpose"])
+        if _is_goal_prebind(request):
+            return _goal_prebind_response(
+                request,
+                verdict="FAIL",
+                reason="goal_support_surface_penetration",
+            )
         return {
             "schema_version": request["schema_version"],
             "planning_scene_revision": request["planning_scene_revision"],

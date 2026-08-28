@@ -1769,6 +1769,143 @@ def test_container_release_uses_support_clearance_without_moving_settled_goal():
     assert stage["placement_release_z_offset_m"] == pytest.approx(0.005)
 
 
+def _rotated_container_goal() -> tuple[dict, dict]:
+    scene = _physical_bin_placement_scene()
+    scene["world_specs"]["target"]["pose_xyz"] = [0.24, -0.19, 0.05]
+    candidate = {
+        "id": "placement_rotated",
+        "object_goal_pose": {
+            "frame": "world",
+            "translation_xyz": [0.48, -0.1, 0.05],
+            "rotation_matrix": [
+                [0.0, -1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        },
+        "world_object_goal_pose": {
+            "frame": "world",
+            "translation_xyz": [0.48, -0.1, 0.05],
+            "rotation_matrix": [
+                [0.0, -1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        },
+        "object_motion_world_transform": {
+            "frame": "world",
+            "convention": "T_world_motion_applied_left",
+            "transform_matrix": [
+                [0.0, -1.0, 0.0, 0.29],
+                [1.0, 0.0, 0.0, -0.34],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        },
+    }
+    return scene, candidate
+
+
+def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation():
+    scene, candidate = _rotated_container_goal()
+    descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
+
+    legality = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, legality)
+
+    binding = legality["checks"]["object_frame_binding"]
+    settled = binding["collision_goal_pose"]
+    release = binding["release_collision_goal_pose"]
+    assert legality["verdict"] == "PASS"
+    assert binding["release_orientation_policy"] == (
+        "preserve_current_orientation_for_container_drop"
+    )
+    assert binding["container_drop"]["model_destination_xy_preserved"] is True
+    assert settled["translation_xyz"][:2] == pytest.approx([0.48, -0.1])
+    assert settled["rotation_matrix"] == [
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    assert release["translation_xyz"][:2] == pytest.approx([0.48, -0.1])
+    assert release["rotation_matrix"] == [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    bound = descriptor["candidate"]
+    assert bound["goal_legality_prebound"] is True
+    assert bound["container_drop_release_prebound"] is True
+    assert bound["model_object_motion_world_transform"] == (
+        candidate["object_motion_world_transform"]
+    )
+    release_motion = bound["object_motion_world_transform"]["transform_matrix"]
+    assert [row[:3] for row in release_motion[:3]] == [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+
+
+def test_goal_prebind_rpc_freezes_container_release_before_pair_compilation():
+    scene, candidate = _rotated_container_goal()
+    engine = _engine(clone_scene=lambda: scene)
+    qualifier = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: engine.qualify(request),
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+
+    goals, summary = qualifier.prebind_placement_goals(
+        [candidate],
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+
+    assert summary["frozen_goal_legality_screen_complete"] is True
+    assert summary["frozen_goal_legality_pass_count"] == 1
+    assert len(goals) == 1
+    assert goals[0]["container_drop_release_prebound"] is True
+    assert goals[0]["qualified_release_pointcloud_object_goal_pose"][
+        "rotation_matrix"
+    ] == [
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+
+
+def test_container_goal_prebind_is_idempotent_after_pair_compilation():
+    scene, candidate = _rotated_container_goal()
+    descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
+    first = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, first)
+    bound = descriptor["candidate"]
+    first_release = bound["qualified_release_pointcloud_object_goal_pose"]
+
+    # This is the same representation change made by the placement compiler:
+    # the executable release goal becomes public while the model goal remains
+    # immutable private evidence.
+    bound["world_object_goal_pose"] = dict(first_release)
+    bound["object_goal_pose"] = dict(first_release)
+    second = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, second)
+
+    second_binding = second["checks"]["object_frame_binding"]
+    assert second["verdict"] == "PASS"
+    assert second["checks"]["se3"]["source"] == (
+        "immutable_model_pointcloud_goal"
+    )
+    assert second_binding["collision_goal_pose"]["rotation_matrix"] == [
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]
+    assert descriptor["candidate"][
+        "qualified_release_pointcloud_object_goal_pose"
+    ] == first_release
+
+
 def test_flat_support_keeps_configured_release_minimum():
     scene = _placement_scene()
     scene["placement_region"]["release_z_offset_m"] = 0.05

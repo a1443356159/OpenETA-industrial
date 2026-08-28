@@ -161,9 +161,11 @@ The portable-object motion contract is deliberately small:
    bilateral fingertip contact with the selected target and a DetachableJoint attach
    ACK. A lift or visual co-motion experiment is neither required nor sufficient.
 4. Every later attached MoveIt receipt revalidates the measured attachment transform
-   and drift. AnyPlace supplies the exact object goal; the host derives the exact EEF
-   release pose from that goal and the measured attachment transform.
-5. At the exact release pose, gripper_control position=1 detaches. Success requires
+   and drift. AnyPlace supplies the destination and settled-state evidence. A flat
+   support uses its full object pose; for a collision-backed container, the host may
+   compile a short-drop terminal at the same destination while preserving the carried
+   orientation. The reviewer must use the resulting host-qualified EEF terminal.
+5. At the qualified release pose, gripper_control position=1 detaches. Success requires
    native stable, in-zone placement evidence. Proximity, an empty gripper, or reward=0
    is not placement proof. No post-release retreat is required.
 
@@ -175,7 +177,7 @@ model inference is allowed only after the qualified queue is exhausted.
 Use host_action_stage.required_action_matches and placement_action_stage as trusted
 state-machine evidence, but never waive deterministic safety checks. Stage=open is
 pre-contact setup or recovery; stage=contact is the exact provider pose; stage=close
-tests native contact; stage=release opens only after the exact model-derived release
+tests native contact; stage=release opens only after the exact host-qualified release
 pose was reached. For attached transport, absence of physical_verification in a
 read-only tool result is not detach proof; an explicit FAIL or drift violation is.
 

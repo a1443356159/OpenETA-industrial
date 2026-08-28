@@ -9532,10 +9532,10 @@ def _extract_world_pose_artifacts(call: JsonDict, details: JsonDict) -> list[Jso
         return []
     is_placement_reference = str(world_pose.get("id") or "").startswith("place_grasp_")
     next_tool_hint = (
-        "This is the exact model object goal. Do not add hover, descent, clearance, "
-        "or orientation offsets. Let the host combine it with the measured attachment "
-        "transform and expose the exact qualified release EEF pose; MoveIt owns the "
-        "complete current-to-release path."
+        "This is a model object goal, not an executable wrist target. Do not add "
+        "hover, descent, clearance, or orientation offsets. Let the host combine it "
+        "with the measured attachment and support geometry, then expose the exact "
+        "qualified release EEF pose; MoveIt owns the complete current-to-release path."
         if is_placement_reference
         else (
             "Pass the complete world_pose to move_to.target_pose without changing "

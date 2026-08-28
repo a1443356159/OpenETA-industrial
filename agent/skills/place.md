@@ -32,18 +32,22 @@ and MoveIt owns complete robot paths.
 2. The host checks each goal once for finite SE(3), valid rotation, legal
    support/height/footprint, static penetration, and certain workspace bounds.
    Only pairs entering the current small wave pay the deeper geometry cost.
-3. For each pair, derive the exact release EEF pose as
-   `object_goal * inverse(measured_attachment)`. Pair legality, Beam-2, state
-   validity, and L5 plan-only must all pass. Stable wave barriers preserve
-   deterministic order; use the first complete pair.
+3. For a flat support, derive the exact release EEF pose as
+   `object_goal * inverse(measured_attachment)`. For a collision-backed
+   container, AnyPlace still selects the destination and proves a settled pose,
+   while the host derives a short-drop terminal at that destination that keeps
+   the carried orientation; gravity owns settling after detach. Pair legality,
+   Beam-2, state validity, and L5 plan-only must all pass in either case. Stable
+   wave barriers preserve deterministic order; use the first complete pair.
 4. After native attach PASS, recompile the frozen AnyPlace pool from the
    measured attachment and current PlanningScene. Do not rerun AnyPlace or the
    grasp model because one pair fails; continue the frozen pair/grasp frontiers.
-5. Execute one `move_to` to the exact release EEF pose with its full orientation.
+5. Execute one `move_to` to the exact host-qualified release EEF pose with its
+   full compiled orientation.
    There is no carry lift, hover, descend offset, rim-clearance waypoint,
    near-target shortcut, or retreat. Every receipt must retain attachment and
    satisfy the native drift bound.
-6. At exact release, call `gripper_control position=1` once. PASS requires
+6. At the qualified release terminal, call `gripper_control position=1` once. PASS requires
    detach ACK and native stable placement. A successful open, empty gripper,
    visual proximity, or reward alone is not proof.
 7. On retained placement PASS, close the environment once. If planning rejects
@@ -52,6 +56,6 @@ and MoveIt owns complete robot paths.
    requires observation on the same handle. Infrastructure errors are never
    candidate failures.
 
-Never edit model goals, add offsets, retry an unchanged failed fingerprint, or
+Never hand-edit model goals, add agent-authored offsets, retry an unchanged failed fingerprint, or
 claim success without native state validity, complete MoveIt plan proof, and
 stable in-zone release evidence.

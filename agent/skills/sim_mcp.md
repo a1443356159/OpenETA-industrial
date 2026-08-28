@@ -117,11 +117,14 @@ The host applies only calibrated frame/TCP representation transforms; it may not
 add pregrasp, hover, approach, alignment, centering, symmetry, or lift offsets.
 MoveIt owns one complete collision-aware path from the current joint state to that
 exact contact. Portable attachment requires native bilateral contact plus attach
-ACK, and every attached transport receipt rechecks relative drift. AnyPlace object
-goals similarly produce one exact EEF release pose from the measured attachment;
-there is no carry hover, release offset, or retreat. Host-classified articulated
+ACK, and every attached transport receipt rechecks relative drift. On a flat
+support, an AnyPlace goal produces the exact EEF release pose from the measured
+attachment. In a host-classified collision-backed container, AnyPlace owns the
+destination and settled-state evidence, while the host may compile a short-drop
+terminal at the same destination that preserves the carried orientation. The agent
+must not add a carry hover, release offset, or retreat. Host-classified articulated
 handles alone retain their frozen 5 cm linear/arc attachment probe. Close remains
-latched until binary `position=1` at the exact release pose.
+latched until binary `position=1` at the exact host-qualified release pose.
 A transport timeout requires observation on the same handle before retry.
 
 Classify failures before retrying:

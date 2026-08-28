@@ -967,7 +967,8 @@ def _candidate_qualification_compiler(
                 # applies the one scene-derived support correction to both the
                 # object motion and the release EEF terminal before IK/L5.
                 world_object_goal = (
-                    candidate.get("model_pointcloud_object_goal_pose")
+                    candidate.get("qualified_release_pointcloud_object_goal_pose")
+                    or candidate.get("model_pointcloud_object_goal_pose")
                     or candidate.get("world_object_goal_pose")
                     or candidate.get("object_goal_pose")
                 )
@@ -977,12 +978,19 @@ def _candidate_qualification_compiler(
                     compiled_candidate["world_object_goal_pose"] = compiled_goal
                     compiled_candidate["object_goal_pose"] = dict(compiled_goal)
                     compiled_candidate["qualification_object_goal_source"] = (
-                        "model_pointcloud_goal_with_predicted_attachment"
+                        "container_release_pointcloud_goal_with_predicted_attachment"
+                        if isinstance(
+                            candidate.get("qualified_release_pointcloud_object_goal_pose"),
+                            Mapping,
+                        )
+                        else "model_pointcloud_goal_with_predicted_attachment"
                     )
                 attachment_transform: object = dict(predicted_attachment)
             else:
-                world_object_goal = candidate.get("world_object_goal_pose") or candidate.get(
-                    "object_goal_pose"
+                world_object_goal = (
+                    candidate.get("qualified_release_object_goal_pose")
+                    or candidate.get("world_object_goal_pose")
+                    or candidate.get("object_goal_pose")
                 )
                 compiled_candidate = dict(candidate)
                 if isinstance(world_object_goal, Mapping):
@@ -990,7 +998,12 @@ def _candidate_qualification_compiler(
                     compiled_candidate["world_object_goal_pose"] = compiled_goal
                     compiled_candidate["object_goal_pose"] = dict(compiled_goal)
                     compiled_candidate["qualification_object_goal_source"] = (
-                        "physical_goal_with_measured_attachment"
+                        "container_release_physical_goal_with_measured_attachment"
+                        if isinstance(
+                            candidate.get("qualified_release_object_goal_pose"),
+                            Mapping,
+                        )
+                        else "physical_goal_with_measured_attachment"
                     )
                 attachment_transform = (
                     dict(predicted_attachment)
@@ -1032,6 +1045,10 @@ def _candidate_qualification_compiler(
                 profile=profile,
                 profile_sha256=profile_sha256,
             )
+            if candidate.get("container_drop_release_prebound") is True:
+                compiled["release_pose"]["terminal_pose_source"] = (
+                    "anyplace_xy_with_container_drop_orientation"
+                )
             compiled_pose_chain = [dict(compiled["release_pose"])]
             stages = [
                 {
@@ -2200,6 +2217,54 @@ class _FrozenGoalPairCoordinator:
                 planning_scene_revision,
             )
 
+        goal_prebind_summary: JsonDict = {}
+        prebind = getattr(self.qualifier, "prebind_placement_goals", None)
+        if (
+            getattr(self.qualifier, "qualification_profile", "legacy") == "fast_v3"
+            and callable(prebind)
+            and any(
+                goal.get("goal_legality_prebound") is not True
+                for goal in self.object_goals
+                if isinstance(goal, Mapping)
+            )
+        ):
+            try:
+                prebound_goals, goal_prebind_summary = prebind(
+                    self.object_goals,
+                    scene_epoch=scene_epoch,
+                    planning_scene_revision=planning_scene_revision,
+                    source=source,
+                )
+            except Exception as exc:  # noqa: BLE001 - private scene boundary.
+                return ToolResult(
+                    False,
+                    f"Placement goal legality infrastructure failed: {exc}",
+                    {
+                        "reason": "qualification_infrastructure_error",
+                        "infrastructure_error": True,
+                        "qualification_infrastructure_reason": (
+                            "placement_goal_prebind_failed"
+                        ),
+                        "error_type": type(exc).__name__,
+                        "execution_started": False,
+                    },
+                )
+            self.object_goals = [
+                json.loads(json.dumps(goal)) for goal in prebound_goals
+            ]
+            if not self.object_goals:
+                result.details.update(goal_prebind_summary)
+                result.details["frozen_pair_stop_reason"] = (
+                    "frozen_goal_pool_exhausted"
+                )
+                return self._replace_grasps(
+                    result,
+                    [],
+                    {},
+                    scene_epoch,
+                    planning_scene_revision,
+                )
+
         retained_entries: dict[str, JsonDict] = {}
         per_grasp_pairs: list[list[JsonDict]] = []
         # Preserve the complete current AnyPlace pool through compilation and
@@ -2286,6 +2351,8 @@ class _FrozenGoalPairCoordinator:
         ]
         if not pairs:
             return self._replace_grasps(result, [], {}, scene_epoch, planning_scene_revision)
+        if goal_prebind_summary:
+            result.details.update(goal_prebind_summary)
         joint = self.qualifier.qualify_result(
             ToolResult(
                 True,

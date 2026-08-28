@@ -4057,7 +4057,7 @@ def _validate_placement_motion_guidance(
         return []
     if decision.action_type.lower().strip() != "tool_call":
         return [
-            "A verified attachment is awaiting its exact model-derived release target; do not end the task."
+            "A verified attachment is awaiting its exact host-qualified release target; do not end the task."
         ]
     if decision.action == "observe":
         return []
@@ -4070,7 +4070,7 @@ def _validate_placement_motion_guidance(
         }:
             return []
         return [
-            "Keep the gripper closed until MoveIt reaches the exact model-derived "
+            "Keep the gripper closed until MoveIt reaches the exact host-qualified "
             "release pose. Do not insert a hover or descent waypoint."
         ]
     if decision.action != "move_to":
@@ -7766,7 +7766,7 @@ def _placement_motion_guidance(
     execution: object,
     attachment: object,
 ) -> JsonDict | None:
-    """Plan once from the current attached state to the model-derived release."""
+    """Plan once from the current attached state to the qualified release."""
 
     if (
         not isinstance(execution, dict)
@@ -7861,8 +7861,9 @@ def _placement_motion_guidance(
         "scene_revision": policy.get("scene_revision"),
         "rule": (
             "MoveIt owns one complete collision-aware plan from the current attached "
-            "joint state to the exact EEF release pose derived from the AnyPlace object "
-            "goal and measured attachment. No hover, lift, retreat, or host pose offset "
+            "joint state to the exact host-qualified EEF release pose. AnyPlace owns "
+            "the destination; the host combines it with the measured attachment and "
+            "support geometry. No hover, lift, retreat, or agent-authored pose offset "
             "may be inserted."
         ),
     }

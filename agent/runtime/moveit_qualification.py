@@ -392,6 +392,115 @@ class MoveItCandidateQualifier:
         self.recovery_ik_timeout_s = float(recovery_ik_timeout_s)
         self.capability_map_id = str(capability_map_id)
 
+    def prebind_placement_goals(
+        self,
+        goals: Sequence[Mapping[str, Any]],
+        *,
+        scene_epoch: int,
+        planning_scene_revision: int,
+        source: Mapping[str, Any] | None = None,
+    ) -> tuple[list[JsonDict], JsonDict]:
+        """Run the cheap complete goal barrier before compiling any pair.
+
+        Container release semantics depend on authoritative support collision
+        geometry owned by the simulator.  Resolve that geometry once for the
+        frozen AnyPlace frontier, then compile every grasp/goal pair from the
+        resulting immutable release goal.  This prevents a late legality pass
+        from changing a pose identity after IK/L5 compilation.
+        """
+
+        descriptors = [
+            {
+                "candidate_id": str(goal.get("id") or f"placement_{index:03d}"),
+                "candidate_pose_sha256": _hash(goal),
+                "candidate": json.loads(json.dumps(goal)),
+            }
+            for index, goal in enumerate(goals)
+        ]
+        request: JsonDict = {
+            "schema_version": QUALIFICATION_SCHEMA_V3,
+            "purpose": "placement",
+            "scene_epoch": scene_epoch,
+            "planning_scene_revision": planning_scene_revision,
+            "planning": {
+                "allowed_planning_time_s": PLANNING_TIME_S,
+                "num_planning_attempts": PLANNING_ATTEMPTS,
+                "plan_only": True,
+            },
+            "funnel": {
+                "qualification_profile": "fast_v3",
+                "qualification_mode": "goal_prebind",
+            },
+            "source": dict(source or {}),
+            "candidates": descriptors,
+        }
+        request["qualification_case_sha256"] = _hash(
+            {
+                "purpose": "placement_goal_prebind",
+                "scene_epoch": scene_epoch,
+                "planning_scene_revision": planning_scene_revision,
+                "candidate_pose_sha256": [
+                    descriptor["candidate_pose_sha256"] for descriptor in descriptors
+                ],
+            }
+        )
+        request["qualification_binding_sha256"] = _hash(
+            {
+                "purpose": request["purpose"],
+                "scene_epoch": scene_epoch,
+                "planning_scene_revision": planning_scene_revision,
+                "funnel": request["funnel"],
+                "candidate_pose_sha256": [
+                    descriptor["candidate_pose_sha256"] for descriptor in descriptors
+                ],
+            }
+        )
+        response = self.rpc(
+            PRIVATE_RPC_NAME,
+            request,
+            QUALIFICATION_RPC_GRACE_S,
+        )
+        if not isinstance(response, Mapping):
+            raise RuntimeError("placement goal prebind returned no evidence")
+        if (
+            response.get("schema_version") != QUALIFICATION_SCHEMA_V3
+            or response.get("planning_scene_revision") != planning_scene_revision
+            or response.get("execution_started") is not False
+            or response.get("infrastructure_error") is True
+        ):
+            raise RuntimeError(
+                str(response.get("stop_reason") or "placement goal prebind failed")
+            )
+        rows = response.get("results")
+        if not isinstance(rows, list) or len(rows) != len(descriptors):
+            raise RuntimeError("placement goal prebind evidence is incomplete")
+        expected = {descriptor["candidate_id"] for descriptor in descriptors}
+        received = {
+            str(row.get("candidate_id") or "")
+            for row in rows
+            if isinstance(row, Mapping)
+        }
+        if received != expected:
+            raise RuntimeError("placement goal prebind candidate identity mismatch")
+        bound: list[JsonDict] = []
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            verdict = str(row.get("verdict") or "UNKNOWN").upper()
+            if verdict == "PASS" and isinstance(row.get("prebound_candidate"), Mapping):
+                bound.append(json.loads(json.dumps(row["prebound_candidate"])))
+            elif verdict not in {"PASS", "FAIL"}:
+                raise RuntimeError(
+                    str(row.get("reason") or "placement goal prebind indeterminate")
+                )
+        return bound, {
+            "frozen_goal_legality_screen_complete": True,
+            "frozen_goal_legality_evidence_count": len(rows),
+            "frozen_goal_legality_pass_count": len(bound),
+            "frozen_goal_legality_reject_count": len(rows) - len(bound),
+            "frozen_goal_legality_frontier_count": len(bound),
+        }
+
     def qualify_result(
         self,
         result: ToolResult,
@@ -1625,6 +1734,104 @@ class MoveItQualificationEngine:
             "results": results,
         }
 
+    def _qualify_goal_prebind(self, request: Mapping[str, Any]) -> JsonDict:
+        """Resolve one complete placement-goal legality frontier, without IK."""
+
+        revision = int(request["planning_scene_revision"])
+        candidates = request["candidates"]
+        binding = str(request.get("qualification_binding_sha256") or "")
+        try:
+            scene = self.clone_scene() if self.clone_scene is not None else None
+        except Exception as exc:  # noqa: BLE001 - PlanningScene service boundary.
+            return {
+                "schema_version": request["schema_version"],
+                "planning_scene_revision": revision,
+                "execution_started": False,
+                "infrastructure_error": True,
+                "stop_reason": f"placement_goal_scene_clone_failed:{type(exc).__name__}",
+                "results": [],
+            }
+        if not isinstance(scene, Mapping):
+            return {
+                "schema_version": request["schema_version"],
+                "planning_scene_revision": revision,
+                "execution_started": False,
+                "infrastructure_error": True,
+                "stop_reason": "placement_goal_scene_clone_unavailable",
+                "results": [],
+            }
+        scene_revision = scene.get("revision")
+        if (
+            isinstance(scene_revision, int)
+            and not isinstance(scene_revision, bool)
+            and scene_revision != revision
+        ):
+            return {
+                "schema_version": request["schema_version"],
+                "planning_scene_revision": revision,
+                "execution_started": False,
+                "infrastructure_error": True,
+                "stop_reason": "placement_goal_scene_revision_drift",
+                "results": [],
+            }
+        rows: list[JsonDict] = []
+        selected: list[str] = []
+        started = time.monotonic()
+        for raw_descriptor in candidates:
+            descriptor = (
+                json.loads(json.dumps(raw_descriptor))
+                if isinstance(raw_descriptor, Mapping)
+                else {}
+            )
+            candidate_id = str(descriptor.get("candidate_id") or "")
+            legality = evaluate_placement_goal_legality(
+                descriptor,
+                scene=scene,
+            )
+            bind_qualified_placement_goal(descriptor, legality)
+            verdict = str(legality.get("verdict") or "UNKNOWN").upper()
+            row: JsonDict = {
+                "candidate_id": candidate_id,
+                "candidate_pose_sha256": str(
+                    descriptor.get("candidate_pose_sha256") or ""
+                ),
+                "verdict": verdict,
+                "reason": str(legality.get("reason") or "goal_legality_unknown"),
+                "goal_legality": legality,
+                "execution_started": False,
+                "qualification_binding_sha256": binding,
+            }
+            candidate = descriptor.get("candidate")
+            if verdict == "PASS" and isinstance(candidate, Mapping):
+                row["prebound_candidate"] = dict(candidate)
+                selected.append(candidate_id)
+            rows.append(row)
+        infrastructure_error = any(
+            isinstance(row.get("goal_legality"), Mapping)
+            and row["goal_legality"].get("infrastructure_error") is True
+            for row in rows
+        )
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": revision,
+            "execution_started": False,
+            "infrastructure_error": infrastructure_error,
+            "stop_reason": (
+                "infrastructure_error"
+                if infrastructure_error
+                else "goal_legality_barrier_complete"
+            ),
+            "selected_candidate_ids": selected,
+            "results": rows,
+            "metrics": {
+                "generated_count": len(candidates),
+                "goal_legality_unique_count": len(candidates),
+                "goal_legality_pass_count": len(selected),
+                "goal_legality_reject_count": len(candidates) - len(selected),
+                "goal_legality_elapsed_s": time.monotonic() - started,
+            },
+        }
+
     def _qualify_fast_v3(self, request: Mapping[str, Any]) -> JsonDict:
         """Run deterministic concurrent waves and a serial plan-only tail."""
 
@@ -1642,6 +1849,11 @@ class MoveItQualificationEngine:
         purpose = str(request.get("purpose") or "grasp")
         if purpose not in {"grasp", "placement", "observation"}:
             raise ValueError("invalid fast_v3 qualification purpose")
+        if (
+            purpose == "placement"
+            and str(funnel.get("qualification_mode") or "") == "goal_prebind"
+        ):
+            return self._qualify_goal_prebind(request)
         beam_width = int(funnel.get("beam_width", 2))
         fast_seed_count = int(funnel.get("fast_seed_count", 2))
         recovery_seed_count = int(funnel.get("recovery_seed_count", 6))
