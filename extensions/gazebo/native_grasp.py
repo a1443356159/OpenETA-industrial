@@ -510,12 +510,15 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # shared GPU/physics load, the previous profiles repeatedly exceeded the
     # former 0.05 rad controller limit on joint 5. A later GUI-on run reached
     # 0.060102 rad on joint 4 at 0.18/0.08, so the unloaded profile also keeps
-    # measured margin below the explicit 0.06 rad path envelope. The unchanged
-    # 0.002 rad terminal goal continues to prove final settling.
+    # measured margin below the explicit 0.06 rad path envelope. A later
+    # GUI-on loaded trajectory reached 0.060016 rad at 0.12/0.06 and was
+    # correctly aborted mid-path. Keep payload transport more conservative
+    # instead of weakening that controller envelope. The unchanged 0.002 rad
+    # terminal goal continues to prove final settling.
     unloaded_velocity_scaling: float = 0.16
     unloaded_acceleration_scaling: float = 0.06
-    loaded_velocity_scaling: float = 0.12
-    loaded_acceleration_scaling: float = 0.06
+    loaded_velocity_scaling: float = 0.10
+    loaded_acceleration_scaling: float = 0.04
 
     def __post_init__(self) -> None:
         GazeboControlConfig.__post_init__(self)
