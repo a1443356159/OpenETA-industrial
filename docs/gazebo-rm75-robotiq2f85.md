@@ -45,12 +45,16 @@ The complete launch starts Gazebo Harmonic, spawns
 `rm75_robotiq_2f85_sim_v1`, activates the three ros2_control controllers in
 dependency order, then starts MoveIt and the RGB-D bridge with simulation
 time. Arm trajectories use collision-enabled MoveIt planning at 30% of the
-declared joint velocity and acceleration limits. Run the release acceptance
-through the single normal entry point:
+declared joint velocity and acceleration limits. Run the final task-neutral
+release acceptance through the `multi_normal` entry point:
 
 ```bash
-scripts/run_normal_gazebo_acceptance.sh --scenario normal
+scripts/run_multi_normal_gazebo_acceptance.sh --operator-mode human_tui
 ```
+
+Follow the complete [human TUI procedure](multi-normal-tui-reproduction.md). The separate `normal`
+scenario remains useful for control-chain smoke and development checks, but is not the final
+multi-object release scene.
 
 The runner allocates an unused ROS domain, isolated Gazebo partition and MCP
 port, records immutable environment and cleanup receipts, and terminates only

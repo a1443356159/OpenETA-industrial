@@ -1,5 +1,9 @@
 # `multi_normal` 人工 TUI 复现指南
 
+> **文档状态：** 最终发行的权威人工操作手册。验收语义以
+> [`gazebo-normal-acceptance.md`](gazebo-normal-acceptance.md) 为准，资格漏斗细节见
+> [`openeta-qualification-funnel-v3.md`](openeta-qualification-funnel-v3.md)。
+
 本文用于复现最终发行验收：人类操作员在同一个任务中，先把黄色活动扳手放入绿色零件箱，再把红色六角螺栓放入蓝色零件箱。物理场景始终是任务中立的 `multi_normal`；物品顺序和目标料箱来自操作员在 TUI 中输入的自然语言，不由场景静态注入。
 
 ## 验收边界
@@ -139,7 +143,7 @@ scripts/run_multi_normal_gazebo_acceptance.sh \
 
 ## 发行复测记录
 
-2026-08-29 在 `final-dev` 的资格/MCP 实现提交 `111848c` 上，使用同一个任务中立的 `multi_normal` 场景和 GPU Gazebo GUI 完成了两次独立人工 TUI 验收：
+2026-08-29 在 `final-dev` 的资格/MCP 实现提交 `111848c` 上，使用同一个任务中立的 `multi_normal` 场景和 GPU Gazebo GUI 完成了两次独立人工 TUI 验收；两份证据随后在发行整理提交 `5e60c3f` 上通过 `--verify-only` 复核：
 
 | 运行 | 人类请求 | 结果 | VLM 工具回合 | Provider tokens | 关键覆盖 |
 | --- | --- | --- | ---: | ---: | --- |

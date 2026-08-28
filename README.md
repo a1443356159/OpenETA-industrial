@@ -32,6 +32,10 @@ change reality.
 
 ## What's New
 
+- **2026-08-29** — **Industrial `multi_normal` release path:** The task-neutral RM75/Robotiq
+  Gazebo scene now accepts human-authored multi-object sorting requests through the real TUI. The
+  release gate uses GraspGenX, AnyPlace, deterministic `fast_v3` qualification, native contact
+  proof, and frozen-frontier recovery.
 - **2026-08-03** — **OpenETA for Codex:** We released the
   [`openeta-light`](https://github.com/OpenMOSS/OpenETA/tree/openeta-light)
   branch, which connects the Codex TUI to LIBERO through six typed tools and a
@@ -265,18 +269,14 @@ uv run openeta --command inspect \
 Process completion does not imply task success. Final outcomes are established by trusted
 environment receipts, rewards, checkers, and retained rollout evidence.
 
-## Roadmap
-
-
-
 ## Documentation
 
 | Document | Scope |
 | --- | --- |
+| [Documentation map](docs/README.md) | Authoritative release contracts, operator runbooks, implementation designs, and optional references |
 | [Architecture](docs/architecture.md) | Boundaries across the Agent, Adapter, Simulator, and MCP layers |
 | [Agent command pipeline](docs/agent-action-pipeline.md) | Command schemas, Tool contracts, AtomActions, and safety gates |
 | [Simulation layer](sim/README.md) | Installation, environment registry, MCP, REST, and Dashboard |
-| [Gazebo SAM3 assets](docs/gazebo-sam3-assets-and-deployment.md) | Pinned ModelScope checkpoint, offline cache, and service deployment |
 | [Gazebo `multi_normal` acceptance](docs/gazebo-normal-acceptance.md) | GraspGenX/AnyPlace compilation, MoveIt scene constraints, frozen-frontier recovery, and release gates |
 | [Human TUI reproduction](docs/multi-normal-tui-reproduction.md) | Operator procedure for the representative two-item `multi_normal` work order |
 | [Parallel simulator evaluation](docs/parallel-simulator-evaluation.md) | Concurrency, budgets, human recovery, and experience promotion |

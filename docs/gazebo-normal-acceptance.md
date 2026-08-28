@@ -1,5 +1,9 @@
 # Gazebo `multi_normal` release acceptance
 
+> **Status:** Normative final-release contract. Human operators should follow
+> [`multi-normal-tui-reproduction.md`](multi-normal-tui-reproduction.md); broader documentation is
+> indexed in [`README.md`](README.md).
+
 Normal acceptance keeps the existing AgentTool surface. A `move_to` call is one MoveIt request
 covering IK, collision-aware planning, and execution from the current state to
 an exact terminal. The agent never invents a pregrasp, hover, approach,

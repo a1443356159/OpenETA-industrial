@@ -1,5 +1,8 @@
 # AnyGrasp remote deployment
 
+> **Status:** Optional development-backend runbook. Final `multi_normal` acceptance uses GraspGenX
+> and does not start or fall back to AnyGrasp.
+
 This runbook deploys the real licensed AnyGrasp SDK used by OpenETA's
 backend-neutral `grasp_pose_estimate` tool. It does not change the public tool
 surface, bypass the MoveIt qualification funnel, or provide an acceptance-only

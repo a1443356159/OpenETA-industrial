@@ -1,5 +1,8 @@
 # Gazebo industrial benchmark
 
+> **Status:** Offline/reference contract, not the final `multi_normal` release gate and not a live
+> benchmark result. Its AnyGrasp requirements belong only to this optional benchmark definition.
+
 `examples/gazebo_industrial_benchmark_v0.json` is an offline scene and metric
 contract only. It must not be reported as a live benchmark. A live benchmark starts only
 after normal acceptance passes with real SAM3, licensed official AnyGrasp and official AnyPlace, compiled

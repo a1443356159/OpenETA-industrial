@@ -1,5 +1,8 @@
 # OpenETA qualification funnel v3
 
+> **Status:** Normative qualification contract. The final `multi_normal` acceptance runner selects
+> `fast_v3`; the repository-wide `legacy` default remains an independent rollback boundary.
+
 `fast_v3` is an opt-in CPU-first qualification profile. The shipped default is
 `legacy`; `shadow` keeps legacy results authoritative while recording private
 v3 evidence. Promotion to `fast_v3` is an operational decision made only after
