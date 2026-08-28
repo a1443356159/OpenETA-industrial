@@ -73,6 +73,12 @@ KINEMATIC_IK_TIMEOUT_S = 2.0
 # false candidate rejection.
 STATE_VALIDITY_TIMEOUT_S = 5.0
 QUALIFICATION_RPC_GRACE_S = 30.0
+# Qualification may legitimately continue beyond this acknowledgement window.
+# The first read-only MCP attempt is bounded so a lost HTTP result cannot
+# strand the TUI behind the exhaustive solver deadline.  A health-gated second
+# attempt retains the complete logical timeout and is served idempotently by
+# the simulator's qualification-response cache.
+QUALIFICATION_RPC_FIRST_ACK_TIMEOUT_S = 60.0
 # Goal prebinding returns one immutable legality record per provider goal.  The
 # simulator serializes that read-only call with live dashboard/control work, so
 # its transport envelope must also scale with the amount of evidence encoded
@@ -1525,10 +1531,18 @@ def private_qualification_rpc(
     """Bind session identity without exposing this RPC in the AgentTool registry."""
 
     def call(name: str, request: JsonDict, timeout_s: float) -> JsonDict:
+        from agent.tools.sim_mcp import call_read_only_mcp_tool_with_retry
+
         arguments = dict(request)
         arguments["handle"] = handle_provider()
         arguments["session_id"] = session_id_provider()
-        return transport.call_tool(name, arguments, timeout_s=timeout_s)
+        return call_read_only_mcp_tool_with_retry(
+            transport,
+            name,
+            arguments,
+            timeout_s=timeout_s,
+            first_attempt_timeout_s=QUALIFICATION_RPC_FIRST_ACK_TIMEOUT_S,
+        )
 
     return call
 
@@ -2617,6 +2631,11 @@ class MoveItQualificationEngine:
             result["fixed_candidate_index"] = fixed_index
             result["qualification_binding_sha256"] = binding
             result["screening_attempts"] = list(screening_history.get(candidate_id, []))
+            # The host-side validator restores these immutable parameters from
+            # the original request.  Omitting the repeated copy from every
+            # wire result keeps large frozen-frontier replies small without
+            # changing the stored qualification artifact.
+            result.pop("compile_parameters", None)
             results.append(result)
 
         screening_records = [

@@ -398,6 +398,24 @@ def _engine(**overrides):
     return MoveItQualificationEngine(**callbacks)
 
 
+def test_fast_wire_response_omits_rehydratable_compile_parameters():
+    candidate = _candidate(0)
+    candidate["compile_parameters"] = {
+        "camera_pose": {"provider_candidate_index": 17}
+    }
+
+    response = _engine().qualify(
+        _request(
+            [candidate],
+            purpose="grasp",
+            overrides={"l5_pass_target": 1, "l5_min_pass_target": 1},
+        )
+    )
+
+    assert response["results"][0]["verdict"] == "PASS"
+    assert "compile_parameters" not in response["results"][0]
+
+
 def test_fast_ik_request_carries_the_wave_queue_depth_separately_from_solver_budget():
     seen: list[tuple[float, int]] = []
     validity_depths: list[int] = []

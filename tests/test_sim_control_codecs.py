@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -87,6 +89,161 @@ def test_dashboard_qualification_latency_is_metrics_only_and_solver_partitioned(
         with session._session_qualification_lock:
             session._session_qualification.pop(sid, None)
             session._session_qualification_latencies.pop(sid, None)
+
+
+def test_qualification_response_cache_replays_exact_proof_by_binding(monkeypatch):
+    sid, handle = "qualification-cache-test", "env-1"
+    binding = "binding-1"
+    calls = []
+    meta = {"control_spec": {"motion_control": True}}
+    response = {
+        "schema_version": "openeta.moveit_qualification.v3",
+        "planning_scene_revision": 4,
+        "execution_started": False,
+        "infrastructure_error": False,
+        "results": [
+            {
+                "candidate_id": "candidate-1",
+                "qualification_binding_sha256": binding,
+                "execution_started": False,
+                "verdict": "PASS",
+            }
+        ],
+    }
+    monkeypatch.setattr(server, "_touch_session", lambda _sid: None)
+    monkeypatch.setattr(server, "_session_envs", {sid: {handle: meta}})
+    monkeypatch.setattr(
+        server,
+        "_proxy_step",
+        lambda *_args, **_kwargs: calls.append("qualified") or dict(response),
+    )
+    monkeypatch.setattr(server, "_record_qualification_dashboard", lambda *_args: None)
+    with session._session_qualification_lock:
+        session._session_qualification_responses[sid] = {}
+
+    def qualify(current_binding):
+        return server.qualify_motion_candidates.__wrapped__(
+            handle,
+            "openeta.moveit_qualification.v3",
+            "grasp",
+            1,
+            4,
+            {},
+            {},
+            [],
+            current_binding,
+            session_id=sid,
+        )
+
+    try:
+        first = qualify(binding)
+        second = qualify(binding)
+        other = qualify("binding-2")
+
+        assert calls == ["qualified", "qualified"]
+        assert "_openeta_qualification_response_cache" not in first
+        assert second["results"] == first["results"]
+        assert second["_openeta_qualification_response_cache"] == {
+            "schema_version": "openeta.qualification_response_cache.v1",
+            "hit": True,
+            "qualification_binding_sha256": binding,
+        }
+        assert "_openeta_qualification_response_cache" not in other
+    finally:
+        with session._session_qualification_lock:
+            session._session_qualification_responses.pop(sid, None)
+
+
+def test_qualification_retry_waits_for_inflight_proof_then_hits_cache(monkeypatch):
+    sid, handle = "qualification-cache-inflight-test", "env-1"
+    binding = "binding-inflight"
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    outputs = []
+    meta = {"control_spec": {"motion_control": True}}
+    response = {
+        "schema_version": "openeta.moveit_qualification.v3",
+        "planning_scene_revision": 4,
+        "execution_started": False,
+        "infrastructure_error": False,
+        "results": [
+            {
+                "candidate_id": "candidate-1",
+                "qualification_binding_sha256": binding,
+                "execution_started": False,
+                "verdict": "PASS",
+            }
+        ],
+    }
+
+    def proxy_step(*_args, **_kwargs):
+        calls.append("qualified")
+        entered.set()
+        assert release.wait(timeout=2.0)
+        return dict(response)
+
+    monkeypatch.setattr(server, "_touch_session", lambda _sid: None)
+    monkeypatch.setattr(server, "_session_envs", {sid: {handle: meta}})
+    monkeypatch.setattr(server, "_proxy_step", proxy_step)
+    monkeypatch.setattr(server, "_record_qualification_dashboard", lambda *_args: None)
+    with session._session_qualification_lock:
+        session._session_qualification_responses[sid] = {}
+
+    def qualify():
+        outputs.append(
+            server.qualify_motion_candidates.__wrapped__(
+                handle,
+                "openeta.moveit_qualification.v3",
+                "grasp",
+                1,
+                4,
+                {},
+                {},
+                [],
+                binding,
+                session_id=sid,
+            )
+        )
+
+    first = threading.Thread(target=qualify)
+    retry = threading.Thread(target=qualify)
+    try:
+        first.start()
+        assert entered.wait(timeout=2.0)
+        retry.start()
+        release.set()
+        first.join(timeout=2.0)
+        retry.join(timeout=2.0)
+
+        assert not first.is_alive() and not retry.is_alive()
+        assert calls == ["qualified"]
+        assert len(outputs) == 2
+        assert sum(
+            "_openeta_qualification_response_cache" in output
+            for output in outputs
+        ) == 1
+    finally:
+        release.set()
+        first.join(timeout=2.0)
+        retry.join(timeout=2.0)
+        with session._session_qualification_lock:
+            session._session_qualification_responses.pop(sid, None)
+
+
+def test_close_env_clears_qualification_response_cache(monkeypatch):
+    sid, handle = "qualification-cache-close-test", "env-1"
+    monkeypatch.setattr(server, "_touch_session", lambda _sid: None)
+    monkeypatch.setattr(server, "_session_envs", {sid: {}})
+    with session._session_qualification_lock:
+        session._session_qualification_responses[sid] = {
+            handle: OrderedDict({"binding": {"results": []}})
+        }
+
+    result = server.close_env.__wrapped__(handle, session_id=sid)
+
+    assert result == {"ok": True, "already_closed": True, "cleanup_errors": []}
+    assert sid not in session._session_qualification_responses
 
 
 def test_behavior_ik_config_and_runtime_layout_are_explicit() -> None:

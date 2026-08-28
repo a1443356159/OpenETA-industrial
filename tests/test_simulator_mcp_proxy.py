@@ -442,6 +442,45 @@ def test_read_only_mcp_retry_is_health_gated_and_host_stamped() -> None:
     }
 
 
+def test_read_only_mcp_retry_uses_ack_watchdog_then_full_logical_timeout() -> None:
+    class RetryTransport:
+        def __init__(self) -> None:
+            self.timeouts = []
+            self.health_calls = []
+
+        def call_tool(self, name, arguments, *, timeout_s=None):
+            assert name == "qualify_motion_candidates"
+            assert arguments == {"qualification_binding_sha256": "binding"}
+            self.timeouts.append(timeout_s)
+            if len(self.timeouts) == 1:
+                raise sim_mcp.SimulatorMcpTransportError(
+                    "call_tool:qualify_motion_candidates",
+                    TimeoutError("response acknowledgement was lost"),
+                )
+            return {"execution_started": False, "results": []}
+
+        def list_tools(self, *, timeout_s=None):
+            self.health_calls.append(timeout_s)
+            return {
+                "tools": [{"name": "qualify_motion_candidates"}],
+                "tool_count": 1,
+            }
+
+    transport = RetryTransport()
+    result = call_read_only_mcp_tool_with_retry(
+        transport,
+        "qualify_motion_candidates",
+        {"qualification_binding_sha256": "binding"},
+        timeout_s=900.0,
+        first_attempt_timeout_s=60.0,
+    )
+
+    assert transport.timeouts == [60.0, 900.0]
+    assert transport.health_calls == [5.0]
+    assert result["_openeta_transport_retry"]["first_attempt_timeout_s"] == 60.0
+    assert result["_openeta_transport_retry"]["retry_timeout_s"] == 900.0
+
+
 def test_read_only_mcp_retry_stops_when_health_check_loses_tool() -> None:
     class UnhealthyTransport:
         def __init__(self) -> None:

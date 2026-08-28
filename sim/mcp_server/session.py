@@ -7,6 +7,7 @@ creation, activity tracking, detachment, and cleanup.
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import contextvars
 import os
 import sys
@@ -53,6 +54,14 @@ _session_qualification: dict[str, dict[str, dict]] = {}
 # configuration so dashboard P50/P95 never mixes bake-off profiles.
 _session_qualification_latencies: dict[
     str, dict[str, dict[str, list[float]]]
+] = {}
+# Idempotent host-only qualification replies.  A client transport may lose the
+# response after the worker has completed a long read-only request; retaining a
+# small binding-keyed window lets the single health-gated retry return the exact
+# proof without repeating IK/L5 work.  This cache is never exposed by the
+# Dashboard and is cleared with the environment/session.
+_session_qualification_responses: dict[
+    str, dict[str, OrderedDict[str, dict]]
 ] = {}
 _session_qualification_lock = threading.Lock()
 
@@ -165,6 +174,7 @@ def _cleanup_session(sid: str) -> None:
     with _session_qualification_lock:
         _session_qualification.pop(sid, None)
         _session_qualification_latencies.pop(sid, None)
+        _session_qualification_responses.pop(sid, None)
     _session_stream_interval.pop(sid, None)
     _session_last_activity.pop(sid, None)
     _sse_sessions.discard(sid)

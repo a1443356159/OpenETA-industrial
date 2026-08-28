@@ -241,13 +241,14 @@ def call_read_only_mcp_tool_with_retry(
     arguments: JsonDict,
     *,
     timeout_s: float | None = None,
+    first_attempt_timeout_s: float | None = None,
     max_attempts: int = DEFAULT_READ_ONLY_MCP_MAX_ATTEMPTS,
     health_timeout_s: float = DEFAULT_READ_ONLY_MCP_HEALTH_TIMEOUT_S,
 ) -> JsonDict:
     """Call a read-only MCP tool with one bounded, health-gated retry.
 
-    Legacy SSE transports can lose the POST acknowledgement after a backend
-    has already completed inference.  Retrying inside the host keeps that
+    An HTTP transport can lose the tool acknowledgement after a backend has
+    already completed its read-only work.  Retrying inside the host keeps that
     transport incident out of the planner transcript and does not consume a
     second TUI/model turn.  This helper is intentionally not used for
     simulator mutation tools because their execution outcome may be unknown.
@@ -261,16 +262,31 @@ def call_read_only_mcp_tool_with_retry(
     health_timeout = float(health_timeout_s)
     if not math.isfinite(health_timeout) or health_timeout <= 0:
         raise ValueError("health_timeout_s must be finite and positive")
+    first_timeout: float | None = None
+    if first_attempt_timeout_s is not None:
+        first_timeout = float(first_attempt_timeout_s)
+        if not math.isfinite(first_timeout) or first_timeout <= 0:
+            raise ValueError(
+                "first_attempt_timeout_s must be finite and positive"
+            )
+    effective_first_timeout_s = (
+        min(float(timeout_s), first_timeout)
+        if first_timeout is not None and timeout_s is not None and timeout_s > 0
+        else first_timeout
+    )
 
     first_failure: SimulatorMcpTransportError | None = None
     first_failure_elapsed_s = 0.0
     started = time.monotonic()
     for attempt in range(1, attempts + 1):
+        attempt_timeout_s = timeout_s
+        if attempt == 1 and effective_first_timeout_s is not None:
+            attempt_timeout_s = effective_first_timeout_s
         try:
             response = transport.call_tool(
                 name,
                 dict(arguments),
-                timeout_s=timeout_s,
+                timeout_s=attempt_timeout_s,
             )
         except SimulatorMcpTransportError as exc:
             if (
@@ -318,6 +334,13 @@ def call_read_only_mcp_tool_with_retry(
             "first_failure_type": first_failure.cause_type,
             "first_failure_elapsed_s": round(first_failure_elapsed_s, 6),
         }
+        if first_timeout is not None:
+            payload["_openeta_transport_retry"].update(
+                {
+                    "first_attempt_timeout_s": effective_first_timeout_s,
+                    "retry_timeout_s": timeout_s,
+                }
+            )
         return payload
 
     raise RuntimeError("read-only MCP retry loop exhausted")  # pragma: no cover

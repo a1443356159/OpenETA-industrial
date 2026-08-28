@@ -10,6 +10,7 @@ The heavy lifting is delegated to sibling modules:
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import functools
 import math
 import os
@@ -34,6 +35,7 @@ from sim.mcp_server.session import (
     _session_qualification,
     _session_qualification_latencies,
     _session_qualification_lock,
+    _session_qualification_responses,
     _sse_sessions,
     _touch_session,
     _detach_sse_session,
@@ -70,6 +72,7 @@ mcp = FastMCP("OpenETA", log_level="WARNING")
 
 _env_control_locks: dict[tuple[str, str], threading.RLock] = {}
 _env_control_locks_guard = threading.Lock()
+_QUALIFICATION_RESPONSE_CACHE_LIMIT = 8
 
 
 def _env_control_lock(session_id: str, handle: str) -> threading.RLock:
@@ -686,6 +689,26 @@ def qualify_motion_candidates(
     control_spec = meta.get("control_spec")
     if not isinstance(control_spec, dict) or not control_spec.get("motion_control"):
         return {"ok": False, "error": "MoveIt qualification is unavailable"}
+    binding = str(qualification_binding_sha256 or "")
+    if binding:
+        with _session_qualification_lock:
+            cached_by_binding = (
+                _session_qualification_responses.get(sid, {}).get(handle)
+            )
+            cached = (
+                cached_by_binding.get(binding)
+                if cached_by_binding is not None
+                else None
+            )
+            if cached is not None:
+                cached_by_binding.move_to_end(binding)
+                response = dict(cached)
+                response["_openeta_qualification_response_cache"] = {
+                    "schema_version": "openeta.qualification_response_cache.v1",
+                    "hit": True,
+                    "qualification_binding_sha256": binding,
+                }
+                return response
     result = _proxy_step(
         meta,
         {
@@ -708,6 +731,31 @@ def qualify_motion_candidates(
         for key, value in result.items()
         if key not in {"observation", "reward", "terminated", "truncated", "info"}
     }
+    response_results = response.get("results")
+    cacheable_response = (
+        bool(binding)
+        and response.get("schema_version") == schema_version
+        and response.get("planning_scene_revision") == planning_scene_revision
+        and response.get("execution_started") is False
+        and response.get("infrastructure_error") is not True
+        and isinstance(response_results, list)
+        and all(
+            isinstance(item, dict)
+            and item.get("execution_started") is False
+            and item.get("qualification_binding_sha256") == binding
+            for item in response_results
+        )
+    )
+    if cacheable_response:
+        with _session_qualification_lock:
+            cached_by_binding = (
+                _session_qualification_responses.setdefault(sid, {})
+                .setdefault(handle, OrderedDict())
+            )
+            cached_by_binding[binding] = dict(response)
+            cached_by_binding.move_to_end(binding)
+            while len(cached_by_binding) > _QUALIFICATION_RESPONSE_CACHE_LIMIT:
+                cached_by_binding.popitem(last=False)
     threading.Thread(
         target=_record_qualification_dashboard,
         args=(sid, handle, response),
@@ -1567,6 +1615,13 @@ def close_env(handle: str, *, session_id: str = "") -> dict:
     sid = session_id or _current_session.get() or ""
     _touch_session(sid)
     meta = _session_envs.get(sid, {}).pop(handle, None)
+    with _session_qualification_lock:
+        _session_qualification.get(sid, {}).pop(handle, None)
+        _session_qualification_latencies.get(sid, {}).pop(handle, None)
+        response_handles = _session_qualification_responses.get(sid, {})
+        response_handles.pop(handle, None)
+        if not response_handles:
+            _session_qualification_responses.pop(sid, None)
     if meta:
         remote_result: dict = {}
         cleanup_errors: list[str] = []

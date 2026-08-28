@@ -11,6 +11,7 @@ from agent.runtime.moveit_qualification import (
     KINEMATIC_IK_TIMEOUT_S,
     PLANNING_ATTEMPTS,
     PLANNING_TIME_S,
+    QUALIFICATION_RPC_FIRST_ACK_TIMEOUT_S,
     QUALIFICATION_RPC_GRACE_S,
     QUALIFICATION_SCHEMA,
     STATE_VALIDITY_TIMEOUT_S,
@@ -19,6 +20,7 @@ from agent.runtime.moveit_qualification import (
     QualificationCache,
     _goal_prebind_rpc_timeout_s,
     _qualification_rpc_timeout_s,
+    private_qualification_rpc,
 )
 from agent.tools.registry import ToolResult
 
@@ -62,6 +64,54 @@ def _engine(**overrides):
     }
     callbacks.update(overrides)
     return MoveItQualificationEngine(**callbacks)
+
+
+def test_private_qualification_rpc_uses_ack_watchdog_and_bound_identity():
+    class Transport:
+        def __init__(self):
+            self.calls = []
+            self.health_calls = []
+
+        def call_tool(self, name, arguments, *, timeout_s=None):
+            self.calls.append((name, dict(arguments), timeout_s))
+            if len(self.calls) == 1:
+                from agent.tools.sim_mcp import SimulatorMcpTransportError
+
+                raise SimulatorMcpTransportError(
+                    f"call_tool:{name}", TimeoutError("lost reply")
+                )
+            return {"execution_started": False, "results": []}
+
+        def list_tools(self, *, timeout_s=None):
+            self.health_calls.append(timeout_s)
+            return {
+                "tools": [{"name": "qualify_motion_candidates"}],
+                "tool_count": 1,
+            }
+
+    transport = Transport()
+    rpc = private_qualification_rpc(
+        transport,
+        handle_provider=lambda: "env-1",
+        session_id_provider=lambda: "session-1",
+    )
+
+    result = rpc("qualify_motion_candidates", {"purpose": "grasp"}, 900.0)
+
+    assert [call[2] for call in transport.calls] == [
+        QUALIFICATION_RPC_FIRST_ACK_TIMEOUT_S,
+        900.0,
+    ]
+    assert all(
+        call[1] == {
+            "purpose": "grasp",
+            "handle": "env-1",
+            "session_id": "session-1",
+        }
+        for call in transport.calls
+    )
+    assert transport.health_calls == [5.0]
+    assert result["_openeta_transport_retry"]["retry_count"] == 1
 
 
 def test_engine_chains_segment_start_state_and_has_zero_execution_side_effects():
@@ -433,6 +483,8 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
     def rpc(name, request, timeout):
         engine = _engine()
         response = engine.qualify(request)
+        for item in response["results"]:
+            item.pop("compile_parameters", None)
         response["results"][1].update({"verdict": "FAIL", "reason": "plan_only_failed"})
         response["search_exhaustion"] = {
             "fast_pool_exhausted": True,
@@ -486,6 +538,11 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
         )
     )
     assert len(stored["results"]) == 2
+    assert all(
+        item["compile_parameters"]
+        == {"camera_extrinsics": {"pose_mat": [1] * 16}}
+        for item in stored["results"]
+    )
     assert stored["search_exhaustion"] == {
         "fast_pool_exhausted": True,
         "recovery_pool_exhausted": True,
