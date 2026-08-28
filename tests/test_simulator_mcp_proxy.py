@@ -729,6 +729,19 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
         "operation": "update_world_target",
         "revision": 4,
     }
+    multi_sort_progress = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "assignment_count": 2,
+        "completed_count": 1,
+        "remaining_count": 1,
+        "all_completed": False,
+        "completed_assignment_ids": ["yellow_wrench_to_green"],
+    }
+    native_target_binding = {
+        "target_id": "target_object",
+        "target_link": "target_link",
+        "assignment_id": "yellow_wrench_to_green",
+    }
     response = {
         "ok": False,
         "error_code": "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE",
@@ -737,6 +750,9 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
         "detachable_joint": {"state": "detached"},
         "release_sequence": release_sequence,
         "planning_scene_target_pose_sync": target_pose_sync,
+        "native_target_binding": native_target_binding,
+        "multi_sort_progress": multi_sort_progress,
+        "next_assignment_planning_scene_revision": 5,
         "placement_verification": {
             "schema_version": "openeta.gazebo.placement_verification.v1",
             "placement_confirmed": True,
@@ -762,6 +778,9 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
     assert receipt["gripper_open_executed"] is True
     assert receipt["release_sequence"] == release_sequence
     assert receipt["planning_scene_target_pose_sync"] == target_pose_sync
+    assert receipt["native_target_binding"] == native_target_binding
+    assert receipt["multi_sort_progress"] == multi_sort_progress
+    assert receipt["next_assignment_planning_scene_revision"] == 5
     assert receipt["placement_verification"] == response["placement_verification"]
 
 

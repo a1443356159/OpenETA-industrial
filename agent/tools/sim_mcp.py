@@ -96,6 +96,13 @@ CONTROL_RECEIPT_FIELDS = (
     "physical_verification",
     "child_link_proof",
     "placement_verification",
+    # Multi-object sorting changes the authoritative target binding and
+    # assignment in-place.  Preserve the bounded transition proof so memory
+    # can associate each native release with its assignment and validate the
+    # next target instead of falling back to the legacy singleton target.
+    "native_target_binding",
+    "multi_sort_progress",
+    "next_assignment_planning_scene_revision",
     # A native attach can be acknowledged before a later controller-owned
     # planning-scene or pose-read step fails.  These bounded fields distinguish
     # that infrastructure failure from an ordinary unreachable candidate and
