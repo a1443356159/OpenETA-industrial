@@ -82,7 +82,7 @@
     <!-- Real Open Robotics picking-bin detail meshes backed by authoritative
          compound collision geometry.  The detailed GLB remains the sole
          operator-facing visual; Gazebo physics and MoveIt consume the same
-         conservative closed-bin primitives independently. -->
+         base, full side/rear walls, and half-height operator-facing front. -->
     <model name="green_parts_bin">
       <static>true</static><pose>0.62 0.180 0 0 0 -1.57079632679</pose>
       <link name="green_parts_bin_link">
