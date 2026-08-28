@@ -178,8 +178,8 @@ def test_attached_support_departure_uses_native_attach_contact_as_start_baseline
     measured_at_attach = {
         **target,
         # Native physics reports a shallow support overlap.  The independent
-        # FK reconstruction is a few nanometres deeper, then MoveIt separates
-        # the target immediately.
+        # FK reconstruction below is sampled later and is 120 nm deeper, then
+        # MoveIt separates the target immediately.
         "pose_xyz": [0.0, 0.0, 0.01 - 3.0e-8],
     }
 
@@ -187,7 +187,7 @@ def test_attached_support_departure_uses_native_attach_contact_as_start_baseline
         joint_names=["lift"],
         trajectory_positions=[[0.0], [0.01]],
         forward_kinematics=lambda _names, joints: (
-            [0.0, 0.0, 0.01 - 3.0e-8 + joints[0]],
+            [0.0, 0.0, 0.01 - 1.5e-7 + joints[0]],
             [0.0, 0.0, 0.0, 1.0],
         ),
         mount_xyz=[0.0, 0.0, 0.0],
@@ -198,10 +198,12 @@ def test_attached_support_departure_uses_native_attach_contact_as_start_baseline
     )
 
     assert evidence["valid"] is True
-    assert evidence["initial_clearance_m"] == pytest.approx(-3.0e-8)
+    assert evidence["initial_clearance_m"] == pytest.approx(-1.5e-7)
     assert evidence["initial_support_reference_clearance_m"] == pytest.approx(
         -3.0e-8
     )
+    assert evidence["support_contact_pose_uncertainty_m"] == pytest.approx(1.0e-6)
+    assert evidence["support_departed"] is True
     assert evidence["first_moving_clearance_m"] > 0.0
 
 

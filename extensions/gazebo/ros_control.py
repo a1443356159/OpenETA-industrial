@@ -42,6 +42,7 @@ from .planning_scene import (
     CollisionPrimitive,
     PlanningSceneError,
     PlanningSceneSynchronizer,
+    _TARGET_POSE_POSITION_ABS_TOL_M,
 )
 from agent.runtime.collision_geometry import (
     CompoundAxisAlignedBounds,
@@ -653,9 +654,9 @@ def _attached_support_departure_audit(
     exactly supported detached object can become an attached start state.
     That exception must not license a later path to scrape through the same
     support.  We therefore project the exact attached compound geometry at
-    every time-parameterized point and every segment midpoint.  The first
-    stationary state may touch; once any arm joint moves, overlapping XY
-    footprints require strictly positive separation along gravity.
+    every time-parameterized point and every segment midpoint.  The initial
+    contact band may resolve along the support normal, but tangential surface
+    motion is rejected until the object has positive separation.
 
     No artificial lift pose is generated here.  MoveIt still owns the route;
     this is a deterministic acceptance proof over that route.
@@ -673,15 +674,17 @@ def _attached_support_departure_audit(
         or any(not math.isfinite(value) for point in points for value in point)
     ):
         raise ValueError("support-departure trajectory is invalid")
-    relative_xyz = tuple(float(value) for value in attached_spec["pose_xyz"])
-    relative_quat = tuple(
+    attached_relative_xyz = tuple(
+        float(value) for value in attached_spec["pose_xyz"]
+    )
+    attached_relative_quat = tuple(
         float(value) for value in attached_spec["pose_quat_xyzw"]
     )
     mount_offset = tuple(float(value) for value in mount_xyz)
     mount_quaternion = tuple(float(value) for value in mount_quat_xyzw)
     if (
-        len(relative_xyz) != 3
-        or len(relative_quat) != 4
+        len(attached_relative_xyz) != 3
+        or len(attached_relative_quat) != 4
         or len(mount_offset) != 3
         or len(mount_quaternion) != 4
     ):
@@ -738,8 +741,8 @@ def _attached_support_departure_audit(
         object_xyz, object_quat = _child_world_pose(
             parent_xyz=mount_world_xyz,
             parent_quat_xyzw=mount_world_quat,
-            relative_xyz=relative_xyz,  # type: ignore[arg-type]
-            relative_quat_xyzw=relative_quat,  # type: ignore[arg-type]
+            relative_xyz=attached_relative_xyz,  # type: ignore[arg-type]
+            relative_quat_xyzw=attached_relative_quat,  # type: ignore[arg-type]
         )
         return _collision_spec_geometry(
             attached_spec,
@@ -768,12 +771,16 @@ def _attached_support_departure_audit(
         and support_contact_reference_target_spec
         else None
     )
-    # This is a measured physical boundary, not a free tolerance.  Admit at
-    # sample zero only the support overlap already present when native attach
-    # was acknowledged.  A deeper reconstructed start state still fails, and
-    # every moving sample below continues to require positive separation.
+    # This is a measured physical boundary, not a task-specific tolerance.
+    # Native attach and the later FK reconstruction are sampled on different
+    # clocks, so reuse the authority-wide pose synchronization uncertainty.
+    # Deeper penetration and tangential scraping still fail below.
+    support_contact_pose_uncertainty = max(
+        geometry_numeric_band,
+        _TARGET_POSE_POSITION_ABS_TOL_M,
+    )
     initial_clearance_floor = min(0.0, reference_clearance or 0.0) - (
-        geometry_numeric_band
+        support_contact_pose_uncertainty
     )
 
     samples: list[tuple[int, str, tuple[float, ...]]] = [(0, "point", first)]
@@ -802,6 +809,8 @@ def _attached_support_departure_audit(
     failure: dict[str, Any] | None = None
     evaluated = 0
     exact_static_box_pair_checks = 0
+    start_bounds = compound_axis_aligned_bounds(geometry_at(first))
+    support_departed = support_clearance(start_bounds) is None
     for point_index, sample_kind, joints in samples:
         evaluated += 1
         moving = any(
@@ -810,9 +819,8 @@ def _attached_support_departure_audit(
         )
         motion_started = motion_started or moving
         object_geometry = geometry_at(joints)
-        clearance = support_clearance(
-            compound_axis_aligned_bounds(object_geometry)
-        )
+        object_bounds = compound_axis_aligned_bounds(object_geometry)
+        clearance = support_clearance(object_bounds)
         if clearance is not None:
             minimum_clearance = min(minimum_clearance, clearance)
         static_collision: tuple[str, int, int] | None = None
@@ -865,18 +873,50 @@ def _attached_support_departure_audit(
             continue
         if moving and first_moving_clearance is None:
             first_moving_clearance = clearance
-        if moving and clearance is not None and clearance <= geometry_numeric_band:
+        if moving and (clearance is None or clearance > geometry_numeric_band):
+            support_departed = True
+        if (
+            moving
+            and clearance is not None
+            and clearance <= geometry_numeric_band
+            and clearance < initial_clearance_floor
+        ):
             failure = {
-                "reason": "support_contact_persists_after_departure",
+                "reason": "support_penetration_increased_after_attach",
                 "point_index": point_index,
                 "sample_kind": sample_kind,
                 "clearance_m": clearance,
             }
             break
+        tangential_surface_displacement = max(
+            abs(
+                getattr(object_bounds, boundary)[axis]
+                - getattr(start_bounds, boundary)[axis]
+            )
+            for boundary in ("minimum_xyz", "maximum_xyz")
+            for axis in (0, 1)
+        )
+        if (
+            moving
+            and clearance is not None
+            and clearance <= geometry_numeric_band
+            and tangential_surface_displacement > support_contact_pose_uncertainty
+        ):
+            failure = {
+                "reason": "support_contact_persists_after_departure",
+                "point_index": point_index,
+                "sample_kind": sample_kind,
+                "clearance_m": clearance,
+                "tangential_surface_displacement_m": tangential_surface_displacement,
+            }
+            break
 
-    valid = failure is None and motion_started
-    if failure is None and not motion_started:
-        failure = {"reason": "trajectory_has_no_motion"}
+    if failure is None:
+        if not motion_started:
+            failure = {"reason": "trajectory_has_no_motion"}
+        elif not support_departed:
+            failure = {"reason": "trajectory_never_leaves_support"}
+    valid = failure is None
     return {
         "schema_version": "openeta.attached_support_departure.v1",
         "applicable": True,
@@ -893,6 +933,8 @@ def _attached_support_departure_audit(
         "initial_clearance_m": initial_clearance,
         "initial_support_reference_clearance_m": reference_clearance,
         "initial_support_clearance_floor_m": initial_clearance_floor,
+        "support_contact_pose_uncertainty_m": support_contact_pose_uncertainty,
+        "support_departed": support_departed,
         "first_moving_clearance_m": first_moving_clearance,
         "minimum_clearance_m": (
             minimum_clearance if math.isfinite(minimum_clearance) else None
