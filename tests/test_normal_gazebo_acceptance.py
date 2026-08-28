@@ -596,6 +596,132 @@ def test_normal_order_helper_requires_frozen_anyplace_pool_before_grasp() -> Non
     assert not acceptance._ordered(invalid, required)
 
 
+def _ordered_call(
+    name: str,
+    *,
+    success: bool = True,
+    parameters: dict | None = None,
+    assignment_id: str | None = None,
+    anyplace_inference: bool | None = None,
+) -> dict:
+    outputs = {}
+    if assignment_id is not None:
+        outputs["native_target_binding"] = {"assignment_id": assignment_id}
+    if anyplace_inference is not None:
+        outputs["anyplace_model_inference_invoked"] = anyplace_inference
+    return {
+        "name": name,
+        "parameters": parameters or {},
+        "result": {
+            "success": success,
+            "details": {"outputs": outputs},
+        },
+    }
+
+
+def test_assignment_order_ignores_failed_contact_and_uses_initial_create_observation() -> None:
+    first = "red_bolt_to_green_parts_bin"
+    second = "yellow_wrench_to_blue_parts_bin"
+    calls = [
+        _ordered_call("anyplace", anyplace_inference=True),
+        _ordered_call("graspgenx"),
+        _ordered_call(
+            "move_to",
+            success=False,
+            parameters={"target_pose": {"grasp_stage": "contact"}},
+        ),
+        _ordered_call(
+            "move_to",
+            parameters={
+                "target_pose": {
+                    "purpose": "grasp_recovery_restore",
+                    "grasp_stage": "recovery_restore",
+                }
+            },
+        ),
+        _ordered_call(
+            "move_to",
+            parameters={"target_pose": {"grasp_stage": "contact"}},
+        ),
+        _ordered_call("gripper_control", parameters={"position": 0}, assignment_id=first),
+        _ordered_call(
+            "anyplace",
+            assignment_id=first,
+            anyplace_inference=False,
+        ),
+        _ordered_call(
+            "move_to",
+            parameters={"target_pose": {"purpose": "placement"}},
+            assignment_id=first,
+        ),
+        _ordered_call("gripper_control", parameters={"position": 1}, assignment_id=first),
+        _ordered_call("observe"),
+        _ordered_call("anyplace", anyplace_inference=True),
+        _ordered_call("graspgenx"),
+        _ordered_call(
+            "move_to",
+            parameters={"target_pose": {"grasp_stage": "contact"}},
+        ),
+        _ordered_call("gripper_control", parameters={"position": 0}, assignment_id=second),
+        _ordered_call(
+            "anyplace",
+            assignment_id=second,
+            anyplace_inference=False,
+        ),
+        _ordered_call(
+            "move_to",
+            parameters={"target_pose": {"purpose": "placement"}},
+            assignment_id=second,
+        ),
+        _ordered_call("gripper_control", parameters={"position": 1}, assignment_id=second),
+    ]
+    assignments = [{"id": first}, {"id": second}]
+
+    assert acceptance._ordered_assignment_execution(
+        calls,
+        assignments,
+        backend="graspgenx",
+    )
+
+
+def test_assignment_order_rejects_cross_assignment_release_evidence() -> None:
+    assignment_id = "red_bolt_to_green_parts_bin"
+    calls = [
+        _ordered_call("anyplace", anyplace_inference=True),
+        _ordered_call("graspgenx"),
+        _ordered_call(
+            "move_to",
+            parameters={"target_pose": {"grasp_stage": "contact"}},
+        ),
+        _ordered_call(
+            "gripper_control",
+            parameters={"position": 0},
+            assignment_id=assignment_id,
+        ),
+        _ordered_call(
+            "anyplace",
+            assignment_id=assignment_id,
+            anyplace_inference=False,
+        ),
+        _ordered_call(
+            "move_to",
+            parameters={"target_pose": {"purpose": "placement"}},
+            assignment_id="yellow_wrench_to_blue_parts_bin",
+        ),
+        _ordered_call(
+            "gripper_control",
+            parameters={"position": 1},
+            assignment_id=assignment_id,
+        ),
+    ]
+
+    assert not acceptance._ordered_assignment_execution(
+        calls,
+        [{"id": assignment_id}],
+        backend="graspgenx",
+    )
+
+
 def test_normal_canonicalizes_public_grasp_tool_only_with_real_anygrasp_backend() -> None:
     assert (
         acceptance._name(

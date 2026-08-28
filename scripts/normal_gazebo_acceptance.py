@@ -769,6 +769,99 @@ def _ordered(names: Sequence[str], required: Sequence[str]) -> bool:
     return all(any(name == wanted for name in cursor) for wanted in required)
 
 
+def _call_succeeded(call: Mapping[str, Any]) -> bool:
+    result = call.get("result")
+    return isinstance(result, Mapping) and result.get("success") is True
+
+
+def _call_assignment_ids(call: Mapping[str, Any]) -> set[str]:
+    return {
+        str(binding.get("assignment_id") or "")
+        for binding in base._values(call, "native_target_binding")
+        if isinstance(binding, Mapping) and str(binding.get("assignment_id") or "")
+    }
+
+
+def _assignment_execution_token(
+    call: Mapping[str, Any], *, backend: str
+) -> str:
+    """Reduce one successful call to its assignment-order evidence token."""
+
+    if not _call_succeeded(call):
+        return ""
+    name = _name(call)
+    parameters = _parameters(call)
+    pose = parameters.get("target_pose")
+    pose = pose if isinstance(pose, Mapping) else {}
+    assignment_ids = _call_assignment_ids(call)
+    assignment_id = next(iter(assignment_ids)) if len(assignment_ids) == 1 else ""
+    if name == "observe":
+        return "observe"
+    if name == "anyplace":
+        if call in _anyplace_model_inference_calls([call]):
+            return "anyplace_model"
+        if (
+            _call_outputs(call).get("anyplace_model_inference_invoked") is False
+            and assignment_id
+        ):
+            return f"placement_qualification:{assignment_id}"
+    if name == backend and parameters.get("mode") != "frozen_frontier":
+        return "grasp_model"
+    if name == "move_to" and pose.get("grasp_stage") == "contact":
+        return "grasp_contact"
+    if name == "move_to" and pose.get("purpose") == "placement" and assignment_id:
+        return f"placement_move:{assignment_id}"
+    if name == "gripper_control" and assignment_id:
+        if parameters.get("position") == 0:
+            return f"attach:{assignment_id}"
+        if parameters.get("position") == 1:
+            return f"release:{assignment_id}"
+    return ""
+
+
+def _ordered_assignment_execution(
+    calls: Sequence[Mapping[str, Any]],
+    assignments: Sequence[Mapping[str, Any]],
+    *,
+    backend: str,
+) -> bool:
+    """Correlate each successful pick/release chain with its work-order item.
+
+    Candidate motion failures and their exact-anchor recovery may appear between
+    model inference and the eventual successful contact.  A name-only
+    subsequence can accidentally treat that failed contact as the accepted
+    grasp, and it also incorrectly requires a standalone ``observe`` before the
+    first assignment even though environment creation already returns calibrated
+    RGB-D.  Match only successful physical transitions and bind close,
+    requalification, placement, and open evidence to the same assignment.
+    """
+
+    observed = [
+        token
+        for call in calls
+        if (token := _assignment_execution_token(call, backend=backend))
+    ]
+    required: list[str] = []
+    for assignment_index, assignment in enumerate(assignments):
+        assignment_id = str(assignment.get("id") or "")
+        if not assignment_id:
+            return False
+        if assignment_index:
+            required.append("observe")
+        required.extend(
+            (
+                "anyplace_model",
+                "grasp_model",
+                "grasp_contact",
+                f"attach:{assignment_id}",
+                f"placement_qualification:{assignment_id}",
+                f"placement_move:{assignment_id}",
+                f"release:{assignment_id}",
+            )
+        )
+    return _ordered(observed, required)
+
+
 def _repeated_failed_motion_fingerprints(
     events: Sequence[Mapping[str, Any]],
 ) -> set[str]:
@@ -1420,22 +1513,10 @@ def verify_case(
             and max(sam_indices) > min(grasp_indices)
         ):
             errors.append("SAM3 was rerun after the cached grasp/placement funnel started")
-        if not _ordered(
-            names,
-            tuple(
-                item
-                for _assignment in assignments
-                for item in (
-                    "observe",
-                    "anyplace",
-                    backend,
-                    "move_to",
-                    "gripper_control",
-                    "anyplace",
-                    "move_to",
-                    "gripper_control",
-                )
-            ),
+        if not _ordered_assignment_execution(
+            calls,
+            assignments,
+            backend=backend,
         ):
             errors.append("model-contact, attach, frozen-goal release order is invalid")
         if any(
