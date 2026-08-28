@@ -769,12 +769,12 @@ def test_normal_accepts_complete_v3_grasp_pool_with_two_l5_branches(tmp_path) ->
         "qualification_artifact": {"kind": "json", "path": artifact.name},
     }
 
-    assert acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
     assert acceptance._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
     proof["selected_candidate_ids"] = ["grasp_000"]
     artifact.write_text(json.dumps(proof), encoding="utf-8")
-    assert not acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert not acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
     assert not acceptance._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
 
@@ -840,14 +840,14 @@ def test_normal_accepts_one_grasp_pose_with_two_independent_l5_joint_branches(
         "qualification_artifact": {"kind": "json", "path": artifact.name},
     }
 
-    assert acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
     assert acceptance._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
     proof["selected_joint_branches"][1][
         "normalized_distance_from_primary"
     ] = 0.049
     artifact.write_text(json.dumps(proof), encoding="utf-8")
-    assert not acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert not acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
     assert not acceptance._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
 
@@ -904,12 +904,12 @@ def test_normal_accepts_single_l5_grasp_only_with_exhaustive_degradation_evidenc
         "qualification_artifact": {"kind": "json", "path": artifact.name},
     }
 
-    assert acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
     assert acceptance._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
     proof["search_exhaustion"]["recovery_pool_exhausted"] = False
     artifact.write_text(json.dumps(proof), encoding="utf-8")
-    assert not acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert not acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
     assert not acceptance._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
 
@@ -944,10 +944,13 @@ def test_normal_accepts_single_primary_with_a_diverse_model_frozen_recovery_fron
         "results": results,
     }
     artifact.write_text(json.dumps(proof), encoding="utf-8")
-    call = {
+    outputs = {
+        "candidate_count": 1,
+        "grasp_candidates": [{"id": "grasp_003"}],
         "diversity_selected_count": 16,
         "qualification_artifact": {"kind": "json", "path": artifact.name},
         "frozen_pair_execution_target": 1,
+        "frozen_pair_qualified_grasp_count": 1,
         "frozen_pair_recovery_policy": (
             "resume_frozen_frontier_after_execution_failure"
         ),
@@ -955,20 +958,38 @@ def test_normal_accepts_single_primary_with_a_diverse_model_frozen_recovery_fron
         "frozen_grasp_frontier_remaining_count": 15,
         "frozen_grasp_frontier_model_inference_invoked": False,
     }
+    call = {"result": {"details": {"outputs": outputs}}}
 
-    assert acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
+
+    proof["l5_attempts"] = [
+        {
+            "candidate_id": "grasp_003",
+            "verdict": "PASS",
+            "joint_branch_index": 0,
+            "joint_branch_joint_state_sha256": "state-a",
+        },
+        {
+            "candidate_id": "grasp_003",
+            "verdict": "PASS",
+            "joint_branch_index": 1,
+            "joint_branch_joint_state_sha256": "state-b",
+        },
+    ]
+    artifact.write_text(json.dumps(proof), encoding="utf-8")
+    assert acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
 
     for field, invalid in (
         ("frozen_grasp_frontier_remaining_count", 0),
         ("frozen_grasp_frontier_model_inference_invoked", True),
         ("frozen_pair_recovery_policy", "rerun_model"),
     ):
-        original = call[field]
-        call[field] = invalid
-        assert not acceptance._has_v3_grasp_diversity_evidence(
+        original = outputs[field]
+        outputs[field] = invalid
+        assert not acceptance._has_v3_grasp_search_evidence(
             call, artifact_root=tmp_path
         )
-        call[field] = original
+        outputs[field] = original
 
 
 def test_fast_v3_pair_evidence_requires_one_primary_and_frozen_recovery_tail() -> None:
@@ -1034,7 +1055,7 @@ def test_normal_rejects_obsolete_four_branch_lookahead(tmp_path) -> None:
         "qualification_artifact": {"kind": "json", "path": artifact.name},
     }
 
-    assert not acceptance._has_v3_grasp_diversity_evidence(call, artifact_root=tmp_path)
+    assert not acceptance._has_v3_grasp_search_evidence(call, artifact_root=tmp_path)
     assert not acceptance._has_bounded_grasp_l5_evidence(call, artifact_root=tmp_path)
 
 

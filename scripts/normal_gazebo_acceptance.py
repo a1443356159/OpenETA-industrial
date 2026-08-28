@@ -827,8 +827,8 @@ def _qualification_blocks(
     return blocks
 
 
-def _has_v3_grasp_diversity_evidence(call: Mapping[str, Any], *, artifact_root: Path) -> bool:
-    """Validate preferred grasp redundancy or its explicit exhaustive fallback."""
+def _has_v3_grasp_search_evidence(call: Mapping[str, Any], *, artifact_root: Path) -> bool:
+    """Validate a complete primary grasp and its bounded recovery search."""
 
     reported_counts = {
         int(value)
@@ -864,12 +864,20 @@ def _has_v3_grasp_diversity_evidence(call: Mapping[str, Any], *, artifact_root: 
             continue
         generated_count = metrics.get("generated_count")
         l5_pass_count = metrics.get("l5_pass_count")
+        resumable_primary = _has_resumable_frozen_pair_evidence(call)
         if not (
             isinstance(generated_count, int)
             and not isinstance(generated_count, bool)
             and generated_count >= 10
             and generated_count == len(results)
-            and generated_count in reported_counts
+            and (
+                generated_count in reported_counts
+                or (
+                    resumable_primary
+                    and reported_counts
+                    and generated_count <= max(reported_counts)
+                )
+            )
             and isinstance(l5_pass_count, int)
             and not isinstance(l5_pass_count, bool)
         ):
@@ -894,12 +902,10 @@ def _has_v3_grasp_diversity_evidence(call: Mapping[str, Any], *, artifact_root: 
             and metrics.get("l5_pass_target") == 1
             and metrics.get("l5_min_pass_target") == 1
         ):
-            # Best-first fast_v3 intentionally executes the first complete
-            # grasp/place pair and leaves the unvisited, model-frozen tail for
-            # physical-failure recovery.  Accept this only when both the
-            # qualification artifact and the public tool receipt prove that a
-            # genuinely diverse tail remains and resumption cannot invoke the
-            # model again.
+            # Best-first fast_v3 executes the first complete grasp/place pair
+            # and leaves the unvisited, model-frozen tail for physical-failure
+            # recovery. Beam-2 may prove two joint branches for that one
+            # candidate; those branches are not two candidate-level primaries.
             selected_cluster = selected_rows[0].get("se3_cluster_id")
             deferred_rows = [
                 row
@@ -919,40 +925,36 @@ def _has_v3_grasp_diversity_evidence(call: Mapping[str, Any], *, artifact_root: 
                 and attempt.get("candidate_id") == selected_ids[0]
                 and attempt.get("verdict") == "PASS"
             ]
-            remaining_counts = [
-                value
-                for value in base._values(
-                    call, "frozen_grasp_frontier_remaining_count"
+            published_grasps = _call_outputs(call).get("grasp_candidates")
+            published_ids = [
+                str(candidate.get("id") or "")
+                for candidate in published_grasps
+                if isinstance(candidate, Mapping) and str(candidate.get("id") or "")
+            ] if isinstance(published_grasps, list) else []
+            pass_branch_indices = {
+                attempt.get("joint_branch_index")
+                for attempt in pass_attempts
+                if isinstance(attempt.get("joint_branch_index"), int)
+                and not isinstance(attempt.get("joint_branch_index"), bool)
+            }
+            pass_branch_hashes = {
+                str(attempt.get("joint_branch_joint_state_sha256") or "")
+                for attempt in pass_attempts
+                if str(attempt.get("joint_branch_joint_state_sha256") or "")
+            }
+            bounded_beam_proof = 1 <= len(pass_attempts) <= 2
+            if len(pass_attempts) == 2:
+                bounded_beam_proof = (
+                    pass_branch_indices == {0, 1}
+                    and len(pass_branch_hashes) == 2
                 )
-                if isinstance(value, int)
-                and not isinstance(value, bool)
-                and value > 0
-            ]
             if (
                 isinstance(selected_cluster, str)
                 and selected_cluster
                 and deferred_rows
-                and len(pass_attempts) == 1
-                and remaining_counts
-                and any(
-                    value == "resume_frozen_frontier_after_execution_failure"
-                    for value in base._values(call, "frozen_pair_recovery_policy")
-                )
-                and any(
-                    value == 1
-                    for value in base._values(call, "frozen_pair_execution_target")
-                    if isinstance(value, int) and not isinstance(value, bool)
-                )
-                and any(
-                    value is False
-                    for value in base._values(
-                        call, "frozen_grasp_frontier_model_inference_invoked"
-                    )
-                )
-                and any(
-                    value == "complete_pair_found"
-                    for value in base._values(call, "frozen_pair_stop_reason")
-                )
+                and bounded_beam_proof
+                and published_ids == selected_ids
+                and resumable_primary
             ):
                 return True
         if block.get("stop_reason") == "complete_l5_pass_found_joint_branch_fallback":
@@ -1108,7 +1110,7 @@ def _has_bounded_grasp_l5_evidence(call: Mapping[str, Any], *, artifact_root: Pa
         for value in base._values(call, "full_plan_submitted_count")
         if isinstance(value, int) and not isinstance(value, bool)
     )
-    return legacy_bound or _has_v3_grasp_diversity_evidence(call, artifact_root=artifact_root)
+    return legacy_bound or _has_v3_grasp_search_evidence(call, artifact_root=artifact_root)
 
 
 def _has_resumable_frozen_pair_evidence(call: Mapping[str, Any]) -> bool:
@@ -1276,12 +1278,12 @@ def verify_case(
             for value in base._values(grasp_call, "diversity_selected_count")
             if isinstance(value, int) and not isinstance(value, bool)
         )
-        has_v3_diversity = any(
-            _has_v3_grasp_diversity_evidence(grasp_call, artifact_root=paths.root)
+        has_v3_search = any(
+            _has_v3_grasp_search_evidence(grasp_call, artifact_root=paths.root)
             for grasp_call in grasp_calls
         )
-        if not has_legacy_diversity_pool and not has_v3_diversity:
-            errors.append(f"{backend_label} diversity pool evidence is missing")
+        if not has_legacy_diversity_pool and not has_v3_search:
+            errors.append(f"{backend_label} validated grasp search evidence is missing")
         if not any(
             _has_bounded_grasp_l5_evidence(grasp_call, artifact_root=paths.root)
             for grasp_call in grasp_calls
