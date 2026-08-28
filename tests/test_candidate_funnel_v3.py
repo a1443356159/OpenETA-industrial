@@ -1719,7 +1719,7 @@ def test_release_z_offset_translates_only_the_terminal_not_the_settled_goal():
     assert stage["placement_release_z_offset_m"] == pytest.approx(0.20)
 
 
-def test_release_offset_clears_compound_support_rim_without_moving_settled_goal():
+def test_container_release_uses_support_clearance_without_moving_settled_goal():
     scene = _physical_bin_placement_scene()
     candidate = _candidate(0)
     candidate.update(
@@ -1752,20 +1752,21 @@ def test_release_offset_clears_compound_support_rim_without_moving_settled_goal(
     assert legality["verdict"] == "PASS"
     binding = legality["checks"]["object_frame_binding"]
     selection = binding["release_offset_selection"]
-    assert selection["source"] == "authoritative_support_collision_geometry"
-    assert selection["configured_minimum_m"] == pytest.approx(0.05)
+    assert selection["source"] == "container_interior_clearance"
+    assert selection["configured_drop_height_m"] == pytest.approx(0.05)
     assert selection["support_collision_maximum_z_m"] == pytest.approx(0.18)
-    assert selection["geometry_minimum_m"] == pytest.approx(0.165)
-    assert selection["effective_offset_m"] == pytest.approx(0.165)
+    assert selection["support_barrier_count"] == 2
+    assert selection["container_clearance_m"] == pytest.approx(0.005)
+    assert selection["effective_offset_m"] == pytest.approx(0.005)
     assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
         [0.48, -0.1, 0.05]
     )
     assert binding["release_collision_goal_pose"]["translation_xyz"] == pytest.approx(
-        [0.48, -0.1, 0.215]
+        [0.48, -0.1, 0.055]
     )
     stage = descriptor["candidate"]["qualification_stages"][0]
-    assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.415])
-    assert stage["placement_release_z_offset_m"] == pytest.approx(0.165)
+    assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.255])
+    assert stage["placement_release_z_offset_m"] == pytest.approx(0.005)
 
 
 def test_flat_support_keeps_configured_release_minimum():
@@ -1794,8 +1795,9 @@ def test_flat_support_keeps_configured_release_minimum():
     selection = legality["checks"]["object_frame_binding"]["release_offset_selection"]
     assert legality["verdict"] == "PASS"
     assert selection["support_geometry_available"] is True
-    assert selection["source"] == "configured_minimum"
-    assert selection["geometry_minimum_m"] == pytest.approx(0.0)
+    assert selection["source"] == "configured_drop_height"
+    assert selection["support_barrier_count"] == 0
+    assert selection["container_clearance_m"] == pytest.approx(0.0)
     assert selection["effective_offset_m"] == pytest.approx(0.05)
 
 

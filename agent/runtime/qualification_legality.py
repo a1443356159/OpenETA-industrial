@@ -534,68 +534,73 @@ def _non_support_obbs(
 
 def _effective_release_z_offset(
     *,
-    configured_minimum_m: float,
+    configured_drop_height_m: float,
     support_object_id: str,
     support_z_m: float | None,
     support_spec: object,
     clearance_m: float,
 ) -> tuple[float, JsonDict]:
-    """Raise a release terminal above the selected support's collision rim.
+    """Select a release height from support geometry, without moving the goal.
 
-    ``support_z_m`` is the surface on which AnyPlace predicts the settled body.
-    A compound physical support may also contain walls above that surface.  The
-    model goal remains the settled pose; only the terminal used while the body
-    is still attached is lifted far enough for its lower face to clear the
-    highest authoritative support primitive.  Flat supports retain the
-    configured minimum unchanged.
+    A flat support keeps the configured gravity-drop height.  A compound
+    support with collision walls is a container: the AnyPlace goal is already
+    inside its opening, so lifting the terminal above the highest wall both
+    changes the intended interior release and needlessly consumes directional
+    arm reach.  For containers, retain only the scene-derived contact
+    clearance and let pair legality plus MoveIt prove the gripper, payload, and
+    complete path against every wall.
     """
 
     evidence: JsonDict = {
-        "source": "configured_minimum",
-        "configured_minimum_m": configured_minimum_m,
-        "geometry_minimum_m": 0.0,
-        "effective_offset_m": configured_minimum_m,
+        "source": "configured_drop_height",
+        "configured_drop_height_m": configured_drop_height_m,
+        "container_clearance_m": 0.0,
+        "effective_offset_m": configured_drop_height_m,
         "support_object_id": support_object_id,
         "support_geometry_available": False,
+        "support_barrier_count": 0,
     }
     if support_z_m is None or not support_object_id:
-        return configured_minimum_m, evidence
+        return configured_drop_height_m, evidence
     geometry = _spec_projected_geometry(support_spec)
     if not geometry:
-        return configured_minimum_m, evidence
+        return configured_drop_height_m, evidence
 
+    barriers, support_primitive_count = _non_support_obbs(
+        support_spec,
+        support_z_m=support_z_m,
+    )
     maximum_z = max(
         primitive.center_xyz[2] + primitive.axis_half_extent(2)
         for primitive in geometry
     )
-    height_above_support = max(0.0, maximum_z - support_z_m)
-    numeric_band = 64.0 * math.ulp(
-        max(1.0, abs(maximum_z), abs(support_z_m))
+    container_clearance = (
+        min(configured_drop_height_m, max(0.0, clearance_m))
+        if barriers
+        else configured_drop_height_m
     )
-    geometry_minimum = (
-        height_above_support + clearance_m
-        if height_above_support > numeric_band
-        else 0.0
-    )
-    effective = max(configured_minimum_m, geometry_minimum)
     evidence.update(
         {
             "source": (
-                "authoritative_support_collision_geometry"
-                if geometry_minimum > configured_minimum_m
-                else "configured_minimum"
+                "container_interior_clearance"
+                if barriers
+                else "configured_drop_height"
             ),
-            "geometry_minimum_m": geometry_minimum,
-            "effective_offset_m": effective,
+            "container_clearance_m": container_clearance if barriers else 0.0,
+            "effective_offset_m": container_clearance,
             "support_geometry_available": True,
             "support_primitive_count": len(geometry),
+            "support_surface_primitive_count": support_primitive_count,
+            "support_barrier_count": len(barriers),
             "support_z_m": support_z_m,
             "support_collision_maximum_z_m": maximum_z,
-            "support_collision_height_above_surface_m": height_above_support,
+            "support_collision_height_above_surface_m": max(
+                0.0, maximum_z - support_z_m
+            ),
             "clearance_m": clearance_m,
         }
     )
-    return effective, evidence
+    return container_clearance, evidence
 
 
 def _obb_penetrates(left: Obb, right: Obb, *, tolerance_m: float) -> bool:
@@ -760,7 +765,7 @@ def evaluate_placement_goal_legality(
         return result
     configured_release_z_offset = float(release_z_offset_value)
     release_z_offset, release_offset_evidence = _effective_release_z_offset(
-        configured_minimum_m=configured_release_z_offset,
+        configured_drop_height_m=configured_release_z_offset,
         support_object_id=support_object_id,
         support_z_m=support_z,
         support_spec=world_specs.get(support_object_id),
