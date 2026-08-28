@@ -57,6 +57,28 @@ L5_TRAJECTORY_START_TOLERANCE_RAD = 0.001
 L5_TRAJECTORY_CACHE_LIMIT = 64
 L5_TRAJECTORY_POSE_DECIMALS = 6
 
+_QUALIFICATION_POSE_FIELDS = (
+    "xyz",
+    "quat_xyzw",
+    "purpose",
+    "compiled_grasp_id",
+    "grasp_stage",
+    "placement_candidate_id",
+    "compiled_placement_id",
+    "placement_stage",
+    "scene_revision",
+)
+
+
+def _qualification_pose_target(target: Mapping[str, Any]) -> dict[str, Any]:
+    """Project private qualification evidence onto the pose-goal contract."""
+
+    return {
+        field: target[field]
+        for field in _QUALIFICATION_POSE_FIELDS
+        if field in target
+    }
+
 
 def _normalized_arm_joint_state(value: object) -> dict[str, float] | None:
     if not isinstance(value, Mapping):
@@ -2277,7 +2299,11 @@ class _RosRuntime:
         from agent.runtime.moveit_qualification import KINEMATIC_IK_TIMEOUT_S
         from geometry_msgs.msg import PoseStamped
 
-        goal = make_move_group_goal(dict(target), config=self.config, tolerances=target)
+        goal = make_move_group_goal(
+            _qualification_pose_target(target),
+            config=self.config,
+            tolerances=target,
+        )
         xyz = goal["target_pose"].get("xyz")
         quat = goal["target_pose"].get("quat_xyzw")
         if (
@@ -2583,9 +2609,11 @@ class _RosRuntime:
     ) -> Mapping[str, Any]:
         # This private L5 call is generating the proof, so its branch cannot
         # yet carry the proof hash required at the public execution boundary.
-        pose_target = dict(target)
-        cache_binding = str(pose_target.pop("_qualification_cache_binding_sha256", "") or "")
-        qualification_goal_joint_state = pose_target.pop("qualification_goal_joint_state", None)
+        pose_target = _qualification_pose_target(target)
+        cache_binding = str(
+            target.get("_qualification_cache_binding_sha256", "") or ""
+        )
+        qualification_goal_joint_state = target.get("qualification_goal_joint_state")
         goal = make_move_group_goal(pose_target, config=self.config, tolerances=target)
         goal.update(
             {

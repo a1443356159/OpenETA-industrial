@@ -34,6 +34,7 @@ from extensions.gazebo.ros_control import (
     _joint_states_within_l5_start_tolerance,
     _l5_trajectory_cache_key,
     _qualification_joint_state_with_sha256,
+    _qualification_pose_target,
     _trajectory_end_joint_state_with_sha256,
     _populate_motion_start_state,
     _populate_recovery_trajectory_goal,
@@ -479,6 +480,36 @@ def test_private_l5_goal_matches_public_joint_digest_and_candidate_identity() ->
     ) == _l5_trajectory_cache_key(
         public_goal, scene_revision=5, scene_sha256="scene"
     )
+
+
+def test_private_qualification_projects_only_pose_goal_fields() -> None:
+    target = {
+        "xyz": [0.42, -0.03, 0.31],
+        "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "compiled_grasp_id": "grasp_0042",
+        "grasp_stage": "contact",
+        "qualification_allowed_collisions": {"target": ["left_tip", "right_tip"]},
+        "qualification_allowed_collisions_sha256": "a" * 64,
+        "qualification_goal_joint_state": {
+            "names": list(ARM_JOINTS),
+            "positions": [0.0] * len(ARM_JOINTS),
+        },
+        "qualification_binding_sha256": "b" * 64,
+        "qualification_scene_diff": {"remove_world_ids": ["target"]},
+        "solver_profile": "kdl_fast",
+    }
+
+    projected = _qualification_pose_target(target)
+
+    assert projected == {
+        "xyz": target["xyz"],
+        "quat_xyzw": target["quat_xyzw"],
+        "compiled_grasp_id": "grasp_0042",
+        "grasp_stage": "contact",
+    }
+    goal = make_move_group_goal(projected)
+    assert "qualification_allowed_collisions" not in goal
+    assert "qualification_goal_joint_state" not in goal
 
 
 def test_l5_cache_binds_to_time_parameterized_trajectory_endpoint() -> None:
