@@ -235,6 +235,65 @@ READ_ONLY_MCP_TRANSIENT_ERROR_CODES = frozenset(
 )
 
 
+def _call_mcp_tool_with_wall_timeout(
+    transport: SimulatorMcpTransport,
+    name: str,
+    arguments: JsonDict,
+    *,
+    transport_timeout_s: float | None,
+    wall_timeout_s: float,
+) -> JsonDict:
+    """Bound one read-only acknowledgement even if SDK cancellation stalls.
+
+    Some MCP transports use a structured task group whose context cleanup can
+    keep ``asyncio.wait_for`` blocked after its deadline.  The qualification
+    request is read-only and binding-idempotent, so its first attempt may run to
+    completion in a daemon thread while the caller health-checks and retrieves
+    the same proof through the bounded retry.
+    """
+
+    completed = threading.Event()
+    outcome: list[tuple[bool, object]] = []
+
+    def invoke() -> None:
+        try:
+            outcome.append(
+                (
+                    True,
+                    transport.call_tool(
+                        name,
+                        dict(arguments),
+                        timeout_s=transport_timeout_s,
+                    ),
+                )
+            )
+        except BaseException as exc:  # noqa: BLE001 - cross-thread propagation.
+            outcome.append((False, exc))
+        finally:
+            completed.set()
+
+    threading.Thread(
+        target=invoke,
+        name=f"openeta-read-only-mcp-{name}",
+        daemon=True,
+    ).start()
+    if not completed.wait(timeout=wall_timeout_s):
+        raise SimulatorMcpTransportError(
+            f"call_tool:{name}",
+            TimeoutError(
+                f"read-only MCP acknowledgement exceeded {wall_timeout_s:.3f}s"
+            ),
+        )
+    succeeded, value = outcome[0]
+    if not succeeded:
+        if isinstance(value, BaseException):
+            raise value
+        raise RuntimeError("read-only MCP worker returned invalid failure evidence")
+    if not isinstance(value, dict):
+        raise TypeError("read-only MCP tool returned a non-object response")
+    return value
+
+
 def call_read_only_mcp_tool_with_retry(
     transport: SimulatorMcpTransport,
     name: str,
@@ -280,14 +339,25 @@ def call_read_only_mcp_tool_with_retry(
     started = time.monotonic()
     for attempt in range(1, attempts + 1):
         attempt_timeout_s = timeout_s
-        if attempt == 1 and effective_first_timeout_s is not None:
-            attempt_timeout_s = effective_first_timeout_s
         try:
-            response = transport.call_tool(
-                name,
-                dict(arguments),
-                timeout_s=attempt_timeout_s,
-            )
+            if attempt == 1 and effective_first_timeout_s is not None:
+                response = _call_mcp_tool_with_wall_timeout(
+                    transport,
+                    name,
+                    arguments,
+                    # Let the in-flight read-only work retain its complete
+                    # logical deadline.  Only the caller's acknowledgement is
+                    # bounded; the daemon attempt may still populate the
+                    # binding cache for the retry.
+                    transport_timeout_s=timeout_s,
+                    wall_timeout_s=effective_first_timeout_s,
+                )
+            else:
+                response = transport.call_tool(
+                    name,
+                    dict(arguments),
+                    timeout_s=attempt_timeout_s,
+                )
         except SimulatorMcpTransportError as exc:
             if (
                 attempt >= attempts

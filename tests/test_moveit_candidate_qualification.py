@@ -99,7 +99,7 @@ def test_private_qualification_rpc_uses_ack_watchdog_and_bound_identity():
     result = rpc("qualify_motion_candidates", {"purpose": "grasp"}, 900.0)
 
     assert [call[2] for call in transport.calls] == [
-        QUALIFICATION_RPC_FIRST_ACK_TIMEOUT_S,
+        900.0,
         900.0,
     ]
     assert all(
@@ -112,6 +112,9 @@ def test_private_qualification_rpc_uses_ack_watchdog_and_bound_identity():
     )
     assert transport.health_calls == [5.0]
     assert result["_openeta_transport_retry"]["retry_count"] == 1
+    assert result["_openeta_transport_retry"]["first_attempt_timeout_s"] == (
+        QUALIFICATION_RPC_FIRST_ACK_TIMEOUT_S
+    )
 
 
 def test_engine_chains_segment_start_state_and_has_zero_execution_side_effects():

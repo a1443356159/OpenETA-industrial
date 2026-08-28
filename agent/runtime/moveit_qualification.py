@@ -2630,7 +2630,13 @@ class MoveItQualificationEngine:
                 )
             result["fixed_candidate_index"] = fixed_index
             result["qualification_binding_sha256"] = binding
-            result["screening_attempts"] = list(screening_history.get(candidate_id, []))
+            history = list(screening_history.get(candidate_id, []))
+            result["screening_attempt_count"] = len(history)
+            # One screening attempt is already represented in full by the
+            # result itself.  Keep detailed history only when recovery adds a
+            # genuinely distinct attempt; this avoids duplicating large stage
+            # and legality proofs on the MCP wire and in the artifact.
+            result["screening_attempts"] = history if len(history) > 1 else []
             # The host-side validator restores these immutable parameters from
             # the original request.  Omitting the repeated copy from every
             # wire result keeps large frozen-frontier replies small without

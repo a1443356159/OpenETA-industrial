@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -447,16 +448,17 @@ def test_read_only_mcp_retry_uses_ack_watchdog_then_full_logical_timeout() -> No
         def __init__(self) -> None:
             self.timeouts = []
             self.health_calls = []
+            self.first_entered = threading.Event()
+            self.release_first = threading.Event()
 
         def call_tool(self, name, arguments, *, timeout_s=None):
             assert name == "qualify_motion_candidates"
             assert arguments == {"qualification_binding_sha256": "binding"}
             self.timeouts.append(timeout_s)
             if len(self.timeouts) == 1:
-                raise sim_mcp.SimulatorMcpTransportError(
-                    "call_tool:qualify_motion_candidates",
-                    TimeoutError("response acknowledgement was lost"),
-                )
+                self.first_entered.set()
+                assert self.release_first.wait(timeout=2.0)
+                return {"execution_started": False, "results": [{"late": True}]}
             return {"execution_started": False, "results": []}
 
         def list_tools(self, *, timeout_s=None):
@@ -467,17 +469,23 @@ def test_read_only_mcp_retry_uses_ack_watchdog_then_full_logical_timeout() -> No
             }
 
     transport = RetryTransport()
-    result = call_read_only_mcp_tool_with_retry(
-        transport,
-        "qualify_motion_candidates",
-        {"qualification_binding_sha256": "binding"},
-        timeout_s=900.0,
-        first_attempt_timeout_s=60.0,
-    )
+    started = time.monotonic()
+    try:
+        result = call_read_only_mcp_tool_with_retry(
+            transport,
+            "qualify_motion_candidates",
+            {"qualification_binding_sha256": "binding"},
+            timeout_s=900.0,
+            first_attempt_timeout_s=0.02,
+        )
+    finally:
+        transport.release_first.set()
 
-    assert transport.timeouts == [60.0, 900.0]
+    assert transport.first_entered.is_set()
+    assert time.monotonic() - started < 0.5
+    assert transport.timeouts == [900.0, 900.0]
     assert transport.health_calls == [5.0]
-    assert result["_openeta_transport_retry"]["first_attempt_timeout_s"] == 60.0
+    assert result["_openeta_transport_retry"]["first_attempt_timeout_s"] == 0.02
     assert result["_openeta_transport_retry"]["retry_timeout_s"] == 900.0
 
 
