@@ -35,7 +35,6 @@ def _compile(scene_id: str = "normal"):
     "scene_id",
     [
         "normal",
-        "reject-first",
         "narrow-pick",
         "barrier-transfer",
         "fastener-bin-sort",

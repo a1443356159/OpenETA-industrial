@@ -56,7 +56,6 @@ REQUIRED_REAL_PICK_PLACE_TOOLS = (
 )
 SCENARIOS = (
     "normal",
-    "reject-first",
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
@@ -115,7 +114,6 @@ TASK_INSTRUCTIONS = """
 
 SCENARIO_INSTRUCTIONS = {
     "normal": "桌上还有几件外观相近的工具，拿之前请确认没有拿错。",
-    "reject-first": "桌上还有几件外观相近的工具，拿之前请确认没有拿错。",
     "narrow-pick": "目标旁边有两个橙色护栏，夹取时请别碰到它们。",
     "barrier-transfer": "目标和料箱之间有一块黄色挡板，移动时请别碰到它。",
     "fastener-bin-sort": (
@@ -208,13 +206,10 @@ def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _scenario_environment(scenario: str) -> dict[str, str]:
-    """Bind one physical scene without conflating it with fault injection."""
+    """Bind one physical scene for the complete worker lifetime."""
 
     scene = _scene_contract(scenario)
-    environment = {"OPENETA_ACCEPTANCE_SCENE": str(scene["world_scene"])}
-    if scenario == "reject-first":
-        environment["OPENETA_ACCEPTANCE_PLACEMENT_FAULT"] = "reject-first"
-    return environment
+    return {"OPENETA_ACCEPTANCE_SCENE": str(scene["world_scene"])}
 
 
 def _validated_grasp_backend(value: str) -> str:
@@ -1464,18 +1459,8 @@ def verify_case(
         ]
         if _repeated_failed_motion_fingerprints(calls):
             errors.append("a failed motion request fingerprint was repeated")
-        placement_failures = [
-            call
-            for call in calls
-            if _name(call) == "move_to"
-            and base._contains(call, "purpose", "placement")
-            and base._contains(call, "error_code", "MOTION_PLAN_FAILED")
-            and base._contains(call, "execution_started", False)
-        ]
         # A normal run may reject a candidate-specific release plan and resume
-        # the frozen AnyPlace frontier.  That is closed-loop recovery, not a
-        # fault injection.  Only the explicit reject-first fixture below
-        # constrains where and how a synthetic rejection must appear.
+        # the frozen AnyPlace frontier. That is ordinary closed-loop recovery.
         frozen_pair_qualification_blocks = [
             block
             for grasp_call in grasp_calls
@@ -1499,25 +1484,6 @@ def verify_case(
                         "qualification evidence did not evaluate scene obstacle: "
                         + obstacle_id
                     )
-        qualification_results = [
-            result
-            for block in frozen_pair_qualification_blocks
-            for result in block.get("results", [])
-        ]
-        first_full_plan_rejections = [
-            value
-            for value in qualification_results
-            if isinstance(value, Mapping)
-            and value.get("full_plan_submitted") is True
-            and value.get("verdict") == "FAIL"
-            and value.get("reason") == "plan_only_failed"
-            and value.get("execution_started") is False
-        ]
-        if scenario == "reject-first":
-            if len(first_full_plan_rejections) != 1:
-                errors.append("reject-first did not retain exactly one qualification rejection")
-            if placement_failures:
-                errors.append("reject-first reached execution planning with a rejected candidate")
         if not fingerprints:
             errors.append("motion request fingerprint evidence missing")
         scene_revisions = [

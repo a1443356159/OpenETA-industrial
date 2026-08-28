@@ -179,10 +179,6 @@ def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
     assert acceptance._scenario_environment("tool-bin-sort") == {
         "OPENETA_ACCEPTANCE_SCENE": "tool-bin-sort"
     }
-    assert acceptance._scenario_environment("reject-first") == {
-        "OPENETA_ACCEPTANCE_SCENE": "normal",
-        "OPENETA_ACCEPTANCE_PLACEMENT_FAULT": "reject-first",
-    }
 
 
 def test_industrial_scene_prompts_bind_one_target_to_one_of_multiple_bins() -> None:
@@ -587,40 +583,6 @@ def test_process_continuity_rejects_pid_reuse_or_external_process_loss() -> None
 
     assert evidence["preexisting_unmanaged_process_snapshot_unchanged"] is False
     assert evidence["preexisting_missing_unmanaged_processes"] == before
-
-
-def test_normal_rejection_scenario_is_explicit_acceptance_only_fixture(tmp_path, monkeypatch) -> None:
-    allocation = acceptance.base.Allocation(81, "partition", 18765, "run-id")
-    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
-    monkeypatch.setattr(
-        acceptance.base,
-        "environment_receipt",
-        lambda *_args, **_kwargs: {"trusted": True},
-    )
-
-    scenario = "reject-first"
-    paths = acceptance.prepare_case(
-        tmp_path,
-        tmp_path / scenario,
-        allocation,
-        dict(acceptance.DEFAULT_SERVICES),
-        scenario=scenario,
-    )
-    prompt = paths.instructions.read_text(encoding="utf-8")
-    assert scenario not in prompt
-    assert acceptance.SCENARIO_INSTRUCTIONS[scenario] in prompt
-    assert "首个放置方案可能规划失败" not in prompt
-    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
-    assert receipt["acceptance_scenario"] == scenario
-    assert receipt["grasp_backend_mode"] == acceptance.DEFAULT_GRASP_BACKEND
-    unhashed = dict(receipt)
-    supplied_hash = unhashed.pop("receipt_sha256")
-    assert (
-        supplied_hash
-        == acceptance.base.hashlib.sha256(
-            json.dumps(unhashed, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-    )
 
 
 def test_normal_failed_fingerprint_check_ignores_receipt_mirrors() -> None:

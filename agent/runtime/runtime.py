@@ -502,8 +502,8 @@ class OpenEtaAgentRuntime:
             )
         except ValueError as exc:
             # A singleton text result is now resolved by the production SAM3
-            # handler before it reaches memory.  The legacy M5 control-only
-            # contract still requires one explicit selection-tool receipt.
+            # handler before it reaches memory. The control-only profile still
+            # requires one explicit selection-tool receipt.
             # Permit that protected host path to attest the exact already
             # selected singleton once; no planner-visible parameter can enter
             # this branch, and mismatched result/candidate ids still fail.

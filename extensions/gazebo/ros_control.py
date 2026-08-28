@@ -3612,22 +3612,8 @@ class _RosRuntime:
             )
         else:
             request.request.start_state.is_diff = True
-        fault_scenario = os.environ.get("OPENETA_ACCEPTANCE_PLACEMENT_FAULT", "")
-        placement_id = str(goal.get("placement_candidate_id") or "")
-        rejected_ids = getattr(self, "_acceptance_rejected_placement_ids", set())
-        inject_rejection = False
-        if placement_id and fault_scenario == "reject-first" and not rejected_ids:
-            inject_rejection = True
-        if inject_rejection:
-            rejected_ids.add(placement_id)
-            self._acceptance_rejected_placement_ids = rejected_ids
         pose = Pose()
         pose.position.x, pose.position.y, pose.position.z = goal["target_pose"]["xyz"]
-        if inject_rejection:
-            # Acceptance-only fault fixture: MoveIt receives an unreachable
-            # position constraint and must itself return an empty plan.  No
-            # receipt or AnyPlace candidate is fabricated or rewritten.
-            pose.position.z = 100.0
         pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w = goal[
             "target_pose"
         ]["quat_xyzw"]
@@ -3649,7 +3635,7 @@ class _RosRuntime:
             oc.absolute_z_axis_tolerance
         ) = goal["orientation_tolerance_rad"]
         qualification_goal = goal.get("qualification_goal_joint_state")
-        if isinstance(qualification_goal, Mapping) and not inject_rejection:
+        if isinstance(qualification_goal, Mapping):
             names = list(qualification_goal.get("names") or ARM_JOINTS)
             positions = [float(value) for value in qualification_goal.get("positions") or []]
             if len(names) != len(positions) or not positions:

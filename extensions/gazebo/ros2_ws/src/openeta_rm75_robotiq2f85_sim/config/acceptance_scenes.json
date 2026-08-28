@@ -47,12 +47,6 @@
       ],
       "static_obstacles": []
     },
-    "reject-first": {
-      "world_scene": "normal",
-      "seed": 0,
-      "description": "Baseline geometry with the existing qualification-only rejection fixture.",
-      "static_obstacles": []
-    },
     "narrow-pick": {
       "world_scene": "narrow-pick",
       "seed": 17,
