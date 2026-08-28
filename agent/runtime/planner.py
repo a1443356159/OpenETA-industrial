@@ -4119,9 +4119,9 @@ def _validate_placement_release_obligation(
         return []
     stage = str(obligation.get("stage") or "release")
     return [
-        "The exact placement release terminal has already been reached. Execute "
+        "The placement state has one deterministic next edge. Execute "
         f"only placement_release_obligation.required_action for stage {stage!r}; "
-        "do not replay move_to, re-run perception, or select another placement."
+        "do not replay a completed motion or skip an unfinished assignment."
     ]
 
 
@@ -5409,6 +5409,7 @@ def _build_tool_context_payload(
             active_environment_task=memory_context.get("active_environment_task"),
         ),
         "task_completion_evidence": memory_context.get("task_completion_evidence"),
+        "multi_sort_progress": memory_context.get("multi_sort_progress"),
         "task_playbook": task_playbook,
         "observation": _observation_summary(observation),
         "vision_image_paths": vision_image_paths,
@@ -5546,6 +5547,7 @@ def _build_tool_context_payload(
         "placement_release_obligation": _placement_release_obligation(
             observation,
             release=memory_context.get("placement_release"),
+            memory_context=memory_context,
         ),
         "motion_reconciliation": memory_context.get("motion_reconciliation"),
         "fresh_observation_obligation": {
@@ -6987,8 +6989,28 @@ def _semantic_perception_obligation(
             str(memory_context.get("current_user_request") or memory_context.get("task") or "")
         )
     )
+    progress = observation.metadata.get("multi_sort_progress")
+    if not isinstance(progress, dict):
+        progress = memory_context.get("multi_sort_progress")
+    active_assignment = (
+        progress.get("active_assignment") if isinstance(progress, dict) else None
+    )
+    active_assignment = (
+        active_assignment if isinstance(active_assignment, dict) else {}
+    )
+    assignment_prompt_key = {
+        "grasp_target": "target_prompt",
+        "placement_object": "placement_object_prompt",
+        "placement_region": "placement_region_prompt",
+    }.get(semantic_role, "")
+    assignment_prompt = (
+        active_assignment.get(assignment_prompt_key) if assignment_prompt_key else None
+    )
     prompt = str(
-        role_state.get("canonical_prompt") or scripted_prompts.get(semantic_role) or ""
+        assignment_prompt
+        or role_state.get("canonical_prompt")
+        or scripted_prompts.get(semantic_role)
+        or ""
     ).strip()
     if not prompt and semantic_role in {"grasp_target", "placement_object"}:
         policy_target = (
@@ -7788,6 +7810,7 @@ def _placement_release_obligation(
     observation: EnvObservation,
     *,
     release: object,
+    memory_context: JsonDict | None = None,
 ) -> JsonDict | None:
     """Return the fixed release or post-release action required before adjudication."""
 
@@ -7818,6 +7841,40 @@ def _placement_release_obligation(
         and verification.get("verdict") == "PASS"
     ):
         return None
+    progress = release.get("multi_sort_progress")
+    if not isinstance(progress, dict):
+        progress = observation.metadata.get("multi_sort_progress")
+    if not isinstance(progress, dict) and isinstance(memory_context, dict):
+        progress = memory_context.get("multi_sort_progress")
+    if (
+        isinstance(progress, dict)
+        and progress.get("schema_version") == "openeta.multi_sort_progress.v1"
+        and int(progress.get("remaining_count") or 0) > 0
+        and progress.get("all_completed") is not True
+    ):
+        active_assignment = progress.get("active_assignment")
+        active_assignment = (
+            dict(active_assignment) if isinstance(active_assignment, dict) else None
+        )
+        return {
+            "schema_version": "openeta.placement_release_obligation.v1",
+            "status": "required",
+            "stage": "next_assignment_observation",
+            "required_action": {
+                "name": "observe",
+                "parameters": {
+                    "reason": "multi_sort_next_assignment",
+                },
+            },
+            "multi_sort_progress": dict(progress),
+            "active_assignment": active_assignment,
+            "rule": (
+                "The previous item has a complete native placement proof and the "
+                "same simulator session is already bound to the next assignment. "
+                "Observe the changed scene once, then continue with the next target; "
+                "do not recreate or close the environment."
+            ),
+        }
     return {
         "schema_version": "openeta.placement_release_obligation.v1",
         "status": "required",

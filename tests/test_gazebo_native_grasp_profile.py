@@ -21,6 +21,7 @@ from extensions.gazebo.ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptanc
     AUTHORITATIVE_SCENE_SCHEMA_VERSION,
     compile_authoritative_scene,
     render_acceptance_world,
+    scene_target_bindings,
 )
 from extensions.gazebo.profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, gazebo_profile
 from sim.env_registry import get_env_spec
@@ -574,6 +575,55 @@ def test_native_grasp_sdf_renderer_allows_only_the_stock_fixed_joint_topology() 
     assert model.findtext(
         "link/collision/surface/contact/collide_bitmask"
     ) == "1"
+
+
+def test_multi_normal_materializes_two_independent_stock_detachable_joints() -> None:
+    root = ET.fromstring(
+        """<sdf><model name="robot"><link name="base_link"/>
+        <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+          <parent_link>gripper_mount_link</parent_link><child_model>target_object</child_model>
+          <child_link>target_link</child_link><attach_topic>/openeta/native_grasp/detachable_joint/target/attach</attach_topic>
+          <detach_topic>/openeta/native_grasp/detachable_joint/target/detach</detach_topic>
+          <output_topic>/openeta/native_grasp/detachable_joint/target/state</output_topic>
+        </plugin></model></sdf>"""
+    )
+    contract = load_acceptance_scene_contract("multi_normal")
+
+    prepared = prepare_detachable_sdf(
+        root,
+        target_bindings=scene_target_bindings(contract),
+    )
+    plugins = prepared.findall(
+        "model/plugin[@name='gz::sim::systems::DetachableJoint']"
+    )
+
+    assert [plugin.findtext("child_model") for plugin in plugins] == [
+        "target_object",
+        "red_m24_hex_bolt",
+    ]
+    assert [plugin.findtext("output_topic") for plugin in plugins] == [
+        "/openeta/native_grasp/detachable_joint/target/state",
+        "/openeta/native_grasp/detachable_joint/red_m24_hex_bolt/state",
+    ]
+
+
+def test_multi_normal_configs_bind_each_object_to_its_own_bin() -> None:
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    assignments = config.sort_assignment_configs
+
+    assert [item.target_id for item in assignments] == [
+        "target_object",
+        "red_m24_hex_bolt",
+    ]
+    assert [item.selected_placement_region_id for item in assignments] == [
+        "green_parts_bin",
+        "blue_parts_bin",
+    ]
+    assert [item.destination_center_xy for item in assignments] == [
+        (0.62, 0.18),
+        (0.62, -0.18),
+    ]
+    assert assignments[1].active_sort_assignment["target_prompt"] == "red hex bolt"
 
 
 def test_native_grasp_sdf_renderer_rejects_a_conflicting_robot_collision_mask() -> None:

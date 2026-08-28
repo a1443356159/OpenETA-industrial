@@ -9,7 +9,7 @@ nor Gazebo imports so the admission and proof rules are testable offline.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import hashlib
 import json
@@ -35,6 +35,7 @@ from .ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptance_scene_world imp
     DETACHED_TARGET_COLLISION_FILTER_MASK,
     ROBOT_COLLISION_FILTER_MASK,
     compile_authoritative_scene,
+    scene_target_bindings,
 )
 
 
@@ -255,6 +256,54 @@ def load_acceptance_scene_contract(
             )
         )
         scene["selected_placement_region_id"] = str(chosen["id"])
+    sort_assignments = scene.get("sort_assignments")
+    if sort_assignments is not None:
+        if not isinstance(sort_assignments, list) or len(sort_assignments) < 2:
+            raise ValueError("acceptance scene sort assignments are invalid")
+        assignment_ids: set[str] = set()
+        target_ids: set[str] = set()
+        region_by_id = {
+            str(region["id"]): region
+            for region in (placement_regions or [])
+            if isinstance(region, Mapping)
+        }
+        for assignment in sort_assignments:
+            required_fields = (
+                "id",
+                "target_object_id",
+                "target_link",
+                "target_prompt",
+                "placement_object_prompt",
+                "placement_region_id",
+                "placement_region_prompt",
+            )
+            if not isinstance(assignment, Mapping) or any(
+                not isinstance(assignment.get(key), str)
+                or not str(assignment[key]).strip()
+                for key in required_fields
+            ):
+                raise ValueError("acceptance scene sort assignment is invalid")
+            assignment_id = str(assignment["id"])
+            target_id = str(assignment["target_object_id"])
+            if assignment_id in assignment_ids or target_id in target_ids:
+                raise ValueError("acceptance scene sort assignment identity is duplicated")
+            assignment_ids.add(assignment_id)
+            target_ids.add(target_id)
+            region = region_by_id.get(str(assignment["placement_region_id"]))
+            if region is None or str(region["prompt"]) != str(
+                assignment["placement_region_prompt"]
+            ):
+                raise ValueError("acceptance scene sort assignment/bin binding is invalid")
+        first_assignment = sort_assignments[0]
+        if task is None or any(
+            str(task[key]) != str(first_assignment[key])
+            for key in (
+                "target_prompt",
+                "placement_object_prompt",
+                "placement_region_prompt",
+            )
+        ):
+            raise ValueError("acceptance scene initial sort semantics are invalid")
     destination = scene.get("destination_center_xy")
     if destination is not None and (
         not isinstance(destination, list)
@@ -382,6 +431,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
     target_link: str = "target_link"
     parent_link: str = "gripper_mount_link"
     acceptance_scene_id: str = field(default_factory=_acceptance_scene_from_environment)
+    active_sort_assignment_index: int = 0
     left_contact_topic: str = "/openeta/native_grasp/contacts/left_pad"
     right_contact_topic: str = "/openeta/native_grasp/contacts/right_pad"
     attach_topic: str = "/openeta/native_grasp/detachable_joint/target/attach"
@@ -470,21 +520,76 @@ class NativePickPlaceConfig(GazeboControlConfig):
     def __post_init__(self) -> None:
         GazeboControlConfig.__post_init__(self)
         contract = self.acceptance_scene_contract
-        destination = contract.get("destination_center_xy")
+        assignments = self.sort_assignments
+        if (
+            not isinstance(self.active_sort_assignment_index, int)
+            or isinstance(self.active_sort_assignment_index, bool)
+            or not 0 <= self.active_sort_assignment_index < len(assignments)
+        ):
+            raise ValueError("active sort assignment index is invalid")
+        assignment = assignments[self.active_sort_assignment_index]
+        bindings = scene_target_bindings(contract)
+        if len(bindings) != len(assignments):
+            raise ValueError("acceptance scene sort binding count is invalid")
+        binding = bindings[self.active_sort_assignment_index]
+        object.__setattr__(self, "target_id", binding.target_model)
+        object.__setattr__(self, "target_link", binding.target_link)
+        object.__setattr__(self, "attach_topic", binding.attach_topic)
+        object.__setattr__(self, "detach_topic", binding.detach_topic)
+        object.__setattr__(self, "state_topic", binding.state_topic)
+        object.__setattr__(
+            self,
+            "attached_collision_filter_state_topic",
+            binding.collision_filter_state_topic,
+        )
+        object.__setattr__(
+            self,
+            "attached_collision_filter_state_request_topic",
+            binding.collision_filter_state_request_topic,
+        )
+        object.__setattr__(
+            self,
+            "attached_collision_filter_state_ack_topic",
+            binding.collision_filter_state_ack_topic,
+        )
+        regions = contract.get("placement_regions")
+        active_region = next(
+            (
+                region
+                for region in (regions if isinstance(regions, list) else [])
+                if isinstance(region, Mapping)
+                and str(region.get("id") or "")
+                == str(assignment["placement_region_id"])
+            ),
+            None,
+        )
+        destination = (
+            active_region.get("center_xy")
+            if isinstance(active_region, Mapping)
+            else contract.get("destination_center_xy")
+        )
         if destination is not None:
             object.__setattr__(
                 self,
                 "destination_center_xy",
                 tuple(float(value) for value in destination),
             )
-        destination_size = contract.get("destination_size_xy_m")
+        destination_size = (
+            active_region.get("size_xy_m")
+            if isinstance(active_region, Mapping)
+            else contract.get("destination_size_xy_m")
+        )
         if destination_size is not None:
             object.__setattr__(
                 self,
                 "destination_size_xy_m",
                 tuple(float(value) for value in destination_size),
             )
-        destination_support = contract.get("destination_support_z_m")
+        destination_support = (
+            active_region.get("support_z_m")
+            if isinstance(active_region, Mapping)
+            else contract.get("destination_support_z_m")
+        )
         if destination_support is not None:
             object.__setattr__(
                 self,
@@ -493,6 +598,11 @@ class NativePickPlaceConfig(GazeboControlConfig):
             )
         placement_semantics = str(
             self.placement_acceptance_semantics
+            or (
+                active_region.get("acceptance_semantics")
+                if isinstance(active_region, Mapping)
+                else None
+            )
             or contract.get("placement_acceptance_semantics")
             or PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
         )
@@ -543,10 +653,29 @@ class NativePickPlaceConfig(GazeboControlConfig):
         ):
             raise ValueError("attached collision-filter contract is invalid")
         target = contract.get("target_object")
-        if isinstance(target, Mapping):
-            target_size = tuple(float(value) for value in target["bounding_box_xyz"])
-            object.__setattr__(self, "target_size_m", target_size)
-            object.__setattr__(self, "target_mass_kg", float(target["mass_kg"]))
+        if isinstance(contract.get("sort_assignments"), list):
+            authoritative_target = self.authoritative_scene.object(self.target_id)
+            object.__setattr__(
+                self,
+                "target_size_m",
+                tuple(float(value) for value in authoritative_target.bounding_box_xyz),
+            )
+            object.__setattr__(
+                self,
+                "target_initial_xyz",
+                tuple(float(value) for value in authoritative_target.pose_xyz),
+            )
+            object.__setattr__(
+                self,
+                "target_initial_quat_xyzw",
+                tuple(float(value) for value in authoritative_target.pose_quat_xyzw),
+            )
+        elif isinstance(target, Mapping):
+            object.__setattr__(
+                self,
+                "target_size_m",
+                tuple(float(value) for value in target["bounding_box_xyz"]),
+            )
             object.__setattr__(
                 self,
                 "target_initial_xyz",
@@ -557,10 +686,52 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "target_initial_quat_xyzw",
                 _quaternion_from_rpy(target["pose_rpy"]),
             )
+        if isinstance(target, Mapping) and self.target_id == "target_object":
+            object.__setattr__(self, "target_mass_kg", float(target["mass_kg"]))
 
     @property
     def acceptance_scene_contract(self) -> Mapping[str, Any]:
         return load_acceptance_scene_contract(self.acceptance_scene_id)
+
+    @property
+    def sort_assignments(self) -> tuple[Mapping[str, str], ...]:
+        contract = self.acceptance_scene_contract
+        configured = contract.get("sort_assignments")
+        if isinstance(configured, list):
+            return tuple(dict(item) for item in configured if isinstance(item, Mapping))
+        task = contract.get("task")
+        task = task if isinstance(task, Mapping) else {}
+        return (
+            {
+                "id": "default",
+                "target_object_id": "target_object",
+                "target_link": "target_link",
+                "target_prompt": str(task.get("target_prompt") or "target object"),
+                "placement_object_prompt": str(
+                    task.get("placement_object_prompt") or "target object"
+                ),
+                "placement_region_id": str(
+                    contract.get("selected_placement_region_id") or self.table_id
+                ),
+                "placement_region_prompt": str(
+                    task.get("placement_region_prompt") or "placement region"
+                ),
+            },
+        )
+
+    @property
+    def active_sort_assignment(self) -> Mapping[str, str]:
+        return self.sort_assignments[self.active_sort_assignment_index]
+
+    @property
+    def sort_assignment_configs(self) -> tuple["NativePickPlaceConfig", ...]:
+        return tuple(
+            replace(self, active_sort_assignment_index=index)
+            for index in range(len(self.sort_assignments))
+        )
+
+    def for_sort_assignment(self, index: int) -> "NativePickPlaceConfig":
+        return replace(self, active_sort_assignment_index=index)
 
     @property
     def authoritative_scene(self) -> CompiledAuthoritativeScene:
@@ -595,9 +766,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
 
     @property
     def selected_placement_region_id(self) -> str:
-        return str(
-            self.acceptance_scene_contract.get("selected_placement_region_id") or self.table_id
-        )
+        return str(self.active_sort_assignment["placement_region_id"])
 
     @property
     def static_obstacle_specs(self) -> tuple[dict[str, Any], ...]:
@@ -636,6 +805,12 @@ class NativePickPlaceConfig(GazeboControlConfig):
             "destination_support_z_m": self.destination_support_z_m,
             "placement_release_z_offset_m": self.placement_release_z_offset_m,
             "placement_acceptance_semantics": (self.placement_acceptance_semantics),
+            "sort_progress": {
+                "schema_version": "openeta.multi_sort_progress.v1",
+                "assignment_count": len(self.sort_assignments),
+                "active_assignment_index": self.active_sort_assignment_index,
+                "active_assignment": dict(self.active_sort_assignment),
+            },
             "attached_collision_filter": {
                 "schema_version": "openeta.attached_collision_filter.v1",
                 "state_topic": self.attached_collision_filter_state_topic,
@@ -654,21 +829,25 @@ class NativePickPlaceConfig(GazeboControlConfig):
         if isinstance(task, Mapping):
             evidence["task"] = dict(task)
         target = contract.get("target_object")
-        if isinstance(target, Mapping):
-            collision_primitives = self.target_collision_primitives
-            evidence["target_object"] = {
-                "id": self.target_id,
-                "shape_class": str(target["shape_class"]),
-                "bounding_box_xyz": list(self.target_size_m),
-                "collision_model": (
-                    "compound_primitives" if collision_primitives else "bounding_box"
-                ),
-                "collision_primitive_count": len(collision_primitives),
-            }
+        collision_primitives = self.target_collision_primitives
+        evidence["target_object"] = {
+            "id": self.target_id,
+            "shape_class": str(
+                target.get("shape_class")
+                if isinstance(target, Mapping) and self.target_id == "target_object"
+                else self.active_sort_assignment.get("shape_class")
+                or self.target_id
+            ),
+            "bounding_box_xyz": list(self.target_size_m),
+            "collision_model": (
+                "compound_primitives" if collision_primitives else "bounding_box"
+            ),
+            "collision_primitive_count": len(collision_primitives),
+        }
         regions = contract.get("placement_regions")
         if isinstance(regions, list):
             evidence["placement_region_ids"] = [str(region["id"]) for region in regions]
-            evidence["selected_placement_region_id"] = str(contract["selected_placement_region_id"])
+            evidence["selected_placement_region_id"] = self.selected_placement_region_id
         return evidence
 
     @property

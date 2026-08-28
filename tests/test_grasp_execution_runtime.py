@@ -1583,11 +1583,63 @@ def test_new_grasp_queue_clears_prior_release_but_keeps_completed_ledger() -> No
 
     assert memory.placement_release() is None
     assert (
-        memory.get_memory("completed_placement_subgoals", namespace="facts")["facts"][
-            "completed_placement_subgoals"
-        ]["value"]
+        memory.get_memory("completed_placement_subgoals", namespace="facts")["facts"]
+        ["completed_placement_subgoals"]["value"]
         == completed
     )
+
+
+def test_multi_sort_release_is_cleared_only_by_fresh_next_assignment_view() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="sort two industrial parts")
+    waiting = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "assignment_count": 2,
+        "completed_count": 1,
+        "remaining_count": 1,
+        "all_completed": False,
+        "fresh_observation_required": True,
+        "completed_assignment_ids": ["yellow_wrench_to_green"],
+        "active_assignment_index": 1,
+        "active_assignment": {"id": "red_bolt_to_blue"},
+    }
+    memory.save_fact(
+        "placement_release",
+        {
+            "status": "released",
+            "multi_sort_progress": waiting,
+        },
+        source="test",
+    )
+
+    memory.add_observation(
+        EnvObservation(
+            task="sort",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"multi_sort_progress": waiting},
+        )
+    )
+    assert memory.placement_release()["status"] == "released"
+
+    ready = {
+        **waiting,
+        "fresh_observation_required": False,
+        "fresh_observation_satisfied": True,
+    }
+    memory.add_observation(
+        EnvObservation(
+            task="sort",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"multi_sort_progress": ready},
+        )
+    )
+
+    assert memory.placement_release() is None
+    assert memory.planning_context()["multi_sort_progress"]["active_assignment"] == {
+        "id": "red_bolt_to_blue"
+    }
 
 
 def test_release_uses_ordered_detach_revision_then_stops_reopening() -> None:

@@ -164,6 +164,7 @@ class RobotiqGripperActionAdapter(Node):
         self.declare_parameter("ramp_s", RAMP_S)
         self.declare_parameter("max_lead_rad", MAX_LEAD_RAD)
         self.declare_parameter("target_model_name", "target_object")
+        self.declare_parameter("target_model_names", ["target_object"])
         (
             self._six_joint_positions,
             self._linkage_terminal_metrics,
@@ -176,7 +177,15 @@ class RobotiqGripperActionAdapter(Node):
         self._allow_stalling = bool(self.get_parameter("allow_stalling").value)
         self._action_timeout_s = float(self.get_parameter("action_timeout_s").value)
         self._target_model_name = str(self.get_parameter("target_model_name").value).strip()
-        if self._action_timeout_s <= 0 or not self._target_model_name:
+        configured_target_names = [
+            str(value).strip()
+            for value in self.get_parameter("target_model_names").value
+            if str(value).strip()
+        ]
+        self._target_model_names = tuple(
+            dict.fromkeys(configured_target_names or [self._target_model_name])
+        )
+        if self._action_timeout_s <= 0 or not self._target_model_names:
             raise ValueError("action timeout and target model name are invalid")
         self._callback_group = ReentrantCallbackGroup()
         self._lock = threading.Lock()
@@ -259,7 +268,11 @@ class RobotiqGripperActionAdapter(Node):
                 str(contact.collision1.name),
                 str(contact.collision2.name),
             )
-            if any(self._target_model_name in name for name in names):
+            if any(
+                target_model in name
+                for target_model in self._target_model_names
+                for name in names
+            ):
                 with self._lock:
                     self._target_contact_sim_times[side] = sim_time_s
                     self._target_contact_sequences[side] = (

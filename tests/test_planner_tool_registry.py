@@ -41,6 +41,7 @@ from agent.runtime.planner import (
     _validate_anyplace_parameters,
     _matching_depth_enhancement,
     _grasp_sensor_safety_obligation,
+    _placement_release_obligation,
     build_tool_context,
 )
 from agent.runtime.promoted_memory import PromotedMemoryStore
@@ -987,6 +988,70 @@ def test_failed_placement_release_forces_observation_before_new_inference() -> N
     assert decision.metadata["host_obligation"]["schema_version"] == (
         "openeta.placement_release_reobservation.v1"
     )
+
+
+def test_multi_sort_release_requires_fresh_observation_instead_of_close() -> None:
+    progress = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "assignment_count": 2,
+        "completed_count": 1,
+        "remaining_count": 1,
+        "all_completed": False,
+        "fresh_observation_required": True,
+        "active_assignment": {
+            "id": "red_bolt_to_blue",
+            "target_prompt": "red hex bolt",
+            "placement_region_prompt": "blue parts bin",
+        },
+    }
+    obligation = _placement_release_obligation(
+        _observation(),
+        release={
+            "status": "released",
+            "placement_verification": {
+                "placement_confirmed": True,
+                "verdict": "PASS",
+            },
+            "multi_sort_progress": progress,
+        },
+    )
+
+    assert obligation["stage"] == "next_assignment_observation"
+    assert obligation["required_action"] == {
+        "name": "observe",
+        "parameters": {"reason": "multi_sort_next_assignment"},
+    }
+    assert obligation["active_assignment"]["target_prompt"] == "red hex bolt"
+
+
+def test_multi_sort_release_closes_only_after_every_assignment_passes() -> None:
+    obligation = _placement_release_obligation(
+        _observation(),
+        release={
+            "status": "released",
+            "placement_verification": {
+                "placement_confirmed": True,
+                "verdict": "PASS",
+            },
+            "multi_sort_progress": {
+                "schema_version": "openeta.multi_sort_progress.v1",
+                "assignment_count": 2,
+                "completed_count": 2,
+                "remaining_count": 0,
+                "all_completed": True,
+                "completed_assignment_ids": [
+                    "yellow_wrench_to_green",
+                    "red_bolt_to_blue",
+                ],
+            },
+        },
+    )
+
+    assert obligation["stage"] == "close"
+    assert obligation["required_action"] == {
+        "name": "close_simulator_env",
+        "parameters": {},
+    }
 
 
 def test_host_macro_stops_after_irreversible_release_failure() -> None:
@@ -6781,6 +6846,59 @@ def test_close_does_not_prove_task_completion_without_placement_pass(verdict: st
     )
 
     assert memory.placement_release() is None
+    assert memory.task_completion_evidence() is None
+
+
+def test_close_does_not_prove_multi_sort_completion_after_only_first_item() -> None:
+    memory = AgentMemory()
+    progress = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "assignment_count": 2,
+        "completed_count": 1,
+        "remaining_count": 1,
+        "all_completed": False,
+        "completed_assignment_ids": ["yellow_wrench_to_green"],
+    }
+    memory.save_fact("multi_sort_progress", progress, source="test")
+    memory.save_fact(
+        "completed_placement_subgoals",
+        {"items": [{"assignment_id": "yellow_wrench_to_green"}]},
+        source="test",
+    )
+    memory.save_fact(
+        "placement_release",
+        {
+            "status": "released",
+            "placement_verification": {
+                "placement_confirmed": True,
+                "verdict": "PASS",
+            },
+            "multi_sort_progress": progress,
+        },
+        source="test",
+    )
+
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {
+                    "kind": "tool_call",
+                    "name": "close_simulator_env",
+                    "parameters": {},
+                },
+                "status": "executed",
+                "tool_calls": [
+                    {
+                        "name": "close_simulator_env",
+                        "status": "executed",
+                        "result": {"success": True, "content": "closed"},
+                    }
+                ],
+            },
+        )
+    )
+
     assert memory.task_completion_evidence() is None
 
 

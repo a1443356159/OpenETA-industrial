@@ -166,6 +166,53 @@ def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
         assert len(receipt["acceptance_scene"]["contract_sha256"]) == 64
 
 
+def test_multi_normal_prepares_one_human_task_with_two_ordered_assignments(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = acceptance.base.Allocation(81, "openeta-multi-normal", 18765, "run-id")
+    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        acceptance.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    paths = acceptance.prepare_case(
+        tmp_path,
+        tmp_path / "multi-normal",
+        allocation,
+        dict(acceptance.DEFAULT_SERVICES),
+        scenario="multi_normal",
+        grasp_backend="graspgenx",
+    )
+
+    prompt = paths.instructions.read_text(encoding="utf-8")
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assignments = receipt["acceptance_scene"]["sort_assignments"]
+
+    assert "黄色活动扳手" in prompt and "绿色零件箱" in prompt
+    assert "红色六角螺栓" in prompt and "蓝色零件箱" in prompt
+    assert "放好第一件后不要关闭环境" in prompt
+    assert [item["id"] for item in assignments] == [
+        "yellow_wrench_to_green",
+        "red_bolt_to_blue",
+    ]
+    assert [item["target_object_id"] for item in assignments] == [
+        "target_object",
+        "red_m24_hex_bolt",
+    ]
+    assert [item["placement_region_id"] for item in assignments] == [
+        "green_parts_bin",
+        "blue_parts_bin",
+    ]
+    assert acceptance._scenario_environment("multi_normal") == {
+        "OPENETA_ACCEPTANCE_SCENE": "multi_normal"
+    }
+
+
 def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
     assert acceptance._scenario_environment("narrow-pick") == {
         "OPENETA_ACCEPTANCE_SCENE": "narrow-pick"

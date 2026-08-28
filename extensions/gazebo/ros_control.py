@@ -1470,6 +1470,38 @@ class RosGazeboController(GazeboController):
     def planning_scene(self) -> PlanningSceneSynchronizer:
         return self.runtime.planning_scene
 
+    def activate_pick_place_config(
+        self,
+        config: Any,
+        *,
+        target_xyz: Sequence[float],
+        target_quat_xyzw: Sequence[float],
+    ) -> int:
+        """Rebind target/destination semantics inside one unchanged world."""
+
+        target_xyz = tuple(float(value) for value in target_xyz)
+        target_quat_xyzw = _normalized_quaternion(
+            tuple(float(value) for value in target_quat_xyzw)
+        )
+        if len(target_xyz) != 3 or not all(math.isfinite(value) for value in target_xyz):
+            raise ValueError("active sort target pose is invalid")
+        revision = self.planning_scene.activate_target(
+            target=_target_collision_geometry(
+                config,
+                pose_xyz=target_xyz,
+                pose_quat_xyzw=target_quat_xyzw,
+            ),
+            support_object_id=str(config.selected_placement_region_id),
+        )
+        self.config = config
+        self.runtime.config = config
+        self.runtime.state_source.config = config
+        self.runtime._l5_trajectory_cache.clear()
+        self._require_current_planning_state_valid()
+        self.runtime.scene_revision = revision
+        self.runtime.planning_scene_ready = self.planning_scene.ready
+        return revision
+
     def sync_planning_scene_reset(
         self,
         config: Any,

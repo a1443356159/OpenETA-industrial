@@ -47,6 +47,61 @@
       ],
       "static_obstacles": []
     },
+    "multi_normal": {
+      "world_scene": "multi_normal",
+      "seed": 0,
+      "description": "Continuous industrial sorting in one world session: yellow adjustable wrench to the green bin, then red M24 hex bolt to the blue bin.",
+      "canonical_world_complete": true,
+      "task": {
+        "target_prompt": "yellow adjustable wrench",
+        "placement_object_prompt": "yellow adjustable wrench",
+        "placement_region_prompt": "green parts bin",
+        "operator_instruction": "请先把黄色活动扳手放进绿色零件箱，再把红色六角螺栓放进蓝色零件箱。其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
+      },
+      "sort_assignments": [
+        {
+          "id": "yellow_wrench_to_green",
+          "target_object_id": "target_object",
+          "target_link": "target_link",
+          "target_prompt": "yellow adjustable wrench",
+          "placement_object_prompt": "yellow adjustable wrench",
+          "placement_region_id": "green_parts_bin",
+          "placement_region_prompt": "green parts bin"
+        },
+        {
+          "id": "red_bolt_to_blue",
+          "target_object_id": "red_m24_hex_bolt",
+          "target_link": "red_m24_hex_bolt_link",
+          "target_prompt": "red hex bolt",
+          "placement_object_prompt": "red hex bolt",
+          "placement_region_id": "blue_parts_bin",
+          "placement_region_prompt": "blue parts bin"
+        }
+      ],
+      "placement_regions": [
+        {
+          "id": "green_parts_bin",
+          "prompt": "green parts bin",
+          "center_xy": [0.62, 0.180],
+          "size_xy_m": [0.285, 0.260],
+          "support_z_m": 0.020,
+          "acceptance_semantics": "stable_geometry_centroid_inside",
+          "rgba": [0.035, 0.70, 0.16, 1.0],
+          "selected": true
+        },
+        {
+          "id": "blue_parts_bin",
+          "prompt": "blue parts bin",
+          "center_xy": [0.62, -0.180],
+          "size_xy_m": [0.285, 0.260],
+          "support_z_m": 0.020,
+          "acceptance_semantics": "stable_geometry_centroid_inside",
+          "rgba": [0.035, 0.25, 0.88, 1.0],
+          "selected": false
+        }
+      ],
+      "static_obstacles": []
+    },
     "narrow-pick": {
       "world_scene": "narrow-pick",
       "seed": 17,

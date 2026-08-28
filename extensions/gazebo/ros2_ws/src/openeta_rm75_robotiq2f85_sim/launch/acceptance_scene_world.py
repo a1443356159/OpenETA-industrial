@@ -32,6 +32,102 @@ ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC = (
 )
 
 
+def _native_target_topic_namespace(target_model: str) -> str:
+    """Return a stable transport namespace for one detachable world body."""
+
+    model = str(target_model).strip()
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    if not model or any(character not in allowed for character in model):
+        raise RuntimeError("native grasp target identity is invalid")
+    # Preserve every existing normal-scene topic byte-for-byte.
+    return "target" if model == "target_object" else model
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTargetBinding:
+    """One scene-owned portable-body binding shared by launch and runtime."""
+
+    assignment_id: str
+    target_model: str
+    target_link: str
+    attach_topic: str
+    detach_topic: str
+    state_topic: str
+    collision_filter_state_topic: str
+    collision_filter_state_request_topic: str
+    collision_filter_state_ack_topic: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "assignment_id": self.assignment_id,
+            "target_model": self.target_model,
+            "target_link": self.target_link,
+            "attach_topic": self.attach_topic,
+            "detach_topic": self.detach_topic,
+            "state_topic": self.state_topic,
+            "collision_filter_state_topic": self.collision_filter_state_topic,
+            "collision_filter_state_request_topic": self.collision_filter_state_request_topic,
+            "collision_filter_state_ack_topic": self.collision_filter_state_ack_topic,
+        }
+
+
+def native_target_binding(
+    *,
+    assignment_id: str,
+    target_model: str,
+    target_link: str,
+) -> NativeTargetBinding:
+    assignment = str(assignment_id).strip()
+    link = str(target_link).strip()
+    if not assignment or not link:
+        raise RuntimeError("native grasp assignment binding is invalid")
+    namespace = _native_target_topic_namespace(target_model)
+    prefix = f"/openeta/native_grasp/detachable_joint/{namespace}"
+    return NativeTargetBinding(
+        assignment_id=assignment,
+        target_model=str(target_model).strip(),
+        target_link=link,
+        attach_topic=f"{prefix}/attach",
+        detach_topic=f"{prefix}/detach",
+        state_topic=f"{prefix}/state",
+        collision_filter_state_topic=f"{prefix}/collision_filter_state",
+        collision_filter_state_request_topic=f"{prefix}/collision_filter_state/request",
+        collision_filter_state_ack_topic=f"{prefix}/collision_filter_state/ack",
+    )
+
+
+def scene_target_bindings(scene: Mapping[str, object]) -> tuple[NativeTargetBinding, ...]:
+    """Resolve physical target bindings, synthesizing the legacy singleton."""
+
+    raw_assignments = scene.get("sort_assignments")
+    if raw_assignments is None:
+        return (
+            native_target_binding(
+                assignment_id="default",
+                target_model="target_object",
+                target_link="target_link",
+            ),
+        )
+    if not isinstance(raw_assignments, list) or not raw_assignments:
+        raise RuntimeError("acceptance scene sort assignments are invalid")
+    bindings: list[NativeTargetBinding] = []
+    for raw in raw_assignments:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("acceptance scene sort assignment is invalid")
+        bindings.append(
+            native_target_binding(
+                assignment_id=str(raw.get("id") or ""),
+                target_model=str(raw.get("target_object_id") or ""),
+                target_link=str(raw.get("target_link") or ""),
+            )
+        )
+    if len({item.assignment_id for item in bindings}) != len(bindings):
+        raise RuntimeError("acceptance scene sort assignment identity is duplicated")
+    if len({item.target_model for item in bindings}) != len(bindings):
+        raise RuntimeError("acceptance scene sort target identity is duplicated")
+    return tuple(bindings)
+
+
 def _quaternion_from_rpy(values: Sequence[float]) -> tuple[float, float, float, float]:
     roll, pitch, yaw = (float(value) for value in values)
     cr, sr = math.cos(roll / 2.0), math.sin(roll / 2.0)
@@ -228,6 +324,7 @@ class CompiledAuthoritativeScene:
     world_scene: str
     sdf_bytes: bytes
     objects: tuple[AuthoritativeObject, ...]
+    target_bindings: tuple[NativeTargetBinding, ...]
     gazebo_sdf_sha256: str
     collision_manifest_sha256: str
     authority_sha256: str
@@ -253,6 +350,7 @@ class CompiledAuthoritativeScene:
             "gazebo_collision_object_ids": [item.object_id for item in self.objects],
             "moveit_collision_object_ids": [item.object_id for item in self.objects],
             "dynamic_object_ids": list(self.dynamic_object_ids),
+            "target_bindings": [item.to_dict() for item in self.target_bindings],
             "primitive_count": sum(len(item.primitives) for item in self.objects),
             "visual_policy": "independent_high_fidelity_gazebo_assets",
             "attached_collision_filter": {
@@ -604,7 +702,28 @@ def _set_collision_filter_mask(model: ET.Element, *, mask: int) -> None:
         bitmask.text = str(mask)
 
 
-def _validate_attached_collision_filter_contract(world: ET.Element) -> None:
+def _attached_collision_filter_expected(
+    binding: NativeTargetBinding,
+) -> dict[str, str]:
+    return {
+        "target_model": binding.target_model,
+        "target_link": binding.target_link,
+        "state_topic": binding.collision_filter_state_topic,
+        "state_request_topic": binding.collision_filter_state_request_topic,
+        "state_ack_topic": binding.collision_filter_state_ack_topic,
+        "robot_mask": str(ROBOT_COLLISION_FILTER_MASK),
+        "detached_mask": str(DETACHED_TARGET_COLLISION_FILTER_MASK),
+        "attached_mask": str(ATTACHED_TARGET_COLLISION_FILTER_MASK),
+    }
+
+
+def _materialize_attached_collision_filter_contract(
+    world: ET.Element,
+    *,
+    bindings: Sequence[NativeTargetBinding],
+) -> None:
+    """Create exactly one independently-addressed filter per sort target."""
+
     plugins = [
         plugin
         for plugin in world.findall("plugin")
@@ -614,24 +733,62 @@ def _validate_attached_collision_filter_contract(world: ET.Element) -> None:
         raise RuntimeError(
             "authoritative attached collision-filter plugin is missing"
         )
-    plugin = plugins[0]
-    expected = {
-        "target_model": "target_object",
-        "target_link": "target_link",
-        "state_topic": ATTACHED_COLLISION_FILTER_STATE_TOPIC,
-        "state_request_topic": ATTACHED_COLLISION_FILTER_STATE_REQUEST_TOPIC,
-        "state_ack_topic": ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC,
-        "robot_mask": str(ROBOT_COLLISION_FILTER_MASK),
-        "detached_mask": str(DETACHED_TARGET_COLLISION_FILTER_MASK),
-        "attached_mask": str(ATTACHED_TARGET_COLLISION_FILTER_MASK),
-    }
+    legacy = native_target_binding(
+        assignment_id="default",
+        target_model="target_object",
+        target_link="target_link",
+    )
+    expected = _attached_collision_filter_expected(legacy)
     actual = {
-        key: (plugin.findtext(key) or "").strip() for key in expected
+        key: (plugins[0].findtext(key) or "").strip() for key in expected
     }
     if actual != expected:
         raise RuntimeError(
             "authoritative attached collision-filter contract is invalid"
         )
+    if len(bindings) == 1 and bindings[0].target_model == legacy.target_model:
+        return
+    world.remove(plugins[0])
+    for binding in bindings:
+        plugin = ET.SubElement(
+            world,
+            "plugin",
+            {
+                "filename": "libopeneta_attached_collision_filter_system.so",
+                "name": "openeta::gazebo::AttachedCollisionFilter",
+            },
+        )
+        for key, value in _attached_collision_filter_expected(binding).items():
+            ET.SubElement(plugin, key).text = value
+
+
+def _validate_attached_collision_filter_contract(
+    world: ET.Element,
+    *,
+    bindings: Sequence[NativeTargetBinding],
+) -> None:
+    plugins = [
+        plugin
+        for plugin in world.findall("plugin")
+        if plugin.get("name") == "openeta::gazebo::AttachedCollisionFilter"
+    ]
+    if len(plugins) != len(bindings):
+        raise RuntimeError("authoritative attached collision-filter plugin count is invalid")
+    actual_by_target = {
+        (plugin.findtext("target_model") or "").strip(): plugin for plugin in plugins
+    }
+    if len(actual_by_target) != len(plugins):
+        raise RuntimeError("authoritative attached collision-filter target is duplicated")
+    for binding in bindings:
+        plugin = actual_by_target.get(binding.target_model)
+        expected = _attached_collision_filter_expected(binding)
+        actual = (
+            {key: (plugin.findtext(key) or "").strip() for key in expected}
+            if plugin is not None
+            else {}
+        )
+        if actual != expected:
+            raise RuntimeError("authoritative attached collision-filter contract is invalid")
 
 
 def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]:
@@ -713,6 +870,39 @@ def _validate_catalog_bindings(
     if not isinstance(scene, Mapping):
         raise RuntimeError("authoritative scene catalog binding is invalid")
     by_id = {item.object_id: item for item in objects}
+    bindings = scene_target_bindings(scene)
+    regions_by_id = {
+        str(raw.get("id") or ""): raw
+        for raw in (scene.get("placement_regions") or [])
+        if isinstance(raw, Mapping)
+    }
+    assignments = scene.get("sort_assignments")
+    assignments_by_id = {
+        str(raw.get("id") or ""): raw
+        for raw in (assignments if isinstance(assignments, list) else [])
+        if isinstance(raw, Mapping)
+    }
+    for binding in bindings:
+        if binding.target_model not in by_id:
+            raise RuntimeError(
+                f"authoritative sort target collision model is missing: {binding.target_model}"
+            )
+        model = world.find(f"model[@name='{binding.target_model}']")
+        if model is None or model.find(f"link[@name='{binding.target_link}']") is None:
+            raise RuntimeError(
+                f"authoritative sort target link is missing: "
+                f"{binding.target_model}/{binding.target_link}"
+            )
+        raw_assignment = assignments_by_id.get(binding.assignment_id)
+        if raw_assignment is not None:
+            region_id = str(raw_assignment.get("placement_region_id") or "")
+            region = regions_by_id.get(region_id)
+            if region is None or str(region.get("prompt") or "") != str(
+                raw_assignment.get("placement_region_prompt") or ""
+            ):
+                raise RuntimeError(
+                    "authoritative sort assignment placement binding is invalid"
+                )
     target_raw = scene.get("target_object")
     if isinstance(target_raw, Mapping):
         target = by_id.get("target_object")
@@ -862,16 +1052,28 @@ def compile_authoritative_scene(
     world = tree.getroot().find("world")
     if world is None:
         raise RuntimeError("authoritative scene world is invalid")
-    target_model = world.find("model[@name='target_object']")
-    if target_model is None:
-        raise RuntimeError("authoritative target collision model is missing")
-    _set_collision_filter_mask(
-        target_model,
-        mask=DETACHED_TARGET_COLLISION_FILTER_MASK,
+    payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    raw_scene = payload.get("scenes", {}).get(selected) if isinstance(payload, Mapping) else None
+    if not isinstance(raw_scene, Mapping):
+        raise RuntimeError("authoritative scene catalog binding is invalid")
+    target_bindings = scene_target_bindings(raw_scene)
+    for binding in target_bindings:
+        target_model = world.find(f"model[@name='{binding.target_model}']")
+        if target_model is None:
+            raise RuntimeError(
+                f"authoritative target collision model is missing: {binding.target_model}"
+            )
+        _set_collision_filter_mask(
+            target_model,
+            mask=DETACHED_TARGET_COLLISION_FILTER_MASK,
+        )
+    _materialize_attached_collision_filter_contract(
+        world,
+        bindings=target_bindings,
     )
-    _validate_attached_collision_filter_contract(world)
+    _validate_attached_collision_filter_contract(world, bindings=target_bindings)
     objects = _authoritative_objects(world)
-    required_ids = {"work_table", "target_object"}
+    required_ids = {"work_table", *(item.target_model for item in target_bindings)}
     object_ids = {item.object_id for item in objects}
     if not required_ids <= object_ids:
         raise RuntimeError(
@@ -911,6 +1113,7 @@ def compile_authoritative_scene(
         world_scene=world_scene,
         sdf_bytes=sdf_bytes,
         objects=objects,
+        target_bindings=target_bindings,
         gazebo_sdf_sha256=sdf_sha256,
         collision_manifest_sha256=collision_sha256,
         authority_sha256=authority_sha256,

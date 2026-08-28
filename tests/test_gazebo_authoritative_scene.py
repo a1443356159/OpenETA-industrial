@@ -35,6 +35,7 @@ def _compile(scene_id: str = "normal"):
     "scene_id",
     [
         "normal",
+        "multi_normal",
         "narrow-pick",
         "barrier-transfer",
         "fastener-bin-sort",
@@ -131,6 +132,31 @@ def test_authoritative_scene_materializes_attachment_collision_masks_and_plugin(
     evidence = compiled.evidence()["attached_collision_filter"]
     assert evidence["attached_target_robot_collision_enabled"] is False
     assert evidence["attached_target_environment_collision_enabled"] is True
+
+
+def test_authoritative_multi_normal_owns_two_filtered_dynamic_targets() -> None:
+    compiled = _compile("multi_normal")
+    world = ET.fromstring(compiled.sdf_bytes).find("world")
+
+    assert world is not None
+    assert [binding.target_model for binding in compiled.target_bindings] == [
+        "target_object",
+        "red_m24_hex_bolt",
+    ]
+    plugins = world.findall(
+        "plugin[@name='openeta::gazebo::AttachedCollisionFilter']"
+    )
+    assert [plugin.findtext("target_model") for plugin in plugins] == [
+        "target_object",
+        "red_m24_hex_bolt",
+    ]
+    for target_id in ("target_object", "red_m24_hex_bolt"):
+        assert {
+            collision.findtext("surface/contact/collide_bitmask")
+            for collision in world.findall(
+                f"model[@name='{target_id}']/link/collision"
+            )
+        } == {"65535"}
 
 
 def test_authoritative_compiler_keeps_detailed_visual_independent_from_collision(

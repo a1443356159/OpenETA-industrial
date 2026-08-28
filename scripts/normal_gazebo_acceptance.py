@@ -56,12 +56,14 @@ REQUIRED_REAL_PICK_PLACE_TOOLS = (
 )
 SCENARIOS = (
     "normal",
+    "multi_normal",
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
     "tool-bin-sort",
 )
 COMPLEX_PHYSICAL_SCENARIOS = (
+    "multi_normal",
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
@@ -114,6 +116,10 @@ TASK_INSTRUCTIONS = """
 
 SCENARIO_INSTRUCTIONS = {
     "normal": "桌上还有几件外观相近的工具，拿之前请确认没有拿错。",
+    "multi_normal": (
+        "这是同一工作单元内的连续分拣；放好第一件后不要关闭环境，"
+        "重新看清当前场景并继续第二件。"
+    ),
     "narrow-pick": "目标旁边有两个橙色护栏，夹取时请别碰到它们。",
     "barrier-transfer": "目标和料箱之间有一块黄色挡板，移动时请别碰到它。",
     "fastener-bin-sort": (
@@ -151,6 +157,26 @@ def _scene_task(scene: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _scene_sort_assignments(scene: Mapping[str, Any]) -> list[dict[str, str]]:
+    configured = scene.get("sort_assignments")
+    if isinstance(configured, list):
+        return [dict(item) for item in configured if isinstance(item, Mapping)]
+    task = _scene_task(scene)
+    return [
+        {
+            "id": "default",
+            "target_object_id": "target_object",
+            "target_link": "target_link",
+            "target_prompt": task["target_prompt"],
+            "placement_object_prompt": task["placement_object_prompt"],
+            "placement_region_id": str(
+                scene.get("selected_placement_region_id") or "placement_zone_marker"
+            ),
+            "placement_region_prompt": task["placement_region_prompt"],
+        }
+    ]
+
+
 def _metadata_semantic(value: str) -> str:
     return "_".join(str(value).strip().split())
 
@@ -180,6 +206,7 @@ def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(regions, list)
         else ["placement_zone_marker"]
     )
+    sort_assignments = scene.get("sort_assignments")
     return {
         "schema_version": "openeta.gazebo_acceptance_scene_receipt.v2",
         "scene_id": str(scene["world_scene"]),
@@ -201,6 +228,28 @@ def _scene_receipt(scene: Mapping[str, Any]) -> dict[str, Any]:
         "placement_region_ids": region_ids,
         "selected_placement_region_id": str(
             scene.get("selected_placement_region_id") or region_ids[0]
+        ),
+        **(
+            {
+                "sort_assignments": [
+                    {
+                        key: str(assignment[key])
+                        for key in (
+                            "id",
+                            "target_object_id",
+                            "target_link",
+                            "target_prompt",
+                            "placement_object_prompt",
+                            "placement_region_id",
+                            "placement_region_prompt",
+                        )
+                    }
+                    for assignment in sort_assignments
+                    if isinstance(assignment, Mapping)
+                ]
+            }
+            if isinstance(sort_assignments, list)
+            else {}
         ),
     }
 
@@ -1143,6 +1192,8 @@ def verify_case(
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
+    assignments = _scene_sort_assignments(scene)
+    assignment_count = len(assignments)
     backend_label = "GraspGenX" if backend == "graspgenx" else "AnyGrasp"
     errors: list[str] = []
     try:
@@ -1176,9 +1227,10 @@ def verify_case(
         for required in _required_tools_for_backend(backend):
             if required not in names:
                 errors.append(f"required real pick-place tool call missing: {required}")
-        if names.count("sam3") != 2:
+        if names.count("sam3") != 2 * assignment_count:
             errors.append(
-                "exactly one target-object and one placement-region SAM3 call are required"
+                "exactly one target-object and one placement-region SAM3 call "
+                "are required per sort assignment"
             )
         sam3_prompts = [
             str(_parameters(call).get("prompt") or "")
@@ -1186,26 +1238,39 @@ def verify_case(
             if _name(call) == "sam3"
         ]
         expected_prompts = [
-            _scene_task(scene)["target_prompt"],
-            _scene_task(scene)["placement_region_prompt"],
+            prompt
+            for assignment in assignments
+            for prompt in (
+                assignment["target_prompt"],
+                assignment["placement_region_prompt"],
+            )
         ]
         if sam3_prompts != expected_prompts:
             errors.append("SAM3 semantic prompts do not match the selected scene task")
         grasp_indices = [index for index, name in enumerate(names) if name == backend]
         sam_indices = [index for index, name in enumerate(names) if name == "sam3"]
-        if grasp_indices and sam_indices and max(sam_indices) > min(grasp_indices):
+        if (
+            assignment_count == 1
+            and grasp_indices
+            and sam_indices
+            and max(sam_indices) > min(grasp_indices)
+        ):
             errors.append("SAM3 was rerun after the cached grasp/placement funnel started")
         if not _ordered(
             names,
-            (
-                "observe",
-                "anyplace",
-                backend,
-                "move_to",
-                "gripper_control",
-                "anyplace",
-                "move_to",
-                "gripper_control",
+            tuple(
+                item
+                for _assignment in assignments
+                for item in (
+                    "observe",
+                    "anyplace",
+                    backend,
+                    "move_to",
+                    "gripper_control",
+                    "anyplace",
+                    "move_to",
+                    "gripper_control",
+                )
             ),
         ):
             errors.append("model-contact, attach, frozen-goal release order is invalid")
@@ -1246,8 +1311,11 @@ def verify_case(
         provider_inference_calls = [
             call for call in grasp_calls if _parameters(call).get("mode") != "frozen_frontier"
         ]
-        if len(provider_inference_calls) != 1:
-            errors.append(f"normal requires exactly one {backend_label} model inference")
+        if len(provider_inference_calls) != assignment_count:
+            errors.append(
+                f"scenario requires exactly one {backend_label} model inference "
+                "per sort assignment"
+            )
         for call in grasp_calls:
             if _parameters(call).get("mode") != "frozen_frontier":
                 continue
@@ -1277,12 +1345,12 @@ def verify_case(
         )
         if not has_legacy_diversity_pool and not has_v3_search:
             errors.append(f"{backend_label} validated grasp search evidence is missing")
-        if not any(
+        if not all(
             _has_bounded_grasp_l5_evidence(grasp_call, artifact_root=paths.root)
-            for grasp_call in grasp_calls
+            for grasp_call in provider_inference_calls
         ):
-            errors.append(f"{backend_label} L5 diversity evidence is missing")
-        if funnel_profile == "fast_v3" and not any(
+            errors.append(f"{backend_label} L5 diversity evidence is missing per assignment")
+        if funnel_profile == "fast_v3" and not all(
             _has_resumable_frozen_pair_evidence(grasp_call)
             for grasp_call in provider_inference_calls
         ):
@@ -1291,15 +1359,34 @@ def verify_case(
             )
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
-        first_anyplace = anyplace_calls[0] if anyplace_calls else {}
+        anyplace_inference_calls = [
+            call
+            for call in anyplace_calls
+            if base._contains(call, "anyplace_model_inference_invoked", True)
+        ]
+        if not anyplace_inference_calls and anyplace_calls:
+            # Compatibility with v1 evidence, which omitted the positive
+            # Boolean on its one model call.
+            anyplace_inference_calls = [anyplace_calls[0]]
+        anyplace_requalification_calls = [
+            call
+            for call in anyplace_calls
+            if base._contains(call, "anyplace_model_inference_invoked", False)
+        ]
+        first_anyplace = anyplace_inference_calls[0] if anyplace_inference_calls else {}
         anyplace_outputs = _call_outputs(anyplace)
-        if len(anyplace_calls) < 2:
+        if len(anyplace_calls) < 2 * assignment_count:
             errors.append(
-                "normal flow requires one model AnyPlace call and at least one "
-                "frozen-pool requalification"
+                "each sort assignment requires one model AnyPlace call and at "
+                "least one frozen-pool requalification"
             )
+        if len(anyplace_inference_calls) != assignment_count:
+            errors.append("AnyPlace model inference count does not match assignments")
+        if len(anyplace_requalification_calls) < assignment_count:
+            errors.append("AnyPlace frozen-pool requalification is missing per assignment")
         qualification_outputs = [
-            _call_outputs(call) for call in [*grasp_calls, *anyplace_calls[1:]]
+            _call_outputs(call)
+            for call in [*grasp_calls, *anyplace_requalification_calls]
         ]
         observed_profiles = {
             str(outputs.get("qualification_profile") or "")
@@ -1311,7 +1398,10 @@ def verify_case(
                 "qualification profile evidence mismatch: expected "
                 f"{funnel_profile}, observed {sorted(observed_profiles)}"
             )
-        for requalification_index, requalification in enumerate(anyplace_calls[1:], start=1):
+        for requalification_index, requalification in enumerate(
+            anyplace_requalification_calls,
+            start=1,
+        ):
             if not base._contains(requalification, "anyplace_model_inference_invoked", False):
                 errors.append(
                     "post-attach AnyPlace requalification "
@@ -1446,13 +1536,57 @@ def verify_case(
             for value in base._values(payload, "placement_verification")
             if isinstance(value, Mapping)
         ]
+        valid_placements = [
+            value
+            for value in placements
+            if value.get("placement_confirmed") is True
+            and value.get("verdict") == "PASS"
+            and float((value.get("evidence") or {}).get("stable_duration_s", 0.0))
+            >= 0.5
+            and float((value.get("evidence") or {}).get("terminal_drift_m", 1.0))
+            <= 0.005
+        ]
+        if len(valid_placements) < assignment_count:
+            errors.append("stable in-zone placement verification is missing per assignment")
+        if assignment_count > 1:
+            final_progress = next(
+                (
+                    value
+                    for payload in reversed(payloads)
+                    for value in base._values(payload, "multi_sort_progress")
+                    if isinstance(value, Mapping)
+                    and value.get("schema_version") == "openeta.multi_sort_progress.v1"
+                    and value.get("all_completed") is True
+                ),
+                None,
+            )
+            expected_assignment_ids = [assignment["id"] for assignment in assignments]
+            if not (
+                isinstance(final_progress, Mapping)
+                and final_progress.get("assignment_count") == assignment_count
+                and final_progress.get("remaining_count") == 0
+                and final_progress.get("completed_assignment_ids")
+                == expected_assignment_ids
+                and final_progress.get("same_environment_session") is True
+            ):
+                errors.append("same-session multi-sort completion evidence is missing")
+            observed_target_ids = {
+                str(binding.get("target_id") or "")
+                for payload in payloads
+                for binding in base._values(payload, "native_target_binding")
+                if isinstance(binding, Mapping)
+            }
+            if not {
+                assignment["target_object_id"] for assignment in assignments
+            } <= observed_target_ids:
+                errors.append("native target binding evidence is missing per assignment")
         if not any(
             value.get("placement_confirmed") is True
             and value.get("verdict") == "PASS"
             and float((value.get("evidence") or {}).get("stable_duration_s", 0.0)) >= 0.5
             and float((value.get("evidence") or {}).get("terminal_drift_m", 1.0)) <= 0.005
             for value in placements
-        ):
+        ) and assignment_count == 1:
             errors.append("stable in-zone placement verification missing")
         fingerprints = [
             str(value) for value in base._values(events, "request_fingerprint") if value
@@ -1491,7 +1625,7 @@ def verify_case(
             for value in base._values(payloads, "planning_scene_revision")
             if isinstance(value, int)
         ]
-        if len(set(scene_revisions)) < 3:
+        if len(set(scene_revisions)) < 2 * assignment_count + 1:
             errors.append("reset/attach/detach planning-scene revision chain missing")
         for call in calls:
             if _name(call) in base.MUTATING_TOOLS and not base._scripted_approved(call):

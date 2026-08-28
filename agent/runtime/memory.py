@@ -54,6 +54,7 @@ PLACEMENT_OBJECT_DETECTION_KEY = "placement_object_detection"
 PLACEMENT_REGION_DETECTION_KEY = "placement_region_detection"
 FROZEN_PLACEMENT_POOL_KEY = "frozen_placement_goal_pool"
 COMPLETED_PLACEMENT_SUBGOALS_KEY = "completed_placement_subgoals"
+MULTI_SORT_PROGRESS_KEY = "multi_sort_progress"
 MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
 PLANNING_SCENE_TARGET_POSE_SYNC_KEY = "planning_scene_target_pose_sync"
@@ -319,14 +320,76 @@ class AgentMemory:
         summary["runtime_camera_sources"] = runtime_sources
         summary["current_camera_sources"] = current_sources
         self.record("observation", summary)
+        multi_sort_updated = self._capture_multi_sort_progress(observation)
         self._capture_grasp_reestimation_observation(observation)
         placement_release_reobserved = self._capture_failed_placement_release_reobservation(
             observation
         )
         reconciliation_updated = self._reconcile_unknown_motion(observation)
         attachment_updated = self._capture_attachment_observation_verdict(observation)
-        if placement_release_reobserved or reconciliation_updated or attachment_updated:
+        if (
+            multi_sort_updated
+            or placement_release_reobserved
+            or reconciliation_updated
+            or attachment_updated
+        ):
             self._save_working_memory()
+
+    def _capture_multi_sort_progress(self, observation: EnvObservation) -> bool:
+        progress = observation.metadata.get("multi_sort_progress")
+        if not isinstance(progress, dict) or progress.get("schema_version") != (
+            "openeta.multi_sort_progress.v1"
+        ):
+            return False
+        try:
+            assignment_count = int(progress["assignment_count"])
+            completed_count = int(progress["completed_count"])
+            remaining_count = int(progress["remaining_count"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (
+            assignment_count < 2
+            or completed_count < 0
+            or remaining_count < 0
+            or completed_count + remaining_count != assignment_count
+            or bool(progress.get("all_completed")) != (remaining_count == 0)
+        ):
+            return False
+        normalized = dict(progress)
+        previous = _memory_fact_value(self.facts.get(MULTI_SORT_PROGRESS_KEY))
+        self.facts[MULTI_SORT_PROGRESS_KEY] = _memory_fact_entry(
+            normalized,
+            source="environment_multi_sort_progress",
+        )
+        release = self.placement_release()
+        release_progress = (
+            release.get("multi_sort_progress") if isinstance(release, dict) else None
+        )
+        advanced_release = bool(
+            isinstance(release, dict)
+            and release.get("status") == "released"
+            and isinstance(release_progress, dict)
+            and int(release_progress.get("completed_count") or -1) == completed_count
+            and remaining_count > 0
+            and progress.get("fresh_observation_required") is False
+            and progress.get("fresh_observation_satisfied") is True
+        )
+        if advanced_release:
+            self.facts.pop(PLACEMENT_RELEASE_KEY, None)
+            self.record(
+                "multi_sort_next_assignment_observed",
+                {
+                    "completed_count": completed_count,
+                    "remaining_count": remaining_count,
+                    "active_assignment_index": progress.get(
+                        "active_assignment_index"
+                    ),
+                    "scene_epoch": self.scene_epoch(),
+                },
+            )
+        if previous != normalized:
+            self.record("multi_sort_progress_updated", normalized)
+        return previous != normalized or advanced_release
 
     def _capture_failed_placement_release_reobservation(self, observation: EnvObservation) -> bool:
         """Acknowledge the fresh scene required after an unsuccessful release."""
@@ -1469,6 +1532,14 @@ class AgentMemory:
         close_call = _successful_tool_call(action, "close_simulator_env")
         if close_call is not None:
             release = self.placement_release()
+            multi_sort = _memory_fact_value(self.facts.get(MULTI_SORT_PROGRESS_KEY))
+            multi_sort = multi_sort if isinstance(multi_sort, dict) else None
+            completed = _memory_fact_value(
+                self.facts.get(COMPLETED_PLACEMENT_SUBGOALS_KEY)
+            )
+            completed_items = (
+                list(completed.get("items") or []) if isinstance(completed, dict) else []
+            )
             verification = (
                 release.get("placement_verification") if isinstance(release, dict) else None
             )
@@ -1479,6 +1550,15 @@ class AgentMemory:
                 and isinstance(verification, dict)
                 and verification.get("placement_confirmed") is True
                 and verification.get("verdict") == "PASS"
+                and (
+                    multi_sort is None
+                    or (
+                        multi_sort.get("all_completed") is True
+                        and int(multi_sort.get("remaining_count", -1)) == 0
+                        and len(completed_items)
+                        >= int(multi_sort.get("assignment_count") or 0)
+                    )
+                )
             ):
                 evidence = {
                     "schema_version": "openeta.task_completion_evidence.v1",
@@ -1489,6 +1569,14 @@ class AgentMemory:
                     "candidate_id": release.get("candidate_id"),
                     "placement_pose_id": release.get("placement_pose_id"),
                     "placement_verification": dict(verification),
+                    **(
+                        {
+                            "multi_sort_progress": dict(multi_sort),
+                            "completed_placement_subgoals": completed_items,
+                        }
+                        if multi_sort is not None
+                        else {}
+                    ),
                     "closed_at_s": time.time(),
                 }
                 self.facts[TASK_COMPLETION_EVIDENCE_KEY] = _memory_fact_entry(
@@ -1500,6 +1588,7 @@ class AgentMemory:
             removed = self.facts.pop(ACTIVE_ENVIRONMENT_TASK_KEY, None)
             gripper_removed = self.facts.pop(GRIPPER_COMMAND_STATE_KEY, None)
             release_removed = self.facts.pop(PLACEMENT_RELEASE_KEY, None)
+            multi_sort_removed = self.facts.pop(MULTI_SORT_PROGRESS_KEY, None)
             self.record(
                 "active_environment_task_cleared",
                 {"reason": "simulator_environment_closed"},
@@ -1508,6 +1597,7 @@ class AgentMemory:
                 removed is not None
                 or gripper_removed is not None
                 or release_removed is not None
+                or multi_sort_removed is not None
                 or completion_recorded
             )
 
@@ -5770,8 +5860,20 @@ class AgentMemory:
                     else {}
                 ),
                 "release_sequence": ordered_release,
+                **(
+                    {"multi_sort_progress": dict(receipt["multi_sort_progress"])}
+                    if isinstance(receipt.get("multi_sort_progress"), dict)
+                    and receipt["multi_sort_progress"].get("schema_version")
+                    == "openeta.multi_sort_progress.v1"
+                    else {}
+                ),
             }
         )
+        if isinstance(release.get("multi_sort_progress"), dict):
+            self.facts[MULTI_SORT_PROGRESS_KEY] = _memory_fact_entry(
+                dict(release["multi_sort_progress"]),
+                source="placement_release_multi_sort_progress",
+            )
         self.facts[PLACEMENT_RELEASE_KEY] = _memory_fact_entry(
             release,
             source="placement_release_completed",
@@ -5992,11 +6094,16 @@ class AgentMemory:
         target = target if isinstance(target, dict) else {}
         completed = _memory_fact_value(self.facts.get(COMPLETED_PLACEMENT_SUBGOALS_KEY))
         items = list(completed.get("items") or []) if isinstance(completed, dict) else []
+        progress = release.get("multi_sort_progress")
+        progress = progress if isinstance(progress, dict) else {}
+        transition = progress.get("transition")
+        transition = transition if isinstance(transition, dict) else {}
         items.append(
             {
                 "candidate_id": release.get("candidate_id"),
                 "placement_pose_id": release.get("placement_pose_id"),
                 "target_object": target.get("target_prompt") or target.get("label"),
+                "assignment_id": transition.get("completed_assignment_id"),
                 "release_mode": release.get("release_mode", "explicit_gripper_open"),
                 "completed_at_s": time.time(),
             }
@@ -6019,7 +6126,25 @@ class AgentMemory:
             ATTACHMENT_GATE_KEY,
         ):
             self.facts.pop(key, None)
+        if int(progress.get("remaining_count") or 0) > 0:
+            for key in (
+                REFERENCE_LOCALIZATION_FAILURE_KEY,
+                TARGET_LOCALIZATION_BUDGET_KEY,
+                SAM3_SEMANTIC_STATE_KEY,
+                GRASP_RECOVERY_KEY,
+                PLACEMENT_CANDIDATE_POLICY_KEY,
+                PLACEMENT_OBJECT_DETECTION_KEY,
+                PLACEMENT_REGION_DETECTION_KEY,
+                FROZEN_PLACEMENT_POOL_KEY,
+                PLANNING_SCENE_TARGET_POSE_SYNC_KEY,
+                MOTION_RECONCILIATION_KEY,
+            ):
+                self.facts.pop(key, None)
         for key in (
+            "anygrasp_grasp_candidates_latest",
+            "grasp_pose_estimate_grasp_candidates_latest",
+            "graspgenx_grasp_candidates_latest",
+            "contact_graspnet_grasp_candidates_latest",
             "anyplace_placement_candidates_latest",
             "camera_pose_to_world_world_pose_latest",
         ):
@@ -6898,6 +7023,9 @@ class AgentMemory:
             "current_user_request": self.current_user_request,
             "active_environment_task": self.active_environment_task(),
             "task_completion_evidence": self.task_completion_evidence(),
+            "multi_sort_progress": _memory_fact_value(
+                self.facts.get(MULTI_SORT_PROGRESS_KEY)
+            ),
             "conversation": self.conversation.planning_context(max_items=0),
             "metadata": self.metadata,
             "selection_obligation": self.pending_sam3_selection(),
@@ -7941,6 +8069,7 @@ def _trusted_retained_attachment_motion_failure(
     proof = receipt.get("physical_verification")
     attached = receipt.get("detachable_joint")
     child_proof = receipt.get("child_link_proof")
+    expected_target_id = _receipt_native_target_id(receipt)
     if not (
         receipt.get("error_code")
         in {
@@ -7958,9 +8087,11 @@ def _trusted_retained_attachment_motion_failure(
         and proof.get("verdict") == "PASS"
         and proof.get("reason_code") == "NATIVE_GRASP_TARGET_HELD"
         and proof.get("grasp_confirmed") is True
-        and proof.get("target_id") == "target_object"
+        and bool(expected_target_id)
+        and proof.get("target_id") == expected_target_id
         and isinstance(attached, Mapping)
         and attached.get("state") == "attached"
+        and attached.get("target_id", expected_target_id) == expected_target_id
         and _valid_attachment_transform(receipt.get("attachment_transform"))
         and isinstance(child_proof, Mapping)
         and child_proof.get("prior_attachment_confirmed") is True
@@ -8098,6 +8229,7 @@ def _trusted_native_attachment_proof(
     attached = receipt.get("detachable_joint")
     attachment_transform = receipt.get("attachment_transform")
     contact_gate = receipt.get("native_contact_gate")
+    expected_target_id = _receipt_native_target_id(receipt)
     if not isinstance(contact_gate, dict) and isinstance(proof, dict):
         proof_evidence = proof.get("evidence")
         contact_gate = proof_evidence.get("gate") if isinstance(proof_evidence, dict) else None
@@ -8112,9 +8244,17 @@ def _trusted_native_attachment_proof(
         or proof.get("grasp_confirmed") is not True
     ):
         reasons.append("native_proof_not_pass")
-    if isinstance(proof, dict) and str(proof.get("target_id") or "") != "target_object":
+    if (
+        not expected_target_id
+        or isinstance(proof, dict)
+        and str(proof.get("target_id") or "") != expected_target_id
+    ):
         reasons.append("native_proof_target_mismatch")
-    if not isinstance(attached, dict) or attached.get("state") != "attached":
+    if (
+        not isinstance(attached, dict)
+        or attached.get("state") != "attached"
+        or attached.get("target_id", expected_target_id) != expected_target_id
+    ):
         reasons.append("native_attach_ack_missing")
     if not (
         isinstance(contact_gate, dict)
@@ -8122,7 +8262,7 @@ def _trusted_native_attachment_proof(
         and contact_gate.get("reason_code") == "NATIVE_GRASP_CONTACT_TARGET_CONFIRMED"
         and isinstance(contact_gate.get("evidence"), dict)
         and contact_gate["evidence"].get("source") == "gazebo_native_contacts"
-        and contact_gate["evidence"].get("target_id") == "target_object"
+        and contact_gate["evidence"].get("target_id") == expected_target_id
     ):
         reasons.append("native_bilateral_contact_proof_missing")
     if not _valid_attachment_transform(attachment_transform):
@@ -8147,6 +8287,15 @@ def _trusted_native_attachment_proof(
         reasons[0] if reasons else "trusted_native_contact_attach_ack",
         retained,
     )
+
+
+def _receipt_native_target_id(receipt: Mapping[str, object]) -> str:
+    binding = receipt.get("native_target_binding")
+    if isinstance(binding, Mapping):
+        return str(binding.get("target_id") or "").strip()
+    # v1 simulator receipts predate explicit target binding evidence and were
+    # defined only for the canonical singleton target.
+    return "target_object"
 
 
 def _valid_attachment_transform(value: object) -> bool:

@@ -292,6 +292,50 @@ class PlanningSceneSynchronizer:
         self.support_contact_reference_target_spec = target_spec
         return revision
 
+    def activate_target(
+        self,
+        *,
+        target: CollisionGeometry,
+        support_object_id: str,
+    ) -> int:
+        """Switch the qualification target while retaining one physical world."""
+
+        if self.attached_ids:
+            return self._fail("sort target cannot change while an object is attached")
+        if target.object_id not in self.world_ids:
+            return self._fail("next sort target is missing from the world scene")
+        support = str(support_object_id).strip()
+        if not support or support not in self.world_ids:
+            return self._fail("next sort support is missing from the world scene")
+        target_spec = target.to_dict()
+        existing = self.world_specs.get(target.object_id)
+        if not (
+            isinstance(existing, Mapping)
+            and _same_collision_geometry_pose(existing, target_spec)
+        ):
+            revision = self._commit(
+                {
+                    "operation": "activate_target",
+                    "world_objects": [target_spec],
+                },
+                expected_world=set(self.world_ids),
+                expected_attached=set(),
+            )
+            self.world_specs[target.object_id] = target_spec
+        else:
+            # The geometry is unchanged in MoveIt, but the OpenETA scene
+            # identity now has a different target and destination. Advance
+            # the wrapper-owned revision so no qualification/cache evidence
+            # from the prior assignment can be rebound to this one.
+            self.revision += 1
+            self.ready = True
+            self.last_error = ""
+            revision = self.revision
+        self.target_id = target.object_id
+        self.support_contact_object_id = support
+        self.support_contact_reference_target_spec = target_spec
+        return revision
+
     def detach_target(self, *, target: CollisionGeometry) -> int:
         if target.object_id not in self.attached_ids:
             return self._fail("target is not attached in the planning scene")

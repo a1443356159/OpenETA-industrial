@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from adapter.protocol import CameraFrame, EnvObservation, RobotState
 from extensions.gazebo.deployment import GazeboDeploymentConfig
 from extensions.gazebo.direct_env import GazeboDirectEnv
 from extensions.gazebo.observation import GazeboObservationError
+from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.profiles import gazebo_profile, gazebo_profiles
 from extensions.gazebo.runtime import GazeboRuntime
 from extensions.gazebo import runtime as gazebo_runtime
@@ -188,6 +190,59 @@ class _ResetController:
     def sync_planning_scene_empty(self):
         self.actions.append({"action_type": "planning_scene_empty"})
         return 1
+
+
+def test_multi_normal_advances_target_without_recreating_the_runtime() -> None:
+    attachments = {}
+
+    class Attachment:
+        def __init__(self, *, child_model, **_kwargs):
+            self.child_model = child_model
+            self.state = "detached"
+            attachments[child_model] = self
+
+        def native_target_mount_poses_with_retry(self, *, max_attempts):
+            assert max_attempts == 2
+            return (
+                SimpleNamespace(
+                    xyz=(0.24, -0.19, 0.002),
+                    quat_xyzw=(0.0, 0.0, 0.5646424734, 0.8253356149),
+                ),
+                SimpleNamespace(xyz=(0.0, 0.0, 0.9), quat_xyzw=(0.0, 0.0, 0.0, 1.0)),
+                1,
+            )
+
+    profile = replace(
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
+        model_config=NativePickPlaceConfig(acceptance_scene_id="multi_normal"),
+    )
+    runtime = GazeboRuntime(
+        _deployment(),
+        profile,
+        world_control=_World(),
+        attachment_factory=Attachment,
+    )
+    activations = []
+    runtime.controller = SimpleNamespace(
+        activate_pick_place_config=lambda config, **pose: (
+            activations.append((config, pose)) or 7
+        )
+    )
+    runtime.started = True
+    runtime.start_count = 1
+
+    progress = runtime.complete_active_sort_assignment(
+        placement_verification={"placement_confirmed": True, "verdict": "PASS"}
+    )
+
+    assert runtime.start_count == 1
+    assert runtime.active_pick_place_config.target_id == "red_m24_hex_bolt"
+    assert runtime.attachment is attachments["red_m24_hex_bolt"]
+    assert activations[0][0].selected_placement_region_id == "blue_parts_bin"
+    assert progress["completed_assignment_ids"] == ["yellow_wrench_to_green"]
+    assert progress["remaining_count"] == 1
+    assert progress["fresh_observation_required"] is True
+    assert progress["transition"]["world_recreated"] is False
 
 
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:

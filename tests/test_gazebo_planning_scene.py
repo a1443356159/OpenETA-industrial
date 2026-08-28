@@ -90,6 +90,24 @@ def test_motion_only_scene_clears_authoritative_support_identity() -> None:
     assert scene.support_contact_reference_target_spec == {}
 
 
+def test_planning_scene_switches_sort_target_without_rebuilding_world_geometry() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, next_target, first_target = _boxes()
+    scene.reset(table=table, distractor=next_target, target=first_target)
+    world_before = set(scene.world_ids)
+
+    revision = scene.activate_target(
+        target=next_target,
+        support_object_id=table.object_id,
+    )
+
+    assert revision == 2
+    assert scene.world_ids == world_before
+    assert scene.attached_ids == set()
+    assert scene.target_id == next_target.object_id
+    assert scene.support_contact_object_id == table.object_id
+
+
 def test_planning_scene_allows_only_the_fixed_robot_support_contact() -> None:
     calls = []
 

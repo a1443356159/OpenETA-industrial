@@ -59,9 +59,20 @@ def _after_success(target, actions, label):
     return RegisterEventHandler(OnProcessExit(target_action=target, on_exit=on_exit))
 
 
-def _spawn_robot(context, *, xacro_file, generated_sdfs, post_spawn_actions):
+def _spawn_robot(
+    context,
+    *,
+    xacro_file,
+    generated_sdfs,
+    post_spawn_actions,
+    target_bindings,
+):
     try:
-        rendered = render_detachable_sdf(xacro_file=xacro_file, environment=os.environ.copy())
+        rendered = render_detachable_sdf(
+            xacro_file=xacro_file,
+            environment=os.environ.copy(),
+            target_bindings=target_bindings,
+        )
     except Exception as exc:
         return [LogInfo(msg=f"NATIVE_GRASP_DART_UNSUPPORTED: {exc}"), EmitEvent(event=Shutdown(reason="NATIVE_GRASP_DART_UNSUPPORTED"))]
     generated_sdfs.append(rendered)
@@ -136,6 +147,9 @@ def generate_launch_description():
             # Contact changes only its rate/lead; grasp admission remains the
             # independent bilateral-contact + attach-ACK gate in DirectEnv.
             "target_model_name": "target_object",
+            "target_model_names": [
+                binding.target_model for binding in authoritative_scene.target_bindings
+            ],
         }],
     )
     move_group = Node(package="moveit_ros_move_group", executable="move_group", output="screen", parameters=[moveit.to_dict(), {"use_sim_time": True}])
@@ -148,7 +162,15 @@ def generate_launch_description():
             "/openeta/gripper/left_outer@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_outer@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/left_inner@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_inner@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/left_tip@std_msgs/msg/Float64]gz.msgs.Double", "/openeta/gripper/right_tip@std_msgs/msg/Float64]gz.msgs.Double", "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock",
         ], parameters=[{"use_sim_time": True}],
     )
-    spawn = OpaqueFunction(function=_spawn_robot, kwargs={"xacro_file": xacro_file, "generated_sdfs": generated_sdfs, "post_spawn_actions": [jsb, bridge]})
+    spawn = OpaqueFunction(
+        function=_spawn_robot,
+        kwargs={
+            "xacro_file": xacro_file,
+            "generated_sdfs": generated_sdfs,
+            "post_spawn_actions": [jsb, bridge],
+            "target_bindings": authoritative_scene.target_bindings,
+        },
+    )
     return LaunchDescription([
         LogInfo(msg=f"OpenETA qualification solver profile: {solver_profile}"),
         LogInfo(msg=f"OpenETA acceptance scene: {acceptance_scene}"),

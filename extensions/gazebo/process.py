@@ -418,6 +418,9 @@ class GazeboDetachableJointControl:
         parent_link: str = "gripper_mount_link",
         child_model: str = "target_object",
         child_link: str = "target_link",
+        attach_topic: str = "/openeta/native_grasp/detachable_joint/target/attach",
+        detach_topic: str = "/openeta/native_grasp/detachable_joint/target/detach",
+        state_topic: str = "/openeta/native_grasp/detachable_joint/target/state",
         collision_filter_state_topic: str = (
             "/openeta/native_grasp/detachable_joint/target/"
             "collision_filter_state"
@@ -441,6 +444,9 @@ class GazeboDetachableJointControl:
         self.parent_link = parent_link
         self.child_model = child_model
         self.child_link = child_link
+        self.attach_topic = str(attach_topic).strip()
+        self.detach_topic = str(detach_topic).strip()
+        self.state_topic = str(state_topic).strip()
         self.collision_filter_state_topic = str(
             collision_filter_state_topic
         ).strip()
@@ -458,7 +464,10 @@ class GazeboDetachableJointControl:
             attached_target_collision_filter_mask
         )
         if (
-            not self.collision_filter_state_topic
+            not self.attach_topic
+            or not self.detach_topic
+            or not self.state_topic
+            or not self.collision_filter_state_topic
             or not self.collision_filter_state_request_topic
             or not self.collision_filter_state_ack_topic
             or self.robot_collision_filter_mask <= 0
@@ -516,9 +525,9 @@ class GazeboDetachableJointControl:
         if timeout_s <= 0:
             raise ValueError("DetachableJoint readiness timeout must be positive")
         required_topics = {
-            "/openeta/native_grasp/detachable_joint/target/attach",
-            "/openeta/native_grasp/detachable_joint/target/detach",
-            "/openeta/native_grasp/detachable_joint/target/state",
+            self.attach_topic,
+            self.detach_topic,
+            self.state_topic,
             self.collision_filter_state_topic,
             self.collision_filter_state_request_topic,
             self.collision_filter_state_ack_topic,
@@ -734,8 +743,8 @@ class GazeboDetachableJointControl:
         if action not in {"attach", "detach"}:
             raise ValueError("unsupported DetachableJoint action")
         expected = action + "ed"
-        topic = f"/openeta/native_grasp/detachable_joint/target/{action}"
-        state_topic = "/openeta/native_grasp/detachable_joint/target/state"
+        topic = self.attach_topic if action == "attach" else self.detach_topic
+        state_topic = self.state_topic
         # The stock joint emits a transition message once.  Listener first
         # avoids accepting a command whose joint ACK was missed.  Collision
         # semantics are queried separately from the state service below.

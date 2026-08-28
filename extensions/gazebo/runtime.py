@@ -61,49 +61,81 @@ class GazeboRuntime:
             gz_executable=deployment.gz_executable,
             environment=deployment.process_environment,
         )
+        self.attachments: dict[str, Any] = {}
         self.attachment: Any | None = None
+        self._sort_configs: tuple[Any, ...] = ()
+        self._active_sort_assignment_index = 0
+        self._completed_sort_assignment_ids: list[str] = []
+        self._multi_sort_observation_required = False
         if PHYSICS in profile.capabilities:
             model_config = profile.model_config
-            self.attachment = attachment_factory(
-                gz_executable=deployment.gz_executable,
-                environment=deployment.process_environment,
-                timeout_s=15.0,
-                world_name=deployment.world_override or profile.world_name,
-                parent_link=getattr(model_config, "parent_link", "gripper_mount_link"),
-                child_model=getattr(model_config, "target_id", "target_object"),
-                child_link=getattr(model_config, "target_link", "target_link"),
-                collision_filter_state_topic=getattr(
-                    model_config,
-                    "attached_collision_filter_state_topic",
-                    "/openeta/native_grasp/detachable_joint/target/"
-                    "collision_filter_state",
-                ),
-                collision_filter_state_request_topic=getattr(
-                    model_config,
-                    "attached_collision_filter_state_request_topic",
-                    "/openeta/native_grasp/detachable_joint/target/"
-                    "collision_filter_state/request",
-                ),
-                collision_filter_state_ack_topic=getattr(
-                    model_config,
-                    "attached_collision_filter_state_ack_topic",
-                    "/openeta/native_grasp/detachable_joint/target/"
-                    "collision_filter_state/ack",
-                ),
-                robot_collision_filter_mask=getattr(
-                    model_config, "robot_collision_filter_mask", 0x0001
-                ),
-                detached_target_collision_filter_mask=getattr(
-                    model_config,
-                    "detached_target_collision_filter_mask",
-                    0xFFFF,
-                ),
-                attached_target_collision_filter_mask=getattr(
-                    model_config,
-                    "attached_target_collision_filter_mask",
-                    0x0002,
-                ),
+            configured = getattr(model_config, "sort_assignment_configs", ())
+            self._sort_configs = (
+                tuple(configured)
+                if isinstance(configured, tuple) and configured
+                else (model_config,)
             )
+            for target_config in self._sort_configs:
+                target_id = str(getattr(target_config, "target_id", "target_object"))
+                if target_id in self.attachments:
+                    raise ValueError("native grasp target binding is duplicated")
+                self.attachments[target_id] = attachment_factory(
+                    gz_executable=deployment.gz_executable,
+                    environment=deployment.process_environment,
+                    timeout_s=15.0,
+                    world_name=deployment.world_override or profile.world_name,
+                    parent_link=getattr(target_config, "parent_link", "gripper_mount_link"),
+                    child_model=target_id,
+                    child_link=getattr(target_config, "target_link", "target_link"),
+                    attach_topic=getattr(
+                        target_config,
+                        "attach_topic",
+                        "/openeta/native_grasp/detachable_joint/target/attach",
+                    ),
+                    detach_topic=getattr(
+                        target_config,
+                        "detach_topic",
+                        "/openeta/native_grasp/detachable_joint/target/detach",
+                    ),
+                    state_topic=getattr(
+                        target_config,
+                        "state_topic",
+                        "/openeta/native_grasp/detachable_joint/target/state",
+                    ),
+                    collision_filter_state_topic=getattr(
+                        target_config,
+                        "attached_collision_filter_state_topic",
+                        "/openeta/native_grasp/detachable_joint/target/"
+                        "collision_filter_state",
+                    ),
+                    collision_filter_state_request_topic=getattr(
+                        target_config,
+                        "attached_collision_filter_state_request_topic",
+                        "/openeta/native_grasp/detachable_joint/target/"
+                        "collision_filter_state/request",
+                    ),
+                    collision_filter_state_ack_topic=getattr(
+                        target_config,
+                        "attached_collision_filter_state_ack_topic",
+                        "/openeta/native_grasp/detachable_joint/target/"
+                        "collision_filter_state/ack",
+                    ),
+                    robot_collision_filter_mask=getattr(
+                        target_config, "robot_collision_filter_mask", 0x0001
+                    ),
+                    detached_target_collision_filter_mask=getattr(
+                        target_config,
+                        "detached_target_collision_filter_mask",
+                        0xFFFF,
+                    ),
+                    attached_target_collision_filter_mask=getattr(
+                        target_config,
+                        "attached_target_collision_filter_mask",
+                        0x0002,
+                    ),
+                )
+            first_target_id = str(getattr(self._sort_configs[0], "target_id", ""))
+            self.attachment = self.attachments.get(first_target_id)
         self._launch: Any | None = None
         self._cameras: list[Any] = []
         self.controller: Any | None = None
@@ -147,6 +179,37 @@ class GazeboRuntime:
             return self.profile.cameras
         first, *rest = self.profile.cameras
         return (replace(first, extrinsics=dict(self.deployment.camera_extrinsics)), *rest)
+
+    @property
+    def active_pick_place_config(self) -> Any | None:
+        if not self._sort_configs:
+            return self.profile.model_config
+        return self._sort_configs[self._active_sort_assignment_index]
+
+    def multi_sort_progress(self) -> dict[str, Any] | None:
+        if len(self._sort_configs) <= 1:
+            return None
+        all_completed = len(self._completed_sort_assignment_ids) == len(self._sort_configs)
+        active = None if all_completed else self.active_pick_place_config
+        assignment = getattr(active, "active_sort_assignment", None)
+        return {
+            "schema_version": "openeta.multi_sort_progress.v1",
+            "scene_id": str(getattr(self._sort_configs[0], "acceptance_scene_id", "")),
+            "assignment_count": len(self._sort_configs),
+            "completed_count": len(self._completed_sort_assignment_ids),
+            "completed_assignment_ids": list(self._completed_sort_assignment_ids),
+            "remaining_count": len(self._sort_configs)
+            - len(self._completed_sort_assignment_ids),
+            "all_completed": all_completed,
+            "active_assignment_index": (
+                None if all_completed else self._active_sort_assignment_index
+            ),
+            "active_assignment": (
+                dict(assignment) if isinstance(assignment, Mapping) else None
+            ),
+            "same_environment_session": True,
+            "fresh_observation_required": self._multi_sort_observation_required,
+        }
 
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - time.monotonic()
@@ -244,13 +307,15 @@ class GazeboRuntime:
                 # that the later-spawned stock joint endpoints exist; wait for
                 # those exact endpoints before listener-first detach.  Do not
                 # resume for a missing topic or detached ACK: native-grasp fails closed.
-                if self.attachment is None:
+                if not self.attachments:
                     raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE")
-                attachment_ready = getattr(self.attachment, "wait_ready", None)
-                if callable(attachment_ready):
-                    attachment_ready(timeout_s=self._remaining(deadline))
+                for attachment in self.attachments.values():
+                    attachment_ready = getattr(attachment, "wait_ready", None)
+                    if callable(attachment_ready):
+                        attachment_ready(timeout_s=self._remaining(deadline))
                 self._world.set_paused(True)
-                self.attachment.ensure_detached(require_ack=True)
+                for attachment in self.attachments.values():
+                    attachment.ensure_detached(require_ack=True)
                 self._world.set_paused(False)
             if CONTROL in self.profile.capabilities:
                 self.controller = self._controller_factory.create(
@@ -306,6 +371,14 @@ class GazeboRuntime:
             )
             for camera in self._cameras
         ]
+        progress = self.multi_sort_progress()
+        if isinstance(progress, dict) and self._multi_sort_observation_required:
+            progress = {
+                **progress,
+                "fresh_observation_required": False,
+                "fresh_observation_satisfied": True,
+            }
+            self._multi_sort_observation_required = False
         observation = EnvObservation(
             task=self.task,
             cameras=frames,
@@ -315,6 +388,7 @@ class GazeboRuntime:
                 "profile": self.profile.name,
                 "observation_provenance": "gazebo_ros_live",
                 "scene_epoch": self.scene_epoch,
+                **({"multi_sort_progress": progress} if progress is not None else {}),
             },
         )
         self._last_observation = observation
@@ -330,6 +404,12 @@ class GazeboRuntime:
         # This is intentionally not a soft attachment or an idempotent-ACK
         # assumption; inability to recreate and receive that ACK still fails
         # closed.
+        if self._sort_configs:
+            self._active_sort_assignment_index = 0
+            self._completed_sort_assignment_ids = []
+            self._multi_sort_observation_required = False
+            first_target_id = str(getattr(self._sort_configs[0], "target_id", ""))
+            self.attachment = self.attachments.get(first_target_id)
         if PHYSICS in self.profile.capabilities and self.started:
             self.close()
             self.closed = False
@@ -457,6 +537,81 @@ class GazeboRuntime:
             )
         return observation
 
+    def complete_active_sort_assignment(
+        self,
+        *,
+        placement_verification: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Advance a proven multi-sort task without recreating the world."""
+
+        if len(self._sort_configs) <= 1:
+            return None
+        if not (
+            placement_verification.get("placement_confirmed") is True
+            and str(placement_verification.get("verdict") or "").upper() == "PASS"
+        ):
+            raise GazeboProcessError("MULTI_SORT_PLACEMENT_NOT_PROVEN")
+        current = self.active_pick_place_config
+        assignment = getattr(current, "active_sort_assignment", None)
+        assignment_id = (
+            str(assignment.get("id") or "") if isinstance(assignment, Mapping) else ""
+        )
+        if not assignment_id or assignment_id in self._completed_sort_assignment_ids:
+            raise GazeboProcessError("MULTI_SORT_ASSIGNMENT_STATE_INVALID")
+        if self.attachment is None or getattr(self.attachment, "state", None) != (
+            DetachableJointState.DETACHED
+        ):
+            raise GazeboProcessError("MULTI_SORT_TARGET_NOT_DETACHED")
+        self._completed_sort_assignment_ids.append(assignment_id)
+        transition: dict[str, Any] = {
+            "completed_assignment_id": assignment_id,
+            "world_recreated": False,
+            "model_inference_invoked": False,
+        }
+        if len(self._completed_sort_assignment_ids) < len(self._sort_configs):
+            next_index = len(self._completed_sort_assignment_ids)
+            next_config = self._sort_configs[next_index]
+            next_target_id = str(getattr(next_config, "target_id", ""))
+            next_attachment = self.attachments.get(next_target_id)
+            if next_attachment is None or getattr(
+                next_attachment, "state", None
+            ) != DetachableJointState.DETACHED:
+                raise GazeboProcessError("MULTI_SORT_NEXT_TARGET_NOT_DETACHED")
+            try:
+                target_pose, _mount_pose, pose_attempts = (
+                    next_attachment.native_target_mount_poses_with_retry(max_attempts=2)
+                )
+            except Exception as exc:
+                raise GazeboProcessError(
+                    f"MULTI_SORT_NEXT_TARGET_POSE_UNAVAILABLE: {exc}"
+                ) from exc
+            activate = getattr(self.controller, "activate_pick_place_config", None)
+            if not callable(activate):
+                raise GazeboProcessError("MULTI_SORT_PLANNING_SCENE_SWITCH_UNAVAILABLE")
+            revision = activate(
+                next_config,
+                target_xyz=tuple(float(value) for value in target_pose.xyz),
+                target_quat_xyzw=tuple(
+                    float(value) for value in target_pose.quat_xyzw
+                ),
+            )
+            self._active_sort_assignment_index = next_index
+            self.attachment = next_attachment
+            self._last_observation = None
+            self._multi_sort_observation_required = True
+            transition.update(
+                {
+                    "activated_assignment_index": next_index,
+                    "activated_target_id": next_target_id,
+                    "planning_scene_revision": int(revision),
+                    "target_pose_read_attempt_count": int(pose_attempts),
+                }
+            )
+        progress = self.multi_sort_progress()
+        if progress is None:
+            raise GazeboProcessError("MULTI_SORT_PROGRESS_UNAVAILABLE")
+        return {**progress, "transition": transition}
+
     def execute(self, action: Mapping[str, Any]) -> tuple[EnvObservation, dict[str, Any]]:
         if self.controller is None:
             raise GazeboProcessError("Gazebo profile is read-only")
@@ -510,20 +665,21 @@ class GazeboRuntime:
         if self.closed:
             return
         errors: list[BaseException] = []
-        if self.attachment is not None and self.started:
-            try:
-                # A previous stock transition already supplied the only valid
-                # detached ACK. Re-publishing detach while it is still known
-                # detached emits no state transition in Gazebo Sim, so never
-                # manufacture a second ACK requirement at cleanup. Unknown
-                # or attached state still requires a real detach ACK.
-                if (
-                    getattr(self.attachment, "state", DetachableJointState.UNKNOWN)
-                    != DetachableJointState.DETACHED
-                ):
-                    self.attachment.ensure_detached(require_ack=True)
-            except BaseException as exc:
-                errors.append(exc)
+        if self.started:
+            for attachment in self.attachments.values():
+                try:
+                    # A previous stock transition already supplied the only valid
+                    # detached ACK. Re-publishing detach while it is still known
+                    # detached emits no state transition in Gazebo Sim, so never
+                    # manufacture a second ACK requirement at cleanup. Unknown
+                    # or attached state still requires a real detach ACK.
+                    if (
+                        getattr(attachment, "state", DetachableJointState.UNKNOWN)
+                        != DetachableJointState.DETACHED
+                    ):
+                        attachment.ensure_detached(require_ack=True)
+                except BaseException as exc:
+                    errors.append(exc)
         # Failures do not short-circuit reverse-order resource cleanup.
         for resource in (self.controller, *reversed(self._cameras)):
             if resource is None:

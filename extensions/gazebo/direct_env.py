@@ -113,7 +113,14 @@ class GazeboDirectEnv(Env):
         self.openeta_capabilities = self.profile.capabilities
         self.openeta_control_spec = build_gazebo_control_spec(self.profile)
         self.action_space = spaces.Discrete(1)
-        self._native_grasp_config = self.profile.model_config if isinstance(self.profile.model_config, NativePickPlaceConfig) else None
+        runtime_config = getattr(self.runtime, "active_pick_place_config", None)
+        self._native_grasp_config = (
+            runtime_config
+            if isinstance(runtime_config, NativePickPlaceConfig)
+            else self.profile.model_config
+            if isinstance(self.profile.model_config, NativePickPlaceConfig)
+            else None
+        )
         self._native_grasp_verifier = NativeGraspVerifier(self._native_grasp_config) if self._native_grasp_config is not None else None
         self._native_grasp_transport_locked = False
         self._attachment_transform: dict[str, Any] | None = None
@@ -187,6 +194,9 @@ class GazeboDirectEnv(Env):
                 "contact_provenance": "gazebo_native_contacts",
                 "attachment_target": self._native_grasp_config.target_id,
             })
+            progress = getattr(self.runtime, "multi_sort_progress", lambda: None)()
+            if isinstance(progress, Mapping):
+                raw["metadata"]["multi_sort_progress"] = dict(progress)
         return raw
 
     def observe(self) -> dict[str, Any]:
@@ -214,6 +224,10 @@ class GazeboDirectEnv(Env):
             self._native_grasp_transport_locked = False
             self._attachment_transform = None
         observation = self.runtime.reset(seed=self._seed)
+        active_config = getattr(self.runtime, "active_pick_place_config", None)
+        if isinstance(active_config, NativePickPlaceConfig):
+            self._native_grasp_config = active_config
+            self._native_grasp_verifier = NativeGraspVerifier(active_config)
         raw = self._decorate_robot(self._as_unified(observation))
         scene_revision = self._planning_scene_revision()
         if scene_revision is not None:
@@ -546,8 +560,16 @@ class GazeboDirectEnv(Env):
                         self._native_grasp_transport_locked = False
                         receipt.update({
                             "native_contact_gate": gate.to_dict(),
+                            "native_target_binding": {
+                                "target_id": self._native_grasp_config.target_id,
+                                "target_link": self._native_grasp_config.target_link,
+                                "assignment_id": self._native_grasp_config.active_sort_assignment.get(
+                                    "id"
+                                ),
+                            },
                             "detachable_joint": {
                                 "state": "attached",
+                                "target_id": self._native_grasp_config.target_id,
                                 "attach_topic": self._native_grasp_config.attach_topic,
                                 "state_topic": self._native_grasp_config.state_topic,
                                 "collision_filter_state_topic": (
@@ -781,9 +803,62 @@ class GazeboDirectEnv(Env):
                         receipt["placement_verification"] = placement.to_dict()
                         receipt["release_sequence"] = release_sequence
                         receipt["gripper_open_executed"] = True
+                        receipt["native_target_binding"] = {
+                            "target_id": self._native_grasp_config.target_id,
+                            "target_link": self._native_grasp_config.target_link,
+                            "assignment_id": self._native_grasp_config.active_sort_assignment.get(
+                                "id"
+                            ),
+                        }
                         raw.setdefault("metadata", {})[
                             "planning_scene_revision"
                         ] = scene_revision
+                        if placement.verdict.value == "PASS":
+                            advance = getattr(
+                                self.runtime,
+                                "complete_active_sort_assignment",
+                                None,
+                            )
+                            progress = (
+                                advance(placement_verification=placement.to_dict())
+                                if callable(advance)
+                                else None
+                            )
+                            if isinstance(progress, Mapping):
+                                progress = dict(progress)
+                                receipt["multi_sort_progress"] = progress
+                                raw["metadata"]["multi_sort_progress"] = progress
+                                next_revision = (progress.get("transition") or {}).get(
+                                    "planning_scene_revision"
+                                )
+                                if isinstance(next_revision, int) and not isinstance(
+                                    next_revision, bool
+                                ):
+                                    raw["metadata"]["planning_scene_revision"] = next_revision
+                                    receipt[
+                                        "next_assignment_planning_scene_revision"
+                                    ] = next_revision
+                                if progress.get("all_completed") is not True:
+                                    next_config = getattr(
+                                        self.runtime,
+                                        "active_pick_place_config",
+                                        None,
+                                    )
+                                    if not isinstance(
+                                        next_config, NativePickPlaceConfig
+                                    ):
+                                        raise GazeboProcessError(
+                                            "MULTI_SORT_ACTIVE_CONFIG_UNAVAILABLE"
+                                        )
+                                    self._native_grasp_config = next_config
+                                    self._native_grasp_verifier = NativeGraspVerifier(
+                                        next_config
+                                    )
+                                    self.openeta_control_spec[
+                                        "validated_pickplace_motion"
+                                    ] = validated_pickplace_motion_guidance(
+                                        next_config
+                                    )
                     except Exception as exc:
                         record = release_before_open["record"]
                         receipt.update(
@@ -845,7 +920,15 @@ class GazeboDirectEnv(Env):
                 receipt["physical_verification"] = record.to_dict()
                 receipt["detachable_joint"] = {
                     "state": "attached",
+                    "target_id": self._native_grasp_config.target_id,
                     "state_topic": self._native_grasp_config.state_topic,
+                }
+                receipt["native_target_binding"] = {
+                    "target_id": self._native_grasp_config.target_id,
+                    "target_link": self._native_grasp_config.target_link,
+                    "assignment_id": self._native_grasp_config.active_sort_assignment.get(
+                        "id"
+                    ),
                 }
                 collision_filter = self._collision_filter_evidence(
                     attachment, attached=True

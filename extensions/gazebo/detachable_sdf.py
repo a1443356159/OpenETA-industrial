@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from typing import Mapping, Sequence
 import xml.etree.ElementTree as ET
 
 
@@ -104,8 +105,18 @@ def _assign_robot_collision_filter_mask(model: ET.Element) -> None:
         bitmask.text = str(ROBOT_COLLISION_FILTER_MASK)
 
 
-def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) -> ET.Element:
-    """Validate the one approved joint and add DART-only fixed-root details."""
+def _binding_field(binding: object, key: str) -> str:
+    value = binding.get(key) if isinstance(binding, Mapping) else getattr(binding, key, None)
+    return str(value or "").strip()
+
+
+def prepare_detachable_sdf(
+    root: ET.Element,
+    *,
+    dart_compatible: bool = True,
+    target_bindings: Sequence[object] | None = None,
+) -> ET.Element:
+    """Validate the template and materialize one stock joint per sort target."""
 
     model = root.find("model")
     if model is None:
@@ -125,6 +136,34 @@ def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) ->
     actual = {key: plugin.findtext(key) for key in expected}
     if actual != expected:
         raise DetachableSdfError("rendered SDF DetachableJoint topology is not approved")
+    bindings = tuple(target_bindings or ())
+    if bindings:
+        normalized: list[dict[str, str]] = []
+        for binding in bindings:
+            values = {
+                "parent_link": "gripper_mount_link",
+                "child_model": _binding_field(binding, "target_model"),
+                "child_link": _binding_field(binding, "target_link"),
+                "attach_topic": _binding_field(binding, "attach_topic"),
+                "detach_topic": _binding_field(binding, "detach_topic"),
+                "output_topic": _binding_field(binding, "state_topic"),
+            }
+            if any(not value for value in values.values()):
+                raise DetachableSdfError("detachable target binding is invalid")
+            normalized.append(values)
+        if len({item["child_model"] for item in normalized}) != len(normalized):
+            raise DetachableSdfError("detachable target binding is duplicated")
+        if plugin not in list(model):
+            raise DetachableSdfError("rendered SDF DetachableJoint must belong to the robot model")
+        model.remove(plugin)
+        for values in normalized:
+            materialized = ET.fromstring(ET.tostring(plugin, encoding="unicode"))
+            for key, value in values.items():
+                field = materialized.find(key)
+                if field is None:
+                    raise DetachableSdfError("rendered SDF DetachableJoint field is missing")
+                field.text = value
+            model.append(materialized)
     if model.find("link[@name='base_link']") is None:
         raise DetachableSdfError("rendered SDF has no base_link for a fixed root")
     _normalize_contact_topics(model)
@@ -152,6 +191,7 @@ def render_detachable_sdf(
     xacro_executable: str = "xacro",
     gz_executable: str = "gz",
     directory: Path | None = None,
+    target_bindings: Sequence[object] | None = None,
 ) -> Path:
     """Render a caller-owned temporary fixed-root SDF or raise fail-closed."""
 
@@ -185,7 +225,11 @@ def render_detachable_sdf(
             f"NATIVE_GRASP_DART_UNSUPPORTED: URDF-to-SDF conversion failed: {converted.stderr[-800:]}"
         )
     try:
-        root = prepare_detachable_sdf(ET.fromstring(converted.stdout), dart_compatible=True)
+        root = prepare_detachable_sdf(
+            ET.fromstring(converted.stdout),
+            dart_compatible=True,
+            target_bindings=target_bindings,
+        )
     except ET.ParseError as exc:
         raise DetachableSdfError("NATIVE_GRASP_DART_UNSUPPORTED: invalid converted SDF") from exc
     descriptor, sdf_name = tempfile.mkstemp(prefix="openeta-native-grasp-", suffix=".sdf", dir=directory)
