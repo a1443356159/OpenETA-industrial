@@ -35,6 +35,7 @@ def test_native_grasp_registration_exposes_the_approved_detachable_joint_profile
     )
     assert NativePickPlaceConfig().model_id == PICKPLACE_MODEL_ID
     assert NativePickPlaceConfig().allow_stalling is True
+    assert NativePickPlaceConfig().placement_release_z_offset_m == pytest.approx(0.05)
     assert GazeboControlConfig().model_id == MODEL_ID
     profile = gazebo_profile("rm75_robotiq2f85_pickplace")
     assert profile.unavailable_reason is None
@@ -50,6 +51,34 @@ def test_native_grasp_registration_exposes_the_approved_detachable_joint_profile
         "sensor_frame": "wrist_camera_optical_frame",
         "sensor_frame_convention": "gazebo_camera",
     }
+
+
+def test_rm75_physical_pedestal_uses_one_workcell_mounting_datum() -> None:
+    config = NativePickPlaceConfig()
+    description = (
+        config.asset_root / "urdf" / "rm75_6fb_v.urdf.xacro"
+    )
+    root = ET.parse(description).getroot()
+    base = root.find("link[@name='base_link']")
+    joint = root.find("joint[@name='joint_1']")
+
+    assert base is not None and joint is not None
+    origins = [
+        base.find("inertial/origin"),
+        base.find("visual/origin"),
+        base.find("collision/origin"),
+        joint.find("origin"),
+    ]
+    assert all(origin is not None for origin in origins)
+    inertial_x, visual_x, collision_x, joint_x = [
+        float(origin.get("xyz", "").split()[0])  # type: ignore[union-attr]
+        for origin in origins
+    ]
+
+    assert visual_x == pytest.approx(0.20)
+    assert collision_x == pytest.approx(visual_x)
+    assert joint_x == pytest.approx(visual_x)
+    assert inertial_x - 0.00049987 == pytest.approx(visual_x)
 
 
 def test_native_grasp_top_camera_profile_matches_the_world_model_pose() -> None:

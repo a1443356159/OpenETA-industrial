@@ -4,11 +4,16 @@
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
   name="openeta_rm75_v_description">
+  <!-- base_link is the workcell datum shared by Gazebo, MoveIt, cameras, and
+       generated model poses.  The physical pedestal is mounted 200 mm along
+       table X so the near picking area and the receptacle area lie in the
+       same constrained-orientation workspace.  Keep the pedestal inertial,
+       visual, collision, and first joint at this one rigid mounting datum. -->
   <link
     name="base_link">
     <inertial>
       <origin
-        xyz="0.00049987 5.2709E-05 0.060019"
+        xyz="0.20049987 5.2709E-05 0.060019"
         rpy="0 0 0" />
       <mass
         value="1.862" />
@@ -22,7 +27,7 @@
     </inertial>
     <visual>
       <origin
-        xyz="0 0 0"
+        xyz="0.20 0 0"
         rpy="0 0 0" />
       <geometry>
         <mesh
@@ -36,7 +41,7 @@
     </visual>
     <collision>
       <origin
-        xyz="0 0 0"
+        xyz="0.20 0 0"
         rpy="0 0 0" />
       <geometry>
         <mesh
@@ -87,12 +92,11 @@
   <joint
     name="joint_1"
     type="revolute">
-    <!-- Workcell mounting transform: the RM75 pedestal faces away from the
-         work table.  Keep this rotation inside the kinematic tree (rather
-         than applying a Gazebo-only spawn yaw) so TF, MoveIt, IK, collision
-         checking, and the rendered robot all share the same base frame. -->
+    <!-- Keep the complete workcell mounting transform inside the kinematic
+         tree (rather than applying a Gazebo-only model pose) so TF, MoveIt,
+         IK, collision checking, and the rendered robot remain identical. -->
     <origin
-      xyz="0 0 0.2405"
+      xyz="0.20 0 0.2405"
       rpy="0 0 3.14159265359" />
     <parent
       link="base_link" />

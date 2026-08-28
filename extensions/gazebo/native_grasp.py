@@ -439,7 +439,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # AnyPlace describes the settled object goal.  Release the attached object
     # above that goal and let native gravity complete the final drop; this is a
     # single terminal-pose translation, not an artificial hover waypoint.
-    placement_release_z_offset_m: float = 0.20
+    placement_release_z_offset_m: float = 0.05
     placement_acceptance_semantics: str | None = None
     placement_stability_duration_s: float = 0.50
     placement_sample_interval_s: float = 0.10
