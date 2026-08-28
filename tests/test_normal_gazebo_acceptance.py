@@ -213,6 +213,37 @@ def test_multi_normal_prepares_one_human_task_with_two_ordered_assignments(
     }
 
 
+def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> None:
+    def call(parameters, outputs):
+        return {
+            "parameters": parameters,
+            "result": {"details": {"outputs": outputs}},
+        }
+
+    first_model = call({"scene_revision": 1}, {})
+    first_requalification = call(
+        {"reuse_frozen_goal_pool": True, "scene_revision": 2},
+        {"anyplace_model_inference_invoked": False},
+    )
+    second_model = call(
+        {"scene_revision": 5},
+        {"anyplace_model_inference_invoked": True},
+    )
+    second_requalification = call(
+        {"reuse_frozen_goal_pool": True, "scene_revision": 6},
+        {"anyplace_model_inference_invoked": False},
+    )
+
+    assert acceptance._anyplace_model_inference_calls(
+        [
+            first_model,
+            first_requalification,
+            second_model,
+            second_requalification,
+        ]
+    ) == [first_model, second_model]
+
+
 def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
     assert acceptance._scenario_environment("narrow-pick") == {
         "OPENETA_ACCEPTANCE_SCENE": "narrow-pick"

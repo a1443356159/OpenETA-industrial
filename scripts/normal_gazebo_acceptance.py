@@ -630,6 +630,26 @@ def _parameters(call: Mapping[str, Any]) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _anyplace_model_inference_calls(
+    calls: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Classify model calls without confusing frozen requalification.
+
+    Current producers emit an explicit Boolean. Older traces omitted only the
+    positive value, so every legacy call without ``reuse_frozen_goal_pool`` is
+    still one model invocation; this matters for same-session multi-sort.
+    """
+
+    inference_calls: list[Mapping[str, Any]] = []
+    for call in calls:
+        flag = _call_outputs(call).get("anyplace_model_inference_invoked")
+        if flag is True or (
+            flag is None and _parameters(call).get("reuse_frozen_goal_pool") is not True
+        ):
+            inference_calls.append(call)
+    return inference_calls
+
+
 def _ordered(names: Sequence[str], required: Sequence[str]) -> bool:
     cursor = iter(names)
     return all(any(name == wanted for name in cursor) for wanted in required)
@@ -1359,15 +1379,7 @@ def verify_case(
             )
         anyplace_calls = [call for call in calls if _name(call) == "anyplace"]
         anyplace = anyplace_calls[-1] if anyplace_calls else {}
-        anyplace_inference_calls = [
-            call
-            for call in anyplace_calls
-            if base._contains(call, "anyplace_model_inference_invoked", True)
-        ]
-        if not anyplace_inference_calls and anyplace_calls:
-            # Compatibility with v1 evidence, which omitted the positive
-            # Boolean on its one model call.
-            anyplace_inference_calls = [anyplace_calls[0]]
+        anyplace_inference_calls = _anyplace_model_inference_calls(anyplace_calls)
         anyplace_requalification_calls = [
             call
             for call in anyplace_calls

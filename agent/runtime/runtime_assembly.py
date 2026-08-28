@@ -1385,6 +1385,7 @@ class _FrozenGoalPairCoordinator:
         result.details["selection_required"] = False
         result.details["frozen_goal_pool_ready"] = True
         result.details["frozen_goal_pool_count"] = len(goals)
+        result.details["anyplace_model_inference_invoked"] = True
         result.details["execution_started"] = False
         result.content = (
             f"Retained {len(goals)} host-private object goals for bounded "
