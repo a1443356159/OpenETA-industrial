@@ -16,8 +16,8 @@
         "shape_class": "adjustable_wrench",
         "bounding_box_xyz": [0.22, 0.062, 0.030],
         "mass_kg": 0.30,
-        "pose_xyz": [0.29, -0.020, 0.015],
-        "pose_rpy": [0.0, 0.0, 0.16],
+        "pose_xyz": [0.06, -0.240, 0.015],
+        "pose_rpy": [0.0, 0.0, -0.45],
         "primitives": [
           {"shape": "box", "size_xyz": [0.165, 0.025, 0.026], "pose_xyz": [-0.025, 0.0, -0.002], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.92, 0.68, 0.08, 1.0]},
           {"shape": "box", "size_xyz": [0.055, 0.062, 0.030], "pose_xyz": [0.080, 0.0, 0.0], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.92, 0.68, 0.08, 1.0]}

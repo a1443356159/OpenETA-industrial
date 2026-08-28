@@ -338,7 +338,7 @@ def test_v_description_is_shared_and_camera_is_fixed() -> None:
     joint_1 = root.find("joint[@name='joint_1']")
     assert joint_1 is not None
     assert joint_1.find("origin").attrib == {
-        "xyz": "0 0 0.2405",
+        "xyz": "0.20 0 0.2405",
         "rpy": "0 0 3.14159265359",
     }
     bracket_joint = root.find("joint[@name='wrist_camera_bracket_joint']")

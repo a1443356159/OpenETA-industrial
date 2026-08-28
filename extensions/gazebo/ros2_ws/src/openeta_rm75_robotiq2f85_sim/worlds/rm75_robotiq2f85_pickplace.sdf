@@ -108,9 +108,12 @@
     <model name="placement_zone_marker"><static>true</static><pose>0.62 0.180 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.275 0.004</size></box></geometry><material><ambient>0.025 0.34 0.095 1</ambient><diffuse>0.035 0.70 0.16 1</diffuse><specular>0.08 0.10 0.08 1</specular></material></visual></link></model>
     <model name="blue_destination_marker"><static>true</static><pose>0.62 -0.180 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.275 0.004</size></box></geometry><material><ambient>0.025 0.11 0.42 1</ambient><diffuse>0.035 0.25 0.88 1</diffuse><specular>0.08 0.09 0.14 1</specular></material></visual></link></model>
 
-    <!-- Required sort item plus six physically independent neighbouring parts. -->
+    <!-- Required sort item plus six physically independent neighbouring parts.
+         Their collision envelopes are distributed around the pedestal instead
+         of forming one foreground cluster; each remains clear of the robot,
+         both bins, its neighbours, and the work-surface boundary. -->
     <model name="target_object">
-      <pose>0.29 -0.020 0.015 0 0 0.16</pose>
+      <pose>0.06 -0.240 0.015 0 0 -0.45</pose>
       <link name="target_link">
         <inertial><mass>0.30</mass><inertia><ixx>0.0001186</ixx><iyy>0.0012325</iyy><izz>0.0013061</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
         <collision name="target_handle_collision"><pose>-0.025 0 -0.002 0 0 0</pose><geometry><box><size>0.165 0.025 0.026</size></box></geometry></collision>
@@ -119,7 +122,7 @@
       </link>
     </model>
     <model name="silver_box_wrench">
-      <pose>0.31 0.105 0.003 0 0 -0.18</pose>
+      <pose>0.05 0.240 0.003 0 0 0.45</pose>
       <link name="silver_box_wrench_link">
         <inertial><mass>0.18</mass><inertia><ixx>0.00012</ixx><iyy>0.00055</iyy><izz>0.00058</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
         <collision name="handle"><pose>0 0 0.007 0 0 0</pose><geometry><box><size>0.15 0.022 0.014</size></box></geometry></collision>
@@ -129,7 +132,7 @@
       </link>
     </model>
     <model name="red_m24_hex_bolt">
-      <pose>0.185 -0.285 0.002 0 0 0.12</pose>
+      <pose>0.24 -0.190 0.002 0 0 1.20</pose>
       <link name="red_m24_hex_bolt_link">
         <inertial><mass>0.17</mass><inertia><ixx>0.00005</ixx><iyy>0.00018</iyy><izz>0.00018</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
         <collision name="shaft"><pose>0.012 0 0.012 0 1.57079632679 0</pose><geometry><cylinder><radius>0.012</radius><length>0.095</length></cylinder></geometry></collision>
@@ -138,7 +141,7 @@
       </link>
     </model>
     <model name="orange_m20_socket_bolt">
-      <pose>0.36 -0.315 0.002 0 0 -0.34</pose>
+      <pose>0.08 0.400 0.002 0 0 -0.65</pose>
       <link name="orange_m20_socket_bolt_link">
         <inertial><mass>0.13</mass><inertia><ixx>0.00004</ixx><iyy>0.00013</iyy><izz>0.00013</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
         <collision name="shaft"><pose>0.010 0 0.010 0 1.57079632679 0</pose><geometry><cylinder><radius>0.010</radius><length>0.080</length></cylinder></geometry></collision>
@@ -147,7 +150,7 @@
       </link>
     </model>
     <model name="distractor_object">
-      <pose>0.34 0.375 0.011 0 0 -0.10</pose>
+      <pose>0.29 0.340 0.011 0 0 2.85</pose>
       <link name="distractor_link">
         <inertial><mass>0.23</mass><inertia><ixx>0.00016</ixx><iyy>0.00066</iyy><izz>0.00070</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
         <collision name="handles"><pose>-0.025 0 -0.002 0 0 0</pose><geometry><box><size>0.145 0.055 0.018</size></box></geometry></collision>
@@ -156,7 +159,7 @@
       </link>
     </model>
     <model name="blue_black_screwdriver">
-      <pose>0.145 -0.390 0.003 0 0 0.05</pose>
+      <pose>0.30 -0.360 0.003 0 0 0.30</pose>
       <link name="blue_black_screwdriver_link">
         <inertial><mass>0.12</mass><inertia><ixx>0.00005</ixx><iyy>0.00034</iyy><izz>0.00034</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
         <collision name="handle"><pose>-0.057 0 0.010 0 1.57079632679 0</pose><geometry><cylinder><radius>0.010</radius><length>0.065</length></cylinder></geometry></collision>
@@ -165,7 +168,7 @@
       </link>
     </model>
     <model name="silver_allen_key">
-      <pose>0.38 0.35 0.003 0 0 1.20</pose>
+      <pose>0.38 -0.100 0.003 0 0 1.35</pose>
       <link name="silver_allen_key_link">
         <inertial><mass>0.055</mass><inertia><ixx>0.00002</ixx><iyy>0.00011</iyy><izz>0.00012</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia></inertial>
         <collision name="long_leg"><pose>-0.018 0 0.0055 0 0 0</pose><geometry><box><size>0.125 0.011 0.011</size></box></geometry></collision>
