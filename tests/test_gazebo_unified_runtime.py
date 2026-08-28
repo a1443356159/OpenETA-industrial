@@ -281,6 +281,52 @@ def test_direct_observe_publishes_current_planning_scene_revision() -> None:
     assert observation["metadata"]["planning_scene_revision"] == 7
 
 
+def test_direct_observe_preserves_one_shot_multi_sort_refresh_proof() -> None:
+    profile = replace(
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
+        model_config=NativePickPlaceConfig(acceptance_scene_id="multi_normal"),
+    )
+    progress = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "assignment_count": 2,
+        "completed_count": 1,
+        "remaining_count": 1,
+        "all_completed": False,
+        "fresh_observation_required": False,
+        "active_assignment": {"id": "red_bolt_to_blue"},
+    }
+    runtime = SimpleNamespace(
+        active_pick_place_config=profile.model_config,
+        controller=SimpleNamespace(planning_scene=SimpleNamespace(revision=5)),
+        observe=lambda: EnvObservation(
+            task="sort",
+            cameras=[],
+            robot=RobotState(),
+            metadata={
+                "scene_epoch": 2,
+                "multi_sort_progress": {
+                    **progress,
+                    "fresh_observation_satisfied": True,
+                },
+            },
+        ),
+        multi_sort_progress=lambda: dict(progress),
+        close=lambda: None,
+        started=False,
+    )
+    env = GazeboDirectEnv(
+        profile=profile,
+        deployment=_deployment(),
+        runtime=runtime,
+    )
+
+    observation = env.observe()
+
+    assert observation["metadata"]["multi_sort_progress"][
+        "fresh_observation_satisfied"
+    ] is True
+
+
 def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() -> None:
     made_launch = []
     made_cameras = []

@@ -195,7 +195,12 @@ class GazeboDirectEnv(Env):
                 "attachment_target": self._native_grasp_config.target_id,
             })
             progress = getattr(self.runtime, "multi_sort_progress", lambda: None)()
-            if isinstance(progress, Mapping):
+            if (
+                isinstance(progress, Mapping)
+                and not isinstance(
+                    raw["metadata"].get("multi_sort_progress"), Mapping
+                )
+            ):
                 raw["metadata"]["multi_sort_progress"] = dict(progress)
         return raw
 
