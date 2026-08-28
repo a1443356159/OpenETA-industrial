@@ -861,6 +861,9 @@ class GazeboController:
         self,
         *,
         state_provider: Callable[[], RobotState],
+        barrier_ordered_terminal_state_provider: (
+            Callable[[float], RobotState] | None
+        ) = None,
         move_action: Callable[[dict, float], Mapping[str, Any]] | None = None,
         gripper_action: Callable[[float, float], Mapping[str, Any]] | None = None,
         start_state_recovery: Callable[[RobotState, float], Mapping[str, Any]] | None = None,
@@ -873,6 +876,9 @@ class GazeboController:
     ):
         self.config = config or GazeboControlConfig()
         self.state_provider = state_provider
+        self.barrier_ordered_terminal_state_provider = (
+            barrier_ordered_terminal_state_provider
+        )
         self.move_action, self.gripper_action = move_action, gripper_action
         self.start_state_recovery = start_state_recovery
         self.cancel_pending, self.close_source = cancel_pending, close_source
@@ -1210,9 +1216,32 @@ class GazeboController:
                             **recovery_timing,
                         },
                     )
-                try:
-                    end = self.state_provider()
-                except Exception:
+                barrier_ordered_terminal_state = False
+                action_started_value = result.get("action_started_ros_time_s")
+                if (
+                    result.get("ok") is True
+                    and result.get("execution_started") is True
+                    and self.barrier_ordered_terminal_state_provider is not None
+                    and isinstance(action_started_value, (int, float))
+                    and not isinstance(action_started_value, bool)
+                    and math.isfinite(float(action_started_value))
+                ):
+                    try:
+                        end = self.barrier_ordered_terminal_state_provider(
+                            float(action_started_value)
+                        )
+                        barrier_ordered_terminal_state = True
+                    except Exception:
+                        try:
+                            end = self.state_provider()
+                        except Exception:
+                            end = None
+                else:
+                    try:
+                        end = self.state_provider()
+                    except Exception:
+                        end = None
+                if end is None:
                     action_timing = {
                         key: result[key]
                         for key in (
@@ -1395,6 +1424,32 @@ class GazeboController:
                     if len(arm_velocities) == len(ARM_JOINTS)
                     else None
                 )
+                if barrier_ordered_terminal_state:
+                    barrier_state_verified = (
+                        target_verified
+                        and max_arm_velocity_rad_s is not None
+                        and max_arm_velocity_rad_s
+                        <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
+                    )
+                    action_evidence.update(
+                        {
+                            "terminal_state_source": (
+                                "barrier_ordered_action_terminal_sample"
+                            ),
+                            "terminal_state_action_barrier_ros_time_s": float(
+                                action_started_value
+                            ),
+                            "terminal_state_stationary_verified": (
+                                barrier_state_verified
+                            ),
+                        }
+                    )
+                    if not barrier_state_verified:
+                        ok = False
+                        error = "MOTION_OUTCOME_UNKNOWN"
+                        result["motion_outcome"] = "unknown"
+                        result["reached_goal"] = False
+                        extra = {"reconciliation_required": True}
                 control_failed_at_verified_terminal = (
                     not ok
                     and result.get("execution_started") is True

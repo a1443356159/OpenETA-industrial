@@ -1387,13 +1387,30 @@ class RosGazeboStateSource:
                 float(min_ros_timestamp_s) if min_ros_timestamp_s is not None else None
             )
 
-    def state(self):
+    def state(
+        self,
+        *,
+        allow_barrier_ordered_stale: bool = False,
+        minimum_ros_timestamp_s: float | None = None,
+    ):
         with self._lock:
             joint = dict(self._joint_state) if self._joint_state is not None else None
             received = self._joint_received
             joint_stamp = self._joint_stamp
-            minimum_stamp = self._minimum_ros_timestamp_s
-        if joint is None or time.monotonic() - received > self.freshness_s:
+            stored_minimum_stamp = self._minimum_ros_timestamp_s
+        minimum_candidates = [
+            float(value)
+            for value in (stored_minimum_stamp, minimum_ros_timestamp_s)
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        ]
+        minimum_stamp = max(minimum_candidates) if minimum_candidates else None
+        joint_wall_age_s = time.monotonic() - received
+        if joint is None or (
+            not allow_barrier_ordered_stale
+            and joint_wall_age_s > self.freshness_s
+        ):
             raise RuntimeError("JOINT_STATE_TIMEOUT")
         try:
             # A zero ROS time asks tf2 for the latest transform. This avoids
@@ -1444,10 +1461,34 @@ class RosGazeboStateSource:
             {
                 "joint_state_timestamp_s": joint_stamp,
                 "joint_state_received_monotonic_s": received,
+                "joint_state_wall_age_s": joint_wall_age_s,
+                "joint_state_freshness_policy": (
+                    "barrier_ordered_action_terminal"
+                    if allow_barrier_ordered_stale
+                    else "wall_fresh"
+                ),
                 "tf_timestamp_s": tf_stamp,
             }
         )
         return state
+
+    def latest_after_action(self, minimum_ros_timestamp_s: float):
+        """Return the latest action-ordered sample even under low real-time factor.
+
+        A successful trajectory action is the completion ACK.  If rendering or
+        physics makes JointState wall-time cadence slower than the ordinary
+        freshness window, retain the latest sample only when both its ROS stamp
+        and the latest TF are newer than the action-start barrier.  The caller
+        still has to prove the exact Cartesian terminal and a stationary arm.
+        """
+
+        minimum = float(minimum_ros_timestamp_s)
+        if not math.isfinite(minimum):
+            raise RuntimeError("POST_ACTION_STATE_NOT_FRESH")
+        return self.state(
+            allow_barrier_ordered_stale=True,
+            minimum_ros_timestamp_s=minimum,
+        )
 
     def wait_fresh(self, timeout_s: float = 15.0):
         deadline = time.monotonic() + timeout_s
@@ -1469,6 +1510,9 @@ class RosGazeboController(GazeboController):
             # execution.  Reconciliation must wait for the first post-action
             # sample instead of racing an immediate non-blocking read.
             state_provider=runtime.state_source.wait_fresh,
+            barrier_ordered_terminal_state_provider=(
+                runtime.state_source.latest_after_action
+            ),
             move_action=runtime.move,
             gripper_action=runtime.gripper,
             start_state_recovery=runtime.recover_start_state,

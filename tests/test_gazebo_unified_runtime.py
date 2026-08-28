@@ -473,6 +473,45 @@ def test_runtime_samples_fresh_robot_state_before_slow_camera_capture() -> None:
     assert events == ["robot", "camera"]
 
 
+def test_runtime_reuses_controller_verified_robot_for_post_action_camera() -> None:
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+    terminal = RobotState(
+        joint_positions=[0.1] * 7,
+        joint_velocities=[0.0] * 7,
+        end_effector_pose={
+            "frame": "gripper_mount_link",
+            "xyz": [0.2, -0.1, 0.4],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+    )
+
+    class Controller(_ResetController):
+        @staticmethod
+        def state_provider():
+            raise RuntimeError("JOINT_STATE_TIMEOUT")
+
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [_Camera(profile.cameras[0])]
+    runtime.controller = Controller(
+        [
+            {
+                "ok": True,
+                "action_completed_ros_time_s": 42.0,
+                "observation": {"robot": terminal.to_dict()},
+            }
+        ]
+    )
+
+    observation, receipt = runtime.execute({"action_type": "move_to"})
+
+    assert observation.robot.to_dict() == terminal.to_dict()
+    assert receipt["post_action_robot_state_reused"] is True
+    assert receipt["post_action_robot_state_source"] == (
+        "controller_verified_terminal_receipt"
+    )
+
+
 def test_runtime_retries_only_observation_after_camera_transport_timeout() -> None:
     profile = gazebo_profile("rm75_robotiq2f85_control")
 

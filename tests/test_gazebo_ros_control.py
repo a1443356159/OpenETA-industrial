@@ -833,6 +833,28 @@ def test_ros_state_source_requires_fresh_complete_joint_state_and_tf() -> None:
         source.state()
 
 
+def test_ros_state_source_retains_action_ordered_terminal_under_slow_wall_time() -> None:
+    source = RosGazeboStateSource(
+        _Node(),
+        _Tf(stamp_s=10.2),
+        config=GazeboControlConfig(),
+        freshness_s=0.02,
+    )
+    source.clear(min_ros_timestamp_s=10.0)
+    source.joint_state_callback(_joint_message(10.1))
+    time.sleep(0.03)
+
+    with pytest.raises(RuntimeError, match="JOINT_STATE_TIMEOUT"):
+        source.state()
+    terminal = source.latest_after_action(10.0)
+
+    assert terminal.metadata["joint_state_timestamp_s"] == pytest.approx(10.1)
+    assert terminal.metadata["joint_state_wall_age_s"] >= 0.02
+    assert terminal.metadata["joint_state_freshness_policy"] == (
+        "barrier_ordered_action_terminal"
+    )
+
+
 def test_ros_state_source_fails_closed_without_tf() -> None:
     source = RosGazeboStateSource(_Node(), _Tf(fail=True), config=GazeboControlConfig())
     source.joint_state_callback(_joint_message())

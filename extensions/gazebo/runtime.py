@@ -396,6 +396,7 @@ class GazeboRuntime:
         min_camera_timestamp_s: float | None = None,
         min_received_monotonic_s: float | None = None,
         timeout_s: float | None = None,
+        robot_state: RobotState | None = None,
     ) -> EnvObservation:
         if not self.started or self.closed:
             raise GazeboProcessError("Gazebo runtime must be reset before observe")
@@ -405,7 +406,7 @@ class GazeboRuntime:
         # still-fresh state from its execution interval.  Deferring this read
         # until after two camera captures can age that evidence past the state
         # freshness bound even though the physical action completed correctly.
-        robot = self._robot_state()
+        robot = robot_state if robot_state is not None else self._robot_state()
         frames = [
             camera.capture(
                 timeout_s=self._remaining(deadline),
@@ -752,6 +753,22 @@ class GazeboRuntime:
             return self._last_observation, receipt
         barrier_value = receipt.get("action_completed_ros_time_s")
         barrier = float(barrier_value) if barrier_value is not None else None
+        receipt_observation = receipt.get("observation")
+        receipt_robot_value = (
+            receipt_observation.get("robot")
+            if isinstance(receipt_observation, Mapping)
+            else None
+        )
+        receipt_robot = (
+            RobotState.from_dict(dict(receipt_robot_value))
+            if receipt.get("ok") is True and isinstance(receipt_robot_value, Mapping)
+            else None
+        )
+        if receipt_robot is not None:
+            receipt["post_action_robot_state_reused"] = True
+            receipt["post_action_robot_state_source"] = (
+                "controller_verified_terminal_receipt"
+            )
         # Header timestamps and ``action_completed_ros_time_s`` share the
         # simulated ROS clock, and are the ordering proof for a post-action
         # image.  Do not additionally require the subscriber callback to run
@@ -762,7 +779,10 @@ class GazeboRuntime:
         # depth sequences, so an image delivered before this action cannot be
         # reused as its observation.
         try:
-            observation = self.observe(min_camera_timestamp_s=barrier)
+            observation = self.observe(
+                min_camera_timestamp_s=barrier,
+                robot_state=receipt_robot,
+            )
         except GazeboObservationError:
             # The control action has already completed and its native receipt
             # must never be discarded or repeated merely because the camera
@@ -776,7 +796,10 @@ class GazeboRuntime:
                 raise
             receipt["observation_refresh_retry_count"] = 1
             receipt["observation_refresh_retry_reason"] = "camera_transport_timeout"
-            observation = self.observe(min_camera_timestamp_s=barrier)
+            observation = self.observe(
+                min_camera_timestamp_s=barrier,
+                robot_state=receipt_robot,
+            )
         return observation, receipt
 
     def close(self) -> None:

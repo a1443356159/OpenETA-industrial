@@ -1041,6 +1041,82 @@ def test_controller_timeout_and_missing_reconciliation_state_fail_closed() -> No
     assert unreconciled.payload["reconciliation_required"] is True
 
 
+def test_controller_accepts_stationary_action_ordered_terminal_after_success() -> None:
+    calls = 0
+
+    def state_then_fail():
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("JOINT_STATE_TIMEOUT")
+        return _state()
+
+    barriers: list[float] = []
+
+    def action_terminal(barrier: float):
+        barriers.append(barrier)
+        return _state()
+
+    result = GazeboController(
+        state_provider=state_then_fail,
+        barrier_ordered_terminal_state_provider=action_terminal,
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "execution_started": True,
+            "planned_point_count": 2,
+            "motion_outcome": "completed",
+            "action_started_ros_time_s": 12.5,
+            "action_completed_ros_time_s": 14.0,
+        },
+    ).execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0.0, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        }
+    )
+
+    assert result.ok is True
+    assert barriers == [12.5]
+    assert result.payload["terminal_state_source"] == (
+        "barrier_ordered_action_terminal_sample"
+    )
+    assert result.payload["terminal_state_stationary_verified"] is True
+
+
+def test_controller_rejects_moving_action_ordered_terminal_as_unknown() -> None:
+    moving = _state()
+    moving.joint_velocities[0] = 0.01
+    result = GazeboController(
+        state_provider=_state,
+        barrier_ordered_terminal_state_provider=lambda _barrier: moving,
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "execution_started": True,
+            "planned_point_count": 2,
+            "motion_outcome": "completed",
+            "action_started_ros_time_s": 12.5,
+        },
+    ).execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0.0, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "MOTION_OUTCOME_UNKNOWN"
+    assert result.payload["reconciliation_required"] is True
+    assert result.payload["terminal_state_stationary_verified"] is False
+
+
 def test_controller_close_is_idempotent() -> None:
     calls: list[str] = []
     controller = GazeboController(
