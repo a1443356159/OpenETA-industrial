@@ -677,6 +677,22 @@ def evaluate_placement_goal_legality(
         max(0.0, support_penetration_tolerance),
         max(0.0, support_tolerance),
     )
+    release_z_offset_value = region.get("release_z_offset_m", 0.0)
+    if (
+        isinstance(release_z_offset_value, bool)
+        or not isinstance(release_z_offset_value, (int, float))
+        or not math.isfinite(float(release_z_offset_value))
+        or float(release_z_offset_value) < 0.0
+    ):
+        result.update(
+            verdict="UNKNOWN",
+            reason="placement_release_z_offset_invalid",
+            geometry_available=False,
+            infrastructure_error=True,
+            elapsed_s=time.monotonic() - started,
+        )
+        return result
+    release_z_offset = float(release_z_offset_value)
     static_penetration_tolerance = float(
         region.get(
             "static_penetration_tolerance_m",
@@ -780,6 +796,24 @@ def evaluate_placement_goal_legality(
                 support_reconciliation["reason"] = (
                     "required_correction_exceeds_collision_geometry_bound"
                 )
+        support_correction = list(
+            support_reconciliation.get("translation_xyz") or [0.0, 0.0, 0.0]
+        )
+        release_translation = [0.0, 0.0, release_z_offset]
+        release_correction = [
+            support_correction[index] + release_translation[index]
+            for index in range(3)
+        ]
+        release_shift: Transform = (
+            (
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            ),
+            (0.0, 0.0, release_z_offset),
+        )
+        release_collision_goal = _compose(release_shift, collision_goal)
+        release_motion = _compose(release_shift, qualified_motion)
         binding_method = "world_motion_times_current_planning_scene_object"
         if support_reconciliation.get("applied") is True:
             binding_method = (
@@ -802,20 +836,40 @@ def evaluate_placement_goal_legality(
                 "translation_xyz": list(collision_goal[1]),
                 "rotation_matrix": [list(row) for row in collision_goal[0]],
             },
+            "release_collision_goal_pose": {
+                "convention": "T_world_collision_object_release",
+                "frame": "world",
+                "translation_xyz": list(release_collision_goal[1]),
+                "rotation_matrix": [list(row) for row in release_collision_goal[0]],
+            },
             "model_world_motion_transform": _transform_payload(
                 motion,
                 convention="T_world_motion_applied_left",
             ),
-            "qualified_world_motion_transform": _transform_payload(
+            "qualified_settled_world_motion_transform": _transform_payload(
                 qualified_motion,
                 convention="T_world_support_reconciled_motion_applied_left",
             ),
-            "release_target_translation_correction_xyz": list(
-                support_reconciliation.get("translation_xyz") or [0.0, 0.0, 0.0]
+            "qualified_world_motion_transform": _transform_payload(
+                release_motion,
+                convention="T_world_release_motion_applied_left",
             ),
+            "support_contact_translation_correction_xyz": support_correction,
+            "placement_release_translation_xyz": release_translation,
+            "release_target_translation_correction_xyz": release_correction,
+            "release_z_offset_m": release_z_offset,
             "support_contact_reconciliation": support_reconciliation,
         }
     else:
+        release_shift = (
+            (
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            ),
+            (0.0, 0.0, release_z_offset),
+        )
+        release_collision_goal = _compose(release_shift, collision_goal)
         result["checks"]["object_frame_binding"] = {
             "available": True,
             "method": "direct_physical_object_goal",
@@ -827,6 +881,16 @@ def evaluate_placement_goal_legality(
                 "translation_xyz": list(collision_goal[1]),
                 "rotation_matrix": [list(row) for row in collision_goal[0]],
             },
+            "release_collision_goal_pose": {
+                "convention": "T_world_collision_object_release",
+                "frame": "world",
+                "translation_xyz": list(release_collision_goal[1]),
+                "rotation_matrix": [list(row) for row in release_collision_goal[0]],
+            },
+            "support_contact_translation_correction_xyz": [0.0, 0.0, 0.0],
+            "placement_release_translation_xyz": [0.0, 0.0, release_z_offset],
+            "release_target_translation_correction_xyz": [0.0, 0.0, release_z_offset],
+            "release_z_offset_m": release_z_offset,
         }
     goal_geometry = _projected_body_geometry(target_spec, collision_goal)
     if not goal_geometry:
@@ -864,6 +928,7 @@ def evaluate_placement_goal_legality(
             "height_error_m": minimum_z - support_z,
             "height_tolerance_m": support_tolerance,
             "penetration_tolerance_m": support_penetration_tolerance,
+            "release_z_offset_m": release_z_offset,
             "tolerance_basis": "sensor_and_model_support_contact_uncertainty",
             "geometry_volume_centroid_xyz": list(volume_centroid),
             "geometry_volume_centroid_height_m": volume_centroid[2] - support_z,
@@ -1119,26 +1184,28 @@ def bind_qualified_placement_goal(
         return
     qualified_motion = binding.get("qualified_world_motion_transform")
     collision_goal = binding.get("collision_goal_pose")
+    release_goal = binding.get("release_collision_goal_pose")
     candidate_value = descriptor.get("candidate")
     if not isinstance(candidate_value, Mapping):
         return
     candidate = dict(candidate_value)
     if isinstance(collision_goal, Mapping):
         candidate["qualified_world_collision_object_goal_pose"] = dict(collision_goal)
-    if not isinstance(qualified_motion, Mapping):
-        descriptor["candidate"] = candidate
-        return
-    if _transform_matrix(qualified_motion.get("transform_matrix")) is None:
-        return
-
-    model_motion = candidate.get("object_motion_world_transform")
-    if isinstance(model_motion, Mapping):
-        candidate["model_object_motion_world_transform"] = dict(model_motion)
-    candidate["object_motion_world_transform"] = dict(qualified_motion)
-    # A virtual pre-attachment proof must attach the actual PlanningScene
-    # collision body at the contact EEF, not the visible point-cloud centroid.
-    candidate["physical_scene_attachment_required"] = True
-    candidate["physical_scene_attachment_source"] = "current_planning_scene_collision_object"
+    if isinstance(release_goal, Mapping):
+        candidate["qualified_release_object_goal_pose"] = dict(release_goal)
+    if isinstance(qualified_motion, Mapping):
+        if _transform_matrix(qualified_motion.get("transform_matrix")) is None:
+            return
+        model_motion = candidate.get("object_motion_world_transform")
+        if isinstance(model_motion, Mapping):
+            candidate["model_object_motion_world_transform"] = dict(model_motion)
+        candidate["object_motion_world_transform"] = dict(qualified_motion)
+        # A virtual pre-attachment proof must attach the actual PlanningScene
+        # collision body at the contact EEF, not the visible point-cloud centroid.
+        candidate["physical_scene_attachment_required"] = True
+        candidate["physical_scene_attachment_source"] = (
+            "current_planning_scene_collision_object"
+        )
 
     correction = _finite_vector(binding.get("release_target_translation_correction_xyz"), 3)
     if correction is not None and any(abs(value) > 1e-12 for value in correction):
@@ -1155,8 +1222,21 @@ def bind_qualified_placement_goal(
                         xyz = _finite_vector(stage.get(key), 3)
                         if xyz is not None:
                             stage[key] = [xyz[index] + correction[index] for index in range(3)]
-                    stage["support_contact_translation_correction_xyz"] = list(correction)
-                    stage["terminal_pose_source"] = "anyplace_se3_with_physical_support_binding"
+                    support_correction = _finite_vector(
+                        binding.get("support_contact_translation_correction_xyz"), 3
+                    )
+                    release_translation = _finite_vector(
+                        binding.get("placement_release_translation_xyz"), 3
+                    )
+                    if support_correction is not None:
+                        stage["support_contact_translation_correction_xyz"] = support_correction
+                    if release_translation is not None:
+                        stage["placement_release_translation_xyz"] = release_translation
+                        stage["placement_release_z_offset_m"] = release_translation[2]
+                    stage["release_target_translation_correction_xyz"] = list(correction)
+                    stage["terminal_pose_source"] = (
+                        "anyplace_se3_with_physical_support_and_release_offset"
+                    )
                 stages.append(stage)
             candidate["qualification_stages"] = stages
     descriptor["candidate"] = candidate
@@ -1173,13 +1253,19 @@ def _expected_pair_eef_goal(candidate: Mapping[str, Any]) -> Transform | None:
     # point-cloud frame, so mixing in the physical collision-body goal would
     # introduce the centroid/body offset a second time.
     qualified_object_goal = rigid_pose(candidate.get("qualified_world_collision_object_goal_pose"))
+    qualified_release_goal = rigid_pose(candidate.get("qualified_release_object_goal_pose"))
     physical_rebase = candidate.get("frozen_object_motion_rebase")
     if (
         isinstance(physical_rebase, Mapping)
-        and qualified_object_goal is not None
+        and (qualified_release_goal is not None or qualified_object_goal is not None)
         and attachment is not None
     ):
-        return _compose(qualified_object_goal, _inverse(attachment))
+        release_goal = qualified_release_goal or qualified_object_goal
+        assert release_goal is not None
+        return _compose(
+            release_goal,
+            _inverse(attachment),
+        )
     contact = rigid_pose(candidate.get("frozen_contact_pose"))
     motion_value = candidate.get("object_motion_world_transform")
     motion = (
@@ -1192,7 +1278,7 @@ def _expected_pair_eef_goal(candidate: Mapping[str, Any]) -> Transform | None:
     # In the attached-object path the model supplies T_world_object_goal.
     # Derive the sole release EEF terminal from the measured native attachment;
     # a direct-EFF fallback would silently change the model/attachment contract.
-    object_goal = rigid_pose(_object_goal(candidate))
+    object_goal = qualified_release_goal or rigid_pose(_object_goal(candidate))
     if object_goal is not None and attachment is not None:
         return _compose(object_goal, _inverse(attachment))
     return None

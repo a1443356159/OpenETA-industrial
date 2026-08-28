@@ -2698,6 +2698,9 @@ class _RosRuntime:
                 "center_xy": [float(value) for value in destination_center],
                 "size_xy_m": [float(value) for value in destination_size],
                 "support_z_m": float(support_z),
+                "release_z_offset_m": float(
+                    getattr(self.config, "placement_release_z_offset_m", 0.0)
+                ),
                 "acceptance_semantics": str(
                     getattr(
                         self.config,

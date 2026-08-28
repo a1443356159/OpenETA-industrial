@@ -436,6 +436,10 @@ class NativePickPlaceConfig(GazeboControlConfig):
     destination_center_xy: tuple[float, float] = (0.48, -0.10)
     destination_size_xy_m: tuple[float, float] = (0.12, 0.12)
     destination_support_z_m: float = 0.0
+    # AnyPlace describes the settled object goal.  Release the attached object
+    # above that goal and let native gravity complete the final drop; this is a
+    # single terminal-pose translation, not an artificial hover waypoint.
+    placement_release_z_offset_m: float = 0.20
     placement_acceptance_semantics: str | None = None
     placement_stability_duration_s: float = 0.50
     placement_sample_interval_s: float = 0.10
@@ -514,6 +518,11 @@ class NativePickPlaceConfig(GazeboControlConfig):
             or self.loaded_acceleration_scaling > self.unloaded_acceleration_scaling
         ):
             raise ValueError("loaded motion profile cannot exceed unloaded profile")
+        if (
+            not math.isfinite(self.placement_release_z_offset_m)
+            or self.placement_release_z_offset_m < 0.0
+        ):
+            raise ValueError("placement release Z offset must be finite and non-negative")
         if (
             not self.attached_collision_filter_state_topic
             or not self.attached_collision_filter_state_request_topic
@@ -625,6 +634,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
             "destination_center_xy": list(self.destination_center_xy),
             "destination_size_xy_m": list(self.destination_size_xy_m),
             "destination_support_z_m": self.destination_support_z_m,
+            "placement_release_z_offset_m": self.placement_release_z_offset_m,
             "placement_acceptance_semantics": (self.placement_acceptance_semantics),
             "attached_collision_filter": {
                 "schema_version": "openeta.attached_collision_filter.v1",

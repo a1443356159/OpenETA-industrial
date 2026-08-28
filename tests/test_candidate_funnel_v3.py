@@ -1624,6 +1624,50 @@ def test_partial_pointcloud_goal_is_bound_to_exact_physical_support_before_pair_
     assert pair["verdict"] == "PASS"
 
 
+def test_release_z_offset_translates_only_the_terminal_not_the_settled_goal():
+    scene = _placement_scene()
+    scene["placement_region"]["release_z_offset_m"] = 0.20
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, -0.1, 0.43],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.48, -0.1, 0.43],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            ],
+        }
+    )
+    descriptor = {"candidate_id": "c0", "candidate": candidate}
+
+    legality = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, legality)
+
+    binding = legality["checks"]["object_frame_binding"]
+    assert legality["verdict"] == "PASS"
+    assert binding["collision_goal_pose"]["translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.43]
+    )
+    assert binding["release_collision_goal_pose"]["translation_xyz"] == pytest.approx(
+        [0.48, -0.1, 0.63]
+    )
+    stage = descriptor["candidate"]["qualification_stages"][0]
+    assert stage["xyz"] == pytest.approx([0.48, -0.1, 0.63])
+    assert stage["placement_release_z_offset_m"] == pytest.approx(0.20)
+
+
 def test_artificial_placement_waypoints_are_rejected_before_ik():
     ik_calls = 0
     candidate = _candidate(0, stages=3)
