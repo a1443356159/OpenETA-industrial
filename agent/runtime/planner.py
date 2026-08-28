@@ -7042,13 +7042,22 @@ def _semantic_perception_obligation(
     active_assignment = (
         active_assignment if isinstance(active_assignment, dict) else {}
     )
-    assignment_prompt_key = {
-        "grasp_target": "target_prompt",
-        "placement_object": "placement_object_prompt",
-        "placement_region": "placement_region_prompt",
-    }.get(semantic_role, "")
-    assignment_prompt = (
-        active_assignment.get(assignment_prompt_key) if assignment_prompt_key else None
+    assignment_prompt_keys = {
+        "grasp_target": ("target_perception_prompt", "target_prompt"),
+        "placement_object": ("target_perception_prompt", "placement_object_prompt"),
+        "placement_region": (
+            "placement_region_perception_prompt",
+            "placement_region_prompt",
+        ),
+    }.get(semantic_role, ())
+    assignment_prompt = next(
+        (
+            active_assignment[key]
+            for key in assignment_prompt_keys
+            if isinstance(active_assignment.get(key), str)
+            and str(active_assignment[key]).strip()
+        ),
+        None,
     )
     prompt = str(
         assignment_prompt

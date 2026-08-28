@@ -84,6 +84,7 @@
         {
           "id": "blue_parts_bin",
           "prompt": "blue parts bin",
+          "perception_prompt": "blue square area inside bin",
           "semantic_aliases": ["blue square area inside bin", "blue bin", "蓝色零件箱"],
           "center_xy": [0.62, -0.180],
           "size_xy_m": [0.285, 0.260],

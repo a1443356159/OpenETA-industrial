@@ -166,6 +166,13 @@ def load_acceptance_scene_contract(
         ):
             raise ValueError("acceptance scene semantic aliases are invalid")
 
+    def validate_perception_prompt(owner: Mapping[str, Any]) -> None:
+        prompt = owner.get("perception_prompt")
+        if prompt is not None and (
+            not isinstance(prompt, str) or not prompt.strip()
+        ):
+            raise ValueError("acceptance scene perception prompt is invalid")
+
     seen: set[str] = {"work_table", "target_object", "distractor_object"}
     for obstacle in obstacles:
         if not isinstance(obstacle, Mapping):
@@ -244,6 +251,7 @@ def load_acceptance_scene_contract(
             catalog_ids.add(catalog_id)
             target_ids.add(target_id)
             validate_semantic_aliases(item)
+            validate_perception_prompt(item)
         if task is not None:
             raise ValueError(
                 "task-neutral manipulation catalog cannot contain a static task"
@@ -281,6 +289,7 @@ def load_acceptance_scene_contract(
                 raise ValueError("acceptance scene placement region identity is invalid")
             placement_ids.add(region_id)
             validate_semantic_aliases(region)
+            validate_perception_prompt(region)
             vector(region, "center_xy", 2)
             vector(region, "size_xy_m", 2, positive=True)
             vector(region, "rgba", 4)
@@ -824,10 +833,16 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 "target_object_id": target_id,
                 "target_link": str(target["target_link"]),
                 "target_prompt": str(target["target_prompt"]),
+                "target_perception_prompt": str(
+                    target.get("perception_prompt") or target["target_prompt"]
+                ),
                 "placement_object_prompt": str(target["target_prompt"]),
                 "source_support_object_id": str(target["source_support_object_id"]),
                 "placement_region_id": str(region["id"]),
                 "placement_region_prompt": str(region["prompt"]),
+                "placement_region_perception_prompt": str(
+                    region.get("perception_prompt") or region["prompt"]
+                ),
                 "source": "vlm_work_order",
             }
             resolved.append(

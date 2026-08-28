@@ -228,21 +228,44 @@ def _expected_work_order(
 ) -> list[dict[str, str]]:
     variant = MULTI_NORMAL_ACCEPTANCE_REQUESTS.get(scenario)
     if isinstance(variant, Mapping):
-        return [
-            {
-                "id": f"{('yellow_wrench' if target_id == 'target_object' else 'red_bolt')}_to_{region_id}",
-                "target_object_id": str(target_id),
-                "target_link": str(target_link),
-                "target_prompt": str(target_prompt),
-                "placement_object_prompt": str(target_prompt),
-                "source_support_object_id": "work_table",
-                "placement_region_id": str(region_id),
-                "placement_region_prompt": str(region_prompt),
-            }
-            for target_id, target_link, target_prompt, region_id, region_prompt in variant[
-                "items"
-            ]
-        ]
+        target_catalog = {
+            str(item["target_object_id"]): item
+            for item in scene.get("manipulation_targets", [])
+            if isinstance(item, Mapping)
+        }
+        region_catalog = {
+            str(item["id"]): item
+            for item in scene.get("placement_regions", [])
+            if isinstance(item, Mapping)
+        }
+        expected: list[dict[str, str]] = []
+        for target_id, target_link, target_prompt, region_id, region_prompt in variant[
+            "items"
+        ]:
+            target = target_catalog[str(target_id)]
+            region = region_catalog[str(region_id)]
+            expected.append(
+                {
+                    "id": (
+                        f"{('yellow_wrench' if target_id == 'target_object' else 'red_bolt')}"
+                        f"_to_{region_id}"
+                    ),
+                    "target_object_id": str(target_id),
+                    "target_link": str(target_link),
+                    "target_prompt": str(target_prompt),
+                    "target_perception_prompt": str(
+                        target.get("perception_prompt") or target_prompt
+                    ),
+                    "placement_object_prompt": str(target_prompt),
+                    "source_support_object_id": "work_table",
+                    "placement_region_id": str(region_id),
+                    "placement_region_prompt": str(region_prompt),
+                    "placement_region_perception_prompt": str(
+                        region.get("perception_prompt") or region_prompt
+                    ),
+                }
+            )
+        return expected
     task = _scene_task(scene, scenario=scenario)
     return [
         {
@@ -1379,8 +1402,10 @@ def verify_case(
             prompt
             for assignment in assignments
             for prompt in (
-                assignment["target_prompt"],
-                assignment["placement_region_prompt"],
+                assignment.get("target_perception_prompt")
+                or assignment["target_prompt"],
+                assignment.get("placement_region_perception_prompt")
+                or assignment["placement_region_prompt"],
             )
         ]
         if sam3_prompts != expected_prompts:

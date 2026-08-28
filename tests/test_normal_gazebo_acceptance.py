@@ -210,6 +210,9 @@ def test_multi_normal_prepares_one_human_request_with_private_verification_oracl
         "green_parts_bin",
         "blue_parts_bin",
     ]
+    assert assignments[1]["placement_region_perception_prompt"] == (
+        "blue square area inside bin"
+    )
     assert acceptance._scenario_environment("multi_normal") == {
         "OPENETA_ACCEPTANCE_SCENE": "multi_normal"
     }
@@ -315,6 +318,11 @@ def test_multi_normal_requests_change_only_user_words_and_verification_oracle(
     assert receipt["acceptance_scene"]["scene_id"] == "multi_normal"
     assert [item["id"] for item in assignments] == ordered_assignment_ids
     assert assignments[0]["placement_region_id"] == first_destination
+    assert assignments[0]["placement_region_perception_prompt"] == (
+        "blue square area inside bin"
+        if first_destination == "blue_parts_bin"
+        else "green parts bin"
+    )
     assert acceptance._scenario_environment(scenario) == {
         "OPENETA_ACCEPTANCE_SCENE": "multi_normal"
     }

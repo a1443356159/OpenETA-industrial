@@ -1426,6 +1426,51 @@ def test_initial_grasp_target_prefers_scene_camera_even_with_calibrated_wrist() 
     assert obligation["required_parameters"]["prompt"] == "red hex bolt"
 
 
+def test_work_order_uses_catalog_perception_prompt_for_placement_segmentation() -> None:
+    obligation = _semantic_perception_obligation(
+        observation=EnvObservation(
+            task="normal pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"step_idx": 2},
+        ),
+        camera_artifacts=[
+            {
+                "kind": "rgb",
+                "frame_id": "top_camera_optical_frame",
+                "role": "scene_primary",
+                "path": "/tmp/top.png",
+            }
+        ],
+        memory_context={
+            "scene_epoch": 1,
+            "selected_sam3_detection": {"id": "yellow-wrench"},
+            "placement_object_detection": {
+                "id": "yellow-wrench-object",
+                "source_image": "/tmp/top.png",
+                "scene_epoch": 1,
+                "perception_bundle_id": "bundle-1",
+            },
+            "multi_sort_progress": {
+                "active_assignment": {
+                    "placement_region_prompt": "blue parts bin",
+                    "placement_region_perception_prompt": (
+                        "blue square area inside bin"
+                    ),
+                }
+            },
+            "sam3_semantic_state": {"roles": {}, "attempts": []},
+        },
+    )
+
+    assert obligation is not None
+    assert obligation["semantic_role"] == "placement_region"
+    assert obligation["semantic_target"] == "blue square area inside bin"
+    assert obligation["required_parameters"]["prompt"] == (
+        "blue square area inside bin"
+    )
+
+
 def _grasp_target_retry_obligation(
     attempts: list[dict[str, object]],
     *,

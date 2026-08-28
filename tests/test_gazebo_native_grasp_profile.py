@@ -689,6 +689,15 @@ def test_vlm_work_order_selects_order_and_bin_binding(
         (0.62, -0.18) if region_id == "blue_parts_bin" else (0.62, 0.18)
         for region_id in region_ids
     ]
+    assert [
+        item.work_order_item["placement_region_perception_prompt"]
+        for item in configs
+    ] == [
+        "blue square area inside bin"
+        if region_id == "blue_parts_bin"
+        else "green parts bin"
+        for region_id in region_ids
+    ]
 
 
 def test_vlm_work_order_rejects_duplicate_or_unknown_physical_targets() -> None:
