@@ -552,11 +552,13 @@ def _effective_release_z_offset(
 ) -> tuple[float, JsonDict]:
     """Select a release height from support geometry, without moving the goal.
 
-    Both flat supports and collision-backed containers keep the configured
-    gravity-drop height.  Container geometry classifies the terminal and stays
-    available as evidence, but must not silently shrink the configured drop or
-    force the wrist above the highest side wall.  Pair legality plus MoveIt
-    prove the gripper, payload, and complete path against every wall.
+    A flat support keeps the configured gravity-drop height.  For a compound
+    container, the lowest collision-backed edge is the least restrictive
+    physical entry.  Keep the configured drop as clearance above that entry,
+    instead of forcing the wrist above the highest side wall or asking MoveIt
+    to descend below every rim while the payload is still attached.  AnyPlace
+    continues to own the settled goal, and pair legality plus MoveIt prove the
+    gripper, payload, and complete path against every wall.
     """
 
     evidence: JsonDict = {
@@ -579,17 +581,30 @@ def _effective_release_z_offset(
         support_z_m=support_z_m,
     )
     maximum_z = max(
+        primitive.center_xyz[2] + primitive.axis_half_extent(2) for primitive in geometry
+    )
+    numeric_scale = max(
+        1.0,
+        abs(support_z_m),
+        *(abs(value) for primitive in geometry for value in primitive.center_xyz),
+    )
+    numeric_band = 64.0 * math.ulp(numeric_scale)
+    barrier_top_z_values = sorted(
         primitive.center_xyz[2] + primitive.axis_half_extent(2)
         for primitive in geometry
+        if primitive.center_xyz[2] + primitive.axis_half_extent(2) > support_z_m + numeric_band
     )
-    effective_offset = configured_drop_height_m
+    minimum_entry_height = (
+        max(0.0, barrier_top_z_values[0] - support_z_m)
+        if barriers and barrier_top_z_values
+        else 0.0
+    )
+    effective_offset = (
+        minimum_entry_height + configured_drop_height_m if barriers else configured_drop_height_m
+    )
     evidence.update(
         {
-            "source": (
-                "configured_container_drop_height"
-                if barriers
-                else "configured_drop_height"
-            ),
+            "source": ("container_entry_drop_clearance" if barriers else "configured_drop_height"),
             "container_clearance_m": max(0.0, clearance_m) if barriers else 0.0,
             "effective_offset_m": effective_offset,
             "support_geometry_available": True,
@@ -598,9 +613,12 @@ def _effective_release_z_offset(
             "support_barrier_count": len(barriers),
             "support_z_m": support_z_m,
             "support_collision_maximum_z_m": maximum_z,
-            "support_collision_height_above_surface_m": max(
-                0.0, maximum_z - support_z_m
+            "support_collision_height_above_surface_m": max(0.0, maximum_z - support_z_m),
+            "support_entry_minimum_z_m": (
+                barrier_top_z_values[0] if barrier_top_z_values else support_z_m
             ),
+            "support_entry_height_above_surface_m": minimum_entry_height,
+            "entry_clearance_above_edge_m": (configured_drop_height_m if barriers else 0.0),
             "clearance_m": clearance_m,
         }
     )
