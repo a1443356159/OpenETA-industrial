@@ -93,6 +93,10 @@ def test_authoritative_normal_bin_is_one_exact_compound_body_with_base_and_four_
             "front_wall",
             "rear_wall",
         ]
+        primitives = {primitive.name: primitive for primitive in bin_object.primitives}
+        assert primitives["front_wall"].pose_xyz[2] == pytest.approx(0.045)
+        assert primitives["front_wall"].size_xyz == pytest.approx((0.32, 0.047, 0.09))
+        assert primitives["rear_wall"].size_xyz == pytest.approx((0.32, 0.016, 0.18))
 
 
 def test_authoritative_scene_materializes_attachment_collision_masks_and_plugin() -> None:

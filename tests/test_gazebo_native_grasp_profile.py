@@ -384,7 +384,8 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
     target_length = float(contract["target_object"]["bounding_box_xyz"][0])
     complete_gripper_envelope = 0.149345541
 
-    # Gazebo physics and PlanningScene must describe the same closed bin.
+    # Gazebo physics and PlanningScene must describe the same bin, including
+    # the detailed asset's half-height operator-facing front wall.
     # The operator-facing visual remains the detailed mesh rather than an
     # opaque rendering of these conservative collision primitives.
     assert {collision.get("name") for collision in green.findall("link/collision")} == {
@@ -417,6 +418,10 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
                 "link/collision"
             )
         )
+        primitives = {primitive.name: primitive for primitive in bin_object.primitives}
+        assert primitives["front_wall"].pose_xyz[2] == pytest.approx(0.045)
+        assert primitives["front_wall"].size_xyz == pytest.approx((0.32, 0.047, 0.09))
+        assert primitives["rear_wall"].size_xyz == pytest.approx((0.32, 0.016, 0.18))
 
     # The short aperture follows the detailed mesh's measured inner wall,
     # while the semantic region remains strictly inside it.  The target and
