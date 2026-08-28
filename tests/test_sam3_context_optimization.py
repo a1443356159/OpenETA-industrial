@@ -17,10 +17,13 @@ from agent.runtime.planner import (
     _default_tool_planner_system_prompt,
     _model_request_context,
     _model_phase_and_legal_tools,
+    _operator_control_metadata,
+    _operator_environment_start_obligation,
+    _operator_planner_mode,
+    _operator_semantic_prompts,
     _sam3_request_identity,
     _semantic_camera_view_identity,
     _semantic_perception_obligation,
-    _scripted_semantic_prompts,
 )
 from agent.runtime.runtime import OpenEtaAgentRuntime
 from agent.runtime.sam3_selection import (
@@ -1302,6 +1305,37 @@ def test_out_of_band_scripted_metadata_keeps_human_task_natural(monkeypatch) -> 
     assert obligation["semantic_role"] == "grasp_target"
 
 
+def test_out_of_band_human_tui_metadata_binds_only_environment(monkeypatch) -> None:
+    human_request = "把黄色活动扳手放进绿色料箱，然后把红色螺栓放进蓝色料箱。"
+    monkeypatch.setenv(
+        "OPENETA_OPERATOR_TASK_METADATA",
+        "[operator=human_tui; planner_mode=agentic_closed_loop; "
+        "environment_id=openeta/gazebo-test-v0; environment_seed=7; "
+        "work_order_source=vlm_conversation]",
+    )
+
+    control = _operator_control_metadata(human_request)
+    obligation = _operator_environment_start_obligation(
+        task=control,
+        active_environment_task=None,
+    )
+
+    assert human_request not in control
+    assert _operator_planner_mode(control) == "agentic_closed_loop"
+    assert obligation == {
+        "schema_version": "openeta.environment_start_obligation.v1",
+        "status": "required",
+        "required_tool": "create_simulator_env",
+        "required_parameters": {
+            "env_id": "openeta/gazebo-test-v0",
+            "seed": 7,
+        },
+        "environment_id": "openeta/gazebo-test-v0",
+        "source": "human_tui_environment_binding",
+    }
+    assert _operator_semantic_prompts(control) == {}
+
+
 def test_scripted_fixed_semantics_dispatch_sam3_without_model_routing_turn() -> None:
     scripted_request = (
         "[automation=scripted_tui; environment_id=openeta/test-v0; "
@@ -1310,7 +1344,7 @@ def test_scripted_fixed_semantics_dispatch_sam3_without_model_routing_turn() -> 
         "placement_object=red_rectangular_block; "
         "placement_region=green_placement_zone_marker] run acceptance"
     )
-    assert _scripted_semantic_prompts(scripted_request) == {
+    assert _operator_semantic_prompts(scripted_request) == {
         "grasp_target": "red rectangular block",
         "placement_object": "red rectangular block",
         "placement_region": "green placement zone marker",

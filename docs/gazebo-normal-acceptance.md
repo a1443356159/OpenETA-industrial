@@ -1,4 +1,4 @@
-# Gazebo normal acceptance: exact model terminals and frozen-candidate recovery
+# Gazebo `multi_normal` release acceptance
 
 Normal acceptance keeps the existing AgentTool surface. A `move_to` call is one MoveIt request
 covering IK, collision-aware planning, and execution from the current state to
@@ -7,18 +7,26 @@ precontact, lift, carry, descent, clearance, or retreat pose.
 
 ## Frozen perception and candidate pools
 
-A `normal` run acquires one calibrated grasp RGB-D observation and performs the
-target SAM3 selection once. AnyGrasp or GraspGenX returns contact EEF poses;
+A release run acquires one calibrated grasp RGB-D observation and performs the
+target SAM3 selection once. GraspGenX returns contact EEF poses;
 camera/world and configured TCP representation transforms are the only allowed
 pose conversions. Scores and capability evidence may order candidates but may
 not edit their translation or rotation.
 
+AnyGrasp remains an optional backend for development compatibility, but it is
+not part of the final `multi_normal` release gate.
+
 The placement object and placement region each use their own calibrated RGB-D
-packet and SAM3 mask. AnyPlace returns up to 96 exact world object goals. Those
-goals and the grasp reserve are immutable for the current scene epoch. A failed
-motion candidate advances within the frozen qualified pool; it does not rerun
-SAM3, the grasp provider, or AnyPlace. Perception/model inference repeats only
-after the applicable pool is exhausted or evidence is stale.
+packet and SAM3 mask. AnyPlace returns up to 96 settled world-object goals.
+The host preserves each goal's rotation and horizontal translation, and adds
+only the configured vertical gravity-drop distance. A completely proven
+exterior container edge may define a higher preferred entry terminal. If that
+preferred terminal exhausts the current frozen grasp batch, the same batch is
+retried at the configured drop height before any grasp-frontier expansion.
+Those goals and the grasp reserve are immutable for the current scene epoch. A
+failed motion candidate advances within the frozen qualified pool; it does not
+rerun SAM3, the grasp provider, or AnyPlace. Perception/model inference repeats
+only after the applicable pool is exhausted or evidence is stale.
 
 ## Legality barriers and qualification
 
@@ -66,13 +74,14 @@ Execution is:
 1. MoveIt plans current state → exact provider contact EEF pose.
 2. Close the gripper; native bilateral contact plus attach ACK proves the grasp
    and records the measured `T_eef_object_attached`.
-3. For a frozen AnyPlace object goal, compute exactly
-   `T_world_eef_release = T_world_object_goal × inverse(T_eef_object_attached)`.
+3. Bind the frozen AnyPlace rigid motion to the measured collision body, apply
+   the host-owned vertical gravity-drop terminal, and compute
+   `T_world_eef_release = T_world_object_release × inverse(T_eef_object_attached)`.
 4. MoveIt plans the complete attached current state → exact release EEF pose.
 5. Open, detach, and verify object stability in the declared placement region.
 
-There is no post-close lift proof and no release offset. The attached object is
-present in the MoveIt PlanningScene during placement. Scene revision,
+There is no post-close lift waypoint and no agent-authored release offset. The
+attached object is present in the MoveIt PlanningScene during placement. Scene revision,
 attachment transform, robot state, model hash, or calibration changes
 invalidate prior qualification evidence.
 
@@ -91,20 +100,30 @@ as proof of a geometric cause. Ordinary portable-object stages expose only the
 single relevant scene image; multi-view reasoning is reserved for an explicit
 articulated-object probe.
 
-## Acceptance
+## Final acceptance
 
-`normal` succeeds at the first complete L5-backed grasp-and-placement PASS. The
+The release gate uses one task-neutral physical scene: `multi_normal`. The
+operator's natural-language prompt defines the ordered object-to-bin work
+order. Prompt fixtures used by automated regression are task variants, not
+additional scenes, and the physical scene never injects a static assignment.
+
+The task succeeds at the first complete L5-backed grasp-and-placement PASS for
+each ordered item. The
 60-second P95 is a performance objective, not a hard deadline; a no-PASS run
 must exhaust all 192 pairs and the fixed recovery seed budget. Fixed input must
 produce the same selected candidate, joint branch, attempt order, and failure
 classification across repeated runs. Dashboard and GUI modes are observers and
 must not affect selection.
 
-Run the canonical acceptance entry point with:
+Run repeatable VLM acceptance through the real PTY TUI with:
 
 ```bash
-scripts/run_normal_gazebo_acceptance.sh --scenario normal
+scripts/run_multi_normal_gazebo_acceptance.sh
 ```
+
+To reproduce the representative work order as a human operator, use the
+interactive `human_tui` mode and follow
+[the operator procedure](multi-normal-tui-reproduction.md).
 
 The canonical entry point starts a case-owned Gazebo operator GUI on the GPU
 VNC desktop by default. Set `OPENETA_GAZEBO_OPERATOR_GUI=0` only for unattended

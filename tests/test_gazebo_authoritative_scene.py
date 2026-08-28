@@ -171,7 +171,7 @@ def test_multi_normal_is_one_task_neutral_physical_world() -> None:
         "red_m24_hex_bolt",
     }
     with pytest.raises(ValueError, match="unsupported acceptance scene"):
-        load_acceptance_scene_contract("multi_normal1")
+        load_acceptance_scene_contract("multi_normal_prompt_variant")
 
 
 def test_authoritative_compiler_keeps_detailed_visual_independent_from_collision(

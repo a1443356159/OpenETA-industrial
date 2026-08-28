@@ -27,7 +27,8 @@ from tools.candidate_config import (
 
 SCHEMA_VERSION = "openeta.gazebo_pick_place_acceptance.v1"
 SUITE = "pick-place"
-MODE = base.SCRIPTED_TUI
+OPERATOR_MODES = (base.SCRIPTED_TUI, base.HUMAN_TUI)
+DEFAULT_OPERATOR_MODE = base.SCRIPTED_TUI
 ENV_ID = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
 GRASP_BACKENDS = ("anygrasp", "graspgenx")
 DEFAULT_GRASP_BACKEND = "graspgenx"
@@ -54,17 +55,12 @@ REQUIRED_REAL_PICK_PLACE_TOOLS = (
     "anyplace",
     "close_simulator_env",
 )
-MULTI_NORMAL_SCENARIOS = (
-    "multi_normal",
-    "multi_normal1",
-    "multi_normal2",
-    "multi_normal3",
-)
+DEFAULT_MULTI_NORMAL_TASK_VARIANT = "wrench-green-bolt-blue"
 # Acceptance-only user requests. These are written to the TUI as ordinary
 # operator utterances and retained privately by the verifier. They are never
 # placed in the physical scene contract or planner context.
-MULTI_NORMAL_ACCEPTANCE_REQUESTS = {
-    "multi_normal": {
+MULTI_NORMAL_TASK_VARIANTS = {
+    DEFAULT_MULTI_NORMAL_TASK_VARIANT: {
         "operator_instruction": (
             "请先把黄色活动扳手放进绿色零件箱，再把红色六角螺栓放进蓝色零件箱。"
             "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
@@ -74,7 +70,7 @@ MULTI_NORMAL_ACCEPTANCE_REQUESTS = {
             ("red_m24_hex_bolt", "red_m24_hex_bolt_link", "red hex bolt", "blue_parts_bin", "blue parts bin"),
         ],
     },
-    "multi_normal1": {
+    "wrench-blue-bolt-green": {
         "operator_instruction": (
             "请先把黄色活动扳手放进蓝色零件箱，再把红色六角螺栓放进绿色零件箱。"
             "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
@@ -84,7 +80,7 @@ MULTI_NORMAL_ACCEPTANCE_REQUESTS = {
             ("red_m24_hex_bolt", "red_m24_hex_bolt_link", "red hex bolt", "green_parts_bin", "green parts bin"),
         ],
     },
-    "multi_normal2": {
+    "bolt-blue-wrench-green": {
         "operator_instruction": (
             "请先把红色六角螺栓放进蓝色零件箱，再把黄色活动扳手放进绿色零件箱。"
             "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
@@ -94,7 +90,7 @@ MULTI_NORMAL_ACCEPTANCE_REQUESTS = {
             ("target_object", "target_link", "yellow wrench", "green_parts_bin", "green parts bin"),
         ],
     },
-    "multi_normal3": {
+    "bolt-green-wrench-blue": {
         "operator_instruction": (
             "请先把红色六角螺栓放进绿色零件箱，再把黄色活动扳手放进蓝色零件箱。"
             "其他物件不要动，每放好一件后继续下一件，全部完成后再结束。"
@@ -105,16 +101,22 @@ MULTI_NORMAL_ACCEPTANCE_REQUESTS = {
         ],
     },
 }
+LEGACY_MULTI_NORMAL_REQUEST_IDS = {
+    DEFAULT_MULTI_NORMAL_TASK_VARIANT: "multi_normal",
+    "wrench-blue-bolt-green": "multi_normal1",
+    "bolt-blue-wrench-green": "multi_normal2",
+    "bolt-green-wrench-blue": "multi_normal3",
+}
 SCENARIOS = (
     "normal",
-    *MULTI_NORMAL_SCENARIOS,
+    "multi_normal",
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
     "tool-bin-sort",
 )
 COMPLEX_PHYSICAL_SCENARIOS = (
-    *MULTI_NORMAL_SCENARIOS,
+    "multi_normal",
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
@@ -168,13 +170,10 @@ TASK_INSTRUCTIONS = """
 
 SCENARIO_INSTRUCTIONS = {
     "normal": "桌上还有几件外观相近的工具，拿之前请确认没有拿错。",
-    **{
-        scenario: (
-            "这是同一工作单元内的连续分拣；放好第一件后不要关闭环境，"
-            "重新看清当前场景并继续第二件。"
-        )
-        for scenario in MULTI_NORMAL_SCENARIOS
-    },
+    "multi_normal": (
+        "这是同一工作单元内的连续分拣；放好第一件后不要关闭环境，"
+        "重新看清当前场景并继续第二件。"
+    ),
     "narrow-pick": "目标旁边有两个橙色护栏，夹取时请别碰到它们。",
     "barrier-transfer": "目标和料箱之间有一块黄色挡板，移动时请别碰到它。",
     "fastener-bin-sort": (
@@ -189,13 +188,33 @@ SCENARIO_INSTRUCTIONS = {
 def _scene_contract(scenario: str) -> dict[str, Any]:
     if scenario not in SCENARIOS:
         raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
-    physical_scene = "multi_normal" if scenario in MULTI_NORMAL_SCENARIOS else scenario
-    return load_acceptance_scene_contract(physical_scene)
+    return load_acceptance_scene_contract(scenario)
 
 
-def _scene_task(scene: Mapping[str, Any], *, scenario: str) -> dict[str, str]:
-    variant = MULTI_NORMAL_ACCEPTANCE_REQUESTS.get(scenario)
-    if isinstance(variant, Mapping):
+def _validated_task_variant(scenario: str, value: str) -> str:
+    variant = str(value).strip().lower()
+    if scenario == "multi_normal":
+        if variant not in MULTI_NORMAL_TASK_VARIANTS:
+            choices = ", ".join(MULTI_NORMAL_TASK_VARIANTS)
+            raise ValueError(f"multi_normal task variant must be one of: {choices}")
+        return variant
+    if variant != DEFAULT_MULTI_NORMAL_TASK_VARIANT:
+        raise ValueError("--task-variant is only valid with --scenario multi_normal")
+    return variant
+
+
+def _scene_task(
+    scene: Mapping[str, Any],
+    *,
+    scenario: str,
+    task_variant: str = DEFAULT_MULTI_NORMAL_TASK_VARIANT,
+) -> dict[str, str]:
+    variant = (
+        MULTI_NORMAL_TASK_VARIANTS[_validated_task_variant(scenario, task_variant)]
+        if scenario == "multi_normal"
+        else None
+    )
+    if variant is not None:
         first = variant["items"][0]
         return {
             "target_prompt": str(first[2]),
@@ -226,9 +245,14 @@ def _expected_work_order(
     scene: Mapping[str, Any],
     *,
     scenario: str,
+    task_variant: str = DEFAULT_MULTI_NORMAL_TASK_VARIANT,
 ) -> list[dict[str, str]]:
-    variant = MULTI_NORMAL_ACCEPTANCE_REQUESTS.get(scenario)
-    if isinstance(variant, Mapping):
+    variant = (
+        MULTI_NORMAL_TASK_VARIANTS[_validated_task_variant(scenario, task_variant)]
+        if scenario == "multi_normal"
+        else None
+    )
+    if variant is not None:
         target_catalog = {
             str(item["target_object_id"]): item
             for item in scene.get("manipulation_targets", [])
@@ -267,7 +291,7 @@ def _expected_work_order(
                 }
             )
         return expected
-    task = _scene_task(scene, scenario=scenario)
+    task = _scene_task(scene, scenario=scenario, task_variant=task_variant)
     return [
         {
             "id": "default",
@@ -288,9 +312,18 @@ def _metadata_semantic(value: str) -> str:
     return "_".join(str(value).strip().split())
 
 
-def _scene_receipt(scene: Mapping[str, Any], *, scenario: str) -> dict[str, Any]:
-    task = _scene_task(scene, scenario=scenario)
-    expected_work_order = _expected_work_order(scene, scenario=scenario)
+def _scene_receipt(
+    scene: Mapping[str, Any],
+    *,
+    scenario: str,
+    task_variant: str = DEFAULT_MULTI_NORMAL_TASK_VARIANT,
+) -> dict[str, Any]:
+    task = _scene_task(scene, scenario=scenario, task_variant=task_variant)
+    expected_work_order = _expected_work_order(
+        scene,
+        scenario=scenario,
+        task_variant=task_variant,
+    )
     target = scene.get("target_object")
     target_evidence = {
         "id": "target_object",
@@ -325,7 +358,9 @@ def _scene_receipt(scene: Mapping[str, Any], *, scenario: str) -> dict[str, Any]
     )
     return {
         "schema_version": "openeta.gazebo_acceptance_scene_receipt.v2",
-        "acceptance_request_id": scenario,
+        "acceptance_request_id": (
+            f"multi_normal:{task_variant}" if scenario == "multi_normal" else scenario
+        ),
         "scene_id": str(scene["scene_id"]),
         "seed": int(scene["seed"]),
         "contract_sha256": str(scene["contract_sha256"]),
@@ -369,6 +404,14 @@ def _validated_grasp_backend(value: str) -> str:
     return backend
 
 
+def _validated_operator_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode not in OPERATOR_MODES:
+        choices = ", ".join(OPERATOR_MODES)
+        raise ValueError(f"operator mode must be one of: {choices}")
+    return mode
+
+
 def _validated_execution_profile(value: str) -> str:
     profile = str(value).strip().lower()
     if profile not in EXECUTION_PROFILES:
@@ -391,16 +434,19 @@ def _automation_metadata_for_backend(
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
     qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
     scenario: str = "normal",
+    task_variant: str = DEFAULT_MULTI_NORMAL_TASK_VARIANT,
+    operator_mode: str = DEFAULT_OPERATOR_MODE,
 ) -> str:
     _validated_grasp_backend(grasp_backend)
+    mode = _validated_operator_mode(operator_mode)
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
-    task = _scene_task(scene, scenario=scenario)
+    task = _scene_task(scene, scenario=scenario, task_variant=task_variant)
     planner_mode = EXECUTION_PROFILE_PLANNER_MODES[profile]
     semantic_metadata = (
         "work_order_source=vlm_conversation"
-        if scenario in MULTI_NORMAL_SCENARIOS
+        if scenario == "multi_normal"
         else (
             f"grasp_target={_metadata_semantic(task['target_prompt'])}; "
             f"placement_object={_metadata_semantic(task['placement_object_prompt'])}; "
@@ -408,7 +454,8 @@ def _automation_metadata_for_backend(
         )
     )
     return (
-        f"[automation=scripted_tui; planner_mode={planner_mode}; "
+        f"[{'automation=scripted_tui' if mode == base.SCRIPTED_TUI else 'operator=human_tui'}; "
+        f"planner_mode={planner_mode}; "
         f"execution_profile={profile}; qualification_profile={funnel_profile}; "
         "initial_observe=required; "
         f"environment_id={ENV_ID}; "
@@ -424,12 +471,13 @@ def _instructions_for_backend(
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
     qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
     scenario: str = "normal",
+    task_variant: str = DEFAULT_MULTI_NORMAL_TASK_VARIANT,
 ) -> str:
     _validated_grasp_backend(grasp_backend)
     profile = _validated_execution_profile(execution_profile)
     _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
-    task = _scene_task(scene, scenario=scenario)
+    task = _scene_task(scene, scenario=scenario, task_variant=task_variant)
     control = AGENTIC_CONTROL if profile == "agentic_normal" else SMOKE_CONTROL
     recovery = f"\n{TASK_INSTRUCTIONS}" if profile == "agentic_normal" else ""
     return (
@@ -450,7 +498,7 @@ def _required_tools_for_backend(
         backend if name == "grasp_pose_estimate" else name
         for name in REQUIRED_REAL_PICK_PLACE_TOOLS
     )
-    if scenario in MULTI_NORMAL_SCENARIOS:
+    if scenario == "multi_normal":
         return (*required[:2], "configure_work_order", *required[2:])
     return required
 
@@ -634,12 +682,16 @@ def prepare_case(
     grasp_backend: str = DEFAULT_GRASP_BACKEND,
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
     qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
+    task_variant: str = DEFAULT_MULTI_NORMAL_TASK_VARIANT,
+    operator_mode: str = DEFAULT_OPERATOR_MODE,
 ) -> base.CasePaths:
     if scenario not in SCENARIOS:
         raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
     backend = _validated_grasp_backend(grasp_backend)
+    mode = _validated_operator_mode(operator_mode)
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
+    variant = _validated_task_variant(scenario, task_variant)
     scene = _scene_contract(scenario)
     if profile == "smoke_normal" and scenario != "normal":
         raise ValueError("smoke_normal execution profile requires scenario=normal")
@@ -649,7 +701,7 @@ def prepare_case(
         raise ValueError(
             f"strict acceptance requires exactly one grasp service: {required_grasp_service}"
         )
-    paths = base.case_paths(run_root, SUITE, MODE)
+    paths = base.case_paths(run_root, SUITE, mode)
     paths.root.mkdir(parents=True, exist_ok=False)
     base._json_dump(
         paths.mcp_config,
@@ -666,17 +718,24 @@ def prepare_case(
             execution_profile=profile,
             qualification_profile=funnel_profile,
             scenario=scenario,
+            task_variant=variant,
         ),
         encoding="utf-8",
     )
     receipt = base.environment_receipt(
         repo,
         allocation,
-        case_name=f"{SUITE}-{MODE}",
+        case_name=f"{SUITE}-{mode}",
         before=base._process_snapshot(),
     )
     receipt["acceptance_scenario"] = scenario
-    receipt["acceptance_scene"] = _scene_receipt(scene, scenario=scenario)
+    receipt["acceptance_scene"] = _scene_receipt(
+        scene,
+        scenario=scenario,
+        task_variant=variant,
+    )
+    receipt["operator_mode"] = mode
+    receipt["task_variant"] = variant if scenario == "multi_normal" else None
     receipt["grasp_backend_mode"] = backend
     receipt["execution_profile"] = profile
     receipt["qualification_profile"] = funnel_profile
@@ -1415,12 +1474,20 @@ def verify_case(
     grasp_backend: str = DEFAULT_GRASP_BACKEND,
     execution_profile: str = DEFAULT_EXECUTION_PROFILE,
     qualification_profile: str = DEFAULT_QUALIFICATION_PROFILE,
+    task_variant: str = DEFAULT_MULTI_NORMAL_TASK_VARIANT,
+    operator_mode: str = DEFAULT_OPERATOR_MODE,
 ) -> dict[str, Any]:
     backend = _validated_grasp_backend(grasp_backend)
+    mode = _validated_operator_mode(operator_mode)
     profile = _validated_execution_profile(execution_profile)
     funnel_profile = _validated_qualification_profile(qualification_profile)
+    variant = _validated_task_variant(scenario, task_variant)
     scene = _scene_contract(scenario)
-    assignments = _expected_work_order(scene, scenario=scenario)
+    assignments = _expected_work_order(
+        scene,
+        scenario=scenario,
+        task_variant=variant,
+    )
     assignment_count = len(assignments)
     backend_label = "GraspGenX" if backend == "graspgenx" else "AnyGrasp"
     errors: list[str] = []
@@ -1432,12 +1499,29 @@ def verify_case(
         receipt_scene = (
             receipt.get("acceptance_scene") if isinstance(receipt, Mapping) else None
         )
+        receipt_operator_mode = (
+            receipt.get("operator_mode") if isinstance(receipt, Mapping) else None
+        )
+        if receipt_operator_mode is not None and receipt_operator_mode != mode:
+            errors.append("operator mode receipt does not match the requested TUI mode")
         expected_obstacle_ids = [
             str(obstacle["id"]) for obstacle in scene["static_obstacles"]
         ]
-        if not isinstance(receipt_scene, Mapping) or receipt_scene != _scene_receipt(
+        expected_scene_receipt = _scene_receipt(
             scene,
             scenario=scenario,
+            task_variant=variant,
+        )
+        compatible_scene_receipts = [expected_scene_receipt]
+        if scenario == "multi_normal":
+            legacy_scene_receipt = dict(expected_scene_receipt)
+            legacy_scene_receipt["acceptance_request_id"] = (
+                LEGACY_MULTI_NORMAL_REQUEST_IDS[variant]
+            )
+            compatible_scene_receipts.append(legacy_scene_receipt)
+        if (
+            not isinstance(receipt_scene, Mapping)
+            or receipt_scene not in compatible_scene_receipts
         ):
             errors.append("acceptance scene receipt does not match the versioned contract")
         planner_evidence = _planner_evidence(
@@ -1456,7 +1540,7 @@ def verify_case(
         for required in _required_tools_for_backend(backend, scenario=scenario):
             if required not in names:
                 errors.append(f"required real pick-place tool call missing: {required}")
-        if scenario in MULTI_NORMAL_SCENARIOS:
+        if scenario == "multi_normal":
             work_order_calls = [
                 call for call in calls if _name(call) == "configure_work_order"
             ]
@@ -1866,8 +1950,15 @@ def verify_case(
         if len(set(scene_revisions)) < 2 * assignment_count + 1:
             errors.append("reset/attach/detach planning-scene revision chain missing")
         for call in calls:
-            if _name(call) in base.MUTATING_TOOLS and not base._scripted_approved(call):
-                errors.append(f"{_name(call)} lacks scripted_tui approval")
+            if _name(call) not in base.MUTATING_TOOLS:
+                continue
+            approved = (
+                base._scripted_approved(call)
+                if mode == base.SCRIPTED_TUI
+                else base._human_approved(call)
+            )
+            if not approved:
+                errors.append(f"{_name(call)} lacks {mode} approval")
         status = "failed" if errors else "passed"
         return {
             "status": status,
@@ -1884,7 +1975,13 @@ def verify_case(
                 or planner_evidence["total_tokens"]
             ),
             "scenario": scenario,
-            "acceptance_scene": _scene_receipt(scene, scenario=scenario),
+            "task_variant": variant if scenario == "multi_normal" else None,
+            "operator_mode": mode,
+            "acceptance_scene": _scene_receipt(
+                scene,
+                scenario=scenario,
+                task_variant=variant,
+            ),
             "grasp_backend": backend,
         }
     except Exception as exc:  # noqa: BLE001 - verifier must return a report.
@@ -1899,7 +1996,13 @@ def verify_case(
             "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
             "planner_provider_invoked": None,
             "scenario": scenario,
-            "acceptance_scene": _scene_receipt(scene, scenario=scenario),
+            "task_variant": variant if scenario == "multi_normal" else None,
+            "operator_mode": mode,
+            "acceptance_scene": _scene_receipt(
+                scene,
+                scenario=scenario,
+                task_variant=variant,
+            ),
             "grasp_backend": backend,
         }
 
@@ -1911,6 +2014,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--skip-provider-preflight", action="store_true")
     parser.add_argument("--scenario", choices=SCENARIOS, default="normal")
+    parser.add_argument(
+        "--task-variant",
+        choices=tuple(MULTI_NORMAL_TASK_VARIANTS),
+        default=DEFAULT_MULTI_NORMAL_TASK_VARIANT,
+        help=(
+            "Private verification fixture for varied human prompts in the single "
+            "multi_normal physical scene."
+        ),
+    )
+    parser.add_argument(
+        "--operator-mode",
+        choices=OPERATOR_MODES,
+        default=DEFAULT_OPERATOR_MODE,
+        help=(
+            "scripted_tui drives the real PTY for repeatable acceptance; human_tui "
+            "waits for an operator prompt and explicit mutation approvals."
+        ),
+    )
     parser.add_argument(
         "--execution-profile",
         choices=EXECUTION_PROFILES,
@@ -1943,8 +2064,14 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    try:
+        task_variant = _validated_task_variant(args.scenario, args.task_variant)
+    except ValueError as exc:
+        raise base.AcceptanceError(str(exc)) from exc
     if args.execution_profile == "smoke_normal" and args.scenario != "normal":
         raise base.AcceptanceError("--execution-profile smoke_normal requires --scenario normal")
+    if args.execution_profile == "smoke_normal" and args.operator_mode != base.SCRIPTED_TUI:
+        raise base.AcceptanceError("--execution-profile smoke_normal requires scripted_tui")
     repo = Path(__file__).resolve().parents[1]
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_root = (
@@ -1952,7 +2079,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.run_root
         else repo / ".cache/reports" / f"pick-place-gazebo-{stamp}"
     )
-    paths = base.case_paths(run_root, SUITE, MODE)
+    paths = base.case_paths(run_root, SUITE, args.operator_mode)
     if args.verify_only:
         report = verify_case(
             paths,
@@ -1960,6 +2087,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             grasp_backend=args.grasp_backend,
             execution_profile=args.execution_profile,
             qualification_profile=args.qualification_profile,
+            task_variant=task_variant,
+            operator_mode=args.operator_mode,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["status"] == "passed" else 1
@@ -1996,7 +2125,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if provider["status"] != "passed":
             print(json.dumps(provider, ensure_ascii=False, indent=2))
             return 2
-    allocation = base.allocate(f"{SUITE}-{MODE}", preflight=not args.prepare_only)
+    allocation = base.allocate(
+        f"{SUITE}-{args.operator_mode}",
+        preflight=not args.prepare_only,
+    )
     paths = prepare_case(
         repo,
         run_root,
@@ -2006,6 +2138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         grasp_backend=args.grasp_backend,
         execution_profile=args.execution_profile,
         qualification_profile=args.qualification_profile,
+        task_variant=task_variant,
+        operator_mode=args.operator_mode,
     )
     if args.prepare_only:
         print(run_root)
@@ -2021,11 +2155,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             "OPENETA_GRASP_BACKEND": args.grasp_backend,
             "OPENETA_QUALIFICATION_PROFILE": args.qualification_profile,
-            "OPENETA_SCRIPTED_TASK_METADATA": _automation_metadata_for_backend(
+            (
+                "OPENETA_SCRIPTED_TASK_METADATA"
+                if args.operator_mode == base.SCRIPTED_TUI
+                else "OPENETA_OPERATOR_TASK_METADATA"
+            ): _automation_metadata_for_backend(
                 args.grasp_backend,
                 execution_profile=args.execution_profile,
                 qualification_profile=args.qualification_profile,
                 scenario=args.scenario,
+                task_variant=task_variant,
+                operator_mode=args.operator_mode,
             ),
             **(
                 AGENTIC_PROVIDER_RESILIENCE_ENV
@@ -2055,6 +2195,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         grasp_backend=args.grasp_backend,
         execution_profile=args.execution_profile,
         qualification_profile=args.qualification_profile,
+        task_variant=task_variant,
+        operator_mode=args.operator_mode,
     )
     report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})
     base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)

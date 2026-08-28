@@ -256,6 +256,8 @@ uv run openeta --command inspect \
 | [架构](docs/architecture.md) | Agent、Adapter、Simulator 和 MCP 各层之间的边界 |
 | [Agent 命令流水线](docs/agent-action-pipeline.md) | 命令 schema、Tool 契约、AtomAction 和安全门 |
 | [模拟层](sim/README.md) | 安装、环境注册表、MCP、REST 和 Dashboard |
+| [Gazebo `multi_normal` 最终验收](docs/gazebo-normal-acceptance.md) | GraspGenX/AnyPlace、MoveIt 资格筛选、冻结前沿恢复与发行门槛 |
+| [人工 TUI 复现指南](docs/multi-normal-tui-reproduction.md) | 人类操作员复现代表性双物品连续分拣任务的步骤 |
 | [并行模拟器评估](docs/parallel-simulator-evaluation.md) | 并发、预算、人工恢复和经验晋级 |
 | [Rollout 数据契约](docs/rollout-data-contract.md) | Session 数据层与不可变证据 |
 | [代码策略运行时](docs/code-policy-runtime.md) | 有边界的代码后端与沙箱边界 |

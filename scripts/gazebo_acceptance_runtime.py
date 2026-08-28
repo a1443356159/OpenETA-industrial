@@ -76,6 +76,7 @@ from agent.runtime.actions import PipelineStatus
 
 
 SCRIPTED_TUI = "scripted_tui"
+HUMAN_TUI = "human_tui"
 
 
 PROTECTED_DOMAINS = frozenset({42, 100})
@@ -1838,8 +1839,30 @@ def _scripted_approved(call: Mapping[str, Any]) -> bool:
             item.get("supervision_profile") or item.get("profile") or nested_profile or ""
         ).lower()
         source = str(item.get("source") or "").lower()
+        if (profile == SCRIPTED_TUI or source == SCRIPTED_TUI) and (
+            item.get("allowed") is True or item.get("approved") is True
+        ):
+            return True
+    return False
+
+
+def _human_approved(call: Mapping[str, Any]) -> bool:
+    """Require durable human-gated provenance for a world mutation."""
+
+    if str(call.get("name") or call.get("tool_name") or "") not in MUTATING_TOOLS:
+        return True
+    for item in _walk(call):
+        if not isinstance(item, Mapping):
+            continue
+        nested = item.get("details")
+        nested_profile = nested.get("profile") if isinstance(nested, Mapping) else ""
+        profile = str(
+            item.get("supervision_profile") or item.get("profile") or nested_profile or ""
+        ).lower()
+        source = str(item.get("source") or "").lower()
         if (
-            (profile == SCRIPTED_TUI or source == SCRIPTED_TUI)
+            profile == "human_gated"
+            and source == "human"
             and (item.get("allowed") is True or item.get("approved") is True)
         ):
             return True

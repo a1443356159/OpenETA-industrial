@@ -12,10 +12,12 @@ AnyPlace. Simulator ground-truth perception and fabricated grasp candidates
 are not exposed by the worker, MCP server, tool registry, or acceptance
 runner.
 
-Formal normal evidence is PTY TUI → MCP/SSE → Gazebo, with a distinct ROS
+Formal release evidence uses the task-neutral `multi_normal` scene and the PTY
+TUI → MCP/SSE → Gazebo chain, with a distinct ROS
 domain, Gazebo partition, loopback port, process-group logs, correlated MCP
 receipts, and cleanup evidence for each case. Scripted approvals are labelled
-`scripted_tui`; they are never reported as human approval.
+`scripted_tui`; interactive operator approvals are labelled `human_gated` with
+source `human`. The verifier never reports one as the other.
 
 The no-VLM `smoke_normal` profile calls the same real external model services
 and native-contact chain, but is control-layer evidence only. It does not

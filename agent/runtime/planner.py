@@ -93,27 +93,28 @@ _CAMERA_ROLE_PREFERENCE = {
 _CAMERA_ROLE_ALIASES = {
     "wrist": "wrist_primary",
 }
-_SCRIPTED_AUTOMATION_MARKER_RE = re.compile(
-    r"\[automation=scripted_tui;(?P<body>[^\]]+)\]",
+_OPERATOR_TASK_MARKER_RE = re.compile(
+    r"\[(?P<origin>automation=scripted_tui|operator=human_tui);"
+    r"(?P<body>[^\]]+)\]",
     flags=re.IGNORECASE,
 )
-_SCRIPTED_ENVIRONMENT_ID_RE = re.compile(
+_OPERATOR_ENVIRONMENT_ID_RE = re.compile(
     r"(?:^|;)\s*environment_id=(?P<value>[A-Za-z0-9._:/-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
 )
-_SCRIPTED_ENVIRONMENT_TASK_RE = re.compile(
+_OPERATOR_ENVIRONMENT_TASK_RE = re.compile(
     r"(?:^|;)\s*environment_task=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
 )
-_SCRIPTED_ENVIRONMENT_SEED_RE = re.compile(
+_OPERATOR_ENVIRONMENT_SEED_RE = re.compile(
     r"(?:^|;)\s*environment_seed=(?P<value>[0-9]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
 )
-_SCRIPTED_PLANNER_MODE_RE = re.compile(
+_OPERATOR_PLANNER_MODE_RE = re.compile(
     r"(?:^|;)\s*planner_mode=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
 )
-_SCRIPTED_SEMANTIC_FIELD_RE = re.compile(
+_OPERATOR_SEMANTIC_FIELD_RE = re.compile(
     r"(?:^|;)\s*(?P<role>grasp_target|placement_object|placement_region)="
     r"(?P<value>[A-Za-z0-9_-]+)\s*(?=;|$)",
     flags=re.IGNORECASE,
@@ -5292,7 +5293,7 @@ def _build_tool_context_payload(
     skill_usage = _skill_usage_guidance(selected_skill_guidance, memory, config=config)
     memory_context = memory.planning_context(max_events=config.max_memory_events)
     effective_task = _effective_task_text(observation, memory)
-    scripted_task = _scripted_control_task(
+    operator_task = _operator_control_metadata(
         str(memory_context.get("current_user_request") or effective_task or "")
     )
     task_playbook = _matched_task_playbook(
@@ -5409,10 +5410,10 @@ def _build_tool_context_payload(
     return {
         "schema_version": "openeta.planner_context.v1",
         "task": effective_task,
-        "planner_mode": _scripted_planner_mode(scripted_task) or "default",
+        "planner_mode": _operator_planner_mode(operator_task) or "default",
         "active_environment_task": memory_context.get("active_environment_task"),
-        "environment_start_obligation": _scripted_environment_start_obligation(
-            task=scripted_task,
+        "environment_start_obligation": _operator_environment_start_obligation(
+            task=operator_task,
             active_environment_task=memory_context.get("active_environment_task"),
         ),
         "work_order_obligation": _work_order_obligation(
@@ -7028,8 +7029,8 @@ def _semantic_perception_obligation(
     roles = roles if isinstance(roles, dict) else {}
     role_state = roles.get(semantic_role) if isinstance(roles, dict) else None
     role_state = role_state if isinstance(role_state, dict) else {}
-    scripted_prompts = _scripted_semantic_prompts(
-        _scripted_control_task(
+    operator_prompts = _operator_semantic_prompts(
+        _operator_control_metadata(
             str(memory_context.get("current_user_request") or memory_context.get("task") or "")
         )
     )
@@ -7062,7 +7063,7 @@ def _semantic_perception_obligation(
     prompt = str(
         assignment_prompt
         or role_state.get("canonical_prompt")
-        or scripted_prompts.get(semantic_role)
+        or operator_prompts.get(semantic_role)
         or ""
     ).strip()
     if not prompt and semantic_role in {"grasp_target", "placement_object"}:
@@ -7361,33 +7362,35 @@ def _semantic_perception_obligation(
     return base
 
 
-def _scripted_environment_start_obligation(
+def _operator_environment_start_obligation(
     *,
     task: str,
     active_environment_task: object,
 ) -> JsonDict | None:
-    """Return the exact environment creation call declared by scripted acceptance.
+    """Return the exact environment creation call declared by an operator runner.
 
-    This route is intentionally opt-in: ordinary user prose cannot trigger it. The
-    acceptance prompt must contain one structured ``automation=scripted_tui`` block
-    with an explicit environment ID.
+    This route is intentionally opt-in: ordinary user prose cannot trigger it.
+    Scripted acceptance and the interactive human TUI runner each supply one
+    out-of-band marker with an explicit environment ID.  The marker selects the
+    physical workcell only; the operator's natural-language work order remains
+    the source of task intent.
     """
 
     if isinstance(active_environment_task, Mapping):
         return None
-    marker = _SCRIPTED_AUTOMATION_MARKER_RE.search(task)
+    marker = _OPERATOR_TASK_MARKER_RE.search(task)
     if marker is None:
         return None
     body = marker.group("body")
-    environment_match = _SCRIPTED_ENVIRONMENT_ID_RE.search(body)
+    environment_match = _OPERATOR_ENVIRONMENT_ID_RE.search(body)
     if environment_match is None:
         return None
     environment_id = environment_match.group("value")
     parameters: JsonDict = {"env_id": environment_id, "seed": 0}
-    seed_match = _SCRIPTED_ENVIRONMENT_SEED_RE.search(body)
+    seed_match = _OPERATOR_ENVIRONMENT_SEED_RE.search(body)
     if seed_match is not None:
         parameters["seed"] = int(seed_match.group("value"))
-    task_match = _SCRIPTED_ENVIRONMENT_TASK_RE.search(body)
+    task_match = _OPERATOR_ENVIRONMENT_TASK_RE.search(body)
     if task_match is not None:
         assigned_task = task_match.group("value").replace("_", " ").strip()
         if assigned_task:
@@ -7398,33 +7401,42 @@ def _scripted_environment_start_obligation(
         "required_tool": "create_simulator_env",
         "required_parameters": parameters,
         "environment_id": environment_id,
-        "source": "scripted_task_marker",
+        "source": (
+            "human_tui_environment_binding"
+            if marker.group("origin").lower() == "operator=human_tui"
+            else "scripted_task_marker"
+        ),
     }
 
 
-def _scripted_control_task(task: str) -> str:
-    """Keep automation contracts separate from the human-facing TUI task.
+def _operator_control_metadata(task: str) -> str:
+    """Keep runner contracts separate from the human-facing TUI task.
 
-    Formal runners may provide the structured opt-in marker out of band. The
-    ordinary user request then remains natural language while the same planner
-    safety and determinism contracts stay explicit. Inline markers remain a
-    backwards-compatible fallback for older artifacts and tests.
+    The human TUI runner and formal automation may provide a structured opt-in
+    marker out of band.  The ordinary user request then remains natural
+    language while environment selection and planner provenance stay explicit.
+    The legacy scripted environment variable remains supported for existing
+    artifacts.
     """
 
-    metadata = os.environ.get("OPENETA_SCRIPTED_TASK_METADATA", "").strip()
-    if _SCRIPTED_AUTOMATION_MARKER_RE.search(metadata):
-        return metadata
+    for variable in (
+        "OPENETA_OPERATOR_TASK_METADATA",
+        "OPENETA_SCRIPTED_TASK_METADATA",
+    ):
+        metadata = os.environ.get(variable, "").strip()
+        if _OPERATOR_TASK_MARKER_RE.search(metadata):
+            return metadata
     return task
 
 
-def _scripted_semantic_prompts(task: str) -> dict[str, str]:
-    """Read opt-in fixed visual phrases from the scripted acceptance marker."""
+def _operator_semantic_prompts(task: str) -> dict[str, str]:
+    """Read opt-in fixed visual phrases from an acceptance-runner marker."""
 
-    marker = _SCRIPTED_AUTOMATION_MARKER_RE.search(task)
+    marker = _OPERATOR_TASK_MARKER_RE.search(task)
     if marker is None:
         return {}
     prompts: dict[str, str] = {}
-    for match in _SCRIPTED_SEMANTIC_FIELD_RE.finditer(marker.group("body")):
+    for match in _OPERATOR_SEMANTIC_FIELD_RE.finditer(marker.group("body")):
         role = match.group("role").lower()
         value = match.group("value").replace("_", " ").strip()
         if value:
@@ -7432,13 +7444,13 @@ def _scripted_semantic_prompts(task: str) -> dict[str, str]:
     return prompts
 
 
-def _scripted_planner_mode(task: str) -> str:
+def _operator_planner_mode(task: str) -> str:
     """Return the explicitly requested planner mode from one acceptance marker."""
 
-    marker = _SCRIPTED_AUTOMATION_MARKER_RE.search(task)
+    marker = _OPERATOR_TASK_MARKER_RE.search(task)
     if marker is None:
         return ""
-    match = _SCRIPTED_PLANNER_MODE_RE.search(marker.group("body"))
+    match = _OPERATOR_PLANNER_MODE_RE.search(marker.group("body"))
     if match is None:
         return ""
     value = match.group("value").strip().lower()
@@ -7463,8 +7475,8 @@ def _agentic_closed_loop_enabled(tool_context: Mapping[str, object]) -> bool:
     task = str(tool_context.get("task") or "")
     memory = tool_context.get("memory")
     if isinstance(memory, Mapping):
-        task = _scripted_control_task(str(memory.get("current_user_request") or task))
-    return _scripted_planner_mode(task) == "agentic_closed_loop"
+        task = _operator_control_metadata(str(memory.get("current_user_request") or task))
+    return _operator_planner_mode(task) == "agentic_closed_loop"
 
 
 def _attached_object_image_projection(
@@ -7579,7 +7591,7 @@ def _explicit_post_create_observe_required(memory_context: JsonDict) -> bool:
     task = str(
         memory_context.get("current_user_request") or memory_context.get("task") or ""
     )
-    control_task = _scripted_control_task(task).lower()
+    control_task = _operator_control_metadata(task).lower()
     explicitly_requested = (
         "initial_observe=required" in control_task
         or "先 observe" in control_task

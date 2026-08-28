@@ -277,7 +277,8 @@ environment receipts, rewards, checkers, and retained rollout evidence.
 | [Agent command pipeline](docs/agent-action-pipeline.md) | Command schemas, Tool contracts, AtomActions, and safety gates |
 | [Simulation layer](sim/README.md) | Installation, environment registry, MCP, REST, and Dashboard |
 | [Gazebo SAM3 assets](docs/gazebo-sam3-assets-and-deployment.md) | Pinned ModelScope checkpoint, offline cache, and service deployment |
-| [Gazebo normal acceptance](docs/gazebo-normal-acceptance.md) | Real AnyGrasp/AnyPlace compilation, MoveIt scene constraints, recovery, and live acceptance gates |
+| [Gazebo `multi_normal` acceptance](docs/gazebo-normal-acceptance.md) | GraspGenX/AnyPlace compilation, MoveIt scene constraints, frozen-frontier recovery, and release gates |
+| [Human TUI reproduction](docs/multi-normal-tui-reproduction.md) | Operator procedure for the representative two-item `multi_normal` work order |
 | [Parallel simulator evaluation](docs/parallel-simulator-evaluation.md) | Concurrency, budgets, human recovery, and experience promotion |
 | [Rollout data contract](docs/rollout-data-contract.md) | Session data layers and immutable evidence |
 | [Code policy runtime](docs/code-policy-runtime.md) | Bounded code backends and sandbox boundaries |

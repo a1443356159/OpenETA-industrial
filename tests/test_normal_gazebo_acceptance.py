@@ -39,7 +39,9 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
 
     paths = acceptance.prepare_case(tmp_path, tmp_path / "run", allocation, services)
 
-    assert paths.root == tmp_path / "run" / "pick-place" / acceptance.MODE
+    assert paths.root == (
+        tmp_path / "run" / "pick-place" / acceptance.DEFAULT_OPERATOR_MODE
+    )
     config = json.loads(paths.mcp_config.read_text(encoding="utf-8"))["mcpServers"]
     assert set(config) == {
         "openeta-sim",
@@ -84,6 +86,75 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
     assert f"environment_id={acceptance.ENV_ID}" in metadata
     assert "initial_observe=required" in metadata
     assert "environment_task=" not in metadata
+
+
+def test_multi_normal_human_tui_uses_human_mode_without_changing_task_prompt(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = acceptance.base.Allocation(83, "human-tui", 18767, "run-id")
+    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        acceptance.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    paths = acceptance.prepare_case(
+        tmp_path,
+        tmp_path / "human",
+        allocation,
+        dict(acceptance.DEFAULT_SERVICES),
+        scenario="multi_normal",
+        operator_mode=acceptance.base.HUMAN_TUI,
+    )
+
+    assert paths.root == tmp_path / "human" / "pick-place" / "human_tui"
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    assert receipt["operator_mode"] == "human_tui"
+    prompt = paths.instructions.read_text(encoding="utf-8")
+    assert "黄色活动扳手" in prompt
+    assert "operator=human_tui" not in prompt
+    metadata = acceptance._automation_metadata_for_backend(
+        "graspgenx",
+        scenario="multi_normal",
+        operator_mode=acceptance.base.HUMAN_TUI,
+    )
+    assert metadata.startswith("[operator=human_tui;")
+    assert "work_order_source=vlm_conversation" in metadata
+    assert "grasp_target=" not in metadata
+
+
+def test_human_tui_approval_requires_human_gated_provenance() -> None:
+    approved = {
+        "name": "move_to",
+        "result": {
+            "details": {
+                "supervision": {
+                    "allowed": True,
+                    "source": "human",
+                    "details": {"profile": "human_gated"},
+                }
+            }
+        },
+    }
+    scripted = {
+        "name": "move_to",
+        "result": {
+            "details": {
+                "supervision": {
+                    "allowed": True,
+                    "source": "scripted_tui",
+                    "details": {"profile": "scripted_tui"},
+                }
+            }
+        },
+    }
+
+    assert acceptance.base._human_approved(approved) is True
+    assert acceptance.base._human_approved(scripted) is False
 
 
 def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
@@ -169,7 +240,7 @@ def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
         assert len(receipt["acceptance_scene"]["contract_sha256"]) == 64
 
 
-def test_multi_normal_prepares_one_human_request_with_private_verification_oracle(
+def test_multi_normal_prepares_one_human_request_with_private_verification_contract(
     tmp_path, monkeypatch
 ) -> None:
     allocation = acceptance.base.Allocation(81, "openeta-multi-normal", 18765, "run-id")
@@ -258,10 +329,10 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
 
 
 @pytest.mark.parametrize(
-    ("scenario", "ordered_assignment_ids", "first_destination"),
+    ("task_variant", "ordered_assignment_ids", "first_destination"),
     [
         (
-            "multi_normal1",
+            "wrench-blue-bolt-green",
             [
                 "yellow_wrench_to_blue_parts_bin",
                 "red_bolt_to_green_parts_bin",
@@ -269,7 +340,7 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
             "blue_parts_bin",
         ),
         (
-            "multi_normal2",
+            "bolt-blue-wrench-green",
             [
                 "red_bolt_to_blue_parts_bin",
                 "yellow_wrench_to_green_parts_bin",
@@ -277,7 +348,7 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
             "blue_parts_bin",
         ),
         (
-            "multi_normal3",
+            "bolt-green-wrench-blue",
             [
                 "red_bolt_to_green_parts_bin",
                 "yellow_wrench_to_blue_parts_bin",
@@ -286,14 +357,14 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
         ),
     ],
 )
-def test_multi_normal_requests_change_only_user_words_and_verification_oracle(
+def test_multi_normal_task_variants_change_only_user_words_and_verification_contract(
     tmp_path,
     monkeypatch,
-    scenario: str,
+    task_variant: str,
     ordered_assignment_ids: list[str],
     first_destination: str,
 ) -> None:
-    allocation = acceptance.base.Allocation(82, scenario, 18766, "run-id")
+    allocation = acceptance.base.Allocation(82, task_variant, 18766, "run-id")
     monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
     monkeypatch.setattr(
         acceptance.base,
@@ -306,17 +377,21 @@ def test_multi_normal_requests_change_only_user_words_and_verification_oracle(
 
     paths = acceptance.prepare_case(
         tmp_path,
-        tmp_path / scenario,
+        tmp_path / task_variant,
         allocation,
         dict(acceptance.DEFAULT_SERVICES),
-        scenario=scenario,
+        scenario="multi_normal",
+        task_variant=task_variant,
         grasp_backend="graspgenx",
     )
     receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
     assignments = receipt["acceptance_scene"]["expected_work_order"]
 
-    assert receipt["acceptance_scenario"] == scenario
-    assert receipt["acceptance_scene"]["acceptance_request_id"] == scenario
+    assert receipt["acceptance_scenario"] == "multi_normal"
+    assert receipt["task_variant"] == task_variant
+    assert receipt["acceptance_scene"]["acceptance_request_id"] == (
+        f"multi_normal:{task_variant}"
+    )
     assert receipt["acceptance_scene"]["scene_id"] == "multi_normal"
     assert [item["id"] for item in assignments] == ordered_assignment_ids
     assert assignments[0]["placement_region_id"] == first_destination
@@ -325,7 +400,7 @@ def test_multi_normal_requests_change_only_user_words_and_verification_oracle(
         if first_destination == "blue_parts_bin"
         else "green parts bin"
     )
-    assert acceptance._scenario_environment(scenario) == {
+    assert acceptance._scenario_environment("multi_normal") == {
         "OPENETA_ACCEPTANCE_SCENE": "multi_normal"
     }
     assert "放好第一件后不要关闭环境" in paths.instructions.read_text(
@@ -546,6 +621,17 @@ def test_pick_place_acceptance_parser_defaults_to_fast_v3() -> None:
     args = acceptance._parser().parse_args([])
 
     assert args.qualification_profile == "fast_v3"
+    assert args.operator_mode == "scripted_tui"
+    assert args.task_variant == "wrench-green-bolt-blue"
+    assert "multi_normal" in acceptance.SCENARIOS
+    assert not {"multi_normal1", "multi_normal2", "multi_normal3"}.intersection(
+        acceptance.SCENARIOS
+    )
+
+
+def test_task_variant_cannot_change_a_non_multi_physical_scene() -> None:
+    with pytest.raises(ValueError, match="only valid with --scenario multi_normal"):
+        acceptance._validated_task_variant("normal", "bolt-green-wrench-blue")
 
 
 def test_smoke_normal_planner_evidence_requires_host_only_and_zero_tokens() -> None:
