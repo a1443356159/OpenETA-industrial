@@ -128,7 +128,7 @@ def test_arm_controller_proves_loaded_terminal_tracking() -> None:
     assert constraints["goal_time"] == 2.0
     assert constraints["stopped_velocity_tolerance"] == 0.01
     assert {name: constraints[name] for name in ARM_JOINTS} == {
-        name: {"trajectory": 0.05, "goal": 0.002} for name in ARM_JOINTS
+        name: {"trajectory": 0.06, "goal": 0.002} for name in ARM_JOINTS
     }
     assert "<position_proportional_gain>1.0</position_proportional_gain>" in control_xacro
 

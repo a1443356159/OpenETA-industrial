@@ -456,12 +456,11 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # General motion profiles are selected from physical load state, never a
     # scene/object identity.  The unloaded contact move can use more of the
     # RM75 limits; a retained payload uses a gentler profile until release.
-    # Keep both profiles inside the measured Gazebo tracking envelope without
-    # relaxing JointTrajectoryController's 0.05 rad path limit. Under shared
-    # GPU/physics load, 0.20/0.10 unloaded and 0.15/0.08 payload trajectories
-    # reached 0.050045 and 0.050341 rad respectively on joint 5. A modest
-    # load-state slowdown is safer and cheaper than aborting mid-path and
-    # requalifying another model goal.
+    # Keep both profiles inside the measured Gazebo tracking envelope. Under
+    # shared GPU/physics load, the previous profiles repeatedly exceeded the
+    # former 0.05 rad controller limit on joint 5. Conservative load-state
+    # profiles reduce tracking lag, while the controller retains an explicit
+    # 0.06 rad path envelope and the unchanged 0.002 rad terminal goal.
     unloaded_velocity_scaling: float = 0.18
     unloaded_acceleration_scaling: float = 0.08
     loaded_velocity_scaling: float = 0.12
