@@ -270,6 +270,13 @@ def test_post_attach_pose_retry_exhaustion_preserves_infrastructure_error(
             return _accepted_gate()
 
         @staticmethod
+        def prove_contact_clearance(**_kwargs):
+            return {
+                "schema_version": "openeta.native_pad_clearance.v1",
+                "cleared": True,
+            }
+
+        @staticmethod
         def close():
             return None
 
@@ -360,6 +367,13 @@ def test_measured_attachment_collision_is_candidate_rejection_then_pose_sync(
             return _accepted_gate()
 
         @staticmethod
+        def prove_contact_clearance(**_kwargs):
+            return {
+                "schema_version": "openeta.native_pad_clearance.v1",
+                "cleared": True,
+            }
+
+        @staticmethod
         def close():
             return None
 
@@ -409,6 +423,18 @@ def test_measured_attachment_collision_is_candidate_rejection_then_pose_sync(
                 },
             },
         )
+
+        @staticmethod
+        def establish_attached_transport_hold():
+            return {
+                "schema_version": "openeta.attached_transport_hold.v1",
+                "actuator_model": "single_common_driver",
+                "object_environment_collision_enabled": True,
+                "minimum_proven_relief_rad": 0.02,
+                "measured_common_before_rad": 0.60,
+                "measured_common_after_rad": 0.57,
+                "action_completed_ros_time_s": 12.0,
+            }
 
         def sync_planning_scene_attach(self, *_args, **_kwargs):
             self.planning_scene.world_ids.remove("target_object")
@@ -480,6 +506,12 @@ def test_measured_attachment_collision_is_candidate_rejection_then_pose_sync(
     assert close_receipt["candidate_rejection"] is True
     assert close_receipt["failure_class"] == "measured_attachment_collision"
     assert close_receipt["attach_acked_before_rollback"] is True
+    assert close_receipt["attached_transport_hold"][
+        "object_environment_collision_enabled"
+    ] is True
+    assert close_receipt["attached_transport_hold"]["schema_version"] == (
+        "openeta.attached_transport_hold.v2"
+    )
     assert close_receipt["error_code"] == ReasonCode.ATTACHMENT_STATE_INVALID.value
     assert close_receipt["planning_scene_rollback"] == {
         "state": "detached",

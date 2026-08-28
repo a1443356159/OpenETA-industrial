@@ -24,6 +24,7 @@ from agent.runtime.calibration_registry import (
     DEFAULT_GRASP_CALIBRATION_PROFILE,
     load_grasp_calibration_capabilities,
 )
+from agent.runtime.release_evidence import ordered_native_release_proof
 
 
 PENDING_SAM3_SELECTION_KEY = "pending_sam3_selection"
@@ -4006,6 +4007,7 @@ class AgentMemory:
         )
         frozen_candidate_retry = (
             qualification_scene_changed
+            and not close_failure_can_rebase_frozen_frontier
             and next_candidate is not None
             and next_candidate.get("grasp_place_joint_qualified") is True
             and isinstance(frozen_pool, dict)
@@ -4059,6 +4061,29 @@ class AgentMemory:
                 policy.get("frozen_grasp_frontier_remaining_count"),
                 default=0,
             )
+            if close_failure_can_rebase_frozen_frontier and not retry_exhausted:
+                # Every old IK/L5 proof is pose-bound after a failed close
+                # moves the detached target. Include unattempted qualified
+                # backups in the frozen requalification count instead of
+                # executing their stale terminal poses directly.
+                rejected_ids = {
+                    str(item.get("candidate_id") or "")
+                    for item in rejected
+                    if isinstance(item, dict)
+                }
+                frozen_frontier_remaining = max(
+                    frozen_frontier_remaining,
+                    sum(
+                        1
+                        for candidate in candidates
+                        if isinstance(candidate, dict)
+                        and str(candidate.get("id") or "")
+                        not in rejected_ids
+                    ),
+                )
+                policy["frozen_grasp_frontier_remaining_count"] = (
+                    frozen_frontier_remaining
+                )
             policy_revision = _optional_int(policy.get("planning_scene_revision"), default=-1)
             rejection_revision = _optional_int(rejection.get("planning_scene_revision"), default=-2)
             planning_scene_unchanged = (
@@ -4089,6 +4114,9 @@ class AgentMemory:
                         "schema_version": ("openeta.frozen_grasp_frontier_rebase_pending.v1"),
                         "reason_code": "FAILED_CLOSE_TARGET_POSE_SYNC_REQUIRED",
                         "source_planning_scene_revision": policy_revision,
+                        "physically_rejected_candidate_id": str(
+                            active.get("id") or ""
+                        ),
                         "required_proof": (
                             "detached_native_target_pose_sync_with_unchanged_static_scene"
                         ),
@@ -5454,29 +5482,53 @@ class AgentMemory:
             if isinstance(release_sequence, list)
             else []
         )
-        release_events = [str(item.get("event") or "") for item in ordered_release]
-        release_numbers = [
-            _optional_int(item.get("sequence"), default=-1) for item in ordered_release
-        ]
-        detach_revision = (
-            _optional_int(ordered_release[1].get("revision"), default=-1)
-            if len(ordered_release) >= 3
-            and release_events[:3]
-            == [
-                "native_detach_ack",
-                "planning_scene_detach_ack",
-                "gripper_open_completed",
-            ]
-            and release_numbers[:3] == [1, 2, 3]
-            else -1
+        release_proof = ordered_native_release_proof(ordered_release)
+        irreversible_open = (
+            receipt.get("gripper_open_executed") is True
+            and isinstance(detached, dict)
+            and detached.get("state") == "detached"
+        )
+        if (
+            release_proof is None
+            or not isinstance(release_proof.get("planning_scene_detach_ack"), dict)
+            or not isinstance(release_proof.get("gripper_open_completed"), dict)
+        ):
+            if not irreversible_open:
+                return False
+            failure_code = "PLACEMENT_RELEASE_SEQUENCE_INVALID"
+            return self._record_failed_placement_release(
+                release,
+                failure_code=failure_code,
+                failure_reason=(
+                    "The object was detached and the gripper opened, but the "
+                    "ordered native release proof was invalid. A fresh observation "
+                    "is required."
+                ),
+                evidence={
+                    "schema_version": "openeta.placement_release_failure.v1",
+                    "failure_code": failure_code,
+                    "planning_scene_revision": receipt.get(
+                        "planning_scene_revision"
+                    ),
+                    "detachable_joint": dict(detached),
+                    "gripper_open_executed": True,
+                    "release_sequence": ordered_release,
+                },
+                source="placement_release_sequence_invalid",
+                event_type="placement_release_failed_after_irreversible_transition",
+                advance_scene_epoch=True,
+            )
+        detach_revision = _optional_int(
+            release_proof["planning_scene_detach_ack"].get("revision"),
+            default=-1,
         )
         final_revision = _optional_int(receipt.get("planning_scene_revision"), default=-1)
-        target_pose_revision = None
-        if len(ordered_release) >= 4:
-            terminal = ordered_release[3]
-            if release_events[3] != "released_target_pose_sync_ack" or release_numbers[3] != 4:
-                return False
-            target_pose_revision = _optional_int(terminal.get("revision"), default=-1)
+        terminal = release_proof.get("released_target_pose_sync_ack")
+        target_pose_revision = (
+            _optional_int(terminal.get("revision"), default=-1)
+            if isinstance(terminal, dict)
+            else None
+        )
         if policy.get("revision_provenance") == "native_attachment_gate":
             if (
                 not isinstance(detached, dict)
@@ -5539,6 +5591,18 @@ class AgentMemory:
                     if target_pose_revision is not None
                     else {}
                 ),
+                **(
+                    {
+                        "attached_collision_filter": dict(
+                            release_proof["attached_collision_filter_ack"]
+                        )
+                    }
+                    if isinstance(
+                        release_proof.get("attached_collision_filter_ack"),
+                        dict,
+                    )
+                    else {}
+                ),
                 "release_sequence": ordered_release,
             }
         )
@@ -5584,14 +5648,16 @@ class AgentMemory:
             if isinstance(sequence, list)
             else []
         )
-        events = [str(item.get("event") or "") for item in ordered]
-        numbers = [_optional_int(item.get("sequence"), default=-1) for item in ordered]
+        release_proof = ordered_native_release_proof(ordered)
         irreversible = (
             receipt.get("gripper_open_executed") is True
             and isinstance(detachable, dict)
             and detachable.get("state") == "detached"
-            and events[:2] == ["native_detach_ack", "planning_scene_detach_ack"]
-            and numbers[:2] == [1, 2]
+            and isinstance(release_proof, dict)
+            and isinstance(release_proof.get("native_detach_ack"), dict)
+            and isinstance(
+                release_proof.get("planning_scene_detach_ack"), dict
+            )
         )
         if not irreversible:
             return False

@@ -66,6 +66,8 @@ def test_planning_scene_reset_and_attach_detach_switch() -> None:
     # Before native attach, MoveIt must reject any route whose open gripper
     # sweeps through the target.  Only the real support contact is allowed.
     assert calls[0]["allowed_collisions"]["target"] == ["table"]
+    assert scene.support_contact_object_id == "table"
+    assert scene.support_contact_reference_target_spec == target.to_dict()
     assert scene.attach_target(target=target, relative_pose_xyz=(0.0, 0.0, -0.04)) == 2
     assert scene.world_ids == {"table", "distractor"}
     assert scene.attached_ids == {"target"}
@@ -75,6 +77,17 @@ def test_planning_scene_reset_and_attach_detach_switch() -> None:
     assert "remove_world_ids" not in calls[1]
     assert scene.detach_target(target=target) == 3
     assert scene.world_ids == {"table", "distractor", "target"}
+
+
+def test_motion_only_scene_clears_authoritative_support_identity() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, distractor, target = _boxes()
+    scene.reset(table=table, distractor=distractor, target=target)
+
+    assert scene.support_contact_object_id == "table"
+    scene.initialize_empty()
+    assert scene.support_contact_object_id == ""
+    assert scene.support_contact_reference_target_spec == {}
 
 
 def test_planning_scene_allows_only_the_fixed_robot_support_contact() -> None:

@@ -42,7 +42,7 @@ def test_native_grasp_profile_constructs_without_starting_a_worker() -> None:
             "height_rule": "compound_collision_geometry_contacts_destination_plane",
             "support_height_tolerance_m": 0.01,
             "destination_center_xy": list(config.destination_center_xy),
-            "destination_size_xy_m": [0.285, 0.275],
+            "destination_size_xy_m": [0.285, 0.260],
             "footprint_rule": "stable_geometry_centroid_inside",
             "complete_footprint_margin_role": "ordering_and_evidence_only",
         }

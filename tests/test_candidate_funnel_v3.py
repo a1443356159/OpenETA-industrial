@@ -359,6 +359,34 @@ def _engine(**overrides):
     return MoveItQualificationEngine(**callbacks)
 
 
+def test_fast_ik_request_carries_the_wave_queue_depth_separately_from_solver_budget():
+    seen: list[tuple[float, int]] = []
+
+    def compute_ik(target, seed, collision):
+        seen.append(
+            (
+                float(target["ik_seed_timeout_s"]),
+                int(target["qualification_ik_queue_depth"]),
+            )
+        )
+        return {
+            "ok": True,
+            "joint_state": {"names": ["j1"], "positions": [0.2]},
+            "min_singular_value": 0.3,
+        }
+
+    response = _engine(compute_ik=compute_ik).qualify(
+        _request(
+            [_candidate(0)],
+            overrides={"max_ik_concurrency": 4, "l5_pass_target": 1},
+        )
+    )
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert seen
+    assert set(seen) == {(0.05, 4)}
+
+
 def test_frozen_pair_retains_two_diverse_l5_passes_without_early_cutoff():
     calls = 0
 
@@ -1814,6 +1842,64 @@ def test_object_goal_static_collision_is_rejected_by_target_gate():
         ]
     )
     assert response["metrics"]["screening_attempt_count"] == 0
+
+
+def test_compound_bin_exempts_only_support_floor_not_collision_wall() -> None:
+    scene = _placement_scene()
+    scene["world_specs"]["table"] = {
+        "id": "table",
+        "shape": "compound",
+        "size_xyz": [0.12, 0.12, 0.1],
+        "pose_xyz": [0.0, 0.0, 0.0],
+        "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "primitives": [
+            {
+                "shape": "box",
+                "size_xyz": [0.12, 0.12, 0.02],
+                "pose_xyz": [0.0, 0.0, 0.39],
+                "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+            {
+                "shape": "box",
+                "size_xyz": [0.01, 0.12, 0.1],
+                "pose_xyz": [0.035, 0.0, 0.45],
+                "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        ],
+    }
+    scene["placement_region"].update(
+        {
+            "center_xy": [0.0, 0.0],
+            "size_xy_m": [0.12, 0.12],
+            "support_z_m": 0.4,
+            "static_penetration_tolerance_m": 0.0,
+        }
+    )
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.03, 0.0, 0.43],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+        }
+    )
+
+    response = _engine(clone_scene=lambda: scene).qualify(_request([candidate]))
+
+    result = response["results"][0]
+    assert result["reason"] == "goal_static_obstacle_penetration"
+    collision = result["goal_legality"]["checks"]["static_scene_collision"]
+    assert collision["collision_ids"] == ["table"]
+    assert collision["support_contact_primitive_count"] == 1
+    assert collision["support_barrier_primitive_count"] == 1
 
 
 def test_exact_gripper_collision_primitive_is_rejected_by_pair_gate():

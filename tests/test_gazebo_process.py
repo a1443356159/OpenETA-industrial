@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -94,7 +95,7 @@ def test_ros_launch_inherits_worker_streams_for_case_local_diagnostics(
     assert captured["kwargs"]["stderr"] is None
 
 
-def test_detachable_joint_wait_ready_requires_the_stock_endpoint_triplet(
+def test_detachable_joint_wait_ready_requires_joint_and_collision_filter_endpoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Native grasp must not publish its one-shot detach before plugin endpoints exist."""
@@ -111,6 +112,9 @@ def test_detachable_joint_wait_ready_requires_the_stock_endpoint_triplet(
                     "/openeta/native_grasp/detachable_joint/target/attach",
                     "/openeta/native_grasp/detachable_joint/target/detach",
                     "/openeta/native_grasp/detachable_joint/target/state",
+                    "/openeta/native_grasp/detachable_joint/target/collision_filter_state",
+                    "/openeta/native_grasp/detachable_joint/target/collision_filter_state/request",
+                    "/openeta/native_grasp/detachable_joint/target/collision_filter_state/ack",
                 ]
             ),
             stderr="",
@@ -152,10 +156,13 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
     events: list[str] = []
 
     class Listener:
-        @staticmethod
-        def communicate(timeout):
-            events.append("ack")
-            return ('data: "detached"\n', "")
+        def __init__(self, label: str, output: str):
+            self.label = label
+            self.output = output
+
+        def communicate(self, timeout):
+            events.append(self.label)
+            return (self.output, "")
 
         @staticmethod
         def poll():
@@ -164,22 +171,50 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
     monkeypatch.setattr(
         gazebo_process.subprocess,
         "Popen",
-        lambda *_args, **_kwargs: Listener(),
+        lambda command, **_kwargs: Listener(
+            "filter_ack"
+            if command[-1].endswith("/collision_filter_state/ack")
+            else "joint_ack",
+            "\n"
+            if command[-1].endswith("/collision_filter_state/ack")
+            else 'data: "detached"\n',
+        ),
     )
 
     def run(command, **_kwargs):
         if "-i" in command:
+            is_filter = command[-1].endswith("/collision_filter_state")
+            is_filter_ack = command[-1].endswith(
+                "/collision_filter_state/ack"
+            )
+            is_filter_request = command[-1].endswith(
+                "/collision_filter_state/request"
+            )
             is_state = command[-1].endswith("/state")
-            events.append("state_listener" if is_state else "command_listener")
+            events.append(
+                "filter_listener"
+                if is_filter or is_filter_ack
+                else (
+                    "filter_request_listener"
+                    if is_filter_request
+                    else ("state_listener" if is_state else "command_listener")
+                )
+            )
             return subprocess.CompletedProcess(
                 command,
                 0,
                 stdout=(
                     (
                         "Publishers [Address, Message Type]:\n"
-                        "  tcp://127.0.0.1:12344, gz.msgs.StringMsg\n"
+                        "  tcp://127.0.0.1:12344, "
+                        + (
+                            "gz.msgs.Boolean\n"
+                            if is_filter_ack
+                            else "gz.msgs.StringMsg\n"
+                        )
                     )
-                    if is_state else "No publishers on topic [command]\n"
+                    if is_state or is_filter or is_filter_ack
+                    else "No publishers on topic [command]\n"
                 )
                 + (
                     "Subscribers [Address, Message Type]:\n"
@@ -196,7 +231,36 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
     )
 
     assert control.ensure_detached() == gazebo_process.DetachableJointState.DETACHED
-    assert events == ["state_listener", "command_listener", "publish", "ack"]
+    assert events == [
+        "state_listener",
+        "command_listener",
+        "publish",
+        "joint_ack",
+        "filter_listener",
+        "publish",
+        "filter_ack",
+    ]
+    assert control.collision_filter_evidence() == {
+        "schema_version": "openeta.attached_collision_filter.v1",
+        "state": "full",
+        "joint_state": "detached",
+        "state_topic": (
+            "/openeta/native_grasp/detachable_joint/target/"
+            "collision_filter_state"
+        ),
+        "state_request_topic": (
+            "/openeta/native_grasp/detachable_joint/target/"
+            "collision_filter_state/request"
+        ),
+        "state_ack_topic": (
+            "/openeta/native_grasp/detachable_joint/target/"
+            "collision_filter_state/ack"
+        ),
+        "robot_mask": 1,
+        "target_mask": 65535,
+        "target_robot_collision_enabled": True,
+        "target_environment_collision_enabled": True,
+    }
 
 
 def test_detachable_joint_proof_uses_the_target_model_world_pose() -> None:
@@ -605,3 +669,164 @@ def test_native_contact_window_proves_a_bounded_post_close_hold(
         "bounded_post_close_bilateral_hold"
     )
     assert result.evidence["post_close_hold_completed"] is True
+
+
+def test_native_contact_window_records_an_empty_contact_heartbeat() -> None:
+    window = gazebo_process.GazeboNativeContactWindow(timeout_s=0.0)
+
+    window._record_message(
+        """
+header {
+  stamp { sec: 10 nanosec: 250000000 }
+}
+""",
+        "left",
+    )
+
+    assert window._latest_message_sim_times == {"left": pytest.approx(10.25)}
+    assert window._samples == []
+
+
+def test_native_contact_window_proves_clear_pads_in_gazebo_time() -> None:
+    window = gazebo_process.GazeboNativeContactWindow(
+        timeout_s=0.0,
+        simulation_time_provider=lambda: 10.30,
+    )
+    window._armed = True
+    window._processes = [
+        SimpleNamespace(poll=lambda: None),
+        SimpleNamespace(poll=lambda: None),
+    ]
+    window._latest_message_sim_times = {"left": 9.99, "right": 9.99}
+
+    evidence = window.prove_contact_clearance(
+        after_sim_time_s=10.0,
+        duration_sim_s=0.12,
+    )
+
+    assert evidence == {
+        "schema_version": "openeta.native_pad_clearance.v1",
+        "cleared": True,
+        "window_started_sim_time_s": 10.0,
+        "window_ended_sim_time_s": 10.12,
+        "duration_sim_s": 0.12,
+        "proof_window_ended_sim_time_s": pytest.approx(10.24),
+        "transport_drain_duration_sim_s": 0.12,
+        "left_contact_sample_count": 0,
+        "right_contact_sample_count": 0,
+        "latest_live_contact_stream_message_sim_time_s": {
+            "left": 9.99,
+            "right": 9.99,
+        },
+        "proof_clock_sim_time_s": 10.30,
+        "contact_subscriptions_live": True,
+        "time_basis": "gazebo_clock_after_previously_live_contact_streams",
+    }
+
+
+def test_native_contact_window_rejects_contact_during_clearance_window() -> None:
+    window = gazebo_process.GazeboNativeContactWindow(
+        timeout_s=0.0,
+        simulation_time_provider=lambda: 10.30,
+    )
+    window._armed = True
+    window._processes = [
+        SimpleNamespace(poll=lambda: None),
+        SimpleNamespace(poll=lambda: None),
+    ]
+    window._latest_message_sim_times = {"left": 9.99, "right": 9.99}
+    target = "target_object::target_link::target_collision"
+    window._samples.append(
+        NativeContactSample(
+            "right",
+            10.08,
+            100.0,
+            (
+                "robot::robotiq_85_right_finger_tip_link::collision",
+                target,
+            ),
+        )
+    )
+
+    evidence = window.prove_contact_clearance(
+        after_sim_time_s=10.0,
+        duration_sim_s=0.12,
+    )
+
+    assert evidence["cleared"] is False
+    assert evidence["left_contact_sample_count"] == 0
+    assert evidence["right_contact_sample_count"] == 1
+
+
+def test_native_contact_window_counts_the_last_unflushed_contact_message() -> None:
+    window = gazebo_process.GazeboNativeContactWindow(
+        timeout_s=0.0,
+        simulation_time_provider=lambda: 10.30,
+    )
+    window._armed = True
+    window._processes = [
+        SimpleNamespace(poll=lambda: None),
+        SimpleNamespace(poll=lambda: None),
+    ]
+    window._latest_message_sim_times = {"left": 9.99, "right": 9.99}
+    window._pending_message_lines["right"] = [
+        """
+header { stamp { sec: 10 nanosec: 80000000 } }
+contact {
+  collision1 { name: "robot::robotiq_85_right_finger_tip_link::collision" }
+  collision2 { name: "target_object::target_link::target_collision" }
+}
+"""
+    ]
+
+    evidence = window.prove_contact_clearance(
+        after_sim_time_s=10.0,
+        duration_sim_s=0.12,
+    )
+
+    assert evidence["cleared"] is False
+    assert evidence["right_contact_sample_count"] == 1
+
+
+def test_native_contact_window_clearance_requires_both_live_streams() -> None:
+    window = gazebo_process.GazeboNativeContactWindow(
+        timeout_s=0.0,
+        simulation_time_provider=lambda: 10.30,
+    )
+    window._armed = True
+    window._processes = [
+        SimpleNamespace(poll=lambda: None),
+        SimpleNamespace(poll=lambda: None),
+    ]
+    window._latest_message_sim_times = {"left": 9.99}
+
+    with pytest.raises(
+        gazebo_process.GazeboProcessError,
+        match="NATIVE_GRASP_CONTACT_CLEARANCE_STREAM_TIMEOUT",
+    ):
+        window.prove_contact_clearance(
+            after_sim_time_s=10.0,
+            duration_sim_s=0.12,
+        )
+
+
+def test_native_contact_window_clearance_requires_gazebo_clock_progress() -> None:
+    window = gazebo_process.GazeboNativeContactWindow(
+        timeout_s=0.0,
+        simulation_time_provider=lambda: 10.20,
+    )
+    window._armed = True
+    window._processes = [
+        SimpleNamespace(poll=lambda: None),
+        SimpleNamespace(poll=lambda: None),
+    ]
+    window._latest_message_sim_times = {"left": 9.99, "right": 9.99}
+
+    with pytest.raises(
+        gazebo_process.GazeboProcessError,
+        match="NATIVE_GRASP_CONTACT_CLEARANCE_STREAM_TIMEOUT",
+    ):
+        window.prove_contact_clearance(
+            after_sim_time_s=10.0,
+            duration_sim_s=0.12,
+        )

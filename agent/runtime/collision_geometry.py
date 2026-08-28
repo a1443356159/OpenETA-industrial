@@ -150,6 +150,74 @@ class CompoundAxisAlignedBounds:
         )  # type: ignore[return-value]
 
 
+def collision_primitives_penetrate(
+    left: ProjectedCollisionPrimitive,
+    right: ProjectedCollisionPrimitive,
+    *,
+    tolerance_m: float = 0.0,
+) -> bool:
+    """Return exact box/box penetration using the separating-axis theorem.
+
+    Touching within ``tolerance_m`` is separation. Cylinders are intentionally
+    not coerced to their enclosing boxes here: that proxy is useful for cheap
+    ordering, but it cannot be used as a hard authoritative collision proof
+    without risking false rejection.
+    """
+
+    if not math.isfinite(tolerance_m) or tolerance_m < 0.0:
+        raise ValueError("collision penetration tolerance is invalid")
+    if (
+        left.shape != "box"
+        or right.shape != "box"
+        or left.size_xyz is None
+        or right.size_xyz is None
+    ):
+        raise ValueError("exact primitive penetration supports boxes only")
+
+    def columns(rotation: Rotation3) -> tuple[Vector3, Vector3, Vector3]:
+        return tuple(
+            tuple(rotation[row][column] for row in range(3))
+            for column in range(3)
+        )  # type: ignore[return-value]
+
+    def dot(a: Sequence[float], b: Sequence[float]) -> float:
+        return sum(float(a[index]) * float(b[index]) for index in range(3))
+
+    def cross(a: Sequence[float], b: Sequence[float]) -> Vector3:
+        return (
+            float(a[1]) * float(b[2]) - float(a[2]) * float(b[1]),
+            float(a[2]) * float(b[0]) - float(a[0]) * float(b[2]),
+            float(a[0]) * float(b[1]) - float(a[1]) * float(b[0]),
+        )
+
+    left_axes = columns(left.rotation_rows)
+    right_axes = columns(right.rotation_rows)
+    left_half = left.enclosing_obb_half_sizes()
+    right_half = right.enclosing_obb_half_sizes()
+    delta = tuple(
+        right.center_xyz[index] - left.center_xyz[index] for index in range(3)
+    )
+    axes = [*left_axes, *right_axes]
+    axes.extend(cross(a, b) for a in left_axes for b in right_axes)
+    for axis in axes:
+        norm = math.sqrt(dot(axis, axis))
+        if norm <= 1e-10:
+            continue
+        unit = tuple(value / norm for value in axis)
+        center_distance = abs(dot(delta, unit))
+        left_radius = sum(
+            left_half[index] * abs(dot(left_axes[index], unit))
+            for index in range(3)
+        )
+        right_radius = sum(
+            right_half[index] * abs(dot(right_axes[index], unit))
+            for index in range(3)
+        )
+        if left_radius + right_radius - center_distance <= tolerance_m:
+            return False
+    return True
+
+
 def collision_geometry_volume_centroid(
     primitives: Sequence[ProjectedCollisionPrimitive],
 ) -> Vector3:

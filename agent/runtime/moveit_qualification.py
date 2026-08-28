@@ -2719,6 +2719,10 @@ class MoveItQualificationEngine:
                     seeded_target = dict(target)
                     seeded_target["ik_seed_timeout_s"] = timeout_s
                     seeded_target["solver_profile"] = solver_profile
+                    # The solver keeps its short per-seed budget, while the
+                    # ROS response may legitimately queue behind every other
+                    # request admitted by this deterministic wave.
+                    seeded_target["qualification_ik_queue_depth"] = ik_gate.limit
                     pure, retry_count, elapsed = self._call_fast_service(
                         lambda seeded_target=seeded_target, seed=seed: self.compute_ik(
                             seeded_target, seed, False
@@ -2776,6 +2780,7 @@ class MoveItQualificationEngine:
                         rescue_target = dict(target)
                         rescue_target["ik_seed_timeout_s"] = timeout_s
                         rescue_target["solver_profile"] = solver_profile
+                        rescue_target["qualification_ik_queue_depth"] = ik_gate.limit
                         rescue, rescue_retry, rescue_elapsed = self._call_fast_service(
                             lambda rescue_target=rescue_target, pure_state=pure_state: (
                                 self.compute_ik(rescue_target, pure_state, True)
@@ -4147,6 +4152,10 @@ class MoveItQualificationEngine:
             evidence["l5_trajectory_cache_stored"] = (
                 planned.get("l5_trajectory_cache_stored") is True
             )
+            if isinstance(planned.get("trajectory_safety"), Mapping):
+                evidence["trajectory_safety"] = dict(
+                    planned["trajectory_safety"]
+                )
             if isinstance(planned.get("l5_trajectory_cache_key"), str):
                 evidence["l5_trajectory_cache_key"] = planned["l5_trajectory_cache_key"]
             reported_elapsed = planned.get("elapsed_s")

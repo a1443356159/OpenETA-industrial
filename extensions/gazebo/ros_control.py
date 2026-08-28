@@ -43,6 +43,13 @@ from .planning_scene import (
     PlanningSceneError,
     PlanningSceneSynchronizer,
 )
+from agent.runtime.collision_geometry import (
+    CompoundAxisAlignedBounds,
+    ProjectedCollisionPrimitive,
+    collision_primitives_penetrate,
+    compound_axis_aligned_bounds,
+    project_collision_geometry,
+)
 
 QUALIFIED_JOINT_GOAL_TOLERANCE_RAD = 0.001
 L5_TRAJECTORY_START_TOLERANCE_RAD = 0.001
@@ -290,18 +297,39 @@ def _move_group_failure_result(
     }
 
 
-def _qualification_ik_response_timeout_s(seed_timeout_s: float) -> float:
-    """Keep a short solver budget without timing out behind concurrent RPCs."""
+def _qualification_ik_response_timeout_s(
+    seed_timeout_s: float,
+    *,
+    queue_depth: int = 1,
+) -> float:
+    """Keep a short solver budget without timing out in its bounded ROS queue.
+
+    MoveGroup may serialize ``/compute_ik`` callbacks even when the client
+    deliberately submits a concurrent wave.  The request's IK timeout remains
+    the solver/search budget.  This separate response deadline covers the
+    finite queue plus executor scheduling, so a slow negative solution cannot
+    turn the other requests in the same wave into infrastructure failures.
+    """
 
     from agent.runtime.moveit_qualification import (
         KINEMATIC_IK_TIMEOUT_S,
         STATE_VALIDITY_TIMEOUT_S,
     )
 
+    seed_timeout = float(seed_timeout_s)
+    depth = int(queue_depth)
+    if (
+        not math.isfinite(seed_timeout)
+        or seed_timeout <= 0.0
+        or isinstance(queue_depth, bool)
+        or depth <= 0
+    ):
+        raise ValueError("qualification IK response deadline inputs are invalid")
     return max(
-        KINEMATIC_IK_TIMEOUT_S,
         STATE_VALIDITY_TIMEOUT_S,
-        float(seed_timeout_s) + 0.1,
+        STATE_VALIDITY_TIMEOUT_S
+        + depth * (KINEMATIC_IK_TIMEOUT_S + 0.5),
+        seed_timeout + 0.1,
     )
 
 
@@ -527,6 +555,353 @@ def _child_world_pose(
         tuple(parent_xyz[index] + offset[index] for index in range(3)),
         _normalized_quaternion(_quaternion_multiply(parent_q, relative_quat_xyzw)),
     )
+
+
+def _quaternion_rotation_rows(
+    quaternion: Sequence[float],
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float],
+    tuple[float, float, float],
+]:
+    """Return the normalized rotation used by exact collision projection."""
+
+    x, y, z, w = _normalized_quaternion(
+        tuple(float(value) for value in quaternion)
+    )
+    return (
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+        ),
+        (
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+        ),
+        (
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ),
+    )
+
+
+def _collision_spec_bounds(
+    spec: Mapping[str, Any],
+    *,
+    object_xyz: Sequence[float] | None = None,
+    object_quat_xyzw: Sequence[float] | None = None,
+) -> CompoundAxisAlignedBounds:
+    """Project one authoritative MoveIt/Gazebo body into a world AABB."""
+
+    return compound_axis_aligned_bounds(
+        _collision_spec_geometry(
+            spec,
+            object_xyz=object_xyz,
+            object_quat_xyzw=object_quat_xyzw,
+        )
+    )
+
+
+def _collision_spec_geometry(
+    spec: Mapping[str, Any],
+    *,
+    object_xyz: Sequence[float] | None = None,
+    object_quat_xyzw: Sequence[float] | None = None,
+) -> tuple[ProjectedCollisionPrimitive, ...]:
+    """Project one authoritative body without replacing compound geometry."""
+
+    xyz = tuple(
+        float(value)
+        for value in (
+            spec.get("pose_xyz") if object_xyz is None else object_xyz
+        )
+    )
+    quaternion = tuple(
+        float(value)
+        for value in (
+            spec.get("pose_quat_xyzw")
+            if object_quat_xyzw is None
+            else object_quat_xyzw
+        )
+    )
+    return project_collision_geometry(
+        object_xyz=xyz,
+        object_rotation=_quaternion_rotation_rows(quaternion),
+        primitives=spec.get("primitives") or (),
+        fallback_size_xyz=spec.get("size_xyz"),
+    )
+
+
+def _attached_support_departure_audit(
+    *,
+    joint_names: Sequence[str],
+    trajectory_positions: Sequence[Sequence[float]],
+    forward_kinematics: Any,
+    mount_xyz: Sequence[float],
+    mount_quat_xyzw: Sequence[float],
+    attached_spec: Mapping[str, Any],
+    support_spec: Mapping[str, Any],
+    support_contact_reference_target_spec: Mapping[str, Any] | None = None,
+    obstacle_specs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Prove an L5 path leaves its initial physical support contact.
+
+    The target / support pair is intentionally present in MoveIt's ACM so an
+    exactly supported detached object can become an attached start state.
+    That exception must not license a later path to scrape through the same
+    support.  We therefore project the exact attached compound geometry at
+    every time-parameterized point and every segment midpoint.  The first
+    stationary state may touch; once any arm joint moves, overlapping XY
+    footprints require strictly positive separation along gravity.
+
+    No artificial lift pose is generated here.  MoveIt still owns the route;
+    this is a deterministic acceptance proof over that route.
+    """
+
+    names = tuple(str(name) for name in joint_names)
+    try:
+        points = [tuple(float(value) for value in row) for row in trajectory_positions]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("support-departure trajectory is invalid") from exc
+    if (
+        not names
+        or not points
+        or any(len(point) != len(names) for point in points)
+        or any(not math.isfinite(value) for point in points for value in point)
+    ):
+        raise ValueError("support-departure trajectory is invalid")
+    relative_xyz = tuple(float(value) for value in attached_spec["pose_xyz"])
+    relative_quat = tuple(
+        float(value) for value in attached_spec["pose_quat_xyzw"]
+    )
+    mount_offset = tuple(float(value) for value in mount_xyz)
+    mount_quaternion = tuple(float(value) for value in mount_quat_xyzw)
+    if (
+        len(relative_xyz) != 3
+        or len(relative_quat) != 4
+        or len(mount_offset) != 3
+        or len(mount_quaternion) != 4
+    ):
+        raise ValueError("support-departure attachment transform is invalid")
+    support_bounds = _collision_spec_bounds(support_spec)
+    target_id = str(attached_spec.get("id") or "")
+    support_id = str(support_spec.get("id") or "")
+    static_obstacles: list[
+        tuple[str, tuple[ProjectedCollisionPrimitive, ...]]
+    ] = []
+    unsupported_primitive_pair_count = 0
+    for object_id, raw_spec in sorted(
+        (obstacle_specs or {}).items(), key=lambda item: str(item[0])
+    ):
+        normalized_id = str(object_id)
+        if normalized_id in {target_id, support_id}:
+            continue
+        geometry = _collision_spec_geometry(raw_spec)
+        static_obstacles.append((normalized_id, geometry))
+        unsupported_primitive_pair_count += sum(
+            left.shape != "box" or right.shape != "box"
+            for left in _collision_spec_geometry(attached_spec)
+            for right in geometry
+        )
+
+    first = points[0]
+    joint_scale = max(1.0, *(abs(value) for point in points for value in point))
+    joint_numeric_band = 64.0 * math.ulp(joint_scale)
+    geometry_scale = max(
+        1.0,
+        *(abs(value) for value in support_bounds.minimum_xyz),
+        *(abs(value) for value in support_bounds.maximum_xyz),
+        *(
+            abs(value)
+            for _, geometry in static_obstacles
+            for primitive in geometry
+            for value in primitive.center_xyz
+        ),
+    )
+    geometry_numeric_band = 64.0 * math.ulp(geometry_scale)
+
+    def geometry_at(
+        joints: Sequence[float],
+    ) -> tuple[ProjectedCollisionPrimitive, ...]:
+        tip_xyz_raw, tip_quat_raw = forward_kinematics(names, joints)
+        tip_xyz = tuple(float(value) for value in tip_xyz_raw)
+        tip_quat = tuple(float(value) for value in tip_quat_raw)
+        mount_world_xyz, mount_world_quat = _child_world_pose(
+            parent_xyz=tip_xyz,  # type: ignore[arg-type]
+            parent_quat_xyzw=tip_quat,  # type: ignore[arg-type]
+            relative_xyz=mount_offset,  # type: ignore[arg-type]
+            relative_quat_xyzw=mount_quaternion,  # type: ignore[arg-type]
+        )
+        object_xyz, object_quat = _child_world_pose(
+            parent_xyz=mount_world_xyz,
+            parent_quat_xyzw=mount_world_quat,
+            relative_xyz=relative_xyz,  # type: ignore[arg-type]
+            relative_quat_xyzw=relative_quat,  # type: ignore[arg-type]
+        )
+        return _collision_spec_geometry(
+            attached_spec,
+            object_xyz=object_xyz,
+            object_quat_xyzw=object_quat,
+        )
+
+    def support_clearance(
+        bounds: CompoundAxisAlignedBounds,
+    ) -> float | None:
+        overlaps_xy = all(
+            min(bounds.maximum_xyz[axis], support_bounds.maximum_xyz[axis])
+            - max(bounds.minimum_xyz[axis], support_bounds.minimum_xyz[axis])
+            > geometry_numeric_band
+            for axis in (0, 1)
+        )
+        if not overlaps_xy:
+            return None
+        return bounds.minimum_xyz[2] - support_bounds.maximum_xyz[2]
+
+    reference_clearance = (
+        support_clearance(
+            _collision_spec_bounds(support_contact_reference_target_spec)
+        )
+        if isinstance(support_contact_reference_target_spec, Mapping)
+        and support_contact_reference_target_spec
+        else None
+    )
+    # This is a measured physical boundary, not a free tolerance.  Admit at
+    # sample zero only the support overlap already present when native attach
+    # was acknowledged.  A deeper reconstructed start state still fails, and
+    # every moving sample below continues to require positive separation.
+    initial_clearance_floor = min(0.0, reference_clearance or 0.0) - (
+        geometry_numeric_band
+    )
+
+    samples: list[tuple[int, str, tuple[float, ...]]] = [(0, "point", first)]
+    for index in range(1, len(points)):
+        previous, current = points[index - 1], points[index]
+        if any(
+            abs(current[offset] - previous[offset]) > joint_numeric_band
+            for offset in range(len(names))
+        ):
+            samples.append(
+                (
+                    index,
+                    "midpoint",
+                    tuple(
+                        (previous[offset] + current[offset]) * 0.5
+                        for offset in range(len(names))
+                    ),
+                )
+            )
+        samples.append((index, "point", current))
+
+    minimum_clearance = math.inf
+    initial_clearance: float | None = None
+    first_moving_clearance: float | None = None
+    motion_started = False
+    failure: dict[str, Any] | None = None
+    evaluated = 0
+    exact_static_box_pair_checks = 0
+    for point_index, sample_kind, joints in samples:
+        evaluated += 1
+        moving = any(
+            abs(joints[offset] - first[offset]) > joint_numeric_band
+            for offset in range(len(names))
+        )
+        motion_started = motion_started or moving
+        object_geometry = geometry_at(joints)
+        clearance = support_clearance(
+            compound_axis_aligned_bounds(object_geometry)
+        )
+        if clearance is not None:
+            minimum_clearance = min(minimum_clearance, clearance)
+        static_collision: tuple[str, int, int] | None = None
+        for object_id, obstacle_geometry in static_obstacles:
+            for target_index, target_primitive in enumerate(object_geometry):
+                for obstacle_index, obstacle_primitive in enumerate(
+                    obstacle_geometry
+                ):
+                    if (
+                        target_primitive.shape != "box"
+                        or obstacle_primitive.shape != "box"
+                    ):
+                        continue
+                    exact_static_box_pair_checks += 1
+                    if collision_primitives_penetrate(
+                        target_primitive,
+                        obstacle_primitive,
+                        tolerance_m=geometry_numeric_band,
+                    ):
+                        static_collision = (
+                            object_id,
+                            target_index,
+                            obstacle_index,
+                        )
+                        break
+                if static_collision is not None:
+                    break
+            if static_collision is not None:
+                break
+        if static_collision is not None:
+            failure = {
+                "reason": "attached_object_static_collision",
+                "point_index": point_index,
+                "sample_kind": sample_kind,
+                "obstacle_id": static_collision[0],
+                "target_primitive_index": static_collision[1],
+                "obstacle_primitive_index": static_collision[2],
+            }
+            break
+        if point_index == 0 and sample_kind == "point":
+            initial_clearance = clearance
+            if clearance is not None and clearance < initial_clearance_floor:
+                failure = {
+                    "reason": "initial_support_penetration",
+                    "point_index": point_index,
+                    "sample_kind": sample_kind,
+                    "clearance_m": clearance,
+                }
+                break
+            continue
+        if moving and first_moving_clearance is None:
+            first_moving_clearance = clearance
+        if moving and clearance is not None and clearance <= geometry_numeric_band:
+            failure = {
+                "reason": "support_contact_persists_after_departure",
+                "point_index": point_index,
+                "sample_kind": sample_kind,
+                "clearance_m": clearance,
+            }
+            break
+
+    valid = failure is None and motion_started
+    if failure is None and not motion_started:
+        failure = {"reason": "trajectory_has_no_motion"}
+    return {
+        "schema_version": "openeta.attached_support_departure.v1",
+        "applicable": True,
+        "valid": valid,
+        "target_object_id": target_id,
+        "support_object_id": support_id,
+        "authoritative_world_collision_audit": True,
+        "static_obstacle_ids": [object_id for object_id, _ in static_obstacles],
+        "exact_static_box_pair_check_count": exact_static_box_pair_checks,
+        "unsupported_primitive_pair_count": unsupported_primitive_pair_count,
+        "trajectory_point_count": len(points),
+        "evaluated_sample_count": evaluated,
+        "sampling": "time_parameterized_points_and_joint_midpoints",
+        "initial_clearance_m": initial_clearance,
+        "initial_support_reference_clearance_m": reference_clearance,
+        "initial_support_clearance_floor_m": initial_clearance_floor,
+        "first_moving_clearance_m": first_moving_clearance,
+        "minimum_clearance_m": (
+            minimum_clearance if math.isfinite(minimum_clearance) else None
+        ),
+        "numerical_separation_band_m": geometry_numeric_band,
+        "route_owner": "moveit",
+        "host_offset_pose_generated": False,
+        **({"failure": failure} if failure is not None else {}),
+    }
 
 
 def _collision_primitive_from_spec(spec: Mapping[str, Any]) -> CollisionPrimitive:
@@ -763,6 +1138,31 @@ def _populate_state_validity_request(
     request.robot_state.is_diff = True
     request.robot_state.joint_state.name = names
     request.robot_state.joint_state.position = list(candidate_positions)
+
+
+def _populate_motion_start_state(
+    robot_state: Any,
+    start_joint_state: Mapping[str, Any],
+) -> None:
+    """Apply a joint-only start override without discarding attached bodies.
+
+    Qualification fixes the arm start state so its plan-only proof and the
+    later single-use trajectory cache have the same deterministic boundary.
+    That payload contains only arm joints; it is not a complete MoveIt
+    ``RobotState``. Marking it as a full state clears every attached collision
+    object in MoveIt's conversion layer, which makes a carried object invisible
+    during the very transport plan intended to prove it. A RobotState diff
+    updates the named joints on top of the authoritative PlanningScene state
+    and therefore preserves the physically attached body and its touch links.
+    """
+
+    names = list(start_joint_state.get("names") or ARM_JOINTS)
+    positions = [float(value) for value in start_joint_state.get("positions") or []]
+    if not names or len(names) != len(positions):
+        raise ValueError("motion start joint state is invalid")
+    robot_state.is_diff = True
+    robot_state.joint_state.name = names
+    robot_state.joint_state.position = positions
 
 
 def _populate_recovery_trajectory_goal(
@@ -1401,6 +1801,7 @@ class _RosRuntime:
         goal: Mapping[str, Any],
         trajectory: Any,
         point_count: int,
+        trajectory_safety: Mapping[str, Any] | None = None,
     ) -> str | None:
         start = goal.get("start_joint_state")
         if _normalized_arm_joint_state(start) is None or point_count <= 0:
@@ -1434,6 +1835,11 @@ class _RosRuntime:
             "point_count": int(point_count),
             "end_joint_state": end_joint_state,
             "end_joint_state_sha256": end_joint_state_sha256,
+            **(
+                {"trajectory_safety": dict(trajectory_safety)}
+                if trajectory_safety is not None
+                else {}
+            ),
         }
         while len(self._l5_trajectory_cache) > L5_TRAJECTORY_CACHE_LIMIT:
             del self._l5_trajectory_cache[next(iter(self._l5_trajectory_cache))]
@@ -1520,6 +1926,70 @@ class _RosRuntime:
             "requested_start_max_delta_rad": requested_delta,
             "measured_start_max_delta_rad": measured_delta,
         }
+
+    def _l5_trajectory_safety(self, trajectory: Any) -> dict[str, Any]:
+        """Audit the support-contact exception for a real attached scene."""
+
+        scene = self.planning_scene
+        target_id = str(getattr(scene, "target_id", "") or "")
+        support_id = str(
+            getattr(scene, "support_contact_object_id", "") or ""
+        )
+        attached_specs = getattr(scene, "attached_specs", {})
+        world_specs = getattr(scene, "world_specs", {})
+        if not target_id or target_id not in attached_specs:
+            return {
+                "schema_version": "openeta.attached_support_departure.v1",
+                "applicable": False,
+                "valid": True,
+                "reason": "no_physically_attached_target",
+            }
+        if not support_id or support_id not in world_specs:
+            return {
+                "schema_version": "openeta.attached_support_departure.v1",
+                "applicable": True,
+                "valid": False,
+                "reason": "authoritative_support_geometry_unavailable",
+                "target_object_id": target_id,
+                "support_object_id": support_id,
+            }
+        names = tuple(str(value) for value in getattr(trajectory, "joint_names", ()))
+        points = list(getattr(trajectory, "points", ()))
+        try:
+            return _attached_support_departure_audit(
+                joint_names=names,
+                trajectory_positions=[
+                    tuple(float(value) for value in point.positions)
+                    for point in points
+                ],
+                forward_kinematics=(
+                    _qualification_serial_chain(self.config).forward_kinematics
+                ),
+                mount_xyz=self.config.mount_xyz,
+                mount_quat_xyzw=self.config.mount_quat_xyzw,
+                attached_spec=attached_specs[target_id],
+                support_spec=world_specs[support_id],
+                support_contact_reference_target_spec=getattr(
+                    scene,
+                    "support_contact_reference_target_spec",
+                    None,
+                ),
+                obstacle_specs={
+                    str(object_id): spec
+                    for object_id, spec in world_specs.items()
+                    if isinstance(spec, Mapping)
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - missing proof must fail closed.
+            return {
+                "schema_version": "openeta.attached_support_departure.v1",
+                "applicable": True,
+                "valid": False,
+                "reason": "support_departure_audit_error",
+                "target_object_id": target_id,
+                "support_object_id": support_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     def current_state_validity(
         self,
@@ -1830,7 +2300,10 @@ class _RosRuntime:
         ik.pose_stamped = pose
         response = self._await(
             self.compute_ik_client.call_async(request),
-            _qualification_ik_response_timeout_s(seed_timeout_s),
+            _qualification_ik_response_timeout_s(
+                seed_timeout_s,
+                queue_depth=int(target.get("qualification_ik_queue_depth", 1)),
+            ),
         )
         solution = response.solution.joint_state
         names = list(solution.name)
@@ -2956,6 +3429,11 @@ class _RosRuntime:
             "l5_trajectory_reused": True,
             "l5_trajectory_cache_key": cache_key,
             "l5_trajectory_scene_sha256": str(entry.get("scene_sha256") or ""),
+            **(
+                {"trajectory_safety": dict(entry["trajectory_safety"])}
+                if isinstance(entry.get("trajectory_safety"), Mapping)
+                else {}
+            ),
         }
 
     def move(self, goal: dict, timeout_s: float) -> Mapping[str, Any]:
@@ -3055,13 +3533,10 @@ class _RosRuntime:
         )
         start_joint_state = goal.get("start_joint_state")
         if isinstance(start_joint_state, Mapping):
-            request.request.start_state.is_diff = False
-            request.request.start_state.joint_state.name = list(
-                start_joint_state.get("names") or ARM_JOINTS
+            _populate_motion_start_state(
+                request.request.start_state,
+                start_joint_state,
             )
-            request.request.start_state.joint_state.position = [
-                float(value) for value in start_joint_state.get("positions") or []
-            ]
         else:
             request.request.start_state.is_diff = True
         fault_scenario = os.environ.get("OPENETA_ACCEPTANCE_PLACEMENT_FAULT", "")
@@ -3219,6 +3694,7 @@ class _RosRuntime:
             end_joint_state = None
             trajectory_points = []
             trajectory_cache_key = None
+            trajectory_safety: dict[str, Any] | None = None
             if planned_points:
                 trajectory_points = [
                     {"positions": [float(value) for value in point.positions]}
@@ -3235,10 +3711,26 @@ class _RosRuntime:
                     "positions": trajectory_points[-1]["positions"],
                 }
                 if request.planning_options.plan_only:
+                    trajectory_safety = self._l5_trajectory_safety(
+                        planned_joint_trajectory
+                    )
+                    if trajectory_safety.get("valid") is not True:
+                        return finish(
+                            {
+                                "ok": False,
+                                "error_code": "MOTION_PLAN_FAILED",
+                                "reason": "authoritative_support_departure_failed",
+                                "motion_outcome": "failed",
+                                "planned_point_count": len(planned_points),
+                                "execution_started": False,
+                                "trajectory_safety": trajectory_safety,
+                            }
+                        )
                     trajectory_cache_key = self._store_l5_trajectory(
                         goal=goal,
                         trajectory=planned_joint_trajectory,
                         point_count=len(planned_points),
+                        trajectory_safety=trajectory_safety,
                     )
             return finish(
                 {
@@ -3254,6 +3746,11 @@ class _RosRuntime:
                         {
                             "trajectory_points": trajectory_points,
                             "end_joint_state": end_joint_state,
+                            **(
+                                {"trajectory_safety": trajectory_safety}
+                                if trajectory_safety is not None
+                                else {}
+                            ),
                             "l5_trajectory_cache_stored": (trajectory_cache_key is not None),
                             **(
                                 {"l5_trajectory_cache_key": trajectory_cache_key}

@@ -4,7 +4,10 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from extensions.gazebo.detachable_sdf import prepare_detachable_sdf
+from extensions.gazebo.detachable_sdf import (
+    DetachableSdfError,
+    prepare_detachable_sdf,
+)
 from extensions.gazebo.robot_control import GAZEBO_CONTROL_ENV_ID, MODEL_ID, GazeboControlConfig
 from extensions.gazebo.native_grasp import (
     PICKPLACE_DISPLAY_NAME,
@@ -367,7 +370,7 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
         region for region in contract["placement_regions"] if region["selected"]
     )
     assert contract["destination_center_xy"] == selected_region["center_xy"]
-    assert contract["destination_size_xy_m"] == [0.285, 0.275]
+    assert contract["destination_size_xy_m"] == [0.285, 0.260]
 
     side_centers = sorted(
         abs(float(collision.findtext("pose").split()[0]))
@@ -408,18 +411,28 @@ def test_native_grasp_normal_bin_admits_target_and_complete_release_envelope() -
             "front_wall",
             "rear_wall",
         ]
+        assert bin_object.mirrored_visual_count == len(bin_object.primitives)
         assert len(bin_object.moveit_spec()["primitives"]) == len(
             world.find(f"model[@name='{prefix}_parts_bin']").findall(
                 "link/collision"
             )
         )
 
-    # AnyPlace may rotate the part in-plane.  Leave at least 50 mm beyond
-    # both the complete target and the calibrated native Robotiq envelope,
-    # instead of validating only the semantic placement-region footprint.
-    assert clear_aperture == pytest.approx(0.288)
-    assert clear_aperture >= target_length + 0.05
+    # The short aperture follows the detailed mesh's measured inner wall,
+    # while the semantic region remains strictly inside it.  The target and
+    # complete native Robotiq envelope both retain physical release room.
+    assert clear_aperture == pytest.approx(0.266)
+    assert contract["destination_size_xy_m"][1] < clear_aperture
+    assert clear_aperture >= target_length + 0.04
     assert clear_aperture >= complete_gripper_envelope + 0.05
+    for collision in green.findall("link/collision"):
+        name = str(collision.get("name"))
+        visual = green.find(f"link/visual[@name='{name}_visual']")
+        assert visual is not None
+        assert visual.findtext("pose") == collision.findtext("pose")
+        assert visual.findtext("geometry/box/size") == collision.findtext(
+            "geometry/box/size"
+        )
     assert float(green.findtext("link/visual/geometry/mesh/scale").split()[0]) == 0.04
     assert float(blue.findtext("link/visual/geometry/mesh/scale").split()[0]) == 0.04
 
@@ -454,8 +467,8 @@ def test_native_grasp_stable_motion_contract_uses_bilateral_contact_goal_toleran
     assert motion["tolerance"] == 0.0002
     assert motion["ori_tolerance"] == 0.002
     assert motion["profile"] == "unloaded"
-    assert motion["velocity_scaling"] == 0.25
-    assert motion["acceleration_scaling"] == 0.15
+    assert motion["velocity_scaling"] == 0.20
+    assert motion["acceleration_scaling"] == 0.10
 
 
 def test_native_grasp_paused_launch_gives_runtime_a_bounded_detach_window() -> None:
@@ -512,7 +525,9 @@ def test_native_grasp_contact_sensor_topics_use_the_sdf_sensor_topic_field() -> 
 
 def test_native_grasp_sdf_renderer_allows_only_the_stock_fixed_joint_topology() -> None:
     root = ET.fromstring(
-        """<sdf><model name="robot"><link name="base_link"/>
+        """<sdf><model name="robot"><link name="base_link">
+        <collision name="base_collision"><geometry><box><size>1 1 1</size></box></geometry></collision>
+        </link>
         <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
           <parent_link>gripper_mount_link</parent_link><child_model>target_object</child_model>
           <child_link>target_link</child_link><attach_topic>/openeta/native_grasp/detachable_joint/target/attach</attach_topic>
@@ -527,6 +542,29 @@ def test_native_grasp_sdf_renderer_allows_only_the_stock_fixed_joint_topology() 
     assert model.findtext("joint[@name='openeta_world_to_base']/parent") == "world"
     assert model.findtext("joint[@name='openeta_world_to_base']/child") == "base_link"
     assert model.findtext("self_collide") == "false"
+    assert model.findtext(
+        "link/collision/surface/contact/collide_bitmask"
+    ) == "1"
+
+
+def test_native_grasp_sdf_renderer_rejects_a_conflicting_robot_collision_mask() -> None:
+    root = ET.fromstring(
+        """<sdf><model name="robot"><link name="base_link">
+        <collision name="base_collision"><surface><contact><collide_bitmask>2</collide_bitmask></contact></surface><geometry><box><size>1 1 1</size></box></geometry></collision>
+        </link>
+        <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
+          <parent_link>gripper_mount_link</parent_link><child_model>target_object</child_model>
+          <child_link>target_link</child_link><attach_topic>/openeta/native_grasp/detachable_joint/target/attach</attach_topic>
+          <detach_topic>/openeta/native_grasp/detachable_joint/target/detach</detach_topic>
+          <output_topic>/openeta/native_grasp/detachable_joint/target/state</output_topic>
+        </plugin></model></sdf>"""
+    )
+
+    with pytest.raises(
+        DetachableSdfError,
+        match="collision bitmask conflicts",
+    ):
+        prepare_detachable_sdf(root)
 
 
 def test_native_grasp_sdf_renderer_replaces_converter_contact_topic_placeholders() -> None:
@@ -548,3 +586,4 @@ def test_native_grasp_sdf_renderer_replaces_converter_contact_topic_placeholders
     assert sensor is not None
     assert sensor.findtext("topic") == "/openeta/native_grasp/contacts/left_pad"
     assert sensor.findtext("contact/topic") == "/openeta/native_grasp/contacts/left_pad"
+    assert sensor.find("contact/collision/surface") is None

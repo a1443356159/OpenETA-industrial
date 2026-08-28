@@ -1570,12 +1570,23 @@ def test_release_uses_ordered_detach_revision_then_stops_reopening() -> None:
             {"sequence": 1, "event": "native_detach_ack", "state": "detached"},
             {
                 "sequence": 2,
+                "event": "attached_collision_filter_ack",
+                "schema_version": "openeta.attached_collision_filter.v1",
+                "joint_state": "detached",
+                "state": "full",
+                "robot_mask": 1,
+                "target_mask": 65535,
+                "target_robot_collision_enabled": True,
+                "target_environment_collision_enabled": True,
+            },
+            {
+                "sequence": 3,
                 "event": "planning_scene_detach_ack",
                 "revision": 3,
             },
-            {"sequence": 3, "event": "gripper_open_completed", "ok": True},
+            {"sequence": 4, "event": "gripper_open_completed", "ok": True},
             {
-                "sequence": 4,
+                "sequence": 5,
                 "event": "released_target_pose_sync_ack",
                 "revision": 4,
             },
@@ -1601,6 +1612,10 @@ def test_release_uses_ordered_detach_revision_then_stops_reopening() -> None:
     assert release["planning_scene_revision"] == 3
     assert release["released_target_pose_revision"] == 4
     assert release["placement_verification"]["verdict"] == "PASS"
+    assert release["attached_collision_filter"]["state"] == "full"
+    assert release["attached_collision_filter"][
+        "target_robot_collision_enabled"
+    ] is True
     # A repeated open is no longer a pending release transition.
     memory.add_action(_tool_action("gripper_control", {"position": 1}))
     assert memory.placement_release() == release
@@ -1988,7 +2003,7 @@ def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None
     assert recovery["required_action"] == {"name": "observe", "parameters": {}}
 
 
-def test_failed_close_reuses_next_frozen_exact_terminal_without_model_rerun() -> None:
+def test_failed_close_never_reuses_next_stale_exact_terminal() -> None:
     candidates = [
         {
             **_candidate(f"grasp_{index:03d}", 0.9 - index * 0.1),
@@ -2066,58 +2081,23 @@ def test_failed_close_reuses_next_frozen_exact_terminal_without_model_rerun() ->
     )
 
     policy = memory.grasp_candidate_policy()
-    assert policy["status"] == "active"
-    assert policy["active_candidate"]["id"] == candidates[1]["id"]
+    assert policy["status"] == "frozen_frontier_required"
+    assert policy["active_candidate"] is None
+    assert policy["remaining_candidate_ids"] == []
     assert "reestimate_required" not in policy
-    assert policy["frozen_model_pool_retry"] == {
-        "schema_version": "openeta.frozen_grasp_retry.v1",
-        "source_scene_epoch": 0,
-        "current_scene_epoch": 3,
-        "candidate_id": candidates[1]["id"],
+    assert "frozen_model_pool_retry" not in policy
+    assert policy["frozen_grasp_frontier_remaining_count"] == 3
+    assert policy["frozen_grasp_frontier_rebase_pending"] == {
+        "schema_version": "openeta.frozen_grasp_frontier_rebase_pending.v1",
+        "reason_code": "FAILED_CLOSE_TARGET_POSE_SYNC_REQUIRED",
+        "source_planning_scene_revision": -1,
+        "physically_rejected_candidate_id": candidates[0]["id"],
+        "required_proof": (
+            "detached_native_target_pose_sync_with_unchanged_static_scene"
+        ),
         "model_inference_invoked": False,
-        "terminal_pose_reused": True,
-        "path_owner": "moveit",
     }
-    execution = memory.grasp_execution()
-    assert execution["candidate_id"] == candidates[1]["id"]
-    assert execution["stage"] == "open"
-    reused = execution["compiled_grasp"]
-    assert reused["scene_epoch"] == 3
-    assert reused["contact_pose"]["xyz"] == compiled[1]["contact_pose"]["xyz"]
-    assert (
-        reused["contact_pose"]["rotation_matrix"] == compiled[1]["contact_pose"]["rotation_matrix"]
-    )
-    assert reused["frozen_model_pool_reuse"]["model_inference_invoked"] is False
-
-    memory.add_action(
-        _tool_action(
-            "gripper_control",
-            {"position": 1},
-            success=False,
-            outputs={"motion_outcome": "unknown", "reconciliation_required": True},
-        )
-    )
-    assert memory.motion_reconciliation()["status"] == "required"
-    assert memory.grasp_recovery()["status"] == "reconciling"
-
-    memory.add_observation(
-        EnvObservation(
-            task="pick and place",
-            cameras=[],
-            robot=RobotState(gripper_state={"open": True, "openness": 0.99}),
-        )
-    )
-
-    assert memory.motion_reconciliation()["status"] == "completed"
-    assert memory.grasp_recovery()["status"] == "completed"
-    execution = memory.grasp_execution()
-    assert execution["candidate_id"] == candidates[1]["id"]
-    assert execution["stage"] == "contact"
-    assert execution["required_action"]["name"] == "move_to"
-    assert (
-        execution["required_action"]["parameters"]["target_pose"]["xyz"]
-        == (compiled[1]["contact_pose"]["xyz"])
-    )
+    assert memory.grasp_recovery()["stage"] == "reopen"
 
 
 def test_failed_close_reopens_once_then_rebases_frozen_frontier_without_observe() -> None:
@@ -2125,9 +2105,20 @@ def test_failed_close_reopens_once_then_rebases_frozen_frontier_without_observe(
         **_candidate("grasp_000", 0.9),
         "grasp_place_joint_qualified": True,
     }
+    backup = {
+        **_candidate("grasp_001", 0.8),
+        "grasp_place_joint_qualified": True,
+    }
     compiled = _compiled_candidate(candidate)
-    compilation = _host_grasp_compilation_event(compiled, queue_position=0, queue_count=1)
+    compiled_backup = _compiled_candidate(backup)
+    compilation = _host_grasp_compilation_event(compiled, queue_position=0, queue_count=2)
+    backup_compilation = _host_grasp_compilation_event(
+        compiled_backup,
+        queue_position=1,
+        queue_count=2,
+    )
     compilation["planning_scene_revision"] = 7
+    backup_compilation["planning_scene_revision"] = 7
     memory = AgentMemory()
     memory.start_session(task="pick and place")
     memory.add_action(
@@ -2148,20 +2139,23 @@ def test_failed_close_reopens_once_then_rebases_frozen_frontier_without_observe(
                 "result_id": "frozen-qualified-grasps",
                 "selected_backend": "graspgenx",
                 "scene_revision": 7,
-                "grasp_candidates": [candidate],
+                "grasp_candidates": [candidate, backup],
                 "qualification_evidence": {
                     "schema_version": "openeta.moveit_candidate_qualification.v3",
                     "scene_epoch": 0,
                     "planning_scene_revision": 7,
                 },
                 "frozen_pair_grasp_branch_limit": 2,
-                "frozen_pair_lookahead_grasp_count": 1,
-                "frozen_pair_full_plan_pass_count": 1,
+                "frozen_pair_lookahead_grasp_count": 2,
+                "frozen_pair_full_plan_pass_count": 2,
                 "frozen_grasp_frontier_remaining_count": 12,
                 "frozen_grasp_frontier_generation": 1,
                 "host_selected_candidate_id": candidate["id"],
                 "host_candidate_compilation": compilation,
-                "host_candidate_compilation_queue": [compilation],
+                "host_candidate_compilation_queue": [
+                    compilation,
+                    backup_compilation,
+                ],
             },
         )
     )
@@ -2201,9 +2195,12 @@ def test_failed_close_reopens_once_then_rebases_frozen_frontier_without_observe(
         "schema_version": "openeta.frozen_grasp_frontier_rebase_pending.v1",
         "reason_code": "FAILED_CLOSE_TARGET_POSE_SYNC_REQUIRED",
         "source_planning_scene_revision": 7,
+        "physically_rejected_candidate_id": "grasp_000",
         "required_proof": ("detached_native_target_pose_sync_with_unchanged_static_scene"),
         "model_inference_invoked": False,
     }
+    assert policy["active_candidate"] is None
+    assert policy["remaining_candidate_ids"] == []
     recovery = memory.grasp_recovery()
     assert recovery["stage"] == "reopen"
     assert recovery["observe_after_reopen"] is False

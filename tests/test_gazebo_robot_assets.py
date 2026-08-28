@@ -271,10 +271,13 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert "closing_goal" in adapter
     assert "TERMINAL_CONTACT_FRESHNESS_SIM_S" in adapter
     assert "TERMINAL_BILATERAL_CONTACT_DWELL_SIM_S" in adapter
+    assert "BILATERAL_HOLD_PRELOAD_RAD" in adapter
     assert "TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S" in adapter
     assert "TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S" in adapter
     assert "COMMON_PROGRESS_EPSILON_RAD" in adapter
     assert "linkage_settle_complete" in adapter
+    assert "functional_opening_complete" in adapter
+    assert "full_open_goal" in adapter
     assert "CONTROLLER_BOUNDARY_INSET_RAD" in adapter
     assert "CONTACT_FRESHNESS_SIM_S" in adapter
     assert "_target_contact_sequences" in adapter
@@ -285,6 +288,8 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert "fresh_contact_sides" in adapter
     assert "sim_now_s - target_contact_sim_times.get" in adapter
     assert "fresh_bilateral_contact" in adapter
+    assert "bilateral_mechanism_stationary" in adapter
+    assert "self._bounded_contact_hold_position" in adapter
     assert "bilateral_contact_started_sim_time_s = None" in adapter
     assert "self._one_pad_compliance_exhausted" in adapter
     assert "compliance_exhausted" in adapter

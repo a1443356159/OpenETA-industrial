@@ -63,11 +63,18 @@ GRIPPER_JOINT_BOUNDS_RAD: Mapping[str, tuple[float, float]] = {
     "gripper_right_finger_tip_joint": (0.0, 0.8),
 }
 
+# Public terminal band of the common Robotiq action adapter.  Keep control
+# invariants which depend on that band here, beside the pure linkage model, so
+# the ROS adapter and the host-side attachment transition cannot drift apart.
+GRIPPER_GOAL_TOLERANCE_RAD: float = 0.02
+
 # Position controllers must not servo an independently modelled linkage joint
-# onto a hard stop.  Half the adapter's 0.02 rad terminal band leaves room for
-# both state-estimation noise and the terminal settle proof.  This is a robot
-# control invariant, not an object- or scene-dependent tuning value.
-DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD: float = 0.01
+# onto a hard stop.  Half the public terminal band leaves room for both state-
+# estimation noise and the terminal settle proof.  This is a robot-control
+# invariant, not an object- or scene-dependent tuning value.
+DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD: float = (
+    GRIPPER_GOAL_TOLERANCE_RAD / 2.0
+)
 
 
 def _rot(alpha: float, v: tuple[float, float]) -> tuple[float, float]:
@@ -197,6 +204,143 @@ def common_driver_position(
     ):
         raise ValueError("outer-finger state is outside the active-joint range")
     return min(left, right) if closing else max(left, right)
+
+
+def bounded_contact_hold_position(
+    *,
+    measured_common_active_rad: float,
+    requested_active_rad: float,
+    preload_rad: float,
+) -> float:
+    """Return a low-energy common-driver target after bilateral contact.
+
+    The simulated six-joint linkage must retain one actuator semantics even
+    after both pads touch.  Holding the pre-contact command can leave the
+    position systems several terminal bands ahead of the physical mechanism;
+    once the workpiece is attached that becomes an over-constrained squeeze
+    against the wrist.  Instead, start from the measured common driver and add
+    only a bounded preload, capped by the requested closing endpoint.
+
+    ``preload_rad`` is a controller property, not an object or scene tune.
+    The action adapter derives it from its public terminal tolerance.
+    """
+
+    measured = float(measured_common_active_rad)
+    requested = float(requested_active_rad)
+    preload = float(preload_rad)
+    if not all(math.isfinite(value) for value in (measured, requested, preload)):
+        raise ValueError("contact hold inputs must be finite")
+    if not _ACTIVE_MIN_RAD <= measured <= _ACTIVE_MAX_RAD:
+        raise ValueError("measured common driver is outside the active-joint range")
+    if not _ACTIVE_MIN_RAD <= requested <= _ACTIVE_MAX_RAD:
+        raise ValueError("requested common driver is outside the active-joint range")
+    if not 0.0 < preload < (_ACTIVE_MAX_RAD - _ACTIVE_MIN_RAD):
+        raise ValueError("contact hold preload must be positive and bounded")
+    return min(requested, measured + preload)
+
+
+def attached_transport_relief_position(
+    *,
+    measured_common_active_rad: float,
+    minimum_active_rad: float,
+    terminal_tolerance_rad: float = GRIPPER_GOAL_TOLERANCE_RAD,
+) -> float:
+    """Return the common-driver target used immediately after native attach.
+
+    A fixed attachment and two position-controlled pads pressing the same body
+    form a redundant constraint in Gazebo physics.  Once native bilateral
+    contact has proved the grasp and the fixed-joint attach is acknowledged,
+    the pads therefore move apart by two terminal bands.  Even if the opening
+    action finishes at the near edge of its permitted error band, this proves
+    at least one full band of physical relief while retaining the object on
+    the fixed attachment.  Environment collisions on the object remain
+    enabled throughout.
+
+    The transition is entirely linkage/tolerance driven.  If the mechanism is
+    already too near its open boundary to prove that relief, fail closed
+    instead of silently retaining an over-constrained transport state.
+    """
+
+    measured = float(measured_common_active_rad)
+    minimum = float(minimum_active_rad)
+    tolerance = float(terminal_tolerance_rad)
+    if not all(math.isfinite(value) for value in (measured, minimum, tolerance)):
+        raise ValueError("attached transport relief inputs must be finite")
+    if not _ACTIVE_MIN_RAD <= minimum <= measured <= _ACTIVE_MAX_RAD:
+        raise ValueError("attached transport relief position is outside the active range")
+    if not 0.0 < tolerance < (_ACTIVE_MAX_RAD - _ACTIVE_MIN_RAD) / 2.0:
+        raise ValueError("attached transport terminal tolerance is invalid")
+    required_travel = 2.0 * tolerance
+    if measured - minimum < required_travel:
+        raise ValueError("insufficient common-driver travel for attached transport relief")
+    return measured - required_travel
+
+
+def functional_opening_complete(
+    positions: Mapping[str, float],
+    velocities: Mapping[str, float],
+    *,
+    open_active_rad: float,
+    max_common_lead_rad: float,
+    terminal_tolerance_rad: float,
+    terminal_velocity_rad_s: float,
+) -> bool:
+    """Prove a safe full-open state using the real one-actuator semantics.
+
+    The public full-open command is a recovery boundary, not a demand that
+    six simulated passive joints independently match an ideal zero-load
+    four-bar pose.  Both mirrored outer joints must prove a bounded common
+    opening and remain mutually consistent; every linkage joint must remain
+    inside its hard limit and stationary.  The allowable common position is
+    the controller's existing maximum lead plus one public terminal band.
+
+    This predicate is intentionally unsuitable for intermediate position
+    commands such as attached transport relief; those still require the exact
+    six-joint terminal target.
+    """
+
+    values = (
+        open_active_rad,
+        max_common_lead_rad,
+        terminal_tolerance_rad,
+        terminal_velocity_rad_s,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("functional opening limits must be finite")
+    target = float(open_active_rad)
+    max_lead = float(max_common_lead_rad)
+    tolerance = float(terminal_tolerance_rad)
+    terminal_velocity = float(terminal_velocity_rad_s)
+    if not _ACTIVE_MIN_RAD <= target <= _ACTIVE_MAX_RAD:
+        raise ValueError("functional opening target is outside the active range")
+    if min(max_lead, tolerance, terminal_velocity) <= 0.0:
+        raise ValueError("functional opening limits must be positive")
+    required = set(GRIPPER_JOINT_BOUNDS_RAD)
+    if not required.issubset(positions) or not required.issubset(velocities):
+        return False
+    try:
+        joint_positions = {name: float(positions[name]) for name in required}
+        joint_velocities = {name: float(velocities[name]) for name in required}
+    except (TypeError, ValueError):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (*joint_positions.values(), *joint_velocities.values())
+    ):
+        return False
+    if any(
+        value < lower - 1e-6 or value > upper + 1e-6
+        for name, value in joint_positions.items()
+        for lower, upper in (GRIPPER_JOINT_BOUNDS_RAD[name],)
+    ):
+        return False
+    left = joint_positions["gripper_left_finger_joint"]
+    right = -joint_positions["gripper_right_finger_joint"]
+    if abs(left - right) > max_lead + 1e-9:
+        return False
+    if max(left, right) > target + max_lead + tolerance + 1e-9:
+        return False
+    return max(abs(value) for value in joint_velocities.values()) <= terminal_velocity
 
 
 def one_pad_compliance_exhausted(

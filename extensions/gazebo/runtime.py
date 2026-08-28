@@ -72,6 +72,37 @@ class GazeboRuntime:
                 parent_link=getattr(model_config, "parent_link", "gripper_mount_link"),
                 child_model=getattr(model_config, "target_id", "target_object"),
                 child_link=getattr(model_config, "target_link", "target_link"),
+                collision_filter_state_topic=getattr(
+                    model_config,
+                    "attached_collision_filter_state_topic",
+                    "/openeta/native_grasp/detachable_joint/target/"
+                    "collision_filter_state",
+                ),
+                collision_filter_state_request_topic=getattr(
+                    model_config,
+                    "attached_collision_filter_state_request_topic",
+                    "/openeta/native_grasp/detachable_joint/target/"
+                    "collision_filter_state/request",
+                ),
+                collision_filter_state_ack_topic=getattr(
+                    model_config,
+                    "attached_collision_filter_state_ack_topic",
+                    "/openeta/native_grasp/detachable_joint/target/"
+                    "collision_filter_state/ack",
+                ),
+                robot_collision_filter_mask=getattr(
+                    model_config, "robot_collision_filter_mask", 0x0001
+                ),
+                detached_target_collision_filter_mask=getattr(
+                    model_config,
+                    "detached_target_collision_filter_mask",
+                    0xFFFF,
+                ),
+                attached_target_collision_filter_mask=getattr(
+                    model_config,
+                    "attached_target_collision_filter_mask",
+                    0x0002,
+                ),
             )
         self._launch: Any | None = None
         self._cameras: list[Any] = []

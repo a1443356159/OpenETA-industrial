@@ -19,6 +19,9 @@ class DetachableSdfError(RuntimeError):
     """The approved DetachableJoint SDF could not be produced safely."""
 
 
+ROBOT_COLLISION_FILTER_MASK = 0x0001
+
+
 def _plugins(model: ET.Element) -> list[ET.Element]:
     return [
         plugin for plugin in model.findall(".//plugin")
@@ -59,6 +62,48 @@ def _normalize_contact_topics(model: ET.Element) -> None:
         contact_topic.text = topic
 
 
+def _assign_robot_collision_filter_mask(model: ET.Element) -> None:
+    """Put every robot shape in one physics collision-filter class.
+
+    Gazebo Physics uses a symmetric bitmask: two shapes collide only when the
+    bitwise AND of their masks is non-zero.  The robot owns bit 0; the normal
+    world mask remains ``0xffff``.  While a target is fixed to the gripper the
+    authoritative world plugin recreates only that target with bit 1, which
+    suppresses internal target/robot contacts while preserving target/world
+    contacts.  Never accept a converter-provided conflicting mask because a
+    partially classified robot would make that guarantee false.
+    """
+
+    # A contact sensor contains a scalar ``<contact><collision>name``
+    # reference which ElementTree also matches with ``.//collision``.  Only
+    # real collision entities are direct children of links; adding a surface
+    # below the scalar reference creates invalid SDF and weakens provenance.
+    for collision in model.findall(".//link/collision"):
+        surface = collision.find("surface")
+        if surface is None:
+            surface = ET.SubElement(collision, "surface")
+        contact = surface.find("contact")
+        if contact is None:
+            contact = ET.SubElement(surface, "contact")
+        bitmask = contact.find("collide_bitmask")
+        if bitmask is None:
+            bitmask = ET.SubElement(contact, "collide_bitmask")
+        existing = (bitmask.text or "").strip()
+        if existing:
+            try:
+                parsed = int(existing, 0)
+            except ValueError as exc:
+                raise DetachableSdfError(
+                    "rendered SDF robot collision bitmask is invalid"
+                ) from exc
+            if parsed != ROBOT_COLLISION_FILTER_MASK:
+                raise DetachableSdfError(
+                    "rendered SDF robot collision bitmask conflicts with the "
+                    "authoritative attachment contract"
+                )
+        bitmask.text = str(ROBOT_COLLISION_FILTER_MASK)
+
+
 def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) -> ET.Element:
     """Validate the one approved joint and add DART-only fixed-root details."""
 
@@ -83,6 +128,7 @@ def prepare_detachable_sdf(root: ET.Element, *, dart_compatible: bool = True) ->
     if model.find("link[@name='base_link']") is None:
         raise DetachableSdfError("rendered SDF has no base_link for a fixed root")
     _normalize_contact_topics(model)
+    _assign_robot_collision_filter_mask(model)
     for joint in list(model.findall("joint[@name='openeta_world_to_base']")):
         model.remove(joint)
     root_joint = ET.Element("joint", {"name": "openeta_world_to_base", "type": "fixed"})

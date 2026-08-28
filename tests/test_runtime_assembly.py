@@ -268,6 +268,101 @@ def test_frozen_frontier_prioritizes_sibling_with_shared_model_parent() -> None:
     ] == "shared_model_centering_parent"
 
 
+def test_frozen_frontier_rebase_requalifies_catalog_and_excludes_physical_failure() -> None:
+    def candidate(candidate_id: str, x: float) -> dict:
+        return {
+            "id": candidate_id,
+            "frame": "camera",
+            "camera_frame": "opencv",
+            "width": 0.06,
+            "translation_xyz": [x, 0.2, 0.3],
+            "rotation_matrix": [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            "transform_matrix": [
+                [1.0, 0.0, 0.0, x],
+                [0.0, 1.0, 0.0, 0.2],
+                [0.0, 0.0, 1.0, 0.3],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+
+    failed = candidate("failed", 0.10)
+    qualified_backup = candidate("qualified_backup", 0.12)
+    provider_tail = candidate("provider_tail", 0.14)
+    coordinator = _FrozenGoalPairCoordinator(qualifier=SimpleNamespace())
+    coordinator.grasp_candidate_catalog = {
+        item["id"]: item
+        for item in (failed, qualified_backup, provider_tail)
+    }
+    # Before the physical attempt only the not-yet-qualified provider tail was
+    # in the expansion queue.  Once the object moves, the qualified backup's
+    # old IK/L5 proof is stale and it must rejoin the requalification frontier.
+    coordinator.grasp_frontier_candidates = [provider_tail]
+    coordinator.grasp_frontier_template = {
+        "source": {
+            "camera_extrinsics": {
+                "camera_frame": "opencv",
+                "pos": [0.0, 0.0, 0.0],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+        }
+    }
+    coordinator.grasp_frontier_planning_scene_revision = 7
+    receipt = {
+        "detachable_joint": {"state": "detached"},
+        "planning_scene_target_pose_sync": {
+            "schema_version": "openeta.planning_scene_target_pose_sync.v1",
+            "operation": "update_world_target",
+            "topology_unchanged": True,
+            "static_world_unchanged": True,
+            "world_ids_before": ["target", "table", "bin"],
+            "world_ids_after": ["target", "table", "bin"],
+            "attached_ids_before": [],
+            "attached_ids_after": [],
+            "source_revision": 7,
+            "revision": 8,
+            "source_target_pose": {
+                "frame": "world",
+                "translation_xyz": [0.25, -0.1, 0.43],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+            "target_pose": {
+                "frame": "world",
+                "translation_xyz": [0.27, -0.1, 0.43],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+            "translation_delta_m": 0.02,
+            "rotation_delta_rad": 0.0,
+            "static_world_sha256_after": "static-scene",
+        },
+    }
+
+    rebased = coordinator.rebase_grasp_frontier_from_target_pose_sync(
+        receipt,
+        scene_epoch=1,
+        planning_scene_revision=8,
+        failed_candidate_id="failed",
+    )
+
+    assert rebased.success is True
+    assert [
+        item["id"] for item in coordinator.grasp_frontier_candidates
+    ] == ["qualified_backup", "provider_tail"]
+    assert coordinator.physically_rejected_grasp_ids == {"failed"}
+    assert coordinator.grasp_frontier_candidates[0][
+        "translation_xyz"
+    ] == pytest.approx([0.14, 0.2, 0.3])
+    assert coordinator.grasp_frontier_candidates[0][
+        "frozen_object_motion_rebase"
+    ]["physically_rejected_candidate_ids"] == ["failed"]
+    assert coordinator.grasp_candidate_catalog["qualified_backup"][
+        "translation_xyz"
+    ] == pytest.approx([0.14, 0.2, 0.3])
+
+
 def test_frozen_grasp_frontier_expansion_bypasses_provider_inference() -> None:
     provider_calls: list[dict] = []
     qualifier_calls: list[dict] = []

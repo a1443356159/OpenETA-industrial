@@ -22,6 +22,7 @@ from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.robotiq_kinematics import (
     DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD,
     minimum_feasible_active_position,
+    six_joint_positions,
 )
 from sim.env_registry import get_env_spec
 
@@ -198,10 +199,10 @@ def test_pickplace_motion_profile_follows_verified_payload_state() -> None:
         "unloaded",
         "loaded",
     )
-    assert unloaded["max_velocity_scaling_factor"] == 0.25
-    assert unloaded["max_acceleration_scaling_factor"] == 0.15
-    assert loaded["max_velocity_scaling_factor"] == 0.20
-    assert loaded["max_acceleration_scaling_factor"] == 0.10
+    assert unloaded["max_velocity_scaling_factor"] == 0.20
+    assert unloaded["max_acceleration_scaling_factor"] == 0.10
+    assert loaded["max_velocity_scaling_factor"] == 0.15
+    assert loaded["max_acceleration_scaling_factor"] == 0.08
 
 
 def test_move_goal_preserves_a_hash_bound_qualified_joint_branch() -> None:
@@ -670,6 +671,80 @@ def test_robot_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> No
     assert receipt["terminal_status"] == "succeeded"
     assert receipt["terminal_status_code"] == 4
     assert receipt["wall_elapsed_ms"] == pytest.approx(123.456)
+
+
+def test_attached_transport_hold_opens_one_common_driver_after_attach() -> None:
+    def linked_state(active: float):
+        linkage = six_joint_positions(active)
+        return robot_state_from_sources(
+            {
+                "name": JOINT_NAMES,
+                "position": [0.0] * len(ARM_JOINTS)
+                + [linkage[name] for name in JOINT_NAMES[len(ARM_JOINTS) :]],
+                "velocity": [0.0] * len(JOINT_NAMES),
+            },
+            {
+                "base_link->gripper_mount_link": {
+                    "xyz": [0.0, 0.0, 0.5],
+                    "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                }
+            },
+        )
+
+    states = iter((linked_state(0.60), linked_state(0.57)))
+    commands: list[tuple[float, float]] = []
+
+    def gripper_action(position, timeout):
+        commands.append((position, timeout))
+        return {
+            "ok": True,
+            "reached_goal": True,
+            "stalled": False,
+            "terminal_status": "succeeded",
+        }
+
+    controller = GazeboController(
+        state_provider=lambda: next(states),
+        gripper_action=gripper_action,
+    )
+
+    evidence = controller.establish_attached_transport_hold(timeout_s=12.0)
+
+    assert commands == [(pytest.approx(0.56), 12.0)]
+    assert evidence["schema_version"] == "openeta.attached_transport_hold.v1"
+    assert evidence["actuator_model"] == "single_common_driver"
+    assert evidence["object_environment_collision_enabled"] is True
+    assert evidence["minimum_proven_relief_rad"] == pytest.approx(0.02)
+    assert evidence["measured_common_after_rad"] == pytest.approx(0.57)
+
+
+def test_attached_transport_hold_rejects_a_stalled_internal_open() -> None:
+    linkage = six_joint_positions(0.60)
+    state = robot_state_from_sources(
+        {
+            "name": JOINT_NAMES,
+            "position": [0.0] * len(ARM_JOINTS)
+            + [linkage[name] for name in JOINT_NAMES[len(ARM_JOINTS) :]],
+            "velocity": [0.0] * len(JOINT_NAMES),
+        },
+        {
+            "base_link->gripper_mount_link": {
+                "xyz": [0.0, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+        },
+    )
+    controller = GazeboController(
+        state_provider=lambda: state,
+        gripper_action=lambda _position, _timeout: {
+            "ok": True,
+            "reached_goal": False,
+            "stalled": True,
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="ATTACHED_TRANSPORT_HOLD_FAILED"):
+        controller.establish_attached_transport_hold()
 
 
 def test_controller_runs_one_recovery_then_submits_the_original_target_once() -> None:

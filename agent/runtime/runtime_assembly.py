@@ -1280,6 +1280,7 @@ class _FrozenGoalPairCoordinator:
     grasp_frontier_scene_epoch: int = -1
     grasp_frontier_planning_scene_revision: int = -1
     grasp_frontier_generation: int = 0
+    physically_rejected_grasp_ids: set[str] = field(default_factory=set)
 
     def retain_goal_pool(
         self,
@@ -1339,6 +1340,7 @@ class _FrozenGoalPairCoordinator:
         self.grasp_frontier_scene_epoch = -1
         self.grasp_frontier_planning_scene_revision = -1
         self.grasp_frontier_generation = 0
+        self.physically_rejected_grasp_ids.clear()
         model_raw_count = result.details.get("model_raw_candidate_count")
         self.source_model_raw_candidate_count = (
             model_raw_count
@@ -1599,8 +1601,17 @@ class _FrozenGoalPairCoordinator:
         *,
         scene_epoch: int,
         planning_scene_revision: int,
+        failed_candidate_id: str = "",
     ) -> ToolResult:
-        """Rebind frozen camera grasps after one proven rigid target motion."""
+        """Rebind all unconsumed model grasps after proven target motion.
+
+        A physical close can move a detached object.  That invalidates both
+        the untouched provider tail and already-qualified backups because all
+        of their IK/L5 proofs were bound to the prior pose.  Rebuild the
+        frontier from the frozen provider catalog, exclude every physically
+        attempted candidate, apply the measured rigid transform, and let the
+        ordinary qualifier prove the candidates again under the new scene.
+        """
 
         sync = receipt.get("planning_scene_target_pose_sync")
         sync = sync if isinstance(sync, Mapping) else {}
@@ -1646,6 +1657,27 @@ class _FrozenGoalPairCoordinator:
                     "execution_started": False,
                 },
             )
+        rejected_id = str(failed_candidate_id or "").strip()
+        if rejected_id:
+            self.physically_rejected_grasp_ids.add(rejected_id)
+        source_candidates = [
+            json.loads(json.dumps(candidate))
+            for candidate_id, candidate in self.grasp_candidate_catalog.items()
+            if candidate_id not in self.physically_rejected_grasp_ids
+        ]
+        if not source_candidates:
+            return ToolResult(
+                False,
+                "The frozen grasp frontier is exhausted after physical failures.",
+                {
+                    "reason": "frozen_grasp_frontier_exhausted",
+                    "physically_rejected_candidate_ids": sorted(
+                        self.physically_rejected_grasp_ids
+                    ),
+                    "model_inference_invoked": False,
+                    "execution_started": False,
+                },
+            )
         try:
             rebased = [
                 rebase_camera_grasp_candidate_for_object_motion(
@@ -1654,7 +1686,7 @@ class _FrozenGoalPairCoordinator:
                     source_object_pose=source_pose,
                     target_object_pose=target_pose,
                 )
-                for candidate in self.grasp_frontier_candidates
+                for candidate in source_candidates
             ]
         except (TypeError, ValueError) as exc:
             return ToolResult(
@@ -1674,12 +1706,24 @@ class _FrozenGoalPairCoordinator:
             "translation_delta_m": sync.get("translation_delta_m"),
             "rotation_delta_rad": sync.get("rotation_delta_rad"),
             "candidate_count": len(rebased),
+            "physically_rejected_candidate_ids": sorted(
+                self.physically_rejected_grasp_ids
+            ),
             "model_inference_invoked": False,
             "static_world_sha256": sync.get("static_world_sha256_after"),
         }
         for candidate in rebased:
             candidate["frozen_object_motion_rebase"] = json.loads(json.dumps(rebase_evidence))
         self.grasp_frontier_candidates = rebased
+        self.grasp_candidate_catalog.update(
+            {
+                str(candidate.get("id") or ""): json.loads(
+                    json.dumps(candidate)
+                )
+                for candidate in rebased
+                if str(candidate.get("id") or "")
+            }
+        )
         self.grasp_frontier_scene_epoch = scene_epoch
         self.grasp_frontier_planning_scene_revision = planning_scene_revision
         self.scene_epoch = scene_epoch
@@ -2790,6 +2834,12 @@ def _qualifying_handler(
                     "planning_scene_revision", frontier_scene_epoch
                 )
             observed_revision = observation_metadata.get("planning_scene_revision")
+            recovery = memory.get("grasp_recovery") if isinstance(memory, Mapping) else None
+            failed_candidate_id = (
+                str(recovery.get("candidate_id") or "")
+                if isinstance(recovery, Mapping)
+                else ""
+            )
             if (
                 isinstance(observed_revision, int)
                 and not isinstance(observed_revision, bool)
@@ -2811,6 +2861,7 @@ def _qualifying_handler(
                         else 0
                     ),
                     planning_scene_revision=observed_revision,
+                    failed_candidate_id=failed_candidate_id,
                 )
                 if not rebase.success:
                     return ToolResult(
@@ -2829,10 +2880,6 @@ def _qualifying_handler(
                         },
                     )
                 frontier_revision = observed_revision
-            recovery = memory.get("grasp_recovery") if isinstance(memory, Mapping) else None
-            failed_candidate_id = (
-                str(recovery.get("candidate_id") or "") if isinstance(recovery, Mapping) else ""
-            )
             preferred_parent_count = (
                 frozen_pair_coordinator.prioritize_grasp_frontier_for_parent(failed_candidate_id)
                 if failed_candidate_id

@@ -35,7 +35,9 @@ def _load_robotiq_kinematics():
 
     try:
         from extensions.gazebo.robotiq_kinematics import (
+            bounded_contact_hold_position,
             common_driver_position,
+            functional_opening_complete,
             linkage_terminal_metrics,
             minimum_feasible_active_position,
             one_pad_compliance_exhausted,
@@ -46,6 +48,8 @@ def _load_robotiq_kinematics():
             six_joint_positions,
             linkage_terminal_metrics,
             common_driver_position,
+            bounded_contact_hold_position,
+            functional_opening_complete,
             minimum_feasible_active_position,
             one_pad_compliance_exhausted,
         )
@@ -55,7 +59,9 @@ def _load_robotiq_kinematics():
         if (parent / "extensions" / "gazebo" / "robotiq_kinematics.py").is_file():
             sys.path.insert(0, str(parent))
             from extensions.gazebo.robotiq_kinematics import (
+                bounded_contact_hold_position,
                 common_driver_position,
+                functional_opening_complete,
                 linkage_terminal_metrics,
                 minimum_feasible_active_position,
                 one_pad_compliance_exhausted,
@@ -66,6 +72,8 @@ def _load_robotiq_kinematics():
                 six_joint_positions,
                 linkage_terminal_metrics,
                 common_driver_position,
+                bounded_contact_hold_position,
+                functional_opening_complete,
                 minimum_feasible_active_position,
                 one_pad_compliance_exhausted,
             )
@@ -132,6 +140,11 @@ MAX_LEAD_RAD: Final = 3.0 * GOAL_TOLERANCE_RAD
 CONTACT_CLOSING_RATE_FACTOR: Final = SLOW_TAIL_FACTOR
 TERMINAL_CONTACT_FRESHNESS_SIM_S: Final = 0.10
 TERMINAL_BILATERAL_CONTACT_DWELL_SIM_S: Final = 0.25
+# Once both pads touch, retain only half a public terminal band of preload.
+# This is enough for a position-controlled simulator to preserve contact while
+# preventing the old pre-contact command from squeezing an object that is
+# subsequently fixed to the wrist.  It remains one common actuator target.
+BILATERAL_HOLD_PRELOAD_RAD: Final = GOAL_TOLERANCE_RAD / 2.0
 COMMON_COMPLIANCE_DWELL_SIM_S: Final = max(
     2.0 * TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S,
     TERMINAL_BILATERAL_CONTACT_DWELL_SIM_S,
@@ -155,6 +168,8 @@ class RobotiqGripperActionAdapter(Node):
             self._six_joint_positions,
             self._linkage_terminal_metrics,
             self._common_driver_position,
+            self._bounded_contact_hold_position,
+            self._functional_opening_complete,
             self._minimum_feasible_active_position,
             self._one_pad_compliance_exhausted,
         ) = _load_robotiq_kinematics()
@@ -348,16 +363,27 @@ class RobotiqGripperActionAdapter(Node):
         stroke = effective_active_position - start_active_position
         closing_goal = stroke > GOAL_TOLERANCE_RAD
         opening_goal = stroke < -GOAL_TOLERANCE_RAD
+        full_open_goal = bool(
+            opening_goal
+            and math.isclose(
+                effective_active_position,
+                feasible_open_position,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        )
         alpha = 0.0
         commanded_active_position = start_active_position
         last_sim_tick_s = goal_started_sim_time_s
         bilateral_contact_started_sim_time_s: float | None = None
+        bilateral_settle_started_sim_time_s: float | None = None
         bilateral_hold_active_position: float | None = None
         single_contact_side: str | None = None
         single_contact_started_sim_time_s: float | None = None
         common_progress_active_position = start_active_position
         common_progress_sim_time_s = goal_started_sim_time_s
         linkage_settle_started_sim_time_s: float | None = None
+        functional_open_settle_started_sim_time_s: float | None = None
 
         while rclpy.ok():
             positions, velocities, state = self._snapshot()
@@ -413,13 +439,23 @@ class RobotiqGripperActionAdapter(Node):
             else:
                 commanded_active_position = nominal_active_position
 
-            if fresh_bilateral_contact and closing_goal:
+            bilateral_control_ready = bool(
+                fresh_bilateral_contact
+                and closing_goal
+                and math.isfinite(common_active_position)
+            )
+            if bilateral_control_ready:
                 if bilateral_contact_started_sim_time_s is None:
                     bilateral_contact_started_sim_time_s = sim_now_s
-                    bilateral_hold_active_position = commanded_active_position
+                    bilateral_hold_active_position = self._bounded_contact_hold_position(
+                        measured_common_active_rad=common_active_position,
+                        requested_active_rad=effective_active_position,
+                        preload_rad=BILATERAL_HOLD_PRELOAD_RAD,
+                    )
                 commanded_active_position = float(bilateral_hold_active_position)
             else:
                 bilateral_contact_started_sim_time_s = None
+                bilateral_settle_started_sim_time_s = None
                 bilateral_hold_active_position = None
 
             # Every publication is generated from exactly one common driver;
@@ -428,11 +464,28 @@ class RobotiqGripperActionAdapter(Node):
             commanded_targets = dict(self._six_joint_positions(commanded_active_position))
             self._publish_targets(commanded_targets)
 
+            complete_velocity_state = set(JOINT_MULTIPLIERS).issubset(velocities)
+            bilateral_mechanism_stationary = bool(
+                bilateral_control_ready
+                and complete_velocity_state
+                and all(math.isfinite(float(velocities[name])) for name in JOINT_MULTIPLIERS)
+                and max(abs(float(velocities[name])) for name in JOINT_MULTIPLIERS)
+                <= TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S
+            )
+            if bilateral_mechanism_stationary:
+                if bilateral_settle_started_sim_time_s is None:
+                    bilateral_settle_started_sim_time_s = sim_now_s
+            else:
+                bilateral_settle_started_sim_time_s = None
+
             bilateral_dwell_complete = bool(
                 self._allow_stalling
                 and bilateral_contact_started_sim_time_s is not None
                 and sim_now_s - bilateral_contact_started_sim_time_s
                 >= TERMINAL_BILATERAL_CONTACT_DWELL_SIM_S
+                and bilateral_settle_started_sim_time_s is not None
+                and sim_now_s - bilateral_settle_started_sim_time_s
+                >= TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S
                 and all(
                     0.0
                     <= sim_now_s - target_contact_sim_times.get(side, -math.inf)
@@ -465,7 +518,6 @@ class RobotiqGripperActionAdapter(Node):
                 ):
                     common_progress_active_position = common_active_position
                     common_progress_sim_time_s = sim_now_s
-                complete_velocity_state = set(JOINT_MULTIPLIERS).issubset(velocities)
                 mechanism_stationary = bool(
                     complete_velocity_state
                     and max(abs(float(velocities[name])) for name in JOINT_MULTIPLIERS)
@@ -504,6 +556,40 @@ class RobotiqGripperActionAdapter(Node):
                 if math.isfinite(common_active_position):
                     common_progress_active_position = common_active_position
                 common_progress_sim_time_s = sim_now_s
+
+            functional_open_ready = bool(
+                full_open_goal
+                and self._functional_opening_complete(
+                    positions,
+                    velocities,
+                    open_active_rad=feasible_open_position,
+                    max_common_lead_rad=max_lead,
+                    terminal_tolerance_rad=GOAL_TOLERANCE_RAD,
+                    terminal_velocity_rad_s=(
+                        TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S
+                    ),
+                )
+            )
+            if functional_open_ready:
+                if functional_open_settle_started_sim_time_s is None:
+                    functional_open_settle_started_sim_time_s = sim_now_s
+            else:
+                functional_open_settle_started_sim_time_s = None
+            functional_open_settled = bool(
+                functional_open_settle_started_sim_time_s is not None
+                and sim_now_s - functional_open_settle_started_sim_time_s
+                >= TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S
+            )
+            if functional_open_settled:
+                self.get_logger().info(
+                    "accepting full-open Robotiq recovery from bounded "
+                    "common-driver state with stationary passive linkage"
+                )
+                result.state = self._result_state(positions, velocities, state)
+                result.stalled = False
+                result.reached_goal = True
+                goal_handle.succeed()
+                return result
 
             if set(final_targets).issubset(positions):
                 try:

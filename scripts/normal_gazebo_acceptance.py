@@ -16,6 +16,7 @@ import urllib.request
 from scripts import gazebo_acceptance_runtime as base
 from agent.runtime.calibration_registry import RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE
 from agent.runtime.qualification_v3 import JOINT_SOLUTION_DEDUP_DISTANCE
+from agent.runtime.release_evidence import ordered_native_release_proof
 from extensions.gazebo.native_grasp import load_acceptance_scene_contract
 from tools.candidate_config import (
     DEFAULT_GRASPGENX_RAW_POOL_SIZE,
@@ -1441,23 +1442,9 @@ def verify_case(
             if isinstance(value, list)
         ]
         if not any(
-            [
-                str(item.get("event") or "")
-                for item in sequence
-                if isinstance(item, Mapping)
-            ][:3]
-            == [
-                "native_detach_ack",
-                "planning_scene_detach_ack",
-                "gripper_open_completed",
-            ]
-            and [
-                int(item.get("sequence"))
-                for item in sequence[:3]
-                if isinstance(item, Mapping)
-                and isinstance(item.get("sequence"), int)
-            ]
-            == [1, 2, 3]
+            isinstance(proof := ordered_native_release_proof(sequence), dict)
+            and isinstance(proof.get("planning_scene_detach_ack"), dict)
+            and isinstance(proof.get("gripper_open_completed"), dict)
             for sequence in release_sequences
         ):
             errors.append("detach-before-open ordered release evidence missing")

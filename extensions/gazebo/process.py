@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import os
 import math
 import re
@@ -13,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 class GazeboProcessError(RuntimeError):
@@ -417,6 +418,21 @@ class GazeboDetachableJointControl:
         parent_link: str = "gripper_mount_link",
         child_model: str = "target_object",
         child_link: str = "target_link",
+        collision_filter_state_topic: str = (
+            "/openeta/native_grasp/detachable_joint/target/"
+            "collision_filter_state"
+        ),
+        collision_filter_state_request_topic: str = (
+            "/openeta/native_grasp/detachable_joint/target/"
+            "collision_filter_state/request"
+        ),
+        collision_filter_state_ack_topic: str = (
+            "/openeta/native_grasp/detachable_joint/target/"
+            "collision_filter_state/ack"
+        ),
+        robot_collision_filter_mask: int = 0x0001,
+        detached_target_collision_filter_mask: int = 0xFFFF,
+        attached_target_collision_filter_mask: int = 0x0002,
     ) -> None:
         self.gz_executable = gz_executable
         self.timeout_s = float(timeout_s)
@@ -425,7 +441,43 @@ class GazeboDetachableJointControl:
         self.parent_link = parent_link
         self.child_model = child_model
         self.child_link = child_link
+        self.collision_filter_state_topic = str(
+            collision_filter_state_topic
+        ).strip()
+        self.collision_filter_state_request_topic = str(
+            collision_filter_state_request_topic
+        ).strip()
+        self.collision_filter_state_ack_topic = str(
+            collision_filter_state_ack_topic
+        ).strip()
+        self.robot_collision_filter_mask = int(robot_collision_filter_mask)
+        self.detached_target_collision_filter_mask = int(
+            detached_target_collision_filter_mask
+        )
+        self.attached_target_collision_filter_mask = int(
+            attached_target_collision_filter_mask
+        )
+        if (
+            not self.collision_filter_state_topic
+            or not self.collision_filter_state_request_topic
+            or not self.collision_filter_state_ack_topic
+            or self.robot_collision_filter_mask <= 0
+            or self.detached_target_collision_filter_mask <= 0
+            or self.attached_target_collision_filter_mask <= 0
+            or (
+                self.robot_collision_filter_mask
+                & self.detached_target_collision_filter_mask
+            )
+            == 0
+            or (
+                self.robot_collision_filter_mask
+                & self.attached_target_collision_filter_mask
+            )
+            != 0
+        ):
+            raise ValueError("invalid attached collision-filter contract")
         self._state = DetachableJointState.UNKNOWN
+        self._collision_filter_attached: bool | None = None
         self._baseline: tuple[float, tuple[float, float, float]] | None = None
         self._last_native_pose_read_attempt_count = 0
 
@@ -463,10 +515,13 @@ class GazeboDetachableJointControl:
 
         if timeout_s <= 0:
             raise ValueError("DetachableJoint readiness timeout must be positive")
-        required = {
+        required_topics = {
             "/openeta/native_grasp/detachable_joint/target/attach",
             "/openeta/native_grasp/detachable_joint/target/detach",
             "/openeta/native_grasp/detachable_joint/target/state",
+            self.collision_filter_state_topic,
+            self.collision_filter_state_request_topic,
+            self.collision_filter_state_ack_topic,
         }
         deadline = time.monotonic() + float(timeout_s)
         last_error = "endpoint discovery did not run"
@@ -487,10 +542,15 @@ class GazeboDetachableJointControl:
                 last_error = f"{type(exc).__name__}: {exc}"
             else:
                 topics = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-                if result.returncode == 0 and required <= topics:
+                if (
+                    result.returncode == 0
+                    and required_topics <= topics
+                ):
                     return
-                missing = sorted(required - topics)
-                detail = (result.stderr or result.stdout)[-500:].strip()
+                missing = sorted(required_topics - topics)
+                detail = (
+                    result.stderr or result.stdout
+                )[-500:].strip()
                 last_error = (
                     f"missing={','.join(missing)}"
                     + (f" detail={detail}" if detail else "")
@@ -498,21 +558,207 @@ class GazeboDetachableJointControl:
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         raise GazeboProcessError(f"NATIVE_GRASP_DETACHABLE_JOINT_NOT_READY: {last_error}")
 
+    def _wait_collision_filter_state(self, *, attached: bool) -> None:
+        """Request and prove the authoritative physics mask.
+
+        This mirrors the stock DetachableJoint transport contract: start the
+        state listener, prove its Boolean publisher and our subscription are
+        discoverable, then publish one Empty request.  Receiving the dedicated
+        ACK also proves the request subscription end-to-end.  The plugin
+        answers from an atomic stable-state snapshot even while simulation
+        physics is paused.
+        """
+
+        deadline = time.monotonic() + self.timeout_s
+        last_error = "no collision-filter state received"
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            listener: subprocess.Popen[str] | None = None
+            output = ""
+            listener_stderr = ""
+            listener_returncode: int | None = None
+            try:
+                listener = subprocess.Popen(
+                    [
+                        self._executable(self.gz_executable),
+                        "topic",
+                        "-e",
+                        "-n",
+                        "1",
+                        "-t",
+                        self.collision_filter_state_ack_topic,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env=self.environment,
+                    start_new_session=True,
+                )
+                listener_ready = False
+                publisher = (
+                    r"Publishers\s*\[[^\]]*\]:\s*\n"
+                    r"(?:\s+\S+,[^\n]*\n)*?\s+\S+,\s*gz\.msgs\.Boolean\b"
+                )
+                subscriber = r"Subscribers\s*\[[^\]]*\]:\s*\n\s+\S"
+                while time.monotonic() < deadline:
+                    remaining = deadline - time.monotonic()
+                    try:
+                        state_info = subprocess.run(
+                            [
+                                self._executable(self.gz_executable),
+                                "topic",
+                                "-i",
+                                "-t",
+                                self.collision_filter_state_ack_topic,
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            env=self.environment,
+                            timeout=min(5.0, max(0.1, remaining)),
+                        )
+                    except subprocess.TimeoutExpired as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        time.sleep(
+                            min(0.02, max(0.0, deadline - time.monotonic()))
+                        )
+                        continue
+                    if (
+                        state_info.returncode == 0
+                        and re.search(publisher, state_info.stdout)
+                        and re.search(subscriber, state_info.stdout)
+                    ):
+                        listener_ready = True
+                        break
+                    detail = (state_info.stderr or state_info.stdout)[-500:].strip()
+                    last_error = (
+                        "collision-filter ACK endpoint not ready"
+                        + (f": {detail}" if detail else "")
+                    )
+                    time.sleep(
+                        min(0.02, max(0.0, deadline - time.monotonic()))
+                    )
+                if not listener_ready:
+                    break
+                self._publish_empty(self.collision_filter_state_request_topic)
+                output, listener_stderr = listener.communicate(
+                    timeout=max(0.1, deadline - time.monotonic())
+                )
+                listener_returncode = listener.poll()
+            except (OSError, subprocess.TimeoutExpired, GazeboProcessError) as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                break
+            finally:
+                if listener is not None and listener.poll() is None:
+                    listener.terminate()
+                    try:
+                        listener.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        listener.kill()
+                        listener.wait(timeout=1.0)
+            match = re.search(
+                r"\bdata:\s*(true|false)\b",
+                output,
+                flags=re.IGNORECASE,
+            )
+            if match is not None:
+                observed = match.group(1).lower() == "true"
+            elif (
+                listener_returncode == 0
+                and not output.strip()
+                and not listener_stderr.strip()
+            ):
+                # ``gz topic -e`` prints a blank record for the proto3 default
+                # Boolean value.  A clean one-message exit plus the typed
+                # publisher proof above therefore represents ``false``; an
+                # absent message cannot make ``-n 1`` exit successfully.
+                observed = False
+            else:
+                observed = None
+            if observed is not None:
+                if observed == attached:
+                    self._collision_filter_attached = observed
+                    return
+                last_error = (
+                    f"observed={'attached' if observed else 'detached'} "
+                    f"expected={'attached' if attached else 'detached'}"
+                )
+            else:
+                detail = (listener_stderr or output)[-500:].strip()
+                last_error = "collision-filter response was not a Boolean"
+                if detail:
+                    last_error += f": {detail}"
+            time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+        self._collision_filter_attached = None
+        raise GazeboProcessError(
+            f"NATIVE_GRASP_COLLISION_FILTER_ACK_MISSING: {last_error}"
+        )
+
+    def collision_filter_evidence(self) -> dict[str, Any]:
+        """Return the last ACKed Gazebo target/robot collision semantics."""
+
+        if self._collision_filter_attached is None:
+            raise GazeboProcessError(
+                "NATIVE_GRASP_COLLISION_FILTER_ACK_MISSING"
+            )
+        mask = (
+            self.attached_target_collision_filter_mask
+            if self._collision_filter_attached
+            else self.detached_target_collision_filter_mask
+        )
+        return {
+            "schema_version": "openeta.attached_collision_filter.v1",
+            "state": (
+                "robot_excluded" if self._collision_filter_attached else "full"
+            ),
+            "joint_state": (
+                DetachableJointState.ATTACHED
+                if self._collision_filter_attached
+                else DetachableJointState.DETACHED
+            ),
+            "state_topic": self.collision_filter_state_topic,
+            "state_request_topic": self.collision_filter_state_request_topic,
+            "state_ack_topic": self.collision_filter_state_ack_topic,
+            "robot_mask": self.robot_collision_filter_mask,
+            "target_mask": mask,
+            "target_robot_collision_enabled": (
+                self.robot_collision_filter_mask & mask
+            )
+            != 0,
+            "target_environment_collision_enabled": mask != 0,
+        }
+
     def _request(self, action: str) -> str:
         if action not in {"attach", "detach"}:
             raise ValueError("unsupported DetachableJoint action")
         expected = action + "ed"
         topic = f"/openeta/native_grasp/detachable_joint/target/{action}"
-        # The plugin emits a transition message once.  Listener first avoids
-        # accepting a command for which the state ACK was missed.
+        state_topic = "/openeta/native_grasp/detachable_joint/target/state"
+        # The stock joint emits a transition message once.  Listener first
+        # avoids accepting a command whose joint ACK was missed.  Collision
+        # semantics are queried separately from the state service below.
         try:
             listener = subprocess.Popen(
-                [self._executable(self.gz_executable), "topic", "-e", "-n", "1", "-t", "/openeta/native_grasp/detachable_joint/target/state"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                env=self.environment, start_new_session=True,
+                [
+                    self._executable(self.gz_executable),
+                    "topic",
+                    "-e",
+                    "-n",
+                    "1",
+                    "-t",
+                    state_topic,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=self.environment,
+                start_new_session=True,
             )
         except OSError as exc:
             raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE") from exc
+        output = ""
         try:
             # Process creation does not mean the transport subscription is
             # discoverable yet.  The state transition is published once, so
@@ -525,7 +771,7 @@ class GazeboDetachableJointControl:
                 try:
                     state_info = subprocess.run(
                         [self._executable(self.gz_executable), "topic", "-i", "-t",
-                         "/openeta/native_grasp/detachable_joint/target/state"],
+                         state_topic],
                         capture_output=True, text=True, check=False,
                         env=self.environment, timeout=min(5.0, max(0.1, remaining)),
                     )
@@ -574,6 +820,8 @@ class GazeboDetachableJointControl:
                 "NATIVE_GRASP_ATTACH_ACK_MISSING" if action == "attach" else "NATIVE_GRASP_DETACH_ACK_MISSING"
             )
         self._state = DetachableJointState.ATTACHED if action == "attach" else DetachableJointState.DETACHED
+        expected_filter_state = action == "attach"
+        self._wait_collision_filter_state(attached=expected_filter_state)
         if action == "detach":
             self._baseline = None
         return self._state
@@ -903,25 +1151,37 @@ class GazeboNativeContactWindow:
         gz_executable: str = "gz",
         environment: dict[str, str] | None = None,
         timeout_s: float = 3.0,
+        simulation_time_provider: Callable[[], float] | None = None,
     ) -> None:
         self.gz_executable = gz_executable
         self.environment = dict(environment) if environment is not None else None
         self.timeout_s = float(timeout_s)
+        self.simulation_time_provider = simulation_time_provider
         self._processes: list[subprocess.Popen] = []
         self._threads: list[threading.Thread] = []
         self._samples: list[object] = []
+        self._latest_message_sim_times: dict[str, float] = {}
+        self._pending_message_lines: dict[str, list[str]] = {}
         self._errors: list[str] = []
         self._lock = threading.Lock()
         self._armed = False
 
     @staticmethod
-    def _contact_message(block: str, side: str):
-        from .native_grasp import NativeContactSample
+    def _message_sim_time(block: str) -> float | None:
         stamp = re.search(r"stamp\s*\{(.*?)\}", block, re.DOTALL)
         if stamp is None:
             return None
         seconds = GazeboDetachableJointControl._field(stamp.group(1), "sec")
         nanoseconds = GazeboDetachableJointControl._field(stamp.group(1), "nanosec", GazeboDetachableJointControl._field(stamp.group(1), "nsec"))
+        sim_time_s = seconds + nanoseconds * 1e-9
+        return sim_time_s if math.isfinite(sim_time_s) and sim_time_s >= 0.0 else None
+
+    @staticmethod
+    def _contact_message(block: str, side: str):
+        from .native_grasp import NativeContactSample
+        sim_time_s = GazeboNativeContactWindow._message_sim_time(block)
+        if sim_time_s is None:
+            return None
         collision_blocks = re.findall(r"collision[12]\s*\{(.*?)\}", block, re.DOTALL)
         names = tuple(
             match.group(1)
@@ -932,28 +1192,39 @@ class GazeboNativeContactWindow:
         if not names:
             return None
         try:
-            return NativeContactSample(side, seconds + nanoseconds * 1e-9, time.monotonic(), names)
+            return NativeContactSample(side, sim_time_s, time.monotonic(), names)
         except ValueError:
             return None
 
+    def _record_message(self, block: str, side: str) -> None:
+        sim_time_s = self._message_sim_time(block)
+        sample = self._contact_message(block, side)
+        if sim_time_s is None and sample is None:
+            return
+        with self._lock:
+            if sim_time_s is not None:
+                self._latest_message_sim_times[side] = max(
+                    sim_time_s,
+                    self._latest_message_sim_times.get(side, -math.inf),
+                )
+            if sample is not None:
+                self._samples.append(sample)
+
     def _read(self, stream, side: str) -> None:
         current: list[str] = []
+        self._pending_message_lines[side] = current
         for line in iter(stream.readline, ""):
             # Every gz.msgs.Contacts begins with its Header.  Flush the prior
             # message at the next Header so bracket depth inside repeated
             # contacts cannot merge simulator samples.
             if line.strip() == "header {" and current:
-                sample = self._contact_message("".join(current), side)
-                if sample is not None:
-                    with self._lock:
-                        self._samples.append(sample)
+                self._record_message("".join(current), side)
                 current = []
+                self._pending_message_lines[side] = current
             current.append(line)
         if current:
-            sample = self._contact_message("".join(current), side)
-            if sample is not None:
-                with self._lock:
-                    self._samples.append(sample)
+            self._record_message("".join(current), side)
+        self._pending_message_lines[side] = []
 
     def arm(self) -> None:
         if self._armed:
@@ -1071,6 +1342,120 @@ class GazeboNativeContactWindow:
                 return result
             if now >= deadline:
                 return result
+            time.sleep(0.02)
+
+    def prove_contact_clearance(
+        self,
+        *,
+        after_sim_time_s: float,
+        duration_sim_s: float,
+    ) -> dict[str, object]:
+        """Prove both previously-live native pads stayed clear after attach.
+
+        Gazebo contact sensors publish contacts, but are silent while clear;
+        silence is therefore not an empty-message heartbeat.  The two streams
+        must already have produced samples and their subscription processes
+        must remain alive.  The authoritative ROS/Gazebo clock then advances
+        across the requested window plus an equal transport-drain window.  No
+        pad contact may occur anywhere in that closed simulator-time proof.
+        """
+
+        if not self._armed:
+            raise GazeboProcessError("NATIVE_GRASP_CONTACT_WINDOW_NOT_ARMED")
+        started = float(after_sim_time_s)
+        duration = float(duration_sim_s)
+        if (
+            not math.isfinite(started)
+            or started < 0.0
+            or not math.isfinite(duration)
+            or duration <= 0.0
+        ):
+            raise ValueError("native contact-clearance window is invalid")
+        ended = started + duration
+        proof_ended = ended + duration
+        deadline = time.monotonic() + self.timeout_s
+        while True:
+            with self._lock:
+                pending_blocks = {
+                    side: "".join(tuple(self._pending_message_lines.get(side, ())))
+                    for side in ("left", "right")
+                }
+                samples = list(self._samples)
+                for side, block in pending_blocks.items():
+                    pending_sample = self._contact_message(block, side)
+                    if pending_sample is not None:
+                        samples.append(pending_sample)
+                unique_samples = {
+                    (
+                        sample.side,
+                        sample.timestamp_s,
+                        tuple(sample.collision_names),
+                    ): sample
+                    for sample in samples
+                }
+                pending_times = {
+                    side: self._message_sim_time(block)
+                    for side, block in pending_blocks.items()
+                }
+                latest = {
+                    side: max(
+                        self._latest_message_sim_times.get(side, -math.inf),
+                        (
+                            pending_times[side]
+                            if pending_times[side] is not None
+                            else -math.inf
+                        ),
+                    )
+                    for side in ("left", "right")
+                }
+                counts = {
+                    side: sum(
+                        1
+                        for sample in unique_samples.values()
+                        if sample.side == side
+                        and started < sample.timestamp_s <= proof_ended
+                    )
+                    for side in ("left", "right")
+                }
+                reader_errors = tuple(self._errors)
+            subscriptions_live = len(self._processes) == 2 and all(
+                process.poll() is None for process in self._processes
+            )
+            streams_proven = all(math.isfinite(value) for value in latest.values())
+            try:
+                clock_now = (
+                    float(self.simulation_time_provider())
+                    if self.simulation_time_provider is not None
+                    else -math.inf
+                )
+            except Exception:  # noqa: BLE001 - clock/provider boundary.
+                clock_now = -math.inf
+            if (
+                subscriptions_live
+                and streams_proven
+                and not reader_errors
+                and math.isfinite(clock_now)
+                and clock_now >= proof_ended
+            ):
+                return {
+                    "schema_version": "openeta.native_pad_clearance.v1",
+                    "cleared": not any(counts.values()),
+                    "window_started_sim_time_s": started,
+                    "window_ended_sim_time_s": ended,
+                    "duration_sim_s": duration,
+                    "proof_window_ended_sim_time_s": proof_ended,
+                    "transport_drain_duration_sim_s": duration,
+                    "left_contact_sample_count": counts["left"],
+                    "right_contact_sample_count": counts["right"],
+                    "latest_live_contact_stream_message_sim_time_s": latest,
+                    "proof_clock_sim_time_s": clock_now,
+                    "contact_subscriptions_live": True,
+                    "time_basis": "gazebo_clock_after_previously_live_contact_streams",
+                }
+            if time.monotonic() >= deadline:
+                raise GazeboProcessError(
+                    "NATIVE_GRASP_CONTACT_CLEARANCE_STREAM_TIMEOUT"
+                )
             time.sleep(0.02)
 
     def close(self) -> None:

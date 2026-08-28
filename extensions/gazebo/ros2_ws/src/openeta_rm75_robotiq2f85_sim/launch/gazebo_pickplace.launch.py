@@ -160,6 +160,15 @@ def generate_launch_description():
             )
         ),
         SetEnvironmentVariable("GZ_SIM_RESOURCE_PATH", os.pathsep.join([str(share.parent), str(description_share.parent), os.environ.get("GZ_SIM_RESOURCE_PATH", "")])),
+        SetEnvironmentVariable(
+            "GZ_SIM_SYSTEM_PLUGIN_PATH",
+            os.pathsep.join(
+                [
+                    str(share.parent.parent / "lib"),
+                    os.environ.get("GZ_SIM_SYSTEM_PLUGIN_PATH", ""),
+                ]
+            ),
+        ),
         gz_launch, rsp, spawn, RegisterEventHandler(OnShutdown(on_shutdown=_unlink_generated_sdf(generated_sdfs))),
         _after_success(jsb, [arm], "joint_state_broadcaster activation"),
         _after_success(arm, [gripper], "RM75 controller activation"),

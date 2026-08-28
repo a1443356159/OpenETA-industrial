@@ -90,6 +90,35 @@ class GazeboDirectEnv(Env):
         return self.runtime.controller
 
     @staticmethod
+    def _collision_filter_evidence(
+        attachment: Any, *, attached: bool
+    ) -> dict[str, Any] | None:
+        """Validate the real runtime's ACKed target collision semantics.
+
+        Lightweight dependency-injected test doubles predating the Gazebo
+        plugin may omit this optional evidence method.  The production
+        attachment controller always implements it and has already failed
+        closed at the attach / detach boundary if the ACK was unavailable.
+        """
+
+        read = getattr(attachment, "collision_filter_evidence", None)
+        if not callable(read):
+            return None
+        evidence = dict(read())
+        expected_state = "robot_excluded" if attached else "full"
+        if (
+            evidence.get("schema_version")
+            != "openeta.attached_collision_filter.v1"
+            or evidence.get("state") != expected_state
+            or evidence.get("target_environment_collision_enabled") is not True
+            or evidence.get("target_robot_collision_enabled") is not (not attached)
+        ):
+            raise GazeboProcessError(
+                "NATIVE_GRASP_COLLISION_FILTER_ACK_INVALID"
+            )
+        return evidence
+
+    @staticmethod
     def _as_unified(observation: EnvObservation) -> dict[str, Any]:
         cameras: dict[str, dict[str, Any]] = {}
         for camera in observation.cameras:
@@ -179,6 +208,11 @@ class GazeboDirectEnv(Env):
             contact_window = GazeboNativeContactWindow(
                 gz_executable=self.deployment.gz_executable,
                 environment=dict(self.deployment.process_environment),
+                simulation_time_provider=getattr(
+                    self.controller,
+                    "observation_barrier_s",
+                    None,
+                ),
             )
             try:
                 contact_window.arm()
@@ -229,6 +263,9 @@ class GazeboDirectEnv(Env):
                     target_pose, _ = attachment.native_target_mount_poses()
                     attachment.ensure_detached(require_ack=True)
                     detached_acked = True
+                    collision_filter = self._collision_filter_evidence(
+                        attachment, attached=False
+                    )
                     release_sequence.append(
                         {
                             "sequence": 1,
@@ -236,6 +273,14 @@ class GazeboDirectEnv(Env):
                             "state": "detached",
                         }
                     )
+                    if collision_filter is not None:
+                        release_sequence.append(
+                            {
+                                "sequence": 2,
+                                "event": "attached_collision_filter_ack",
+                                **collision_filter,
+                            }
+                        )
                     sync_detach = getattr(
                         self.controller, "sync_planning_scene_detach", None
                     )
@@ -248,7 +293,7 @@ class GazeboDirectEnv(Env):
                     )
                     release_sequence.append(
                         {
-                            "sequence": 2,
+                            "sequence": len(release_sequence) + 1,
                             "event": "planning_scene_detach_ack",
                             "revision": int(scene_revision),
                         }
@@ -263,6 +308,7 @@ class GazeboDirectEnv(Env):
                         "target_pose": target_pose,
                         "planning_scene_revision": int(scene_revision),
                         "record": record,
+                        "attached_collision_filter": collision_filter,
                     }
                 except Exception as exc:
                     record = self._native_grasp_verifier.release_result(
@@ -303,6 +349,7 @@ class GazeboDirectEnv(Env):
             if action_type == "gripper_close":
                 gate = None
                 attach_acked = False
+                attached_transport_hold: dict[str, Any] | None = None
                 pose_snapshot_attempt_count = 0
                 baseline_pose_snapshot_attempt_count = 0
                 self._native_grasp_transport_locked = True
@@ -319,6 +366,9 @@ class GazeboDirectEnv(Env):
                     else:
                         attachment.attach()
                         attach_acked = True
+                        collision_filter = self._collision_filter_evidence(
+                            attachment, attached=True
+                        )
                         retrying_pose_reader = getattr(
                             attachment,
                             "native_target_mount_poses_with_retry",
@@ -349,6 +399,101 @@ class GazeboDirectEnv(Env):
                             "quat_xyzw": list(relative_quat),
                             "measurement_boundary": "native_attach_ack",
                         }
+                        establish_transport_hold = getattr(
+                            self.controller,
+                            "establish_attached_transport_hold",
+                            None,
+                        )
+                        if not callable(establish_transport_hold):
+                            raise GazeboProcessError("GRIPPER_UNAVAILABLE")
+                        transport_hold_attempts: list[dict[str, Any]] = []
+                        while True:
+                            hold_step = dict(establish_transport_hold())
+                            if (
+                                hold_step.get("schema_version")
+                                != "openeta.attached_transport_hold.v1"
+                                or hold_step.get(
+                                    "object_environment_collision_enabled"
+                                )
+                                is not True
+                            ):
+                                raise GazeboProcessError(
+                                    "ATTACHED_TRANSPORT_HOLD_FAILED"
+                                )
+                            hold_completed = hold_step.get(
+                                "action_completed_ros_time_s"
+                            )
+                            if not isinstance(hold_completed, int | float):
+                                raise GazeboProcessError(
+                                    "ATTACHED_TRANSPORT_HOLD_FAILED"
+                                )
+                            prove_clearance = getattr(
+                                contact_window,
+                                "prove_contact_clearance",
+                                None,
+                            )
+                            if not callable(prove_clearance):
+                                raise GazeboProcessError(
+                                    "NATIVE_GRASP_CONTACT_CLEARANCE_UNAVAILABLE"
+                                )
+                            clearance = dict(
+                                prove_clearance(
+                                    after_sim_time_s=float(hold_completed),
+                                    duration_sim_s=(
+                                        self._native_grasp_config.contact_post_close_hold_s
+                                    ),
+                                )
+                            )
+                            if (
+                                clearance.get("schema_version")
+                                != "openeta.native_pad_clearance.v1"
+                                or type(clearance.get("cleared")) is not bool
+                            ):
+                                raise GazeboProcessError(
+                                    "NATIVE_GRASP_CONTACT_CLEARANCE_INVALID"
+                                )
+                            transport_hold_attempts.append(
+                                {
+                                    **hold_step,
+                                    "target_contact_clearance": clearance,
+                                }
+                            )
+                            if clearance.get("cleared") is True:
+                                break
+                        first_hold = transport_hold_attempts[0]
+                        last_hold = transport_hold_attempts[-1]
+                        attached_transport_hold = {
+                            "schema_version": "openeta.attached_transport_hold.v2",
+                            "actuator_model": "single_common_driver",
+                            "object_environment_collision_enabled": True,
+                            "selection_policy": (
+                                "open_by_terminal_bands_until_native_pads_clear"
+                            ),
+                            "attempt_count": len(transport_hold_attempts),
+                            "attempts": transport_hold_attempts,
+                            "measured_common_before_rad": first_hold[
+                                "measured_common_before_rad"
+                            ],
+                            "measured_common_after_rad": last_hold[
+                                "measured_common_after_rad"
+                            ],
+                            "measured_relief_rad": (
+                                float(first_hold["measured_common_before_rad"])
+                                - float(last_hold["measured_common_after_rad"])
+                            ),
+                            "target_contact_clearance": last_hold[
+                                "target_contact_clearance"
+                            ],
+                            **(
+                                {
+                                    "attached_collision_filter": dict(
+                                        collision_filter
+                                    )
+                                }
+                                if collision_filter is not None
+                                else {}
+                            ),
+                        }
                         sync_attach = getattr(self.controller, "sync_planning_scene_attach", None)
                         if not callable(sync_attach):
                             raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
@@ -372,9 +517,25 @@ class GazeboDirectEnv(Env):
                                 "state": "attached",
                                 "attach_topic": self._native_grasp_config.attach_topic,
                                 "state_topic": self._native_grasp_config.state_topic,
+                                "collision_filter_state_topic": (
+                                    self._native_grasp_config
+                                    .attached_collision_filter_state_topic
+                                ),
                             },
                             "planning_scene_revision": scene_revision,
                             "attachment_transform": dict(self._attachment_transform),
+                            "attached_transport_hold": dict(
+                                attached_transport_hold
+                            ),
+                            **(
+                                {
+                                    "attached_collision_filter": dict(
+                                        collision_filter
+                                    )
+                                }
+                                if collision_filter is not None
+                                else {}
+                            ),
                             "native_state_snapshot": {
                                 "post_attach_attempt_count": pose_snapshot_attempt_count,
                                 "baseline_attempt_count": (
@@ -490,6 +651,15 @@ class GazeboDirectEnv(Env):
                         ),
                         "motion_outcome": "failed",
                         "execution_started": True,
+                        **(
+                            {
+                                "attached_transport_hold": dict(
+                                    attached_transport_hold
+                                )
+                            }
+                            if attached_transport_hold is not None
+                            else {}
+                        ),
                         "native_state_snapshot": {
                             "post_attach_attempt_count": pose_snapshot_attempt_count,
                             "baseline_attempt_count": (
@@ -522,7 +692,7 @@ class GazeboDirectEnv(Env):
                         )
                         release_sequence.append(
                             {
-                                "sequence": 3,
+                                "sequence": len(release_sequence) + 1,
                                 "event": "gripper_open_completed",
                                 "ok": True,
                             }
@@ -531,7 +701,19 @@ class GazeboDirectEnv(Env):
                             "state": "detached",
                             "detach_topic": self._native_grasp_config.detach_topic,
                             "state_topic": self._native_grasp_config.state_topic,
+                            "collision_filter_state_topic": (
+                                self._native_grasp_config
+                                .attached_collision_filter_state_topic
+                            ),
                         }
+                        if release_before_open.get(
+                            "attached_collision_filter"
+                        ) is not None:
+                            receipt["attached_collision_filter"] = dict(
+                                release_before_open[
+                                    "attached_collision_filter"
+                                ]
+                            )
                         samples = attachment.sample_detached_target_poses(
                             duration_s=(
                                 self._native_grasp_config.placement_settling_observation_s
@@ -566,7 +748,7 @@ class GazeboDirectEnv(Env):
                         )
                         release_sequence.append(
                             {
-                                "sequence": 4,
+                                "sequence": len(release_sequence) + 1,
                                 "event": "released_target_pose_sync_ack",
                                 "revision": int(scene_revision),
                             }
@@ -642,6 +824,11 @@ class GazeboDirectEnv(Env):
                     "state": "attached",
                     "state_topic": self._native_grasp_config.state_topic,
                 }
+                collision_filter = self._collision_filter_evidence(
+                    attachment, attached=True
+                )
+                if collision_filter is not None:
+                    receipt["attached_collision_filter"] = collision_filter
                 if self._attachment_transform is not None:
                     receipt["attachment_transform"] = dict(self._attachment_transform)
                 proof_evidence = dict(record.evidence)

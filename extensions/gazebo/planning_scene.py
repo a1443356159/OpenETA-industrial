@@ -121,6 +121,12 @@ class PlanningSceneSynchronizer:
         self.world_specs: dict[str, dict[str, Any]] = {}
         self.attached_specs: dict[str, dict[str, Any]] = {}
         self.target_id = ""
+        # The detached target starts in exact support contact.  MoveIt needs
+        # that one pair in its ACM to admit the measured start state, while a
+        # later trajectory-level audit proves that an attached path actually
+        # leaves the support instead of inheriting the exception forever.
+        self.support_contact_object_id = ""
+        self.support_contact_reference_target_spec: dict[str, Any] = {}
         self.authoritative_scene_sha256 = ""
         self.world_geometry_sha256 = ""
         self.attached_geometry_sha256 = ""
@@ -138,6 +144,8 @@ class PlanningSceneSynchronizer:
         self.world_specs = {}
         self.attached_specs = {}
         self.target_id = ""
+        self.support_contact_object_id = ""
+        self.support_contact_reference_target_spec = {}
         self.authoritative_scene_sha256 = ""
         self.world_geometry_sha256 = ""
         self.attached_geometry_sha256 = ""
@@ -199,6 +207,8 @@ class PlanningSceneSynchronizer:
         }
         self.attached_specs = {}
         self.target_id = target.object_id
+        self.support_contact_object_id = table.object_id
+        self.support_contact_reference_target_spec = target.to_dict()
         self.authoritative_scene_sha256 = str(authoritative_scene_sha256)
         return revision
 
@@ -234,6 +244,12 @@ class PlanningSceneSynchronizer:
             expected_world=self.world_ids - {target.object_id},
             expected_attached={target.object_id},
         )
+        # Preserve the native attach-time world pose as the physical support
+        # baseline.  The attached start state reconstructed through FK can
+        # differ by a few floating-point / timestamp interpolation bits.  The
+        # trajectory audit may admit that measured contact at sample zero, but
+        # it still requires positive separation as soon as motion begins.
+        self.support_contact_reference_target_spec = target.to_dict()
         self.world_specs.pop(target.object_id, None)
         self.attached_specs = {target.object_id: attached_spec}
         return revision
@@ -273,6 +289,7 @@ class PlanningSceneSynchronizer:
             expected_attached=set(self.attached_ids),
         )
         self.world_specs[target.object_id] = target_spec
+        self.support_contact_reference_target_spec = target_spec
         return revision
 
     def detach_target(self, *, target: CollisionGeometry) -> int:

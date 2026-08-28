@@ -17,7 +17,10 @@ from typing import Any, Callable, Mapping, Sequence
 
 from adapter.protocol import RobotState
 from .robotiq_kinematics import (
+    GRIPPER_GOAL_TOLERANCE_RAD,
     DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD,
+    attached_transport_relief_position,
+    common_driver_position,
     minimum_feasible_active_position,
 )
 
@@ -99,6 +102,7 @@ ERROR_CODES = frozenset(
         "GRIPPER_UNAVAILABLE",
         "GRIPPER_FAILED",
         "GRIPPER_TIMEOUT",
+        "ATTACHED_TRANSPORT_HOLD_FAILED",
         "INVALID_CONTROL_ACTION",
         "ROBOT_STATE_UNAVAILABLE",
     }
@@ -844,6 +848,110 @@ class GazeboController:
         if self.close_source is not None:
             self.close_source()
         self._closed = True
+
+    @staticmethod
+    def _gripper_joint_position_map(
+        state: RobotState,
+        *,
+        joint_names: Sequence[str],
+    ) -> dict[str, float]:
+        positions = list(state.joint_positions)
+        names = [str(name) for name in joint_names]
+        if len(names) != len(positions) or any(
+            name not in names for name in GRIPPER_JOINTS
+        ):
+            raise RuntimeError("ROBOT_STATE_UNAVAILABLE")
+        result = {
+            name: float(positions[index])
+            for index, name in enumerate(names)
+            if name in GRIPPER_JOINTS
+        }
+        if not all(math.isfinite(value) for value in result.values()):
+            raise RuntimeError("ROBOT_STATE_UNAVAILABLE")
+        return result
+
+    def establish_attached_transport_hold(
+        self,
+        *,
+        timeout_s: float = 30.0,
+    ) -> dict[str, Any]:
+        """Relieve fingertip preload only after native fixed-joint attach.
+
+        Gazebo's detachable joint retains the object during this short common-
+        actuator opening.  Object-vs-environment collision remains enabled;
+        the method removes only the redundant pad squeeze which would
+        otherwise over-constrain DART during arm transport.
+        """
+
+        if self.gripper_action is None:
+            raise RuntimeError("GRIPPER_UNAVAILABLE")
+        timeout = float(timeout_s)
+        if not math.isfinite(timeout) or timeout <= 0.0:
+            raise ValueError("attached transport hold timeout must be positive")
+        joint_names = tuple(getattr(self.config, "joint_names", JOINT_NAMES))
+        before_state = self.state_provider()
+        before_positions = self._gripper_joint_position_map(
+            before_state,
+            joint_names=joint_names,
+        )
+        measured_before = common_driver_position(
+            before_positions,
+            closing=False,
+        )
+        target = attached_transport_relief_position(
+            measured_common_active_rad=measured_before,
+            minimum_active_rad=float(self.config.gripper_position(1)),
+            terminal_tolerance_rad=GRIPPER_GOAL_TOLERANCE_RAD,
+        )
+        try:
+            result = dict(self.gripper_action(target, timeout))
+        except TimeoutError as exc:
+            raise RuntimeError("ATTACHED_TRANSPORT_HOLD_FAILED") from exc
+        if (
+            type(result.get("ok")) is not bool
+            or result["ok"] is not True
+            or bool(result.get("reached_goal", False)) is not True
+            or bool(result.get("stalled", False))
+        ):
+            raise RuntimeError("ATTACHED_TRANSPORT_HOLD_FAILED")
+
+        after_state = self.state_provider()
+        after_positions = self._gripper_joint_position_map(
+            after_state,
+            joint_names=joint_names,
+        )
+        measured_after = common_driver_position(
+            after_positions,
+            closing=False,
+        )
+        maximum_terminal_position = target + GRIPPER_GOAL_TOLERANCE_RAD
+        if measured_after > maximum_terminal_position + 1e-9:
+            raise RuntimeError("ATTACHED_TRANSPORT_HOLD_FAILED")
+        return {
+            "schema_version": "openeta.attached_transport_hold.v1",
+            "actuator_model": "single_common_driver",
+            "object_environment_collision_enabled": True,
+            "measured_common_before_rad": measured_before,
+            "commanded_common_target_rad": target,
+            "measured_common_after_rad": measured_after,
+            "commanded_relief_rad": measured_before - target,
+            "minimum_proven_relief_rad": (
+                measured_before - maximum_terminal_position
+            ),
+            "reached_goal": True,
+            "stalled": False,
+            **{
+                key: result[key]
+                for key in (
+                    "action_started_ros_time_s",
+                    "action_completed_ros_time_s",
+                    "terminal_status",
+                    "terminal_status_code",
+                    "wall_elapsed_ms",
+                )
+                if key in result
+            },
+        }
 
     def execute(self, action: Mapping[str, Any]) -> GazeboControlResult:
         kind = action.get("action_type")

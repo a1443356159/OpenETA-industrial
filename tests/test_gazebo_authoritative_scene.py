@@ -63,6 +63,10 @@ def test_authoritative_compiler_emits_the_same_object_set_for_gazebo_and_moveit(
     assert compiled.evidence()["gazebo_collision_object_ids"] == compiled.evidence()[
         "moveit_collision_object_ids"
     ]
+    if scene_id == "normal":
+        assert {"green_parts_bin", "blue_parts_bin"} <= set(
+            compiled.evidence()["visual_collision_aligned_object_ids"]
+        )
 
 
 def test_authoritative_normal_bin_is_one_exact_compound_body_with_base_and_four_walls() -> (
@@ -79,6 +83,7 @@ def test_authoritative_normal_bin_is_one_exact_compound_body_with_base_and_four_
             "front_wall",
             "rear_wall",
         ]
+        assert bin_object.mirrored_visual_count == len(bin_object.primitives) == 5
         moveit = bin_object.moveit_spec()
         assert moveit["shape"] == "compound"
         assert len(moveit["primitives"]) == 5
@@ -89,6 +94,66 @@ def test_authoritative_normal_bin_is_one_exact_compound_body_with_base_and_four_
             "front_wall",
             "rear_wall",
         ]
+
+
+def test_authoritative_scene_materializes_attachment_collision_masks_and_plugin() -> None:
+    compiled = _compile()
+    world = ET.fromstring(compiled.sdf_bytes).find("world")
+
+    assert world is not None
+    target_masks = {
+        collision.findtext("surface/contact/collide_bitmask")
+        for collision in world.findall(
+            "model[@name='target_object']/link/collision"
+        )
+    }
+    assert target_masks == {"65535"}
+    plugin = world.find(
+        "plugin[@name='openeta::gazebo::AttachedCollisionFilter']"
+    )
+    assert plugin is not None
+    assert plugin.get("filename") == (
+        "libopeneta_attached_collision_filter_system.so"
+    )
+    assert plugin.findtext("robot_mask") == "1"
+    assert plugin.findtext("detached_mask") == "65535"
+    assert plugin.findtext("attached_mask") == "2"
+    assert plugin.findtext("state_request_topic") == (
+        "/openeta/native_grasp/detachable_joint/target/"
+        "collision_filter_state/request"
+    )
+    assert plugin.findtext("state_ack_topic") == (
+        "/openeta/native_grasp/detachable_joint/target/"
+        "collision_filter_state/ack"
+    )
+    evidence = compiled.evidence()["attached_collision_filter"]
+    assert evidence["attached_target_robot_collision_enabled"] is False
+    assert evidence["attached_target_environment_collision_enabled"] is True
+
+
+def test_authoritative_compiler_rejects_visible_placement_wall_drift(
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    tree = ET.parse(package / "worlds/rm75_robotiq2f85_pickplace.sdf")
+    visual_size = tree.getroot().find(
+        "world/model[@name='green_parts_bin']/link/"
+        "visual[@name='left_wall_visual']/geometry/box/size"
+    )
+    assert visual_size is not None
+    visual_size.text = "0.026 0.36 0.18"
+    world_path = tmp_path / "visible-wall-drift.sdf"
+    tree.write(world_path, encoding="utf-8", xml_declaration=True)
+
+    with pytest.raises(
+        RuntimeError,
+        match="placement support visual/collision geometry differs",
+    ):
+        compile_authoritative_scene(
+            base_world=world_path,
+            catalog_path=package / "config/acceptance_scenes.json",
+            scene_id="normal",
+        )
 
 
 def test_authoritative_scene_hash_is_deterministic_and_covers_materialized_sdf() -> None:

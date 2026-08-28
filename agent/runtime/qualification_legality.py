@@ -462,6 +462,14 @@ def _projected_obb(primitive: ProjectedCollisionPrimitive) -> Obb:
 
 
 def _spec_obbs(spec: object) -> tuple[Obb, ...]:
+    return tuple(
+        _projected_obb(item) for item in _spec_projected_geometry(spec)
+    )
+
+
+def _spec_projected_geometry(
+    spec: object,
+) -> tuple[ProjectedCollisionPrimitive, ...]:
     if not isinstance(spec, Mapping):
         return ()
     pose = rigid_pose(
@@ -477,7 +485,51 @@ def _spec_obbs(spec: object) -> tuple[Obb, ...]:
     )
     if pose is None:
         return ()
-    return tuple(_projected_obb(item) for item in _projected_body_geometry(spec, pose))
+    return _projected_body_geometry(spec, pose)
+
+
+def _non_support_obbs(
+    spec: object,
+    *,
+    support_z_m: object,
+) -> tuple[tuple[Obb, ...], int]:
+    """Separate a compound container's floor from its collision walls.
+
+    Placement may touch the primitive whose upper support face is exactly the
+    catalogued support height. Every other primitive remains a normal static
+    obstacle. This avoids the previous whole-object exemption that treated a
+    bin's base and four walls as if they were one infinite support plane.
+    """
+
+    if (
+        isinstance(support_z_m, bool)
+        or not isinstance(support_z_m, (int, float))
+        or not math.isfinite(float(support_z_m))
+    ):
+        return _spec_obbs(spec), 0
+    geometry = _spec_projected_geometry(spec)
+    if not geometry:
+        return (), 0
+    support_z = float(support_z_m)
+    scale = max(
+        1.0,
+        abs(support_z),
+        *(
+            abs(value)
+            for primitive in geometry
+            for value in primitive.center_xyz
+        ),
+    )
+    numeric_band = 64.0 * math.ulp(scale)
+    barriers: list[Obb] = []
+    support_count = 0
+    for primitive in geometry:
+        top_z = primitive.center_xyz[2] + primitive.axis_half_extent(2)
+        if abs(top_z - support_z) <= numeric_band:
+            support_count += 1
+        else:
+            barriers.append(_projected_obb(primitive))
+    return tuple(barriers), support_count
 
 
 def _obb_penetrates(left: Obb, right: Obb, *, tolerance_m: float) -> bool:
@@ -956,13 +1008,23 @@ def evaluate_placement_goal_legality(
     collisions: list[str] = []
     uncheckable: list[str] = []
     evaluated_obstacles: list[str] = []
+    support_contact_primitive_count = 0
+    support_barrier_primitive_count = 0
     for object_id, spec in sorted(world_specs.items(), key=lambda item: str(item[0])):
         object_id = str(object_id)
-        if object_id in {target_id, support_object_id}:
+        if object_id == target_id:
             continue
-        obstacle_boxes = _spec_obbs(spec)
+        all_obstacle_boxes = _spec_obbs(spec)
+        obstacle_boxes = all_obstacle_boxes
+        if object_id == support_object_id:
+            obstacle_boxes, support_contact_primitive_count = _non_support_obbs(
+                spec,
+                support_z_m=support_z,
+            )
+            support_barrier_primitive_count = len(obstacle_boxes)
         if not obstacle_boxes:
-            uncheckable.append(object_id)
+            if not all_obstacle_boxes:
+                uncheckable.append(object_id)
             continue
         evaluated_obstacles.append(object_id)
         if any(
@@ -980,6 +1042,8 @@ def evaluate_placement_goal_legality(
         "evaluated_obstacle_ids": evaluated_obstacles,
         "collision_ids": collisions,
         "uncheckable_ids": uncheckable,
+        "support_contact_primitive_count": support_contact_primitive_count,
+        "support_barrier_primitive_count": support_barrier_primitive_count,
     }
     if collisions:
         result.update(
@@ -1329,6 +1393,8 @@ def evaluate_grasp_placement_pair_legality(
         )
     )
     collision_events: list[JsonDict] = []
+    support_contact_primitive_count = 0
+    support_barrier_primitive_count = 0
     evaluated_obstacle_ids = sorted(
         str(object_id)
         for object_id, spec in world_specs.items()
@@ -1381,9 +1447,17 @@ def evaluate_grasp_placement_pair_legality(
                 )
             for object_id, spec in sorted(world_specs.items(), key=lambda item: str(item[0])):
                 object_id = str(object_id)
-                if object_id in {target_id, support_object_id}:
+                if object_id == target_id:
                     continue
                 obstacle_boxes = _spec_obbs(spec)
+                if object_id == support_object_id:
+                    obstacle_boxes, support_contact_primitive_count = (
+                        _non_support_obbs(
+                            spec,
+                            support_z_m=support_z,
+                        )
+                    )
+                    support_barrier_primitive_count = len(obstacle_boxes)
                 if obstacle_boxes and any(
                     _obb_penetrates(
                         _projected_obb(body),
@@ -1464,6 +1538,8 @@ def evaluate_grasp_placement_pair_legality(
         "evaluated_obstacle_ids": evaluated_obstacle_ids,
         "uncheckable_obstacle_ids": uncheckable_obstacle_ids,
         "collisions": collision_events,
+        "support_contact_primitive_count": support_contact_primitive_count,
+        "support_barrier_primitive_count": support_barrier_primitive_count,
     }
     if collision_events:
         result.update(

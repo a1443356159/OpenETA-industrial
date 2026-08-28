@@ -8,17 +8,85 @@ import pytest
 
 from extensions.gazebo.robot_control import Robotiq2F85Calibration
 from extensions.gazebo.robotiq_kinematics import (
+    attached_transport_relief_position,
+    bounded_contact_hold_position,
     BD_M,
     DEFAULT_CONTROLLER_BOUNDARY_INSET_RAD,
     aperture_from_angle_closed_form,
     common_driver_position,
     controller_safe_targets,
+    functional_opening_complete,
     linkage_terminal_metrics,
     minimum_feasible_active_position,
     one_pad_compliance_exhausted,
     six_joint_positions,
     solve_four_bar,
 )
+
+
+def test_attached_transport_relief_proves_one_terminal_band_after_action_error() -> None:
+    target = attached_transport_relief_position(
+        measured_common_active_rad=0.60,
+        minimum_active_rad=0.04,
+        terminal_tolerance_rad=0.02,
+    )
+
+    assert target == pytest.approx(0.56)
+    # The opening action may finish one terminal band on the closed side of
+    # its target and still guarantees one complete band of physical relief.
+    assert 0.60 - (target + 0.02) == pytest.approx(0.02)
+
+
+def test_attached_transport_relief_fails_near_open_boundary() -> None:
+    with pytest.raises(ValueError, match="insufficient common-driver travel"):
+        attached_transport_relief_position(
+            measured_common_active_rad=0.07,
+            minimum_active_rad=0.04,
+            terminal_tolerance_rad=0.02,
+        )
+
+
+def test_functional_full_open_accepts_stationary_bounded_passive_deflection() -> None:
+    positions = {
+        "gripper_left_finger_joint": 0.1007,
+        "gripper_right_finger_joint": -0.0469,
+        "gripper_left_inner_knuckle_joint": 0.0215,
+        "gripper_right_inner_knuckle_joint": -0.0216,
+        "gripper_left_finger_tip_joint": 0.0,
+        "gripper_right_finger_tip_joint": 0.0530,
+    }
+    velocities = {name: 0.0 for name in positions}
+
+    assert functional_opening_complete(
+        positions,
+        velocities,
+        open_active_rad=0.0401,
+        max_common_lead_rad=0.06,
+        terminal_tolerance_rad=0.02,
+        terminal_velocity_rad_s=0.08,
+    )
+
+
+@pytest.mark.parametrize("failure", ["not_open", "asymmetric", "moving"])
+def test_functional_full_open_rejects_unproven_common_states(failure: str) -> None:
+    positions = dict(six_joint_positions(0.08))
+    velocities = {name: 0.0 for name in positions}
+    if failure == "not_open":
+        positions.update(six_joint_positions(0.20))
+    elif failure == "asymmetric":
+        positions["gripper_left_finger_joint"] = 0.12
+        positions["gripper_right_finger_joint"] = -0.04
+    else:
+        velocities["gripper_left_finger_joint"] = 0.081
+
+    assert not functional_opening_complete(
+        positions,
+        velocities,
+        open_active_rad=0.0401,
+        max_common_lead_rad=0.06,
+        terminal_tolerance_rad=0.02,
+        terminal_velocity_rad_s=0.08,
+    )
 
 
 def test_loop_closes_to_submillimetre_across_the_stroke() -> None:
@@ -145,6 +213,32 @@ def test_common_driver_uses_directional_slowest_mirrored_side() -> None:
     positions["gripper_right_finger_joint"] = math.nan
     with pytest.raises(ValueError, match="finite"):
         common_driver_position(positions, closing=True)
+
+
+def test_bilateral_contact_hold_uses_measured_common_driver_and_bounded_preload() -> None:
+    assert bounded_contact_hold_position(
+        measured_common_active_rad=0.38,
+        requested_active_rad=0.70,
+        preload_rad=0.01,
+    ) == pytest.approx(0.39)
+    assert bounded_contact_hold_position(
+        measured_common_active_rad=0.695,
+        requested_active_rad=0.70,
+        preload_rad=0.01,
+    ) == pytest.approx(0.70)
+
+    with pytest.raises(ValueError, match="finite"):
+        bounded_contact_hold_position(
+            measured_common_active_rad=math.nan,
+            requested_active_rad=0.70,
+            preload_rad=0.01,
+        )
+    with pytest.raises(ValueError, match="positive and bounded"):
+        bounded_contact_hold_position(
+            measured_common_active_rad=0.38,
+            requested_active_rad=0.70,
+            preload_rad=0.0,
+        )
 
 
 def test_one_pad_contact_remains_compliance_until_all_exhaustion_proofs_hold() -> None:

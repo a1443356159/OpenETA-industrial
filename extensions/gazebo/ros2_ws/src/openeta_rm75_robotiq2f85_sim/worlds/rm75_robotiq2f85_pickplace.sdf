@@ -13,6 +13,16 @@
     <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
     <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
     <plugin filename="gz-sim-contact-system" name="gz::sim::systems::Contact"/>
+    <plugin filename="libopeneta_attached_collision_filter_system.so" name="openeta::gazebo::AttachedCollisionFilter">
+      <target_model>target_object</target_model>
+      <target_link>target_link</target_link>
+      <state_topic>/openeta/native_grasp/detachable_joint/target/collision_filter_state</state_topic>
+      <state_request_topic>/openeta/native_grasp/detachable_joint/target/collision_filter_state/request</state_request_topic>
+      <state_ack_topic>/openeta/native_grasp/detachable_joint/target/collision_filter_state/ack</state_ack_topic>
+      <robot_mask>1</robot_mask>
+      <detached_mask>65535</detached_mask>
+      <attached_mask>2</attached_mask>
+    </plugin>
     <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
@@ -69,34 +79,45 @@
       </link>
     </model>
 
-    <!-- Real Open Robotics picking-bin visuals with simple compound physics.
-         The 288 mm clear aperture admits the complete Robotiq release
-         envelope around the 220 mm wrench; a target-only footprint fit is
-         insufficient because release occurs before the gripper opens. -->
+    <!-- Real Open Robotics picking-bin detail meshes backed by authoritative
+         compound geometry.  Every collision primitive has an identical
+         opaque visual twin, so neither an operator nor a vision model sees a
+         wall that MoveIt/Gazebo physics can traverse.  The conservative proxy
+         follows the detailed mesh's inner/outer wall envelope. -->
     <model name="green_parts_bin">
       <static>true</static><pose>0.43 -0.300 0 0 0 -1.57079632679</pose>
       <link name="green_parts_bin_link">
-        <collision name="base"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.34 0.020</size></box></geometry></collision>
-        <collision name="left_wall"><pose>-0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
-        <collision name="right_wall"><pose>0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
-        <collision name="front_wall"><pose>0 -0.162 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
-        <collision name="rear_wall"><pose>0 0.162 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
+        <collision name="base"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.36 0.020</size></box></geometry></collision>
+        <collision name="left_wall"><pose>-0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry></collision>
+        <collision name="right_wall"><pose>0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry></collision>
+        <collision name="front_wall"><pose>0 -0.1565 0.09 0 0 0</pose><geometry><box><size>0.32 0.047 0.18</size></box></geometry></collision>
+        <collision name="rear_wall"><pose>0 0.172 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
+        <visual name="base_visual"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.36 0.020</size></box></geometry><material><ambient>0.025 0.30 0.08 1</ambient><diffuse>0.035 0.62 0.14 1</diffuse><specular>0.10 0.13 0.10 1</specular></material></visual>
+        <visual name="left_wall_visual"><pose>-0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry><material><ambient>0.025 0.30 0.08 1</ambient><diffuse>0.035 0.62 0.14 1</diffuse><specular>0.10 0.13 0.10 1</specular></material></visual>
+        <visual name="right_wall_visual"><pose>0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry><material><ambient>0.025 0.30 0.08 1</ambient><diffuse>0.035 0.62 0.14 1</diffuse><specular>0.10 0.13 0.10 1</specular></material></visual>
+        <visual name="front_wall_visual"><pose>0 -0.1565 0.09 0 0 0</pose><geometry><box><size>0.32 0.047 0.18</size></box></geometry><material><ambient>0.025 0.30 0.08 1</ambient><diffuse>0.035 0.62 0.14 1</diffuse><specular>0.10 0.13 0.10 1</specular></material></visual>
+        <visual name="rear_wall_visual"><pose>0 0.172 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry><material><ambient>0.025 0.30 0.08 1</ambient><diffuse>0.035 0.62 0.14 1</diffuse><specular>0.10 0.13 0.10 1</specular></material></visual>
         <visual name="bin_mesh"><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/picking_bin.glb</uri><scale>0.04 0.02 0.02</scale></mesh></geometry><material><ambient>0.025 0.30 0.08 1</ambient><diffuse>0.035 0.62 0.14 1</diffuse><specular>0.10 0.13 0.10 1</specular></material></visual>
       </link>
     </model>
     <model name="blue_parts_bin">
       <static>true</static><pose>0.62 0.230 0 0 0 -1.57079632679</pose>
       <link name="blue_parts_bin_link">
-        <collision name="base"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.34 0.020</size></box></geometry></collision>
-        <collision name="left_wall"><pose>-0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
-        <collision name="right_wall"><pose>0.152 0 0.09 0 0 0</pose><geometry><box><size>0.016 0.34 0.18</size></box></geometry></collision>
-        <collision name="front_wall"><pose>0 -0.162 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
-        <collision name="rear_wall"><pose>0 0.162 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
+        <collision name="base"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.36 0.020</size></box></geometry></collision>
+        <collision name="left_wall"><pose>-0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry></collision>
+        <collision name="right_wall"><pose>0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry></collision>
+        <collision name="front_wall"><pose>0 -0.1565 0.09 0 0 0</pose><geometry><box><size>0.32 0.047 0.18</size></box></geometry></collision>
+        <collision name="rear_wall"><pose>0 0.172 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry></collision>
+        <visual name="base_visual"><pose>0 0 0.010 0 0 0</pose><geometry><box><size>0.32 0.36 0.020</size></box></geometry><material><ambient>0.025 0.10 0.34 1</ambient><diffuse>0.035 0.22 0.72 1</diffuse><specular>0.10 0.12 0.18 1</specular></material></visual>
+        <visual name="left_wall_visual"><pose>-0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry><material><ambient>0.025 0.10 0.34 1</ambient><diffuse>0.035 0.22 0.72 1</diffuse><specular>0.10 0.12 0.18 1</specular></material></visual>
+        <visual name="right_wall_visual"><pose>0.1465 0 0.09 0 0 0</pose><geometry><box><size>0.027 0.36 0.18</size></box></geometry><material><ambient>0.025 0.10 0.34 1</ambient><diffuse>0.035 0.22 0.72 1</diffuse><specular>0.10 0.12 0.18 1</specular></material></visual>
+        <visual name="front_wall_visual"><pose>0 -0.1565 0.09 0 0 0</pose><geometry><box><size>0.32 0.047 0.18</size></box></geometry><material><ambient>0.025 0.10 0.34 1</ambient><diffuse>0.035 0.22 0.72 1</diffuse><specular>0.10 0.12 0.18 1</specular></material></visual>
+        <visual name="rear_wall_visual"><pose>0 0.172 0.09 0 0 0</pose><geometry><box><size>0.32 0.016 0.18</size></box></geometry><material><ambient>0.025 0.10 0.34 1</ambient><diffuse>0.035 0.22 0.72 1</diffuse><specular>0.10 0.12 0.18 1</specular></material></visual>
         <visual name="bin_mesh"><geometry><mesh><uri>model://openeta_rm75_robotiq2f85_sim/assets/industrial_workcell/picking_bin.glb</uri><scale>0.04 0.02 0.02</scale></mesh></geometry><material><ambient>0.025 0.10 0.34 1</ambient><diffuse>0.035 0.22 0.72 1</diffuse><specular>0.10 0.12 0.18 1</specular></material></visual>
       </link>
     </model>
-    <model name="placement_zone_marker"><static>true</static><pose>0.43 -0.300 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.275 0.004</size></box></geometry><material><ambient>0.025 0.34 0.095 1</ambient><diffuse>0.035 0.70 0.16 1</diffuse><specular>0.08 0.10 0.08 1</specular></material></visual></link></model>
-    <model name="blue_destination_marker"><static>true</static><pose>0.62 0.230 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.275 0.004</size></box></geometry><material><ambient>0.025 0.11 0.42 1</ambient><diffuse>0.035 0.25 0.88 1</diffuse><specular>0.08 0.09 0.14 1</specular></material></visual></link></model>
+    <model name="placement_zone_marker"><static>true</static><pose>0.43 -0.300 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.260 0.004</size></box></geometry><material><ambient>0.025 0.34 0.095 1</ambient><diffuse>0.035 0.70 0.16 1</diffuse><specular>0.08 0.10 0.08 1</specular></material></visual></link></model>
+    <model name="blue_destination_marker"><static>true</static><pose>0.62 0.230 0.014 0 0 0</pose><link name="marker_link"><visual name="marker_visual"><geometry><box><size>0.285 0.260 0.004</size></box></geometry><material><ambient>0.025 0.11 0.42 1</ambient><diffuse>0.035 0.25 0.88 1</diffuse><specular>0.08 0.09 0.14 1</specular></material></visual></link></model>
 
     <!-- Required sort item plus six physically independent neighbouring parts. -->
     <model name="target_object">

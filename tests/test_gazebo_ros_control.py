@@ -22,6 +22,7 @@ from extensions.gazebo.ros_control import (
     QUALIFIED_JOINT_GOAL_TOLERANCE_RAD,
     RosGazeboStateSource,
     _RosRuntime,
+    _attached_support_departure_audit,
     _collision_message_geometry_record,
     _configured_qualification_solver_profile,
     _qualification_ik_response_timeout_s,
@@ -34,6 +35,7 @@ from extensions.gazebo.ros_control import (
     _l5_trajectory_cache_key,
     _qualification_joint_state_with_sha256,
     _trajectory_end_joint_state_with_sha256,
+    _populate_motion_start_state,
     _populate_recovery_trajectory_goal,
     _populate_state_validity_request,
     _qualification_robot_model_sha256,
@@ -46,6 +48,186 @@ def _pose(xyz=(0.0, 0.0, 0.0), quat=(0.0, 0.0, 0.0, 1.0)):
         position=SimpleNamespace(x=xyz[0], y=xyz[1], z=xyz[2]),
         orientation=SimpleNamespace(x=quat[0], y=quat[1], z=quat[2], w=quat[3]),
     )
+
+
+def _support_departure_geometry():
+    return (
+        {
+            "id": "target",
+            "shape": "box",
+            "size_xyz": [0.02, 0.02, 0.02],
+            "pose_xyz": [0.0, 0.0, 0.0],
+            "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        {
+            "id": "work_table",
+            "shape": "box",
+            "size_xyz": [2.0, 2.0, 0.02],
+            "pose_xyz": [0.0, 0.0, -0.01],
+            "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+    )
+
+
+def test_attached_support_departure_accepts_moveit_generated_separation() -> None:
+    target, table = _support_departure_geometry()
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["lift"],
+        trajectory_positions=[[0.0], [0.01]],
+        forward_kinematics=lambda _names, joints: (
+            [0.0, 0.0, 0.01 + joints[0]],
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+    )
+
+    assert evidence["valid"] is True
+    assert evidence["route_owner"] == "moveit"
+    assert evidence["host_offset_pose_generated"] is False
+    assert evidence["initial_clearance_m"] == pytest.approx(0.0)
+    assert evidence["minimum_clearance_m"] == pytest.approx(0.0)
+    assert evidence["evaluated_sample_count"] == 3
+
+
+def test_attached_support_departure_rejects_scraping_moveit_path() -> None:
+    target, table = _support_departure_geometry()
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [0.1]],
+        forward_kinematics=lambda _names, joints: (
+            [joints[0], 0.0, 0.01],
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["failure"]["reason"] == (
+        "support_contact_persists_after_departure"
+    )
+    assert evidence["failure"]["sample_kind"] == "midpoint"
+
+
+def test_attached_world_audit_rejects_carried_object_crossing_bin_wall() -> None:
+    target, table = _support_departure_geometry()
+    bin_wall = {
+        "id": "green_parts_bin",
+        "shape": "box",
+        "size_xyz": [0.01, 0.1, 0.1],
+        "pose_xyz": [0.05, 0.0, 0.01],
+        "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [0.1]],
+        forward_kinematics=lambda _names, joints: (
+            [joints[0], 0.0, 0.01],
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+        obstacle_specs={"green_parts_bin": bin_wall},
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["authoritative_world_collision_audit"] is True
+    assert evidence["failure"] == {
+        "reason": "attached_object_static_collision",
+        "point_index": 1,
+        "sample_kind": "midpoint",
+        "obstacle_id": "green_parts_bin",
+        "target_primitive_index": 0,
+        "obstacle_primitive_index": 0,
+    }
+    assert evidence["exact_static_box_pair_check_count"] == 2
+
+
+def test_attached_support_departure_rejects_initial_penetration() -> None:
+    target, table = _support_departure_geometry()
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["lift"],
+        trajectory_positions=[[0.0], [0.01]],
+        forward_kinematics=lambda _names, joints: (
+            [0.0, 0.0, 0.009 + joints[0]],
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["failure"]["reason"] == "initial_support_penetration"
+
+
+def test_attached_support_departure_uses_native_attach_contact_as_start_baseline() -> None:
+    target, table = _support_departure_geometry()
+    measured_at_attach = {
+        **target,
+        # Native physics reports a shallow support overlap.  The independent
+        # FK reconstruction is a few nanometres deeper, then MoveIt separates
+        # the target immediately.
+        "pose_xyz": [0.0, 0.0, 0.01 - 3.0e-8],
+    }
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["lift"],
+        trajectory_positions=[[0.0], [0.01]],
+        forward_kinematics=lambda _names, joints: (
+            [0.0, 0.0, 0.01 - 3.0e-8 + joints[0]],
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+        support_contact_reference_target_spec=measured_at_attach,
+    )
+
+    assert evidence["valid"] is True
+    assert evidence["initial_clearance_m"] == pytest.approx(-3.0e-8)
+    assert evidence["initial_support_reference_clearance_m"] == pytest.approx(
+        -3.0e-8
+    )
+    assert evidence["first_moving_clearance_m"] > 0.0
+
+
+def test_attached_support_departure_rejects_start_deeper_than_native_baseline() -> None:
+    target, table = _support_departure_geometry()
+    measured_at_attach = {
+        **target,
+        "pose_xyz": [0.0, 0.0, 0.01 - 3.0e-8],
+    }
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["lift"],
+        trajectory_positions=[[0.0], [0.01]],
+        forward_kinematics=lambda _names, joints: (
+            [0.0, 0.0, 0.0099 + joints[0]],
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+        support_contact_reference_target_spec=measured_at_attach,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["failure"]["reason"] == "initial_support_penetration"
 
 
 def test_moveit_geometry_proof_accepts_equivalent_object_pose_factoring() -> None:
@@ -84,8 +266,20 @@ def test_fast_ik_solver_budget_does_not_shorten_ros_response_deadline() -> None:
     # Eight short IK requests may queue behind one MoveGroup service callback.
     # The IK request still carries 50 ms, while its transport may wait for the
     # bounded queue to drain without classifying a reachable pose as infra loss.
-    assert _qualification_ik_response_timeout_s(0.05) == pytest.approx(5.0)
-    assert _qualification_ik_response_timeout_s(0.05) > 8 * 0.05
+    assert _qualification_ik_response_timeout_s(
+        0.05,
+        queue_depth=8,
+    ) == pytest.approx(25.0)
+    assert _qualification_ik_response_timeout_s(
+        0.05,
+        queue_depth=8,
+    ) > 8 * 2.0
+
+
+@pytest.mark.parametrize("queue_depth", [0, -1, True])
+def test_fast_ik_response_deadline_rejects_invalid_queue_depth(queue_depth) -> None:
+    with pytest.raises(ValueError, match="response deadline inputs are invalid"):
+        _qualification_ik_response_timeout_s(0.05, queue_depth=queue_depth)
 
 
 def test_plan_only_rejected_trajectory_never_claims_execution() -> None:
@@ -472,6 +666,44 @@ def test_moveit_scene_maps_gazebo_world_to_fixed_robot_root_only() -> None:
         _moveit_scene_frame("gripper_mount_link", base_link="base_link")
         == "gripper_mount_link"
     )
+
+
+def test_l5_joint_only_start_state_preserves_authoritative_attachment() -> None:
+    state = SimpleNamespace(
+        is_diff=False,
+        joint_state=SimpleNamespace(name=[], position=[]),
+        # The PlanningScene owns the attached bodies. The joint-only request
+        # deliberately does not duplicate or replace that collection.
+        attached_collision_objects=[],
+    )
+
+    _populate_motion_start_state(
+        state,
+        {
+            "names": list(ARM_JOINTS),
+            "positions": [0.1 * index for index in range(len(ARM_JOINTS))],
+        },
+    )
+
+    assert state.is_diff is True
+    assert state.joint_state.name == list(ARM_JOINTS)
+    assert state.joint_state.position == pytest.approx(
+        [0.1 * index for index in range(len(ARM_JOINTS))]
+    )
+    assert state.attached_collision_objects == []
+
+
+def test_l5_joint_only_start_state_rejects_incomplete_vector() -> None:
+    state = SimpleNamespace(
+        is_diff=False,
+        joint_state=SimpleNamespace(name=[], position=[]),
+    )
+
+    with pytest.raises(ValueError, match="motion start joint state is invalid"):
+        _populate_motion_start_state(
+            state,
+            {"names": list(ARM_JOINTS), "positions": [0.0]},
+        )
 
 
 class _Clock:

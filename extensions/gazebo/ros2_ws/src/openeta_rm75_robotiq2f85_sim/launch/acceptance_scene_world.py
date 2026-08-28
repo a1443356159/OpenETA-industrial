@@ -15,7 +15,21 @@ import xml.etree.ElementTree as ET
 
 SCHEMA_VERSION = "openeta.gazebo_acceptance_scenes.v2"
 SCENE_ENV = "OPENETA_ACCEPTANCE_SCENE"
-AUTHORITATIVE_SCENE_SCHEMA_VERSION = "openeta.authoritative_scene.v1"
+AUTHORITATIVE_SCENE_SCHEMA_VERSION = "openeta.authoritative_scene.v3"
+ROBOT_COLLISION_FILTER_MASK = 0x0001
+DETACHED_TARGET_COLLISION_FILTER_MASK = 0xFFFF
+ATTACHED_TARGET_COLLISION_FILTER_MASK = 0x0002
+ATTACHED_COLLISION_FILTER_STATE_TOPIC = (
+    "/openeta/native_grasp/detachable_joint/target/collision_filter_state"
+)
+ATTACHED_COLLISION_FILTER_STATE_REQUEST_TOPIC = (
+    "/openeta/native_grasp/detachable_joint/target/"
+    "collision_filter_state/request"
+)
+ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC = (
+    "/openeta/native_grasp/detachable_joint/target/"
+    "collision_filter_state/ack"
+)
 
 
 def _quaternion_from_rpy(values: Sequence[float]) -> tuple[float, float, float, float]:
@@ -155,6 +169,7 @@ class AuthoritativeObject:
     pose_quat_xyzw: tuple[float, float, float, float]
     gazebo_static: bool
     visual_count: int
+    mirrored_visual_count: int
     primitives: tuple[AuthoritativePrimitive, ...]
     bounding_box_xyz: tuple[float, float, float]
 
@@ -224,6 +239,11 @@ class CompiledAuthoritativeScene:
         return tuple(item.object_id for item in self.objects if not item.gazebo_static)
 
     def evidence(self) -> dict[str, Any]:
+        aligned_objects = [
+            item.object_id
+            for item in self.objects
+            if item.mirrored_visual_count == len(item.primitives)
+        ]
         return {
             "schema_version": AUTHORITATIVE_SCENE_SCHEMA_VERSION,
             "scene_id": self.scene_id,
@@ -233,8 +253,25 @@ class CompiledAuthoritativeScene:
             "collision_manifest_sha256": self.collision_manifest_sha256,
             "gazebo_collision_object_ids": [item.object_id for item in self.objects],
             "moveit_collision_object_ids": [item.object_id for item in self.objects],
+            "visual_collision_aligned_object_ids": aligned_objects,
             "dynamic_object_ids": list(self.dynamic_object_ids),
             "primitive_count": sum(len(item.primitives) for item in self.objects),
+            "mirrored_visual_primitive_count": sum(
+                item.mirrored_visual_count for item in self.objects
+            ),
+            "attached_collision_filter": {
+                "schema_version": "openeta.attached_collision_filter.v1",
+                "state_topic": ATTACHED_COLLISION_FILTER_STATE_TOPIC,
+                "state_request_topic": (
+                    ATTACHED_COLLISION_FILTER_STATE_REQUEST_TOPIC
+                ),
+                "state_ack_topic": ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC,
+                "robot_mask": ROBOT_COLLISION_FILTER_MASK,
+                "detached_target_mask": DETACHED_TARGET_COLLISION_FILTER_MASK,
+                "attached_target_mask": ATTACHED_TARGET_COLLISION_FILTER_MASK,
+                "attached_target_robot_collision_enabled": False,
+                "attached_target_environment_collision_enabled": True,
+            },
         }
 
 
@@ -535,6 +572,147 @@ def _primitive_from_collision(
     )
 
 
+def _primitive_geometry_signature(
+    element: ET.Element,
+    *,
+    owner: str,
+) -> tuple[str, tuple[float, ...]]:
+    """Return the supported primitive geometry without accepting a mesh proxy."""
+
+    geometry = element.find("geometry")
+    if geometry is None:
+        raise RuntimeError(f"authoritative geometry is missing: {owner}")
+    box = geometry.find("box")
+    cylinder = geometry.find("cylinder")
+    if box is not None and cylinder is None:
+        size = tuple(float(value) for value in box.findtext("size", "").split())
+        if len(size) != 3 or any(
+            not math.isfinite(value) or value <= 0.0 for value in size
+        ):
+            raise RuntimeError(f"authoritative visual box is invalid: {owner}")
+        return "box", size
+    if cylinder is not None and box is None:
+        try:
+            radius = float(cylinder.findtext("radius", ""))
+            length = float(cylinder.findtext("length", ""))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"authoritative visual cylinder is invalid: {owner}"
+            ) from exc
+        if any(
+            not math.isfinite(value) or value <= 0.0
+            for value in (radius, length)
+        ):
+            raise RuntimeError(f"authoritative visual cylinder is invalid: {owner}")
+        return "cylinder", (radius, length)
+    raise RuntimeError(f"authoritative visual shape is unsupported: {owner}")
+
+
+def _collision_has_exact_visual_twin(
+    link: ET.Element,
+    collision: ET.Element,
+    *,
+    model_id: str,
+) -> bool:
+    """Prove one visible primitive is exactly the Gazebo/MoveIt primitive."""
+
+    collision_name = str(collision.get("name") or "")
+    visual = link.find(f"visual[@name='{collision_name}_visual']")
+    if visual is None:
+        return False
+    collision_xyz, collision_quat = _pose(
+        collision,
+        owner=f"{model_id}/{collision_name}",
+    )
+    visual_xyz, visual_quat = _pose(
+        visual,
+        owner=f"{model_id}/{collision_name}_visual",
+    )
+    if not _same_numbers(collision_xyz, visual_xyz) or not _same_numbers(
+        collision_quat,
+        visual_quat,
+    ):
+        return False
+    collision_geometry = _primitive_geometry_signature(
+        collision,
+        owner=f"{model_id}/{collision_name}",
+    )
+    visual_geometry = _primitive_geometry_signature(
+        visual,
+        owner=f"{model_id}/{collision_name}_visual",
+    )
+    return collision_geometry[0] == visual_geometry[0] and _same_numbers(
+        collision_geometry[1],
+        visual_geometry[1],
+    )
+
+
+def _set_collision_filter_mask(model: ET.Element, *, mask: int) -> None:
+    """Materialize one explicit Gazebo Physics mask on every model shape."""
+
+    if mask <= 0 or mask > 0xFFFF:
+        raise RuntimeError("authoritative collision-filter mask is invalid")
+    collisions = model.findall("link/collision")
+    if not collisions:
+        raise RuntimeError(
+            "authoritative collision-filter target has no collision geometry"
+        )
+    for collision in collisions:
+        surface = collision.find("surface")
+        if surface is None:
+            surface = ET.SubElement(collision, "surface")
+        contact = surface.find("contact")
+        if contact is None:
+            contact = ET.SubElement(surface, "contact")
+        bitmask = contact.find("collide_bitmask")
+        if bitmask is None:
+            bitmask = ET.SubElement(contact, "collide_bitmask")
+        existing = (bitmask.text or "").strip()
+        if existing:
+            try:
+                parsed = int(existing, 0)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "authoritative collision-filter mask is invalid"
+                ) from exc
+            if parsed != mask:
+                raise RuntimeError(
+                    "authoritative target collision-filter mask conflicts with "
+                    "the scene manager"
+                )
+        bitmask.text = str(mask)
+
+
+def _validate_attached_collision_filter_contract(world: ET.Element) -> None:
+    plugins = [
+        plugin
+        for plugin in world.findall("plugin")
+        if plugin.get("name") == "openeta::gazebo::AttachedCollisionFilter"
+    ]
+    if len(plugins) != 1:
+        raise RuntimeError(
+            "authoritative attached collision-filter plugin is missing"
+        )
+    plugin = plugins[0]
+    expected = {
+        "target_model": "target_object",
+        "target_link": "target_link",
+        "state_topic": ATTACHED_COLLISION_FILTER_STATE_TOPIC,
+        "state_request_topic": ATTACHED_COLLISION_FILTER_STATE_REQUEST_TOPIC,
+        "state_ack_topic": ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC,
+        "robot_mask": str(ROBOT_COLLISION_FILTER_MASK),
+        "detached_mask": str(DETACHED_TARGET_COLLISION_FILTER_MASK),
+        "attached_mask": str(ATTACHED_TARGET_COLLISION_FILTER_MASK),
+    }
+    actual = {
+        key: (plugin.findtext(key) or "").strip() for key in expected
+    }
+    if actual != expected:
+        raise RuntimeError(
+            "authoritative attached collision-filter contract is invalid"
+        )
+
+
 def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]:
     objects: list[AuthoritativeObject] = []
     seen_models: set[str] = set()
@@ -546,6 +724,7 @@ def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]
         model_xyz, model_quat = _pose(model, owner=model_id)
         primitives: list[AuthoritativePrimitive] = []
         visual_count = 0
+        mirrored_visual_count = 0
         collision_names: set[str] = set()
         for link in model.findall("link"):
             link_name = str(link.get("name") or "")
@@ -567,6 +746,12 @@ def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]
                     )
                 collision_names.add(primitive.name)
                 primitives.append(primitive)
+                if _collision_has_exact_visual_twin(
+                    link,
+                    collision,
+                    model_id=model_id,
+                ):
+                    mirrored_visual_count += 1
         if not primitives:
             continue
         if visual_count <= 0:
@@ -583,6 +768,7 @@ def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]
                 pose_quat_xyzw=model_quat,
                 gazebo_static=(model.findtext("static", "false").strip().lower() == "true"),
                 visual_count=visual_count,
+                mirrored_visual_count=mirrored_visual_count,
                 primitives=tuple(primitives),
                 bounding_box_xyz=tuple(
                     upper[axis] - lower[axis] for axis in range(3)
@@ -704,6 +890,11 @@ def _validate_catalog_bindings(
                 # their generated marker intentionally has no collision.
                 continue
             physical_supports.append(support)
+            if support.mirrored_visual_count != len(support.primitives):
+                raise RuntimeError(
+                    "authoritative placement support visual/collision geometry differs: "
+                    f"{support.object_id}"
+                )
             center = _numbers(raw.get("center_xy"), 2)
             if not _same_numbers(support.pose_xyz[:2], center):
                 raise RuntimeError(
@@ -763,6 +954,14 @@ def compile_authoritative_scene(
     world = tree.getroot().find("world")
     if world is None:
         raise RuntimeError("authoritative scene world is invalid")
+    target_model = world.find("model[@name='target_object']")
+    if target_model is None:
+        raise RuntimeError("authoritative target collision model is missing")
+    _set_collision_filter_mask(
+        target_model,
+        mask=DETACHED_TARGET_COLLISION_FILTER_MASK,
+    )
+    _validate_attached_collision_filter_contract(world)
     objects = _authoritative_objects(world)
     required_ids = {"work_table", "target_object"}
     object_ids = {item.object_id for item in objects}

@@ -27,7 +27,13 @@ from agent.runtime.collision_geometry import (
 
 from .robot_control import GazeboControlConfig
 from .ros2_ws.src.openeta_rm75_robotiq2f85_sim.launch.acceptance_scene_world import (
+    ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC,
+    ATTACHED_COLLISION_FILTER_STATE_REQUEST_TOPIC,
+    ATTACHED_COLLISION_FILTER_STATE_TOPIC,
+    ATTACHED_TARGET_COLLISION_FILTER_MASK,
     CompiledAuthoritativeScene,
+    DETACHED_TARGET_COLLISION_FILTER_MASK,
+    ROBOT_COLLISION_FILTER_MASK,
     compile_authoritative_scene,
 )
 
@@ -381,6 +387,22 @@ class NativePickPlaceConfig(GazeboControlConfig):
     attach_topic: str = "/openeta/native_grasp/detachable_joint/target/attach"
     detach_topic: str = "/openeta/native_grasp/detachable_joint/target/detach"
     state_topic: str = "/openeta/native_grasp/detachable_joint/target/state"
+    attached_collision_filter_state_topic: str = (
+        ATTACHED_COLLISION_FILTER_STATE_TOPIC
+    )
+    attached_collision_filter_state_request_topic: str = (
+        ATTACHED_COLLISION_FILTER_STATE_REQUEST_TOPIC
+    )
+    attached_collision_filter_state_ack_topic: str = (
+        ATTACHED_COLLISION_FILTER_STATE_ACK_TOPIC
+    )
+    robot_collision_filter_mask: int = ROBOT_COLLISION_FILTER_MASK
+    detached_target_collision_filter_mask: int = (
+        DETACHED_TARGET_COLLISION_FILTER_MASK
+    )
+    attached_target_collision_filter_mask: int = (
+        ATTACHED_TARGET_COLLISION_FILTER_MASK
+    )
     contact_samples_required: int = 3
     contact_span_s: float = 0.100
     contact_freshness_s: float = 2.0
@@ -430,17 +452,16 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # General motion profiles are selected from physical load state, never a
     # scene/object identity.  The unloaded contact move can use more of the
     # RM75 limits; a retained payload uses a gentler profile until release.
-    # Keep the unloaded contact path inside the measured Gazebo tracking
-    # envelope.  At 0.30/0.20 joint_4 crossed the unchanged 0.05 rad path
-    # tolerance under load variance; 0.25/0.15 is the conservative profile
-    # already used by the generic direct-motion contract.
-    unloaded_velocity_scaling: float = 0.25
-    unloaded_acceleration_scaling: float = 0.15
-    # The loaded path is the only profile that showed repeatable controller
-    # clipping at 0.25/0.15. Preserve the proven 500 Hz control chain and use
-    # the legacy-stable payload envelope instead of relaxing path tolerances.
-    loaded_velocity_scaling: float = 0.20
-    loaded_acceleration_scaling: float = 0.10
+    # Keep both profiles inside the measured Gazebo tracking envelope without
+    # relaxing JointTrajectoryController's 0.05 rad path limit.  The faster
+    # 0.25/0.15 unloaded and 0.20/0.10 payload profiles crossed that unchanged
+    # limit on joints 4/5 under normal physics variance.  These conservative
+    # load-state profiles cost less wall time than rejecting a trajectory and
+    # requalifying another model goal.
+    unloaded_velocity_scaling: float = 0.20
+    unloaded_acceleration_scaling: float = 0.10
+    loaded_velocity_scaling: float = 0.15
+    loaded_acceleration_scaling: float = 0.08
 
     def __post_init__(self) -> None:
         GazeboControlConfig.__post_init__(self)
@@ -493,6 +514,25 @@ class NativePickPlaceConfig(GazeboControlConfig):
             or self.loaded_acceleration_scaling > self.unloaded_acceleration_scaling
         ):
             raise ValueError("loaded motion profile cannot exceed unloaded profile")
+        if (
+            not self.attached_collision_filter_state_topic
+            or not self.attached_collision_filter_state_request_topic
+            or not self.attached_collision_filter_state_ack_topic
+            or self.robot_collision_filter_mask <= 0
+            or self.detached_target_collision_filter_mask <= 0
+            or self.attached_target_collision_filter_mask <= 0
+            or (
+                self.robot_collision_filter_mask
+                & self.detached_target_collision_filter_mask
+            )
+            == 0
+            or (
+                self.robot_collision_filter_mask
+                & self.attached_target_collision_filter_mask
+            )
+            != 0
+        ):
+            raise ValueError("attached collision-filter contract is invalid")
         target = contract.get("target_object")
         if isinstance(target, Mapping):
             target_size = tuple(float(value) for value in target["bounding_box_xyz"])
@@ -586,6 +626,19 @@ class NativePickPlaceConfig(GazeboControlConfig):
             "destination_size_xy_m": list(self.destination_size_xy_m),
             "destination_support_z_m": self.destination_support_z_m,
             "placement_acceptance_semantics": (self.placement_acceptance_semantics),
+            "attached_collision_filter": {
+                "schema_version": "openeta.attached_collision_filter.v1",
+                "state_topic": self.attached_collision_filter_state_topic,
+                "state_request_topic": (
+                    self.attached_collision_filter_state_request_topic
+                ),
+                "state_ack_topic": self.attached_collision_filter_state_ack_topic,
+                "robot_mask": self.robot_collision_filter_mask,
+                "detached_target_mask": self.detached_target_collision_filter_mask,
+                "attached_target_mask": self.attached_target_collision_filter_mask,
+                "attached_target_robot_collision_enabled": False,
+                "attached_target_environment_collision_enabled": True,
+            },
         }
         task = contract.get("task")
         if isinstance(task, Mapping):
