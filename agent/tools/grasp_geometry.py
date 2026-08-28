@@ -392,10 +392,10 @@ def _bind_qualified_joint_goal(
 ) -> None:
     """Bind one immutable L5-certified joint branch to an executable pose.
 
-    The terminal Cartesian pose remains exactly model-derived and is hashed
-    before this evidence is attached. MoveIt still replans from the live
-    state; this binding only prevents a redundant arm from silently selecting
-    a different IK branch than the one exercised by L5 plan-only.
+    The terminal Cartesian pose remains model- and scene-derived and is hashed
+    before this evidence is attached. The binding lets execution reuse the
+    exact L5 trajectory; if reuse is unavailable, it prevents a redundant arm
+    from silently selecting a different IK branch during replanning.
     """
 
     if str(proof.get("verdict") or "").upper() != "PASS":
@@ -419,6 +419,14 @@ def _bind_qualified_joint_goal(
         raise GraspGeometryError(
             "qualified terminal stage is not an L5 plan-only proof"
         )
+    proof_target = final_stage.get("target_pose")
+    if (
+        terminal_pose.get("purpose") == "placement"
+        and isinstance(proof_target, Mapping)
+        and proof_target.get("release_target_translation_correction_xyz")
+        is not None
+    ):
+        _bind_qualified_placement_terminal(terminal_pose, proof_target)
     raw_state = final_stage.get("end_joint_state")
     if not isinstance(raw_state, Mapping):
         raise GraspGeometryError("qualified terminal joint state is missing")
@@ -488,6 +496,76 @@ def _bind_qualified_joint_goal(
             ).hexdigest()
         )
     terminal_pose.update(execution_proof)
+
+
+def _bind_qualified_placement_terminal(
+    terminal_pose: JsonDict,
+    proof_target: Mapping[str, Any],
+) -> None:
+    """Expose the exact scene-corrected release pose proven by L5.
+
+    The placement compiler first preserves the frozen AnyPlace object goal.
+    Scene legality may then translate that terminal for physical support and
+    release clearance before IK/L5.  Public execution must use that same
+    host-private proof target; otherwise the transient L5 trajectory cannot
+    be reused and execution silently falls back to a different Cartesian
+    goal.
+    """
+
+    for field in ("placement_candidate_id", "compiled_placement_id"):
+        compiled_identity = str(terminal_pose.get(field) or "")
+        proof_identity = str(proof_target.get(field) or "")
+        if proof_identity and compiled_identity != proof_identity:
+            raise GraspGeometryError(
+                "qualified placement terminal identity does not match its proof"
+            )
+    compiled_xyz = _vector(
+        terminal_pose.get("xyz"),
+        3,
+        "compiled placement terminal xyz",
+    )
+    correction = _vector(
+        proof_target.get("release_target_translation_correction_xyz"),
+        3,
+        "qualified placement terminal correction",
+    )
+    proof_xyz = _vector(
+        proof_target.get("xyz"),
+        3,
+        "qualified placement terminal xyz",
+    )
+    expected_xyz = _round_vector(_add(compiled_xyz, correction))
+    if expected_xyz != _round_vector(proof_xyz):
+        raise GraspGeometryError(
+            "qualified placement terminal correction does not match its proof"
+        )
+    compiled_rotation = _round_matrix(
+        _rotation(
+            terminal_pose.get("rotation_matrix"),
+            "compiled placement terminal rotation",
+        )
+    )
+    proof_rotation = _round_matrix(
+        _rotation(
+            proof_target.get("rotation_matrix"),
+            "qualified placement terminal rotation",
+        )
+    )
+    if compiled_rotation != proof_rotation:
+        raise GraspGeometryError(
+            "qualified placement terminal rotation does not match its proof"
+        )
+    terminal_pose["xyz"] = _round_vector(proof_xyz)
+    terminal_pose["rotation_matrix"] = proof_rotation
+    for field in (
+        "support_contact_translation_correction_xyz",
+        "placement_release_translation_xyz",
+        "placement_release_z_offset_m",
+        "release_target_translation_correction_xyz",
+        "terminal_pose_source",
+    ):
+        if field in proof_target:
+            terminal_pose[field] = proof_target[field]
 
 
 def _normalized_allowed_collisions(value: object) -> JsonDict:

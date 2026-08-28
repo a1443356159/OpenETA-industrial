@@ -519,6 +519,115 @@ def test_placement_handler_rejects_stale_attachment_and_accepts_frozen_proof() -
     assert "attachment transform is stale" in rejected.content
 
 
+def test_placement_handler_executes_the_scene_corrected_l5_release_pose() -> None:
+    robot = RobotState(
+        joint_positions=[0.1, 0.2],
+        gripper_state={"openness": 0.2},
+    )
+    parameters = {
+        "placement_candidate_id": "placement_002",
+        "placement_candidate": _placement_candidate(),
+        "attachment_transform": _attachment(),
+        "scene_epoch": 4,
+        "scene_revision": 7,
+        "qualification_profile_sha256": _profile_sha(),
+        "qualified_attachment_transform_sha256": hashlib.sha256(
+            json.dumps(
+                _attachment(), sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest(),
+        "qualified_start_state_sha256": hashlib.sha256(
+            json.dumps(
+                {
+                    "joint_positions": robot.joint_positions,
+                    "gripper_state": robot.gripper_state,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    }
+    compiled = compile_placement_seed(
+        parameters, profile=_profile(), profile_sha256=_profile_sha()
+    )
+    parameters["qualified_compiled_pose_sha256"] = hashlib.sha256(
+        json.dumps(
+            [compiled["release_pose"]],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    proof = _qualified_proof(parameters)
+    proof["stages"][-1]["target_pose"] = {
+        **compiled["release_pose"],
+        "xyz": [0.344, -0.1, 0.48],
+        "release_target_translation_correction_xyz": [0.0, 0.0, 0.05],
+        "placement_release_translation_xyz": [0.0, 0.0, 0.05],
+        "placement_release_z_offset_m": 0.05,
+        "terminal_pose_source": (
+            "anyplace_se3_with_physical_support_and_release_offset"
+        ),
+    }
+
+    class Cache:
+        def resolve(self, **_kwargs):
+            return {
+                "candidate": _placement_candidate(),
+                "proof": proof,
+                "scene_epoch": 4,
+                "planning_scene_revision": 7,
+            }
+
+    context = ToolExecutionContext(
+        name="host_candidate_compiler",
+        spec=_compiler_spec(),
+        parameters={"placement_candidate_id": "placement_002"},
+        observation=EnvObservation(
+            task="place",
+            cameras=[],
+            robot=robot,
+            metadata={"scene_epoch": 4, "planning_scene_revision": 7},
+        ),
+        metadata={
+            "_openeta_host_candidate_compilation_binding": {
+                "scene_epoch": 4,
+                "planning_scene_revision": 7,
+            },
+            "supervision_context": {
+                "memory": {
+                    "attachment_gate": {
+                        "attachment_proof": {
+                            "attachment_transform": _attachment()
+                        }
+                    },
+                    "placement_candidate_policy": {
+                        "scene_epoch": 4,
+                        "planning_scene_revision": 7,
+                    },
+                }
+            },
+        },
+    )
+
+    result = build_compile_placement_seed_handler(qualification_cache=Cache())(
+        context
+    )
+
+    assert result.success is True
+    release = result.details["outputs"]["release_pose"]
+    assert release["xyz"] == [0.344, -0.1, 0.48]
+    assert release["placement_release_z_offset_m"] == pytest.approx(0.05)
+    assert release["qualification_goal_joint_state"]["positions"] == [
+        0.1,
+        -0.2,
+        0.3,
+        -0.4,
+        0.5,
+        -0.6,
+        0.7,
+    ]
+
+
 def test_materialize_anyplace_goal_preserves_full_se3() -> None:
     candidate = materialize_world_object_goal(
         {
