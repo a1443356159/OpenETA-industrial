@@ -875,6 +875,63 @@ def test_pending_gripper_reopen_hides_and_blocks_frozen_frontier() -> None:
     )
 
 
+def test_host_macro_restores_pre_attempt_pose_before_frozen_frontier() -> None:
+    memory = AgentMemory()
+    memory.start_session(
+        task=(
+            "[automation=scripted_tui; planner_mode=host_macro; "
+            "execution_profile=smoke_normal] recover the failed grasp"
+        )
+    )
+    memory.save_fact(
+        "grasp_candidate_policy",
+        {
+            "status": "frozen_frontier_required",
+            "frozen_grasp_frontier_remaining_count": 64,
+            "planning_scene_revision": 4,
+        },
+        source="test",
+    )
+    required_action = {
+        "name": "move_to",
+        "parameters": {
+            "target_pose": {
+                "frame": "world",
+                "xyz": [0.2, 0.0, 0.89],
+                "quat_xyzw": [0.0, 0.0, 0.70710678, 0.70710678],
+                "scene_epoch": 3,
+                "purpose": "grasp_recovery_restore",
+                "recovery_id": "grasp-recovery-test",
+            }
+        },
+    }
+    memory.save_fact(
+        "grasp_recovery",
+        {
+            "schema_version": "openeta.grasp_recovery.v2",
+            "status": "required",
+            "stage": "restore",
+            "candidate_id": "grasp_000",
+            "required_action": required_action,
+        },
+        source="test",
+    )
+
+    def fail_if_called(_request):
+        raise AssertionError("host recovery must not call the VLM")
+
+    decision = ToolCallingPlanner(CallablePlannerBackend(fail_if_called)).plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("move_to", "grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "move_to"
+    assert decision.parameters == required_action["parameters"]
+    assert decision.metadata["host_obligation"]["stage"] == "candidate_restore"
+
+
 def test_environment_id_in_ordinary_prose_does_not_trigger_host_creation() -> None:
     memory = AgentMemory()
     memory.start_session(

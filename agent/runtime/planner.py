@@ -1095,12 +1095,12 @@ def _host_obligation_decision(
         required = recovery.get("required_action")
         if (
             isinstance(required, dict)
-            and required.get("name") in {"gripper_control", "observe"}
+            and required.get("name") in {"gripper_control", "move_to", "observe"}
             and isinstance(required.get("parameters"), dict)
             and tools.can_execute(str(required.get("name")))
         ):
             action = str(required["name"])
-            is_reopen = action == "gripper_control"
+            recovery_stage = str(recovery.get("stage") or "")
             return PlannerDecision(
                 action_type="tool_call",
                 action=action,
@@ -1108,19 +1108,20 @@ def _host_obligation_decision(
                 reasoning=(
                     "The failed close left the detached gripper closed; reopen it "
                     "before acquiring the next grasp observation."
-                    if is_reopen
-                    else "The retained grasp candidates are exhausted; obtain a fresh "
-                    "observation before re-estimating from an alternate camera view."
+                    if recovery_stage == "reopen"
+                    else (
+                        "Return through MoveIt to the exact pre-attempt EEF pose before "
+                        "qualifying or executing the next frozen candidate."
+                        if recovery_stage == "restore"
+                        else "The retained grasp candidates are exhausted; obtain a fresh "
+                        "observation before re-estimating from an alternate camera view."
+                    )
                 ),
                 metadata={
                     "host_obligation": {
                         "schema_version": recovery.get("schema_version"),
                         "tool": action,
-                        "stage": (
-                            "candidate_gripper_reopen"
-                            if is_reopen
-                            else "candidate_reestimate_observation"
-                        ),
+                        "stage": f"candidate_{recovery_stage}",
                         "candidate_id": recovery.get("candidate_id"),
                         "reestimate_strategy": recovery.get("reestimate_strategy"),
                         "previous_view": recovery.get("previous_view"),
@@ -3232,6 +3233,8 @@ def _validate_anygrasp_candidate_policy(
 ) -> list[str]:
     if decision.action_type.lower().strip() != "tool_call":
         return []
+    if _decision_matches_required_grasp_recovery(decision, tool_context=tool_context):
+        return []
     policy = tool_context.get("grasp_candidate_policy")
     if not isinstance(policy, dict):
         return []
@@ -3336,6 +3339,8 @@ def _validate_grasp_execution_obligation(
     *,
     tool_context: JsonDict,
 ) -> list[str]:
+    if _decision_matches_required_grasp_recovery(decision, tool_context=tool_context):
+        return []
     reconciliation = tool_context.get("motion_reconciliation")
     if isinstance(reconciliation, dict) and reconciliation.get("status") in {
         "required",
@@ -3967,17 +3972,30 @@ def _validate_grasp_recovery_obligation(
         and isinstance(required.get("parameters"), dict)
     ):
         return ["The required grasp recovery action is malformed; do not continue."]
-    if (
-        decision.action_type.lower().strip() == "tool_call"
-        and decision.action == required["name"]
-        and decision.parameters == required["parameters"]
-    ):
+    if _decision_matches_required_grasp_recovery(decision, tool_context=tool_context):
         return []
     return [
         "A failed grasp left a physical recovery action pending. Execute the exact "
         "grasp_recovery.required_action before switching candidates, expanding the "
         "frozen frontier, observing, or ending the task."
     ]
+
+
+def _decision_matches_required_grasp_recovery(
+    decision: PlannerDecision,
+    *,
+    tool_context: JsonDict,
+) -> bool:
+    recovery = tool_context.get("grasp_recovery")
+    required = recovery.get("required_action") if isinstance(recovery, dict) else None
+    return bool(
+        isinstance(recovery, dict)
+        and recovery.get("status") == "required"
+        and isinstance(required, dict)
+        and decision.action_type.lower().strip() == "tool_call"
+        and decision.action == required.get("name")
+        and decision.parameters == required.get("parameters")
+    )
 
 
 def _validate_semantic_perception_obligation(

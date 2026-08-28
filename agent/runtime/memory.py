@@ -1665,6 +1665,16 @@ class AgentMemory:
         execution = self.grasp_execution()
         if not isinstance(execution, dict):
             return None
+        recovery = self.grasp_recovery()
+        recovery_action = recovery.get("required_action") if isinstance(recovery, dict) else None
+        if (
+            isinstance(recovery, dict)
+            and recovery.get("status") == "required"
+            and isinstance(recovery_action, dict)
+            and tool_name == recovery_action.get("name")
+            and parameters == recovery_action.get("parameters")
+        ):
+            return None
         if execution.get("status") == "stopped_requires_human":
             if tool_name == "observe":
                 return None
@@ -3519,14 +3529,19 @@ class AgentMemory:
             rejection=rejection,
         )
         # Retained candidates are already qualified from the same model result.
-        # A failed close needs one exact reopen; otherwise switch immediately.
-        # Only an exhausted queue is allowed to request fresh perception/model
-        # inference.
+        # Reopen after a failed close, then restore the captured pre-attempt pose
+        # before exposing another candidate. Only an exhausted queue may request
+        # fresh perception/model inference.
         next_candidate_available = str(policy.get("status") or "") == "active" and isinstance(
             policy.get("active_candidate"), dict
         )
         reestimate_required = isinstance(policy.get("reestimate_required"), dict)
-        if advanced and (str(rejection.get("grasp_stage") or "") == "close" or reestimate_required):
+        restore_required = _grasp_recovery_requires_restore(rejection)
+        if advanced and (
+            str(rejection.get("grasp_stage") or "") == "close"
+            or restore_required
+            or reestimate_required
+        ):
             self._schedule_grasp_recovery(
                 rejection=rejection,
                 candidate_id=active_candidate_id,
@@ -3599,8 +3614,41 @@ class AgentMemory:
         failed_stage = str(rejection.get("grasp_stage") or "")
         reopen_required = failed_stage == "close"
         recovery_id = f"grasp-recovery-{uuid4()}"
+        restore_required = _grasp_recovery_requires_restore(rejection)
+        execution = self.grasp_execution()
+        source_eef_pose = (
+            execution.get("source_eef_pose") if isinstance(execution, dict) else None
+        )
+        restore_pose = _world_recovery_pose(source_eef_pose)
+        if restore_required and restore_pose is None:
+            recovery = {
+                "schema_version": "openeta.grasp_recovery.v2",
+                "status": "stopped_requires_human",
+                "recovery_id": recovery_id,
+                "candidate_id": candidate_id,
+                "rejection_source": rejection.get("source"),
+                "rejection_reason": rejection.get("reason"),
+                "stage": "restore",
+                "required_action": None,
+                "stop_reason": "grasp_restore_anchor_unavailable",
+                "created_at_s": time.time(),
+                "completed_at_s": time.time(),
+            }
+            self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+                recovery,
+                source="grasp_restore_anchor_unavailable",
+            )
+            self.record("grasp_recovery_stopped", dict(recovery))
+            return True
+        initial_stage = (
+            "reopen"
+            if reopen_required
+            else "restore"
+            if restore_required
+            else "observe"
+        )
         recovery = {
-            "schema_version": "openeta.grasp_recovery.v1",
+            "schema_version": "openeta.grasp_recovery.v2",
             "status": "required",
             "recovery_id": recovery_id,
             "candidate_id": candidate_id,
@@ -3618,12 +3666,23 @@ class AgentMemory:
             "previous_view": previous_view,
             "observation_views": ["agentview", "wrist", "render"],
             "scene_epoch": self.scene_epoch(),
-            "stage": "reopen" if reopen_required else "observe",
+            "stage": initial_stage,
             "reopen_required": reopen_required,
+            "restore_required": restore_required,
+            "source_eef_pose": (
+                dict(source_eef_pose) if isinstance(source_eef_pose, dict) else None
+            ),
+            "restore_pose": restore_pose,
             "observe_after_reopen": observe_after_reopen,
             "required_action": (
                 {"name": "gripper_control", "parameters": {"position": 1}}
                 if reopen_required
+                else _grasp_restore_action(
+                    restore_pose,
+                    recovery_id=recovery_id,
+                    scene_epoch=self.scene_epoch(),
+                )
+                if restore_required
                 else {"name": "observe", "parameters": {}}
             ),
             "created_at_s": time.time(),
@@ -3647,7 +3706,8 @@ class AgentMemory:
         if not isinstance(call, dict):
             return False
         completed = _call_result_success(call) and not _motion_call_rejects_candidate(call)
-        if recovery.get("stage") == "reopen":
+        stage = str(recovery.get("stage") or "")
+        if stage in {"reopen", "restore"}:
             if not completed:
                 reconciliation = self.motion_reconciliation()
                 intended_parameters = (
@@ -3664,16 +3724,17 @@ class AgentMemory:
                     recovery.update(
                         {
                             "status": "reconciling",
+                            "reconciling_action": dict(required),
                             "required_action": None,
                             "reconciliation_created_at_s": reconciliation.get("created_at_s"),
                         }
                     )
                     self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
                         recovery,
-                        source="candidate_gripper_reopen_reconciling",
+                        source=f"candidate_{stage}_reconciling",
                     )
                     self.record(
-                        "grasp_recovery_gripper_reopen_reconciling",
+                        f"grasp_recovery_{stage}_reconciling",
                         dict(recovery),
                     )
                     return True
@@ -3681,31 +3742,24 @@ class AgentMemory:
                     {
                         "status": "stopped_requires_human",
                         "required_action": None,
-                        "stop_reason": "gripper_reopen_not_completed",
+                        "stop_reason": f"grasp_{stage}_not_completed",
                         "completed_at_s": time.time(),
                     }
                 )
                 self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
-                    recovery, source="candidate_gripper_reopen_stopped"
+                    recovery, source=f"candidate_{stage}_stopped"
                 )
-                self.record("grasp_recovery_gripper_reopen_stopped", dict(recovery))
+                self.record(f"grasp_recovery_{stage}_stopped", dict(recovery))
                 return True
-            observe_after_reopen = recovery.get("observe_after_reopen") is True
-            recovery.update(
-                {
-                    "status": "required" if observe_after_reopen else "completed",
-                    "stage": "observe" if observe_after_reopen else "completed",
-                    "required_action": (
-                        {"name": "observe", "parameters": {}} if observe_after_reopen else None
-                    ),
-                    "gripper_reopened_at_s": time.time(),
-                    **({"completed_at_s": time.time()} if not observe_after_reopen else {}),
-                }
+            self._complete_grasp_recovery_physical_stage(
+                recovery,
+                stage=stage,
+                reconciled=False,
             )
             self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
-                recovery, source="candidate_gripper_reopened"
+                recovery, source=f"candidate_{stage}_completed"
             )
-            self.record("grasp_recovery_gripper_reopened", dict(recovery))
+            self.record(f"grasp_recovery_{stage}_completed", dict(recovery))
             return True
         recovery.update(
             {
@@ -3749,50 +3803,144 @@ class AgentMemory:
         self,
         *,
         tool_name: str,
-        requested_position: object,
+        parameters: JsonDict,
         verdict: str,
     ) -> bool:
-        """Resolve an unknown reopen from observed physical gripper state."""
+        """Resolve an unknown physical recovery action from observed state."""
 
         recovery = self.grasp_recovery()
-        if not (
-            tool_name == "gripper_control"
-            and _binary_gripper_position(requested_position) == 1
-            and isinstance(recovery, dict)
-            and recovery.get("status") == "reconciling"
-            and recovery.get("stage") == "reopen"
+        if not isinstance(recovery, dict) or recovery.get("status") != "reconciling":
+            return False
+        stage = str(recovery.get("stage") or "")
+        required = recovery.get("reconciling_action")
+        expected_tool = "gripper_control" if stage == "reopen" else "move_to"
+        if (
+            stage not in {"reopen", "restore"}
+            or tool_name != expected_tool
+            or not isinstance(required, dict)
+            or parameters != required.get("parameters")
         ):
             return False
         if verdict == "completed":
-            observe_after_reopen = recovery.get("observe_after_reopen") is True
-            recovery.update(
-                {
-                    "status": "required" if observe_after_reopen else "completed",
-                    "stage": "observe" if observe_after_reopen else "completed",
-                    "required_action": (
-                        {"name": "observe", "parameters": {}} if observe_after_reopen else None
-                    ),
-                    "gripper_reopened_at_s": time.time(),
-                    "reconciled_from_observation": True,
-                    **({"completed_at_s": time.time()} if not observe_after_reopen else {}),
-                }
+            recovery.pop("reconciling_action", None)
+            self._complete_grasp_recovery_physical_stage(
+                recovery,
+                stage=stage,
+                reconciled=True,
             )
-            source = "candidate_gripper_reopen_reconciled"
+            source = f"candidate_{stage}_reconciled"
         elif verdict == "failed":
+            recovery.pop("reconciling_action", None)
             recovery.update(
                 {
                     "status": "stopped_requires_human",
                     "required_action": None,
-                    "stop_reason": "gripper_reopen_reconciliation_failed",
+                    "stop_reason": f"grasp_{stage}_reconciliation_failed",
                     "completed_at_s": time.time(),
                 }
             )
-            source = "candidate_gripper_reopen_reconciliation_failed"
+            source = f"candidate_{stage}_reconciliation_failed"
         else:
             return False
         self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(recovery, source=source)
-        self.record("grasp_recovery_gripper_reopen_reconciled", dict(recovery))
+        self.record(f"grasp_recovery_{stage}_reconciled", dict(recovery))
         return True
+
+    def _complete_grasp_recovery_physical_stage(
+        self,
+        recovery: JsonDict,
+        *,
+        stage: str,
+        reconciled: bool,
+    ) -> None:
+        """Advance reopen/restore without exposing the next frozen candidate early."""
+
+        now = time.time()
+        if stage == "reopen":
+            recovery["gripper_reopened_at_s"] = now
+            restore_pose = recovery.get("restore_pose")
+            if recovery.get("restore_required") is True and isinstance(restore_pose, dict):
+                recovery.update(
+                    {
+                        "status": "required",
+                        "stage": "restore",
+                        "required_action": _grasp_restore_action(
+                            restore_pose,
+                            recovery_id=str(recovery.get("recovery_id") or ""),
+                            scene_epoch=self.scene_epoch(),
+                        ),
+                    }
+                )
+            else:
+                self._finish_grasp_recovery_physical_stages(recovery, now=now)
+        else:
+            recovery["restored_at_s"] = now
+            self._rebind_pending_grasp_execution_after_restore(recovery)
+            self._finish_grasp_recovery_physical_stages(recovery, now=now)
+        if reconciled:
+            recovery["reconciled_from_observation"] = True
+
+    def _finish_grasp_recovery_physical_stages(
+        self,
+        recovery: JsonDict,
+        *,
+        now: float,
+    ) -> None:
+        observe = recovery.get("observe_after_reopen") is True
+        recovery.update(
+            {
+                "status": "required" if observe else "completed",
+                "stage": "observe" if observe else "completed",
+                "required_action": (
+                    {"name": "observe", "parameters": {}} if observe else None
+                ),
+                **({"completed_at_s": now} if not observe else {}),
+            }
+        )
+
+    def _rebind_pending_grasp_execution_after_restore(
+        self,
+        recovery: JsonDict,
+    ) -> None:
+        """Bind the next retained candidate to the proven restored start pose."""
+
+        execution = self.grasp_execution()
+        policy = self.grasp_candidate_policy()
+        active = policy.get("active_candidate") if isinstance(policy, dict) else None
+        if (
+            not isinstance(execution, dict)
+            or execution.get("status") != "required"
+            or not isinstance(active, dict)
+            or str(execution.get("candidate_id") or "") != str(active.get("id") or "")
+        ):
+            return
+        source_pose = recovery.get("source_eef_pose")
+        if isinstance(source_pose, dict):
+            execution["source_eef_pose"] = dict(source_pose)
+        execution["scene_epoch"] = self.scene_epoch()
+        compiled = execution.get("compiled_grasp")
+        if isinstance(compiled, dict):
+            compiled = dict(compiled)
+            compiled["scene_epoch"] = self.scene_epoch()
+            contact = compiled.get("contact_pose")
+            if isinstance(contact, dict):
+                contact = _pose_for_epoch(contact, self.scene_epoch())
+                compiled["contact_pose"] = contact
+                if execution.get("stage") == "contact":
+                    execution["required_action"] = {
+                        "name": "move_to",
+                        "parameters": {"target_pose": contact},
+                    }
+            execution["compiled_grasp"] = compiled
+        execution["recovery_anchor"] = {
+            "schema_version": "openeta.grasp_recovery_anchor.v1",
+            "recovery_id": recovery.get("recovery_id"),
+            "scene_epoch": self.scene_epoch(),
+        }
+        self.facts[GRASP_EXECUTION_KEY] = _memory_fact_entry(
+            execution,
+            source="grasp_recovery_anchor_restored",
+        )
 
     def _schedule_grasp_estimation_recovery(
         self,
@@ -6211,12 +6359,26 @@ class AgentMemory:
         outputs = _tool_call_outputs(call) if isinstance(call, dict) else {}
         if outputs.get("motion_outcome") != "unknown":
             return False
+        recovery = self.grasp_recovery()
+        recovery_action = recovery.get("required_action") if isinstance(recovery, dict) else None
+        is_recovery_action = bool(
+            isinstance(recovery, dict)
+            and recovery.get("status") == "required"
+            and isinstance(recovery_action, dict)
+            and name == recovery_action.get("name")
+            and request.get("parameters") == recovery_action.get("parameters")
+        )
         reconciliation = {
             "status": "required",
             "tool": name,
             "intended_parameters": dict(request.get("parameters") or {}),
             "candidate_id": _parameters_grasp_candidate_id(request.get("parameters") or {}),
-            "grasp_stage": (self.grasp_execution() or {}).get("stage"),
+            "grasp_stage": (
+                None if is_recovery_action else (self.grasp_execution() or {}).get("stage")
+            ),
+            "grasp_recovery_stage": (
+                recovery.get("stage") if is_recovery_action and isinstance(recovery, dict) else None
+            ),
             "scene_epoch": self.scene_epoch(),
             "created_at_s": time.time(),
         }
@@ -6334,11 +6496,6 @@ class AgentMemory:
                     "resolved_at_s": time.time(),
                 }
             )
-            self._resolve_reconciled_grasp_recovery(
-                tool_name=tool_name,
-                requested_position=requested_position,
-                verdict=verdict,
-            )
         elif _finite_xyz(target_xyz) and _finite_xyz(measured_xyz):
             distance = math.sqrt(
                 sum(
@@ -6383,6 +6540,12 @@ class AgentMemory:
             )
         else:
             reconciliation.update({"status": "unresolved", "resolved_at_s": time.time()})
+            verdict = "unresolved"
+        self._resolve_reconciled_grasp_recovery(
+            tool_name=tool_name,
+            parameters=parameters,
+            verdict=verdict,
+        )
         self.facts[MOTION_RECONCILIATION_KEY] = _memory_fact_entry(
             reconciliation,
             source="same_handle_observation",
@@ -6415,12 +6578,15 @@ class AgentMemory:
             },
         )
         if advanced:
+            rejection = {
+                "source": "reconciled_candidate_motion_rejected",
+                "target_tool": reconciliation.get("tool"),
+                "grasp_stage": reconciliation.get("grasp_stage"),
+                "reason": "reconciled_target_not_reached",
+                "execution_started": True,
+            }
             self._schedule_grasp_recovery(
-                rejection={
-                    "source": "reconciled_candidate_motion_rejected",
-                    "target_tool": reconciliation.get("tool"),
-                    "reason": "reconciled_target_not_reached",
-                },
+                rejection=rejection,
                 candidate_id=candidate_id,
             )
             self.facts.pop(ARTICULATED_ATTACHMENT_PROBE_KEY, None)
@@ -8132,6 +8298,66 @@ def _pose_for_epoch(pose: JsonDict, epoch: int) -> JsonDict:
     updated = dict(pose)
     updated["scene_epoch"] = epoch
     return updated
+
+
+def _grasp_recovery_requires_restore(rejection: JsonDict) -> bool:
+    """Return whether a rejected candidate may have displaced the arm."""
+
+    stage = str(rejection.get("grasp_stage") or "")
+    if stage == "close":
+        # Reaching the close stage proves that the contact move already ran.
+        return True
+    return bool(
+        stage == "contact"
+        and str(rejection.get("target_tool") or "")
+        in {"move_to", "follow_eef_trajectory"}
+        and rejection.get("execution_started") is True
+    )
+
+
+def _world_recovery_pose(value: object) -> JsonDict | None:
+    """Normalize one observed EEF pose into an exact world-frame motion target."""
+
+    if not isinstance(value, dict):
+        return None
+    xyz = value.get("xyz")
+    quat = value.get("quat_xyzw")
+    if not (
+        isinstance(xyz, (list, tuple))
+        and len(xyz) == 3
+        and all(isinstance(item, int | float) and math.isfinite(float(item)) for item in xyz)
+        and isinstance(quat, (list, tuple))
+        and len(quat) == 4
+        and all(isinstance(item, int | float) and math.isfinite(float(item)) for item in quat)
+    ):
+        return None
+    norm = math.sqrt(sum(float(item) ** 2 for item in quat))
+    if norm <= 1e-12:
+        return None
+    return {
+        "frame": "world",
+        "xyz": [float(item) for item in xyz],
+        "quat_xyzw": [float(item) / norm for item in quat],
+    }
+
+
+def _grasp_restore_action(
+    restore_pose: JsonDict | None,
+    *,
+    recovery_id: str,
+    scene_epoch: int,
+) -> JsonDict:
+    if not isinstance(restore_pose, dict):
+        raise ValueError("grasp restore pose is unavailable")
+    target = dict(restore_pose)
+    target.update(
+        {
+            "scene_epoch": int(scene_epoch),
+            "purpose": "grasp_recovery_restore",
+            "recovery_id": recovery_id,
+        }
+    )
+    return {"name": "move_to", "parameters": {"target_pose": target}}
 
 
 def _optional_int(value: Any, *, default: int) -> int:

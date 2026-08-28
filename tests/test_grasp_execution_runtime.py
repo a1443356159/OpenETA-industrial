@@ -9,6 +9,14 @@ import json
 from pathlib import Path
 
 
+def _recovery_anchor_pose() -> dict:
+    return {
+        "frame": "gripper_mount_link",
+        "xyz": [0.20, 0.0, 0.89],
+        "quat_xyzw": [0.0, 0.0, 0.7071067811865476, 0.7071067811865476],
+    }
+
+
 def _candidate(candidate_id: str, score: float) -> dict:
     return {
         "id": candidate_id,
@@ -982,7 +990,7 @@ def _host_grasp_compilation_event(compiled: dict, *, queue_position: int, queue_
     }
 
 
-def test_host_compilation_activates_head_and_precompiled_grasp_fallback() -> None:
+def test_host_compilation_restores_anchor_before_precompiled_grasp_fallback() -> None:
     first = _candidate("grasp_000", 0.9)
     second = _candidate("grasp_001", 0.8)
     first_compiled = _compiled_candidate(first)
@@ -993,6 +1001,16 @@ def test_host_compilation_activates_head_and_precompiled_grasp_fallback() -> Non
     ]
     memory = AgentMemory()
     memory.start_session(task="pick the object")
+    memory.add_observation(
+        EnvObservation(
+            task="pick the object",
+            cameras=[],
+            robot=RobotState(
+                end_effector_pose=_recovery_anchor_pose(),
+                gripper_state={"open": True, "openness": 1.0},
+            ),
+        )
+    )
 
     memory.add_action(
         _tool_action(
@@ -1018,10 +1036,23 @@ def test_host_compilation_activates_head_and_precompiled_grasp_fallback() -> Non
     }
     assert memory.grasp_execution()["candidate_id"] == "grasp_000"
 
+    execution = memory.grasp_execution()
+    first_action = {
+        "name": "move_to",
+        "parameters": {"target_pose": dict(first_compiled["contact_pose"])},
+    }
+    execution.update(
+            {
+                "stage": "contact",
+                "required_action": first_action,
+        }
+    )
+    memory.save_fact("grasp_execution", execution, source="test")
+
     memory.add_action(
         _tool_action(
-            "move_to",
-            {"target_pose": {"source_grasp_id": "grasp_000"}},
+            first_action["name"],
+            first_action["parameters"],
             success=False,
             outputs={
                 "motion_summary": {
@@ -1029,12 +1060,31 @@ def test_host_compilation_activates_head_and_precompiled_grasp_fallback() -> Non
                     "end": {"xyz": [0.1, 0.2, 0.3]},
                 }
             },
+            environment_receipt={
+                "execution_started": True,
+                "planning_scene_revision": 0,
+            },
         )
     )
 
     assert memory.grasp_candidate_policy()["active_candidate"]["id"] == "grasp_001"
-    assert memory.grasp_execution()["candidate_id"] == "grasp_001"
-    assert memory.grasp_execution()["compiled_grasp_id"] == second_compiled["compiled_grasp_id"]
+    recovery = memory.grasp_recovery()
+    assert recovery["stage"] == "restore"
+
+    memory.add_action(
+        _tool_action(
+            recovery["required_action"]["name"],
+            recovery["required_action"]["parameters"],
+        )
+    )
+
+    fallback = memory.grasp_execution()
+    assert memory.grasp_recovery()["status"] == "completed"
+    assert fallback["candidate_id"] == "grasp_001"
+    assert fallback["compiled_grasp_id"] == second_compiled["compiled_grasp_id"]
+    assert fallback["source_eef_pose"] == _recovery_anchor_pose()
+    assert fallback["scene_epoch"] == 1
+    assert fallback["required_action"]["parameters"]["target_pose"]["scene_epoch"] == 1
 
 
 def test_anygrasp_requires_host_compilation_but_anyplace_pose_keeps_generic_transform() -> None:
@@ -1970,6 +2020,7 @@ def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None
             "stage": "close",
             "candidate_id": "grasp_000",
             "compiled_grasp": compiled,
+            "source_eef_pose": _recovery_anchor_pose(),
             "required_action": {
                 "name": "gripper_control",
                 "parameters": {"position": 0},
@@ -1998,6 +2049,14 @@ def test_failed_close_requalifies_candidates_after_scene_epoch_changes() -> None
         "parameters": {"position": 1},
     }
     memory.add_action(_tool_action("gripper_control", {"position": 1}))
+    recovery = memory.grasp_recovery()
+    assert recovery["stage"] == "restore"
+    memory.add_action(
+        _tool_action(
+            recovery["required_action"]["name"],
+            recovery["required_action"]["parameters"],
+        )
+    )
     recovery = memory.grasp_recovery()
     assert recovery["stage"] == "observe"
     assert recovery["required_action"] == {"name": "observe", "parameters": {}}
@@ -2063,6 +2122,7 @@ def test_failed_close_never_reuses_next_stale_exact_terminal() -> None:
     execution.update(
         {
             "stage": "close",
+            "source_eef_pose": _recovery_anchor_pose(),
             "required_action": {
                 "name": "gripper_control",
                 "parameters": {"position": 0},
@@ -2164,6 +2224,7 @@ def test_failed_close_reopens_once_then_rebases_frozen_frontier_without_observe(
     execution.update(
         {
             "stage": "close",
+            "source_eef_pose": _recovery_anchor_pose(),
             "required_action": {
                 "name": "gripper_control",
                 "parameters": {"position": 0},
@@ -2210,6 +2271,18 @@ def test_failed_close_reopens_once_then_rebases_frozen_frontier_without_observe(
     }
 
     memory.add_action(_tool_action("gripper_control", {"position": 1}))
+
+    recovery = memory.grasp_recovery()
+    assert recovery["status"] == "required"
+    assert recovery["stage"] == "restore"
+    restore_action = recovery["required_action"]
+    assert restore_action["name"] == "move_to"
+    assert restore_action["parameters"]["target_pose"]["frame"] == "world"
+    assert restore_action["parameters"]["target_pose"]["xyz"] == [0.20, 0.0, 0.89]
+
+    memory.add_action(
+        _tool_action(restore_action["name"], restore_action["parameters"])
+    )
 
     recovery = memory.grasp_recovery()
     assert recovery["status"] == "completed"
@@ -2268,6 +2341,7 @@ def test_failed_close_reobserves_when_frozen_pool_is_exhausted() -> None:
     execution.update(
         {
             "stage": "close",
+            "source_eef_pose": _recovery_anchor_pose(),
             "required_action": {
                 "name": "gripper_control",
                 "parameters": {"position": 0},
@@ -2308,6 +2382,15 @@ def test_failed_close_reobserves_when_frozen_pool_is_exhausted() -> None:
 
     memory.add_action(_tool_action("gripper_control", {"position": 1}))
 
+    recovery = memory.grasp_recovery()
+    assert recovery["status"] == "required"
+    assert recovery["stage"] == "restore"
+    memory.add_action(
+        _tool_action(
+            recovery["required_action"]["name"],
+            recovery["required_action"]["parameters"],
+        )
+    )
     recovery = memory.grasp_recovery()
     assert recovery["status"] == "required"
     assert recovery["stage"] == "observe"
@@ -2371,6 +2454,7 @@ def test_exhausted_backup_resumes_frozen_frontier_when_scene_revision_is_unchang
     execution.update(
         {
             "stage": "contact",
+            "source_eef_pose": _recovery_anchor_pose(),
             "required_action": {
                 "name": "move_to",
                 "parameters": {
@@ -2407,6 +2491,26 @@ def test_exhausted_backup_resumes_frozen_frontier_when_scene_revision_is_unchang
     assert policy["frozen_grasp_frontier_remaining_count"] == 12
     assert policy["last_rejection"]["execution_started"] is True
     assert policy["last_rejection"]["planning_scene_revision"] == 7
+    recovery = memory.grasp_recovery()
+    assert recovery["stage"] == "restore"
+    assert recovery["required_action"]["name"] == "move_to"
+    assert memory.grasp_candidate_gate_error(
+        tool_name="move_to",
+        parameters=recovery["required_action"]["parameters"],
+    ) is None
+    assert memory.grasp_execution_gate_error(
+        tool_name="move_to",
+        parameters=recovery["required_action"]["parameters"],
+    ) is None
+
+    memory.add_action(
+        _tool_action(
+            recovery["required_action"]["name"],
+            recovery["required_action"]["parameters"],
+        )
+    )
+
+    assert memory.grasp_recovery()["status"] == "completed"
 
 
 def test_native_target_pose_sync_is_retained_for_host_frozen_frontier_rebase() -> None:
