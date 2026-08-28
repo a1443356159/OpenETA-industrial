@@ -3406,11 +3406,15 @@ def test_builtin_task_skills_are_loaded_from_markdown_guidance() -> None:
         skill = skills.get(name)
         assert skill.source == f"markdown:skills/{name}.md"
         assert skill.editable is True
-        assert skill.version == "v1"
+        assert skill.version == ("v2" if name in {"pick", "place"} else "v1")
         assert skill.task_patterns
         assert skill.allowed_tools
         assert "guidance" in skill.content.lower()
         assert "macro" in skill.content.lower()
+
+    context_limit = PlannerContextConfig().max_model_skill_content_chars
+    assert len(skills.get("pick").content) <= context_limit
+    assert len(skills.get("place").content) <= context_limit
 
 
 def test_planner_context_selects_gazebo_skill_from_environment_receipt_identity() -> None:

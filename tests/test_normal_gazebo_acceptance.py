@@ -49,9 +49,10 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
     prompt = paths.instructions.read_text(encoding="utf-8")
     assert "黄色活动扳手" in prompt
     assert "绿色零件箱" in prompt
-    assert "麻烦先看清整个工作台" in prompt
-    assert "如果一时看不清，就换个角度再看看" in prompt
-    assert "稳稳放进目标箱" in prompt
+    assert "请先看清工作台" in prompt
+    assert "如果视角不清楚，可以换个角度确认" in prompt
+    assert "在目标箱里放稳就好" in prompt
+    assert "一种办法没成功" not in prompt
     assert "yellow adjustable wrench" not in prompt
     assert "green area inside physical parts bin" not in prompt
     assert "系统保留的候选" not in prompt
