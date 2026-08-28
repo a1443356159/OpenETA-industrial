@@ -278,6 +278,8 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert "linkage_settle_complete" in adapter
     assert "functional_opening_complete" in adapter
     assert "full_open_goal" in adapter
+    assert "full_open_goal = bool(\n            math.isclose(" in adapter
+    assert "full_open_goal = bool(\n            opening_goal" not in adapter
     assert "CONTROLLER_BOUNDARY_INSET_RAD" in adapter
     assert "CONTACT_FRESHNESS_SIM_S" in adapter
     assert "_target_contact_sequences" in adapter

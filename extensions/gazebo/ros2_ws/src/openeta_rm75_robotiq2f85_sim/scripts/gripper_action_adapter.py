@@ -376,9 +376,14 @@ class RobotiqGripperActionAdapter(Node):
         stroke = effective_active_position - start_active_position
         closing_goal = stroke > GOAL_TOLERANCE_RAD
         opening_goal = stroke < -GOAL_TOLERANCE_RAD
+        # A recovery open can begin in an already functionally open but
+        # passively deflected linkage state after a rejected close.  Classify
+        # the requested endpoint itself, not the signed stroke inferred from
+        # the two exposed outer joints; otherwise that safe no-op waits for
+        # the controller timeout even though the functional terminal proof
+        # below already holds.
         full_open_goal = bool(
-            opening_goal
-            and math.isclose(
+            math.isclose(
                 effective_active_position,
                 feasible_open_position,
                 rel_tol=0.0,
