@@ -67,6 +67,14 @@ scripts/run_multi_normal_gazebo_acceptance.sh \
 
 如果智能体确实提出语义问题，像普通操作员一样简短回答目标物品或料箱；不要给出候选编号、坐标或关节值。共享 GPU 负载可能使 TUI 一段时间没有新输出，看到模型或资格筛选仍在运行时不要重复提交任务。
 
+一次 `grasp_pose_estimate` 会在内部完成模型生成、目标预绑定和多轮 MoveIt 资格筛选；因此工具总耗时可能超过单次资格 RPC 的确认窗口。只要 TUI 仍显示 `working`，就继续等待，不要再次粘贴 Prompt。若物理运动失败，正常恢复输出应类似：
+
+```text
+grasp_pose_estimate mode=frozen_frontier model_inference=False
+```
+
+这表示系统正在使用同一次模型输出的冻结候选前沿，不是重新运行 GraspGenX。资格响应在传输层丢失时，主机也会自动健康检查并按绑定哈希幂等重取；该恢复不增加 VLM 回合，不需要操作员干预。
+
 任务成功时，TUI 应显示环境已终止。此后输入：
 
 ```text
@@ -85,6 +93,14 @@ jq '{status,scenario,task_variant,operator_mode,tool_call_count,
      host_dispatch_count:.planner_evidence.host_dispatch_count,
      total_tokens:.planner_evidence.total_tokens}' \
   "$RUN_ROOT/acceptance-report.json"
+
+jq '{mcp_group_exited,port_free,
+     owned_process_residuals,owned_residual_groups,
+     operator_gui:{started:.operator_gui.started,
+                   group_exited:.operator_gui.group_exited,
+                   lifecycle_ok:.operator_gui.lifecycle_ok},
+     protected_ros_graphs_unchanged}' \
+  "$RUN_ROOT/pick-place/human_tui/cleanup.json"
 ```
 
 正式复现必须同时满足：
@@ -96,7 +112,7 @@ jq '{status,scenario,task_variant,operator_mode,tool_call_count,
 - `host_dispatch_count` 为 `0`；
 - 两个物品各有一次 SAM3、AnyPlace 和 GraspGenX 模型链证据；
 - 最终放置具有 MoveIt 状态有效性、L5 plan-only、原生 attach/detach 和稳定入箱证明；
-- `cleanup.json` 证明本轮拥有的 MCP、ROS/Gazebo 和 GUI 进程均已退出。
+- `cleanup.json` 中 `mcp_group_exited`、`port_free`、GUI lifecycle 和 protected ROS graph 检查均通过，且 owned residual 列表为空。
 
 运行失败时保留整个 `RUN_ROOT`，不要覆盖或删除。可用相同参数加 `--verify-only` 重新读取证据；新的物理复测必须换一个新目录。
 
@@ -120,3 +136,21 @@ scripts/run_multi_normal_gazebo_acceptance.sh \
 ```
 
 `--task-variant` 只告诉验收器如何核对人类请求，不会把任务写入物理场景或 Planner 上下文。实际智能体仍可接受场景内更多自然语言任务；若要把新的物品/料箱组合纳入正式自动核验，应新增任务契约，而不是复制或特化物理场景。
+
+## 发行复测记录
+
+2026-08-29 在 `final-dev` 的资格/MCP 实现提交 `111848c` 上，使用同一个任务中立的 `multi_normal` 场景和 GPU Gazebo GUI 完成了两次独立人工 TUI 验收：
+
+| 运行 | 人类请求 | 结果 | VLM 工具回合 | Provider tokens | 关键覆盖 |
+| --- | --- | --- | ---: | ---: | --- |
+| `run1` | 扳手 → 绿箱；螺栓 → 蓝箱 | PASS | 22 | 131,549 | 两件均首方案贯通 |
+| `run2` | 螺栓 → 绿箱；扳手 → 蓝箱 | PASS | 25 | 151,175 | 首个物理方案失败后冻结前沿恢复；未重跑模型 |
+
+对应发行证据位于服务器工作树的：
+
+```text
+.cache/reports/multi-normal-human-repro-20260829-v5/run1/acceptance-report.json
+.cache/reports/multi-normal-human-repro-20260829-v5/run2/acceptance-report.json
+```
+
+两次均为 `agentic_closed_loop`、`host_dispatch_count=0`，并完成两个物品的稳定入箱与本轮进程清理。墙钟分别约 13 分 32 秒和 24 分 13 秒；复测期间服务器存在显著共享 GPU/CPU 负载，第二次还包含一次物理恢复和一次 11 分 17 秒的困难候选穷尽，因此这些墙钟用于稳定性记录，不作为正常负载下的性能基线。

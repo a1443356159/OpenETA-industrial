@@ -1127,6 +1127,8 @@ class MoveItCandidateQualifier:
                 "artifact_schema_version",
                 "qualification_case_sha256",
                 "case_id",
+                "_openeta_transport_retry",
+                "_openeta_qualification_response_cache",
             ):
                 value = response.get(key)
                 if value is not None:

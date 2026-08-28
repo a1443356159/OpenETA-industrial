@@ -494,6 +494,14 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
             "recovery_pool_exhausted": True,
             "redundancy_degraded": True,
         }
+        response["_openeta_transport_retry"] = {
+            "schema_version": "openeta.read_only_mcp_retry.v1",
+            "retry_count": 1,
+        }
+        response["_openeta_qualification_response_cache"] = {
+            "schema_version": "openeta.qualification_response_cache.v1",
+            "hit": True,
+        }
         return response
 
     def compile_candidate(candidate, purpose, source, epoch, revision):
@@ -551,6 +559,9 @@ def test_qualifier_exposes_only_pass_and_cache_rejects_failed_id(tmp_path):
         "recovery_pool_exhausted": True,
         "redundancy_degraded": True,
     }
+    assert stored["_openeta_transport_retry"]["retry_count"] == 1
+    assert stored["_openeta_qualification_response_cache"]["hit"] is True
+    assert "_openeta_transport_retry" not in result.details["qualification_evidence"]
     assert result.details["qualification_evidence"]["search_exhaustion"] == stored[
         "search_exhaustion"
     ]
