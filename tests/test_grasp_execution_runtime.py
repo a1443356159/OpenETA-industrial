@@ -5,6 +5,7 @@ from agent.runtime.memory import AgentMemory
 from agent.runtime import memory as memory_module
 from agent.tools.grasp_geometry import DEFAULT_GRASP_PROFILE, compile_grasp_seed
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -2410,6 +2411,19 @@ def test_exhausted_backup_resumes_frozen_frontier_when_scene_revision_is_unchang
         "grasp_place_joint_qualified": True,
     }
     compiled = _compiled_candidate(candidate)
+    allowed = {"target_object": ["left_tip", "right_tip"]}
+    compiled["contact_pose"].update(
+        {
+            "qualification_allowed_collisions": allowed,
+            "qualification_allowed_collisions_sha256": hashlib.sha256(
+                json.dumps(
+                    allowed,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+        }
+    )
     compilation = _host_grasp_compilation_event(compiled, queue_position=0, queue_count=1)
     compilation["planning_scene_revision"] = 7
     memory = AgentMemory()
@@ -2494,6 +2508,10 @@ def test_exhausted_backup_resumes_frozen_frontier_when_scene_revision_is_unchang
     recovery = memory.grasp_recovery()
     assert recovery["stage"] == "restore"
     assert recovery["required_action"]["name"] == "move_to"
+    recovery_target = recovery["required_action"]["parameters"]["target_pose"]
+    assert recovery_target["grasp_stage"] == "recovery_restore"
+    assert recovery_target["compiled_grasp_id"] == compiled["compiled_grasp_id"]
+    assert recovery_target["qualification_allowed_collisions"] == allowed
     assert memory.grasp_candidate_gate_error(
         tool_name="move_to",
         parameters=recovery["required_action"]["parameters"],

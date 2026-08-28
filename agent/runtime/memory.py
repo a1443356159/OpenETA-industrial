@@ -3616,6 +3616,10 @@ class AgentMemory:
         recovery_id = f"grasp-recovery-{uuid4()}"
         restore_required = _grasp_recovery_requires_restore(rejection)
         execution = self.grasp_execution()
+        restore_collision_policy = _grasp_recovery_collision_policy(
+            self.grasp_candidate_policy(),
+            candidate_id=candidate_id,
+        )
         source_eef_pose = (
             execution.get("source_eef_pose") if isinstance(execution, dict) else None
         )
@@ -3673,6 +3677,11 @@ class AgentMemory:
                 dict(source_eef_pose) if isinstance(source_eef_pose, dict) else None
             ),
             "restore_pose": restore_pose,
+            **(
+                {"restore_collision_policy": restore_collision_policy}
+                if restore_collision_policy is not None
+                else {}
+            ),
             "observe_after_reopen": observe_after_reopen,
             "required_action": (
                 {"name": "gripper_control", "parameters": {"position": 1}}
@@ -3681,6 +3690,7 @@ class AgentMemory:
                     restore_pose,
                     recovery_id=recovery_id,
                     scene_epoch=self.scene_epoch(),
+                    collision_policy=restore_collision_policy,
                 )
                 if restore_required
                 else {"name": "observe", "parameters": {}}
@@ -3868,6 +3878,14 @@ class AgentMemory:
                             restore_pose,
                             recovery_id=str(recovery.get("recovery_id") or ""),
                             scene_epoch=self.scene_epoch(),
+                            collision_policy=(
+                                recovery.get("restore_collision_policy")
+                                if isinstance(
+                                    recovery.get("restore_collision_policy"),
+                                    dict,
+                                )
+                                else None
+                            ),
                         ),
                     }
                 )
@@ -8346,6 +8364,7 @@ def _grasp_restore_action(
     *,
     recovery_id: str,
     scene_epoch: int,
+    collision_policy: JsonDict | None = None,
 ) -> JsonDict:
     if not isinstance(restore_pose, dict):
         raise ValueError("grasp restore pose is unavailable")
@@ -8357,7 +8376,40 @@ def _grasp_restore_action(
             "recovery_id": recovery_id,
         }
     )
+    if isinstance(collision_policy, dict):
+        target.update(collision_policy)
     return {"name": "move_to", "parameters": {"target_pose": target}}
+
+
+def _grasp_recovery_collision_policy(
+    policy: JsonDict | None,
+    *,
+    candidate_id: str,
+) -> JsonDict | None:
+    """Reuse only the failed contact's hash-bound target touch policy."""
+
+    if not isinstance(policy, dict):
+        return None
+    compilations = policy.get("host_candidate_compilations")
+    compiled = compilations.get(candidate_id) if isinstance(compilations, dict) else None
+    contact = compiled.get("contact_pose") if isinstance(compiled, dict) else None
+    if not isinstance(contact, dict):
+        return None
+    raw_allowed = contact.get("qualification_allowed_collisions")
+    allowed_hash = str(contact.get("qualification_allowed_collisions_sha256") or "")
+    compiled_grasp_id = str(contact.get("compiled_grasp_id") or "").strip()
+    if not compiled_grasp_id or not isinstance(raw_allowed, dict) or len(allowed_hash) != 64:
+        return None
+    return {
+        "compiled_grasp_id": compiled_grasp_id,
+        "grasp_stage": "recovery_restore",
+        "qualification_allowed_collisions": {
+            str(object_id): list(links)
+            for object_id, links in raw_allowed.items()
+            if isinstance(links, list)
+        },
+        "qualification_allowed_collisions_sha256": allowed_hash,
+    }
 
 
 def _optional_int(value: Any, *, default: int) -> int:

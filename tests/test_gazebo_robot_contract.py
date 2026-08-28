@@ -199,8 +199,8 @@ def test_pickplace_motion_profile_follows_verified_payload_state() -> None:
         "unloaded",
         "loaded",
     )
-    assert unloaded["max_velocity_scaling_factor"] == 0.18
-    assert unloaded["max_acceleration_scaling_factor"] == 0.08
+    assert unloaded["max_velocity_scaling_factor"] == 0.16
+    assert unloaded["max_acceleration_scaling_factor"] == 0.06
     assert loaded["max_velocity_scaling_factor"] == 0.12
     assert loaded["max_acceleration_scaling_factor"] == 0.06
 
@@ -258,6 +258,49 @@ def test_move_goal_preserves_hash_bound_contact_collision_policy() -> None:
 
     assert goal["qualification_allowed_collisions"] == allowed
     assert goal["qualification_allowed_collisions_sha256"] == allowed_hash
+
+
+def test_move_goal_preserves_hash_bound_contact_policy_for_exact_restore() -> None:
+    allowed = {"target_object": ["left_tip", "right_tip"]}
+    allowed_hash = hashlib.sha256(
+        json.dumps(allowed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    goal = make_move_group_goal(
+        {
+            "xyz": [0, 0, 0.5],
+            "quat_xyzw": [0, 0, 0, 1],
+            "purpose": "grasp_recovery_restore",
+            "recovery_id": "grasp-recovery-test",
+            "compiled_grasp_id": "grasp-7",
+            "grasp_stage": "recovery_restore",
+            "qualification_allowed_collisions": allowed,
+            "qualification_allowed_collisions_sha256": allowed_hash,
+        }
+    )
+
+    assert goal["purpose"] == "grasp_recovery_restore"
+    assert goal["recovery_id"] == "grasp-recovery-test"
+    assert goal["grasp_stage"] == "recovery_restore"
+    assert goal["qualification_allowed_collisions"] == allowed
+    assert goal["qualification_allowed_collisions_sha256"] == allowed_hash
+
+
+def test_move_goal_rejects_contact_policy_on_an_unbound_ordinary_move() -> None:
+    allowed = {"target_object": ["left_tip", "right_tip"]}
+    allowed_hash = hashlib.sha256(
+        json.dumps(allowed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="only valid for a compiled grasp"):
+        make_move_group_goal(
+            {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "qualification_allowed_collisions": allowed,
+                "qualification_allowed_collisions_sha256": allowed_hash,
+            }
+        )
 
 
 @pytest.mark.parametrize("mutation", ["position", "hash", "binding", "names"])

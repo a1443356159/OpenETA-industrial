@@ -496,8 +496,8 @@ def test_native_grasp_stable_motion_contract_uses_bilateral_contact_goal_toleran
     assert motion["tolerance"] == 0.0002
     assert motion["ori_tolerance"] == 0.002
     assert motion["profile"] == "unloaded"
-    assert motion["velocity_scaling"] == 0.18
-    assert motion["acceleration_scaling"] == 0.08
+    assert motion["velocity_scaling"] == 0.16
+    assert motion["acceleration_scaling"] == 0.06
 
 
 def test_native_grasp_paused_launch_gives_runtime_a_bounded_detach_window() -> None:

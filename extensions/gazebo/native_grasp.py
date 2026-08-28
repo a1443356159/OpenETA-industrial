@@ -458,11 +458,12 @@ class NativePickPlaceConfig(GazeboControlConfig):
     # RM75 limits; a retained payload uses a gentler profile until release.
     # Keep both profiles inside the measured Gazebo tracking envelope. Under
     # shared GPU/physics load, the previous profiles repeatedly exceeded the
-    # former 0.05 rad controller limit on joint 5. Conservative load-state
-    # profiles reduce tracking lag, while the controller retains an explicit
-    # 0.06 rad path envelope and the unchanged 0.002 rad terminal goal.
-    unloaded_velocity_scaling: float = 0.18
-    unloaded_acceleration_scaling: float = 0.08
+    # former 0.05 rad controller limit on joint 5. A later GUI-on run reached
+    # 0.060102 rad on joint 4 at 0.18/0.08, so the unloaded profile also keeps
+    # measured margin below the explicit 0.06 rad path envelope. The unchanged
+    # 0.002 rad terminal goal continues to prove final settling.
+    unloaded_velocity_scaling: float = 0.16
+    unloaded_acceleration_scaling: float = 0.06
     loaded_velocity_scaling: float = 0.12
     loaded_acceleration_scaling: float = 0.06
 

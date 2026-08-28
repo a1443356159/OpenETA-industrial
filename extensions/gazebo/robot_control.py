@@ -572,6 +572,7 @@ def make_move_group_goal(
             key: target_pose[key]
             for key in (
                 "purpose",
+                "recovery_id",
                 "compiled_grasp_id",
                 "grasp_stage",
                 "placement_candidate_id",
@@ -614,6 +615,8 @@ def make_move_group_goal(
         ),
     }
     qualified_joint_goal = _validated_qualified_joint_goal(target_pose)
+    if qualified_joint_goal is None:
+        qualified_joint_goal = _validated_recovery_collision_policy(target_pose)
     if qualified_joint_goal is not None:
         goal.update(qualified_joint_goal)
     return goal
@@ -697,6 +700,42 @@ def _validated_qualified_joint_goal(
         raise ValueError(
             "qualified collision policy is only valid for a compiled grasp contact"
         )
+    result.update(_validated_allowed_collision_policy(target_pose))
+    return result
+
+
+def _validated_recovery_collision_policy(
+    target_pose: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Validate the failed contact's target-only touch policy for one restore."""
+
+    allowed_field = "qualification_allowed_collisions"
+    allowed_hash_field = "qualification_allowed_collisions_sha256"
+    if not any(
+        field in target_pose for field in (allowed_field, allowed_hash_field)
+    ):
+        return None
+    if not (
+        target_pose.get("purpose") == "grasp_recovery_restore"
+        and target_pose.get("grasp_stage") == "recovery_restore"
+        and str(target_pose.get("compiled_grasp_id") or "")
+        and str(target_pose.get("recovery_id") or "").startswith(
+            "grasp-recovery-"
+        )
+    ):
+        raise ValueError(
+            "qualified collision policy is only valid for a compiled grasp "
+            "contact or its exact recovery restore"
+        )
+    return _validated_allowed_collision_policy(target_pose)
+
+
+def _validated_allowed_collision_policy(
+    target_pose: Mapping[str, Any],
+) -> dict[str, Any]:
+    allowed_field = "qualification_allowed_collisions"
+    allowed_hash_field = "qualification_allowed_collisions_sha256"
+    raw_allowed = target_pose.get(allowed_field)
     if not isinstance(raw_allowed, Mapping) or len(raw_allowed) != 1:
         raise ValueError(
             "qualified collision policy must name exactly one target object"
@@ -714,18 +753,19 @@ def _validated_qualified_joint_goal(
         if not links:
             raise ValueError("qualified collision policy is malformed")
         normalized_allowed[object_id] = links
-    expected_allowed_hash = hashlib.sha256(
+    expected_hash = hashlib.sha256(
         json.dumps(
             normalized_allowed, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
     ).hexdigest()
-    if str(supplied_allowed_hash or "") != expected_allowed_hash:
+    if str(target_pose.get(allowed_hash_field) or "") != expected_hash:
         raise ValueError(
             "qualified collision policy hash does not match its policy"
         )
-    result[allowed_field] = normalized_allowed
-    result[allowed_hash_field] = expected_allowed_hash
-    return result
+    return {
+        allowed_field: normalized_allowed,
+        allowed_hash_field: expected_hash,
+    }
 
 
 def _q_normalize(q: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
