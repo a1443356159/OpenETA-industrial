@@ -123,7 +123,7 @@ def generate_launch_description():
     # confirms the initial detach before it calls world control pause:false.
     physics_engine = os.environ.get(
         "OPENETA_GZ_PHYSICS_ENGINE",
-        "gz-physics-bullet-featherstone-plugin",
+        "gz-physics-dartsim-plugin",
     ).strip()
     if physics_engine not in {
         "gz-physics-dartsim-plugin",

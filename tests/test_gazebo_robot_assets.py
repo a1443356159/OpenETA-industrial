@@ -263,7 +263,10 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert 'params="joint topic p_gain d_gain"' in pickplace_robot
     assert pickplace_robot.count('p_gain="4.0" d_gain="0.04"') == 2
     assert pickplace_robot.count('p_gain="0.5" d_gain="0.005"') == 4
-    assert '"OPENETA_GZ_PHYSICS_ENGINE"' in pickplace_launch
+    assert (
+        '"OPENETA_GZ_PHYSICS_ENGINE",\n        "gz-physics-dartsim-plugin",'
+        in pickplace_launch
+    )
     assert '"gz-physics-bullet-featherstone-plugin"' in pickplace_launch
     assert "unsupported OPENETA_GZ_PHYSICS_ENGINE" in pickplace_launch
     assert "<use_velocity_commands>" not in pickplace_robot
