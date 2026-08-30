@@ -204,7 +204,7 @@
           "id": "blue_handle_pliers",
           "shape_class": "combination_pliers",
           "size_xyz": [0.125, 0.060, 0.030],
-          "pose_xyz": [0.23, 0.06, 0.415],
+          "pose_xyz": [0.08, 0.30, 0.415],
           "pose_rpy": [0.0, 0.0, 0.72],
           "rgba": [0.04, 0.22, 0.78, 1.0],
           "primitives": [
