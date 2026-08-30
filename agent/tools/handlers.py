@@ -202,6 +202,8 @@ def build_sam3_handler(
     image_output_root = (
         Path(output_root) if output_root is not None else DEFAULT_SAM3_IMAGE_OUTPUT_ROOT
     )
+    response_cache: dict[tuple[str, str, str], JsonDict] = {}
+
     json_output_root = (
         Path(result_output_root)
         if result_output_root is not None
@@ -491,8 +493,19 @@ def build_sam3_handler(
                     "reason": "prefetch_start_failed",
                     "error_type": type(exc).__name__,
                 }
+        cache_key = (str(image), mode, prompt or repr(points))
+        response = response_cache.get(cache_key)
+        if response is None:
+            try:
+                response = call(mcp_request)
+            except Exception as exc:  # noqa: BLE001 - tool failures must stay structured.
+                return finish(
+                    _sam3_failure(mode=mode, prompt=prompt, points=points, source_image=image, reason="mcp_call_failed", content=f"SAM3 segmentation failed: MCP call failed: {exc}", metadata={"error_type": type(exc).__name__}),
+                    mcp_called=True, reason="mcp_call_failed",
+                )
+            if isinstance(response, dict) and response.get("success") is True:
+                response_cache[cache_key] = response
         try:
-            response = call(mcp_request)
             if roi_metadata and _sam3_response_has_no_detections(response):
                 fallback_attempted = True
                 sam_prompt_used = DEFAULT_SAM3_ROI_FALLBACK_PROMPT
@@ -2100,8 +2113,15 @@ def build_anyplace_handler(
     return handler
 
 
+_OBSERVE_FAILURES: dict[str, int] = {}
+
 def _observe_handler(context: ToolExecutionContext) -> ToolResult:
     observation = context.observation
+    if observation is None:
+        key = str(context.metadata.get("session_id") or "default")
+        _OBSERVE_FAILURES[key] = _OBSERVE_FAILURES.get(key, 0) + 1
+        if _OBSERVE_FAILURES[key] > 2:
+            return make_tool_result(context, success=False, content="observation circuit open after repeated HTTP 500/empty observations", outputs={"reason":"circuit_open", "retryable":False})
     return make_tool_result(
         context,
         success=True,
