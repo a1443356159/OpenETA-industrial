@@ -30,7 +30,7 @@ def test_candidate_services_have_only_reserve_defaults(tmp_path):
     ).raw_pool_size == 96
     assert DEFAULT_GRASPGENX_RAW_POOL_SIZE == 512
     assert inspect.signature(GraspGenXBackend).parameters["raw_pool_size"].default == 512
-    assert DEFAULT_GRASP_WAVES == (4, 8, 16, 32, 64, 128, 256)
+    assert DEFAULT_GRASP_WAVES == (4, 8, 16, 32, 64, 128)
     assert CandidateFunnelConfig().grasp_waves == DEFAULT_GRASP_WAVES
     assert DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT == 4
     assert DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT == 2
