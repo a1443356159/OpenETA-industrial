@@ -320,7 +320,7 @@ def test_default_grasp_ladder_caps_at_128_before_implicit_pool_exhaustion() -> N
         16,
         32,
         64,
-        128,
+        384,
     ]
 
 
