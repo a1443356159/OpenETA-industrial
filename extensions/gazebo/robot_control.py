@@ -58,10 +58,16 @@ ARM_HOME_JOINT_POSITIONS = (
 START_STATE_RECOVERY_SCHEMA_VERSION = "openeta.gazebo.start_state_recovery.v1"
 START_STATE_BOUNDS_TOLERANCE_RAD = 1e-6
 START_STATE_RECOVERY_INSET_RAD = 1e-3
+# ros2_control may stop a bounded joint a few encoder quanta beyond the URDF
+# endpoint.  Normalize only deviations no larger than the same inset used to
+# return the joint to the interior; larger deviations remain invalid.
+START_STATE_RECOVERY_MAX_VIOLATION_RAD = START_STATE_RECOVERY_INSET_RAD
 START_STATE_RECOVERY_TRAJECTORY_S = 1.0
 START_STATE_RECOVERY_TIMEOUT_S = 5.0
 MOTION_SETTLE_RECHECK_TIMEOUT_S = 1.0
 MOTION_SETTLE_RECHECK_INTERVAL_S = 0.1
+MOTION_FAILURE_SETTLE_TIMEOUT_S = 3.0
+MOTION_FAILURE_SETTLE_INTERVAL_S = 0.05
 # Bound the numerical allowance around the nominal post-motion TF tolerance.
 # This covers sub-millimetre sampling/rounding noise without changing the
 # requested MoveIt goal or accepting a materially incomplete trajectory.
@@ -74,6 +80,11 @@ MOTION_VERIFICATION_NUMERIC_MARGIN_M = 0.0001
 # existing Cartesian terminal tolerances.
 MOVEIT_CONTROL_FAILED = -4
 MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S = 0.001
+# Match the trajectory controller's configured stopped-velocity tolerance when
+# deciding whether a known failed motion is safe to use as the next planning
+# start.  This is not a success tolerance; successful terminal reconciliation
+# retains the stricter value above.
+MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S = 0.01
 # These targets are relative to the first fresh mount pose after a reset, not
 # absolute world coordinates.  They are the small, validated neutral motions
 # available in the empty motion-control profile.  Publishing the relation in the existing
@@ -136,18 +147,25 @@ def assess_start_state_bounds(
     *,
     tolerance_rad: float = START_STATE_BOUNDS_TOLERANCE_RAD,
     inset_rad: float = START_STATE_RECOVERY_INSET_RAD,
+    max_recovery_violation_rad: float = START_STATE_RECOVERY_MAX_VIOLATION_RAD,
     freshness_s: float = 2.0,
     now_monotonic_s: float | None = None,
 ) -> dict[str, Any]:
     """Classify the seven RM75 joints without importing ROS or MoveIt."""
 
-    if tolerance_rad < 0 or inset_rad <= 0 or freshness_s <= 0:
+    if (
+        tolerance_rad < 0
+        or inset_rad <= 0
+        or max_recovery_violation_rad < tolerance_rad
+        or freshness_s <= 0
+    ):
         raise ValueError("invalid start-state bounds policy")
     timestamp = state.metadata.get("joint_state_timestamp_s")
     received = state.metadata.get("joint_state_received_monotonic_s")
     base = {
         "tolerance_rad": float(tolerance_rad),
         "inset_rad": float(inset_rad),
+        "max_recovery_violation_rad": float(max_recovery_violation_rad),
         "pre_joint_state_timestamp_s": (
             float(timestamp)
             if isinstance(timestamp, (int, float)) and math.isfinite(float(timestamp))
@@ -215,7 +233,7 @@ def assess_start_state_bounds(
 
     affected: list[dict[str, Any]] = []
     candidate = list(positions)
-    outside_tolerance = False
+    outside_recovery_band = False
     boundary_inset_required = False
     for offset, ((name, lower, upper), position) in enumerate(
         zip(ARM_JOINT_BOUNDS, positions)
@@ -239,10 +257,13 @@ def assess_start_state_bounds(
             target = upper - inset_rad
         boundary_inset_required = boundary_inset_required or violation == 0.0
         candidate[offset] = target
-        outside_tolerance = outside_tolerance or (
-            violation > tolerance_rad
+        outside_recovery_band = outside_recovery_band or (
+            violation > max_recovery_violation_rad
             and not math.isclose(
-                violation, tolerance_rad, rel_tol=0.0, abs_tol=1e-15
+                violation,
+                max_recovery_violation_rad,
+                rel_tol=0.0,
+                abs_tol=1e-15,
             )
         )
         affected.append(
@@ -265,21 +286,28 @@ def assess_start_state_bounds(
             "joints": [],
             "candidate_positions": positions,
         }
-    if outside_tolerance:
+    if outside_recovery_band:
         return {
             **base,
             "classification": "INVALID",
-            "reason_code": "BOUNDS_VIOLATION_EXCEEDS_TOLERANCE",
+            "reason_code": "BOUNDS_VIOLATION_EXCEEDS_RECOVERY_BAND",
             "joints": affected,
             "candidate_positions": None,
         }
+    has_controller_endpoint_deviation = any(
+        float(item["violation_rad"]) > tolerance_rad for item in affected
+    )
     return {
         **base,
         "classification": "RECOVERABLE",
         "reason_code": (
-            "START_STATE_BOUNDARY_INSET"
-            if boundary_inset_required
-            else "NUMERIC_BOUNDS_VIOLATION"
+            "BOUNDED_CONTROLLER_ENDPOINT_NORMALIZATION"
+            if has_controller_endpoint_deviation
+            else (
+                "START_STATE_BOUNDARY_INSET"
+                if boundary_inset_required
+                else "NUMERIC_BOUNDS_VIOLATION"
+            )
         ),
         "joints": affected,
         "candidate_positions": candidate,
@@ -304,6 +332,12 @@ def start_state_recovery_record(
         "attempted": bool(attempted),
         "tolerance_rad": float(assessment["tolerance_rad"]),
         "inset_rad": float(assessment["inset_rad"]),
+        "max_recovery_violation_rad": float(
+            assessment.get(
+                "max_recovery_violation_rad",
+                START_STATE_RECOVERY_MAX_VIOLATION_RAD,
+            )
+        ),
         "joints": [dict(item) for item in assessment.get("joints", ())],
         "pre_joint_state_timestamp_s": assessment.get(
             "pre_joint_state_timestamp_s"
@@ -864,6 +898,9 @@ class GazeboController:
         barrier_ordered_terminal_state_provider: (
             Callable[[float], RobotState] | None
         ) = None,
+        failed_motion_terminal_state_provider: (
+            Callable[[float], RobotState] | None
+        ) = None,
         move_action: Callable[[dict, float], Mapping[str, Any]] | None = None,
         gripper_action: Callable[[float, float], Mapping[str, Any]] | None = None,
         start_state_recovery: Callable[[RobotState, float], Mapping[str, Any]] | None = None,
@@ -878,6 +915,9 @@ class GazeboController:
         self.state_provider = state_provider
         self.barrier_ordered_terminal_state_provider = (
             barrier_ordered_terminal_state_provider
+        )
+        self.failed_motion_terminal_state_provider = (
+            failed_motion_terminal_state_provider
         )
         self.move_action, self.gripper_action = move_action, gripper_action
         self.start_state_recovery = start_state_recovery
@@ -1229,18 +1269,26 @@ class GazeboController:
                     if completion_barrier_available
                     else action_started_value
                 )
+                terminal_state_provider = (
+                    self.barrier_ordered_terminal_state_provider
+                    if result.get("ok") is True
+                    else (
+                        self.failed_motion_terminal_state_provider
+                        or self.barrier_ordered_terminal_state_provider
+                    )
+                    if result.get("ok") is False
+                    else None
+                )
+                failed_motion_terminal_sample = result.get("ok") is False
                 if (
-                    result.get("ok") is True
-                    and result.get("execution_started") is True
-                    and self.barrier_ordered_terminal_state_provider is not None
+                    result.get("execution_started") is True
+                    and terminal_state_provider is not None
                     and isinstance(action_barrier_value, (int, float))
                     and not isinstance(action_barrier_value, bool)
                     and math.isfinite(float(action_barrier_value))
                 ):
                     try:
-                        end = self.barrier_ordered_terminal_state_provider(
-                            float(action_barrier_value)
-                        )
+                        end = terminal_state_provider(float(action_barrier_value))
                         barrier_ordered_terminal_state = True
                     except Exception:
                         # A generic latest-state fallback could predate the
@@ -1437,11 +1485,20 @@ class GazeboController:
                     else None
                 )
                 if barrier_ordered_terminal_state:
-                    barrier_state_verified = (
-                        target_verified
-                        and max_arm_velocity_rad_s is not None
+                    terminal_state_stationary_verified = (
+                        max_arm_velocity_rad_s is not None
                         and max_arm_velocity_rad_s
                         <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
+                    )
+                    restart_state_stationary_verified = (
+                        max_arm_velocity_rad_s is not None
+                        and max_arm_velocity_rad_s
+                        <= MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+                    )
+                    barrier_state_verified = (
+                        restart_state_stationary_verified
+                        if failed_motion_terminal_sample
+                        else terminal_state_stationary_verified
                     )
                     action_evidence.update(
                         {
@@ -1457,7 +1514,10 @@ class GazeboController:
                                 else "action_started_ros_time_s"
                             ),
                             "terminal_state_stationary_verified": (
-                                barrier_state_verified
+                                terminal_state_stationary_verified
+                            ),
+                            "restart_state_stationary_verified": (
+                                restart_state_stationary_verified
                             ),
                         }
                     )
@@ -1574,6 +1634,70 @@ class GazeboController:
                     ok = False
                     error = "MOTION_TARGET_NOT_REACHED"
                     extra = {}
+                current_state_restart: dict[str, Any] | None = None
+                if (
+                    not ok
+                    and error
+                    in {"MOTION_EXECUTION_FAILED", "MOTION_TARGET_NOT_REACHED"}
+                    and result.get("execution_started") is True
+                    and barrier_ordered_terminal_state
+                ):
+                    final_joint_names = end.metadata.get("joint_names")
+                    final_joint_index = (
+                        {
+                            str(name): index
+                            for index, name in enumerate(final_joint_names)
+                        }
+                        if isinstance(final_joint_names, (list, tuple))
+                        else {}
+                    )
+                    final_arm_velocities = [
+                        float(end.joint_velocities[final_joint_index[name]])
+                        for name in ARM_JOINTS
+                        if name in final_joint_index
+                        and final_joint_index[name] < len(end.joint_velocities)
+                        and math.isfinite(
+                            float(end.joint_velocities[final_joint_index[name]])
+                        )
+                    ]
+                    final_max_arm_velocity_rad_s = (
+                        max(abs(value) for value in final_arm_velocities)
+                        if len(final_arm_velocities) == len(ARM_JOINTS)
+                        else None
+                    )
+                    restart_bounds = assess_start_state_bounds(end)
+                    if (
+                        final_max_arm_velocity_rad_s is not None
+                        and final_max_arm_velocity_rad_s
+                        <= MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+                        and restart_bounds.get("classification") != "INVALID"
+                    ):
+                        current_state_restart = {
+                            "schema_version": (
+                                "openeta.gazebo.current_state_restart.v1"
+                            ),
+                            "status": "PASS",
+                            "reason_code": (
+                                "KNOWN_STATIONARY_TERMINAL_FAILURE"
+                            ),
+                            "planning_scene_revision": scene_revision,
+                            "target_verified": bool(target_verified),
+                            "max_arm_velocity_rad_s": (
+                                final_max_arm_velocity_rad_s
+                            ),
+                            "max_arm_velocity_tolerance_rad_s": (
+                                MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+                            ),
+                            "start_state_bounds": start_state_recovery_record(
+                                restart_bounds,
+                                status=(
+                                    "RECOVERY_REQUIRED"
+                                    if restart_bounds.get("classification")
+                                    == "RECOVERABLE"
+                                    else "NOT_REQUIRED"
+                                ),
+                            ),
+                        }
                 return GazeboControlResult(
                     ok,
                     error,
@@ -1629,6 +1753,11 @@ class GazeboController:
                         **(
                             {"terminal_reconciliation": terminal_reconciliation}
                             if terminal_reconciliation is not None
+                            else {}
+                        ),
+                        **(
+                            {"current_state_restart": current_state_restart}
+                            if current_state_restart is not None
                             else {}
                         ),
                         "observation": {"robot": end.to_dict()},

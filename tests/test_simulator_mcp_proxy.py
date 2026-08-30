@@ -903,6 +903,14 @@ def test_worker_proxy_retains_moveit_rejection_in_trusted_receipt(tmp_path: Path
         "orientation_error_rad": 0.4,
         "request_fingerprint": "placement-fingerprint",
         "planning_scene_revision": 2,
+        "current_state_restart": {
+            "schema_version": "openeta.gazebo.current_state_restart.v1",
+            "status": "PASS",
+            "reason_code": "KNOWN_STATIONARY_TERMINAL_FAILURE",
+            "planning_scene_revision": 2,
+            "max_arm_velocity_rad_s": 0.0,
+            "max_arm_velocity_tolerance_rad_s": 0.01,
+        },
     }
     transport = FakeSimulatorMcpTransport(response)
     tools = bind_simulator_mcp_tool_handlers(

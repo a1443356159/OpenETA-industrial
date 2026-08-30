@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from prompt_toolkit.document import Document
@@ -1293,6 +1294,38 @@ def test_cli_ask_human_prints_question(monkeypatch, capsys) -> None:
 
     assert "Which LIBERO environment should I create?" in capsys.readouterr().out
     assert cli.state.continue_after_human is True
+
+
+def test_cli_terminal_handoff_records_answer_without_resuming_episode(
+    monkeypatch,
+    capsys,
+) -> None:
+    cli = OpenEtaCli()
+    resumes: list[bool] = []
+    cli.state.episode_runner = SimpleNamespace(
+        waiting_for_human=True,
+        resume_after_human=lambda: resumes.append(True),
+    )
+    monkeypatch.setattr(cli, "_prompt_text", lambda _prompt: "I will inspect the cell")
+    action = EnvAction(
+        action_type="response",
+        command={
+            "request": {
+                "kind": "response",
+                "name": "ask_human",
+                "parameters": {
+                    "question": "Inspect the cell before continuing.",
+                    "terminal_handoff": True,
+                },
+            }
+        },
+    )
+
+    cli._handle_interactive_action(action)
+
+    assert resumes == []
+    assert cli.state.continue_after_human is False
+    assert "current episode remains stopped" in capsys.readouterr().out
 
 
 def test_cli_ask_human_trace_prints_question_without_parameter_json(capsys) -> None:

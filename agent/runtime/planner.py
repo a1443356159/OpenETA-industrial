@@ -727,6 +727,7 @@ class ToolCallingPlanner(BasePlanner):
                 ),
                 "failure_code": "sam3_selection_infrastructure_failure",
                 "sam3_result_id": selection.get("result_id"),
+                "terminal_handoff": True,
             },
             reasoning=(
                 "Repeated bounded-review exceptions are infrastructure failures, not evidence "
@@ -843,6 +844,7 @@ def _host_obligation_decision(
                     )
                 ),
                 "reason": grasp_policy.get("terminal_failure"),
+                "terminal_handoff": True,
             },
             reasoning=(
                 "Qualification already performed its one bounded infrastructure retry; "
@@ -892,6 +894,7 @@ def _host_obligation_decision(
                     or grasp_policy.get("stop_reason")
                     or "CURRENT_FROZEN_MODEL_POOL_INFEASIBLE"
                 ),
+                "terminal_handoff": True,
             },
             reasoning=(
                 "The primary and reserve branches from the frozen model output are "
@@ -929,6 +932,7 @@ def _host_obligation_decision(
                     placement_release.get("failure_code")
                     or "SMOKE_NORMAL_IRREVERSIBLE_RELEASE_FAILED"
                 ),
+                "terminal_handoff": True,
             },
             reasoning=(
                 "A smoke acceptance run stops at its first irreversible release "
@@ -975,6 +979,7 @@ def _host_obligation_decision(
                 "failure_code": str(
                     placement_release.get("failure_code") or "PLACEMENT_RELEASE_VERIFICATION_FAILED"
                 ),
+                "terminal_handoff": True,
             },
             reasoning="A fresh scene is required before any new model inference.",
         )
@@ -1033,11 +1038,12 @@ def _host_obligation_decision(
             action="ask_human",
             parameters={
                 "question": (
-                    "The gripper recovery could not be proven from the simulator "
+                    "The arm/grasp recovery could not be proven from the simulator "
                     "receipt or follow-up observation. Inspect the cell before "
                     "continuing the frozen grasp queue."
                 ),
                 "failure_code": stop_reason,
+                "terminal_handoff": True,
             },
             reasoning=(
                 "The bounded host recovery is terminal; stop instead of falling "
@@ -1072,6 +1078,7 @@ def _host_obligation_decision(
                 "failure_code": str(
                     placement_policy.get("stop_reason") or "CURRENT_GRASP_PLACE_INFEASIBLE"
                 ),
+                "terminal_handoff": True,
             },
             reasoning=(
                 "A bounded host recovery reached its terminal fail-closed state; "

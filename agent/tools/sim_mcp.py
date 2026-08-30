@@ -92,6 +92,10 @@ CONTROL_RECEIPT_FIELDS = (
     "planned_point_count",
     "position_error_m",
     "orientation_error_rad",
+    # A failed pre-close arm motion may safely continue only from a causal,
+    # stationary state proved by the simulator adapter.  This compact record
+    # contains no agent-authored pose and must survive response artifacting.
+    "current_state_restart",
     "detachable_joint",
     "attachment_transform",
     "physical_verification",

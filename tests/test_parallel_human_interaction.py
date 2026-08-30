@@ -203,7 +203,7 @@ def test_paused_record_does_not_persist_expiring_simulator_handle(tmp_path) -> N
 
     assert payload["schema_version"] == "openeta.paused_episode.v2"
     assert payload["resume_mode"] == "restart_environment"
-    assert payload["max_tool_calls"] == 80
+    assert payload["max_tool_calls"] == 200
     assert payload["timeout_s"] == 3600
     assert payload["max_total_tokens"] == 5_000_000
     assert payload["tool_call_count"] == 7

@@ -4285,6 +4285,14 @@ class AgentMemory:
         )
         frozen_pool = self.frozen_placement_goal_pool()
         attachment = self.attachment_gate()
+        current_state_frontier_retry = (
+            str(rejection.get("grasp_stage") or "") == "contact"
+            and str(rejection.get("target_tool") or "")
+            in {"move_to", "follow_eef_trajectory"}
+            and rejection.get("current_state_requalification_safe") is True
+            and isinstance(frozen_pool, dict)
+            and frozen_pool.get("status") == "ready"
+        )
         close_failure_can_rebase_frozen_frontier = (
             str(rejection.get("source") or "") == "host_gripper_close_failed"
             and str(rejection.get("grasp_stage") or "") == "close"
@@ -4308,6 +4316,14 @@ class AgentMemory:
             )
         )
         qualification_invalidated = qualification_scene_changed and not frozen_candidate_retry
+        if current_state_frontier_retry:
+            # Physical execution changed the arm start, so every old IK/L5
+            # branch is stale even though the object and PlanningScene did not
+            # change.  Keep model outputs, but force their qualification to
+            # restart from the proved current state.
+            qualification_invalidated = True
+            frozen_candidate_retry = False
+            next_candidate = None
         if qualification_invalidated:
             next_candidate = None
         source_tool = str(policy.get("source_tool") or "grasp_pose_estimate")
@@ -4373,6 +4389,24 @@ class AgentMemory:
                 policy["frozen_grasp_frontier_remaining_count"] = (
                     frozen_frontier_remaining
                 )
+            if current_state_frontier_retry and not retry_exhausted:
+                rejected_ids = {
+                    str(item.get("candidate_id") or "")
+                    for item in rejected
+                    if isinstance(item, dict)
+                }
+                frozen_frontier_remaining = max(
+                    frozen_frontier_remaining,
+                    sum(
+                        1
+                        for candidate in candidates
+                        if isinstance(candidate, dict)
+                        and str(candidate.get("id") or "") not in rejected_ids
+                    ),
+                )
+                policy["frozen_grasp_frontier_remaining_count"] = (
+                    frozen_frontier_remaining
+                )
             policy_revision = _optional_int(policy.get("planning_scene_revision"), default=-1)
             rejection_revision = _optional_int(rejection.get("planning_scene_revision"), default=-2)
             planning_scene_unchanged = (
@@ -4411,6 +4445,31 @@ class AgentMemory:
                         ),
                         "model_inference_invoked": False,
                     }
+                if current_state_frontier_retry:
+                    policy["frozen_grasp_frontier_current_state_pending"] = {
+                        "schema_version": (
+                            "openeta.frozen_grasp_frontier_current_state.v1"
+                        ),
+                        "reason_code": (
+                            "FAILED_CONTACT_CURRENT_STATE_REQUALIFICATION"
+                        ),
+                        "source_planning_scene_revision": policy_revision,
+                        "physically_rejected_candidate_id": str(
+                            active.get("id") or ""
+                        ),
+                        "current_state_restart_sha256": rejection.get(
+                            "current_state_restart_sha256"
+                        ),
+                        "model_inference_invoked": False,
+                        "exact_anchor_restoration": False,
+                    }
+                    policy.pop("host_candidate_compilations", None)
+                    policy.pop("qualification_evidence", None)
+                    policy.pop("frozen_model_pool_retry", None)
+                    policy.pop("accepted_candidate", None)
+                    policy.pop("accepted_at_s", None)
+                    self.facts.pop(GRASP_EXECUTION_KEY, None)
+                    self.facts.pop(GRASP_RECOVERY_KEY, None)
                 policy.pop("reestimate_required", None)
                 self.facts.pop(GRASP_REESTIMATION_KEY, None)
                 self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
@@ -7756,6 +7815,28 @@ def _motion_rejection_fingerprint(call: JsonDict) -> JsonDict:
         revision = source.get("planning_scene_revision")
         if isinstance(revision, int) and not isinstance(revision, bool):
             evidence.setdefault("planning_scene_revision", revision)
+    revision = evidence.get("planning_scene_revision")
+    if (
+        isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and _trusted_open_unattached_grasp_motion_failure(
+            _environment_receipt(call),
+            planning_scene_revision=revision,
+        )
+    ):
+        restart = _environment_receipt(call).get("current_state_restart")
+        evidence.update(
+            {
+                "current_state_requalification_safe": True,
+                "current_state_restart_sha256": hashlib.sha256(
+                    json.dumps(
+                        restart,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
     return evidence
 
 
@@ -8250,6 +8331,49 @@ def _trusted_failed_motion_end_state(
     )
 
 
+def _trusted_open_unattached_grasp_motion_failure(
+    receipt: Mapping[str, object],
+    *,
+    planning_scene_revision: int,
+) -> bool:
+    """Authorize frozen requalification from a failed pre-close arm state."""
+
+    restart = receipt.get("current_state_restart")
+    snapshot = receipt.get("observation_snapshot")
+    observation = snapshot.get("observation") if isinstance(snapshot, Mapping) else None
+    robot = observation.get("robot") if isinstance(observation, Mapping) else None
+    gripper = robot.get("gripper_state") if isinstance(robot, Mapping) else None
+    physical = receipt.get("physical_verification")
+    detachable = receipt.get("detachable_joint")
+    if not (
+        receipt.get("error_code")
+        in {"MOTION_TARGET_NOT_REACHED", "MOTION_EXECUTION_FAILED"}
+        and receipt.get("execution_started") is True
+        and receipt.get("motion_outcome") == "failed"
+        and receipt.get("planning_scene_revision") == planning_scene_revision
+        and isinstance(restart, Mapping)
+        and restart.get("schema_version")
+        == "openeta.gazebo.current_state_restart.v1"
+        and restart.get("status") == "PASS"
+        and restart.get("planning_scene_revision") == planning_scene_revision
+        and isinstance(gripper, Mapping)
+        and gripper.get("open") is True
+        and _trusted_failed_motion_end_state(
+            receipt,
+            planning_scene_revision=planning_scene_revision,
+        )
+    ):
+        return False
+    if isinstance(physical, Mapping) and (
+        physical.get("verdict") == "PASS"
+        or physical.get("grasp_confirmed") is True
+    ):
+        return False
+    if isinstance(detachable, Mapping) and detachable.get("state") != "detached":
+        return False
+    return True
+
+
 def _finite_robot_end_state(value: Mapping[str, object]) -> bool:
     pose = value.get("end_effector_pose")
     joints = value.get("joint_positions")
@@ -8563,6 +8687,12 @@ def _grasp_recovery_requires_restore(rejection: JsonDict) -> bool:
     if stage == "close":
         # Reaching the close stage proves that the contact move already ran.
         return True
+    if rejection.get("current_state_requalification_safe") is True:
+        # The simulator proved a causal, stationary, open and unattached end
+        # state.  Requalify the frozen model frontier from that state; an exact
+        # Cartesian return to the old anchor would add risk without restoring
+        # any model or scene invariant.
+        return False
     return bool(
         stage == "contact"
         and str(rejection.get("target_tool") or "")

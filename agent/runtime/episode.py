@@ -23,8 +23,8 @@ from agent.runtime.runtime import OpenEtaAgentRuntime
 from agent.runtime.supervision import InteractionResolver
 
 
-DEFAULT_MAX_TURNS = 40
-DEFAULT_MAX_TOOL_CALLS = 80
+DEFAULT_MAX_TURNS = 100
+DEFAULT_MAX_TOOL_CALLS = 200
 DEFAULT_EPISODE_TIMEOUT_S = 3600.0
 DEFAULT_MAX_TOTAL_TOKENS = 5_000_000
 INTERRUPT_CLOSE_GRACE_S = 0.25

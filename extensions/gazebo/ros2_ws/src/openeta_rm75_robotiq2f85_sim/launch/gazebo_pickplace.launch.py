@@ -121,8 +121,16 @@ def generate_launch_description():
     generated_sdfs.append(selected_world)
     # Deliberately omit -r: Gazebo starts paused.  GazeboRuntime sends and
     # confirms the initial detach before it calls world control pause:false.
-    physics_engine = os.environ.get("OPENETA_GZ_PHYSICS_ENGINE", "gz-physics-bullet-featherstone-plugin").strip()
-    if physics_engine not in {"gz-physics-dartsim-plugin", "gz-physics-bullet-featherstone-plugin", "gz-physics-bullet-plugin", "gz-physics-tpe-plugin"}:
+    physics_engine = os.environ.get(
+        "OPENETA_GZ_PHYSICS_ENGINE",
+        "gz-physics-bullet-featherstone-plugin",
+    ).strip()
+    if physics_engine not in {
+        "gz-physics-dartsim-plugin",
+        "gz-physics-bullet-featherstone-plugin",
+        "gz-physics-bullet-plugin",
+        "gz-physics-tpe-plugin",
+    }:
         raise RuntimeError(f"unsupported OPENETA_GZ_PHYSICS_ENGINE={physics_engine!r}")
     gz_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(str(Path(get_package_share_directory("ros_gz_sim")) / "launch/gz_sim.launch.py")),

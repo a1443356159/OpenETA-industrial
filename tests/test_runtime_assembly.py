@@ -268,6 +268,50 @@ def test_frozen_frontier_prioritizes_sibling_with_shared_model_parent() -> None:
     ] == "shared_model_centering_parent"
 
 
+def test_frozen_frontier_current_state_restart_requalifies_complete_catalog() -> None:
+    invalidations: list[str | None] = []
+    qualifier = SimpleNamespace(
+        cache=SimpleNamespace(
+            invalidate=lambda *, purpose=None: invalidations.append(purpose)
+        )
+    )
+    coordinator = _FrozenGoalPairCoordinator(qualifier=qualifier)
+    coordinator.grasp_candidate_catalog = {
+        "failed": {"id": "failed", "translation_xyz": [0.1, 0.2, 0.3]},
+        "qualified_backup": {
+            "id": "qualified_backup",
+            "translation_xyz": [0.2, 0.2, 0.3],
+        },
+        "provider_tail": {
+            "id": "provider_tail",
+            "translation_xyz": [0.3, 0.2, 0.3],
+        },
+    }
+    coordinator.grasp_frontier_candidates = [
+        coordinator.grasp_candidate_catalog["provider_tail"]
+    ]
+    coordinator.grasp_frontier_planning_scene_revision = 7
+    coordinator.grasp_frontier_generation = 1
+    coordinator.qualified_goals_by_grasp = {"qualified_backup": [{"id": "p0"}]}
+
+    restarted = coordinator.restart_grasp_frontier_from_current_state(
+        failed_candidate_id="failed",
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+
+    assert restarted.success is True
+    assert [item["id"] for item in coordinator.grasp_frontier_candidates] == [
+        "qualified_backup",
+        "provider_tail",
+    ]
+    assert coordinator.physically_rejected_grasp_ids == {"failed"}
+    assert coordinator.qualified_goals_by_grasp == {}
+    assert coordinator.grasp_frontier_generation == 2
+    assert invalidations == ["grasp"]
+    assert restarted.details["model_inference_invoked"] is False
+
+
 def test_frozen_frontier_rebase_requalifies_catalog_and_excludes_physical_failure() -> None:
     def candidate(candidate_id: str, x: float) -> dict:
         return {

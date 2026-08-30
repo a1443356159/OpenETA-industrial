@@ -2593,6 +2593,136 @@ def test_exhausted_backup_resumes_frozen_frontier_when_scene_revision_is_unchang
     assert memory.grasp_recovery()["status"] == "completed"
 
 
+def test_failed_contact_requalifies_frozen_frontier_from_proven_current_state() -> None:
+    candidate = {
+        **_candidate("grasp_000", 0.9),
+        "grasp_place_joint_qualified": True,
+    }
+    compiled = _compiled_candidate(candidate)
+    compilation = _host_grasp_compilation_event(
+        compiled, queue_position=0, queue_count=1
+    )
+    compilation["planning_scene_revision"] = 7
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.add_action(
+        _tool_action(
+            "anyplace",
+            {},
+            outputs={
+                "frozen_goal_pool_ready": True,
+                "frozen_goal_pool_count": 96,
+            },
+        )
+    )
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "frozen-qualified-grasps",
+                "selected_backend": "graspgenx",
+                "scene_revision": 7,
+                "grasp_candidates": [candidate],
+                "qualification_evidence": {
+                    "schema_version": "openeta.moveit_candidate_qualification.v3",
+                    "scene_epoch": 0,
+                    "planning_scene_revision": 7,
+                },
+                "frozen_pair_grasp_branch_limit": 2,
+                "frozen_pair_lookahead_grasp_count": 1,
+                "frozen_pair_full_plan_pass_count": 1,
+                "frozen_grasp_frontier_remaining_count": 12,
+                "frozen_grasp_frontier_generation": 1,
+                "host_selected_candidate_id": candidate["id"],
+                "host_candidate_compilation": compilation,
+                "host_candidate_compilation_queue": [compilation],
+            },
+        )
+    )
+    memory.save_fact("scene_epoch", {"epoch": 3}, source="test")
+    execution = memory.grasp_execution()
+    execution.update(
+        {
+            "stage": "contact",
+            "source_eef_pose": _recovery_anchor_pose(),
+            "required_action": {
+                "name": "move_to",
+                "parameters": {
+                    "target_pose": {
+                        "source_grasp_id": candidate["id"],
+                        "xyz": compiled["contact_pose"]["xyz"],
+                    }
+                },
+            },
+        }
+    )
+    memory.save_fact("grasp_execution", execution, source="test")
+    required = execution["required_action"]
+    end_pose = {
+        "frame": "world",
+        "xyz": [0.20639, 0.0, 0.89],
+        "quat_xyzw": [0.0, 0.0, 0.7071067811865476, 0.7071067811865476],
+    }
+    robot = {
+        "joint_positions": [0.0, 0.0, 0.0, 0.0, 0.0, 2.2340483665, 3.14],
+        "joint_velocities": [0.0] * 7,
+        "end_effector_pose": end_pose,
+        "gripper_state": {"open": True},
+    }
+    restart = {
+        "schema_version": "openeta.gazebo.current_state_restart.v1",
+        "status": "PASS",
+        "reason_code": "KNOWN_STATIONARY_TERMINAL_FAILURE",
+        "planning_scene_revision": 7,
+        "max_arm_velocity_rad_s": 0.0,
+        "max_arm_velocity_tolerance_rad_s": 0.01,
+    }
+
+    memory.add_action(
+        _tool_action(
+            required["name"],
+            required["parameters"],
+            success=False,
+            outputs={"motion_summary": {"reached_target": False}},
+            environment_receipt={
+                "error_code": "MOTION_EXECUTION_FAILED",
+                "execution_started": True,
+                "motion_outcome": "failed",
+                "planning_scene_revision": 7,
+                "request_fingerprint": "failed-g0-from-current-state",
+                "observation_fresh": True,
+                "observation_snapshot": {
+                    "schema_version": "openeta.observation_snapshot.v1",
+                    "observation": {
+                        "metadata": {"planning_scene_revision": 7},
+                        "robot": robot,
+                    },
+                },
+                "motion": {"reached_target": False, "end": end_pose},
+                "physical_verification": {
+                    "verdict": "FAIL",
+                    "grasp_confirmed": False,
+                },
+                "detachable_joint": {"state": "detached"},
+                "current_state_restart": restart,
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "frozen_frontier_required"
+    assert policy["frozen_grasp_frontier_remaining_count"] == 12
+    pending = policy["frozen_grasp_frontier_current_state_pending"]
+    assert pending["physically_rejected_candidate_id"] == "grasp_000"
+    assert pending["model_inference_invoked"] is False
+    assert pending["exact_anchor_restoration"] is False
+    assert "host_candidate_compilations" not in policy
+    assert "qualification_evidence" not in policy
+    assert memory.grasp_execution() is None
+    assert memory.grasp_recovery() is None
+
+
 def test_native_target_pose_sync_is_retained_for_host_frozen_frontier_rebase() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick and place")

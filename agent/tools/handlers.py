@@ -60,6 +60,7 @@ DEFAULT_CONTACT_GRASPNET_OUTPUT_ROOT = Path("tmp") / "tool_result" / "contact_gr
 DEFAULT_SAM3_SELECTION_VISUAL_LIMIT = 8
 DEFAULT_SAM3_ROI_PADDING_RATIO = 0.12
 DEFAULT_SAM3_ROI_FALLBACK_PROMPT = "foreground object"
+SAM3_SUCCESS_CACHE_MAX_ENTRIES = 8
 SAM3_MAX_POINT_COUNT = 64
 DEFAULT_ANYPLACE_OUTPUT_ROOT = Path("tmp") / "tool_result" / "anyplace"
 ANYPLACE_OBJECT_MASK_DEPTH_CLEANUP_SCHEMA = "openeta.anyplace.object_mask_depth_cleanup.v1"
@@ -202,7 +203,10 @@ def build_sam3_handler(
     image_output_root = (
         Path(output_root) if output_root is not None else DEFAULT_SAM3_IMAGE_OUTPUT_ROOT
     )
-    response_cache: dict[tuple[str, str, str], JsonDict] = {}
+    # Cache only byte-identical successful inference requests.  Image paths are
+    # routinely reused for newly captured frames, so a path-based key would
+    # leak stale segmentation across observations.
+    response_cache: dict[str, JsonDict] = {}
 
     json_output_root = (
         Path(result_output_root)
@@ -493,8 +497,16 @@ def build_sam3_handler(
                     "reason": "prefetch_start_failed",
                     "error_type": type(exc).__name__,
                 }
-        cache_key = (str(image), mode, prompt or repr(points))
+        cache_key = hashlib.sha256(
+            json.dumps(
+                mcp_request,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         response = response_cache.get(cache_key)
+        cache_hit = response is not None
         if response is None:
             try:
                 response = call(mcp_request)
@@ -504,6 +516,8 @@ def build_sam3_handler(
                     mcp_called=True, reason="mcp_call_failed",
                 )
             if isinstance(response, dict) and response.get("success") is True:
+                if len(response_cache) >= SAM3_SUCCESS_CACHE_MAX_ENTRIES:
+                    response_cache.pop(next(iter(response_cache)))
                 response_cache[cache_key] = response
         try:
             if roi_metadata and _sam3_response_has_no_detections(response):
@@ -738,7 +752,7 @@ def build_sam3_handler(
         reason = "" if result.success else _string_param(result.details.get("reason"))
         return finish(
             result,
-            mcp_called=True,
+            mcp_called=not cache_hit or fallback_attempted,
             response=response,
             reason=reason,
         )
@@ -1362,9 +1376,6 @@ def build_grasp_pose_estimate_handler(
         assert isinstance(intrinsics_value, Mapping)
         intrinsics = dict(intrinsics_value)
         object_mask = dict(object_mask_value) if isinstance(object_mask_value, Mapping) else None
-        request_key = (str(scene_epoch), repr((rgb, depth, object_mask_value)))
-        if request_key in _GRASP_FAILURE_KEYS:
-            return _grasp_pose_estimate_failure("circuit_open", attempts=[], retryable=False)
         attempts: list[JsonDict] = []
         for backend in order:
             if backend in excluded_backends:
@@ -1463,8 +1474,6 @@ def build_grasp_pose_estimate_handler(
                 )
 
         reason, retryable = _aggregate_grasp_backend_failure(attempts)
-        if reason in {"no_grasp_candidates", "model_inference_failed"}:
-            _GRASP_FAILURE_KEYS.add(request_key)
         return _grasp_pose_estimate_failure(
             reason,
             attempts=attempts,
@@ -2011,7 +2020,6 @@ def build_anyplace_handler(
     expected_raw_pool_size = raw_pool_size(expected_raw_pool_size, placement=True)
 
     def handler(context: ToolExecutionContext) -> ToolResult:
-        global _ANYPLACE_MODEL_LOAD_OPEN
         session_id = artifact_session_id(context.metadata)
         object_observation = context.parameters.get("object_observation")
         placement_observation = context.parameters.get("placement_observation")
@@ -2101,13 +2109,9 @@ def build_anyplace_handler(
                 "invalid_independent_observation",
                 f"AnyPlace placement prediction failed: {exc}",
             )
-        if _ANYPLACE_MODEL_LOAD_OPEN:
-            return _anyplace_failure("circuit_open", "AnyPlace model-load circuit open; repair checkpoint and restart service.", metadata={"retryable": False})
         try:
             response = predict_placement(mcp_request)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured.
-            if "checkpoint" in str(exc).lower() or "model load" in str(exc).lower():
-                _ANYPLACE_MODEL_LOAD_OPEN = True
             return _anyplace_failure(
                 "mcp_call_failed",
                 f"AnyPlace placement prediction failed: MCP call failed: {exc}",
@@ -2123,17 +2127,8 @@ def build_anyplace_handler(
     return handler
 
 
-_GRASP_FAILURE_KEYS: set[tuple[str, str]] = set()
-_ANYPLACE_MODEL_LOAD_OPEN = False
-_OBSERVE_FAILURES: dict[str, int] = {}
-
 def _observe_handler(context: ToolExecutionContext) -> ToolResult:
     observation = context.observation
-    if observation is None:
-        key = str(context.metadata.get("session_id") or "default")
-        _OBSERVE_FAILURES[key] = _OBSERVE_FAILURES.get(key, 0) + 1
-        if _OBSERVE_FAILURES[key] > 2:
-            return make_tool_result(context, success=False, content="observation circuit open after repeated HTTP 500/empty observations", outputs={"reason":"circuit_open", "retryable":False})
     return make_tool_result(
         context,
         success=True,

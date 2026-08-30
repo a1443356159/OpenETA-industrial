@@ -1560,6 +1560,73 @@ class _FrozenGoalPairCoordinator:
         self.grasp_frontier_candidates = [*preferred, *remaining]
         return len(preferred)
 
+    def restart_grasp_frontier_from_current_state(
+        self,
+        *,
+        failed_candidate_id: str,
+        scene_epoch: int,
+        planning_scene_revision: int,
+    ) -> ToolResult:
+        """Discard stale IK/L5 branches while retaining frozen model poses."""
+
+        if planning_scene_revision != self.grasp_frontier_planning_scene_revision:
+            return ToolResult(
+                False,
+                "The current-state restart no longer matches the PlanningScene revision.",
+                {
+                    "reason": "frozen_grasp_current_state_scene_revision_changed",
+                    "source_planning_scene_revision": (
+                        self.grasp_frontier_planning_scene_revision
+                    ),
+                    "planning_scene_revision": planning_scene_revision,
+                    "model_inference_invoked": False,
+                    "execution_started": False,
+                },
+            )
+        rejected_id = str(failed_candidate_id or "").strip()
+        if rejected_id:
+            self.physically_rejected_grasp_ids.add(rejected_id)
+        candidates = [
+            json.loads(json.dumps(candidate))
+            for candidate_id, candidate in self.grasp_candidate_catalog.items()
+            if candidate_id not in self.physically_rejected_grasp_ids
+        ]
+        if not candidates:
+            return ToolResult(
+                False,
+                "The frozen grasp frontier is exhausted after physical failures.",
+                {
+                    "reason": "frozen_grasp_frontier_exhausted",
+                    "physically_rejected_candidate_ids": sorted(
+                        self.physically_rejected_grasp_ids
+                    ),
+                    "model_inference_invoked": False,
+                    "execution_started": False,
+                },
+            )
+        self.qualifier.cache.invalidate(purpose="grasp")
+        self.qualified_goals_by_grasp.clear()
+        self.grasp_frontier_candidates = candidates
+        self.grasp_frontier_scene_epoch = scene_epoch
+        self.grasp_frontier_planning_scene_revision = planning_scene_revision
+        self.scene_epoch = scene_epoch
+        self.planning_scene_revision = planning_scene_revision
+        self.grasp_frontier_generation += 1
+        return ToolResult(
+            True,
+            "Restarted the frozen grasp frontier from the settled current arm state.",
+            {
+                "frozen_grasp_frontier_current_state_restart": True,
+                "candidate_count": len(candidates),
+                "planning_scene_revision": planning_scene_revision,
+                "physically_rejected_candidate_ids": sorted(
+                    self.physically_rejected_grasp_ids
+                ),
+                "model_inference_invoked": False,
+                "execution_started": False,
+            },
+        )
+
     def prepare_grasp_frontier_expansion(
         self,
         *,
@@ -3077,11 +3144,25 @@ def _qualifying_handler(
                     "planning_scene_revision", frontier_scene_epoch
                 )
             observed_revision = observation_metadata.get("planning_scene_revision")
+            grasp_policy = (
+                memory.get("grasp_candidate_policy")
+                if isinstance(memory, Mapping)
+                else None
+            )
+            current_state_pending = (
+                grasp_policy.get("frozen_grasp_frontier_current_state_pending")
+                if isinstance(grasp_policy, Mapping)
+                else None
+            )
             recovery = memory.get("grasp_recovery") if isinstance(memory, Mapping) else None
             failed_candidate_id = (
-                str(recovery.get("candidate_id") or "")
-                if isinstance(recovery, Mapping)
-                else ""
+                str(current_state_pending.get("physically_rejected_candidate_id") or "")
+                if isinstance(current_state_pending, Mapping)
+                else (
+                    str(recovery.get("candidate_id") or "")
+                    if isinstance(recovery, Mapping)
+                    else ""
+                )
             )
             if (
                 isinstance(observed_revision, int)
@@ -3123,6 +3204,42 @@ def _qualifying_handler(
                         },
                     )
                 frontier_revision = observed_revision
+            current_state_restarted = False
+            if isinstance(current_state_pending, Mapping):
+                # Resolve any authoritative object-pose rebase before
+                # invalidating the current qualification cache.  This avoids
+                # exposing a half-restarted frontier when the scene-revision
+                # proof is unavailable.
+                restart = frozen_pair_coordinator.restart_grasp_frontier_from_current_state(
+                    failed_candidate_id=failed_candidate_id,
+                    scene_epoch=(
+                        frontier_scene_epoch
+                        if isinstance(frontier_scene_epoch, int)
+                        and not isinstance(frontier_scene_epoch, bool)
+                        else 0
+                    ),
+                    planning_scene_revision=(
+                        frontier_revision
+                        if isinstance(frontier_revision, int)
+                        and not isinstance(frontier_revision, bool)
+                        else -1
+                    ),
+                )
+                if not restart.success:
+                    return ToolResult(
+                        False,
+                        "The frozen grasp frontier could not restart from the current state.",
+                        {
+                            **restart.details,
+                            "reason": restart.details.get(
+                                "reason",
+                                "frozen_grasp_current_state_restart_failed",
+                            ),
+                            "model_inference_invoked": False,
+                            "execution_started": False,
+                        },
+                    )
+                current_state_restarted = True
             preferred_parent_count = (
                 frozen_pair_coordinator.prioritize_grasp_frontier_for_parent(failed_candidate_id)
                 if failed_candidate_id
@@ -3147,6 +3264,9 @@ def _qualifying_handler(
                     {
                         "frozen_frontier_failed_parent_candidate_id": (failed_candidate_id),
                         "frozen_frontier_preferred_parent_variant_count": (preferred_parent_count),
+                        "frozen_frontier_current_state_restart": (
+                            current_state_restarted
+                        ),
                     }
                 )
         else:

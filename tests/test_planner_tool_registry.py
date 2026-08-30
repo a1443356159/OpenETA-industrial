@@ -1192,6 +1192,7 @@ def test_host_macro_stops_after_irreversible_release_failure() -> None:
     assert decision.parameters["failure_code"] == (
         "PLACEMENT_RELEASE_POST_DETACH_VERIFICATION_FAILED"
     )
+    assert decision.parameters["terminal_handoff"] is True
     assert decision.metadata["host_obligation"]["schema_version"] == (
         "openeta.smoke_normal_release_stop.v1"
     )
@@ -1213,6 +1214,7 @@ def test_exhausted_frozen_grasp_pool_hands_off_without_model_rerun() -> None:
     assert decision is not None
     assert decision.action == "ask_human"
     assert decision.parameters["failure_code"] == ("CURRENT_FROZEN_MODEL_POOL_INFEASIBLE")
+    assert decision.parameters["terminal_handoff"] is True
     assert decision.metadata["host_obligation"]["status"] == ("stopped_requires_human")
 
 
@@ -1232,6 +1234,7 @@ def test_terminal_gripper_recovery_hands_off_without_vlm_fallthrough() -> None:
     assert decision is not None
     assert decision.action == "ask_human"
     assert decision.parameters["failure_code"] == ("gripper_reopen_reconciliation_failed")
+    assert decision.parameters["terminal_handoff"] is True
     assert decision.metadata["host_obligation"]["status"] == ("stopped_requires_human")
 
 

@@ -17,6 +17,7 @@ from agent.tools import handlers as handlers_module
 from agent.tools.handlers import (
     DEFAULT_SAM3_IMAGE_OUTPUT_ROOT,
     DEFAULT_SAM3_RESULT_OUTPUT_ROOT,
+    SAM3_SUCCESS_CACHE_MAX_ENTRIES,
     build_sam3_handler,
     build_sse_sam3_mcp_segmenter,
     build_stdio_sam3_mcp_segmenter,
@@ -951,6 +952,101 @@ def test_sam3_handler_selects_single_text_candidate_without_vlm_review(
     assert result.details["selection_review"]["decision"] == "select"
     assert result.details["selection_review"]["deterministic_singleton"] is True
     assert result.details["selection_review"]["model_review_invoked"] is False
+
+
+def test_sam3_success_cache_uses_image_bytes_not_reused_path(tmp_path: Path) -> None:
+    source = tmp_path / "current.png"
+    image = Image.open(FIXTURE_IMAGE).convert("RGB")
+    image.save(source)
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+    calls: list[dict] = []
+
+    def segment(request: dict) -> dict:
+        calls.append(dict(request))
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 1,
+                "detections": [
+                    {
+                        "label": "part",
+                        "score": 0.9,
+                        "bbox_xyxy": [10, 10, 20, 20],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 100,
+                    }
+                ],
+                "artifacts": [],
+            },
+        }
+
+    handler = build_sam3_handler(
+        segment,
+        output_root=tmp_path / "images",
+        result_output_root=tmp_path / "results",
+    )
+    parameters = {"mode": "text", "image": str(source), "prompt": "part"}
+    first = handler(_context(dict(parameters)))
+    second = handler(_context(dict(parameters)))
+    changed = image.copy()
+    changed.putpixel((0, 0), (255, 0, 0))
+    changed.save(source)
+    third = handler(_context(dict(parameters)))
+
+    assert first.success is second.success is third.success is True
+    assert len(calls) == 2
+    assert json.loads(Path(first.details["raw_output_ref"]).read_text())["mcp_called"] is True
+    assert json.loads(Path(second.details["raw_output_ref"]).read_text())["mcp_called"] is False
+    assert json.loads(Path(third.details["raw_output_ref"]).read_text())["mcp_called"] is True
+
+
+def test_sam3_success_cache_has_a_bounded_process_lifetime(tmp_path: Path) -> None:
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+    calls: list[dict] = []
+
+    def segment(request: dict) -> dict:
+        calls.append(dict(request))
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 1,
+                "detections": [
+                    {
+                        "label": "part",
+                        "score": 0.9,
+                        "bbox_xyxy": [10, 10, 20, 20],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 100,
+                    }
+                ],
+                "artifacts": [],
+            },
+        }
+
+    handler = build_sam3_handler(
+        segment,
+        output_root=tmp_path / "images",
+        result_output_root=tmp_path / "results",
+    )
+    sources: list[Path] = []
+    source_image = Image.open(FIXTURE_IMAGE).convert("RGB")
+    for index in range(SAM3_SUCCESS_CACHE_MAX_ENTRIES + 1):
+        source = tmp_path / f"observation-{index}.png"
+        image = source_image.copy()
+        image.putpixel((0, 0), (index, 255 - index, 17))
+        image.save(source)
+        sources.append(source)
+        result = handler(
+            _context({"mode": "text", "image": str(source), "prompt": "part"})
+        )
+        assert result.success is True
+
+    replay = handler(
+        _context({"mode": "text", "image": str(sources[0]), "prompt": "part"})
+    )
+
+    assert replay.success is True
+    assert len(calls) == SAM3_SUCCESS_CACHE_MAX_ENTRIES + 2
 
 
 def test_sam3_handler_selects_single_text_candidate_when_reviewer_is_disabled(

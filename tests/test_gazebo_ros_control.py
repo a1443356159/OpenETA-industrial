@@ -804,7 +804,11 @@ class _Tf:
         )
 
 
-def _joint_message(stamp_s: float | None = None):
+def _joint_message(
+    stamp_s: float | None = None,
+    *,
+    velocities: list[float] | None = None,
+):
     header = None
     if stamp_s is not None:
         sec = int(stamp_s)
@@ -816,7 +820,7 @@ def _joint_message(stamp_s: float | None = None):
     return SimpleNamespace(
         name=JOINT_NAMES,
         position=[0.0] * len(JOINT_NAMES),
-        velocity=[],
+        velocity=list(velocities or []),
         header=header,
     )
 
@@ -876,6 +880,32 @@ def test_ros_state_source_waits_for_sample_after_completion_barrier() -> None:
 
     assert terminal.metadata["joint_state_timestamp_s"] == pytest.approx(10.1)
     assert terminal.metadata["tf_timestamp_s"] == pytest.approx(10.1)
+
+
+def test_ros_state_source_waits_until_failed_motion_is_stationary() -> None:
+    tf = _Tf(stamp_s=10.1)
+    source = RosGazeboStateSource(
+        _Node(), tf, config=GazeboControlConfig(), freshness_s=0.2
+    )
+    source.joint_state_callback(
+        _joint_message(10.1, velocities=[0.02] + [0.0] * (len(JOINT_NAMES) - 1))
+    )
+
+    def publish_stationary() -> None:
+        tf.stamp_s = 10.2
+        source.joint_state_callback(
+            _joint_message(10.2, velocities=[0.0] * len(JOINT_NAMES))
+        )
+
+    timer = threading.Timer(0.02, publish_stationary)
+    timer.start()
+    try:
+        terminal = source.wait_stationary_after_action(10.0)
+    finally:
+        timer.join()
+
+    assert terminal.metadata["joint_state_timestamp_s"] == pytest.approx(10.2)
+    assert max(abs(value) for value in terminal.joint_velocities[:7]) == 0.0
 
 
 def test_ros_state_source_fails_closed_without_tf() -> None:
@@ -1423,6 +1453,36 @@ def _recovery_runtime(
     runtime._await = lambda future, timeout_s: future
     runtime.ros_time_s = lambda: 100.0
     return runtime, validity_client, trajectory_client
+
+
+def test_qualification_normalizes_bounded_controller_endpoint_deviation() -> None:
+    state = _arm_state(0.0)
+    state.joint_positions[5] = 2.2340483665
+    runtime = _RosRuntime.__new__(_RosRuntime)
+    runtime.state_source = _StateSource(state)
+    runtime.config = GazeboControlConfig()
+    runtime.planning_scene = SimpleNamespace(
+        authoritative_scene_sha256="authority",
+        world_geometry_sha256="world",
+        attached_geometry_sha256="attached",
+        geometry_verified_ids=(),
+    )
+    runtime._qualification_robot_model_hash = "robot"
+    runtime.qualification_joint_quality = lambda _joint_state: {
+        "ok": True,
+        "min_singular_value": 0.1,
+    }
+    runtime.qualification_scene_sha256 = lambda: "scene"
+
+    joint_state = runtime.qualification_joint_state()
+
+    assert joint_state["positions"][5] == pytest.approx(2.233)
+    assert joint_state["start_state_recovery"]["status"] == (
+        "QUALIFICATION_NORMALIZED"
+    )
+    assert joint_state["start_state_recovery"]["reason_code"] == (
+        "BOUNDED_CONTROLLER_ENDPOINT_NORMALIZATION"
+    )
 
 
 def test_ros_recovery_validates_candidate_then_executes_physical_inset() -> None:

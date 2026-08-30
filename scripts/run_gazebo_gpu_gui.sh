@@ -11,6 +11,10 @@ if ! command -v vglrun >/dev/null 2>&1; then
   echo "VirtualGL (vglrun) is required for the GPU Gazebo client." >&2
   exit 2
 fi
+if ! command -v gz >/dev/null 2>&1; then
+  echo "Gazebo (gz) is required for the operator client." >&2
+  exit 2
+fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 default_gui_config="${script_dir}/../extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/config/gazebo_operator_gui.config"
@@ -25,6 +29,14 @@ export QT_QPA_PLATFORM=xcb
 export QT_OPENGL=desktop
 export __GL_FSAA_MODE="${OPENETA_GAZEBO_FSAA_MODE:-5}"
 export __GL_ALLOW_FXAA_USAGE="${OPENETA_GAZEBO_ALLOW_FXAA:-1}"
+
+wait_for_partition_server() {
+  echo "Waiting for the Gazebo server on partition ${GZ_PARTITION}..." >&2
+  while ! gz service -l 2>/dev/null \
+    | grep -Eq '^/gazebo/worlds$|^/world/[^/]+/control$'; do
+    sleep 0.25
+  done
+}
 
 focus_operator_view() {
   local camera_request
@@ -54,6 +66,7 @@ focus_operator_view() {
   echo "Gazebo GUI started, but its camera service did not become ready." >&2
 }
 
+wait_for_partition_server
 focus_operator_view &
 exec vglrun \
   -d "${OPENETA_VGL_DISPLAY:-egl}" \

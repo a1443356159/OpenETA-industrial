@@ -25,6 +25,9 @@ from .robot_control import (
     ARM_HOME_JOINT_POSITIONS,
     GazeboControlConfig,
     GazeboController,
+    MOTION_FAILURE_SETTLE_INTERVAL_S,
+    MOTION_FAILURE_SETTLE_TIMEOUT_S,
+    MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S,
     MOVEIT_CONTROL_FAILED,
     START_STATE_RECOVERY_TRAJECTORY_S,
     assess_start_state_bounds,
@@ -1502,6 +1505,54 @@ class RosGazeboStateSource:
                     raise last_error
                 time.sleep(min(0.01, remaining_s))
 
+    def wait_stationary_after_action(self, minimum_ros_timestamp_s: float):
+        """Wait for a causal, controller-stationary state after failed motion.
+
+        A failed MoveGroup result may arrive while ros2_control is still
+        braking.  The next frozen candidate must start from the settled state,
+        never from the originally qualified anchor or an in-flight sample.
+        """
+
+        minimum = float(minimum_ros_timestamp_s)
+        if not math.isfinite(minimum):
+            raise RuntimeError("POST_ACTION_STATE_NOT_FRESH")
+        deadline = time.monotonic() + MOTION_FAILURE_SETTLE_TIMEOUT_S
+        last_error: RuntimeError | None = None
+        while True:
+            try:
+                state = self.state(
+                    allow_barrier_ordered_stale=True,
+                    minimum_ros_timestamp_s=minimum,
+                )
+                names = state.metadata.get("joint_names")
+                index = (
+                    {str(name): offset for offset, name in enumerate(names)}
+                    if isinstance(names, (list, tuple))
+                    else {}
+                )
+                velocities = [
+                    float(state.joint_velocities[index[name]])
+                    for name in ARM_JOINTS
+                    if name in index
+                    and index[name] < len(state.joint_velocities)
+                    and math.isfinite(float(state.joint_velocities[index[name]]))
+                ]
+                if (
+                    len(velocities) == len(ARM_JOINTS)
+                    and max(abs(value) for value in velocities)
+                    <= MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+                ):
+                    return state
+                last_error = RuntimeError("POST_ACTION_STATE_NOT_STATIONARY")
+            except RuntimeError as exc:
+                last_error = exc
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0.0:
+                raise last_error or RuntimeError(
+                    "POST_ACTION_STATE_NOT_STATIONARY"
+                )
+            time.sleep(min(MOTION_FAILURE_SETTLE_INTERVAL_S, remaining_s))
+
     def wait_fresh(self, timeout_s: float = 15.0):
         deadline = time.monotonic() + timeout_s
         last_error: Exception | None = None
@@ -1524,6 +1575,9 @@ class RosGazeboController(GazeboController):
             state_provider=runtime.state_source.wait_fresh,
             barrier_ordered_terminal_state_provider=(
                 runtime.state_source.latest_after_action
+            ),
+            failed_motion_terminal_state_provider=(
+                runtime.state_source.wait_stationary_after_action
             ),
             move_action=runtime.move,
             gripper_action=runtime.gripper,
@@ -2229,9 +2283,18 @@ class _RosRuntime:
 
     def qualification_joint_state(self) -> Mapping[str, Any]:
         state = self.state_source.wait_fresh(3.0)
+        start_state_bounds = assess_start_state_bounds(state)
+        if start_state_bounds.get("classification") == "INVALID":
+            raise RuntimeError("START_STATE_INVALID")
         lower = [float(item[1]) for item in ARM_JOINT_BOUNDS]
         upper = [float(item[2]) for item in ARM_JOINT_BOUNDS]
-        positions = [float(value) for value in state.joint_positions[: len(ARM_JOINTS)]]
+        positions = [
+            float(value)
+            for value in (
+                start_state_bounds.get("candidate_positions")
+                or state.joint_positions[: len(ARM_JOINTS)]
+            )
+        ]
         jacobian_quality = self.qualification_joint_quality(
             {"names": list(ARM_JOINTS), "positions": positions}
         )
@@ -2271,6 +2334,14 @@ class _RosRuntime:
             ),
             "jacobian_quality_available": jacobian_quality.get("ok") is True,
             "jacobian_quality_error": jacobian_quality.get("error"),
+            "start_state_recovery": start_state_recovery_record(
+                start_state_bounds,
+                status=(
+                    "QUALIFICATION_NORMALIZED"
+                    if start_state_bounds.get("classification") == "RECOVERABLE"
+                    else "NOT_REQUIRED"
+                ),
+            ),
         }
 
     def qualification_joint_quality(self, joint_state: Mapping[str, Any]) -> Mapping[str, Any]:

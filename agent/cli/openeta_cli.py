@@ -1673,6 +1673,10 @@ class OpenEtaCli:
                 "answer": answer,
             }
         )
+        if params.get("terminal_handoff") is True:
+            self.state.continue_after_human = False
+            print(Theme.dim("terminal handoff recorded; current episode remains stopped"))
+            return
         if self.state.episode_runner is not None:
             self.state.episode_runner.resume_after_human()
         self.state.continue_after_human = True

@@ -10,6 +10,7 @@ from extensions.gazebo.robot_control import (
     ARM_JOINTS,
     JOINT_NAMES,
     START_STATE_BOUNDS_TOLERANCE_RAD,
+    START_STATE_RECOVERY_MAX_VIOLATION_RAD,
     GazeboControlConfig,
     GazeboController,
     MODEL_ID,
@@ -54,7 +55,9 @@ def _bounded_state(arm_positions=None):
         (3.106, "RECOVERABLE"),
         (3.106 + 4.5e-13, "RECOVERABLE"),
         (3.106 + START_STATE_BOUNDS_TOLERANCE_RAD, "RECOVERABLE"),
-        (3.106 + 1.1e-6, "INVALID"),
+        (3.106 + 48.3665e-6, "RECOVERABLE"),
+        (3.106 + START_STATE_RECOVERY_MAX_VIOLATION_RAD, "RECOVERABLE"),
+        (3.106 + START_STATE_RECOVERY_MAX_VIOLATION_RAD + 1e-7, "INVALID"),
     ],
 )
 def test_start_state_bounds_classifies_numeric_boundary_cases(joint_3, classification) -> None:
@@ -66,6 +69,48 @@ def test_start_state_bounds_classifies_numeric_boundary_cases(joint_3, classific
     if classification == "RECOVERABLE":
         assert assessment["candidate_positions"][2] == pytest.approx(3.105)
         assert assessment["joints"][0]["name"] == "joint_3"
+        assert assessment["max_recovery_violation_rad"] == pytest.approx(0.001)
+
+
+def test_controller_exposes_stationary_failed_motion_as_current_state_restart() -> None:
+    start = _bounded_state()
+    terminal = _bounded_state()
+    terminal.joint_positions[5] = 2.2340483665
+    terminal.end_effector_pose["xyz"] = [0.00639, 0.0, 0.5]
+    controller = GazeboController(
+        state_provider=lambda: start,
+        failed_motion_terminal_state_provider=lambda _barrier: terminal,
+        move_action=lambda _goal, _timeout: {
+            "ok": False,
+            "error_code": "MOTION_EXECUTION_FAILED",
+            "motion_outcome": "failed",
+            "moveit_error_code": -4,
+            "planned_point_count": 64,
+            "execution_started": True,
+            "action_completed_ros_time_s": 14.0,
+        },
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0.0, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is False
+    assert receipt["error_code"] == "MOTION_EXECUTION_FAILED"
+    assert receipt["motion_outcome"] == "failed"
+    restart = receipt["current_state_restart"]
+    assert restart["status"] == "PASS"
+    assert restart["reason_code"] == "KNOWN_STATIONARY_TERMINAL_FAILURE"
+    assert restart["start_state_bounds"]["status"] == "RECOVERY_REQUIRED"
+    assert restart["start_state_bounds"]["reason_code"] == (
+        "BOUNDED_CONTROLLER_ENDPOINT_NORMALIZATION"
+    )
 
 
 def test_start_state_bounds_recovers_only_affected_joints() -> None:
