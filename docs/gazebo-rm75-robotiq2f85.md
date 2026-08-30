@@ -29,7 +29,8 @@ parameter for RM75; it is not presented as a real Robotiq/UR adapter.
 
 The profile publishes two RGB-D views.  `top_camera_optical_frame` is the
 parameterized overhead scene camera (edit the `<pose>` in
-`worlds/rm75_robotiq2f85.sdf`, expressed as `x y z roll pitch yaw`).
+`worlds/rm75_robotiq2f85_pickplace.sdf`, expressed as
+`x y z roll pitch yaw`).
 `wrist_camera_optical_frame` is attached through the V description's fixed
 `link_7 -> camera_rolink -> camera_link` chain and follows the end effector.
 Its bracket and camera-body meshes, inertias and default offsets come directly
