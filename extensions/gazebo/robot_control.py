@@ -64,7 +64,7 @@ START_STATE_RECOVERY_INSET_RAD = 1e-3
 START_STATE_RECOVERY_MAX_VIOLATION_RAD = START_STATE_RECOVERY_INSET_RAD
 START_STATE_RECOVERY_TRAJECTORY_S = 1.0
 START_STATE_RECOVERY_TIMEOUT_S = 5.0
-MOTION_SETTLE_RECHECK_TIMEOUT_S = 1.0
+MOTION_SETTLE_RECHECK_TIMEOUT_S = 3.0
 MOTION_SETTLE_RECHECK_INTERVAL_S = 0.1
 MOTION_FAILURE_SETTLE_TIMEOUT_S = 3.0
 MOTION_FAILURE_SETTLE_INTERVAL_S = 0.05
@@ -1464,50 +1464,146 @@ class GazeboController:
                     "exact_terminal_euclidean_with_bounded_numeric_margin"
                 )
                 terminal_reconciliation: dict[str, Any] | None = None
-                joint_names = end.metadata.get("joint_names")
-                joint_index = (
-                    {str(name): index for index, name in enumerate(joint_names)}
-                    if isinstance(joint_names, (list, tuple))
-                    else {}
-                )
-                arm_velocities = [
-                    float(end.joint_velocities[joint_index[name]])
-                    for name in ARM_JOINTS
-                    if name in joint_index
-                    and joint_index[name] < len(end.joint_velocities)
-                    and math.isfinite(
-                        float(end.joint_velocities[joint_index[name]])
+
+                def arm_max_velocity(state: RobotState) -> float | None:
+                    names = state.metadata.get("joint_names")
+                    index = (
+                        {str(name): offset for offset, name in enumerate(names)}
+                        if isinstance(names, (list, tuple))
+                        else {}
                     )
-                ]
-                max_arm_velocity_rad_s = (
-                    max(abs(value) for value in arm_velocities)
-                    if len(arm_velocities) == len(ARM_JOINTS)
-                    else None
+                    velocities = [
+                        float(state.joint_velocities[index[name]])
+                        for name in ARM_JOINTS
+                        if name in index
+                        and index[name] < len(state.joint_velocities)
+                        and math.isfinite(float(state.joint_velocities[index[name]]))
+                    ]
+                    return (
+                        max(abs(value) for value in velocities)
+                        if len(velocities) == len(ARM_JOINTS)
+                        else None
+                    )
+
+                max_arm_velocity_rad_s = arm_max_velocity(end)
+                terminal_state_stationary_verified = (
+                    max_arm_velocity_rad_s is not None
+                    and max_arm_velocity_rad_s <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
                 )
+                restart_state_stationary_verified = (
+                    max_arm_velocity_rad_s is not None
+                    and max_arm_velocity_rad_s <= MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+                )
+                settling_recheck: dict[str, Any] | None = None
+                if (
+                    ok
+                    and not bool(result.get("plan_only", False))
+                    and (
+                        not target_verified
+                        or (
+                            barrier_ordered_terminal_state
+                            and not terminal_state_stationary_verified
+                        )
+                    )
+                ):
+                    initial_position_error_m = position_error_m
+                    initial_orientation_error_rad = orientation_error_rad
+                    initial_max_arm_velocity_rad_s = max_arm_velocity_rad_s
+                    best_position_error_m = position_error_m
+                    best_orientation_error_rad = orientation_error_rad
+                    sample_count = 0
+                    recheck_started = time.monotonic()
+                    recheck_status = "timeout"
+                    recheck_error_type: str | None = None
+                    while True:
+                        remaining_s = MOTION_SETTLE_RECHECK_TIMEOUT_S - (
+                            time.monotonic() - recheck_started
+                        )
+                        if remaining_s <= 0.0:
+                            break
+                        time.sleep(min(MOTION_SETTLE_RECHECK_INTERVAL_S, remaining_s))
+                        try:
+                            if (
+                                barrier_ordered_terminal_state
+                                and self.barrier_ordered_terminal_state_provider is not None
+                                and isinstance(action_barrier_value, (int, float))
+                            ):
+                                sample = self.barrier_ordered_terminal_state_provider(
+                                    float(action_barrier_value)
+                                )
+                            else:
+                                sample = self.state_provider()
+                        except Exception as exc:  # noqa: BLE001 - sensor boundary.
+                            recheck_status = "state_unavailable"
+                            recheck_error_type = type(exc).__name__
+                            break
+                        sample_count += 1
+                        end = sample
+                        (
+                            position_error_m,
+                            orientation_error_rad,
+                            horizontal_error_m,
+                            vertical_error_m,
+                            target_verified,
+                        ) = verification_metrics(sample)
+                        max_arm_velocity_rad_s = arm_max_velocity(sample)
+                        terminal_state_stationary_verified = (
+                            max_arm_velocity_rad_s is not None
+                            and max_arm_velocity_rad_s <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
+                        )
+                        restart_state_stationary_verified = (
+                            max_arm_velocity_rad_s is not None
+                            and max_arm_velocity_rad_s <= MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+                        )
+                        best_position_error_m = min(best_position_error_m, position_error_m)
+                        best_orientation_error_rad = min(
+                            best_orientation_error_rad, orientation_error_rad
+                        )
+                        if target_verified and (
+                            not barrier_ordered_terminal_state or terminal_state_stationary_verified
+                        ):
+                            recheck_status = "target_verified"
+                            break
+                        if (
+                            barrier_ordered_terminal_state
+                            and terminal_state_stationary_verified
+                            and not target_verified
+                        ):
+                            recheck_status = "stationary_target_not_reached"
+                            break
+                    if (
+                        recheck_status == "timeout"
+                        and barrier_ordered_terminal_state
+                        and restart_state_stationary_verified
+                        and not target_verified
+                    ):
+                        recheck_status = "stationary_target_not_reached"
+                    settling_recheck = {
+                        "attempted": True,
+                        "status": recheck_status,
+                        "sample_count": sample_count,
+                        "timeout_s": MOTION_SETTLE_RECHECK_TIMEOUT_S,
+                        "interval_s": MOTION_SETTLE_RECHECK_INTERVAL_S,
+                        "elapsed_s": time.monotonic() - recheck_started,
+                        "initial_position_error_m": initial_position_error_m,
+                        "initial_orientation_error_rad": (initial_orientation_error_rad),
+                        "initial_max_arm_velocity_rad_s": (initial_max_arm_velocity_rad_s),
+                        "final_max_arm_velocity_rad_s": max_arm_velocity_rad_s,
+                        "best_position_error_m": best_position_error_m,
+                        "best_orientation_error_rad": best_orientation_error_rad,
+                    }
+                    if recheck_error_type is not None:
+                        settling_recheck["error_type"] = recheck_error_type
                 if barrier_ordered_terminal_state:
-                    terminal_state_stationary_verified = (
-                        max_arm_velocity_rad_s is not None
-                        and max_arm_velocity_rad_s
-                        <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
-                    )
-                    restart_state_stationary_verified = (
-                        max_arm_velocity_rad_s is not None
-                        and max_arm_velocity_rad_s
-                        <= MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
-                    )
-                    barrier_state_verified = (
-                        restart_state_stationary_verified
-                        if failed_motion_terminal_sample
-                        else terminal_state_stationary_verified
-                    )
                     action_evidence.update(
                         {
                             "terminal_state_source": (
-                                "barrier_ordered_action_terminal_sample"
+                                "barrier_ordered_post_action_settling_sample"
+                                if settling_recheck is not None
+                                and settling_recheck["sample_count"] > 0
+                                else "barrier_ordered_action_terminal_sample"
                             ),
-                            "terminal_state_action_barrier_ros_time_s": float(
-                                action_barrier_value
-                            ),
+                            "terminal_state_action_barrier_ros_time_s": float(action_barrier_value),
                             "terminal_state_action_barrier_source": (
                                 "action_completed_ros_time_s"
                                 if completion_barrier_available
@@ -1520,6 +1616,11 @@ class GazeboController:
                                 restart_state_stationary_verified
                             ),
                         }
+                    )
+                    barrier_state_verified = (
+                        restart_state_stationary_verified
+                        if failed_motion_terminal_sample or not target_verified
+                        else terminal_state_stationary_verified
                     )
                     if not barrier_state_verified:
                         ok = False
@@ -1534,30 +1635,21 @@ class GazeboController:
                     and result.get("moveit_error_code") == MOVEIT_CONTROL_FAILED
                     and target_verified
                     and max_arm_velocity_rad_s is not None
-                    and max_arm_velocity_rad_s
-                    <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
+                    and max_arm_velocity_rad_s <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
                 )
                 if control_failed_at_verified_terminal:
                     original_error = str(error or "MOTION_EXECUTION_FAILED")
                     ok = True
                     error = None
                     terminal_reconciliation = {
-                        "schema_version": (
-                            "openeta.gazebo.motion_terminal_reconciliation.v1"
-                        ),
+                        "schema_version": ("openeta.gazebo.motion_terminal_reconciliation.v1"),
                         "status": "PASS",
-                        "reason_code": (
-                            "CONTROL_FAILED_AFTER_EXACT_TARGET_REACHED"
-                        ),
-                        "proof_boundary": (
-                            "fresh_terminal_tf_and_stationary_arm_joint_state"
-                        ),
+                        "reason_code": ("CONTROL_FAILED_AFTER_EXACT_TARGET_REACHED"),
+                        "proof_boundary": ("fresh_terminal_tf_and_stationary_arm_joint_state"),
                         "original_error_code": original_error,
                         "moveit_error_code": MOVEIT_CONTROL_FAILED,
                         "execution_started": True,
-                        "planned_point_count": int(
-                            result.get("planned_point_count") or 0
-                        ),
+                        "planned_point_count": int(result.get("planned_point_count") or 0),
                         "target_verified": True,
                         "max_arm_velocity_rad_s": max_arm_velocity_rad_s,
                         "max_arm_velocity_tolerance_rad_s": (
@@ -1566,70 +1658,6 @@ class GazeboController:
                         "position_error_m": position_error_m,
                         "orientation_error_rad": orientation_error_rad,
                     }
-                settling_recheck: dict[str, Any] | None = None
-                if (
-                    ok
-                    and not bool(result.get("plan_only", False))
-                    and not target_verified
-                ):
-                    initial_position_error_m = position_error_m
-                    initial_orientation_error_rad = orientation_error_rad
-                    best_position_error_m = position_error_m
-                    best_orientation_error_rad = orientation_error_rad
-                    sample_count = 0
-                    recheck_started = time.monotonic()
-                    recheck_status = "timeout"
-                    recheck_error_type: str | None = None
-                    while True:
-                        remaining_s = (
-                            MOTION_SETTLE_RECHECK_TIMEOUT_S
-                            - (time.monotonic() - recheck_started)
-                        )
-                        if remaining_s <= 0.0:
-                            break
-                        time.sleep(
-                            min(MOTION_SETTLE_RECHECK_INTERVAL_S, remaining_s)
-                        )
-                        try:
-                            sample = self.state_provider()
-                        except Exception as exc:  # noqa: BLE001 - sensor boundary.
-                            recheck_status = "state_unavailable"
-                            recheck_error_type = type(exc).__name__
-                            break
-                        sample_count += 1
-                        end = sample
-                        (
-                            position_error_m,
-                            orientation_error_rad,
-                            horizontal_error_m,
-                            vertical_error_m,
-                            target_verified,
-                        ) = verification_metrics(sample)
-                        best_position_error_m = min(
-                            best_position_error_m, position_error_m
-                        )
-                        best_orientation_error_rad = min(
-                            best_orientation_error_rad, orientation_error_rad
-                        )
-                        if target_verified:
-                            recheck_status = "target_verified"
-                            break
-                    settling_recheck = {
-                        "attempted": True,
-                        "status": recheck_status,
-                        "sample_count": sample_count,
-                        "timeout_s": MOTION_SETTLE_RECHECK_TIMEOUT_S,
-                        "interval_s": MOTION_SETTLE_RECHECK_INTERVAL_S,
-                        "elapsed_s": time.monotonic() - recheck_started,
-                        "initial_position_error_m": initial_position_error_m,
-                        "initial_orientation_error_rad": (
-                            initial_orientation_error_rad
-                        ),
-                        "best_position_error_m": best_position_error_m,
-                        "best_orientation_error_rad": best_orientation_error_rad,
-                    }
-                    if recheck_error_type is not None:
-                        settling_recheck["error_type"] = recheck_error_type
                 if ok and not bool(result.get("plan_only", False)) and not target_verified:
                     ok = False
                     error = "MOTION_TARGET_NOT_REACHED"

@@ -1135,12 +1135,102 @@ def test_controller_accepts_stationary_action_ordered_terminal_after_success() -
     assert result.payload["terminal_state_stationary_verified"] is True
 
 
-def test_controller_rejects_moving_action_ordered_terminal_as_unknown() -> None:
+def test_controller_waits_for_stationary_state_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     moving = _state()
     moving.joint_velocities[0] = 0.01
+    terminal_states = iter((moving, _state()))
+    monkeypatch.setattr("extensions.gazebo.robot_control.time.sleep", lambda _s: None)
     result = GazeboController(
         state_provider=_state,
-        barrier_ordered_terminal_state_provider=lambda _barrier: moving,
+        barrier_ordered_terminal_state_provider=lambda _barrier: next(terminal_states),
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "execution_started": True,
+            "planned_point_count": 2,
+            "motion_outcome": "completed",
+            "action_started_ros_time_s": 12.5,
+        },
+    ).execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0.0, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        }
+    )
+
+    assert result.ok is True
+    assert result.error_code is None
+    assert result.payload["settling_recheck"]["status"] == "target_verified"
+    assert result.payload["settling_recheck"]["initial_max_arm_velocity_rad_s"] == (
+        pytest.approx(0.01)
+    )
+    assert result.payload["settling_recheck"]["final_max_arm_velocity_rad_s"] == (
+        pytest.approx(0.0)
+    )
+    assert result.payload["terminal_state_stationary_verified"] is True
+
+
+def test_controller_restarts_from_settled_state_when_success_receipt_misses_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start, moving, settled = _bounded_state(), _bounded_state(), _bounded_state()
+    moving.end_effector_pose["xyz"] = [0.02, 0.0, 0.5]
+    moving.joint_velocities[0] = 0.01
+    settled.end_effector_pose["xyz"] = [0.015, 0.0, 0.5]
+    terminal_states = iter((moving, settled))
+    monkeypatch.setattr("extensions.gazebo.robot_control.time.sleep", lambda _s: None)
+
+    result = GazeboController(
+        state_provider=lambda: start,
+        barrier_ordered_terminal_state_provider=lambda _barrier: next(terminal_states),
+        move_action=lambda _goal, _timeout: {
+            "ok": True,
+            "reached_goal": True,
+            "execution_started": True,
+            "planned_point_count": 2,
+            "motion_outcome": "completed",
+            "action_completed_ros_time_s": 14.0,
+        },
+    ).execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0.0, 0.0, 0.5],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            },
+        }
+    )
+
+    assert result.ok is False
+    assert result.error_code == "MOTION_TARGET_NOT_REACHED"
+    assert result.payload["settling_recheck"]["status"] == ("stationary_target_not_reached")
+    assert result.payload["restart_state_stationary_verified"] is True
+    assert result.payload["current_state_restart"]["status"] == "PASS"
+
+
+def test_controller_keeps_unsettled_action_ordered_terminal_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start, moving = _state(), _state()
+    moving.joint_velocities[0] = 0.01
+    calls = 0
+
+    def terminal_then_unavailable(_barrier):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return moving
+        raise RuntimeError("JOINT_STATE_TIMEOUT")
+
+    monkeypatch.setattr("extensions.gazebo.robot_control.time.sleep", lambda _s: None)
+    result = GazeboController(
+        state_provider=lambda: start,
+        barrier_ordered_terminal_state_provider=terminal_then_unavailable,
         move_action=lambda _goal, _timeout: {
             "ok": True,
             "reached_goal": True,
@@ -1163,6 +1253,7 @@ def test_controller_rejects_moving_action_ordered_terminal_as_unknown() -> None:
     assert result.error_code == "MOTION_OUTCOME_UNKNOWN"
     assert result.payload["reconciliation_required"] is True
     assert result.payload["terminal_state_stationary_verified"] is False
+    assert "current_state_restart" not in result.payload
 
 
 def test_controller_close_is_idempotent() -> None:
