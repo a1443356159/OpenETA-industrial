@@ -288,7 +288,7 @@ def test_pose_diversity_scheduler_caches_pairwise_distances(monkeypatch) -> None
     assert calls <= 32 * 31 // 2
 
 
-def test_default_grasp_ladder_reaches_256_before_implicit_pool_exhaustion() -> None:
+def test_default_grasp_ladder_caps_at_128_before_implicit_pool_exhaustion() -> None:
     descriptors = []
     for index in range(512):
         candidate = _candidate(index, score=512.0 - index)
@@ -303,7 +303,7 @@ def test_default_grasp_ladder_reaches_256_before_implicit_pool_exhaustion() -> N
 
     waves = schedule_candidate_waves(descriptors, purpose="grasp")
 
-    assert DEFAULT_GRASP_WAVES == (4, 8, 16, 32, 64, 128, 256)
+    assert DEFAULT_GRASP_WAVES == (4, 8, 16, 32, 64, 128)
     assert [wave.cumulative_per_branch for wave in waves] == [
         4,
         8,
@@ -311,7 +311,6 @@ def test_default_grasp_ladder_reaches_256_before_implicit_pool_exhaustion() -> N
         32,
         64,
         128,
-        256,
         512,
     ]
     assert [len(wave.candidates) for wave in waves] == [
@@ -321,8 +320,7 @@ def test_default_grasp_ladder_reaches_256_before_implicit_pool_exhaustion() -> N
         16,
         32,
         64,
-        128,
-        256,
+        384,
     ]
 
 
