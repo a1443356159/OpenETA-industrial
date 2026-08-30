@@ -76,8 +76,22 @@ silently replaced by a reachability verdict.
 The first grasp that completes its paired placement L5 proof is executed.
 Untouched candidates remain in the same frozen provider frontier. A
 candidate-linked execution failure resumes that frontier through an explicit
-`model_inference=false` request and proves the next complete pair. SAM3,
-AnyPlace, and the grasp model are not rerun unless the scene actually changed
+`model_inference=false` request and proves the next complete pair from an
+authoritative `current_state_restart`. The restart is admitted only after
+causal post-action robot samples settle: a settled non-target state is
+recoverable, while an unproven state stays unknown and fails closed instead of
+being classified as candidate geometry.
+
+If the failed physical attempt moved a still-detached target, recovery first
+synchronizes its measured Gazebo pose into the PlanningScene. Remaining grasp
+poses are rigidly rebased from the frozen source pose to the measured pose,
+but cached placement goals stay in their original physical world frame.
+Pair compilation removes stale model/object motion transforms before applying
+the measured attachment transform; otherwise the destination would be moved a
+second time. The original candidate ID, failed-candidate exclusion, source and
+destination scene revisions, and rebase proof are retained in the artifact.
+SAM3, AnyPlace, and the grasp model are not rerun unless the scene evidence is
+actually stale, the agent deliberately requests new perception after feedback,
 or the frozen pool was exhausted.
 
 Only after every applicable fast wave has failed does v3 use six fixed low-discrepancy

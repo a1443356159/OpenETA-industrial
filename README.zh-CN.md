@@ -23,9 +23,11 @@ OpenETA 将从数字智能体（Digital Agent）到物理智能体（Physical Ag
 
 ## 最新动态
 
-- **2026-08-29** — **工业 `multi_normal` 发行链路：** 任务中立的 RM75/Robotiq Gazebo
+- **2026-08-31** — **工业 `multi_normal` 发行链路：** 任务中立的 RM75/Robotiq Gazebo
   场景现已支持人类通过真实 TUI 输入多物品分拣任务。发行门槛使用 GraspGenX、AnyPlace、
-  确定性的 `fast_v3` 资格漏斗、原生接触证明和冻结前沿恢复。
+  确定性的 `fast_v3` 资格漏斗、原生接触证明、基于当前实测状态的冻结前沿恢复，以及
+  每轮隔离的 NVIDIA Gazebo GUI。代表性人工 TUI 任务已连续通过三轮，每轮均为 22 次
+  Agent 自主选择的工具调用、零 Host 代决策。
 - **2026-08-03** — **OpenETA for Codex：** 我们发布了
   [`openeta-light`](https://github.com/OpenMOSS/OpenETA/tree/openeta-light)
   分支，通过六个类型化工具与版本化 Operator 上下文，将 Codex TUI 接入 LIBERO。使用

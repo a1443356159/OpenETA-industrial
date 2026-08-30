@@ -16,8 +16,11 @@ calibration maps it to aperture: closed 0 m, active opening 0.0425 m, and
 maximum aperture 0.085 m. Gazebo Harmonic does not propagate the complete
 2F-85 linkage reliably from one imported URDF mimic command, so the
 simulation-only action adapter expands the active-joint command to all six
-vendor multiplier targets and drives six Gazebo position systems. Planner and
-MCP callers still use the standard one-joint
+vendor multiplier targets and drives six Gazebo position systems from one
+common closure coordinate. It never freezes or advances one side independently:
+one-pad contact is a normal intermediate state, bounded common preload and
+reduced common motion provide simulated compliance, and bilateral sustained
+contact admits attach. Planner and MCP callers still use the standard one-joint
 `control_msgs/action/ParallelGripperCommand` endpoint; no Gazebo command topic
 is exposed in the planner-facing schema.
 
@@ -41,11 +44,24 @@ mounting pose and has no controller. Their ROS topics are:
 The OpenETA observation contains both camera frames; `gripper_mount_link` is
 only the mechanical gripper mounting link and is not used as a camera label.
 
+The checked-in world source is
+`extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/worlds/rm75_robotiq2f85_pickplace.sdf`.
+The task-neutral `multi_normal` binding is selected by
+`extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/config/acceptance_scenes.json`.
+At launch, `acceptance_scene_world.py` compiles one authoritative collision
+contract from that world and materializes both Gazebo collision geometry and
+MoveIt `CollisionObject` payloads. Visual-only alignment is not accepted as
+collision evidence; geometry identity and readback hashes are recorded in the
+PlanningScene receipt.
+
 The complete launch starts Gazebo Harmonic, spawns
 `rm75_robotiq_2f85_sim_v1`, activates the three ros2_control controllers in
 dependency order, then starts MoveIt and the RGB-D bridge with simulation
 time. Arm trajectories use collision-enabled MoveIt planning at 30% of the
-declared joint velocity and acceleration limits. Run the final task-neutral
+declared joint velocity and acceleration limits. DART
+(`gz-physics-dartsim-plugin`) is the stable default physics engine; Bullet
+remains an explicit development override through `OPENETA_GZ_PHYSICS_ENGINE`
+and is not the validated release default. Run the final task-neutral
 release acceptance through the `multi_normal` entry point:
 
 ```bash
@@ -61,3 +77,8 @@ port, records immutable environment and cleanup receipts, and terminates only
 process groups proven to belong to that run. See
 [`gazebo-normal-acceptance.md`](gazebo-normal-acceptance.md) for the complete
 model, planning and physical PASS contract.
+
+When the operator GUI is enabled, the runner passes the same partition to
+`scripts/run_gazebo_gpu_gui.sh`. That launcher waits for the current Gazebo
+server before opening a VirtualGL/OGRE2 client on the VNC display, so an older
+server or an early empty GUI cannot become the visible authority.

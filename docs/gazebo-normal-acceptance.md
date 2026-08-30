@@ -67,7 +67,21 @@ retry. L5 plan-only attempts are serialized in deterministic physical-quality
 order. A candidate L5 failure advances to the next candidate and then the next
 wave; the search stops at the first complete grasp/place proof. A later
 candidate-linked execution failure resumes the unvisited frozen provider
-frontier with `model_inference=false`.
+frontier with `model_inference=false`. The action adapter first waits for
+causal post-action joint samples to settle. A settled target state is success;
+a settled non-target state is a recoverable `current_state_restart`; absence
+of a provable settled state remains unknown and cannot be relabelled as an
+unreachable candidate.
+
+Recovery qualification starts from the measured current joint state, not the
+pre-action state or named home. If a failed close moved a still-detached
+object, the authoritative Gazebo pose is synchronized into the PlanningScene
+and the remaining frozen grasp poses are rigidly rebased to that pose. Frozen
+placement goals remain physical world goals: stale
+`model_object_motion_world_transform` and `object_motion_world_transform`
+metadata is removed before pair compilation so the destination is never moved
+twice. Candidate IDs and both the original and rebased evidence remain
+auditable.
 Infrastructure timeout/error is health-checked and retried once, then
 terminates the run as infrastructure failure rather than “unreachable”.
 
@@ -104,6 +118,13 @@ as proof of a geometric cause. Ordinary portable-object stages expose only the
 single relevant scene image; multi-view reasoning is reserved for an explicit
 articulated-object probe.
 
+The normal agent runtime retains its compatibility budgets of 100 planner
+turns and 200 concrete tool calls. There is no episode-wide circuit breaker
+that converts repeated observe, GraspGenX, or AnyPlace failures into hidden
+task control. Typed subsystem retries and evidence freshness rules remain
+local; when evidence cannot prove a safe continuation, the agent may observe,
+ask the operator, change strategy, or terminate based on the real feedback.
+
 ## Final acceptance
 
 The release gate uses one task-neutral physical scene: `multi_normal`. The
@@ -132,6 +153,10 @@ interactive `human_tui` mode and follow
 The canonical entry point starts a case-owned Gazebo operator GUI on the GPU
 VNC desktop by default. Set `OPENETA_GAZEBO_OPERATOR_GUI=0` only for unattended
 CI; this does not change the simulator server or qualification executor.
+The GUI process inherits the case's `GZ_PARTITION` and waits until that exact
+partition exposes a Gazebo world/server service before starting the client.
+It is then launched through VirtualGL, while GUI latency remains outside the
+qualification executor.
 
 When the planner provider is unavailable, the same perception, frozen-pool,
 qualification, MoveIt, and physical chain can be exercised without a VLM:
@@ -153,3 +178,9 @@ The wrapper validates Python, ROS, Gazebo, overlay provenance, provider
 endpoints, and checkout consistency before starting an isolated run. Use
 `--verify-only` to re-verify an existing evidence directory without launching
 the environment.
+
+The validated 2026-08-31 release baseline is implementation commit `3a70294`.
+Three consecutive GPU-GUI `human_tui` runs of the representative two-item work
+order passed with 22 agent-selected tools each and zero host dispatches; exact
+paths, timings, token counts, approval procedure, and cleanup checks are
+recorded in the [operator reproduction guide](multi-normal-tui-reproduction.md).

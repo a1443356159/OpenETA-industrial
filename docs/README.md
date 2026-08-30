@@ -24,6 +24,11 @@ SAM3, MoveIt, and the `fast_v3` qualification profile. AnyGrasp remains availabl
 backend evaluation. The repository-wide rollback default may remain `legacy`; the release runner
 selects `fast_v3` explicitly.
 
+The validated implementation baseline is `3a70294` (2026-08-31). Three consecutive GPU-GUI
+`human_tui` runs of the representative wrench/bolt work order passed with 22 agent-selected tools
+and zero host dispatches each. The operator runbook records the exact server path, SSH/VNC tunnel,
+health and VirtualGL checks, prompt, approvals, report queries, timings, tokens, and evidence roots.
+
 ## Framework and interfaces
 
 | Document | Purpose |

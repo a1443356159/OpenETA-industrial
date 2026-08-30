@@ -32,10 +32,12 @@ change reality.
 
 ## What's New
 
-- **2026-08-29** — **Industrial `multi_normal` release path:** The task-neutral RM75/Robotiq
+- **2026-08-31** — **Industrial `multi_normal` release path:** The task-neutral RM75/Robotiq
   Gazebo scene now accepts human-authored multi-object sorting requests through the real TUI. The
   release gate uses GraspGenX, AnyPlace, deterministic `fast_v3` qualification, native contact
-  proof, and frozen-frontier recovery.
+  proof, measured-current-state frozen-frontier recovery, and a case-isolated NVIDIA Gazebo GUI.
+  Three consecutive representative human-TUI runs passed with 22 agent-selected tools and zero
+  host dispatches each.
 - **2026-08-03** — **OpenETA for Codex:** We released the
   [`openeta-light`](https://github.com/OpenMOSS/OpenETA/tree/openeta-light)
   branch, which connects the Codex TUI to LIBERO through six typed tools and a

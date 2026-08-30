@@ -19,6 +19,13 @@ receipts, and cleanup evidence for each case. Scripted approvals are labelled
 `scripted_tui`; interactive operator approvals are labelled `human_gated` with
 source `human`. The verifier never reports one as the other.
 
+The operator GUI is case-owned but not acceptance-critical. Its launcher waits
+for a world/server service on the current case's `GZ_PARTITION` before opening
+the VirtualGL Gazebo client. Cleanup must prove that the client stayed live
+until case cleanup, exited with its owned process group, and did not change a
+protected ROS graph. A visible empty or wrong-partition client is therefore a
+startup failure, not evidence about the robot task.
+
 The no-VLM `smoke_normal` profile calls the same real external model services
 and native-contact chain, but is control-layer evidence only. It does not
 replace the normal agentic acceptance defined by

@@ -180,9 +180,11 @@ Current runtime pieces:
   episodes. `ToolFeedbackEpisodeEnvironment` feeds bound-tool summaries into
   the next CLI planner turn when no simulator-owned episode environment is
   active; `DummyEpisodeEnvironment` remains a test compatibility subclass.
-  The runner owns separate resource budgets: 50 concrete tool calls, a
-  600-second wall-clock deadline, and 5,000,000 cumulative model tokens, plus a
-  compatibility `max_turns=100` guardrail. The agent can end an episode with
+  The runner owns separate resource budgets: 200 concrete tool calls, a
+  3,600-second wall-clock deadline, and 5,000,000 cumulative model tokens, plus a
+  compatibility `max_turns=100` guardrail. A concrete acceptance profile may
+  raise the token ceiling without narrowing the 100-turn / 200-tool behavior.
+  The agent can end an episode with
   `response::task_complete` or explicit completion parameters, while
   env/checker feedback can force `terminated`/`truncated`. Each turn runs in a
   daemon worker behind the remaining episode deadline; timeout abandons the
