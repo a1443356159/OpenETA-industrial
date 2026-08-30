@@ -510,6 +510,205 @@ def test_frozen_grasp_frontier_expansion_bypasses_provider_inference() -> None:
     assert qualifier_calls[0]["l5_min_pass_target"] == 1
 
 
+def test_failed_close_rebases_frozen_frontier_even_when_request_has_current_revision() -> None:
+    calls: list[tuple] = []
+
+    class Qualifier:
+        def qualify_result(self, result, **_kwargs):
+            result.details["qualification_profile"] = "fast_v3"
+            result.details["qualification_stop_reason"] = "complete_l5_pass_found"
+            return result
+
+    class Coordinator:
+        object_goals = [{"id": "p0"}]
+        grasp_branch_limit = 2
+
+        def rebase_grasp_frontier_from_target_pose_sync(
+            self,
+            receipt,
+            *,
+            scene_epoch,
+            planning_scene_revision,
+            failed_candidate_id,
+        ):
+            calls.append(
+                (
+                    "rebase",
+                    receipt["planning_scene_target_pose_sync"]["revision"],
+                    scene_epoch,
+                    planning_scene_revision,
+                    failed_candidate_id,
+                )
+            )
+            return ToolResult(True, "rebased", {})
+
+        def prioritize_grasp_frontier_for_parent(self, candidate_id):
+            calls.append(("prioritize", candidate_id))
+            return 2
+
+        def prepare_grasp_frontier_expansion(
+            self, *, scene_epoch, planning_scene_revision
+        ):
+            calls.append(("prepare", scene_epoch, planning_scene_revision))
+            return ToolResult(
+                True,
+                "frozen",
+                {
+                    "grasp_candidates": [{"id": "g2"}],
+                    "model_inference_invoked": False,
+                    "scene_revision": planning_scene_revision,
+                },
+            )
+
+        def update_grasp_frontier(
+            self,
+            _provider_result,
+            _qualified_result,
+            *,
+            scene_epoch,
+            planning_scene_revision,
+        ):
+            calls.append(("update", scene_epoch, planning_scene_revision))
+
+        def filter_grasps(
+            self,
+            result,
+            *,
+            scene_epoch,
+            planning_scene_revision,
+            source,
+        ):
+            del source
+            calls.append(("filter", scene_epoch, planning_scene_revision))
+            return result
+
+    wrapped = _qualifying_handler(
+        lambda _context: (_ for _ in ()).throw(
+            AssertionError("frozen frontier must not invoke the grasp provider")
+        ),
+        Qualifier(),
+        purpose="grasp",
+        frozen_pair_coordinator=Coordinator(),
+    )
+    pose_sync = {
+        "planning_scene_target_pose_sync": {"revision": 8},
+        "detachable_joint": {"state": "detached"},
+    }
+    context = ToolExecutionContext(
+        name="grasp_pose_estimate",
+        spec=build_default_tool_registry().get("grasp_pose_estimate"),
+        parameters={
+            "mode": "frozen_frontier",
+            "model_inference": False,
+            # The host already publishes the post-close revision.  The
+            # explicit pending proof, not another revision mismatch, must
+            # still trigger the rigid object-motion rebase.
+            "scene_revision": 8,
+        },
+        observation=EnvObservation(
+            task="pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"planning_scene_revision": 8},
+        ),
+        metadata={
+            "supervision_context": {
+                "memory": {
+                    "scene_epoch": 5,
+                    "grasp_candidate_policy": {
+                        "frozen_grasp_frontier_rebase_pending": {
+                            "schema_version": (
+                                "openeta.frozen_grasp_frontier_rebase_pending.v1"
+                            ),
+                            "physically_rejected_candidate_id": "failed-grasp",
+                        }
+                    },
+                    "planning_scene_target_pose_sync": pose_sync,
+                }
+            }
+        },
+    )
+
+    result = wrapped(context)
+
+    assert result.success is True
+    assert result.details["frozen_frontier_object_pose_rebased"] is True
+    assert result.details["frozen_frontier_failed_parent_candidate_id"] == (
+        "failed-grasp"
+    )
+    assert calls == [
+        ("rebase", 8, 5, 8, "failed-grasp"),
+        ("prioritize", "failed-grasp"),
+        ("prepare", 5, 8),
+        ("update", 5, 8),
+        ("filter", 5, 8),
+    ]
+
+
+def test_failed_close_rebase_proof_failure_stops_before_stale_qualification() -> None:
+    calls: list[str] = []
+
+    class Coordinator:
+        object_goals = [{"id": "p0"}]
+
+        def rebase_grasp_frontier_from_target_pose_sync(self, *_args, **_kwargs):
+            calls.append("rebase")
+            return ToolResult(
+                False,
+                "missing proof",
+                {"reason": "frozen_grasp_frontier_rebase_proof_missing"},
+            )
+
+        def prepare_grasp_frontier_expansion(self, **_kwargs):
+            calls.append("prepare")
+            raise AssertionError("stale candidates must not be qualified")
+
+    wrapped = _qualifying_handler(
+        lambda _context: (_ for _ in ()).throw(
+            AssertionError("frozen frontier must not invoke the grasp provider")
+        ),
+        SimpleNamespace(),
+        purpose="grasp",
+        frozen_pair_coordinator=Coordinator(),
+    )
+    context = ToolExecutionContext(
+        name="grasp_pose_estimate",
+        spec=build_default_tool_registry().get("grasp_pose_estimate"),
+        parameters={
+            "mode": "frozen_frontier",
+            "model_inference": False,
+            "scene_revision": 8,
+        },
+        observation=EnvObservation(
+            task="pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"planning_scene_revision": 8},
+        ),
+        metadata={
+            "supervision_context": {
+                "memory": {
+                    "scene_epoch": 5,
+                    "grasp_candidate_policy": {
+                        "frozen_grasp_frontier_rebase_pending": {
+                            "physically_rejected_candidate_id": "failed-grasp"
+                        }
+                    },
+                }
+            }
+        },
+    )
+
+    result = wrapped(context)
+
+    assert result.success is False
+    assert result.details["reason"] == (
+        "frozen_grasp_frontier_rebase_proof_missing"
+    )
+    assert result.details["model_inference_invoked"] is False
+    assert calls == ["rebase"]
+
+
 def test_qualification_infrastructure_error_is_not_reported_as_unreachable() -> None:
     class Qualifier:
         qualification_profile = "fast_v3"

@@ -171,9 +171,9 @@ def test_new_grasp_pair_replays_cached_model_motion_only_for_predicted_attachmen
             "schema_version": "openeta.frozen_object_motion_rebase.v1"
         },
     }
-    rebased.pop("object_motion_world_transform")
     _restore_frozen_model_motion_for_predicted_pair(rebased)
     assert "object_motion_world_transform" not in rebased
+    assert "model_object_motion_world_transform" not in rebased
 
 
 def test_host_compiles_every_full_plan_pass_into_one_equal_status_queue() -> None:
@@ -484,6 +484,10 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
         solver_profile="kdl_fast",
     )
     grasps = [{"id": f"g{index}"} for index in range(4)]
+    grasps[0]["frozen_object_motion_rebase"] = {
+        "schema_version": "openeta.frozen_object_motion_rebase.v1",
+        "model_inference_invoked": False,
+    }
     proofs: dict[str, dict[str, Any]] = {}
     for grasp in grasps:
         grasp_id = grasp["id"]
@@ -525,6 +529,15 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
                 "translation_xyz": [0.45 + index * 0.001, 0.0, 0.43],
                 "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
             },
+            "frozen_goal_frame_binding": {"physical_collision_goal": True},
+            "model_object_motion_world_transform": {
+                "transform_matrix": [
+                    [1.0, 0.0, 0.0, 0.17],
+                    [0.0, 1.0, 0.0, -0.04],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            },
         }
         for index in range(96)
     ]
@@ -548,6 +561,17 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     assert captured["funnel"]["l5_min_pass_target"] == 1
     assert "l5_submission_limit" not in captured["funnel"]
     assert captured["funnel"]["qualification_mode"] == "frozen_pair"
+    rebased_pairs = [
+        item["candidate"]
+        for item in captured["candidates"]
+        if item["candidate"]["source_grasp_id"] == "g0"
+    ]
+    assert rebased_pairs
+    assert all(
+        "object_motion_world_transform" not in pair
+        and "model_object_motion_world_transform" not in pair
+        for pair in rebased_pairs
+    )
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0"]
     assert result.details["ranking"] == "grasp_place_physical_quality"
     assert [

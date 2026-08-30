@@ -1261,6 +1261,13 @@ def _restore_frozen_model_motion_for_predicted_pair(pair: JsonDict) -> None:
     """
 
     if isinstance(pair.get("frozen_object_motion_rebase"), Mapping):
+        # The cached physical bin goal is already authoritative after the
+        # grasp catalog has been rebased to the measured detached object.
+        # Reapplying the old AnyPlace world-motion transform to that object's
+        # new pose rotates/translates the destination a second time and makes
+        # every grasp/place pair fail the exact EEF-chain check.
+        pair.pop("object_motion_world_transform", None)
+        pair.pop("model_object_motion_world_transform", None)
         return
     binding = pair.get("frozen_goal_frame_binding")
     model_motion = pair.get("model_object_motion_world_transform")
@@ -2452,6 +2459,11 @@ class _FrozenGoalPairCoordinator:
                     pair["predicted_attachment_transform"] = dict(
                         context["predicted_attachment"]
                     )
+                    physical_rebase = grasp.get("frozen_object_motion_rebase")
+                    if isinstance(physical_rebase, Mapping):
+                        pair["frozen_object_motion_rebase"] = json.loads(
+                            json.dumps(physical_rebase)
+                        )
                     _restore_frozen_model_motion_for_predicted_pair(pair)
                     alignment = grasp.get("target_closing_alignment")
                     if isinstance(alignment, Mapping):
@@ -2461,11 +2473,6 @@ class _FrozenGoalPairCoordinator:
                     score = grasp.get("score")
                     if isinstance(score, (int, float)) and not isinstance(score, bool):
                         pair["score"] = float(score)
-                    physical_rebase = grasp.get("frozen_object_motion_rebase")
-                    if isinstance(physical_rebase, Mapping):
-                        pair["frozen_object_motion_rebase"] = json.loads(
-                            json.dumps(physical_rebase)
-                        )
                     pair["qualification_start_joint_state"] = dict(
                         context["contact_state"]
                     )
@@ -3154,28 +3161,55 @@ def _qualifying_handler(
                 if isinstance(grasp_policy, Mapping)
                 else None
             )
+            object_pose_rebase_pending = (
+                grasp_policy.get("frozen_grasp_frontier_rebase_pending")
+                if isinstance(grasp_policy, Mapping)
+                else None
+            )
             recovery = memory.get("grasp_recovery") if isinstance(memory, Mapping) else None
             failed_candidate_id = (
                 str(current_state_pending.get("physically_rejected_candidate_id") or "")
                 if isinstance(current_state_pending, Mapping)
                 else (
-                    str(recovery.get("candidate_id") or "")
-                    if isinstance(recovery, Mapping)
-                    else ""
+                    str(object_pose_rebase_pending.get("physically_rejected_candidate_id") or "")
+                    if isinstance(object_pose_rebase_pending, Mapping)
+                    else (
+                        str(recovery.get("candidate_id") or "")
+                        if isinstance(recovery, Mapping)
+                        else ""
+                    )
                 )
             )
-            if (
+            planning_scene_revision_changed = (
                 isinstance(observed_revision, int)
                 and not isinstance(observed_revision, bool)
                 and isinstance(frontier_revision, int)
                 and not isinstance(frontier_revision, bool)
                 and observed_revision != frontier_revision
+            )
+            object_pose_rebased = False
+            if isinstance(object_pose_rebase_pending, Mapping) or (
+                planning_scene_revision_changed
             ):
                 latest_receipt = (
                     memory.get("planning_scene_target_pose_sync")
                     if isinstance(memory, Mapping)
                     else None
                 )
+                if not isinstance(observed_revision, int) or isinstance(
+                    observed_revision, bool
+                ):
+                    return ToolResult(
+                        False,
+                        "The frozen grasp frontier lacks a current PlanningScene revision.",
+                        {
+                            "reason": "frozen_grasp_frontier_rebase_proof_missing",
+                            "source_planning_scene_revision": frontier_revision,
+                            "planning_scene_revision": observed_revision,
+                            "model_inference_invoked": False,
+                            "execution_started": False,
+                        },
+                    )
                 rebase = frozen_pair_coordinator.rebase_grasp_frontier_from_target_pose_sync(
                     latest_receipt if isinstance(latest_receipt, Mapping) else {},
                     scene_epoch=(
@@ -3190,12 +3224,12 @@ def _qualifying_handler(
                 if not rebase.success:
                     return ToolResult(
                         False,
-                        (
-                            "The frozen grasp frontier no longer matches the "
-                            "observed PlanningScene revision."
-                        ),
+                        "The frozen grasp frontier could not be rebound to the current object pose.",
                         {
-                            "reason": "frozen_grasp_frontier_scene_revision_changed",
+                            "reason": rebase.details.get(
+                                "reason",
+                                "frozen_grasp_frontier_rebase_proof_missing",
+                            ),
                             "source_planning_scene_revision": frontier_revision,
                             "planning_scene_revision": observed_revision,
                             "rebase_reason": rebase.details.get("reason"),
@@ -3204,6 +3238,7 @@ def _qualifying_handler(
                         },
                     )
                 frontier_revision = observed_revision
+                object_pose_rebased = True
             current_state_restarted = False
             if isinstance(current_state_pending, Mapping):
                 # Resolve any authoritative object-pose rebase before
@@ -3267,6 +3302,7 @@ def _qualifying_handler(
                         "frozen_frontier_current_state_restart": (
                             current_state_restarted
                         ),
+                        "frozen_frontier_object_pose_rebased": object_pose_rebased,
                     }
                 )
         else:
