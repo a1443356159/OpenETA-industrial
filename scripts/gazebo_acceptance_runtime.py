@@ -1148,6 +1148,7 @@ def _resolved_provider_environment(config: PlannerProviderConfig) -> dict[str, s
         "OPENETA_LLM_MAX_ATTEMPTS": str(config.max_attempts),
         "OPENETA_LLM_RETRY_BACKOFF_S": str(config.retry_backoff_s),
         "OPENETA_LLM_MAX_TOKENS": str(config.max_tokens),
+        "OPENETA_LLM_THINKING_MODE": config.thinking_mode,
     }
     if config.context_window_tokens is not None:
         values["OPENETA_LLM_CONTEXT_WINDOW_TOKENS"] = str(config.context_window_tokens)

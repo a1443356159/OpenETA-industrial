@@ -468,6 +468,7 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
         max_attempts=2,
         retry_backoff_s=1.0,
         max_tokens=32_768,
+        thinking_mode="disabled",
     )
 
     environment = acceptance.base._tui_provider_environment(
@@ -479,6 +480,7 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
             "OPENETA_LLM_API_KEY": "unexpected-secret",
             "OPENETA_LLM_FALLBACK_API_BASE": "https://unexpected.invalid/v1",
             "OPENETA_LLM_FALLBACK_API_KEY": "unexpected-fallback-secret",
+            "OPENETA_LLM_THINKING_MODE": "enabled",
             "OPENETA_UNRELATED": "ignored",
         },
     )
@@ -490,6 +492,7 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
     assert environment["OPENETA_LLM_MAX_ATTEMPTS"] == "2"
     assert environment["OPENETA_LLM_RETRY_BACKOFF_S"] == "0.5"
     assert environment["OPENETA_LLM_MAX_TOKENS"] == "512"
+    assert environment["OPENETA_LLM_THINKING_MODE"] == "disabled"
     assert environment["OPENETA_LLM_FALLBACK_PROVIDER"] == "configured-provider"
     assert environment["OPENETA_LLM_FALLBACK_MODEL"] == "gpt-5.6-luna"
     assert environment["OPENETA_LLM_FALLBACK_API_BASE"] == (

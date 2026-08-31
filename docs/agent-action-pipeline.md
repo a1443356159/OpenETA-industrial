@@ -622,6 +622,12 @@ endpoint. Configure the retry policy with `OPENETA_LLM_MAX_ATTEMPTS` and
 `OPENETA_LLM_RETRY_BACKOFF_S`; exhausted or non-transient failures remain
 structured `response::ask_human` results.
 
+Provider reasoning control is opt-in through
+`OPENETA_LLM_THINKING_MODE=default|enabled|disabled`. The default omits the
+non-standard request field and preserves existing provider behaviour. The two
+explicit values add `"thinking": {"type": "enabled|disabled"}` to chat
+completion requests for providers that implement that compatible extension.
+
 The first local GUI entry point is:
 
 ```bash

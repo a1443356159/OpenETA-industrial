@@ -95,6 +95,7 @@ class ProviderConfigHandler(BaseHTTPRequestHandler):
             context_window_tokens=_optional_positive_int(
                 payload.get("context_window_tokens")
             ),
+            thinking_mode=existing.thinking_mode,
             fallback=existing.fallback,
         )
         missing = config.missing_fields()

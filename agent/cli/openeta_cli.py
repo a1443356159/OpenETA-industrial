@@ -668,6 +668,7 @@ class OpenEtaCli:
         retry_backoff_s = current.retry_backoff_s
         context_window_tokens = current.context_window_tokens
         max_tokens = current.max_tokens
+        thinking_mode = current.thinking_mode
         fallback = current.fallback
         metadata = dict(current.metadata)
 
@@ -768,6 +769,7 @@ class OpenEtaCli:
             retry_backoff_s=retry_backoff_s,
             context_window_tokens=context_window_tokens,
             max_tokens=max_tokens,
+            thinking_mode=thinking_mode,
             fallback=fallback,
             metadata=metadata,
         )
@@ -842,6 +844,7 @@ class OpenEtaCli:
             max_attempts=self.state.config.max_attempts,
             retry_backoff_s=self.state.config.retry_backoff_s,
             max_tokens=self.state.config.max_tokens,
+            thinking_mode=self.state.config.thinking_mode,
             context_window_tokens=(
                 context_window_tokens
                 if context_window_tokens is not None

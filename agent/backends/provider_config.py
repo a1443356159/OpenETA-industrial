@@ -14,6 +14,23 @@ from agent.runtime.token_counting import DEFAULT_CONTEXT_WINDOW_TOKENS
 
 DEFAULT_ENV_PATH = ".env"
 DEFAULT_APIKEY_PATH = "apikey.md"
+DEFAULT_THINKING_MODE = "default"
+THINKING_MODES = frozenset({DEFAULT_THINKING_MODE, "enabled", "disabled"})
+
+
+def normalize_thinking_mode(value: object) -> str:
+    """Return one supported provider thinking mode.
+
+    ``default`` preserves OpenAI-compatible behaviour by omitting the optional
+    request field.  Explicit modes are useful for compatible providers that
+    expose reasoning control through ``thinking.type``.
+    """
+
+    mode = str(value or DEFAULT_THINKING_MODE).strip().lower()
+    if mode not in THINKING_MODES:
+        supported = ", ".join(sorted(THINKING_MODES))
+        raise ValueError(f"thinking_mode must be one of: {supported}")
+    return mode
 
 
 @dataclass(slots=True)
@@ -65,8 +82,12 @@ class PlannerProviderConfig:
     retry_backoff_s: float = 0.5
     context_window_tokens: int | None = DEFAULT_CONTEXT_WINDOW_TOKENS
     max_tokens: int = 512
+    thinking_mode: str = DEFAULT_THINKING_MODE
     fallback: ProviderEndpointConfig | None = None
     metadata: JsonDict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.thinking_mode = normalize_thinking_mode(self.thinking_mode)
 
     def missing_fields(self) -> list[str]:
         missing: list[str] = []
@@ -93,6 +114,7 @@ class PlannerProviderConfig:
             "retry_backoff_s": self.retry_backoff_s,
             "context_window_tokens": self.context_window_tokens,
             "max_tokens": self.max_tokens,
+            "thinking_mode": self.thinking_mode,
             "fallback": self.fallback.redacted() if self.fallback is not None else None,
             "metadata": dict(self.metadata),
         }
@@ -107,6 +129,7 @@ class PlannerProviderConfig:
             f"OPENETA_LLM_MAX_ATTEMPTS={self.max_attempts}",
             f"OPENETA_LLM_RETRY_BACKOFF_S={self.retry_backoff_s}",
             f"OPENETA_LLM_MAX_TOKENS={self.max_tokens}",
+            f"OPENETA_LLM_THINKING_MODE={self.thinking_mode}",
         ]
         if self.context_window_tokens is not None:
             lines.append(f"OPENETA_LLM_CONTEXT_WINDOW_TOKENS={self.context_window_tokens}")
@@ -195,6 +218,13 @@ def load_planner_provider_config(
         dotenv.get("OPENETA_LLM_MAX_TOKENS"),
         "512",
     ) or 512
+    thinking_mode = normalize_thinking_mode(
+        _first_present(
+            source_env.get("OPENETA_LLM_THINKING_MODE"),
+            dotenv.get("OPENETA_LLM_THINKING_MODE"),
+            DEFAULT_THINKING_MODE,
+        )
+    )
     enable_vision = _first_optional_bool(
         source_env.get("OPENETA_LLM_ENABLE_VISION"),
         dotenv.get("OPENETA_LLM_ENABLE_VISION"),
@@ -250,6 +280,7 @@ def load_planner_provider_config(
         retry_backoff_s=retry_backoff_s,
         context_window_tokens=context_window_tokens,
         max_tokens=max_tokens,
+        thinking_mode=thinking_mode,
         fallback=fallback,
         metadata=metadata,
     )

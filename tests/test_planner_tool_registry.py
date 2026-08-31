@@ -4371,6 +4371,7 @@ def test_provider_config_roundtrips_context_window_tokens_and_retry_policy(
             retry_backoff_s=0.25,
             context_window_tokens=128000,
             max_tokens=4096,
+            thinking_mode="disabled",
             metadata={"enable_vision": False},
         ),
         env_path,
@@ -4385,8 +4386,15 @@ def test_provider_config_roundtrips_context_window_tokens_and_retry_policy(
     assert loaded.max_attempts == 4
     assert loaded.retry_backoff_s == 0.25
     assert loaded.max_tokens == 4096
+    assert loaded.thinking_mode == "disabled"
     assert loaded.metadata["enable_vision"] is False
     assert loaded.redacted()["context_window_tokens"] == 128000
+    assert loaded.redacted()["thinking_mode"] == "disabled"
+
+
+def test_provider_config_rejects_unknown_thinking_mode() -> None:
+    with pytest.raises(ValueError, match="thinking_mode must be one of"):
+        PlannerProviderConfig(thinking_mode="unsupported")
 
 
 def test_provider_config_defaults_context_window_to_one_million(tmp_path) -> None:
@@ -9871,12 +9879,55 @@ def test_openai_compatible_backend_uses_chat_completions_transport() -> None:
 
     assert captured["url"] == "https://api.example.test/v1/chat/completions"
     assert captured["body"]["model"] == "test-model"
+    assert "thinking" not in captured["body"]
     assert captured["headers"]["Authorization"] == "Bearer secret-key"
     assert captured["timeout_s"] == 3.0
     assert result.payload.startswith('{"kind": "tool_call"')
     assert result.details["usage"]["total_tokens"] == 42
     assert result.details["usage_source"] == "provider"
     assert result.details["provider_attempts"] == 1
+
+
+@pytest.mark.parametrize("thinking_mode", ["enabled", "disabled"])
+def test_openai_compatible_backend_sends_explicit_thinking_mode(
+    thinking_mode: str,
+) -> None:
+    captured = {}
+
+    def fake_transport(url, body, headers, timeout_s):
+        del url, headers, timeout_s
+        captured["body"] = body
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": (
+                            '{"kind":"response","name":"talk",'
+                            '"parameters":{"message":"ok"},'
+                            '"reasoning":"done"}'
+                        )
+                    },
+                }
+            ]
+        }
+
+    backend = OpenAICompatiblePlannerBackend(
+        OpenAICompatiblePlannerBackendConfig(
+            model="test-model",
+            api_base="https://api.example.test",
+            api_key="secret-key",
+            thinking_mode=thinking_mode,
+        ),
+        transport=fake_transport,
+    )
+
+    result = backend.decide(
+        PlannerBackendRequest(tool_context={"task": "test"}, system_prompt="return json")
+    )
+
+    assert captured["body"]["thinking"] == {"type": thinking_mode}
+    assert result.status == PipelineStatus.PLANNED
 
 
 def test_openai_compatible_backend_fails_structurally_on_empty_content() -> None:

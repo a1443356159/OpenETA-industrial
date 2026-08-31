@@ -16,7 +16,12 @@ from typing import Callable
 
 from adapter.protocol import JsonDict
 from agent.runtime.actions import PipelineStatus
-from agent.backends.provider_config import PlannerProviderConfig, ProviderEndpointConfig
+from agent.backends.provider_config import (
+    DEFAULT_THINKING_MODE,
+    PlannerProviderConfig,
+    ProviderEndpointConfig,
+    normalize_thinking_mode,
+)
 from agent.runtime.token_counting import estimate_json_tokens, estimate_text_tokens
 
 
@@ -312,6 +317,7 @@ class OpenAICompatiblePlannerBackendConfig:
     retry_backoff_s: float = 0.5
     temperature: float = 0.0
     max_tokens: int = 512
+    thinking_mode: str = DEFAULT_THINKING_MODE
     context_window_tokens: int | None = None
     use_json_response_format: bool = True
     enable_vision: bool = True
@@ -319,6 +325,9 @@ class OpenAICompatiblePlannerBackendConfig:
     max_vision_image_bytes: int = 8 * 1024 * 1024
     fallback: ProviderEndpointConfig | None = None
     metadata: JsonDict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.thinking_mode = normalize_thinking_mode(self.thinking_mode)
 
     @classmethod
     def from_provider_config(
@@ -335,6 +344,7 @@ class OpenAICompatiblePlannerBackendConfig:
             retry_backoff_s=config.retry_backoff_s,
             context_window_tokens=config.context_window_tokens,
             max_tokens=config.max_tokens,
+            thinking_mode=config.thinking_mode,
             enable_vision=_metadata_bool(metadata, "enable_vision", default=True),
             max_vision_images=_metadata_positive_int(
                 metadata,
@@ -373,6 +383,7 @@ class OpenAICompatiblePlannerBackendConfig:
             "retry_backoff_s": self.retry_backoff_s,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "thinking_mode": self.thinking_mode,
             "context_window_tokens": self.context_window_tokens,
             "use_json_response_format": self.use_json_response_format,
             "enable_vision": self.enable_vision,
@@ -450,6 +461,8 @@ class OpenAICompatiblePlannerBackend(PlannerBackend):
         }
         if self.config.use_json_response_format:
             body["response_format"] = {"type": "json_object"}
+        if self.config.thinking_mode != DEFAULT_THINKING_MODE:
+            body["thinking"] = {"type": self.config.thinking_mode}
 
         (
             response,
