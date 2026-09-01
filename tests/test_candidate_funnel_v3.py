@@ -3214,6 +3214,36 @@ def test_l5_failure_is_replanned_with_fixed_recovery_branch():
     )
 
 
+def test_recovery_barrier_does_not_publish_unsubmitted_endpoint_as_pass():
+    plan_calls = 0
+
+    def plan(target, start, timeout, attempts):
+        nonlocal plan_calls
+        plan_calls += 1
+        # Both candidates fail in the fast layer.  The first recovery L5
+        # succeeds, so the second recovery screen is intentionally never sent
+        # to L5 even though the wave barrier has already completed it.
+        ok = plan_calls == 3
+        return {
+            "ok": ok,
+            "execution_started": False,
+            "trajectory_points": ([{}] if ok else []),
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(plan_only=plan).qualify(
+        _request([_candidate(0, score=2.0), _candidate(1, score=1.0)])
+    )
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert plan_calls == 3
+    deferred = next(item for item in response["results"] if item["candidate_id"] == "c1")
+    assert deferred["verdict"] == "NOT_EVALUATED"
+    assert deferred["reason"] == "l5_not_submitted_after_success"
+    assert deferred["endpoint_pass"] is True
+    assert deferred["full_plan_submitted"] is False
+
+
 def test_pick_ik_uses_global_mode_only_for_recovery_and_restores_local():
     modes = []
     plan_calls = 0

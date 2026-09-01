@@ -2622,7 +2622,10 @@ class MoveItQualificationEngine:
                         "endpoint_evaluated": False,
                     }
                 )
-            elif result.get("endpoint_pass") is True and candidate_id not in planned_ids:
+            elif (
+                result.get("endpoint_pass") is True
+                and result.get("full_plan_submitted") is not True
+            ):
                 result.update(
                     {
                         "verdict": "NOT_EVALUATED",
@@ -3523,6 +3526,7 @@ class MoveItQualificationEngine:
             "virtual_scene_transition_unavailable",
         }
         first = self._plan_candidate(descriptor, revision, screen=screen)
+        first["full_plan_submitted"] = True
         if first.get("reason") not in infrastructure_reasons:
             return first, 0
         if self.service_health_check is not None:
@@ -3531,6 +3535,7 @@ class MoveItQualificationEngine:
             except Exception:  # noqa: BLE001
                 pass
         second = self._plan_candidate(descriptor, revision, screen=screen)
+        second["full_plan_submitted"] = True
         if second.get("reason") in infrastructure_reasons:
             second["infrastructure_error"] = True
         return second, 1
