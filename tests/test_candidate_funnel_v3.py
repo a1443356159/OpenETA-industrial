@@ -2097,6 +2097,59 @@ def test_container_goal_prebind_is_idempotent_after_pair_compilation():
     ] == first_release
 
 
+def test_prebound_container_release_stage_is_not_corrected_twice():
+    scene, candidate = _rotated_container_goal()
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "frozen_contact_pose": {
+                "frame": "world",
+                "xyz": [0.3, 0.0, 0.5],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+        }
+    )
+    descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
+
+    first = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, first)
+    bound = descriptor["candidate"]
+    release_motion = bound["object_motion_world_transform"]["transform_matrix"]
+    contact_xyz = bound["frozen_contact_pose"]["xyz"]
+    release_xyz = [
+        sum(release_motion[row][column] * contact_xyz[column] for column in range(3))
+        + release_motion[row][3]
+        for row in range(3)
+    ]
+    bound["qualification_stages"] = [
+        {
+            "name": "release",
+            "xyz": release_xyz,
+            "rotation_matrix": [row[:3] for row in release_motion[:3]],
+        }
+    ]
+
+    second = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, second)
+
+    stage = descriptor["candidate"]["qualification_stages"][0]
+    assert stage["xyz"] == pytest.approx(release_xyz)
+    assert stage["release_target_translation_correction_application"] == (
+        "already_materialized_in_compiled_terminal"
+    )
+    pair = evaluate_grasp_placement_pair_legality(
+        descriptor,
+        scene=scene,
+        workspace_filter=None,
+    )
+    assert pair["checks"]["eef_chain"]["pass"] is True
+
+
 def test_flat_support_keeps_configured_release_minimum():
     scene = _placement_scene()
     scene["placement_region"]["release_z_offset_m"] = 0.05

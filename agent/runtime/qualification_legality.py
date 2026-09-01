@@ -215,6 +215,20 @@ def _rotation_distance(left: Rotation, right: Rotation) -> float:
     return math.atan2(sine, cosine)
 
 
+def _transforms_aligned(left: Transform, right: Transform) -> bool:
+    """Return whether two serialized poses represent the same motion target."""
+
+    left_rotation, left_xyz = left
+    right_rotation, right_xyz = right
+    return (
+        all(
+            abs(left_xyz[index] - right_xyz[index]) <= _POSE_TOLERANCE_M
+            for index in range(3)
+        )
+        and _rotation_distance(left_rotation, right_rotation) <= _ORIENTATION_TOLERANCE
+    )
+
+
 def _obb(transform: Transform, size_xyz: Sequence[float]) -> Obb:
     rotation, xyz = transform
     return xyz, rotation, tuple(float(value) / 2.0 for value in size_xyz)  # type: ignore[return-value]
@@ -1596,6 +1610,11 @@ def bind_qualified_placement_goal(
 
     correction = _finite_vector(binding.get("release_target_translation_correction_xyz"), 3)
     if correction is not None and any(abs(value) > 1e-12 for value in correction):
+        # Frozen goals reach this point either as an unbound model terminal or
+        # after the goal-prebind RPC has already materialized the corrected
+        # release before candidate compilation.  Compare against the exact
+        # motion/contact chain so repeated binding stays idempotent.
+        expected_release = _expected_pair_eef_goal(candidate)
         stages_value = candidate.get("qualification_stages")
         if isinstance(stages_value, list):
             stages: list[object] = []
@@ -1605,10 +1624,19 @@ def bind_qualified_placement_goal(
                     continue
                 stage = dict(raw_stage)
                 if str(stage.get("name") or "") == "release":
-                    for key in ("xyz", "translation_xyz", "position"):
-                        xyz = _finite_vector(stage.get(key), 3)
-                        if xyz is not None:
-                            stage[key] = [xyz[index] + correction[index] for index in range(3)]
+                    stage_pose = rigid_pose(stage)
+                    correction_already_materialized = (
+                        expected_release is not None
+                        and stage_pose is not None
+                        and _transforms_aligned(stage_pose, expected_release)
+                    )
+                    if not correction_already_materialized:
+                        for key in ("xyz", "translation_xyz", "position"):
+                            xyz = _finite_vector(stage.get(key), 3)
+                            if xyz is not None:
+                                stage[key] = [
+                                    xyz[index] + correction[index] for index in range(3)
+                                ]
                     support_correction = _finite_vector(
                         binding.get("support_contact_translation_correction_xyz"), 3
                     )
@@ -1621,6 +1649,11 @@ def bind_qualified_placement_goal(
                         stage["placement_release_translation_xyz"] = release_translation
                         stage["placement_release_z_offset_m"] = release_translation[2]
                     stage["release_target_translation_correction_xyz"] = list(correction)
+                    stage["release_target_translation_correction_application"] = (
+                        "already_materialized_in_compiled_terminal"
+                        if correction_already_materialized
+                        else "applied_to_unbound_terminal"
+                    )
                     stage["terminal_pose_source"] = (
                         "anyplace_se3_with_physical_support_and_release_offset"
                     )
@@ -1684,12 +1717,7 @@ def _pair_chain_check(
         }
     expected_rotation, expected_xyz = expected
     release_rotation, release_xyz = release
-    aligned = (
-        abs(release_xyz[0] - expected_xyz[0]) <= _POSE_TOLERANCE_M
-        and abs(release_xyz[1] - expected_xyz[1]) <= _POSE_TOLERANCE_M
-        and abs(release_xyz[2] - expected_xyz[2]) <= _POSE_TOLERANCE_M
-        and _rotation_distance(release_rotation, expected_rotation) <= _ORIENTATION_TOLERANCE
-    )
+    aligned = _transforms_aligned(release, expected)
     return {
         "available": True,
         "pass": aligned,
