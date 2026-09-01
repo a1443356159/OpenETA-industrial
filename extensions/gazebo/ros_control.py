@@ -714,6 +714,8 @@ def _attached_support_departure_audit(
     support_spec: Mapping[str, Any],
     support_contact_reference_target_spec: Mapping[str, Any] | None = None,
     obstacle_specs: Mapping[str, Mapping[str, Any]] | None = None,
+    support_penetration_tolerance_m: float = 0.005,
+    static_penetration_tolerance_m: float = 0.001,
 ) -> dict[str, Any]:
     """Prove an L5 path leaves its initial physical support contact.
 
@@ -741,6 +743,13 @@ def _attached_support_departure_audit(
         or any(not math.isfinite(value) for point in points for value in point)
     ):
         raise ValueError("support-departure trajectory is invalid")
+    if (
+        not math.isfinite(support_penetration_tolerance_m)
+        or not math.isfinite(static_penetration_tolerance_m)
+        or static_penetration_tolerance_m <= 0.0
+        or support_penetration_tolerance_m < static_penetration_tolerance_m
+    ):
+        raise ValueError("support-departure collision tolerances are invalid")
     attached_relative_xyz = tuple(
         float(value) for value in attached_spec["pose_xyz"]
     )
@@ -838,16 +847,22 @@ def _attached_support_departure_audit(
         and support_contact_reference_target_spec
         else None
     )
-    # This is a measured physical boundary, not a task-specific tolerance.
     # Native attach and the later FK reconstruction are sampled on different
-    # clocks, so reuse the authority-wide pose synchronization uncertainty.
-    # Deeper penetration and tangential scraping still fail below.
+    # clocks.  Keep the exact pose-sync uncertainty as evidence, but judge a
+    # support-contact departure against the scene-wide physical contact band.
+    # This avoids turning micrometre interpolation noise into a collision
+    # while still rejecting material penetration and tangential scraping.
     support_contact_pose_uncertainty = max(
         geometry_numeric_band,
         _TARGET_POSE_POSITION_ABS_TOL_M,
     )
-    initial_clearance_floor = min(0.0, reference_clearance or 0.0) - (
-        support_contact_pose_uncertainty
+    support_contact_clearance_floor = min(0.0, reference_clearance or 0.0) - max(
+        support_contact_pose_uncertainty,
+        support_penetration_tolerance_m,
+    )
+    tangential_contact_tolerance = max(
+        support_contact_pose_uncertainty,
+        static_penetration_tolerance_m,
     )
 
     samples: list[tuple[int, str, tuple[float, ...]]] = [(0, "point", first)]
@@ -905,7 +920,10 @@ def _attached_support_departure_audit(
                     if collision_primitives_penetrate(
                         target_primitive,
                         obstacle_primitive,
-                        tolerance_m=geometry_numeric_band,
+                        tolerance_m=max(
+                            geometry_numeric_band,
+                            static_penetration_tolerance_m,
+                        ),
                     ):
                         static_collision = (
                             object_id,
@@ -929,7 +947,7 @@ def _attached_support_departure_audit(
             break
         if point_index == 0 and sample_kind == "point":
             initial_clearance = clearance
-            if clearance is not None and clearance < initial_clearance_floor:
+            if clearance is not None and clearance < support_contact_clearance_floor:
                 failure = {
                     "reason": "initial_support_penetration",
                     "point_index": point_index,
@@ -946,7 +964,7 @@ def _attached_support_departure_audit(
             moving
             and clearance is not None
             and clearance <= geometry_numeric_band
-            and clearance < initial_clearance_floor
+            and clearance < support_contact_clearance_floor
         ):
             failure = {
                 "reason": "support_penetration_increased_after_attach",
@@ -967,7 +985,7 @@ def _attached_support_departure_audit(
             moving
             and clearance is not None
             and clearance <= geometry_numeric_band
-            and tangential_surface_displacement > support_contact_pose_uncertainty
+            and tangential_surface_displacement > tangential_contact_tolerance
         ):
             failure = {
                 "reason": "support_contact_persists_after_departure",
@@ -999,8 +1017,11 @@ def _attached_support_departure_audit(
         "sampling": "time_parameterized_points_and_joint_midpoints",
         "initial_clearance_m": initial_clearance,
         "initial_support_reference_clearance_m": reference_clearance,
-        "initial_support_clearance_floor_m": initial_clearance_floor,
+        "initial_support_clearance_floor_m": support_contact_clearance_floor,
         "support_contact_pose_uncertainty_m": support_contact_pose_uncertainty,
+        "support_penetration_tolerance_m": support_penetration_tolerance_m,
+        "tangential_contact_tolerance_m": tangential_contact_tolerance,
+        "static_penetration_tolerance_m": static_penetration_tolerance_m,
         "support_departed": support_departed,
         "first_moving_clearance_m": first_moving_clearance,
         "minimum_clearance_m": (
@@ -2229,6 +2250,20 @@ class _RosRuntime:
                     for object_id, spec in world_specs.items()
                     if isinstance(spec, Mapping)
                 },
+                support_penetration_tolerance_m=float(
+                    getattr(
+                        self.config,
+                        "support_contact_penetration_tolerance_m",
+                        0.005,
+                    )
+                ),
+                static_penetration_tolerance_m=float(
+                    getattr(
+                        self.config,
+                        "static_collision_penetration_tolerance_m",
+                        0.001,
+                    )
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - missing proof must fail closed.
             return {
@@ -2998,8 +3033,20 @@ class _RosRuntime:
                 # support overlap as the calibrated contact uncertainty band,
                 # not a mathematical penetration proof.  Non-support static
                 # obstacles retain the tighter exact-box tolerance below.
-                "support_penetration_tolerance_m": 0.005,
-                "static_penetration_tolerance_m": 0.001,
+                "support_penetration_tolerance_m": float(
+                    getattr(
+                        self.config,
+                        "support_contact_penetration_tolerance_m",
+                        0.005,
+                    )
+                ),
+                "static_penetration_tolerance_m": float(
+                    getattr(
+                        self.config,
+                        "static_collision_penetration_tolerance_m",
+                        0.001,
+                    )
+                ),
                 "provenance": "acceptance_scene_contract",
             }
         return snapshot

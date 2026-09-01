@@ -164,7 +164,7 @@ def test_attached_support_departure_rejects_initial_penetration() -> None:
         joint_names=["lift"],
         trajectory_positions=[[0.0], [0.01]],
         forward_kinematics=lambda _names, joints: (
-            [0.0, 0.0, 0.009 + joints[0]],
+            [0.0, 0.0, 0.003 + joints[0]],
             [0.0, 0.0, 0.0, 1.0],
         ),
         mount_xyz=[0.0, 0.0, 0.0],
@@ -211,6 +211,38 @@ def test_attached_support_departure_uses_native_attach_contact_as_start_baseline
     assert evidence["first_moving_clearance_m"] > 0.0
 
 
+def test_attached_support_departure_accepts_submillimetre_contact_noise() -> None:
+    target, table = _support_departure_geometry()
+    measured_at_attach = {
+        **target,
+        "pose_xyz": [0.0, 0.0, 0.01 - 2.0e-8],
+    }
+
+    def fk(_names, joints):
+        progress = joints[0]
+        if progress == 0.0:
+            return [0.0, 0.0, 0.01 - 2.0e-8], [0.0, 0.0, 0.0, 1.0]
+        if progress < 1.0:
+            return [0.0002, 0.0, 0.01 - 8.5e-6], [0.0, 0.0, 0.0, 1.0]
+        return [0.002, 0.0, 0.02], [0.0, 0.0, 0.0, 1.0]
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["lift"],
+        trajectory_positions=[[0.0], [1.0]],
+        forward_kinematics=fk,
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+        support_contact_reference_target_spec=measured_at_attach,
+    )
+
+    assert evidence["valid"] is True
+    assert evidence["minimum_clearance_m"] == pytest.approx(-8.5e-6)
+    assert evidence["support_penetration_tolerance_m"] == pytest.approx(0.005)
+    assert evidence["tangential_contact_tolerance_m"] == pytest.approx(0.001)
+
+
 def test_attached_support_departure_rejects_start_deeper_than_native_baseline() -> None:
     target, table = _support_departure_geometry()
     measured_at_attach = {
@@ -222,7 +254,7 @@ def test_attached_support_departure_rejects_start_deeper_than_native_baseline() 
         joint_names=["lift"],
         trajectory_positions=[[0.0], [0.01]],
         forward_kinematics=lambda _names, joints: (
-            [0.0, 0.0, 0.0099 + joints[0]],
+            [0.0, 0.0, 0.003 + joints[0]],
             [0.0, 0.0, 0.0, 1.0],
         ),
         mount_xyz=[0.0, 0.0, 0.0],

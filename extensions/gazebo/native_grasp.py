@@ -609,6 +609,13 @@ class NativePickPlaceConfig(GazeboControlConfig):
     placement_terminal_window_s: float = 0.50
     maximum_placement_terminal_drift_m: float = 0.005
     placement_support_height_tolerance_m: float = 0.01
+    # Gazebo's native contact pose, the later TF/FK reconstruction, and the
+    # time-parameterized MoveIt samples do not share one numerical clock.
+    # Treat shallow support overlap as the physical contact band and require
+    # a larger penetration before geometry may veto an otherwise valid path.
+    # Non-support obstacles retain the tighter threshold below.
+    support_contact_penetration_tolerance_m: float = 0.005
+    static_collision_penetration_tolerance_m: float = 0.001
     # General motion profiles are selected from physical load state, never a
     # scene/object identity.  The unloaded contact move can use more of the
     # RM75 limits; a retained payload uses a gentler profile until release.
@@ -751,6 +758,16 @@ class NativePickPlaceConfig(GazeboControlConfig):
             or self.placement_release_z_offset_m < 0.0
         ):
             raise ValueError("placement release Z offset must be finite and non-negative")
+        if (
+            not math.isfinite(self.support_contact_penetration_tolerance_m)
+            or not math.isfinite(self.static_collision_penetration_tolerance_m)
+            or self.static_collision_penetration_tolerance_m <= 0.0
+            or self.support_contact_penetration_tolerance_m
+            < self.static_collision_penetration_tolerance_m
+            or self.support_contact_penetration_tolerance_m
+            > self.placement_support_height_tolerance_m
+        ):
+            raise ValueError("pick/place collision tolerance policy is invalid")
         if (
             not self.attached_collision_filter_state_topic
             or not self.attached_collision_filter_state_request_topic
