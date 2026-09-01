@@ -5729,6 +5729,19 @@ def _semantic_camera_view_identity(
     if pose:
         payload["pose"] = pose
 
+    if not _is_wrist_camera(artifact):
+        # A fixed camera can acquire genuinely new semantic evidence after the
+        # robot moves: the camera calibration is unchanged, but the arm and
+        # gripper are dynamic occluders.  Bind only the quantised EEF pose so a
+        # repeated passive observe at the same robot state remains the same
+        # view, while an intentional clearing/inspection motion opens a fresh
+        # deterministic view cell.
+        end_effector_pose = observation.robot.end_effector_pose
+        if isinstance(end_effector_pose, Mapping):
+            occluder_pose = _canonical_semantic_view_pose(end_effector_pose)
+            if occluder_pose:
+                payload["robot_occluder_pose"] = occluder_pose
+
     image_geometry: JsonDict = {}
     intrinsics = camera.intrinsics if camera is not None else {}
     if isinstance(intrinsics, Mapping):
@@ -7311,14 +7324,6 @@ def _semantic_perception_obligation(
                 "fallback": "simplified_text_after_bounded_exact_views",
                 "canonical_semantic_target": prompt,
             }
-        if semantic_role == "grasp_target":
-            return {
-                **base,
-                "status": "exhausted",
-                "failure_code": "grasp_target_localization_exhausted",
-                "attempts": len(role_attempts),
-                "fallback": "bounded_text_views_and_simplified_text_exhausted",
-            }
         failure = memory_context.get("reference_localization_failure")
         failed_molmopoint_attempts = (
             _coerce_nonnegative_int(failure.get("molmopoint_attempts"), default=0)
@@ -7336,6 +7341,73 @@ def _semantic_perception_obligation(
             )
             or semantic_role
         )
+        if semantic_role == "grasp_target":
+            active_search_attempts = [
+                attempt
+                for attempt in role_attempts
+                if str(attempt.get("mode") or "") == "active_search"
+            ]
+            hint_points = (
+                no_detection.get("positive_points")
+                if isinstance(no_detection, dict)
+                else None
+            )
+            hint_source = (
+                str(no_detection.get("source_image") or "")
+                if isinstance(no_detection, dict)
+                else ""
+            )
+            if (
+                completed_point_attempts >= 1
+                and isinstance(hint_points, list)
+                and hint_points
+                and hint_source
+                and not active_search_attempts
+            ):
+                return {
+                    **base,
+                    "status": "required",
+                    "required_tool": "active_observe",
+                    "required_parameters": {
+                        "semantic_target": prompt,
+                        "semantic_role": "grasp_target",
+                        "quality_profile": "grasp_rgbd",
+                        "max_motion_attempts": 2,
+                        "target_hint": {
+                            "source_image": hint_source,
+                            "positive_points": [
+                                dict(point)
+                                for point in hint_points
+                                if isinstance(point, dict)
+                            ],
+                            "source": "bounded_visual_point_localization",
+                        },
+                    },
+                    "fallback": "active_view_after_point_segmentation_failure",
+                    "attempt": 1,
+                    "rule": (
+                        "The target phrase and calibrated visual point are frozen by "
+                        "the host. The model chooses the active observation action; "
+                        "the tool owns view geometry and MoveIt proof."
+                    ),
+                }
+            if active_search_attempts:
+                latest_active = active_search_attempts[-1]
+                infrastructure = str(latest_active.get("status") or "").endswith(
+                    "infrastructure_error"
+                )
+                return {
+                    **base,
+                    "status": "exhausted",
+                    "failure_code": (
+                        "active_vision_infrastructure_error"
+                        if infrastructure
+                        else "grasp_target_localization_exhausted"
+                    ),
+                    "attempts": len(role_attempts),
+                    "fallback": "bounded_active_view_frontier_exhausted",
+                    "infrastructure_error": infrastructure,
+                }
         if point_attempts >= 2:
             return {
                 **base,

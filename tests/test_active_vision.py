@@ -201,6 +201,32 @@ def _context(controller: ActiveVisionController, observation: EnvObservation) ->
     )
 
 
+def _search_context(
+    controller: ActiveVisionController,
+    observation: EnvObservation,
+    *,
+    source_image: Path,
+) -> ToolExecutionContext:
+    tools = build_default_tool_registry()
+    return ToolExecutionContext(
+        name="active_observe",
+        spec=tools.get("active_observe"),
+        parameters={
+            "semantic_target": "red hex bolt",
+            "semantic_role": "grasp_target",
+            "quality_profile": "grasp_rgbd",
+            "max_motion_attempts": 2,
+            "target_hint": {
+                "source_image": str(source_image),
+                "positive_points": [{"x": 80.0, "y": 60.0, "label": 1}],
+                "source": "bounded_visual_point_localization",
+            },
+        },
+        observation=observation,
+        metadata={"session_id": "unit-session"},
+    )
+
+
 def test_active_observe_reuses_quality_current_rgbd_without_motion(tmp_path: Path) -> None:
     top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
     wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
@@ -349,6 +375,12 @@ def test_active_observe_acquires_point_grounded_view_and_caches_sam3(tmp_path: P
 
     def sam3_handler(context: ToolExecutionContext) -> ToolResult:
         sam_calls.append(dict(context.parameters))
+        detection = {
+            "id": "detection_000",
+            "label": "yellow wrench",
+            "mask_ref": str(new_mask_path),
+            "bbox_xyxy": [60, 35, 100, 85],
+        }
         return ToolResult(
             True,
             details={
@@ -358,12 +390,8 @@ def test_active_observe_acquires_point_grounded_view_and_caches_sam3(tmp_path: P
                 "semantic_target": "yellow wrench",
                 "perception_bundle_id": "perception-active",
                 "observation_id": "observation-active",
-                "selected_detection": {
-                    "id": "detection_000",
-                    "label": "yellow wrench",
-                    "mask_ref": str(new_mask_path),
-                    "bbox_xyxy": [60, 35, 100, 85],
-                },
+                "detections": [detection],
+                "selected_detection": detection,
             },
         )
 
@@ -382,6 +410,88 @@ def test_active_observe_acquires_point_grounded_view_and_caches_sam3(tmp_path: P
     assert len(sam_calls) == 1
     assert sam_calls[0]["mode"] == "points"
     assert sam_calls[0]["semantic_role"] == "grasp_target"
+
+
+def test_active_observe_searches_from_calibrated_visual_point_without_mask(
+    tmp_path: Path,
+) -> None:
+    top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
+    wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
+    new_rgb, new_depth = tmp_path / "new-wrist.png", tmp_path / "new-wrist-depth.png"
+    new_mask_path = tmp_path / "new-mask.png"
+    for path in (top_rgb, wrist_rgb, new_rgb):
+        _save_rgb(path)
+    top_target = np.zeros((120, 160), dtype=bool)
+    top_target[56:65, 76:85] = True
+    new_mask = np.zeros((120, 160), dtype=bool)
+    new_mask[35:85, 60:100] = True
+    _save_depth(top_depth, millimetres=980, mask=top_target)
+    _save_depth(wrist_depth)
+    _save_depth(new_depth, millimetres=380, mask=new_mask)
+    Image.fromarray((new_mask * 255).astype(np.uint8)).save(new_mask_path)
+    initial = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=wrist_rgb,
+        wrist_depth=wrist_depth,
+    )
+    acquired = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=new_rgb,
+        wrist_depth=new_depth,
+        wrist_position=[0.3, 0.0, 0.4],
+        wrist_quaternion=[1.0, 0.0, 0.0, 0.0],
+    )
+    proxy = _Proxy(acquired)
+    sam_calls: list[dict[str, Any]] = []
+
+    def sam3_handler(context: ToolExecutionContext) -> ToolResult:
+        sam_calls.append(dict(context.parameters))
+        detection = {
+            "id": "detection_000",
+            "label": "red hex bolt",
+            "mask_ref": str(new_mask_path),
+            "bbox_xyxy": [60, 35, 100, 85],
+        }
+        return ToolResult(
+            True,
+            details={
+                "result_id": "active-search-result",
+                "source_image": str(new_rgb),
+                "source_frame_id": "wrist_camera_optical_frame",
+                "semantic_role": "grasp_target",
+                "semantic_target": "red hex bolt",
+                "perception_bundle_id": "perception-active-search",
+                "observation_id": "observation-active-search",
+                "segmentation_mode": "point_prompt",
+                "scene_epoch": 1,
+                "attempt_id": "active-point-attempt",
+                "attempt_fingerprint": "active-point-fingerprint",
+                "detections": [detection],
+                "selected_detection": detection,
+            },
+        )
+
+    controller = _controller(tmp_path, proxy=proxy, sam3_handler=sam3_handler)
+    controller.qualifier = _PassQualifier()  # type: ignore[assignment]
+
+    result = controller.handler(
+        _search_context(controller, initial, source_image=top_rgb)
+    )
+
+    assert result.success is True
+    assert result.details["outputs"]["status"] == "acquired"
+    assert result.details["outputs"]["active_vision_mode"] == "semantic_search"
+    assert result.details["outputs"]["detections"][0]["label"] == "red hex bolt"
+    assert result.details["outputs"]["selected_detection"]["id"] == "detection_000"
+    assert result.details["outputs"]["active_vision_attempt_id"].startswith(
+        "active-observe-"
+    )
+    assert proxy.calls == ["move_to", "observe"]
+    assert len(sam_calls) == 1
+    assert sam_calls[0]["mode"] == "points"
+    assert sam_calls[0]["semantic_target"] == "red hex bolt"
 
 
 def test_gazebo_industrial_profile_hides_irrelevant_tools_without_deleting_specs() -> None:

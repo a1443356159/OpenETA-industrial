@@ -908,15 +908,24 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             name="active_observe",
             category="perception",
             description=(
-                "Acquire a grasp-quality RGB-D view of one already grounded target. "
-                "The host reuses a sufficient current view, or deterministically "
-                "generates and MoveIt-qualifies wrist-camera viewpoints before "
-                "executing at most two frozen alternatives. It never reruns grasp or "
-                "placement generation and never invents manipulation waypoints."
+                "Acquire a grasp-quality RGB-D view of a grounded target, or recover "
+                "from bounded text/point segmentation failure using the retained "
+                "calibrated visual point. The host deterministically generates and "
+                "MoveIt-qualifies wrist-camera viewpoints before executing at most "
+                "two frozen alternatives. It never reruns grasp or placement "
+                "generation and never invents manipulation waypoints."
             ),
             parameters={
                 "target_evidence_id": (
-                    "required selected SAM3 result_id for the current grounded target"
+                    "selected SAM3 result_id for grounded refinement; omit only when "
+                    "the host supplies target_hint for semantic search"
+                ),
+                "semantic_target": (
+                    "required target phrase when target_evidence_id is unavailable"
+                ),
+                "target_hint": (
+                    "host-retained current RGB path and foreground point from bounded "
+                    "visual localization; never an agent-authored pose"
                 ),
                 "semantic_role": "grasp_target; v1 supports pre-contact grasp observation",
                 "quality_profile": "grasp_rgbd",

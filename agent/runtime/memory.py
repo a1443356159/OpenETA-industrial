@@ -29,8 +29,9 @@ from agent.runtime.release_evidence import ordered_native_release_proof
 
 PENDING_SAM3_SELECTION_KEY = "pending_sam3_selection"
 SELECTED_SAM3_DETECTION_KEY = "selected_sam3_detection"
-# Successful SAM3 results feed the shared selection flow.
-SELECTION_CAPTURE_TOOL_NAMES = frozenset({"sam3"})
+# Successful SAM3 results, including a point-grounded refresh performed inside
+# active_observe, feed the same shared selection flow.
+SELECTION_CAPTURE_TOOL_NAMES = frozenset({"sam3", "active_observe"})
 PENDING_REFERENCE_LOCALIZATION_KEY = "pending_reference_localization"
 REFERENCE_LOCALIZATION_FAILURE_KEY = "reference_localization_failure"
 TARGET_LOCALIZATION_BUDGET_KEY = "target_localization_budget"
@@ -504,6 +505,7 @@ class AgentMemory:
         environment_task_updated = self._capture_active_environment_task(action)
         self._capture_reference_localization_state(action)
         self._capture_sam3_selection_state(action)
+        self._capture_active_vision_state(action)
         target_mask_invalidated = self._invalidate_failed_anygrasp_target_mask(action)
         self._capture_anygrasp_candidate_policy(action)
         placement_candidates_updated = self._capture_placement_candidates(action)
@@ -2369,6 +2371,11 @@ class AgentMemory:
                 "view_identity": outputs.get("view_identity")
                 or parameters.get("view_identity"),
             }
+            positive_points = parameters.get("positive_points") or parameters.get("points")
+            if isinstance(positive_points, list) and positive_points:
+                base["positive_points"] = [
+                    dict(point) for point in positive_points if isinstance(point, dict)
+                ]
             selection_review = outputs.get("selection_review")
             if isinstance(selection_review, dict):
                 base["selection_review"] = dict(selection_review)
@@ -2547,6 +2554,58 @@ class AgentMemory:
                     {"result_id": result_id, "semantic_role": semantic_role},
                 )
             self._save_working_memory()
+
+    def _capture_active_vision_state(self, action: EnvAction) -> None:
+        """Retain one bounded active-search outcome without fabricating a SAM mask."""
+
+        call = _tool_call(action, "active_observe")
+        if not isinstance(call, dict):
+            return
+        result = call.get("result")
+        details = result.get("details") if isinstance(result, dict) else None
+        if not isinstance(details, dict):
+            return
+        outputs = details.get("outputs")
+        if not isinstance(outputs, dict):
+            return
+        mode = str(outputs.get("active_vision_mode") or "").strip()
+        status = str(outputs.get("status") or "").strip().lower()
+        if mode != "semantic_search" or status not in {
+            "acquired",
+            "exhausted",
+            "infrastructure_error",
+        }:
+            return
+        record = {
+            "result_id": outputs.get("result_id")
+            or outputs.get("active_vision_attempt_id"),
+            "semantic_role": outputs.get("semantic_role") or "grasp_target",
+            "target_prompt": outputs.get("semantic_target"),
+            "source_image": (
+                (outputs.get("target_hint") or {}).get("source_image")
+                if isinstance(outputs.get("target_hint"), dict)
+                else None
+            ),
+            "segmentation_mode": "active_search",
+            "scene_epoch": outputs.get("scene_epoch"),
+            "perception_bundle_id": outputs.get("observation_bundle_id"),
+            "observation_id": outputs.get("observation_id"),
+            "attempt_id": outputs.get("active_vision_attempt_id"),
+            "attempt_fingerprint": outputs.get("active_vision_attempt_fingerprint"),
+            "active_vision_status": status,
+            "active_vision_stop_reason": outputs.get("stop_reason"),
+        }
+        self._record_sam3_semantic_result(record, status=f"active_search_{status}")
+        self.record(
+            "active_vision_search_completed",
+            {
+                "semantic_role": record["semantic_role"],
+                "target_prompt": record["target_prompt"],
+                "status": status,
+                "stop_reason": record["active_vision_stop_reason"],
+            },
+        )
+        self._save_working_memory()
 
     def _capture_grasp_fallback_segmentation_failure(self, sam3_result: JsonDict) -> None:
         policy = self.grasp_candidate_policy()
