@@ -1950,7 +1950,7 @@ def _rotated_container_goal() -> tuple[dict, dict]:
     return scene, candidate
 
 
-def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation():
+def test_container_drop_preserves_anyplace_se3_and_adds_release_height():
     scene, candidate = _rotated_container_goal()
     descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
 
@@ -1961,10 +1961,9 @@ def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation()
     settled = binding["collision_goal_pose"]
     release = binding["release_collision_goal_pose"]
     assert legality["verdict"] == "PASS"
-    assert binding["release_orientation_policy"] == (
-        "preserve_current_orientation_for_container_drop"
-    )
+    assert binding["release_orientation_policy"] == "model_settled_orientation"
     assert binding["container_drop"]["model_destination_xy_preserved"] is True
+    assert binding["container_drop"]["model_destination_se3_preserved"] is True
     assert settled["translation_xyz"][:2] == pytest.approx([0.48, -0.1])
     assert settled["rotation_matrix"] == [
         [0.0, -1.0, 0.0],
@@ -1973,8 +1972,8 @@ def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation()
     ]
     assert release["translation_xyz"][:2] == pytest.approx([0.48, -0.1])
     assert release["rotation_matrix"] == [
+        [0.0, -1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
     ]
     bound = descriptor["candidate"]
@@ -1985,8 +1984,8 @@ def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation()
     )
     release_motion = bound["object_motion_world_transform"]["transform_matrix"]
     assert [row[:3] for row in release_motion[:3]] == [
+        [0.0, -1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
     ]
 
@@ -2022,8 +2021,8 @@ def test_goal_prebind_rpc_freezes_container_release_before_pair_compilation():
     assert goals[0]["qualified_release_pointcloud_object_goal_pose"][
         "rotation_matrix"
     ] == [
+        [0.0, -1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
     ]
 

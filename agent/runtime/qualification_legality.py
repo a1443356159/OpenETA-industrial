@@ -1116,74 +1116,30 @@ def evaluate_placement_goal_legality(
             support_z is not None
             and int(release_offset_evidence.get("support_barrier_count") or 0) > 0
         ):
-            # A container task asks for a stable final state inside a region,
-            # not for the wrist to realize the model's post-gravity settled
-            # orientation while the object is still rigidly attached. Keep the
-            # model-selected in-plane destination, preserve the measured
-            # current object orientation during transport, and let the
-            # simulator settle the short final drop after detach. Pair
-            # legality and MoveIt still prove the complete gripper/payload
-            # state against every authoritative wall.
-            provisional_release: Transform = (
-                current_collision[0],
-                (collision_goal[1][0], collision_goal[1][1], 0.0),
-            )
-            provisional_geometry = _projected_body_geometry(
-                target_spec,
-                provisional_release,
-            )
-            if provisional_geometry:
-                provisional_bounds = compound_axis_aligned_bounds(
-                    provisional_geometry
-                )
-                desired_bottom_z = (
-                    support_z + release_clearance + release_z_offset
-                )
-                desired_release_collision: Transform = (
-                    current_collision[0],
-                    (
-                        collision_goal[1][0],
-                        collision_goal[1][1],
-                        desired_bottom_z - provisional_bounds.minimum_xyz[2],
-                    ),
-                )
-                release_delta = tuple(
-                    desired_release_collision[1][index]
-                    - current_collision[1][index]
-                    for index in range(3)
-                )
-                release_motion = (
-                    (
-                        (1.0, 0.0, 0.0),
-                        (0.0, 1.0, 0.0),
-                        (0.0, 0.0, 1.0),
-                    ),
-                    release_delta,
-                )
-                release_collision_goal = desired_release_collision
-                release_pointcloud_goal = _compose(
-                    release_motion,
-                    current_pointcloud,
-                )
-                release_correction = [0.0, 0.0, 0.0]
-                release_orientation_policy = (
-                    "preserve_current_orientation_for_container_drop"
-                )
-                binding_method = (
-                    "container_drop_translation_from_current_planning_scene_object"
-                )
-                container_drop = {
-                    "enabled": True,
-                    "reason": "authoritative_support_has_collision_barriers",
-                    "path_owner": "moveit",
-                    "settling_owner": "native_gravity",
-                    "model_destination_xy_preserved": True,
-                    "current_object_orientation_preserved": True,
-                    "release_bottom_z_m": desired_bottom_z,
-                    "support_barrier_count": int(
-                        release_offset_evidence.get("support_barrier_count") or 0
-                    ),
-                }
+            # AnyPlace owns the complete object SE(3) destination.  Container
+            # geometry only raises that model pose along world Z so the payload
+            # clears the proven entry boundary before detach.  Replacing the
+            # model orientation with the object's current orientation changes
+            # the measured attachment transform into a different EEF target;
+            # for long or off-centre grasps that can move every otherwise valid
+            # release outside the robot workspace.  Keep the model pose and let
+            # pair legality, IK, and MoveIt prove it against all authoritative
+            # walls.
+            desired_bottom_z = support_z + release_clearance + release_z_offset
+            binding_method = "model_settled_container_release_with_world_motion"
+            container_drop = {
+                "enabled": True,
+                "reason": "authoritative_support_has_collision_barriers",
+                "path_owner": "moveit",
+                "settling_owner": "native_gravity",
+                "model_destination_xy_preserved": True,
+                "model_destination_se3_preserved": True,
+                "current_object_orientation_preserved": False,
+                "release_bottom_z_m": desired_bottom_z,
+                "support_barrier_count": int(
+                    release_offset_evidence.get("support_barrier_count") or 0
+                ),
+            }
         result["checks"]["object_frame_binding"] = {
             "available": True,
             "method": binding_method,
@@ -1245,8 +1201,9 @@ def evaluate_placement_goal_legality(
         if prebound_container_drop:
             release_collision_goal = prebound_release_goal
             release_correction = [0.0, 0.0, 0.0]
-            release_orientation_policy = (
-                "preserve_current_orientation_for_container_drop"
+            release_orientation_policy = str(
+                candidate.get("release_orientation_policy")
+                or "model_settled_orientation"
             )
             binding_method = "prebound_container_drop_physical_goal"
         else:
@@ -1616,7 +1573,8 @@ def bind_qualified_placement_goal(
         and math.isfinite(float(release_z_offset))
     ):
         candidate["placement_release_z_offset_m"] = float(release_z_offset)
-    if release_orientation_policy == "preserve_current_orientation_for_container_drop":
+    container_drop = binding.get("container_drop")
+    if isinstance(container_drop, Mapping) and container_drop.get("enabled") is True:
         candidate["container_drop_release_prebound"] = True
     if isinstance(qualified_motion, Mapping):
         if _transform_matrix(qualified_motion.get("transform_matrix")) is None:

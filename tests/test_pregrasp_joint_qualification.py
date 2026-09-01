@@ -376,7 +376,7 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
     ] == "container_release_pointcloud_goal_with_predicted_attachment"
     assert predicted_container["qualification_stages"][0][
         "terminal_pose_source"
-    ] == "anyplace_xy_with_container_drop_orientation"
+    ] == "anyplace_se3_with_container_release_offset"
     assert measured_container["compile_parameters"]["placement_candidate"][
         "object_goal_pose"
     ] == container_release_physical_goal
