@@ -689,6 +689,10 @@ def test_vlm_work_order_selects_order_and_bin_binding(
         (0.62, -0.18) if region_id == "blue_parts_bin" else (0.62, 0.18)
         for region_id in region_ids
     ]
+    assert [item.placement_acceptance_semantics for item in configs] == [
+        "stable_geometry_centroid_inside"
+        for _region_id in region_ids
+    ]
     assert [
         item.work_order_item["placement_region_perception_prompt"]
         for item in configs

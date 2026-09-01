@@ -786,6 +786,10 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 self,
                 active_manipulation_target_index=index,
                 work_order_item=None,
+                # The catalog-level config has no selected destination, so
+                # its fallback must not override the physical semantics of a
+                # destination selected later by the work order.
+                placement_acceptance_semantics=None,
             )
             for index in range(len(self.manipulation_targets))
         )
@@ -850,6 +854,10 @@ class NativePickPlaceConfig(GazeboControlConfig):
                     self,
                     active_manipulation_target_index=target_index,
                     work_order_item=normalized,
+                    # Re-resolve this from the selected placement region.
+                    # dataclasses.replace otherwise carries the catalog
+                    # config's fallback (complete_footprint) into every bin.
+                    placement_acceptance_semantics=None,
                 )
             )
         return tuple(resolved)
