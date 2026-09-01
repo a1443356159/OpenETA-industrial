@@ -1159,9 +1159,19 @@ def verify_stable_placement(
         "destination_center_xy": list(cfg.destination_center_xy),
         "destination_size_xy_m": list(cfg.destination_size_xy_m),
         "placement_acceptance_semantics": cfg.placement_acceptance_semantics,
+        "placement_acceptance_authority": (
+            "visual_primary_geometry_obvious_failure_guard"
+            if cfg.placement_acceptance_semantics
+            == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+            else "strict_geometry_contract"
+        ),
         "geometry_volume_centroid_xyz": list(geometry_centroid),
         "centroid_margin_xy_m": [centroid_x_margin_m, centroid_y_margin_m],
         "complete_footprint_inside": min(x_margin_m, y_margin_m) >= 0.0,
+        "complete_footprint_is_quality_only": (
+            cfg.placement_acceptance_semantics
+            == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+        ),
         "conservative_footprint_radius_m": radius_m,
         "projected_footprint_half_extent_xy_m": [
             (bounds.maximum_xyz[0] - bounds.minimum_xyz[0]) / 2.0,

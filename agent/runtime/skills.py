@@ -90,7 +90,11 @@ def build_default_skill_registry() -> SkillRegistry:
                 "Use this skill as guidance only. Locate the receptacle or surface, "
                 "use the exact host-qualified release pose, let MoveIt check and "
                 "plan the complete path, open there without an agent-authored "
-                "offset or retreat waypoint, and confirm native stable placement. "
+                "offset or retreat waypoint, and inspect the post-release camera "
+                "view as the primary placement confirmation. For a physical bin, "
+                "native geometry only rejects an obvious miss, penetration, retained "
+                "attachment, or continued motion; a millimetre-scale conservative "
+                "footprint overhang is quality evidence, not a failed visual sort. "
                 "Flat supports retain the full model pose; container drops retain "
                 "the model destination while native gravity owns settling."
             ),

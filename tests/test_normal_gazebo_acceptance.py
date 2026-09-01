@@ -84,7 +84,7 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
     metadata = acceptance._automation_metadata_for_backend("anygrasp")
     assert "planner_mode=agentic_closed_loop" in metadata
     assert f"environment_id={acceptance.ENV_ID}" in metadata
-    assert "initial_observe=required" in metadata
+    assert "initial_observe=" not in metadata
     assert "environment_task=" not in metadata
 
 
@@ -447,15 +447,8 @@ def test_industrial_scene_prompts_bind_one_target_to_one_of_multiple_bins() -> N
     assert "yellow open end tool" not in tool and "green square area inside bin" not in tool
 
 
-def test_agentic_profile_uses_short_bounded_provider_retries() -> None:
-    assert acceptance.AGENTIC_PROVIDER_RESILIENCE_ENV == {
-        "OPENETA_LLM_TIMEOUT_S": "60",
-        "OPENETA_LLM_MAX_ATTEMPTS": "2",
-        "OPENETA_LLM_RETRY_BACKOFF_S": "0.5",
-        "OPENETA_LLM_MAX_TOKENS": "512",
-        "OPENETA_LLM_FALLBACK_MODEL": "gpt-5.6-luna",
-        "OPENETA_LLM_FALLBACK_TIMEOUT_S": "60",
-    }
+def test_agentic_profile_does_not_override_deployment_provider_policy() -> None:
+    assert acceptance.AGENTIC_PROVIDER_RESILIENCE_ENV == {}
 
 
 def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -> None:
@@ -488,18 +481,18 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
     assert environment["OPENETA_LLM_PROVIDER"] == "configured-provider"
     assert environment["OPENETA_LLM_MODEL"] == "configured-model"
     assert environment["OPENETA_LLM_API_KEY"] == "configured-secret"
-    assert environment["OPENETA_LLM_TIMEOUT_S"] == "60"
+    assert environment["OPENETA_LLM_TIMEOUT_S"] == "30"
     assert environment["OPENETA_LLM_MAX_ATTEMPTS"] == "2"
-    assert environment["OPENETA_LLM_RETRY_BACKOFF_S"] == "0.5"
-    assert environment["OPENETA_LLM_MAX_TOKENS"] == "512"
+    assert environment["OPENETA_LLM_RETRY_BACKOFF_S"] == "1"
+    assert environment["OPENETA_LLM_MAX_TOKENS"] == "32768"
     assert environment["OPENETA_LLM_THINKING_MODE"] == "disabled"
     assert environment["OPENETA_LLM_FALLBACK_PROVIDER"] == "configured-provider"
-    assert environment["OPENETA_LLM_FALLBACK_MODEL"] == "gpt-5.6-luna"
+    assert environment["OPENETA_LLM_FALLBACK_MODEL"] == "configured-model"
     assert environment["OPENETA_LLM_FALLBACK_API_BASE"] == (
         "https://configured.invalid/v1"
     )
     assert environment["OPENETA_LLM_FALLBACK_API_KEY"] == "configured-secret"
-    assert environment["OPENETA_LLM_FALLBACK_TIMEOUT_S"] == "60"
+    assert environment["OPENETA_LLM_FALLBACK_TIMEOUT_S"] == "30"
     assert "OPENETA_UNRELATED" not in environment
 
 
@@ -683,6 +676,18 @@ def test_normal_order_helper_requires_frozen_anyplace_pool_before_grasp() -> Non
     required = ("observe", "anyplace", "anygrasp", "move_to", "gripper_control")
     assert acceptance._ordered(valid, required)
     assert not acceptance._ordered(invalid, required)
+
+
+def test_acceptance_reports_agent_route_findings_without_failing_the_result() -> None:
+    assert acceptance._is_non_blocking_flow_finding(
+        "exactly one target-object and one placement-region SAM3 call is required"
+    )
+    assert acceptance._is_non_blocking_flow_finding(
+        "AnyPlace model inference count does not match assignments"
+    )
+    assert not acceptance._is_non_blocking_flow_finding(
+        "stable in-zone placement verification is missing per assignment"
+    )
 
 
 def _ordered_call(

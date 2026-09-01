@@ -296,6 +296,10 @@ def test_physical_bin_accepts_stable_body_centroid_with_edge_overhang() -> None:
     assert result.evidence["placement_acceptance_semantics"] == (
         PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
     )
+    assert result.evidence["placement_acceptance_authority"] == (
+        "visual_primary_geometry_obvious_failure_guard"
+    )
+    assert result.evidence["complete_footprint_is_quality_only"] is True
 
 
 def test_physical_bin_rejects_stable_body_centroid_outside_region() -> None:
