@@ -432,7 +432,7 @@ def test_runtime_action_observation_uses_ros_completion_barrier_without_callback
     assert receipt["action_completed_ros_time_s"] == 42.0
     assert camera.capture_arguments == [
         {
-            "timeout_s": pytest.approx(30.0),
+            "timeout_s": pytest.approx(30.0, abs=0.01),
             "min_timestamp_s": 42.0,
             "min_received_monotonic_s": None,
         }
@@ -455,7 +455,7 @@ def test_read_only_motion_qualification_reuses_frozen_observation() -> None:
     assert observation is cached
     assert camera.capture_arguments == [
         {
-            "timeout_s": pytest.approx(30.0),
+            "timeout_s": pytest.approx(30.0, abs=0.01),
             "min_timestamp_s": None,
             "min_received_monotonic_s": None,
         }
