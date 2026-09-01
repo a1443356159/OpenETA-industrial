@@ -74,6 +74,7 @@ SIMULATOR_STARTUP_RETRY_METADATA_KEY = "_openeta_simulator_startup_retry_attempt
 CONTROL_RECEIPT_FIELDS = (
     "ok",
     "error_code",
+    "error_type",
     "moveit_error_code",
     "failure_class",
     "candidate_rejection",
@@ -121,6 +122,7 @@ CONTROL_RECEIPT_FIELDS = (
     # boolean so AgentMemory can stop replaying open instead of treating the
     # artifact-truncated response as a reversible tool failure.
     "gripper_open_executed",
+    "post_release_failure_stage",
     # The release transition is atomic but spans four independently proven
     # environment events.  Keep the bounded ordered evidence in the trusted
     # host receipt so AgentMemory can consume the transition without reopening

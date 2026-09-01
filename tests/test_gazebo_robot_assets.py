@@ -280,7 +280,6 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert "BILATERAL_HOLD_PRELOAD_RAD" in adapter
     assert "TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S" in adapter
     assert "TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S" in adapter
-    assert "COMMON_PROGRESS_EPSILON_RAD" in adapter
     assert "linkage_settle_complete" in adapter
     assert "functional_opening_complete" in adapter
     assert "full_open_goal" in adapter
@@ -299,9 +298,8 @@ def test_robotiq_manifest_launch_and_control_adapter_are_complete() -> None:
     assert "bilateral_mechanism_stationary" in adapter
     assert "self._bounded_contact_hold_position" in adapter
     assert "bilateral_contact_started_sim_time_s = None" in adapter
-    assert "self._one_pad_compliance_exhausted" in adapter
-    assert "compliance_exhausted" in adapter
-    assert "COMMON_COMPLIANCE_DWELL_SIM_S" in adapter
+    assert "if fresh_contact_sides" in adapter
+    assert "self-centring preload exhausted" not in adapter
     assert "side_holds" not in adapter
     assert "stall_hold_extra_rad" not in adapter
     assert "drive_mode" not in adapter

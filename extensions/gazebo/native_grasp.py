@@ -488,8 +488,10 @@ class PlacementReasonCode(StrEnum):
     OBSERVATION_TOO_SHORT = "PLACEMENT_OBSERVATION_TOO_SHORT"
     TERMINAL_DRIFT = "PLACEMENT_TERMINAL_DRIFT_EXCEEDED"
     HEIGHT_OUT_OF_RANGE = "PLACEMENT_SUPPORT_HEIGHT_OUT_OF_RANGE"
+    SUPPORT_PENETRATION = "PLACEMENT_SUPPORT_PENETRATION"
     FOOTPRINT_OUTSIDE_DESTINATION = "PLACEMENT_FOOTPRINT_OUTSIDE_DESTINATION"
     CENTROID_OUTSIDE_DESTINATION = "PLACEMENT_GEOMETRY_CENTROID_OUTSIDE_DESTINATION"
+    NO_DESTINATION_OVERLAP = "PLACEMENT_GEOMETRY_OUTSIDE_DESTINATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1181,6 +1183,16 @@ def verify_stable_placement(
     centroid_x_margin_m = half_x - abs(geometry_centroid[0] - cfg.destination_center_xy[0])
     centroid_y_margin_m = half_y - abs(geometry_centroid[1] - cfg.destination_center_xy[1])
     support_height_error_m = abs(bounds.minimum_xyz[2] - cfg.destination_support_z_m)
+    support_penetration_m = max(
+        0.0,
+        cfg.destination_support_z_m - bounds.minimum_xyz[2],
+    )
+    destination_overlaps = not (
+        bounds.maximum_xyz[0] < cfg.destination_center_xy[0] - half_x
+        or bounds.minimum_xyz[0] > cfg.destination_center_xy[0] + half_x
+        or bounds.maximum_xyz[1] < cfg.destination_center_xy[1] - half_y
+        or bounds.minimum_xyz[1] > cfg.destination_center_xy[1] + half_y
+    )
     expected_link_origin_height_m = (
         final.xyz[2] + cfg.destination_support_z_m - bounds.minimum_xyz[2]
     )
@@ -1227,6 +1239,10 @@ def verify_stable_placement(
         "expected_link_origin_height_m": expected_link_origin_height_m,
         "support_height_tolerance_m": cfg.placement_support_height_tolerance_m,
         "support_height_error_m": support_height_error_m,
+        "support_penetration_m": support_penetration_m,
+        "maximum_support_penetration_m": (
+            cfg.placement_support_height_tolerance_m
+        ),
         "destination_center_xy": list(cfg.destination_center_xy),
         "destination_size_xy_m": list(cfg.destination_size_xy_m),
         "placement_acceptance_semantics": cfg.placement_acceptance_semantics,
@@ -1239,6 +1255,7 @@ def verify_stable_placement(
         "geometry_volume_centroid_xyz": list(geometry_centroid),
         "centroid_margin_xy_m": [centroid_x_margin_m, centroid_y_margin_m],
         "complete_footprint_inside": min(x_margin_m, y_margin_m) >= 0.0,
+        "destination_geometry_overlaps": destination_overlaps,
         "complete_footprint_is_quality_only": (
             cfg.placement_acceptance_semantics
             == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
@@ -1264,23 +1281,38 @@ def verify_stable_placement(
         )
     if terminal_drift_m > cfg.maximum_placement_terminal_drift_m:
         return PlacementVerification(Verdict.FAIL, PlacementReasonCode.TERMINAL_DRIFT, evidence)
-    if support_height_error_m > cfg.placement_support_height_tolerance_m and not math.isclose(
-        support_height_error_m,
-        cfg.placement_support_height_tolerance_m,
-        rel_tol=0.0,
-        abs_tol=_POSE_BOUNDARY_ABS_TOL_M,
-    ):
-        return PlacementVerification(
-            Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
-        )
     if (
         cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
-        and min(centroid_x_margin_m, centroid_y_margin_m) < 0.0
+        and support_penetration_m
+        > cfg.placement_support_height_tolerance_m + _POSE_BOUNDARY_ABS_TOL_M
     ):
         return PlacementVerification(
             Verdict.FAIL,
-            PlacementReasonCode.CENTROID_OUTSIDE_DESTINATION,
+            PlacementReasonCode.SUPPORT_PENETRATION,
             evidence,
+        )
+    if (
+        cfg.placement_acceptance_semantics
+        == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+        and not destination_overlaps
+    ):
+        return PlacementVerification(
+            Verdict.FAIL,
+            PlacementReasonCode.NO_DESTINATION_OVERLAP,
+            evidence,
+        )
+    if (
+        cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
+        and support_height_error_m > cfg.placement_support_height_tolerance_m
+        and not math.isclose(
+            support_height_error_m,
+            cfg.placement_support_height_tolerance_m,
+            rel_tol=0.0,
+            abs_tol=_POSE_BOUNDARY_ABS_TOL_M,
+        )
+    ):
+        return PlacementVerification(
+            Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
         )
     if (
         cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
@@ -1345,22 +1377,38 @@ def validated_pickplace_motion_guidance(
             {
                 "tool": "gripper_control",
                 "position": 1,
-                "requires_receipt": ["detached_ack", "stable_placement"],
+                "requires_receipt": [
+                    "detached_ack",
+                    "post_release_visual_observation",
+                    "geometry_obvious_failure_guard",
+                ],
             },
         ],
         "success_evidence": {
             "grasp_admission": "bilateral_native_contact_and_attach_ack",
             "maximum_capture_relative_translation_m": (cfg.maximum_capture_relative_translation_m),
             "placement": {
+                "verification_authority": (
+                    "visual_primary_geometry_obvious_failure_guard"
+                    if cfg.placement_acceptance_semantics
+                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+                    else "strict_geometry_contract"
+                ),
+                "visual_source": "causal_post_release_rgbd",
                 "minimum_stability_duration_s": cfg.placement_stability_duration_s,
                 "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
                 "support_plane_height_m": cfg.destination_support_z_m,
-                "height_rule": "compound_collision_geometry_contacts_destination_plane",
+                "height_rule": (
+                    "reject_support_penetration_only"
+                    if cfg.placement_acceptance_semantics
+                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+                    else "compound_collision_geometry_contacts_destination_plane"
+                ),
                 "support_height_tolerance_m": cfg.placement_support_height_tolerance_m,
                 "destination_center_xy": list(cfg.destination_center_xy),
                 "destination_size_xy_m": list(cfg.destination_size_xy_m),
                 "footprint_rule": (
-                    "stable_geometry_centroid_inside"
+                    "reject_only_no_destination_overlap"
                     if cfg.placement_acceptance_semantics
                     == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
                     else "compound_collision_projection_fully_inside"

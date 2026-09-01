@@ -349,67 +349,6 @@ def functional_opening_complete(
     return max(abs(value) for value in joint_velocities.values()) <= terminal_velocity
 
 
-def one_pad_compliance_exhausted(
-    *,
-    single_contact_age_s: float,
-    no_common_progress_age_s: float,
-    commanded_active_rad: float,
-    nominal_active_rad: float,
-    measured_common_active_rad: float,
-    max_lead_rad: float,
-    progress_epsilon_rad: float,
-    mechanism_stationary: bool,
-    remaining_close_travel_rad: float,
-    goal_tolerance_rad: float,
-    compliance_dwell_s: float,
-) -> bool:
-    """Prove that bounded one-pad self-centring travel is exhausted.
-
-    One pad touching is a normal intermediate state for a single-actuator
-    parallel gripper and is never sufficient to fail a close.  Exhaustion is
-    reported only after the common command has accumulated its complete
-    bounded preload, the whole linkage is stationary, and the common driver
-    has made no measurable progress throughout the compliance window while
-    meaningful close travel remains.
-    """
-
-    values = (
-        single_contact_age_s,
-        no_common_progress_age_s,
-        commanded_active_rad,
-        nominal_active_rad,
-        measured_common_active_rad,
-        max_lead_rad,
-        progress_epsilon_rad,
-        remaining_close_travel_rad,
-        goal_tolerance_rad,
-        compliance_dwell_s,
-    )
-    if not all(math.isfinite(float(value)) for value in values):
-        raise ValueError("one-pad compliance evidence must be finite")
-    if (
-        single_contact_age_s < 0.0
-        or no_common_progress_age_s < 0.0
-        or max_lead_rad <= 0.0
-        or progress_epsilon_rad < 0.0
-        or progress_epsilon_rad >= max_lead_rad
-        or goal_tolerance_rad <= 0.0
-        or compliance_dwell_s <= 0.0
-    ):
-        raise ValueError("one-pad compliance limits are invalid")
-    common_preload_saturated = bool(
-        commanded_active_rad - measured_common_active_rad >= max_lead_rad - progress_epsilon_rad
-        and nominal_active_rad - measured_common_active_rad >= max_lead_rad - progress_epsilon_rad
-    )
-    return bool(
-        single_contact_age_s >= compliance_dwell_s
-        and no_common_progress_age_s >= compliance_dwell_s
-        and common_preload_saturated
-        and mechanism_stationary
-        and remaining_close_travel_rad > goal_tolerance_rad
-    )
-
-
 def linkage_terminal_metrics(
     targets: Mapping[str, float],
     positions: Mapping[str, float],

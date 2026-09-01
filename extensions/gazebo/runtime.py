@@ -671,6 +671,7 @@ class GazeboRuntime:
         self,
         *,
         placement_verification: Mapping[str, Any],
+        post_release_observation: EnvObservation | None = None,
     ) -> dict[str, Any] | None:
         """Advance a proven VLM-authored work order without recreating the world."""
 
@@ -744,6 +745,29 @@ class GazeboRuntime:
         progress = self.multi_sort_progress()
         if progress is None:
             raise GazeboProcessError("MULTI_SORT_PROGRESS_UNAVAILABLE")
+        if (
+            progress.get("all_completed") is not True
+            and post_release_observation is not None
+            and post_release_observation.cameras
+            and post_release_observation.metadata.get("observation_stale") is not True
+        ):
+            # The gripper action already captured this RGB-D packet after the
+            # irreversible detach/open boundary. Activating the next semantic
+            # target changes only PlanningScene bookkeeping, not Gazebo. Reuse
+            # that causal scene view instead of forcing another camera frame
+            # and another TUI round before the next assignment.
+            self._multi_sort_observation_required = False
+            progress = {
+                **progress,
+                "fresh_observation_required": False,
+                "fresh_observation_satisfied": True,
+                "fresh_observation_source": "post_release_action",
+            }
+            post_release_observation.metadata = {
+                **post_release_observation.metadata,
+                "multi_sort_progress": dict(progress),
+            }
+            self._last_observation = post_release_observation
         return {**progress, "transition": transition}
 
     def execute(self, action: Mapping[str, Any]) -> tuple[EnvObservation, dict[str, Any]]:

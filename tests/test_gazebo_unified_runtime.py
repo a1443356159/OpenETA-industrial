@@ -244,8 +244,15 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
             },
         ]
     )
+    post_release = EnvObservation(
+        task="sort",
+        cameras=[_Camera(profile.cameras[0]).capture()],
+        robot=RobotState(),
+        metadata={"observation_provenance": "gazebo_ros_live"},
+    )
     progress = runtime.complete_active_work_order_item(
-        placement_verification={"placement_confirmed": True, "verdict": "PASS"}
+        placement_verification={"placement_confirmed": True, "verdict": "PASS"},
+        post_release_observation=post_release,
     )
 
     assert runtime.start_count == 1
@@ -263,7 +270,11 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
         "yellow_wrench_to_green_parts_bin"
     ]
     assert progress["remaining_count"] == 1
-    assert progress["fresh_observation_required"] is True
+    assert progress["fresh_observation_required"] is False
+    assert progress["fresh_observation_satisfied"] is True
+    assert progress["fresh_observation_source"] == "post_release_action"
+    assert runtime._last_observation is post_release
+    assert post_release.metadata["multi_sort_progress"]["active_assignment_index"] == 1
     assert progress["transition"]["world_recreated"] is False
 
 

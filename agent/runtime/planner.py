@@ -8006,6 +8006,15 @@ def _placement_release_obligation(
         and int(progress.get("remaining_count") or 0) > 0
         and progress.get("all_completed") is not True
     ):
+        if (
+            progress.get("fresh_observation_required") is False
+            and progress.get("fresh_observation_satisfied") is True
+        ):
+            # A world-mutating tool may already carry a causal post-action
+            # RGB-D packet. Semantic activation of the next work-order item
+            # does not mutate Gazebo, so forcing another observe call would
+            # add a TUI round without improving scene freshness.
+            return None
         active_assignment = progress.get("active_assignment")
         active_assignment = (
             dict(active_assignment) if isinstance(active_assignment, dict) else None

@@ -884,6 +884,48 @@ def test_release_detaches_both_bindings_before_opening_gripper() -> None:
     assert raw["metadata"]["planning_scene_revision"] == 9
 
 
+def test_irreversible_release_proof_survives_later_scene_sync_failure() -> None:
+    env, events = _attached_release_env()
+
+    def fail_pose_sync(
+        _config,
+        *,
+        target_xyz,
+        target_quat_xyzw,
+        allow_target_touch=False,
+    ):
+        del _config, target_xyz, target_quat_xyzw, allow_target_touch
+        events.append("planning_scene_pose_sync_failed")
+        # TimeoutError without a message reproduces the empty error code that
+        # previously hid the actual post-release failure stage.
+        raise TimeoutError
+
+    env.runtime.controller.sync_planning_scene_target_pose = fail_pose_sync
+
+    _, _, _, _, result = env.step({"action_type": "gripper_open"})
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is False
+    assert receipt["gripper_open_executed"] is True
+    assert receipt["infrastructure_error"] is True
+    assert receipt["post_release_failure_stage"] == "released_target_pose_sync"
+    assert receipt["error_code"] == "TimeoutError"
+    assert receipt["error_type"] == "TimeoutError"
+    assert receipt["placement_verification"]["verdict"] == "PASS"
+    assert [item["event"] for item in receipt["release_sequence"]] == [
+        "native_detach_ack",
+        "planning_scene_detach_ack",
+        "gripper_open_completed",
+    ]
+    assert events == [
+        "native_detach_ack",
+        "planning_scene_detach_ack",
+        "gripper_open",
+        "sample_released_target",
+        "planning_scene_pose_sync_failed",
+    ]
+
+
 def test_release_detach_failure_forbids_gripper_open() -> None:
     env, events = _attached_release_env(detach_fails=True)
 

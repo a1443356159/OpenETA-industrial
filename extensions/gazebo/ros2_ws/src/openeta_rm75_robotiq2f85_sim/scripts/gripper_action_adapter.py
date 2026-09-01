@@ -40,7 +40,6 @@ def _load_robotiq_kinematics():
             functional_opening_complete,
             linkage_terminal_metrics,
             minimum_feasible_active_position,
-            one_pad_compliance_exhausted,
             six_joint_positions,
         )
 
@@ -51,7 +50,6 @@ def _load_robotiq_kinematics():
             bounded_contact_hold_position,
             functional_opening_complete,
             minimum_feasible_active_position,
-            one_pad_compliance_exhausted,
         )
     except ImportError:
         pass
@@ -64,7 +62,6 @@ def _load_robotiq_kinematics():
                 functional_opening_complete,
                 linkage_terminal_metrics,
                 minimum_feasible_active_position,
-                one_pad_compliance_exhausted,
                 six_joint_positions,
             )
 
@@ -75,7 +72,6 @@ def _load_robotiq_kinematics():
                 bounded_contact_hold_position,
                 functional_opening_complete,
                 minimum_feasible_active_position,
-                one_pad_compliance_exhausted,
             )
     raise RuntimeError("extensions/gazebo/robotiq_kinematics.py not found relative to the adapter")
 
@@ -111,12 +107,6 @@ TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S: Final = 0.25
 TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S: Final = (
     GOAL_TOLERANCE_RAD / TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S
 )
-# Common-driver progress is measured below the public terminal tolerance.
-# Sustained one-pad contact is a normal self-centring intermediate state.  It
-# becomes exhausted only after the bounded common preload is fully applied and
-# the complete linkage still makes no progress through a longer compliance
-# window.
-COMMON_PROGRESS_EPSILON_RAD: Final = GOAL_TOLERANCE_RAD / 4.0
 # The controller target remains strictly inside a hard joint stop while the
 # action result stays referenced to the original requested endpoint.
 CONTROLLER_BOUNDARY_INSET_RAD: Final = GOAL_TOLERANCE_RAD / 2.0
@@ -145,10 +135,6 @@ TERMINAL_BILATERAL_CONTACT_DWELL_SIM_S: Final = 0.25
 # preventing the old pre-contact command from squeezing an object that is
 # subsequently fixed to the wrist.  It remains one common actuator target.
 BILATERAL_HOLD_PRELOAD_RAD: Final = GOAL_TOLERANCE_RAD / 2.0
-COMMON_COMPLIANCE_DWELL_SIM_S: Final = max(
-    2.0 * TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S,
-    TERMINAL_BILATERAL_CONTACT_DWELL_SIM_S,
-)
 # A contact remains current for a simulator-time interval longer than the
 # bilateral proof freshness.  Wall-clock load cannot expire physical contact.
 CONTACT_FRESHNESS_SIM_S: Final = 0.25
@@ -172,7 +158,6 @@ class RobotiqGripperActionAdapter(Node):
             self._bounded_contact_hold_position,
             self._functional_opening_complete,
             self._minimum_feasible_active_position,
-            self._one_pad_compliance_exhausted,
         ) = _load_robotiq_kinematics()
         self._allow_stalling = bool(self.get_parameter("allow_stalling").value)
         self._action_timeout_s = float(self.get_parameter("action_timeout_s").value)
@@ -396,10 +381,6 @@ class RobotiqGripperActionAdapter(Node):
         bilateral_contact_started_sim_time_s: float | None = None
         bilateral_settle_started_sim_time_s: float | None = None
         bilateral_hold_active_position: float | None = None
-        single_contact_side: str | None = None
-        single_contact_started_sim_time_s: float | None = None
-        common_progress_active_position = start_active_position
-        common_progress_sim_time_s = goal_started_sim_time_s
         linkage_settle_started_sim_time_s: float | None = None
         functional_open_settle_started_sim_time_s: float | None = None
 
@@ -443,9 +424,26 @@ class RobotiqGripperActionAdapter(Node):
             except ValueError:
                 common_active_position = math.nan
             if closing_goal and math.isfinite(common_active_position):
+                # Before contact, keep the position systems close to the
+                # measured common mechanism.  Once either pad touches, the
+                # slowly advancing *single* target must be allowed to build
+                # force and move the workpiece toward the opposing pad.  A
+                # fixed angular lead ceiling turns that ordinary self-centring
+                # phase into an artificial one-sided stall: the blocked side
+                # defines the conservative measured driver forever, so the
+                # target can never advance far enough to transfer force.
+                #
+                # All six targets below still come from this one scalar and
+                # the exact four-bar map.  Contact only changes how far that
+                # common actuator may lag its measured mechanism; it never
+                # creates a per-side command.
                 commanded_active_position = min(
                     nominal_active_position,
-                    common_active_position + max_lead,
+                    (
+                        effective_active_position
+                        if fresh_contact_sides
+                        else common_active_position + max_lead
+                    ),
                     effective_active_position,
                 )
             elif opening_goal and math.isfinite(common_active_position):
@@ -517,63 +515,6 @@ class RobotiqGripperActionAdapter(Node):
                 result.reached_goal = False
                 goal_handle.succeed()
                 return result
-
-            if (
-                self._allow_stalling
-                and closing_goal
-                and len(fresh_contact_sides) == 1
-                and math.isfinite(common_active_position)
-            ):
-                current_side = next(iter(fresh_contact_sides))
-                if current_side != single_contact_side:
-                    single_contact_side = current_side
-                    single_contact_started_sim_time_s = sim_now_s
-                    common_progress_active_position = common_active_position
-                    common_progress_sim_time_s = sim_now_s
-                elif (
-                    common_active_position - common_progress_active_position
-                    >= COMMON_PROGRESS_EPSILON_RAD
-                ):
-                    common_progress_active_position = common_active_position
-                    common_progress_sim_time_s = sim_now_s
-                mechanism_stationary = bool(
-                    complete_velocity_state
-                    and max(abs(float(velocities[name])) for name in JOINT_MULTIPLIERS)
-                    <= TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S
-                )
-                compliance_exhausted = self._one_pad_compliance_exhausted(
-                    single_contact_age_s=(
-                        sim_now_s - single_contact_started_sim_time_s
-                        if single_contact_started_sim_time_s is not None
-                        else 0.0
-                    ),
-                    no_common_progress_age_s=(sim_now_s - common_progress_sim_time_s),
-                    commanded_active_rad=commanded_active_position,
-                    nominal_active_rad=nominal_active_position,
-                    measured_common_active_rad=common_active_position,
-                    max_lead_rad=max_lead,
-                    progress_epsilon_rad=COMMON_PROGRESS_EPSILON_RAD,
-                    mechanism_stationary=mechanism_stationary,
-                    remaining_close_travel_rad=(effective_active_position - common_active_position),
-                    goal_tolerance_rad=GOAL_TOLERANCE_RAD,
-                    compliance_dwell_s=COMMON_COMPLIANCE_DWELL_SIM_S,
-                )
-                if compliance_exhausted:
-                    self.get_logger().info(
-                        "terminating common Robotiq driver after bounded "
-                        f"self-centring preload exhausted with {current_side} contact"
-                    )
-                    result.state = self._result_state(positions, velocities, state)
-                    result.stalled = True
-                    result.reached_goal = False
-                    goal_handle.succeed()
-                    return result
-            else:
-                single_contact_side = None
-                single_contact_started_sim_time_s = None
-                if math.isfinite(common_active_position):
-                    common_progress_active_position = common_active_position
-                common_progress_sim_time_s = sim_now_s
 
             functional_open_ready = bool(
                 full_open_goal

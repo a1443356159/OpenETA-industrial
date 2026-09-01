@@ -308,6 +308,13 @@ class GazeboDirectEnv(Env):
                 )
             ):
                 raw["metadata"]["multi_sort_progress"] = dict(progress)
+        # Work-order activation can change the selected target, destination,
+        # and placement semantics without recreating the environment. Carry
+        # the current profile contract with every observation; the MCP proxy's
+        # creation-time copy is only a fallback for older environments.
+        control_spec = getattr(self, "openeta_control_spec", None)
+        if isinstance(control_spec, Mapping):
+            raw.setdefault("metadata", {})["control_spec"] = dict(control_spec)
         return raw
 
     def observe(self) -> dict[str, Any]:
@@ -1079,14 +1086,16 @@ class GazeboDirectEnv(Env):
                 receipt["physical_verification"] = record.to_dict()
             elif action_type == "gripper_open":
                 if release_before_open is not None:
+                    release_sequence = list(
+                        release_before_open["release_sequence"]
+                    )
+                    open_executed = receipt.get("ok") is True
+                    post_release_stage = "gripper_result"
                     try:
-                        if receipt.get("ok") is not True:
+                        if not open_executed:
                             raise GazeboProcessError(
                                 str(receipt.get("error_code") or "GRIPPER_FAILED")
                             )
-                        release_sequence = list(
-                            release_before_open["release_sequence"]
-                        )
                         release_sequence.append(
                             {
                                 "sequence": len(release_sequence) + 1,
@@ -1094,6 +1103,12 @@ class GazeboDirectEnv(Env):
                                 "ok": True,
                             }
                         )
+                        # Detach and the physical open are already irreversible
+                        # at this point. Publish their complete causal proof
+                        # before any pose sampling, PlanningScene bookkeeping,
+                        # or multi-sort transition can fail independently.
+                        receipt["release_sequence"] = release_sequence
+                        receipt["gripper_open_executed"] = True
                         receipt["detachable_joint"] = {
                             "state": "detached",
                             "detach_topic": self._native_grasp_config.detach_topic,
@@ -1111,6 +1126,7 @@ class GazeboDirectEnv(Env):
                                     "attached_collision_filter"
                                 ]
                             )
+                        post_release_stage = "placement_pose_sampling"
                         samples = attachment.sample_detached_target_poses(
                             duration_s=(
                                 self._native_grasp_config.placement_settling_observation_s
@@ -1122,6 +1138,7 @@ class GazeboDirectEnv(Env):
                         placement = verify_stable_placement(
                             samples, self._native_grasp_config
                         )
+                        receipt["placement_verification"] = placement.to_dict()
                         target_pose = samples[-1]
                         sync_target_pose = getattr(
                             self.controller,
@@ -1130,6 +1147,7 @@ class GazeboDirectEnv(Env):
                         )
                         if not callable(sync_target_pose):
                             raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                        post_release_stage = "released_target_pose_sync"
                         scene_revision = sync_target_pose(
                             self._native_grasp_config,
                             target_xyz=target_pose.xyz,
@@ -1152,9 +1170,7 @@ class GazeboDirectEnv(Env):
                         )
                         record = release_before_open["record"]
                         receipt["planning_scene_revision"] = scene_revision
-                        receipt["placement_verification"] = placement.to_dict()
                         receipt["release_sequence"] = release_sequence
-                        receipt["gripper_open_executed"] = True
                         receipt["native_target_binding"] = {
                             "target_id": self._native_grasp_config.target_id,
                             "target_link": self._native_grasp_config.target_link,
@@ -1168,13 +1184,25 @@ class GazeboDirectEnv(Env):
                             "planning_scene_revision"
                         ] = scene_revision
                         if placement.verdict.value == "PASS":
+                            post_release_stage = "work_order_transition"
                             advance = getattr(
                                 self.runtime,
                                 "complete_active_work_order_item",
                                 None,
                             )
                             progress = (
-                                advance(placement_verification=placement.to_dict())
+                                advance(
+                                    placement_verification=placement.to_dict(),
+                                    post_release_observation=(
+                                        observation
+                                        if observation.cameras
+                                        and observation.metadata.get(
+                                            "observation_stale"
+                                        )
+                                        is not True
+                                        else None
+                                    ),
+                                )
                                 if callable(advance)
                                 else None
                             )
@@ -1213,16 +1241,22 @@ class GazeboDirectEnv(Env):
                                     ] = validated_pickplace_motion_guidance(
                                         next_config
                                     )
+                                    raw["metadata"]["control_spec"] = dict(
+                                        self.openeta_control_spec
+                                    )
+                        post_release_stage = "complete"
                     except Exception as exc:
                         record = release_before_open["record"]
+                        error = str(exc).strip() or type(exc).__name__
                         receipt.update(
                             {
                                 "ok": False,
-                                "error_code": str(exc),
-                                "gripper_open_executed": bool(receipt.get("ok")),
-                                "release_sequence": list(
-                                    release_before_open["release_sequence"]
-                                ),
+                                "error_code": error,
+                                "error_type": type(exc).__name__,
+                                "infrastructure_error": open_executed,
+                                "post_release_failure_stage": post_release_stage,
+                                "gripper_open_executed": open_executed,
+                                "release_sequence": release_sequence,
                             }
                         )
                 else:

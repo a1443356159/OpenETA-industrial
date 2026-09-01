@@ -719,6 +719,12 @@ def test_worker_proxy_carries_existing_control_spec_into_observation_metadata() 
 
     assert nested["observation"]["metadata"]["control_spec"] == control_spec
     assert top_level["metadata"]["control_spec"] == control_spec
+    dynamic = {"validated_pickplace_motion": {"selected_region": "blue"}}
+    updated = _attach_control_spec(
+        {"observation": {"metadata": {"control_spec": dynamic}}},
+        {"control_spec": control_spec},
+    )
+    assert updated["observation"]["metadata"]["control_spec"] == dynamic
     assert _attach_control_spec({"metadata": {}}, {}) == {"metadata": {}}
 
 

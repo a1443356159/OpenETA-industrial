@@ -19,7 +19,6 @@ from extensions.gazebo.robotiq_kinematics import (
     functional_opening_complete,
     linkage_terminal_metrics,
     minimum_feasible_active_position,
-    one_pad_compliance_exhausted,
     six_joint_positions,
     solve_four_bar,
 )
@@ -243,35 +242,6 @@ def test_bilateral_contact_hold_uses_measured_common_driver_and_bounded_preload(
             requested_active_rad=0.70,
             preload_rad=0.0,
         )
-
-
-def test_one_pad_contact_remains_compliance_until_all_exhaustion_proofs_hold() -> None:
-    evidence = {
-        "single_contact_age_s": 0.8,
-        "no_common_progress_age_s": 0.8,
-        "commanded_active_rad": 0.46,
-        "nominal_active_rad": 0.60,
-        "measured_common_active_rad": 0.40,
-        "max_lead_rad": 0.06,
-        "progress_epsilon_rad": 0.005,
-        "mechanism_stationary": True,
-        "remaining_close_travel_rad": 0.30,
-        "goal_tolerance_rad": 0.02,
-        "compliance_dwell_s": 0.5,
-    }
-
-    assert one_pad_compliance_exhausted(**evidence) is True
-    # Contact age alone is not failure: preload, stationarity, recent common
-    # progress, and remaining stroke are independent mandatory proofs.
-    for override in (
-        {"commanded_active_rad": 0.43},
-        {"mechanism_stationary": False},
-        {"no_common_progress_age_s": 0.1},
-        {"remaining_close_travel_rad": 0.01},
-    ):
-        assert one_pad_compliance_exhausted(**(evidence | override)) is False
-    with pytest.raises(ValueError, match="limits"):
-        one_pad_compliance_exhausted(**(evidence | {"max_lead_rad": 0.0}))
 
 
 def test_controller_safe_targets_inset_each_hard_stop_inside_action_tolerance() -> None:

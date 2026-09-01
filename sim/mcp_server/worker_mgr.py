@@ -803,16 +803,24 @@ def _attach_control_spec(response: dict, meta: dict) -> dict:
     if isinstance(observation, dict):
         enriched = dict(observation)
         metadata = enriched.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        current = metadata.get("control_spec")
         enriched["metadata"] = {
-            **(metadata if isinstance(metadata, dict) else {}),
-            "control_spec": dict(control_spec),
+            **metadata,
+            "control_spec": dict(
+                current if isinstance(current, dict) and current else control_spec
+            ),
         }
         result["observation"] = enriched
         return result
     metadata = result.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    current = metadata.get("control_spec")
     result["metadata"] = {
-        **(metadata if isinstance(metadata, dict) else {}),
-        "control_spec": dict(control_spec),
+        **metadata,
+        "control_spec": dict(
+            current if isinstance(current, dict) and current else control_spec
+        ),
     }
     return result
 

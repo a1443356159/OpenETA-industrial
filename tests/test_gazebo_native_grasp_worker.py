@@ -36,14 +36,16 @@ def test_native_grasp_profile_constructs_without_starting_a_worker() -> None:
             "attached_ack",
         ]
         assert motion["success_evidence"]["placement"] == {
+            "verification_authority": "visual_primary_geometry_obvious_failure_guard",
+            "visual_source": "causal_post_release_rgbd",
             "minimum_stability_duration_s": 0.5,
             "maximum_terminal_drift_m": 0.005,
             "support_plane_height_m": 0.02,
-            "height_rule": "compound_collision_geometry_contacts_destination_plane",
+            "height_rule": "reject_support_penetration_only",
             "support_height_tolerance_m": 0.01,
             "destination_center_xy": list(config.destination_center_xy),
             "destination_size_xy_m": [0.285, 0.260],
-            "footprint_rule": "stable_geometry_centroid_inside",
+            "footprint_rule": "reject_only_no_destination_overlap",
             "complete_footprint_margin_role": "ordering_and_evidence_only",
         }
         assert environment.runtime.started is False
