@@ -1,0 +1,84 @@
+name: openeta-industrial
+
+services:
+  openeta:
+    image: ${OPENETA_IMAGE:-openeta-industrial:local}
+    build:
+      context: ../..
+      dockerfile: deploy/ubuntu/Dockerfile
+      args:
+        OPENETA_REVISION: ${OPENETA_REVISION:-local}
+    init: true
+    stdin_open: true
+    tty: true
+    user: "${OPENETA_UID:-1000}:${OPENETA_GID:-1000}"
+    network_mode: host
+    shm_size: ${OPENETA_SHM_SIZE:-8gb}
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    secrets:
+      - source: openeta_provider_env
+        target: openeta_provider_env
+    environment:
+      HOME: /srv/openeta/state/home
+      XDG_CACHE_HOME: /srv/openeta/state/cache
+      HF_HOME: /srv/openeta/state/cache/huggingface/sam3
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      MPLCONFIGDIR: /srv/openeta/state/cache/matplotlib
+      ROS_HOME: /srv/openeta/state/ros
+      ROS_LOCALHOST_ONLY: ${OPENETA_ROS_LOCALHOST_ONLY:-1}
+      PYTHONPATH: /opt/openeta/src
+      QT_QPA_PLATFORM: ${OPENETA_QT_QPA_PLATFORM:-offscreen}
+      GZ_SIM_RENDER_ENGINE_SERVER: ${OPENETA_GZ_RENDER_ENGINE:-ogre2}
+      NVIDIA_VISIBLE_DEVICES: ${OPENETA_NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${OPENETA_NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      OPENETA_SOURCE_ROOT: /opt/openeta/src
+      OPENETA_STATE_ROOT: /srv/openeta/state
+      OPENETA_RUN_ROOT: /srv/openeta/state/runs
+      OPENETA_MODEL_ROOT: /srv/openeta/models
+      OPENETA_MCP_PORT: ${OPENETA_MCP_PORT:-8765}
+      OPENETA_SAM3_PORT: ${OPENETA_SAM3_PORT:-8773}
+      OPENETA_ANYPLACE_PORT: ${OPENETA_ANYPLACE_PORT:-8775}
+      OPENETA_GRASPGENX_PORT: ${OPENETA_GRASPGENX_PORT:-8778}
+      OPENETA_PYTHON_EXECUTABLE: /opt/openeta/venvs/openeta/bin/python
+      OPENETA_GAZEBO_SYSTEM_ROS_PREFIX: /opt/ros/jazzy
+      OPENETA_GAZEBO_OVERLAY: /opt/openeta/src/extensions/gazebo/ros2_ws/install
+      OPENETA_SAM3_PYTHON: /opt/openeta/venvs/sam3/bin/python
+      OPENETA_ANYPLACE_PYTHON: /opt/openeta/venvs/anyplace/bin/python
+      OPENETA_GRASPGENX_PYTHON: /opt/openeta/venvs/graspgenx/bin/python
+      OPENETA_ANYPLACE_ROOT: /opt/openeta/third_party/anyplace
+      OPENETA_ANYPLACE_CONFIG_PATH: /opt/openeta/config/anyplace-normal.yaml
+      OPENETA_GRASPGENX_ROOT: /opt/openeta/third_party/GraspGenX
+      OPENETA_GRASPGENX_CHECKPOINT_ROOT: /srv/openeta/models/graspgenx/GraspGenXModel/release
+      OPENETA_GRASPGENX_GRIPPER_DESCRIPTIONS_ROOT: /srv/openeta/models/graspgenx/gripper_descriptions
+      OPENETA_GRASP_BACKEND: ${OPENETA_GRASP_BACKEND:-graspgenx}
+      OPENETA_QUALIFICATION_PROFILE: ${OPENETA_QUALIFICATION_PROFILE:-fast_v3}
+      OPENETA_ACCEPTANCE_RUNS: ${OPENETA_ACCEPTANCE_RUNS:-2}
+    volumes:
+      - type: bind
+        source: ${OPENETA_MODEL_ROOT:-../../.cache/docker/models}
+        target: /srv/openeta/models
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ${OPENETA_DOCKER_STATE_ROOT:-../../.cache/docker/state}
+        target: /srv/openeta/state
+        bind:
+          create_host_path: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    entrypoint:
+      - /opt/openeta/src/deploy/ubuntu/container_entrypoint.sh
+    command: [shell]
+
+secrets:
+  openeta_provider_env:
+    file: ${OPENETA_PROVIDER_ENV_FILE:-../../.env.example}

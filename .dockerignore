@@ -1,4 +1,11 @@
 .git
+.env
+.env.*
+!.env.example
+.mcp.json
+.mcp.local.json
+.mcp.*.local.json
+apikey.md
 .cache
 .openeta_memory
 .pytest_cache
@@ -11,6 +18,9 @@ checkpoint_detection.tar*
 checkpoint_tracking.tar*
 license_YuanyiYan.zip*
 outputs
+runs
+artifacts
+*.log
 sim/venvs
 tmp
 extensions/gazebo/ros2_ws/build

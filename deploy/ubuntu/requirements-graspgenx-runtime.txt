@@ -1,4 +1,4 @@
-# Imports reachable from OpenETA's pinned GraspGenX inference entry points.
+# Imports reachable from the Ubuntu image's pinned GraspGenX inference entry points.
 # Training, rendering and end-to-end simulation extras are intentionally not
 # installed. Torch/Torchvision come from the pinned NVIDIA base image and are
 # shared read-only with this service venv.

@@ -28,6 +28,7 @@ change reality.
 [Architecture](docs/architecture.md) ·
 [Action Pipeline](docs/agent-action-pipeline.md) ·
 [Parallel Evaluation](docs/parallel-simulator-evaluation.md) ·
+[Docker Deployment](docs/ubuntu-docker-deployment.md) ·
 [Real-robot Deployment](real/README.md)
 
 ## What's New

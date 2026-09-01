@@ -1,9 +1,9 @@
-# OpenETA 的通用 Slurm 容器部署
+# OpenETA 的通用 HPC / Slurm 容器部署
 
-`hepo` 是本方案的首个落地点，但 `deploy/hepo/` 中的运行脚本遵循通用 Slurm
+`hepo` 是本方案的首个落地点，但 `deploy/HPC/` 中的运行脚本遵循通用 Slurm
 边界，不写死用户、共享目录、partition、account、QoS、GPU 型号或容器运行时：
 
-1. 有 Docker 能力的外部 CI 从 `Dockerfile` 构建不可变 OCI 镜像并发布到 GHCR；
+1. 有 Docker 能力的外部 CI 从 `deploy/ubuntu/Dockerfile` 构建不可变 OCI 镜像并发布到 GHCR；
 2. 集群在一次 Slurm allocation 中用 Apptainer 或 Singularity 无特权地转换为 SIF；
 3. ROS、Gazebo、MoveIt 和模型服务只在 Slurm 分配的 GPU 计算节点内运行；
 4. 模型权重、运行证据和 workspace 位于集群共享存储，不写入镜像；
@@ -11,6 +11,10 @@
 
 这也适用于登录节点没有 Docker/Podman、sudo 或 subordinate UID/GID 的集群。
 Docker 是镜像定义与构建格式，SIF 是 Slurm 节点上的正式运行格式。
+
+登录节点只用于轻量控制面操作：Git/文件同步、`sbatch`、`squeue`、`sacct` 和日志读取。
+OCI→SIF 转换、模型校验/推理、ROS/Gazebo/MoveIt 以及验收测试必须提交到 Slurm
+计算节点；不得为了省一次排队而在登录节点直接运行。
 
 镜像使用 NVIDIA PyTorch 25.03（Ubuntu 24.04、CUDA 12.8）作为基础，并包含
 四个相互隔离的环境：
@@ -23,7 +27,8 @@ Docker 是镜像定义与构建格式，SIF 是 Slurm 节点上的正式运行�
 | GraspGenX | `/opt/openeta/venvs/graspgenx` | NGC Torch、GraspGenX 与抓取 MCP |
 
 模型服务仍由 `scripts/openeta_mcp_services.py` 管理并使用正式 MCP 接口；各服务
-不共享其 venv 中新增的 site-packages。依赖 GPU/ROS ABI 的基础包只读复用镜像层。
+不共享其 venv 中新增的 site-packages。依赖 GPU/ROS ABI 的基础包只读复用镜像层，
+模型目录也只读挂载；SAM3 的可写 Hugging Face cache 位于本次 job 的运行目录。
 
 ## 共享目录契约
 
@@ -43,7 +48,7 @@ SLURM_DEPLOY_ROOT/
 
 ## 构建 OCI 镜像
 
-`.github/workflows/hepo-container.yml` 只发布
+`.github/workflows/hpc-container.yml` 只发布
 `ghcr.io/<owner>/openeta-slurm:sha-<full-commit>`。正式候选通过不可变 tag 触发：
 
 ```bash
@@ -64,7 +69,7 @@ OCI digest 封存。workflow 合入默认分支后也可手动触发。
 ```bash
 srun [--partition=...] [--account=...] --nodes=1 --ntasks=1 --cpus-per-task=4 \
   --time=01:00:00 \
-  bash deploy/hepo/import_oci_image.sh \
+  bash deploy/HPC/import_oci_image.sh \
     ghcr.io/<owner>/openeta-slurm@sha256:<digest> \
     <SLURM_DEPLOY_ROOT>/images/openeta-slurm-<commit>.sif \
     <SLURM_DEPLOY_ROOT>/images/openeta-slurm-current.sif
@@ -81,7 +86,7 @@ layer；重试次数可通过 `OPENETA_IMAGE_IMPORT_ATTEMPTS` 调整。
 在能够访问模型 registry 的节点执行：
 
 ```bash
-bash deploy/hepo/fetch_models.sh <SLURM_DEPLOY_ROOT>
+bash deploy/ubuntu/fetch_models.sh <SLURM_DEPLOY_ROOT>
 ```
 
 脚本只获取 smoke 所需资产并校验每个关键文件的 SHA-256：
@@ -101,7 +106,7 @@ bash deploy/hepo/fetch_models.sh <SLURM_DEPLOY_ROOT>
 ```bash
 OPENETA_SLURM_PARTITION=<partition> \
 OPENETA_SLURM_GRES=<site-gres> \
-bash deploy/hepo/submit_smoke_normal.sh <SLURM_DEPLOY_ROOT>
+bash deploy/HPC/submit_smoke_normal.sh <SLURM_DEPLOY_ROOT>
 ```
 
 可选变量包括 `OPENETA_SLURM_ACCOUNT`、`OPENETA_SLURM_QOS`、
@@ -115,6 +120,11 @@ job 会校验镜像、workspace 和模型，启动三个隔离 MCP 服务，并�
 `acceptance-report.json` 都为 `status=passed`，且 smoke profile 的 planner/VLM
 调用与 token 均为零。
 
+仅在提交前诊断未提交源码时，可以显式设置
+`OPENETA_SLURM_DIAGNOSTIC_WORKSPACE_ENTRYPOINT=1`，让容器执行 workspace 中的入口
+脚本。作业会打印非正式证据标记；这种结果不得替代精确 commit、OCI digest 与 SIF
+三者一致的正式验收。默认始终执行不可变镜像内入口。
+
 ## hepo 实例
 
 hepo 当前使用共享根 `/home/yyy/openeta-hepo`，运行分区 `hepnodes`，正式 GPU GRES
@@ -123,7 +133,7 @@ hepo 当前使用共享根 `/home/yyy/openeta-hepo`，运行分区 `hepnodes`，
 ```bash
 OPENETA_SLURM_PARTITION=hepnodes \
 OPENETA_SLURM_GRES=gpu:L40:1 \
-bash deploy/hepo/submit_smoke_normal.sh /home/yyy/openeta-hepo
+bash deploy/HPC/submit_smoke_normal.sh /home/yyy/openeta-hepo
 ```
 
 这些值只属于 hepo 的提交实例，不进入通用 sbatch job。结果位于

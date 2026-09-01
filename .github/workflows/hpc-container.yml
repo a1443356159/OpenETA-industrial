@@ -1,4 +1,4 @@
-name: Build OpenETA Slurm container
+name: Build OpenETA HPC/Slurm container
 
 on:
   push:
@@ -40,7 +40,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deploy/hepo/Dockerfile
+          file: deploy/ubuntu/Dockerfile
           build-args: OPENETA_REVISION=${{ github.sha }}
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/openeta-slurm:sha-${{ github.sha }}

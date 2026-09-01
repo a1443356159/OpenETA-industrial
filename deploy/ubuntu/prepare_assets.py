@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate frozen hepo model assets and create the SAM3 offline cache view."""
+"""Validate frozen OpenETA model assets and create the SAM3 offline cache view."""
 
 from __future__ import annotations
 
@@ -98,7 +98,35 @@ def asset_paths(model_root: Path) -> dict[str, Path]:
     }
 
 
-def prepare_assets(model_root: Path, source_root: Path) -> dict[str, Any]:
+def prepare_sam3_cache_view(model_root: Path, sam3_hf_home: Path) -> Path:
+    """Create a writable HF cache view backed by immutable SAM3 model files."""
+
+    resolved_home = sam3_hf_home.resolve()
+    snapshot = (
+        resolved_home / f"hub/models--facebook--sam3/snapshots/{SAM3_REVISION}"
+    )
+    sam3_source = model_root.resolve() / f"sam3/{SAM3_REVISION}"
+    _relative_symlink(
+        snapshot / "config.json",
+        os.path.relpath(sam3_source / "config.json", snapshot),
+    )
+    _relative_symlink(
+        snapshot / "sam3.pt",
+        os.path.relpath(sam3_source / "sam3.pt", snapshot),
+    )
+    _atomic_text(
+        resolved_home / "hub/models--facebook--sam3/refs/main",
+        SAM3_REVISION,
+    )
+    return resolved_home
+
+
+def prepare_assets(
+    model_root: Path,
+    source_root: Path,
+    *,
+    sam3_hf_home: Path | None = None,
+) -> dict[str, Any]:
     paths = asset_paths(model_root)
     files: dict[str, Any] = {}
     for name, path in paths.items():
@@ -130,15 +158,9 @@ def prepare_assets(model_root: Path, source_root: Path) -> dict[str, Any]:
     if revisions != expected_revisions:
         raise RuntimeError(f"model/source revision mismatch: {revisions} != {expected_revisions}")
 
-    snapshot = (
-        model_root
-        / f"sam3/hf/hub/models--facebook--sam3/snapshots/{SAM3_REVISION}"
-    )
-    _relative_symlink(snapshot / "config.json", f"../../../../../{SAM3_REVISION}/config.json")
-    _relative_symlink(snapshot / "sam3.pt", f"../../../../../{SAM3_REVISION}/sam3.pt")
-    _atomic_text(
-        model_root / "sam3/hf/hub/models--facebook--sam3/refs/main",
-        SAM3_REVISION,
+    sam3_hf_home = prepare_sam3_cache_view(
+        model_root,
+        sam3_hf_home or model_root / "sam3/hf",
     )
 
     return {
@@ -148,7 +170,7 @@ def prepare_assets(model_root: Path, source_root: Path) -> dict[str, Any]:
         "files": files,
         "revisions": revisions,
         "runtime": {
-            "sam3_hf_home": str(model_root / "sam3/hf"),
+            "sam3_hf_home": str(sam3_hf_home),
             "anyplace_config": "/opt/openeta/config/anyplace-normal.yaml",
             "anyplace_root": str(source_root / "anyplace"),
             "graspgenx_root": str(source_root / "GraspGenX"),
@@ -168,9 +190,22 @@ def main() -> int:
     parser.add_argument(
         "--source-root", type=Path, default=Path("/opt/openeta/third_party")
     )
+    parser.add_argument(
+        "--sam3-hf-home",
+        type=Path,
+        help=(
+            "Writable Hugging Face cache view for SAM3. Defaults under the model "
+            "root for backward compatibility; container runtimes should place it "
+            "in their writable state volume so model assets can stay read-only."
+        ),
+    )
     parser.add_argument("--manifest", type=Path)
     args = parser.parse_args()
-    manifest = prepare_assets(args.model_root.resolve(), args.source_root.resolve())
+    manifest = prepare_assets(
+        args.model_root.resolve(),
+        args.source_root.resolve(),
+        sam3_hf_home=(args.sam3_hf_home.resolve() if args.sam3_hf_home else None),
+    )
     if args.manifest:
         _atomic_text(
             args.manifest.resolve(),

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 SLURM_DEPLOY_ROOT" >&2
+  echo "usage: $0 DEPLOY_ROOT" >&2
   exit 2
 }
 

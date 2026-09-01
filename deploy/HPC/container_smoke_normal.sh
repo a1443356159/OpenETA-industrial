@@ -17,6 +17,13 @@ fi
 
 mkdir -p "${RUN_ROOT}/home" "${RUN_ROOT}/cache" "${MCP_STATE}"
 
+# smoke_normal is an offline, node-local control chain. Cluster proxy
+# variables must not redirect loopback MCP traffic through an HTTP/SOCKS
+# proxy (httpx initializes configured transports before applying NO_PROXY).
+unset ALL_PROXY HTTPS_PROXY HTTP_PROXY all_proxy https_proxy http_proxy
+export NO_PROXY="127.0.0.1,localhost,::1"
+export no_proxy="${NO_PROXY}"
+
 set +u
 source /opt/ros/jazzy/setup.bash
 source /opt/openeta/src/extensions/gazebo/ros2_ws/install/setup.bash
@@ -25,7 +32,7 @@ set -u
 export HOME="${RUN_ROOT}/home"
 export XDG_CACHE_HOME="${RUN_ROOT}/cache"
 export HF_HUB_OFFLINE=1
-export HF_HOME=/srv/openeta/models/sam3/hf
+export HF_HOME="${RUN_ROOT}/cache/huggingface/sam3"
 export MPLCONFIGDIR="${RUN_ROOT}/cache/matplotlib"
 export ROS_HOME="${RUN_ROOT}/ros"
 export PYTHONPATH="${REPO_ROOT}:/opt/openeta/src"
@@ -76,7 +83,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"${APP_PYTHON}" "${REPO_ROOT}/deploy/hepo/prepare_assets.py" \
+"${APP_PYTHON}" "${REPO_ROOT}/deploy/ubuntu/prepare_assets.py" \
+  --sam3-hf-home "${HF_HOME}" \
   --manifest "${RUN_ROOT}/model-assets.json"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader \
   > "${RUN_ROOT}/gpu.txt"

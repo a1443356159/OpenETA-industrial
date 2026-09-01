@@ -2,6 +2,7 @@
 set -euo pipefail
 
 usage() {
+  # Site policy is injected by this HPC wrapper, never by the Ubuntu image.
   cat >&2 <<'EOF'
 usage: submit_smoke_normal.sh SLURM_DEPLOY_ROOT
 

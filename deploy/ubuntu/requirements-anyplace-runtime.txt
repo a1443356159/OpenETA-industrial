@@ -1,4 +1,4 @@
-# Inference-only dependencies for the pinned official AnyPlace checkout.
+# Inference-only dependencies for the Ubuntu image's pinned AnyPlace checkout.
 # Torch and its CUDA extensions are installed separately in the Dockerfile so
 # their wheel indexes stay explicit and auditable.
 cython==0.29.37

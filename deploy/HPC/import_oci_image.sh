@@ -2,6 +2,7 @@
 set -euo pipefail
 
 usage() {
+  # OCI-to-SIF conversion belongs to the HPC/Slurm deployment boundary.
   echo "usage: $0 OCI_DIGEST_REFERENCE TARGET_SIF [CURRENT_SYMLINK]" >&2
   exit 2
 }

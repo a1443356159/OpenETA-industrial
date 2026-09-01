@@ -82,8 +82,8 @@ RUN GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/ac-rad/anyplace.git \
       /opt/openeta/third_party/sam3 && \
     git -C /opt/openeta/third_party/sam3 checkout "${SAM3_COMMIT}"
 
-COPY deploy/hepo/requirements-anyplace-runtime.txt /tmp/openeta-requirements/
-COPY deploy/hepo/requirements-graspgenx-runtime.txt /tmp/openeta-requirements/
+COPY deploy/ubuntu/requirements-anyplace-runtime.txt /tmp/openeta-requirements/
+COPY deploy/ubuntu/requirements-graspgenx-runtime.txt /tmp/openeta-requirements/
 COPY tools/requirements-anyplace.txt /tmp/openeta-requirements/
 COPY tools/requirements-graspgenx.txt /tmp/openeta-requirements/
 COPY tools/requirements-sam3.txt /tmp/openeta-requirements/
@@ -191,6 +191,6 @@ WORKDIR /workspace/openeta
 
 LABEL org.opencontainers.image.source="https://github.com/a1443356159/OpenETA-industrial" \
       org.opencontainers.image.revision="${OPENETA_REVISION}" \
-      org.opencontainers.image.description="OpenETA ROS Jazzy, Gazebo, MoveIt and isolated MCP service venvs for Slurm"
+      org.opencontainers.image.description="OpenETA Ubuntu CUDA runtime with ROS Jazzy, Gazebo, MoveIt and isolated MCP service venvs"
 
 CMD ["bash"]

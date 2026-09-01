@@ -4,18 +4,19 @@ import os
 from pathlib import Path
 import subprocess
 
-from deploy.hepo.prepare_assets import (
+from deploy.ubuntu.prepare_assets import (
     ANYPLACE_RELEASE,
     EXPECTED_FILES,
     SAM3_REVISION,
     asset_paths,
+    prepare_sam3_cache_view,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_hepo_asset_layout_is_revisioned_and_complete(tmp_path: Path) -> None:
+def test_hpc_asset_layout_is_revisioned_and_complete(tmp_path: Path) -> None:
     paths = asset_paths(tmp_path)
 
     assert paths["sam3/sam3.pt"] == tmp_path / f"sam3/{SAM3_REVISION}/sam3.pt"
@@ -26,8 +27,28 @@ def test_hepo_asset_layout_is_revisioned_and_complete(tmp_path: Path) -> None:
     assert set(paths) == set(EXPECTED_FILES)
 
 
-def test_hepo_container_keeps_model_services_in_separate_venvs() -> None:
-    dockerfile = (REPO_ROOT / "deploy/hepo/Dockerfile").read_text(encoding="utf-8")
+def test_sam3_cache_can_live_outside_read_only_model_root(tmp_path: Path) -> None:
+    model_root = tmp_path / "models"
+    source = model_root / "sam3" / SAM3_REVISION
+    source.mkdir(parents=True)
+    (source / "config.json").write_text("{}\n", encoding="utf-8")
+    (source / "sam3.pt").write_bytes(b"checkpoint")
+    cache_root = tmp_path / "state" / "huggingface" / "sam3"
+
+    resolved = prepare_sam3_cache_view(model_root, cache_root)
+    snapshot = (
+        resolved / f"hub/models--facebook--sam3/snapshots/{SAM3_REVISION}"
+    )
+
+    assert (snapshot / "config.json").resolve() == source / "config.json"
+    assert (snapshot / "sam3.pt").resolve() == source / "sam3.pt"
+    assert (
+        resolved / "hub/models--facebook--sam3/refs/main"
+    ).read_text(encoding="utf-8") == SAM3_REVISION
+
+
+def test_hpc_container_keeps_model_services_in_separate_venvs() -> None:
+    dockerfile = (REPO_ROOT / "deploy/ubuntu/Dockerfile").read_text(encoding="utf-8")
 
     for environment in ("openeta", "sam3", "anyplace", "graspgenx"):
         assert f"/opt/openeta/venvs/{environment}" in dockerfile
@@ -43,12 +64,19 @@ def test_hepo_container_keeps_model_services_in_separate_venvs() -> None:
     assert "from anyplace.model.transformer.policy import" in dockerfile
     assert "-e /opt/openeta/third_party" not in dockerfile
 
-
-def test_hepo_slurm_job_leaves_cluster_resources_to_submit_wrapper() -> None:
-    sbatch = (REPO_ROOT / "deploy/hepo/run_smoke_normal.sbatch").read_text(
+    runtime = (REPO_ROOT / "deploy/HPC/container_smoke_normal.sh").read_text(
         encoding="utf-8"
     )
-    submit = (REPO_ROOT / "deploy/hepo/submit_smoke_normal.sh").read_text(
+    assert "unset ALL_PROXY HTTPS_PROXY HTTP_PROXY" in runtime
+    assert 'export NO_PROXY="127.0.0.1,localhost,::1"' in runtime
+    assert '--sam3-hf-home "${HF_HOME}"' in runtime
+
+
+def test_hpc_slurm_job_leaves_cluster_resources_to_submit_wrapper() -> None:
+    sbatch = (REPO_ROOT / "deploy/HPC/run_smoke_normal.sbatch").read_text(
+        encoding="utf-8"
+    )
+    submit = (REPO_ROOT / "deploy/HPC/submit_smoke_normal.sh").read_text(
         encoding="utf-8"
     )
 
@@ -56,7 +84,10 @@ def test_hepo_slurm_job_leaves_cluster_resources_to_submit_wrapper() -> None:
     assert "#SBATCH --partition" not in sbatch
     assert "#SBATCH --gres" not in sbatch
     assert "#SBATCH --mem" not in sbatch
+    assert '"${MODEL_ROOT}:/srv/openeta/models:ro"' in sbatch
     assert "command -v apptainer || command -v singularity" in sbatch
+    assert 'CONTAINER_ENTRYPOINT="/opt/openeta/src/' in sbatch
+    assert "OPENETA_SLURM_DIAGNOSTIC_WORKSPACE_ENTRYPOINT" in sbatch
     assert "OPENETA_SLURM_PARTITION" in submit
     assert "OPENETA_SLURM_GRES:-gpu:1" in submit
     assert "OPENETA_SLURM_MEMORY" in submit
@@ -71,7 +102,10 @@ def test_slurm_runtime_scripts_do_not_embed_site_identity() -> None:
     )
 
     for name in runtime_scripts:
-        content = (REPO_ROOT / "deploy/hepo" / name).read_text(encoding="utf-8")
+        base = REPO_ROOT / (
+            "deploy/ubuntu" if name == "fetch_models.sh" else "deploy/HPC"
+        )
+        content = (base / name).read_text(encoding="utf-8")
         assert "/home/yyy" not in content
         assert "hepnodes" not in content
         assert "gpu:L40" not in content
@@ -85,8 +119,8 @@ def test_docker_context_excludes_local_protected_assets() -> None:
     assert "license_YuanyiYan.zip*" in dockerignore
 
 
-def test_hepo_workflow_keeps_digest_provenance_without_oversized_sbom() -> None:
-    workflow = (REPO_ROOT / ".github/workflows/hepo-container.yml").read_text(
+def test_hpc_workflow_keeps_digest_provenance_without_oversized_sbom() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/hpc-container.yml").read_text(
         encoding="utf-8"
     )
 
@@ -144,7 +178,7 @@ esac
     subprocess.run(
         [
             "bash",
-            str(REPO_ROOT / "deploy/hepo/import_oci_image.sh"),
+            str(REPO_ROOT / "deploy/HPC/import_oci_image.sh"),
             "ghcr.io/example/openeta@sha256:deadbeef",
             str(target),
             str(current),
