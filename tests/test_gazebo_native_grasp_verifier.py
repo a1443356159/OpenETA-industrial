@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from adapter.protocol import EnvObservation, RobotState
-from extensions.gazebo.direct_env import GazeboDirectEnv
+from extensions.gazebo.direct_env import (
+    GazeboDirectEnv,
+    _detached_target_motion_audit,
+)
 from extensions.gazebo import direct_env as gazebo_direct_env
 from extensions.gazebo.native_grasp import (
     ChildLinkProof,
@@ -82,6 +85,161 @@ def test_native_close_failure_classification_distinguishes_candidate_geometry(
         error,
         attach_acked=attach_acked,
     ) == (candidate_rejection, infrastructure_error, failure_class)
+
+
+def test_detached_target_motion_audit_uses_authoritative_compound_radius() -> None:
+    source = {
+        "shape": "compound",
+        "size_xyz": [0.215, 0.062, 0.030],
+        "pose_xyz": [0.30, 0.10, 0.42],
+        "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "primitives": [
+            {
+                "shape": "box",
+                "size_xyz": [0.165, 0.025, 0.026],
+                "pose_xyz": [-0.025, 0.0, 0.0],
+                "pose_rpy": [0.0, 0.0, 0.0],
+            },
+            {
+                "shape": "box",
+                "size_xyz": [0.055, 0.062, 0.030],
+                "pose_xyz": [0.080, 0.0, 0.0],
+                "pose_rpy": [0.0, 0.0, 0.0],
+            },
+        ],
+    }
+
+    stationary = _detached_target_motion_audit(
+        source_spec=source,
+        before_xyz=(0.30, 0.10, 0.42),
+        before_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+        after_xyz=(0.3002, 0.10, 0.42),
+        after_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+        physical_tolerance_m=0.001,
+    )
+    displaced = _detached_target_motion_audit(
+        source_spec=source,
+        before_xyz=(0.30, 0.10, 0.42),
+        before_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+        after_xyz=(0.30, 0.10, 0.42),
+        after_quat_xyzw=(0.0, 0.0, 0.01, 0.99995),
+        physical_tolerance_m=0.001,
+    )
+
+    assert stationary["valid"] is True
+    assert stationary["target_geometry_radius_m"] > 0.10
+    assert displaced["valid"] is False
+    assert displaced["failure_phase"] == "moveit_contact_approach"
+    assert displaced["maximum_surface_displacement_m"] > 0.002
+
+
+def test_contact_move_rejects_native_target_displacement_before_close() -> None:
+    config = NativePickPlaceConfig()
+    observation = EnvObservation(task="pick and place", cameras=[], robot=RobotState())
+
+    class Attachment:
+        state = "detached"
+        reads = 0
+
+        def native_target_mount_poses_with_retry(self, *, max_attempts):
+            assert max_attempts == 2
+            self.reads += 1
+            xyz = (0.30, 0.10, 0.42) if self.reads == 1 else (0.312, 0.10, 0.42)
+            return (
+                SimpleNamespace(xyz=xyz, quat_xyzw=(0.0, 0.0, 0.0, 1.0)),
+                SimpleNamespace(
+                    xyz=(0.0, 0.0, 0.6),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                1,
+            )
+
+    class Controller:
+        planning_scene = SimpleNamespace(
+            revision=7,
+            world_ids={"work_table", config.target_id},
+            attached_ids=set(),
+            world_specs={
+                "work_table": {
+                    "shape": "box",
+                    "size_xyz": [1.0, 1.0, 0.05],
+                    "pose_xyz": [0.0, 0.0, -0.025],
+                    "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                },
+                config.target_id: {
+                    "shape": "box",
+                    "size_xyz": [0.20, 0.05, 0.03],
+                    "pose_xyz": [0.30, 0.10, 0.42],
+                    "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                },
+            },
+        )
+
+        def sync_planning_scene_target_pose(
+            self,
+            _config,
+            *,
+            target_xyz,
+            target_quat_xyzw,
+            allow_target_touch=False,
+        ):
+            assert allow_target_touch is True
+            self.planning_scene.world_specs[config.target_id] = {
+                **self.planning_scene.world_specs[config.target_id],
+                "pose_xyz": list(target_xyz),
+                "pose_quat_xyzw": list(target_quat_xyzw),
+            }
+            self.planning_scene.revision = 8
+            return 8
+
+    controller = Controller()
+    runtime = SimpleNamespace(
+        attachment=Attachment(),
+        controller=controller,
+        scene_revision=7,
+        observe=lambda: observation,
+        execute=lambda _action: (
+            observation,
+            {
+                "ok": True,
+                "execution_started": True,
+                "motion_outcome": "completed",
+                "reached_target": True,
+            },
+        ),
+    )
+    env = object.__new__(GazeboDirectEnv)
+    env.runtime = runtime
+    env.profile = SimpleNamespace(
+        model_config=config,
+        cameras=(),
+        capabilities={STRUCTURED_RECEIPT},
+    )
+    env._native_grasp_config = config
+    env._native_grasp_verifier = NativeGraspVerifier(config)
+    env._native_grasp_transport_locked = False
+    env._attachment_transform = None
+
+    _, _, _, _, result = env.step(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "frame": "world",
+                "xyz": [0.30, 0.10, 0.42],
+                "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+                "grasp_stage": "contact",
+            },
+        }
+    )
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is False
+    assert receipt["error_code"] == "GRASP_CONTACT_TARGET_DISPLACED"
+    assert receipt["candidate_rejection"] is True
+    assert receipt["infrastructure_error"] is False
+    assert receipt["detached_target_motion_audit"]["valid"] is False
+    assert receipt["planning_scene_target_pose_sync"]["revision"] == 8
+    assert receipt["detachable_joint"]["state"] == "detached"
 
 
 def test_native_contact_and_attach_ack_directly_prove_grasp() -> None:

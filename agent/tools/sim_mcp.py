@@ -129,6 +129,7 @@ CONTROL_RECEIPT_FIELDS = (
     # A failed physical close may resynchronize the detached target pose before
     # the frozen frontier resumes.  This controller-authored proof is likewise
     # needed by the host state machine, not by the model context.
+    "detached_target_motion_audit",
     "planning_scene_target_pose_sync",
     "planning_scene_rollback",
     # Camera refresh is downstream of the control mutation. Preserve its

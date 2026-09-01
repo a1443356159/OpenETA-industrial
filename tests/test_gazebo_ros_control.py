@@ -24,6 +24,7 @@ from extensions.gazebo.ros_control import (
     RosGazeboStateSource,
     _RosRuntime,
     _attached_support_departure_audit,
+    _detached_contact_approach_audit,
     _collision_message_geometry_record,
     _configured_qualification_solver_profile,
     _qualification_ik_response_timeout_s,
@@ -71,6 +72,60 @@ def _support_departure_geometry():
             "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
         },
     )
+
+
+def test_detached_contact_approach_allows_target_touch_only_at_endpoint() -> None:
+    calls: list[list[float]] = []
+
+    def state_validity(state):
+        positions = list(state["positions"])
+        calls.append(positions)
+        terminal = positions == [1.0]
+        return {
+            "valid": not terminal,
+            "collision_pairs": (
+                [["target", "left_tip"], ["target", "right_tip"]]
+                if terminal
+                else []
+            ),
+        }
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [1.0]],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+    )
+
+    assert evidence["valid"] is True
+    assert evidence["terminal_contact_exception_scope"] == (
+        "exact_final_waypoint_only"
+    )
+    assert evidence["terminal_target_contact_links"] == ["left_tip", "right_tip"]
+    assert calls == [[0.0], [0.5], [1.0]]
+
+
+def test_detached_contact_approach_rejects_preterminal_target_contact() -> None:
+    def state_validity(state):
+        contact = state["positions"] == [0.5]
+        return {
+            "valid": not contact,
+            "collision_pairs": [["target", "left_tip"]] if contact else [],
+        }
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [1.0]],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["failure"]["reason"] == "target_contact_before_terminal"
+    assert evidence["failure"]["sample_kind"] == "midpoint"
+    assert evidence["evaluated_sample_count"] == 2
 
 
 def test_attached_support_departure_accepts_moveit_generated_separation() -> None:
