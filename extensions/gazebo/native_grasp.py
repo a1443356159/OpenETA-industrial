@@ -617,19 +617,19 @@ class NativePickPlaceConfig(GazeboControlConfig):
     support_contact_penetration_tolerance_m: float = 0.005
     static_collision_penetration_tolerance_m: float = 0.001
     # General motion profiles are selected from physical load state, never a
-    # scene/object identity.  The unloaded contact move can use more of the
-    # RM75 limits; a retained payload uses a gentler profile until release.
+    # scene/object identity. Keep separate unloaded and loaded fields so a
+    # later evidence-backed bake-off can tune them without changing semantics.
     # Keep both profiles inside the measured Gazebo tracking envelope. Under
-    # shared GPU/physics load, the previous profiles repeatedly exceeded the
-    # former 0.05 rad controller limit on joint 5. A later GUI-on run reached
-    # 0.060102 rad on joint 4 at 0.18/0.08, so the unloaded profile also keeps
-    # measured margin below the explicit 0.06 rad path envelope. A later
-    # GUI-on loaded trajectory reached 0.060016 rad at 0.12/0.06 and was
-    # correctly aborted mid-path. Keep payload transport more conservative
-    # instead of weakening that controller envelope. The unchanged 0.002 rad
-    # terminal goal continues to prove final settling.
-    unloaded_velocity_scaling: float = 0.16
-    unloaded_acceleration_scaling: float = 0.06
+    # shared GPU/physics load, 0.16/0.06 crossed the unchanged 0.06 rad path
+    # envelope by 0.000151 rad and aborted 38 mm before an otherwise qualified
+    # grasp target. Use the already proven loaded profile as the conservative
+    # baseline for both load states while stability is established. The
+    # controller path envelope remains unchanged, and the independent 0.002 rad
+    # terminal goal plus Cartesian terminal proof still decide success. A later
+    # performance bake-off may raise the unloaded profile only after repeated
+    # GUI-on execution evidence.
+    unloaded_velocity_scaling: float = 0.10
+    unloaded_acceleration_scaling: float = 0.04
     loaded_velocity_scaling: float = 0.10
     loaded_acceleration_scaling: float = 0.04
 

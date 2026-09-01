@@ -244,8 +244,8 @@ def test_pickplace_motion_profile_follows_verified_payload_state() -> None:
         "unloaded",
         "loaded",
     )
-    assert unloaded["max_velocity_scaling_factor"] == 0.16
-    assert unloaded["max_acceleration_scaling_factor"] == 0.06
+    assert unloaded["max_velocity_scaling_factor"] == 0.10
+    assert unloaded["max_acceleration_scaling_factor"] == 0.04
     assert loaded["max_velocity_scaling_factor"] == 0.10
     assert loaded["max_acceleration_scaling_factor"] == 0.04
 
