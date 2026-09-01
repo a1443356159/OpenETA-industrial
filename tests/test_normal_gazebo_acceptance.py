@@ -770,7 +770,7 @@ def _ordered_call(
     }
 
 
-def test_assignment_order_ignores_failed_contact_and_uses_initial_create_observation() -> None:
+def test_assignment_order_uses_create_and_post_release_observations() -> None:
     first = "red_bolt_to_green_parts_bin"
     second = "yellow_wrench_to_blue_parts_bin"
     calls = [
@@ -805,7 +805,6 @@ def test_assignment_order_ignores_failed_contact_and_uses_initial_create_observa
             assignment_id=first,
         ),
         _ordered_call("gripper_control", parameters={"position": 1}, assignment_id=first),
-        _ordered_call("observe"),
         _ordered_call("anyplace", anyplace_inference=True),
         _ordered_call("graspgenx"),
         _ordered_call(
@@ -886,6 +885,7 @@ def test_normal_canonicalizes_public_grasp_tool_only_with_real_anygrasp_backend(
 
 def test_normal_requires_only_executable_public_grasp_tools() -> None:
     assert "grasp_pose_estimate" in acceptance.REQUIRED_REAL_PICK_PLACE_TOOLS
+    assert "observe" not in acceptance.REQUIRED_REAL_PICK_PLACE_TOOLS
     assert "anygrasp" not in acceptance.REQUIRED_REAL_PICK_PLACE_TOOLS
     assert "grasp_pose_estimate" not in acceptance._required_tools_for_backend("anygrasp")
     assert "anygrasp" in acceptance._required_tools_for_backend("anygrasp")

@@ -48,7 +48,6 @@ DEFAULT_SERVICES = {
 }
 REQUIRED_REAL_PICK_PLACE_TOOLS = (
     "create_simulator_env",
-    "observe",
     "sam3",
     "grasp_pose_estimate",
     "gripper_control",
@@ -550,7 +549,7 @@ def _required_tools_for_backend(
         for name in REQUIRED_REAL_PICK_PLACE_TOOLS
     )
     if scenario in MULTI_SORT_SCENARIOS:
-        return (*required[:2], "configure_work_order", *required[2:])
+        return (*required[:1], "configure_work_order", *required[1:])
     return required
 
 
@@ -945,6 +944,9 @@ def _ordered_assignment_execution(
     first assignment even though environment creation already returns calibrated
     RGB-D.  Match only successful physical transitions and bind close,
     requalification, placement, and open evidence to the same assignment.
+    A standalone ``observe`` is deliberately not part of the sequence: the
+    initial calibrated frame comes from environment creation, and a successful
+    release can carry the next assignment's causal post-action RGB-D frame.
     """
 
     observed = [
@@ -953,12 +955,10 @@ def _ordered_assignment_execution(
         if (token := _assignment_execution_token(call, backend=backend))
     ]
     required: list[str] = []
-    for assignment_index, assignment in enumerate(assignments):
+    for assignment in assignments:
         assignment_id = str(assignment.get("id") or "")
         if not assignment_id:
             return False
-        if assignment_index:
-            required.append("observe")
         required.extend(
             (
                 "anyplace_model",
