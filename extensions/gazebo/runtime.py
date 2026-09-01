@@ -713,6 +713,7 @@ class GazeboRuntime:
                 target_quat_xyzw=tuple(
                     float(value) for value in target_pose.quat_xyzw
                 ),
+                departure_contact_object_id=str(getattr(current, "target_id", "")),
             )
             self._active_work_order_index = next_index
             self.attachment = next_attachment
@@ -724,6 +725,9 @@ class GazeboRuntime:
                     "activated_target_id": next_target_id,
                     "planning_scene_revision": int(revision),
                     "target_pose_read_attempt_count": int(pose_attempts),
+                    "departure_contact_object_id": str(
+                        getattr(current, "target_id", "")
+                    ),
                 }
             )
         progress = self.multi_sort_progress()

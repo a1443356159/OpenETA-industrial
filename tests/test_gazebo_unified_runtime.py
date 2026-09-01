@@ -254,6 +254,8 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
         "green_parts_bin",
         "blue_parts_bin",
     ]
+    assert "departure_contact_object_id" not in activations[0][1]
+    assert activations[1][1]["departure_contact_object_id"] == "target_object"
     assert configured["source"] == "vlm_work_order"
     assert configured["transition"]["configured_by"] == "vlm_tool_call"
     assert progress["completed_assignment_ids"] == [

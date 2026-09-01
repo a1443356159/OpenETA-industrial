@@ -1607,6 +1607,7 @@ class RosGazeboController(GazeboController):
         *,
         target_xyz: Sequence[float],
         target_quat_xyzw: Sequence[float],
+        departure_contact_object_id: str = "",
     ) -> int:
         """Rebind target/destination semantics inside one unchanged world."""
 
@@ -1623,6 +1624,7 @@ class RosGazeboController(GazeboController):
                 pose_quat_xyzw=target_quat_xyzw,
             ),
             support_object_id=str(config.source_support_object_id),
+            departure_contact_object_id=str(departure_contact_object_id),
         )
         self.config = config
         self.runtime.config = config
