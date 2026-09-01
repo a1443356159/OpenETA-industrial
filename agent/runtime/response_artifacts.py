@@ -171,6 +171,12 @@ def build_observation_snapshot(
         observation = payload if _looks_like_observation(payload) else {}
     if not observation:
         return {}
+    metadata = observation.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("observation_stale") is True:
+        # A completed control action can outlive a failed post-action camera
+        # refresh. Such a payload deliberately preserves the action receipt,
+        # but it must never be promoted to a fresh environment snapshot.
+        return {}
 
     cameras: list[JsonDict] = []
     cameras_raw = observation.get("cameras")
@@ -206,7 +212,6 @@ def build_observation_snapshot(
             row["timestamp_s"] = float(timestamp)
         cameras.append(row)
 
-    metadata = observation.get("metadata")
     snapshot_metadata = (
         _plain_json_value(metadata) if isinstance(metadata, dict) else {}
     )

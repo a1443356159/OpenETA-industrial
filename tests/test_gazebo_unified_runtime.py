@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
@@ -385,6 +386,29 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
     assert made_cameras[0].closed == 1
 
 
+def test_runtime_captures_independent_cameras_concurrently_in_configured_order() -> None:
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+    rendezvous = threading.Barrier(2)
+
+    class Camera(_Camera):
+        def capture(self, **kwargs):
+            rendezvous.wait(timeout=1.0)
+            return super().capture(**kwargs)
+
+    first_config = replace(profile.cameras[0], frame_id="first_camera")
+    second_config = replace(profile.cameras[0], frame_id="second_camera")
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [Camera(first_config), Camera(second_config)]
+
+    observation = runtime.observe(timeout_s=1.0)
+
+    assert [frame.frame_id for frame in observation.cameras] == [
+        "first_camera",
+        "second_camera",
+    ]
+
+
 def test_runtime_action_observation_uses_ros_completion_barrier_without_callback_race() -> None:
     """A post-action frame may be queued before ``execute`` returns to Python.
 
@@ -544,7 +568,7 @@ def test_runtime_retries_only_observation_after_camera_transport_timeout() -> No
     assert receipt["observation_refresh_retry_reason"] == "camera_transport_timeout"
 
 
-def test_runtime_propagates_second_camera_transport_timeout_without_repeating_action() -> None:
+def test_runtime_preserves_action_receipt_after_second_camera_transport_timeout() -> None:
     profile = gazebo_profile("rm75_robotiq2f85_control")
 
     class Camera(_Camera):
@@ -563,11 +587,18 @@ def test_runtime_propagates_second_camera_transport_timeout_without_repeating_ac
     runtime._cameras = [camera]
     runtime.controller = controller
 
-    with pytest.raises(GazeboObservationError, match="camera transport timeout"):
-        runtime.execute({"action_type": "gripper_close"})
+    observation, receipt = runtime.execute({"action_type": "gripper_close"})
 
     assert camera.attempts == 2
     assert controller.actions == [{"action_type": "gripper_close"}]
+    assert observation.cameras == []
+    assert observation.metadata["observation_stale"] is True
+    assert observation.metadata["fresh_observation_required"] is True
+    assert receipt["ok"] is True
+    assert receipt["post_action_observation_available"] is False
+    assert receipt["observation_refresh_retry_count"] == 1
+    assert receipt["observation_refresh_runtime_healthy"] is True
+    assert receipt["observation_refresh_error"] == "camera transport timeout"
 
 
 def test_runtime_waits_for_world_control_before_its_first_rgbd_reset() -> None:

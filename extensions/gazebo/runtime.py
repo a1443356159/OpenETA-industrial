@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import shutil
 import subprocess
@@ -407,14 +408,24 @@ class GazeboRuntime:
         # until after two camera captures can age that evidence past the state
         # freshness bound even though the physical action completed correctly.
         robot = robot_state if robot_state is not None else self._robot_state()
-        frames = [
-            camera.capture(
+        # Each RGB-D source is independent. Capture them concurrently so a
+        # high-resolution source cannot consume the shared deadline before a
+        # second camera even begins waiting for its already-published frame.
+        # Futures are consumed in configured camera order, keeping the public
+        # observation deterministic regardless of callback completion order.
+        def capture(camera: Any) -> Any:
+            return camera.capture(
                 timeout_s=self._remaining(deadline),
                 min_timestamp_s=min_camera_timestamp_s,
                 min_received_monotonic_s=min_received_monotonic_s,
             )
-            for camera in self._cameras
-        ]
+
+        with ThreadPoolExecutor(
+            max_workers=max(1, len(self._cameras)),
+            thread_name_prefix="openeta-rgbd-capture",
+        ) as executor:
+            futures = [executor.submit(capture, camera) for camera in self._cameras]
+            frames = [future.result() for future in futures]
         progress = self.multi_sort_progress()
         if isinstance(progress, dict) and self._multi_sort_observation_required:
             progress = {
@@ -782,28 +793,75 @@ class GazeboRuntime:
         # 30-second transport timeout.  ``capture`` still consumes new RGB and
         # depth sequences, so an image delivered before this action cannot be
         # reused as its observation.
+        observation_error: GazeboObservationError | None = None
         try:
             observation = self.observe(
                 min_camera_timestamp_s=barrier,
                 robot_state=receipt_robot,
             )
-        except GazeboObservationError:
+        except GazeboObservationError as exc:
             # The control action has already completed and its native receipt
             # must never be discarded or repeated merely because the camera
             # transport missed one bounded refresh.  Retry only the read-only
             # post-action observation, once, and only while the owned launch
-            # and ROS executor still look healthy.  A second miss propagates
-            # as infrastructure failure instead of candidate unreachability.
+            # and ROS executor still look healthy.
+            observation_error = exc
             launch_healthy = self._launch is None or bool(getattr(self._launch, "running", True))
             ros_healthy = self._ros_thread is None or self._ros_thread.is_alive()
-            if not self.started or self.closed or not launch_healthy or not ros_healthy:
-                raise
-            receipt["observation_refresh_retry_count"] = 1
-            receipt["observation_refresh_retry_reason"] = "camera_transport_timeout"
-            observation = self.observe(
-                min_camera_timestamp_s=barrier,
-                robot_state=receipt_robot,
+            runtime_healthy = bool(
+                self.started and not self.closed and launch_healthy and ros_healthy
             )
+            receipt["observation_refresh_retry_count"] = 0
+            receipt["observation_refresh_retry_reason"] = "camera_transport_timeout"
+            receipt["observation_refresh_runtime_healthy"] = runtime_healthy
+            if runtime_healthy:
+                receipt["observation_refresh_retry_count"] = 1
+                try:
+                    observation = self.observe(
+                        min_camera_timestamp_s=barrier,
+                        robot_state=receipt_robot,
+                    )
+                    observation_error = None
+                except GazeboObservationError as retry_exc:
+                    observation_error = retry_exc
+            if observation_error is not None:
+                # The action receipt is causal evidence for a mutation which
+                # may be irreversible (notably native detach then open). Do
+                # not turn a later camera transport miss into an action
+                # failure or invite the agent to repeat that mutation. Return
+                # a deliberately image-free, explicitly stale observation;
+                # the host obligation dispatcher will request an independent
+                # observe call before further visual decisions.
+                prior_metadata = (
+                    dict(self._last_observation.metadata)
+                    if self._last_observation is not None
+                    else {}
+                )
+                observation = EnvObservation(
+                    task=self.task,
+                    cameras=[],
+                    robot=receipt_robot or RobotState(),
+                    objects=[],
+                    metadata={
+                        **prior_metadata,
+                        "backend": "gazebo",
+                        "profile": self.profile.name,
+                        "scene_epoch": self.scene_epoch,
+                        "observation_provenance": (
+                            "gazebo_post_action_camera_refresh_unavailable"
+                        ),
+                        "observation_stale": True,
+                        "fresh_observation_required": True,
+                    },
+                )
+                receipt.update(
+                    {
+                        "post_action_observation_available": False,
+                        "observation_refresh_error": str(observation_error),
+                    }
+                )
+            else:
+                receipt["post_action_observation_available"] = True
         return observation, receipt
 
     def close(self) -> None:

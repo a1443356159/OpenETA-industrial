@@ -131,6 +131,14 @@ CONTROL_RECEIPT_FIELDS = (
     # needed by the host state machine, not by the model context.
     "planning_scene_target_pose_sync",
     "planning_scene_rollback",
+    # Camera refresh is downstream of the control mutation. Preserve its
+    # independent state while keeping a stale observation out of the trusted
+    # snapshot path.
+    "post_action_observation_available",
+    "observation_refresh_retry_count",
+    "observation_refresh_retry_reason",
+    "observation_refresh_runtime_healthy",
+    "observation_refresh_error",
 )
 
 SIMULATOR_CONTROL_MCP_TOOL_NAMES = (

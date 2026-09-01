@@ -28,7 +28,6 @@ DEFAULT_MAX_TOOL_CALLS = 200
 DEFAULT_EPISODE_TIMEOUT_S = 3600.0
 DEFAULT_MAX_TOTAL_TOKENS = 5_000_000
 INTERRUPT_CLOSE_GRACE_S = 0.25
-MAX_AUTO_OBSERVE_ATTEMPTS = 3
 ENVIRONMENT_RECEIPT_SCHEMA_VERSION = "openeta.environment_receipt.v1"
 OBSERVATION_SNAPSHOT_SCHEMA_VERSION = "openeta.observation_snapshot.v1"
 
@@ -900,17 +899,13 @@ class ToolFeedbackEpisodeEnvironment:
             and _trusted_receipt_flag(receipt, "environment_closed")
         )
         max_steps_reached = self.max_steps is not None and self.step_idx >= self.max_steps
-        refresh_exhausted = (
-            observation.metadata.get("fresh_observation_required") is True
-            and self.refresh_attempts >= MAX_AUTO_OBSERVE_ATTEMPTS
-        )
         # An explicit, host-authoritative close ends this episode even when the
         # remote simulator's close response does not repeat Gym's ``terminated``
         # flag.  Do not infer the same from a failed create/reset cleanup: that
         # receipt may also say the abandoned handle was closed, but the planner
         # must still be allowed to retry infrastructure startup.
         terminated = receipt_terminated or explicit_environment_close or max_steps_reached
-        truncated = receipt_truncated or refresh_exhausted
+        truncated = receipt_truncated
         info: JsonDict = {
             "step_idx": self.step_idx,
             "previous_action": self.last_action_summary,
@@ -933,14 +928,6 @@ class ToolFeedbackEpisodeEnvironment:
             )
         if rejected_receipts:
             info["rejected_environment_receipts"] = rejected_receipts
-        if refresh_exhausted:
-            info.update(
-                {
-                    "truncation_source": "environment_feedback",
-                    "truncation_reason": "fresh_observation_unavailable",
-                    "failure_class": "simulator_observation_unavailable",
-                }
-            )
         return StepResult(
             observation=observation,
             reward=reward,

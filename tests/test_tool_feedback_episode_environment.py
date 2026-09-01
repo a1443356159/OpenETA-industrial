@@ -6,7 +6,6 @@ from pathlib import Path
 from adapter.protocol import EnvAction, JsonDict
 from agent.backends.planner import StaticPlannerBackend
 from agent.runtime.episode import (
-    MAX_AUTO_OBSERVE_ATTEMPTS,
     EpisodeResult,
     EpisodeStep,
     OpenEtaEpisodeRunner,
@@ -236,7 +235,7 @@ def test_world_mutation_without_snapshot_hides_old_frame_and_host_observes(
     assert refresh_step.observation.cameras[0].frame_id == "agentview"
 
 
-def test_refresh_attempts_are_bounded() -> None:
+def test_failed_refresh_attempts_remain_visible_without_truncating_episode() -> None:
     environment = ToolFeedbackEpisodeEnvironment()
     environment.reset(
         task="pick cube",
@@ -278,11 +277,12 @@ def test_refresh_attempts_are_bounded() -> None:
             ],
         },
     )
-    for attempt in range(1, MAX_AUTO_OBSERVE_ATTEMPTS + 1):
+    for attempt in range(1, 6):
         step = environment.step(failed_observe)
         assert step.observation.metadata["fresh_observation_attempts"] == attempt
-    assert step.truncated is True
-    assert step.info["truncation_reason"] == "fresh_observation_unavailable"
+        assert step.truncated is False
+        assert step.observation.metadata["fresh_observation_required"] is True
+    assert "truncation_reason" not in step.info
 
 
 def test_successful_explicit_close_latches_episode_terminal_state(tmp_path: Path) -> None:
