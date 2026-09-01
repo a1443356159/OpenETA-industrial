@@ -107,16 +107,20 @@ LEGACY_MULTI_NORMAL_REQUEST_IDS = {
     "bolt-blue-wrench-green": "multi_normal2",
     "bolt-green-wrench-blue": "multi_normal3",
 }
+MULTI_SORT_SCENARIOS = (
+    "multi_normal",
+    "multi_normal_random_12345",
+)
 SCENARIOS = (
     "normal",
-    "multi_normal",
+    *MULTI_SORT_SCENARIOS,
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
     "tool-bin-sort",
 )
 COMPLEX_PHYSICAL_SCENARIOS = (
-    "multi_normal",
+    *MULTI_SORT_SCENARIOS,
     "narrow-pick",
     "barrier-transfer",
     "fastener-bin-sort",
@@ -216,6 +220,10 @@ SCENARIO_INSTRUCTIONS = {
         "这是同一工作单元内的连续分拣；放好第一件后不要关闭环境，"
         "重新看清当前场景并继续第二件。"
     ),
+    "multi_normal_random_12345": (
+        "工作台物件的位置和朝向已经变化。这是同一工作单元内的连续分拣；"
+        "放好第一件后不要关闭环境，重新看清当前场景并继续第二件。"
+    ),
     "narrow-pick": "目标旁边有两个橙色护栏，夹取时请别碰到它们。",
     "barrier-transfer": "目标和料箱之间有一块黄色挡板，移动时请别碰到它。",
     "fastener-bin-sort": (
@@ -235,13 +243,13 @@ def _scene_contract(scenario: str) -> dict[str, Any]:
 
 def _validated_task_variant(scenario: str, value: str) -> str:
     variant = str(value).strip().lower()
-    if scenario == "multi_normal":
+    if scenario in MULTI_SORT_SCENARIOS:
         if variant not in MULTI_NORMAL_TASK_VARIANTS:
             choices = ", ".join(MULTI_NORMAL_TASK_VARIANTS)
-            raise ValueError(f"multi_normal task variant must be one of: {choices}")
+            raise ValueError(f"multi-sort task variant must be one of: {choices}")
         return variant
     if variant != DEFAULT_MULTI_NORMAL_TASK_VARIANT:
-        raise ValueError("--task-variant is only valid with --scenario multi_normal")
+        raise ValueError("--task-variant is only valid with a multi-sort scenario")
     return variant
 
 
@@ -253,7 +261,7 @@ def _scene_task(
 ) -> dict[str, str]:
     variant = (
         MULTI_NORMAL_TASK_VARIANTS[_validated_task_variant(scenario, task_variant)]
-        if scenario == "multi_normal"
+        if scenario in MULTI_SORT_SCENARIOS
         else None
     )
     if variant is not None:
@@ -291,7 +299,7 @@ def _expected_work_order(
 ) -> list[dict[str, str]]:
     variant = (
         MULTI_NORMAL_TASK_VARIANTS[_validated_task_variant(scenario, task_variant)]
-        if scenario == "multi_normal"
+        if scenario in MULTI_SORT_SCENARIOS
         else None
     )
     if variant is not None:
@@ -401,7 +409,9 @@ def _scene_receipt(
     return {
         "schema_version": "openeta.gazebo_acceptance_scene_receipt.v2",
         "acceptance_request_id": (
-            f"multi_normal:{task_variant}" if scenario == "multi_normal" else scenario
+            f"{scenario}:{task_variant}"
+            if scenario in MULTI_SORT_SCENARIOS
+            else scenario
         ),
         "scene_id": str(scene["scene_id"]),
         "seed": int(scene["seed"]),
@@ -488,7 +498,7 @@ def _automation_metadata_for_backend(
     planner_mode = EXECUTION_PROFILE_PLANNER_MODES[profile]
     semantic_metadata = (
         "work_order_source=vlm_conversation"
-        if scenario == "multi_normal"
+        if scenario in MULTI_SORT_SCENARIOS
         else (
             f"grasp_target={_metadata_semantic(task['target_prompt'])}; "
             f"placement_object={_metadata_semantic(task['placement_object_prompt'])}; "
@@ -539,7 +549,7 @@ def _required_tools_for_backend(
         backend if name == "grasp_pose_estimate" else name
         for name in REQUIRED_REAL_PICK_PLACE_TOOLS
     )
-    if scenario == "multi_normal":
+    if scenario in MULTI_SORT_SCENARIOS:
         return (*required[:2], "configure_work_order", *required[2:])
     return required
 
@@ -776,7 +786,7 @@ def prepare_case(
         task_variant=variant,
     )
     receipt["operator_mode"] = mode
-    receipt["task_variant"] = variant if scenario == "multi_normal" else None
+    receipt["task_variant"] = variant if scenario in MULTI_SORT_SCENARIOS else None
     receipt["grasp_backend_mode"] = backend
     receipt["execution_profile"] = profile
     receipt["qualification_profile"] = funnel_profile
@@ -1574,7 +1584,7 @@ def verify_case(
         for required in _required_tools_for_backend(backend, scenario=scenario):
             if required not in names:
                 errors.append(f"required real pick-place tool call missing: {required}")
-        if scenario == "multi_normal":
+        if scenario in MULTI_SORT_SCENARIOS:
             work_order_calls = [
                 call for call in calls if _name(call) == "configure_work_order"
             ]
@@ -2021,7 +2031,7 @@ def verify_case(
                 or planner_evidence["total_tokens"]
             ),
             "scenario": scenario,
-            "task_variant": variant if scenario == "multi_normal" else None,
+            "task_variant": variant if scenario in MULTI_SORT_SCENARIOS else None,
             "operator_mode": mode,
             "acceptance_scene": _scene_receipt(
                 scene,
@@ -2043,7 +2053,7 @@ def verify_case(
             "acceptance_scope": EXECUTION_PROFILE_SCOPES[profile],
             "planner_provider_invoked": None,
             "scenario": scenario,
-            "task_variant": variant if scenario == "multi_normal" else None,
+            "task_variant": variant if scenario in MULTI_SORT_SCENARIOS else None,
             "operator_mode": mode,
             "acceptance_scene": _scene_receipt(
                 scene,
@@ -2066,8 +2076,8 @@ def _parser() -> argparse.ArgumentParser:
         choices=tuple(MULTI_NORMAL_TASK_VARIANTS),
         default=DEFAULT_MULTI_NORMAL_TASK_VARIANT,
         help=(
-            "Private verification fixture for varied human prompts in the single "
-            "multi_normal physical scene."
+            "Private verification fixture for varied human prompts in a "
+            "task-neutral multi-sort physical scene."
         ),
     )
     parser.add_argument(

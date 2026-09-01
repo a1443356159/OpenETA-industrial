@@ -298,6 +298,51 @@ def test_multi_normal_prepares_one_human_request_with_private_verification_contr
     assert "placement_region=" not in metadata
 
 
+def test_seeded_random_scene_keeps_the_same_vlm_authored_multi_sort_contract(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = acceptance.base.Allocation(84, "random-multi", 18768, "run-id")
+    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        acceptance.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    paths = acceptance.prepare_case(
+        tmp_path,
+        tmp_path / "random-multi",
+        allocation,
+        dict(acceptance.DEFAULT_SERVICES),
+        scenario="multi_normal_random_12345",
+        grasp_backend="graspgenx",
+    )
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    prompt = paths.instructions.read_text(encoding="utf-8")
+    metadata = acceptance._automation_metadata_for_backend(
+        "graspgenx", scenario="multi_normal_random_12345"
+    )
+
+    assert receipt["acceptance_scene"]["seed"] == 12345
+    assert receipt["acceptance_scene"]["scene_id"] == (
+        "multi_normal_random_12345"
+    )
+    assert receipt["acceptance_scene"]["acceptance_request_id"] == (
+        "multi_normal_random_12345:wrench-green-bolt-blue"
+    )
+    assert receipt["task_variant"] == "wrench-green-bolt-blue"
+    assert len(receipt["acceptance_scene"]["expected_work_order"]) == 2
+    assert "工作台物件的位置和朝向已经变化" in prompt
+    assert "environment_seed=12345" in metadata
+    assert "work_order_source=vlm_conversation" in metadata
+    assert acceptance._scenario_environment("multi_normal_random_12345") == {
+        "OPENETA_ACCEPTANCE_SCENE": "multi_normal_random_12345"
+    }
+
+
 def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> None:
     def call(parameters, outputs):
         return {
@@ -410,6 +455,9 @@ def test_multi_normal_task_variants_change_only_user_words_and_verification_cont
 
 
 def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
+    assert acceptance._scenario_environment("multi_normal_random_12345") == {
+        "OPENETA_ACCEPTANCE_SCENE": "multi_normal_random_12345"
+    }
     assert acceptance._scenario_environment("narrow-pick") == {
         "OPENETA_ACCEPTANCE_SCENE": "narrow-pick"
     }
@@ -635,7 +683,7 @@ def test_pick_place_acceptance_parser_defaults_to_fast_v3() -> None:
 
 
 def test_task_variant_cannot_change_a_non_multi_physical_scene() -> None:
-    with pytest.raises(ValueError, match="only valid with --scenario multi_normal"):
+    with pytest.raises(ValueError, match="only valid with a multi-sort scenario"):
         acceptance._validated_task_variant("normal", "bolt-green-wrench-blue")
 
 

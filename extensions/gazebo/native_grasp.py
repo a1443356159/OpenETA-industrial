@@ -173,6 +173,60 @@ def load_acceptance_scene_contract(
         ):
             raise ValueError("acceptance scene perception prompt is invalid")
 
+    model_pose_overrides = scene.get("model_pose_overrides")
+    if model_pose_overrides is not None:
+        if not isinstance(model_pose_overrides, list) or not model_pose_overrides:
+            raise ValueError("acceptance scene model pose overrides are invalid")
+        overridden_ids: set[str] = set()
+        for override in model_pose_overrides:
+            if not isinstance(override, Mapping):
+                raise ValueError("acceptance scene model pose override is invalid")
+            model_id = str(override.get("id") or "").strip()
+            if not model_id or model_id in overridden_ids:
+                raise ValueError(
+                    "acceptance scene model pose override identity is invalid"
+                )
+            overridden_ids.add(model_id)
+            vector(override, "pose_xyz", 3)
+            vector(override, "pose_rpy", 3)
+        layout_validation = scene.get("layout_validation")
+        if not isinstance(layout_validation, Mapping):
+            raise ValueError("acceptance randomized layout validation is missing")
+        if not str(layout_validation.get("support_object_id") or "").strip():
+            raise ValueError("acceptance randomized layout support is invalid")
+        for key in (
+            "support_margin_m",
+            "minimum_xy_clearance_m",
+            "maximum_initial_drop_m",
+        ):
+            value = layout_validation.get(key, 0.0)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or float(value) < 0.0
+            ):
+                raise ValueError("acceptance randomized layout clearance is invalid")
+        exclusions = layout_validation.get("exclusion_regions", [])
+        if not isinstance(exclusions, list):
+            raise ValueError("acceptance randomized layout exclusions are invalid")
+        exclusion_ids: set[str] = set()
+        for exclusion in exclusions:
+            if not isinstance(exclusion, Mapping):
+                raise ValueError("acceptance randomized layout exclusion is invalid")
+            exclusion_id = str(exclusion.get("id") or "").strip()
+            if not exclusion_id or exclusion_id in exclusion_ids:
+                raise ValueError(
+                    "acceptance randomized layout exclusion identity is invalid"
+                )
+            exclusion_ids.add(exclusion_id)
+            vector(exclusion, "center_xy", 2)
+            vector(exclusion, "size_xy_m", 2, positive=True)
+    elif scene.get("layout_validation") is not None:
+        raise ValueError(
+            "acceptance randomized layout validation has no model pose overrides"
+        )
+
     seen: set[str] = {"work_table", "target_object", "distractor_object"}
     for obstacle in obstacles:
         if not isinstance(obstacle, Mapping):
