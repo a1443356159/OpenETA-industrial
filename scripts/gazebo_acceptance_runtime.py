@@ -1130,13 +1130,12 @@ def _root_provider_config(
 
 
 def _resolved_provider_environment(config: PlannerProviderConfig) -> dict[str, str]:
-    """Return the primary, resolved provider config for a case-local TUI.
+    """Return the resolved deployment provider config for a case-local TUI.
 
-    This function intentionally returns only the primary.  A root-configured
-    fallback is not transferred automatically, so an unavailable primary
-    cannot turn into an unrecorded switch during a scripted acceptance case.
-    A formal profile may add its explicitly evaluated fallback through
-    :func:`_tui_provider_environment`.  The mapping stays in process memory.
+    Primary and fallback identities come from the same root configuration and
+    remain visible in provider-call evidence.  Acceptance profiles may tune
+    request handling, but they must not silently replace deployment endpoints
+    or credentials.  The mapping stays in process memory.
     """
 
     values = {
@@ -1155,6 +1154,16 @@ def _resolved_provider_environment(config: PlannerProviderConfig) -> dict[str, s
     vision = config.metadata.get("enable_vision")
     if isinstance(vision, bool):
         values["OPENETA_LLM_ENABLE_VISION"] = "true" if vision else "false"
+    if config.fallback is not None:
+        values.update(
+            {
+                "OPENETA_LLM_FALLBACK_PROVIDER": config.fallback.provider,
+                "OPENETA_LLM_FALLBACK_MODEL": config.fallback.model,
+                "OPENETA_LLM_FALLBACK_API_BASE": config.fallback.api_base,
+                "OPENETA_LLM_FALLBACK_API_KEY": config.fallback.api_key,
+                "OPENETA_LLM_FALLBACK_TIMEOUT_S": str(config.fallback.timeout_s),
+            }
+        )
     return values
 
 
@@ -1163,13 +1172,13 @@ def _tui_provider_environment(
     *,
     profile_environment: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Resolve one provider identity plus profile-scoped request bounds.
+    """Resolve deployment provider identities plus profile-scoped bounds.
 
-    The root configuration remains authoritative for primary identity and all
-    credentials.  Acceptance profiles may tune bounded request handling and
-    name one evaluated fallback model hosted by that exact provider/endpoint.
+    The root configuration remains authoritative for primary/fallback identity
+    and all credentials.  Acceptance profiles may tune bounded request handling
+    and name one evaluated fallback model hosted by the primary endpoint.
     Keeping this merge explicit prevents a profile from silently redirecting
-    requests or replacing the primary model being evaluated.
+    requests or replacing the primary deployment model being evaluated.
     """
 
     values = _resolved_provider_environment(config)

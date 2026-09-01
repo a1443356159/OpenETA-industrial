@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.backends.provider_config import ProviderEndpointConfig
 from scripts import normal_gazebo_acceptance as acceptance
 
 
@@ -462,6 +463,13 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
         retry_backoff_s=1.0,
         max_tokens=32_768,
         thinking_mode="disabled",
+        fallback=ProviderEndpointConfig(
+            provider="configured-fallback-provider",
+            model="configured-fallback-model",
+            api_base="https://configured-fallback.invalid/v1",
+            api_key="configured-fallback-secret",
+            timeout_s=45.0,
+        ),
     )
 
     environment = acceptance.base._tui_provider_environment(
@@ -486,14 +494,14 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
     assert environment["OPENETA_LLM_RETRY_BACKOFF_S"] == "1.0"
     assert environment["OPENETA_LLM_MAX_TOKENS"] == "32768"
     assert environment["OPENETA_LLM_THINKING_MODE"] == "disabled"
-    for key in (
-        "OPENETA_LLM_FALLBACK_PROVIDER",
-        "OPENETA_LLM_FALLBACK_MODEL",
-        "OPENETA_LLM_FALLBACK_API_BASE",
-        "OPENETA_LLM_FALLBACK_API_KEY",
-        "OPENETA_LLM_FALLBACK_TIMEOUT_S",
-    ):
-        assert key not in environment
+    assert environment["OPENETA_LLM_FALLBACK_PROVIDER"] == "configured-fallback-provider"
+    assert environment["OPENETA_LLM_FALLBACK_MODEL"] == "configured-fallback-model"
+    assert (
+        environment["OPENETA_LLM_FALLBACK_API_BASE"]
+        == "https://configured-fallback.invalid/v1"
+    )
+    assert environment["OPENETA_LLM_FALLBACK_API_KEY"] == "configured-fallback-secret"
+    assert environment["OPENETA_LLM_FALLBACK_TIMEOUT_S"] == "45.0"
     assert "OPENETA_UNRELATED" not in environment
 
 
