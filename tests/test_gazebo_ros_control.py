@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import json
@@ -543,6 +544,42 @@ def test_l5_trajectory_cache_accepts_euler_roundtrip_pose_noise_only() -> None:
     assert _l5_trajectory_cache_key(
         different_candidate, scene_revision=2, scene_sha256="scene"
     ) != private_key
+
+
+def test_l5_trajectory_cache_normalizes_euler_signed_zero() -> None:
+    private_goal = {
+        "qualification_cache_binding_sha256": "b" * 64,
+        "qualification_goal_joint_state_sha256": "c" * 64,
+        "compiled_grasp_id": "grasp_0042",
+        "grasp_stage": "contact",
+        "group_name": "rm_group",
+        "link_name": "link_7",
+        "requested_tool_pose": {
+            "xyz": [0.375329495519, -0.107262827456, 0.172620624542],
+            "quat_xyzw": [0.8383174512, 0.5451824107, 0.0, 0.0],
+        },
+        "target_pose": {
+            "xyz": [0.375329495519, -0.107262827456, 0.172620624542],
+            "quat_xyzw": [0.2072781, 0.9782821, 0.0, 0.0],
+        },
+        "motion_profile": "unloaded",
+        "max_velocity_scaling_factor": 0.1,
+        "max_acceleration_scaling_factor": 0.04,
+    }
+    public_goal = copy.deepcopy(private_goal)
+    public_goal["qualification_binding_sha256"] = public_goal.pop(
+        "qualification_cache_binding_sha256"
+    )
+    # This is the harmless representation produced by the real public
+    # roll/pitch/yaw-to-quaternion round trip that previously caused a miss.
+    public_goal["target_pose"]["quat_xyzw"][2] = -0.0
+
+    assert json.dumps(0.0) != json.dumps(-0.0)
+    assert _l5_trajectory_cache_key(
+        private_goal, scene_revision=6, scene_sha256="scene"
+    ) == _l5_trajectory_cache_key(
+        public_goal, scene_revision=6, scene_sha256="scene"
+    )
 
 
 def test_private_l5_goal_matches_public_joint_digest_and_candidate_identity() -> None:

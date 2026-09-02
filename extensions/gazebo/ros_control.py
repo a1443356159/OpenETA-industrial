@@ -222,7 +222,14 @@ def _canonical_l5_pose(value: object) -> object:
                 )
                 if first_nonzero < 0.0:
                     numeric = [-item for item in numeric]
-        canonical[field] = [round(item, L5_TRAJECTORY_POSE_DECIMALS) for item in numeric]
+        rounded = [round(item, L5_TRAJECTORY_POSE_DECIMALS) for item in numeric]
+        # JSON preserves the sign of IEEE-754 zero (``-0.0``), even though it
+        # has the same geometric and numeric value as ``0.0``.  Euler transport
+        # through the public tool boundary can introduce signed zero into the
+        # flange quaternion while private L5 qualification retains positive
+        # zero.  Normalize it before hashing so one proven pose cannot miss its
+        # exact trajectory solely because of a serialization artefact.
+        canonical[field] = [0.0 if item == 0.0 else item for item in rounded]
     return canonical
 
 
