@@ -853,6 +853,12 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
         "target_link": "target_link",
         "assignment_id": "yellow_wrench_to_green",
     }
+    release_coordination = {
+        "schema_version": "openeta.native_release_coordination.v1",
+        "mode": "detach_confirmation_triggers_open",
+        "native_detach_confirmed_before_open_dispatch": True,
+        "planning_scene_sync_concurrent_with_open_dispatch": True,
+    }
     response = {
         "ok": False,
         "error_code": "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE",
@@ -860,6 +866,7 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
         "gripper_open_executed": True,
         "detachable_joint": {"state": "detached"},
         "release_sequence": release_sequence,
+        "release_coordination": release_coordination,
         "planning_scene_target_pose_sync": target_pose_sync,
         "native_target_binding": native_target_binding,
         "multi_sort_progress": multi_sort_progress,
@@ -888,6 +895,7 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
     receipt = result.details["environment_receipt"]
     assert receipt["gripper_open_executed"] is True
     assert receipt["release_sequence"] == release_sequence
+    assert receipt["release_coordination"] == release_coordination
     assert receipt["planning_scene_target_pose_sync"] == target_pose_sync
     assert receipt["native_target_binding"] == native_target_binding
     assert receipt["multi_sort_progress"] == multi_sort_progress

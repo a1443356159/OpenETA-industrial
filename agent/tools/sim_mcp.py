@@ -128,6 +128,7 @@ CONTROL_RECEIPT_FIELDS = (
     # host receipt so AgentMemory can consume the transition without reopening
     # the raw response artifact from disk.
     "release_sequence",
+    "release_coordination",
     # A failed physical close may resynchronize the detached target pose before
     # the frozen frontier resumes.  This controller-authored proof is likewise
     # needed by the host state machine, not by the model context.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -369,6 +370,7 @@ class GazeboDirectEnv(Env):
         action_type = str(raw_action.get("action_type") or "")
         contact_window: GazeboNativeContactWindow | None = None
         release_before_open: dict[str, Any] | None = None
+        coordinated_open_result: tuple[EnvObservation, dict[str, Any]] | None = None
         detached_contact_motion_source: dict[str, Any] | None = None
         target_pose = raw_action.get("target_pose")
         detached_contact_motion = bool(
@@ -524,86 +526,130 @@ class GazeboDirectEnv(Env):
             if attached_before_open:
                 release_sequence: list[dict[str, Any]] = []
                 detached_acked = False
-                try:
-                    if attachment is None:
-                        raise GazeboProcessError(
-                            "NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE"
-                        )
-                    target_pose, _ = attachment.native_target_mount_poses()
-                    attachment.ensure_detached(require_ack=True)
-                    detached_acked = True
-                    collision_filter = self._collision_filter_evidence(
-                        attachment, attached=False
-                    )
-                    release_sequence.append(
-                        {
-                            "sequence": 1,
-                            "event": "native_detach_ack",
-                            "state": "detached",
-                        }
-                    )
-                    if collision_filter is not None:
+                open_future: Future[tuple[EnvObservation, dict[str, Any]]] | None = None
+
+                with ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="openeta-release",
+                ) as release_executor:
+                    try:
+                        if attachment is None:
+                            raise GazeboProcessError(
+                                "NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE"
+                            )
+                        target_pose, _ = attachment.native_target_mount_poses()
+                        attachment.ensure_detached(require_ack=True)
+                        detached_acked = True
                         release_sequence.append(
                             {
-                                "sequence": 2,
-                                "event": "attached_collision_filter_ack",
-                                **collision_filter,
+                                "sequence": 1,
+                                "event": "native_detach_ack",
+                                "state": "detached",
                             }
                         )
-                    sync_detach = getattr(
-                        self.controller, "sync_planning_scene_detach", None
-                    )
-                    if not callable(sync_detach):
-                        raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
-                    scene_revision = sync_detach(
-                        self._native_grasp_config,
-                        target_xyz=target_pose.xyz,
-                        target_quat_xyzw=target_pose.quat_xyzw,
-                    )
-                    release_sequence.append(
-                        {
-                            "sequence": len(release_sequence) + 1,
-                            "event": "planning_scene_detach_ack",
-                            "revision": int(scene_revision),
-                        }
-                    )
-                    record = self._native_grasp_verifier.release_result(
-                        detached_acked=True
-                    )
-                    self._native_grasp_transport_locked = False
-                    self._attachment_transform = None
-                    release_before_open = {
-                        "release_sequence": release_sequence,
-                        "target_pose": target_pose,
-                        "planning_scene_revision": int(scene_revision),
-                        "record": record,
-                        "attached_collision_filter": collision_filter,
-                    }
-                except Exception as exc:
-                    record = self._native_grasp_verifier.release_result(
-                        detached_acked=detached_acked
-                    )
-                    self._native_grasp_transport_locked = not detached_acked
-                    if detached_acked:
+                        # Once Gazebo has acknowledged both the physical detach
+                        # and collision-filter transition, begin opening at once.
+                        # MoveIt's representation can be synchronized in parallel;
+                        # neither operation changes the already-detached object.
+                        open_future = release_executor.submit(
+                            self.runtime.execute,
+                            raw_action,
+                        )
+                        collision_filter = self._collision_filter_evidence(
+                            attachment, attached=False
+                        )
+                        if collision_filter is not None:
+                            release_sequence.append(
+                                {
+                                    "sequence": 2,
+                                    "event": "attached_collision_filter_ack",
+                                    **collision_filter,
+                                }
+                            )
+                        sync_detach = getattr(
+                            self.controller, "sync_planning_scene_detach", None
+                        )
+                        if not callable(sync_detach):
+                            raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                        scene_revision = sync_detach(
+                            self._native_grasp_config,
+                            target_xyz=target_pose.xyz,
+                            target_quat_xyzw=target_pose.quat_xyzw,
+                        )
+                        release_sequence.append(
+                            {
+                                "sequence": len(release_sequence) + 1,
+                                "event": "planning_scene_detach_ack",
+                                "revision": int(scene_revision),
+                            }
+                        )
+                        if open_future is None:
+                            raise GazeboProcessError(
+                                "GRIPPER_OPEN_DISPATCH_FAILED"
+                            )
+                        coordinated_open_result = open_future.result()
+                        record = self._native_grasp_verifier.release_result(
+                            detached_acked=True
+                        )
+                        self._native_grasp_transport_locked = False
                         self._attachment_transform = None
-                    observation = self.runtime.observe()
-                    raw = self._decorate_robot(self._as_unified(observation))
-                    receipt = {
-                        "ok": False,
-                        "error_code": str(exc),
-                        "gripper_open_executed": False,
-                        "release_sequence": release_sequence,
-                        "physical_verification": record.to_dict(),
-                        "observation": raw,
-                    }
-                    raw.setdefault("metadata", {})[
-                        "physical_verification"
-                    ] = record.to_dict()
-                    return raw, 0.0, False, False, {
-                        "_openeta_receipt": receipt
-                    }
+                        release_before_open = {
+                            "release_sequence": release_sequence,
+                            "target_pose": target_pose,
+                            "planning_scene_revision": int(scene_revision),
+                            "record": record,
+                            "attached_collision_filter": collision_filter,
+                            "release_coordination": {
+                                "schema_version": (
+                                    "openeta.native_release_coordination.v1"
+                                ),
+                                "mode": "detach_confirmation_triggers_open",
+                                "native_detach_confirmed_before_open_dispatch": True,
+                                "planning_scene_sync_concurrent_with_open_dispatch": True,
+                            },
+                        }
+                    except Exception as exc:
+                        open_result = None
+                        if open_future is not None:
+                            try:
+                                open_result = open_future.result()
+                            except Exception:
+                                open_result = None
+                        record = self._native_grasp_verifier.release_result(
+                            detached_acked=detached_acked
+                        )
+                        self._native_grasp_transport_locked = not detached_acked
+                        if detached_acked:
+                            self._attachment_transform = None
+                        if open_result is None:
+                            observation = self.runtime.observe()
+                            open_receipt: dict[str, Any] = {}
+                        else:
+                            observation, open_receipt = open_result
+                        raw = self._decorate_robot(self._as_unified(observation))
+                        receipt = {
+                            **open_receipt,
+                            "ok": False,
+                            "error_code": str(exc),
+                            "gripper_open_executed": (
+                                open_receipt.get("ok") is True
+                            ),
+                            "release_sequence": release_sequence,
+                            "physical_verification": record.to_dict(),
+                            "observation": raw,
+                            "infrastructure_error": bool(detached_acked),
+                        }
+                        raw.setdefault("metadata", {})[
+                            "physical_verification"
+                        ] = record.to_dict()
+                        return raw, 0.0, False, False, {
+                            "_openeta_receipt": receipt
+                        }
         try:
-            observation, receipt = self.runtime.execute(raw_action)
+            if coordinated_open_result is None:
+                observation, receipt = self.runtime.execute(raw_action)
+            else:
+                observation, receipt = coordinated_open_result
         except Exception:
             if contact_window is not None:
                 contact_window.close()
@@ -1109,6 +1155,9 @@ class GazeboDirectEnv(Env):
                         # or multi-sort transition can fail independently.
                         receipt["release_sequence"] = release_sequence
                         receipt["gripper_open_executed"] = True
+                        receipt["release_coordination"] = dict(
+                            release_before_open["release_coordination"]
+                        )
                         receipt["detachable_joint"] = {
                             "state": "detached",
                             "detach_topic": self._native_grasp_config.detach_topic,

@@ -54,8 +54,11 @@ and MoveIt owns complete robot paths.
    near-target shortcut, or retreat. Every receipt must retain attachment and
    satisfy the native drift bound.
 6. At the qualified release terminal, call `gripper_control position=1` once. PASS requires
-   detach ACK and native stable placement. A successful open, empty gripper,
-   visual proximity, or reward alone is not proof.
+   detach ACK and native stable placement. After Gazebo confirms physical
+   detach and collision-filter state, opening may proceed while the host
+   synchronizes the same detach into PlanningScene; the ordered receipt must
+   prove both. A successful open, empty gripper, visual proximity, or reward
+   alone is not proof.
 7. On retained placement PASS, close the environment once. If planning rejects
    before execution, consume only that pair. If execution leaves a known safe
    state, follow the typed frozen-frontier recovery. Unknown transport state

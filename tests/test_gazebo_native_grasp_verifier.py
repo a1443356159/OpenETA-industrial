@@ -859,17 +859,16 @@ def _attached_release_env(*, detach_fails: bool = False):
     return env, events
 
 
-def test_release_detaches_both_bindings_before_opening_gripper() -> None:
+def test_release_ack_triggers_open_while_planning_scene_detach_runs() -> None:
     env, events = _attached_release_env()
 
     raw, _, _, _, result = env.step({"action_type": "gripper_open"})
 
     receipt = result["_openeta_receipt"]
     assert receipt["ok"] is True
-    assert events == [
-        "native_detach_ack",
-        "planning_scene_detach_ack",
-        "gripper_open",
+    assert events[0] == "native_detach_ack"
+    assert set(events[1:3]) == {"gripper_open", "planning_scene_detach_ack"}
+    assert events[3:] == [
         "sample_released_target",
         "planning_scene_pose_sync_ack",
     ]
@@ -880,6 +879,12 @@ def test_release_detaches_both_bindings_before_opening_gripper() -> None:
         "released_target_pose_sync_ack",
     ]
     assert receipt["gripper_open_executed"] is True
+    assert receipt["release_coordination"] == {
+        "schema_version": "openeta.native_release_coordination.v1",
+        "mode": "detach_confirmation_triggers_open",
+        "native_detach_confirmed_before_open_dispatch": True,
+        "planning_scene_sync_concurrent_with_open_dispatch": True,
+    }
     assert receipt["placement_verification"]["verdict"] == "PASS"
     assert raw["metadata"]["planning_scene_revision"] == 9
 
@@ -917,10 +922,9 @@ def test_irreversible_release_proof_survives_later_scene_sync_failure() -> None:
         "planning_scene_detach_ack",
         "gripper_open_completed",
     ]
-    assert events == [
-        "native_detach_ack",
-        "planning_scene_detach_ack",
-        "gripper_open",
+    assert events[0] == "native_detach_ack"
+    assert set(events[1:3]) == {"gripper_open", "planning_scene_detach_ack"}
+    assert events[3:] == [
         "sample_released_target",
         "planning_scene_pose_sync_failed",
     ]
