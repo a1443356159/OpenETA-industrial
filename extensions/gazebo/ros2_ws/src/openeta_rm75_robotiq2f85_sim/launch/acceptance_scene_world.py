@@ -466,6 +466,46 @@ def _append_static_model(
     _append_primitives(link, owner_id=obstacle_id, owner=raw)
 
 
+def _apply_model_pose_overrides(
+    world: ET.Element,
+    *,
+    overrides: object,
+) -> tuple[str, ...]:
+    """Move existing dynamic bodies without creating a second geometry source."""
+
+    if not isinstance(overrides, list) or not overrides:
+        raise RuntimeError("acceptance scene model pose overrides are invalid")
+    overridden: list[str] = []
+    for raw in overrides:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("acceptance scene model pose override is invalid")
+        model_id = str(raw.get("id") or "").strip()
+        if not model_id or model_id in overridden:
+            raise RuntimeError("acceptance scene model pose override identity is invalid")
+        model = world.find(f"model[@name='{model_id}']")
+        if model is None:
+            raise RuntimeError(
+                f"acceptance scene model pose override is unknown: {model_id}"
+            )
+        if model.findtext("static", "false").strip().lower() == "true":
+            raise RuntimeError(
+                f"acceptance scene cannot move static model: {model_id}"
+            )
+        xyz = _numbers(raw.get("pose_xyz"), 3)
+        rpy = _numbers(raw.get("pose_rpy"), 3)
+        pose = model.find("pose")
+        if pose is None:
+            pose = ET.Element("pose")
+            model.insert(0, pose)
+        if pose.attrib.get("relative_to"):
+            raise RuntimeError(
+                f"acceptance scene cannot override relative pose: {model_id}"
+            )
+        pose.text = _text([*xyz, *rpy])
+        overridden.append(model_id)
+    return tuple(overridden)
+
+
 def _replace_target_model(
     world: ET.Element,
     *,
@@ -602,6 +642,9 @@ def _render_scene_tree(
             if not isinstance(raw, Mapping):
                 raise RuntimeError("acceptance scene obstacle is invalid")
             _append_static_model(world, raw=raw, existing_ids=existing_ids)
+    model_pose_overrides = scene.get("model_pose_overrides")
+    if model_pose_overrides is not None:
+        _apply_model_pose_overrides(world, overrides=model_pose_overrides)
     return tree, world_scene
 
 
@@ -848,6 +891,152 @@ def _authoritative_objects(world: ET.Element) -> tuple[AuthoritativeObject, ...]
     return tuple(objects)
 
 
+def _xy_bounds_are_separated(
+    left: tuple[tuple[float, float, float], tuple[float, float, float]],
+    right: tuple[tuple[float, float, float], tuple[float, float, float]],
+    *,
+    clearance_m: float,
+) -> bool:
+    return any(
+        left[1][axis] + clearance_m <= right[0][axis]
+        or right[1][axis] + clearance_m <= left[0][axis]
+        for axis in range(2)
+    )
+
+
+def _validate_overridden_dynamic_layout(
+    *,
+    scene: Mapping[str, object],
+    objects: Sequence[AuthoritativeObject],
+) -> None:
+    """Reject randomized starts that are not collision-free workcell layouts."""
+
+    overrides = scene.get("model_pose_overrides")
+    if overrides is None:
+        return
+    validation = scene.get("layout_validation")
+    if not isinstance(validation, Mapping):
+        raise RuntimeError("acceptance randomized layout validation is missing")
+    support_id = str(validation.get("support_object_id") or "").strip()
+    if not support_id:
+        raise RuntimeError("acceptance randomized layout support is invalid")
+    try:
+        support_margin_m = float(validation.get("support_margin_m", 0.0))
+        clearance_m = float(validation.get("minimum_xy_clearance_m", 0.0))
+        maximum_initial_drop_m = float(
+            validation.get("maximum_initial_drop_m", 0.0)
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("acceptance randomized layout clearance is invalid") from exc
+    if any(
+        not math.isfinite(value) or value < 0.0
+        for value in (support_margin_m, clearance_m, maximum_initial_drop_m)
+    ):
+        raise RuntimeError("acceptance randomized layout clearance is invalid")
+
+    by_id = {item.object_id: item for item in objects}
+    support = by_id.get(support_id)
+    if support is None or not support.gazebo_static:
+        raise RuntimeError("acceptance randomized layout support is invalid")
+    support_bounds = support.world_bounds()
+    support_surface_z = support_bounds[1][2]
+    movable = tuple(item for item in objects if not item.gazebo_static)
+    if not movable:
+        raise RuntimeError("acceptance randomized layout has no dynamic objects")
+    for item in movable:
+        lower, upper = item.world_bounds()
+        if any(
+            lower[axis] < support_bounds[0][axis] + support_margin_m
+            or upper[axis] > support_bounds[1][axis] - support_margin_m
+            for axis in range(2)
+        ):
+            raise RuntimeError(
+                f"acceptance randomized model leaves support bounds: {item.object_id}"
+            )
+        if lower[2] < support_surface_z - 1e-6:
+            raise RuntimeError(
+                f"acceptance randomized model penetrates support: {item.object_id}"
+            )
+        if lower[2] > support_surface_z + maximum_initial_drop_m:
+            raise RuntimeError(
+                f"acceptance randomized model starts unsupported: {item.object_id}"
+            )
+
+    regions = scene.get("placement_regions")
+    region_ids = (
+        tuple(
+            str(raw.get("id") or "")
+            for raw in regions
+            if isinstance(raw, Mapping)
+        )
+        if isinstance(regions, list)
+        else ()
+    )
+    physical_regions = tuple(by_id[item] for item in region_ids if item in by_id)
+    for movable_object in movable:
+        movable_bounds = movable_object.world_bounds()
+        for region in physical_regions:
+            if not _xy_bounds_are_separated(
+                movable_bounds,
+                region.world_bounds(),
+                clearance_m=clearance_m,
+            ):
+                raise RuntimeError(
+                    "acceptance randomized model overlaps placement support: "
+                    f"{movable_object.object_id}/{region.object_id}"
+                )
+
+    exclusions = validation.get("exclusion_regions", [])
+    if not isinstance(exclusions, list):
+        raise RuntimeError("acceptance randomized layout exclusions are invalid")
+    exclusion_bounds: list[
+        tuple[str, tuple[tuple[float, float, float], tuple[float, float, float]]]
+    ] = []
+    seen_exclusions: set[str] = set()
+    for raw in exclusions:
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("acceptance randomized layout exclusion is invalid")
+        exclusion_id = str(raw.get("id") or "").strip()
+        if not exclusion_id or exclusion_id in seen_exclusions:
+            raise RuntimeError("acceptance randomized layout exclusion identity is invalid")
+        seen_exclusions.add(exclusion_id)
+        center = _numbers(raw.get("center_xy"), 2)
+        size = _numbers(raw.get("size_xy_m"), 2, positive=True)
+        exclusion_bounds.append(
+            (
+                exclusion_id,
+                (
+                    (center[0] - size[0] / 2.0, center[1] - size[1] / 2.0, 0.0),
+                    (center[0] + size[0] / 2.0, center[1] + size[1] / 2.0, 0.0),
+                ),
+            )
+        )
+    for movable_object in movable:
+        movable_bounds = movable_object.world_bounds()
+        for exclusion_id, excluded_bounds in exclusion_bounds:
+            if not _xy_bounds_are_separated(
+                movable_bounds,
+                excluded_bounds,
+                clearance_m=clearance_m,
+            ):
+                raise RuntimeError(
+                    "acceptance randomized model enters exclusion region: "
+                    f"{movable_object.object_id}/{exclusion_id}"
+                )
+
+    for index, left in enumerate(movable):
+        for right in movable[index + 1 :]:
+            if not _xy_bounds_are_separated(
+                left.world_bounds(),
+                right.world_bounds(),
+                clearance_m=clearance_m,
+            ):
+                raise RuntimeError(
+                    "acceptance randomized dynamic models overlap: "
+                    f"{left.object_id}/{right.object_id}"
+                )
+
+
 def _same_numbers(
     left: Sequence[float], right: Sequence[float], *, tolerance: float = 1e-9
 ) -> bool:
@@ -1052,6 +1241,7 @@ def compile_authoritative_scene(
     )
     _validate_attached_collision_filter_contract(world, bindings=target_bindings)
     objects = _authoritative_objects(world)
+    _validate_overridden_dynamic_layout(scene=raw_scene, objects=objects)
     required_ids = {"work_table", *(item.target_model for item in target_bindings)}
     object_ids = {item.object_id for item in objects}
     if not required_ids <= object_ids:

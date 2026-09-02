@@ -127,6 +127,11 @@ class PlanningSceneSynchronizer:
         # leaves the support instead of inheriting the exception forever.
         self.support_contact_object_id = ""
         self.support_contact_reference_target_spec: dict[str, Any] = {}
+        # A stable, detached placement can still touch an open fingertip at
+        # the exact release endpoint.  Multi-sort departure may temporarily
+        # allow only that completed object against gripper touch links; the
+        # allowance is cleared atomically when the next object is attached.
+        self.transient_departure_contact_object_id = ""
         self.authoritative_scene_sha256 = ""
         self.world_geometry_sha256 = ""
         self.attached_geometry_sha256 = ""
@@ -146,6 +151,7 @@ class PlanningSceneSynchronizer:
         self.target_id = ""
         self.support_contact_object_id = ""
         self.support_contact_reference_target_spec = {}
+        self.transient_departure_contact_object_id = ""
         self.authoritative_scene_sha256 = ""
         self.world_geometry_sha256 = ""
         self.attached_geometry_sha256 = ""
@@ -209,6 +215,7 @@ class PlanningSceneSynchronizer:
         self.target_id = target.object_id
         self.support_contact_object_id = table.object_id
         self.support_contact_reference_target_spec = target.to_dict()
+        self.transient_departure_contact_object_id = ""
         self.authoritative_scene_sha256 = str(authoritative_scene_sha256)
         return revision
 
@@ -230,17 +237,19 @@ class PlanningSceneSynchronizer:
             "link_name": link_name,
             "touch_links": list(TARGET_TOUCH_LINKS),
         }
+        diff: dict[str, Any] = {
+            "operation": "attach",
+            # MoveIt automatically removes a same-id world object when an
+            # AttachedCollisionObject ADD is applied. Sending an explicit
+            # REMOVE in the same diff removes it twice and makes the apply
+            # service return success=false.
+            "attached_objects": [attached_spec],
+        }
+        departure_object_id = self.transient_departure_contact_object_id
+        if departure_object_id:
+            diff["allowed_collisions"] = {departure_object_id: []}
         revision = self._commit(
-            {
-                "operation": "attach",
-                # MoveIt automatically removes a same-id world object when an
-                # AttachedCollisionObject ADD is applied. Sending an explicit
-                # REMOVE in the same diff removes it twice and makes the apply
-                # service return success=false.
-                "attached_objects": [
-                    attached_spec
-                ],
-            },
+            diff,
             expected_world=self.world_ids - {target.object_id},
             expected_attached={target.object_id},
         )
@@ -252,6 +261,7 @@ class PlanningSceneSynchronizer:
         self.support_contact_reference_target_spec = target.to_dict()
         self.world_specs.pop(target.object_id, None)
         self.attached_specs = {target.object_id: attached_spec}
+        self.transient_departure_contact_object_id = ""
         return revision
 
     def update_world_target(self, *, target: CollisionGeometry) -> int:
@@ -297,6 +307,7 @@ class PlanningSceneSynchronizer:
         *,
         target: CollisionGeometry,
         support_object_id: str,
+        departure_contact_object_id: str = "",
     ) -> int:
         """Switch the qualification target while retaining one physical world."""
 
@@ -308,6 +319,11 @@ class PlanningSceneSynchronizer:
         if not support or support not in self.world_ids:
             return self._fail("next sort support is missing from the world scene")
         previous_target_id = self.target_id
+        departure_object_id = str(departure_contact_object_id).strip()
+        if departure_object_id and departure_object_id != previous_target_id:
+            return self._fail(
+                "departure contact object does not match the completed sort target"
+            )
         target_spec = target.to_dict()
         existing = self.world_specs.get(target.object_id)
         geometry_changed = not (
@@ -317,7 +333,13 @@ class PlanningSceneSynchronizer:
         allowed_collisions = {
             target.object_id: [support],
             **(
-                {previous_target_id: []}
+                {
+                    previous_target_id: (
+                        list(TARGET_TOUCH_LINKS)
+                        if departure_object_id == previous_target_id
+                        else []
+                    )
+                }
                 if previous_target_id and previous_target_id != target.object_id
                 else {}
             ),
@@ -339,6 +361,7 @@ class PlanningSceneSynchronizer:
         self.target_id = target.object_id
         self.support_contact_object_id = support
         self.support_contact_reference_target_spec = target_spec
+        self.transient_departure_contact_object_id = departure_object_id
         return revision
 
     def detach_target(self, *, target: CollisionGeometry) -> int:

@@ -11,6 +11,10 @@ import numpy as np
 from gymnasium import Env, spaces
 
 from adapter.protocol import EnvObservation
+from agent.runtime.collision_geometry import (
+    orientation_invariant_radius_m,
+    project_collision_geometry,
+)
 
 from .deployment import GazeboDeploymentConfig, worker_deployment_config
 from .robot_control import JOINT_NAMES, neutral_relative_motion_guidance
@@ -60,6 +64,105 @@ def _native_close_failure_classification(
         else "native_attach_unacknowledged"
     )
     return candidate_rejection, infrastructure_error, failure_class
+
+
+def _detached_target_motion_audit(
+    *,
+    source_spec: Mapping[str, Any],
+    before_xyz: tuple[float, float, float],
+    before_quat_xyzw: tuple[float, float, float, float],
+    after_xyz: tuple[float, float, float],
+    after_quat_xyzw: tuple[float, float, float, float],
+    physical_tolerance_m: float,
+) -> dict[str, Any]:
+    """Measure qualified-to-native target drift as maximum surface motion."""
+
+    if not math.isfinite(physical_tolerance_m) or physical_tolerance_m <= 0.0:
+        raise GazeboProcessError("DETACHED_TARGET_MOTION_TOLERANCE_INVALID")
+    source_xyz = tuple(float(value) for value in source_spec.get("pose_xyz") or ())
+    source_quat = tuple(
+        float(value) for value in source_spec.get("pose_quat_xyzw") or ()
+    )
+    if len(source_xyz) != 3 or len(source_quat) != 4:
+        raise GazeboProcessError("PLANNING_SCENE_TARGET_SOURCE_POSE_UNAVAILABLE")
+    try:
+        local_geometry = project_collision_geometry(
+            object_xyz=(0.0, 0.0, 0.0),
+            object_rotation=(
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+            ),
+            primitives=source_spec.get("primitives") or (),
+            fallback_size_xyz=source_spec.get("size_xyz"),
+        )
+        radius_m = orientation_invariant_radius_m(
+            local_geometry,
+            object_xyz=(0.0, 0.0, 0.0),
+        )
+    except (TypeError, ValueError) as exc:
+        raise GazeboProcessError(
+            "PLANNING_SCENE_TARGET_GEOMETRY_UNAVAILABLE"
+        ) from exc
+
+    def displacement(
+        left_xyz: tuple[float, float, float],
+        left_quat: tuple[float, float, float, float],
+        right_xyz: tuple[float, float, float],
+        right_quat: tuple[float, float, float, float],
+    ) -> dict[str, float]:
+        translation = math.dist(left_xyz, right_xyz)
+        rotation = _quaternion_distance_rad(left_quat, right_quat)
+        rotational_surface = 2.0 * radius_m * math.sin(rotation / 2.0)
+        return {
+            "translation_m": translation,
+            "rotation_rad": rotation,
+            "rotational_surface_displacement_m": rotational_surface,
+            "maximum_surface_displacement_m": translation + rotational_surface,
+        }
+
+    source_to_before = displacement(
+        source_xyz, source_quat, before_xyz, before_quat_xyzw
+    )
+    before_to_after = displacement(
+        before_xyz, before_quat_xyzw, after_xyz, after_quat_xyzw
+    )
+    source_to_after = displacement(
+        source_xyz, source_quat, after_xyz, after_quat_xyzw
+    )
+    maximum_surface_displacement = max(
+        source_to_after["maximum_surface_displacement_m"],
+        before_to_after["maximum_surface_displacement_m"],
+    )
+    valid = maximum_surface_displacement <= physical_tolerance_m
+    return {
+        "schema_version": "openeta.detached_target_motion_audit.v1",
+        "valid": valid,
+        "reason_code": (
+            "DETACHED_TARGET_STATIONARY"
+            if valid
+            else "GRASP_CONTACT_TARGET_DISPLACED"
+        ),
+        "measurement_boundary": (
+            "planning_scene_source_and_native_pose_before_after_contact_motion"
+        ),
+        "target_geometry_radius_m": radius_m,
+        "physical_tolerance_m": physical_tolerance_m,
+        "source_to_before": source_to_before,
+        "before_to_after": before_to_after,
+        "source_to_after": source_to_after,
+        "maximum_surface_displacement_m": maximum_surface_displacement,
+        "failure_phase": (
+            "none"
+            if valid
+            else "preexisting_target_pose_drift"
+            if source_to_before["maximum_surface_displacement_m"]
+            > physical_tolerance_m
+            else "moveit_contact_approach"
+        ),
+        "geometry_source": "authoritative_planning_scene_collision_geometry",
+        "host_offset_pose_generated": False,
+    }
 
 
 def build_gazebo_control_spec(profile: GazeboProfile) -> dict[str, Any]:
@@ -205,6 +308,13 @@ class GazeboDirectEnv(Env):
                 )
             ):
                 raw["metadata"]["multi_sort_progress"] = dict(progress)
+        # Work-order activation can change the selected target, destination,
+        # and placement semantics without recreating the environment. Carry
+        # the current profile contract with every observation; the MCP proxy's
+        # creation-time copy is only a fallback for older environments.
+        control_spec = getattr(self, "openeta_control_spec", None)
+        if isinstance(control_spec, Mapping):
+            raw.setdefault("metadata", {})["control_spec"] = dict(control_spec)
         return raw
 
     def observe(self) -> dict[str, Any]:
@@ -259,6 +369,61 @@ class GazeboDirectEnv(Env):
         action_type = str(raw_action.get("action_type") or "")
         contact_window: GazeboNativeContactWindow | None = None
         release_before_open: dict[str, Any] | None = None
+        detached_contact_motion_source: dict[str, Any] | None = None
+        target_pose = raw_action.get("target_pose")
+        detached_contact_motion = bool(
+            self._native_grasp_config is not None
+            and action_type in {"move_to", "follow_eef_trajectory"}
+            and isinstance(target_pose, Mapping)
+            and target_pose.get("grasp_stage") == "contact"
+            and not self._native_grasp_transport_locked
+        )
+        if detached_contact_motion:
+            attachment = getattr(self.runtime, "attachment", None)
+            if attachment is None or getattr(attachment, "state", None) != "detached":
+                detached_contact_motion = False
+            else:
+                try:
+                    scene_source = self._planning_scene_target_pose_sync_source()
+                    pose_reader = getattr(
+                        attachment,
+                        "native_target_mount_poses_with_retry",
+                        None,
+                    )
+                    if callable(pose_reader):
+                        before_pose, _mount_pose, before_attempts = pose_reader(
+                            max_attempts=2
+                        )
+                    else:
+                        before_pose, _mount_pose = (
+                            attachment.native_target_mount_poses()
+                        )
+                        before_attempts = 1
+                    detached_contact_motion_source = {
+                        "scene_source": scene_source,
+                        "before_xyz": tuple(float(value) for value in before_pose.xyz),
+                        "before_quat_xyzw": tuple(
+                            float(value) for value in before_pose.quat_xyzw
+                        ),
+                        "before_pose_read_attempt_count": int(before_attempts),
+                    }
+                except Exception as exc:
+                    observation = self.runtime.observe()
+                    raw = self._decorate_robot(self._as_unified(observation))
+                    receipt = {
+                        "ok": False,
+                        "error_code": str(exc) or type(exc).__name__,
+                        "failure_class": "detached_target_pose_infrastructure_failure",
+                        "candidate_rejection": False,
+                        "infrastructure_error": True,
+                        "motion_outcome": "failed",
+                        "execution_started": False,
+                        "observation": raw,
+                    }
+                    self._latest = raw
+                    return raw, 0.0, False, False, {
+                        "_openeta_receipt": receipt
+                    } if STRUCTURED_RECEIPT in self.profile.capabilities else {}
         if action_type == "configure_work_order":
             if self._native_grasp_transport_locked:
                 raise GazeboProcessError("WORK_ORDER_RECONFIGURATION_DURING_TRANSPORT")
@@ -444,6 +609,119 @@ class GazeboDirectEnv(Env):
                 contact_window.close()
             raise
         raw = self._decorate_robot(self._as_unified(observation))
+        if (
+            detached_contact_motion_source is not None
+            and (receipt.get("execution_started") is True or receipt.get("ok") is True)
+        ):
+            attachment = getattr(self.runtime, "attachment", None)
+            try:
+                pose_reader = getattr(
+                    attachment,
+                    "native_target_mount_poses_with_retry",
+                    None,
+                )
+                if callable(pose_reader):
+                    after_pose, _mount_pose, after_attempts = pose_reader(
+                        max_attempts=2
+                    )
+                else:
+                    after_pose, _mount_pose = attachment.native_target_mount_poses()
+                    after_attempts = 1
+                scene_source = detached_contact_motion_source["scene_source"]
+                planning_scene = getattr(self.controller, "planning_scene", None)
+                source_spec = (
+                    getattr(planning_scene, "world_specs", {}).get(
+                        self._native_grasp_config.target_id
+                    )
+                    if planning_scene is not None
+                    else None
+                )
+                if not isinstance(source_spec, Mapping):
+                    raise GazeboProcessError(
+                        "PLANNING_SCENE_TARGET_SOURCE_POSE_UNAVAILABLE"
+                    )
+                motion_audit = _detached_target_motion_audit(
+                    source_spec=source_spec,
+                    before_xyz=detached_contact_motion_source["before_xyz"],
+                    before_quat_xyzw=detached_contact_motion_source[
+                        "before_quat_xyzw"
+                    ],
+                    after_xyz=tuple(float(value) for value in after_pose.xyz),
+                    after_quat_xyzw=tuple(
+                        float(value) for value in after_pose.quat_xyzw
+                    ),
+                    physical_tolerance_m=float(
+                        self._native_grasp_config.static_collision_penetration_tolerance_m
+                    ),
+                )
+                motion_audit["native_pose_read_attempts"] = {
+                    "before": detached_contact_motion_source[
+                        "before_pose_read_attempt_count"
+                    ],
+                    "after": int(after_attempts),
+                    "maximum_per_read": 2,
+                }
+                receipt["detached_target_motion_audit"] = motion_audit
+                receipt["detachable_joint"] = {
+                    "state": "detached",
+                    "target_id": self._native_grasp_config.target_id,
+                    "state_topic": self._native_grasp_config.state_topic,
+                }
+                if motion_audit["valid"] is not True:
+                    sync_target_pose = getattr(
+                        self.controller,
+                        "sync_planning_scene_target_pose",
+                        None,
+                    )
+                    if not callable(sync_target_pose):
+                        raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                    revision = sync_target_pose(
+                        self._native_grasp_config,
+                        target_xyz=tuple(float(value) for value in after_pose.xyz),
+                        target_quat_xyzw=tuple(
+                            float(value) for value in after_pose.quat_xyzw
+                        ),
+                        allow_target_touch=True,
+                    )
+                    pose_sync = self._planning_scene_target_pose_sync_evidence(
+                        scene_source,
+                        target_xyz=tuple(float(value) for value in after_pose.xyz),
+                        target_quat_xyzw=tuple(
+                            float(value) for value in after_pose.quat_xyzw
+                        ),
+                        revision=int(revision),
+                        execution_started=True,
+                    )
+                    receipt.update(
+                        {
+                            "ok": False,
+                            "error_code": "GRASP_CONTACT_TARGET_DISPLACED",
+                            "failure_class": "detached_target_displacement",
+                            "candidate_rejection": True,
+                            "infrastructure_error": False,
+                            "motion_outcome": "failed",
+                            "execution_started": True,
+                            "planning_scene_revision": int(revision),
+                            "planning_scene_target_pose_sync": pose_sync,
+                        }
+                    )
+                    raw.setdefault("metadata", {})[
+                        "planning_scene_revision"
+                    ] = int(revision)
+            except Exception as exc:
+                receipt.update(
+                    {
+                        "ok": False,
+                        "error_code": str(exc) or type(exc).__name__,
+                        "failure_class": (
+                            "detached_target_pose_infrastructure_failure"
+                        ),
+                        "candidate_rejection": False,
+                        "infrastructure_error": True,
+                        "motion_outcome": "unknown",
+                        "execution_started": True,
+                    }
+                )
         scene_revision = self._planning_scene_revision()
         if scene_revision is not None:
             receipt["planning_scene_revision"] = scene_revision
@@ -808,14 +1086,16 @@ class GazeboDirectEnv(Env):
                 receipt["physical_verification"] = record.to_dict()
             elif action_type == "gripper_open":
                 if release_before_open is not None:
+                    release_sequence = list(
+                        release_before_open["release_sequence"]
+                    )
+                    open_executed = receipt.get("ok") is True
+                    post_release_stage = "gripper_result"
                     try:
-                        if receipt.get("ok") is not True:
+                        if not open_executed:
                             raise GazeboProcessError(
                                 str(receipt.get("error_code") or "GRIPPER_FAILED")
                             )
-                        release_sequence = list(
-                            release_before_open["release_sequence"]
-                        )
                         release_sequence.append(
                             {
                                 "sequence": len(release_sequence) + 1,
@@ -823,6 +1103,12 @@ class GazeboDirectEnv(Env):
                                 "ok": True,
                             }
                         )
+                        # Detach and the physical open are already irreversible
+                        # at this point. Publish their complete causal proof
+                        # before any pose sampling, PlanningScene bookkeeping,
+                        # or multi-sort transition can fail independently.
+                        receipt["release_sequence"] = release_sequence
+                        receipt["gripper_open_executed"] = True
                         receipt["detachable_joint"] = {
                             "state": "detached",
                             "detach_topic": self._native_grasp_config.detach_topic,
@@ -840,6 +1126,7 @@ class GazeboDirectEnv(Env):
                                     "attached_collision_filter"
                                 ]
                             )
+                        post_release_stage = "placement_pose_sampling"
                         samples = attachment.sample_detached_target_poses(
                             duration_s=(
                                 self._native_grasp_config.placement_settling_observation_s
@@ -851,6 +1138,7 @@ class GazeboDirectEnv(Env):
                         placement = verify_stable_placement(
                             samples, self._native_grasp_config
                         )
+                        receipt["placement_verification"] = placement.to_dict()
                         target_pose = samples[-1]
                         sync_target_pose = getattr(
                             self.controller,
@@ -859,6 +1147,7 @@ class GazeboDirectEnv(Env):
                         )
                         if not callable(sync_target_pose):
                             raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+                        post_release_stage = "released_target_pose_sync"
                         scene_revision = sync_target_pose(
                             self._native_grasp_config,
                             target_xyz=target_pose.xyz,
@@ -881,9 +1170,7 @@ class GazeboDirectEnv(Env):
                         )
                         record = release_before_open["record"]
                         receipt["planning_scene_revision"] = scene_revision
-                        receipt["placement_verification"] = placement.to_dict()
                         receipt["release_sequence"] = release_sequence
-                        receipt["gripper_open_executed"] = True
                         receipt["native_target_binding"] = {
                             "target_id": self._native_grasp_config.target_id,
                             "target_link": self._native_grasp_config.target_link,
@@ -897,13 +1184,25 @@ class GazeboDirectEnv(Env):
                             "planning_scene_revision"
                         ] = scene_revision
                         if placement.verdict.value == "PASS":
+                            post_release_stage = "work_order_transition"
                             advance = getattr(
                                 self.runtime,
                                 "complete_active_work_order_item",
                                 None,
                             )
                             progress = (
-                                advance(placement_verification=placement.to_dict())
+                                advance(
+                                    placement_verification=placement.to_dict(),
+                                    post_release_observation=(
+                                        observation
+                                        if observation.cameras
+                                        and observation.metadata.get(
+                                            "observation_stale"
+                                        )
+                                        is not True
+                                        else None
+                                    ),
+                                )
                                 if callable(advance)
                                 else None
                             )
@@ -942,16 +1241,22 @@ class GazeboDirectEnv(Env):
                                     ] = validated_pickplace_motion_guidance(
                                         next_config
                                     )
+                                    raw["metadata"]["control_spec"] = dict(
+                                        self.openeta_control_spec
+                                    )
+                        post_release_stage = "complete"
                     except Exception as exc:
                         record = release_before_open["record"]
+                        error = str(exc).strip() or type(exc).__name__
                         receipt.update(
                             {
                                 "ok": False,
-                                "error_code": str(exc),
-                                "gripper_open_executed": bool(receipt.get("ok")),
-                                "release_sequence": list(
-                                    release_before_open["release_sequence"]
-                                ),
+                                "error_code": error,
+                                "error_type": type(exc).__name__,
+                                "infrastructure_error": open_executed,
+                                "post_release_failure_stage": post_release_stage,
+                                "gripper_open_executed": open_executed,
+                                "release_sequence": release_sequence,
                             }
                         )
                 else:

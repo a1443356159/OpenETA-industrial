@@ -497,8 +497,8 @@ def test_native_grasp_stable_motion_contract_uses_bilateral_contact_goal_toleran
     assert motion["tolerance"] == 0.0002
     assert motion["ori_tolerance"] == 0.002
     assert motion["profile"] == "unloaded"
-    assert motion["velocity_scaling"] == 0.16
-    assert motion["acceleration_scaling"] == 0.06
+    assert motion["velocity_scaling"] == 0.10
+    assert motion["acceleration_scaling"] == 0.04
 
 
 def test_native_grasp_paused_launch_gives_runtime_a_bounded_detach_window() -> None:
@@ -688,6 +688,10 @@ def test_vlm_work_order_selects_order_and_bin_binding(
     assert [item.destination_center_xy for item in configs] == [
         (0.62, -0.18) if region_id == "blue_parts_bin" else (0.62, 0.18)
         for region_id in region_ids
+    ]
+    assert [item.placement_acceptance_semantics for item in configs] == [
+        "stable_geometry_centroid_inside"
+        for _region_id in region_ids
     ]
     assert [
         item.work_order_item["placement_region_perception_prompt"]

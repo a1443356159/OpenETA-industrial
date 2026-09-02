@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import json
@@ -24,6 +25,7 @@ from extensions.gazebo.ros_control import (
     RosGazeboStateSource,
     _RosRuntime,
     _attached_support_departure_audit,
+    _detached_contact_approach_audit,
     _collision_message_geometry_record,
     _configured_qualification_solver_profile,
     _qualification_ik_response_timeout_s,
@@ -71,6 +73,60 @@ def _support_departure_geometry():
             "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
         },
     )
+
+
+def test_detached_contact_approach_allows_target_touch_only_at_endpoint() -> None:
+    calls: list[list[float]] = []
+
+    def state_validity(state):
+        positions = list(state["positions"])
+        calls.append(positions)
+        terminal = positions == [1.0]
+        return {
+            "valid": not terminal,
+            "collision_pairs": (
+                [["target", "left_tip"], ["target", "right_tip"]]
+                if terminal
+                else []
+            ),
+        }
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [1.0]],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+    )
+
+    assert evidence["valid"] is True
+    assert evidence["terminal_contact_exception_scope"] == (
+        "exact_final_waypoint_only"
+    )
+    assert evidence["terminal_target_contact_links"] == ["left_tip", "right_tip"]
+    assert calls == [[0.0], [0.5], [1.0]]
+
+
+def test_detached_contact_approach_rejects_preterminal_target_contact() -> None:
+    def state_validity(state):
+        contact = state["positions"] == [0.5]
+        return {
+            "valid": not contact,
+            "collision_pairs": [["target", "left_tip"]] if contact else [],
+        }
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [1.0]],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["failure"]["reason"] == "target_contact_before_terminal"
+    assert evidence["failure"]["sample_kind"] == "midpoint"
+    assert evidence["evaluated_sample_count"] == 2
 
 
 def test_attached_support_departure_accepts_moveit_generated_separation() -> None:
@@ -164,7 +220,7 @@ def test_attached_support_departure_rejects_initial_penetration() -> None:
         joint_names=["lift"],
         trajectory_positions=[[0.0], [0.01]],
         forward_kinematics=lambda _names, joints: (
-            [0.0, 0.0, 0.009 + joints[0]],
+            [0.0, 0.0, 0.003 + joints[0]],
             [0.0, 0.0, 0.0, 1.0],
         ),
         mount_xyz=[0.0, 0.0, 0.0],
@@ -211,6 +267,38 @@ def test_attached_support_departure_uses_native_attach_contact_as_start_baseline
     assert evidence["first_moving_clearance_m"] > 0.0
 
 
+def test_attached_support_departure_accepts_submillimetre_contact_noise() -> None:
+    target, table = _support_departure_geometry()
+    measured_at_attach = {
+        **target,
+        "pose_xyz": [0.0, 0.0, 0.01 - 2.0e-8],
+    }
+
+    def fk(_names, joints):
+        progress = joints[0]
+        if progress == 0.0:
+            return [0.0, 0.0, 0.01 - 2.0e-8], [0.0, 0.0, 0.0, 1.0]
+        if progress < 1.0:
+            return [0.0002, 0.0, 0.01 - 8.5e-6], [0.0, 0.0, 0.0, 1.0]
+        return [0.002, 0.0, 0.02], [0.0, 0.0, 0.0, 1.0]
+
+    evidence = _attached_support_departure_audit(
+        joint_names=["lift"],
+        trajectory_positions=[[0.0], [1.0]],
+        forward_kinematics=fk,
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+        support_contact_reference_target_spec=measured_at_attach,
+    )
+
+    assert evidence["valid"] is True
+    assert evidence["minimum_clearance_m"] == pytest.approx(-8.5e-6)
+    assert evidence["support_penetration_tolerance_m"] == pytest.approx(0.005)
+    assert evidence["tangential_contact_tolerance_m"] == pytest.approx(0.001)
+
+
 def test_attached_support_departure_rejects_start_deeper_than_native_baseline() -> None:
     target, table = _support_departure_geometry()
     measured_at_attach = {
@@ -222,7 +310,7 @@ def test_attached_support_departure_rejects_start_deeper_than_native_baseline() 
         joint_names=["lift"],
         trajectory_positions=[[0.0], [0.01]],
         forward_kinematics=lambda _names, joints: (
-            [0.0, 0.0, 0.0099 + joints[0]],
+            [0.0, 0.0, 0.003 + joints[0]],
             [0.0, 0.0, 0.0, 1.0],
         ),
         mount_xyz=[0.0, 0.0, 0.0],
@@ -456,6 +544,42 @@ def test_l5_trajectory_cache_accepts_euler_roundtrip_pose_noise_only() -> None:
     assert _l5_trajectory_cache_key(
         different_candidate, scene_revision=2, scene_sha256="scene"
     ) != private_key
+
+
+def test_l5_trajectory_cache_normalizes_euler_signed_zero() -> None:
+    private_goal = {
+        "qualification_cache_binding_sha256": "b" * 64,
+        "qualification_goal_joint_state_sha256": "c" * 64,
+        "compiled_grasp_id": "grasp_0042",
+        "grasp_stage": "contact",
+        "group_name": "rm_group",
+        "link_name": "link_7",
+        "requested_tool_pose": {
+            "xyz": [0.375329495519, -0.107262827456, 0.172620624542],
+            "quat_xyzw": [0.8383174512, 0.5451824107, 0.0, 0.0],
+        },
+        "target_pose": {
+            "xyz": [0.375329495519, -0.107262827456, 0.172620624542],
+            "quat_xyzw": [0.2072781, 0.9782821, 0.0, 0.0],
+        },
+        "motion_profile": "unloaded",
+        "max_velocity_scaling_factor": 0.1,
+        "max_acceleration_scaling_factor": 0.04,
+    }
+    public_goal = copy.deepcopy(private_goal)
+    public_goal["qualification_binding_sha256"] = public_goal.pop(
+        "qualification_cache_binding_sha256"
+    )
+    # This is the harmless representation produced by the real public
+    # roll/pitch/yaw-to-quaternion round trip that previously caused a miss.
+    public_goal["target_pose"]["quat_xyzw"][2] = -0.0
+
+    assert json.dumps(0.0) != json.dumps(-0.0)
+    assert _l5_trajectory_cache_key(
+        private_goal, scene_revision=6, scene_sha256="scene"
+    ) == _l5_trajectory_cache_key(
+        public_goal, scene_revision=6, scene_sha256="scene"
+    )
 
 
 def test_private_l5_goal_matches_public_joint_digest_and_candidate_identity() -> None:

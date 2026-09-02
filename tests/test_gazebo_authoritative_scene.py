@@ -36,6 +36,7 @@ def _compile(scene_id: str = "normal"):
     [
         "normal",
         "multi_normal",
+        "multi_normal_random_12345",
         "narrow-pick",
         "barrier-transfer",
         "fastener-bin-sort",
@@ -172,6 +173,87 @@ def test_multi_normal_is_one_task_neutral_physical_world() -> None:
     }
     with pytest.raises(ValueError, match="unsupported acceptance scene"):
         load_acceptance_scene_contract("multi_normal_prompt_variant")
+
+
+def test_seeded_multi_normal_layout_is_task_neutral_and_authoritative() -> None:
+    canonical = _compile("multi_normal")
+    randomized = _compile("multi_normal_random_12345")
+    contract = load_acceptance_scene_contract("multi_normal_random_12345")
+
+    assert contract["seed"] == 12345
+    assert "task" not in contract
+    assert randomized.world_scene == "multi_normal_random_12345"
+    assert randomized.authority_sha256 != canonical.authority_sha256
+    assert randomized.object("target_object").pose_xyz == pytest.approx(
+        (0.30, -0.30, 0.015)
+    )
+    assert randomized.object("red_m24_hex_bolt").pose_xyz == pytest.approx(
+        (0.35, -0.10, 0.002)
+    )
+    assert [binding.target_model for binding in randomized.target_bindings] == [
+        "target_object",
+        "red_m24_hex_bolt",
+    ]
+    assert {item.object_id for item in randomized.objects} == {
+        item.object_id for item in canonical.objects
+    }
+
+
+def test_seeded_layout_rejects_overlapping_dynamic_models(tmp_path: Path) -> None:
+    package = _package()
+    source = package / "config/acceptance_scenes.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    scene = payload["scenes"]["multi_normal_random_12345"]
+    target_pose = scene["model_pose_overrides"][0]["pose_xyz"]
+    scene["model_pose_overrides"][5]["pose_xyz"][:2] = target_pose[:2]
+    catalog = tmp_path / "acceptance_scenes.json"
+    catalog.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError,
+        match="randomized dynamic models overlap",
+    ):
+        compile_authoritative_scene(
+            base_world=package / "worlds/rm75_robotiq2f85_pickplace.sdf",
+            catalog_path=catalog,
+            scene_id="multi_normal_random_12345",
+        )
+
+
+def test_seeded_layout_cannot_move_static_workcell_geometry(tmp_path: Path) -> None:
+    package = _package()
+    source = package / "config/acceptance_scenes.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["scenes"]["multi_normal_random_12345"]["model_pose_overrides"][0][
+        "id"
+    ] = "work_table"
+    catalog = tmp_path / "acceptance_scenes.json"
+    catalog.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="cannot move static model"):
+        compile_authoritative_scene(
+            base_world=package / "worlds/rm75_robotiq2f85_pickplace.sdf",
+            catalog_path=catalog,
+            scene_id="multi_normal_random_12345",
+        )
+
+
+def test_seeded_layout_rejects_an_unsupported_floating_model(tmp_path: Path) -> None:
+    package = _package()
+    source = package / "config/acceptance_scenes.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["scenes"]["multi_normal_random_12345"]["model_pose_overrides"][2][
+        "pose_xyz"
+    ][2] = 0.05
+    catalog = tmp_path / "acceptance_scenes.json"
+    catalog.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="starts unsupported"):
+        compile_authoritative_scene(
+            base_world=package / "worlds/rm75_robotiq2f85_pickplace.sdf",
+            catalog_path=catalog,
+            scene_id="multi_normal_random_12345",
+        )
 
 
 def test_authoritative_compiler_keeps_detailed_visual_independent_from_collision(

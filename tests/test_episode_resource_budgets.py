@@ -226,6 +226,55 @@ def test_runner_actively_interrupts_blocked_turn_and_closes_environment() -> Non
     assert runner.wait_for_idle(timeout_s=0.2) is True
 
 
+def test_operator_wait_does_not_consume_episode_deadline() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    result_holder = {}
+    runner_holder = {}
+
+    def approval_handler(context):
+        del context
+        runner = runner_holder["runner"]
+        runner.begin_human_wait()
+        try:
+            started.set()
+            release.wait(timeout=1.0)
+        finally:
+            runner.end_human_wait()
+        return ToolResult(True, content="approved")
+
+    runner = OpenEtaEpisodeRunner(
+        runtime=_runtime(
+            StaticPlannerBackend(
+                {"kind": "tool_call", "name": "scene_detector", "parameters": {}}
+            ),
+            handler=approval_handler,
+        ),
+        environment=DummyEpisodeEnvironment(),
+    )
+    runner_holder["runner"] = runner
+
+    worker = threading.Thread(
+        target=lambda: result_holder.setdefault(
+            "result",
+            runner.run(task="find cube", max_turns=1, timeout_s=0.05),
+        )
+    )
+    worker.start()
+    assert started.wait(timeout=0.2)
+    time.sleep(0.1)
+
+    assert worker.is_alive() is True
+    release.set()
+    worker.join(timeout=0.5)
+
+    assert worker.is_alive() is False
+    result = result_holder["result"]
+    assert len(result.steps) == 1
+    assert result.metadata["failure_reason"] == {}
+    assert result.metadata["usage"]["human_wait_s"] >= 0.1
+
+
 def test_cancelled_tool_result_is_fenced_before_next_command() -> None:
     started = threading.Event()
     release = threading.Event()

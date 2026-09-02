@@ -125,6 +125,58 @@ def test_planning_scene_switches_sort_target_without_rebuilding_world_geometry()
     }
 
 
+def test_multi_sort_departure_touch_is_scoped_until_next_attach() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        if diff["operation"] == "attach":
+            return {
+                "applied": True,
+                "world_ids": ["table", "target"],
+                "attached_ids": ["distractor"],
+            }
+        return {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
+    table, next_target, completed_target = _boxes()
+    scene.reset(table=table, distractor=next_target, target=completed_target)
+
+    scene.activate_target(
+        target=next_target,
+        support_object_id=table.object_id,
+        departure_contact_object_id=completed_target.object_id,
+    )
+
+    assert calls[1]["allowed_collisions"] == {
+        next_target.object_id: [table.object_id],
+        completed_target.object_id: list(TARGET_TOUCH_LINKS),
+    }
+    assert scene.transient_departure_contact_object_id == completed_target.object_id
+
+    scene.attach_target(target=next_target)
+
+    assert calls[2]["allowed_collisions"] == {completed_target.object_id: []}
+    assert scene.transient_departure_contact_object_id == ""
+
+
+def test_multi_sort_departure_contact_must_name_completed_target() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, next_target, completed_target = _boxes()
+    scene.reset(table=table, distractor=next_target, target=completed_target)
+
+    with pytest.raises(PlanningSceneError, match="completed sort target"):
+        scene.activate_target(
+            target=next_target,
+            support_object_id=table.object_id,
+            departure_contact_object_id="unrelated_object",
+        )
+
+
 def test_planning_scene_allows_only_the_fixed_robot_support_contact() -> None:
     calls = []
 

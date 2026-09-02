@@ -95,6 +95,72 @@
       ],
       "static_obstacles": []
     },
+    "multi_normal_random_12345": {
+      "world_scene": "multi_normal_random_12345",
+      "seed": 12345,
+      "description": "Seeded task-neutral multi-object workcell with randomized poses and the same physical targets and bins as multi_normal.",
+      "canonical_world_complete": true,
+      "manipulation_targets": [
+        {
+          "id": "yellow_wrench",
+          "target_object_id": "target_object",
+          "target_link": "target_link",
+          "target_prompt": "yellow wrench",
+          "semantic_aliases": ["yellow adjustable wrench", "黄色活动扳手"],
+          "source_support_object_id": "work_table"
+        },
+        {
+          "id": "red_bolt",
+          "target_object_id": "red_m24_hex_bolt",
+          "target_link": "red_m24_hex_bolt_link",
+          "target_prompt": "red hex bolt",
+          "semantic_aliases": ["red M24 hex bolt", "红色六角螺栓"],
+          "source_support_object_id": "work_table"
+        }
+      ],
+      "placement_regions": [
+        {
+          "id": "green_parts_bin",
+          "prompt": "green parts bin",
+          "semantic_aliases": ["green bin", "绿色零件箱"],
+          "center_xy": [0.62, 0.180],
+          "size_xy_m": [0.285, 0.260],
+          "support_z_m": 0.020,
+          "acceptance_semantics": "stable_geometry_centroid_inside",
+          "rgba": [0.035, 0.70, 0.16, 1.0]
+        },
+        {
+          "id": "blue_parts_bin",
+          "prompt": "blue parts bin",
+          "perception_prompt": "blue square area inside bin",
+          "semantic_aliases": ["blue square area inside bin", "blue bin", "蓝色零件箱"],
+          "center_xy": [0.62, -0.180],
+          "size_xy_m": [0.285, 0.260],
+          "support_z_m": 0.020,
+          "acceptance_semantics": "stable_geometry_centroid_inside",
+          "rgba": [0.035, 0.25, 0.88, 1.0]
+        }
+      ],
+      "model_pose_overrides": [
+        {"id": "target_object", "pose_xyz": [0.30, -0.30, 0.015], "pose_rpy": [0.0, 0.0, 2.043331034812934]},
+        {"id": "silver_box_wrench", "pose_xyz": [0.27, 0.32, 0.003], "pose_rpy": [0.0, 0.0, -2.360798798007409]},
+        {"id": "red_m24_hex_bolt", "pose_xyz": [0.35, -0.10, 0.002], "pose_rpy": [0.0, 0.0, 2.878103496441782]},
+        {"id": "orange_m20_socket_bolt", "pose_xyz": [0.05, 0.39, 0.002], "pose_rpy": [0.0, 0.0, -0.9955043639881325]},
+        {"id": "distractor_object", "pose_xyz": [0.06, 0.22, 0.011], "pose_rpy": [0.0, 0.0, -3.1198840587957983]},
+        {"id": "blue_black_screwdriver", "pose_xyz": [0.08, -0.22, 0.003], "pose_rpy": [0.0, 0.0, -0.5370078844956656]},
+        {"id": "silver_allen_key", "pose_xyz": [0.30, 0.08, 0.003], "pose_rpy": [0.0, 0.0, 1.315612676271546]}
+      ],
+      "layout_validation": {
+        "support_object_id": "work_table",
+        "support_margin_m": 0.015,
+        "minimum_xy_clearance_m": 0.008,
+        "maximum_initial_drop_m": 0.005,
+        "exclusion_regions": [
+          {"id": "robot_base_keepout", "center_xy": [0.0, 0.0], "size_xy_m": [0.24, 0.24]}
+        ]
+      },
+      "static_obstacles": []
+    },
     "narrow-pick": {
       "world_scene": "narrow-pick",
       "seed": 17,

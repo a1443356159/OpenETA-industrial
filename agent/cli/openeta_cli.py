@@ -1689,7 +1689,14 @@ class OpenEtaCli:
         if not sys.stdin.isatty():
             print(Theme.warn(f"permission required: {message}"))
             return False
-        answer = self._prompt_text(f"permission {message} [y/N]").lower()
+        runner = self.state.episode_runner
+        if runner is not None:
+            runner.begin_human_wait()
+        try:
+            answer = self._prompt_text(f"permission {message} [y/N]").lower()
+        finally:
+            if runner is not None:
+                runner.end_human_wait()
         return answer in {"y", "yes"}
 
     def _print_header(self) -> None:

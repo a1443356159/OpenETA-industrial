@@ -100,6 +100,24 @@ def test_camera_roles_survive_compact_refs_and_observation_snapshots(
     )
 
 
+def test_stale_post_action_observation_is_not_promoted_to_fresh_snapshot() -> None:
+    snapshot = build_observation_snapshot(
+        {
+            "observation": {
+                "task": "sort parts",
+                "cameras": {},
+                "robot": {},
+                "metadata": {
+                    "observation_stale": True,
+                    "fresh_observation_required": True,
+                },
+            }
+        }
+    )
+
+    assert snapshot == {}
+
+
 def test_json_responses_with_same_bundle_are_isolated_by_session(tmp_path: Path) -> None:
     first = materialize_json_response(
         {"session": "a"},

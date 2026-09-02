@@ -789,7 +789,7 @@ def compile_placement_seed(
     r_world_eef = [row[:3] for row in t_world_eef[:3]]
     p_world_eef = [row[3] for row in t_world_eef[:3]]
     terminal_pose_source = (
-        "anyplace_xy_with_container_drop_orientation"
+        "anyplace_se3_with_container_release_offset"
         if candidate.get("container_drop_release_prebound") is True
         else "anyplace_object_goal_with_measured_attachment"
     )

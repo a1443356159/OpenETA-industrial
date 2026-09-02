@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import threading
 from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
@@ -243,8 +244,15 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
             },
         ]
     )
+    post_release = EnvObservation(
+        task="sort",
+        cameras=[_Camera(profile.cameras[0]).capture()],
+        robot=RobotState(),
+        metadata={"observation_provenance": "gazebo_ros_live"},
+    )
     progress = runtime.complete_active_work_order_item(
-        placement_verification={"placement_confirmed": True, "verdict": "PASS"}
+        placement_verification={"placement_confirmed": True, "verdict": "PASS"},
+        post_release_observation=post_release,
     )
 
     assert runtime.start_count == 1
@@ -254,13 +262,19 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
         "green_parts_bin",
         "blue_parts_bin",
     ]
+    assert "departure_contact_object_id" not in activations[0][1]
+    assert activations[1][1]["departure_contact_object_id"] == "target_object"
     assert configured["source"] == "vlm_work_order"
     assert configured["transition"]["configured_by"] == "vlm_tool_call"
     assert progress["completed_assignment_ids"] == [
         "yellow_wrench_to_green_parts_bin"
     ]
     assert progress["remaining_count"] == 1
-    assert progress["fresh_observation_required"] is True
+    assert progress["fresh_observation_required"] is False
+    assert progress["fresh_observation_satisfied"] is True
+    assert progress["fresh_observation_source"] == "post_release_action"
+    assert runtime._last_observation is post_release
+    assert post_release.metadata["multi_sort_progress"]["active_assignment_index"] == 1
     assert progress["transition"]["world_recreated"] is False
 
 
@@ -383,6 +397,29 @@ def test_runtime_is_lazy_starts_once_observes_fresh_and_closes_idempotently() ->
     assert made_cameras[0].closed == 1
 
 
+def test_runtime_captures_independent_cameras_concurrently_in_configured_order() -> None:
+    profile = gazebo_profile("rm75_robotiq2f85_control")
+    rendezvous = threading.Barrier(2)
+
+    class Camera(_Camera):
+        def capture(self, **kwargs):
+            rendezvous.wait(timeout=1.0)
+            return super().capture(**kwargs)
+
+    first_config = replace(profile.cameras[0], frame_id="first_camera")
+    second_config = replace(profile.cameras[0], frame_id="second_camera")
+    runtime = GazeboRuntime(_deployment(), profile, world_control=_World())
+    runtime.started = True
+    runtime._cameras = [Camera(first_config), Camera(second_config)]
+
+    observation = runtime.observe(timeout_s=1.0)
+
+    assert [frame.frame_id for frame in observation.cameras] == [
+        "first_camera",
+        "second_camera",
+    ]
+
+
 def test_runtime_action_observation_uses_ros_completion_barrier_without_callback_race() -> None:
     """A post-action frame may be queued before ``execute`` returns to Python.
 
@@ -406,7 +443,7 @@ def test_runtime_action_observation_uses_ros_completion_barrier_without_callback
     assert receipt["action_completed_ros_time_s"] == 42.0
     assert camera.capture_arguments == [
         {
-            "timeout_s": pytest.approx(30.0),
+            "timeout_s": pytest.approx(30.0, abs=0.01),
             "min_timestamp_s": 42.0,
             "min_received_monotonic_s": None,
         }
@@ -429,7 +466,7 @@ def test_read_only_motion_qualification_reuses_frozen_observation() -> None:
     assert observation is cached
     assert camera.capture_arguments == [
         {
-            "timeout_s": pytest.approx(30.0),
+            "timeout_s": pytest.approx(30.0, abs=0.01),
             "min_timestamp_s": None,
             "min_received_monotonic_s": None,
         }
@@ -542,7 +579,7 @@ def test_runtime_retries_only_observation_after_camera_transport_timeout() -> No
     assert receipt["observation_refresh_retry_reason"] == "camera_transport_timeout"
 
 
-def test_runtime_propagates_second_camera_transport_timeout_without_repeating_action() -> None:
+def test_runtime_preserves_action_receipt_after_second_camera_transport_timeout() -> None:
     profile = gazebo_profile("rm75_robotiq2f85_control")
 
     class Camera(_Camera):
@@ -561,11 +598,18 @@ def test_runtime_propagates_second_camera_transport_timeout_without_repeating_ac
     runtime._cameras = [camera]
     runtime.controller = controller
 
-    with pytest.raises(GazeboObservationError, match="camera transport timeout"):
-        runtime.execute({"action_type": "gripper_close"})
+    observation, receipt = runtime.execute({"action_type": "gripper_close"})
 
     assert camera.attempts == 2
     assert controller.actions == [{"action_type": "gripper_close"}]
+    assert observation.cameras == []
+    assert observation.metadata["observation_stale"] is True
+    assert observation.metadata["fresh_observation_required"] is True
+    assert receipt["ok"] is True
+    assert receipt["post_action_observation_available"] is False
+    assert receipt["observation_refresh_retry_count"] == 1
+    assert receipt["observation_refresh_runtime_healthy"] is True
+    assert receipt["observation_refresh_error"] == "camera transport timeout"
 
 
 def test_runtime_waits_for_world_control_before_its_first_rgbd_reset() -> None:

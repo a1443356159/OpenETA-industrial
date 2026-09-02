@@ -1141,6 +1141,32 @@ def test_multi_sort_release_requires_fresh_observation_instead_of_close() -> Non
     assert obligation["active_assignment"]["target_prompt"] == "red hex bolt"
 
 
+def test_multi_sort_release_reuses_causal_post_action_observation() -> None:
+    obligation = _placement_release_obligation(
+        _observation(),
+        release={
+            "status": "released",
+            "placement_verification": {
+                "placement_confirmed": True,
+                "verdict": "PASS",
+            },
+            "multi_sort_progress": {
+                "schema_version": "openeta.multi_sort_progress.v1",
+                "assignment_count": 2,
+                "completed_count": 1,
+                "remaining_count": 1,
+                "all_completed": False,
+                "fresh_observation_required": False,
+                "fresh_observation_satisfied": True,
+                "fresh_observation_source": "post_release_action",
+                "active_assignment": {"id": "red_bolt_to_blue"},
+            },
+        },
+    )
+
+    assert obligation is None
+
+
 def test_multi_sort_release_closes_only_after_every_assignment_passes() -> None:
     obligation = _placement_release_obligation(
         _observation(),

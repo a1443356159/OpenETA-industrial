@@ -13,7 +13,7 @@
 - Gazebo GUI 在 GPU VNC 桌面上保持开启，Dashboard 仅用于观察。
 - 每件物品只运行一次模型推理；物理失败优先从冻结候选前沿恢复。
 - 人类只描述任务、处理真正的语义澄清，并确认世界状态变更；不输入末端位姿、偏移量、候选编号或工具调用顺序。
-- Agent 保留正常工程闭环的决策自由；100 回合 / 200 次工具调用只是兼容性上限，不使用跨观察、GraspGenX 或 AnyPlace 的全局失败熔断器。
+- Agent 保留正常工程闭环的决策自由；验收脚本不规定回合数、工具调用数、观察/重试次数或恢复顺序，也不使用跨观察、GraspGenX 或 AnyPlace 的全局失败熔断器。
 
 ## 1. 准备
 
@@ -177,6 +177,20 @@ scripts/run_multi_normal_gazebo_acceptance.sh \
 ```
 
 `--task-variant` 只告诉验收器如何核对人类请求，不会把任务写入物理场景或 Planner 上下文。实际智能体仍可接受场景内更多自然语言任务；若要把新的物品/料箱组合纳入正式自动核验，应新增任务契约，而不是复制或特化物理场景。
+
+## 随机布局复测
+
+发行树还包含 seed `12345` 的任务中立随机布局。它保留与 `multi_normal` 相同的七个工业物件、两个可抓目标、两个物理料箱和自然语言工单，只改变桌面动态物件的位置与朝向：
+
+```bash
+RUN_ROOT="$REPO/.cache/reports/random-multi-normal-human-$(date -u +%Y%m%dT%H%M%SZ)"
+
+scripts/run_random_multi_normal_gazebo_acceptance.sh \
+  --operator-mode human_tui \
+  --run-root "$RUN_ROOT"
+```
+
+使用第 3 节的同一条操作员 Prompt。正式报告中的 `scenario` 应为 `multi_normal_random_12345`，`acceptance_scene.seed` 应为 `12345`。随机布局不是外部 SDF 旁路：目录中的 `model_pose_overrides` 只允许移动当前权威世界里已有的动态模型；最终 SDF 仍由同一个场景编译器生成并同步为 MoveIt CollisionObject。启动前会按真实碰撞包围盒检查桌面边界、初始支撑高度、物体间间隙、两个料箱和机器人基座保留区。物件颜色和语义身份保持不变，避免把“随机颜色导致任务含义变化”误当成几何泛化测试。
 
 ## 发行复测记录
 

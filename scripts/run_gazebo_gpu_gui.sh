@@ -7,14 +7,26 @@ if [[ -z "${GZ_PARTITION:-}" ]]; then
   echo "GZ_PARTITION must identify the already-running Gazebo server." >&2
   exit 2
 fi
-if ! command -v vglrun >/dev/null 2>&1; then
+vglrun_bin="$(command -v vglrun || true)"
+gz_bin="$(command -v gz || true)"
+if [[ -z "${vglrun_bin}" ]]; then
   echo "VirtualGL (vglrun) is required for the GPU Gazebo client." >&2
   exit 2
 fi
-if ! command -v gz >/dev/null 2>&1; then
+if [[ -z "${gz_bin}" ]]; then
   echo "Gazebo (gz) is required for the operator client." >&2
   exit 2
 fi
+
+# ``gz`` is a Ruby launcher with an ``/usr/bin/env ruby`` shebang.  Login
+# shells on the GPU host may auto-activate a Conda environment whose Ruby and
+# gems are ABI-incompatible with Gazebo's vendor extension.  Resolve the two
+# executables before changing PATH (which also keeps test/operator overrides),
+# then make the system Ruby authoritative for the launcher and discard only
+# Ruby-specific package state.  CUDA, VirtualGL, ROS, and Gazebo paths remain
+# available through the unchanged tail of PATH.
+unset GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+export PATH="/usr/bin:/bin:${PATH}"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 default_gui_config="${script_dir}/../extensions/gazebo/ros2_ws/src/openeta_rm75_robotiq2f85_sim/config/gazebo_operator_gui.config"
@@ -32,7 +44,7 @@ export __GL_ALLOW_FXAA_USAGE="${OPENETA_GAZEBO_ALLOW_FXAA:-1}"
 
 wait_for_partition_server() {
   echo "Waiting for the Gazebo server on partition ${GZ_PARTITION}..." >&2
-  while ! gz service -l 2>/dev/null \
+  while ! "${gz_bin}" service -l 2>/dev/null \
     | grep -Eq '^/gazebo/worlds$|^/world/[^/]+/control$'; do
     sleep 0.25
   done
@@ -42,7 +54,7 @@ focus_operator_view() {
   local camera_request
   camera_request='pose: {position: {x: -1.0, y: -1.1, z: 1.2}, orientation: {x: -0.07846, y: 0.20781, z: 0.34439, w: 0.91217}}'
   for _attempt in $(seq 1 60); do
-    if gz service \
+    if "${gz_bin}" service \
       -s /gui/move_to/pose \
       --reqtype gz.msgs.GUICamera \
       --reptype gz.msgs.Boolean \
@@ -68,12 +80,12 @@ focus_operator_view() {
 
 wait_for_partition_server
 focus_operator_view &
-exec vglrun \
+exec "${vglrun_bin}" \
   -d "${OPENETA_VGL_DISPLAY:-egl}" \
   -c "${OPENETA_VGL_TRANSPORT:-proxy}" \
   -fps "${OPENETA_GAZEBO_GUI_FPS:-30}" \
   -ms "${OPENETA_VGL_MSAA_SAMPLES:-8}" \
-  gz sim -g \
+  "${gz_bin}" sim -g \
   --render-engine-gui ogre2 \
   --render-engine-gui-api-backend opengl \
   --gui-config "${gui_config}" \

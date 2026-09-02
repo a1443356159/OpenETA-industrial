@@ -28,6 +28,7 @@ PAIR_LEGALITY_SCHEMA = "openeta.grasp_placement_pair_legality.v1"
 GRASP_TARGET_CLOSING_SCHEMA = "openeta.grasp_target_closing_alignment.v1"
 RELEASE_HEIGHT_VARIANT_FIELD = "_openeta_release_height_variant"
 CONFIGURED_RELEASE_HEIGHT_FALLBACK = "configured_drop_height_fallback"
+FULL_BARRIER_RELEASE_HEIGHT = "full_barrier_clearance"
 _ROTATION_TOLERANCE = 1e-4
 _POSE_TOLERANCE_M = 1e-5
 _ORIENTATION_TOLERANCE = 1e-4
@@ -213,6 +214,20 @@ def _rotation_distance(left: Rotation, right: Rotation) -> float:
     sine = 0.5 * math.sqrt(_dot(skew, skew))
     cosine = 0.5 * (relative[0][0] + relative[1][1] + relative[2][2] - 1.0)
     return math.atan2(sine, cosine)
+
+
+def _transforms_aligned(left: Transform, right: Transform) -> bool:
+    """Return whether two serialized poses represent the same motion target."""
+
+    left_rotation, left_xyz = left
+    right_rotation, right_xyz = right
+    return (
+        all(
+            abs(left_xyz[index] - right_xyz[index]) <= _POSE_TOLERANCE_M
+            for index in range(3)
+        )
+        and _rotation_distance(left_rotation, right_rotation) <= _ORIENTATION_TOLERANCE
+    )
 
 
 def _obb(transform: Transform, size_xyz: Sequence[float]) -> Obb:
@@ -704,6 +719,19 @@ def _effective_release_z_offset(
         if exterior_entry_top_z_values
         else 0.0
     )
+    maximum_entry_height = (
+        max(0.0, exterior_entry_top_z_values[-1] - support_z_m)
+        if exterior_entry_top_z_values
+        else 0.0
+    )
+    full_barrier_clearance_offset = (
+        max(
+            configured_drop_height_m,
+            maximum_entry_height + max(0.0, clearance_m),
+        )
+        if exterior_entry_top_z_values
+        else configured_drop_height_m
+    )
     effective_offset = (
         max(
             configured_drop_height_m,
@@ -746,6 +774,13 @@ def _effective_release_z_offset(
                 else support_z_m
             ),
             "support_entry_height_above_surface_m": minimum_entry_height,
+            "support_entry_maximum_z_m": (
+                exterior_entry_top_z_values[-1]
+                if exterior_entry_top_z_values
+                else support_z_m
+            ),
+            "support_entry_maximum_height_above_surface_m": maximum_entry_height,
+            "full_barrier_clearance_offset_m": full_barrier_clearance_offset,
             "entry_clearance_above_edge_m": (
                 max(0.0, effective_offset - minimum_entry_height)
                 if entry_geometry_proven
@@ -951,7 +986,35 @@ def evaluate_placement_goal_legality(
     release_height_variant = str(
         candidate.get(RELEASE_HEIGHT_VARIANT_FIELD) or "geometry_primary"
     )
-    if release_height_variant == CONFIGURED_RELEASE_HEIGHT_FALLBACK:
+    if release_height_variant == FULL_BARRIER_RELEASE_HEIGHT:
+        primary_offset = release_z_offset
+        full_barrier_offset = release_offset_evidence.get(
+            "full_barrier_clearance_offset_m"
+        )
+        if (
+            not isinstance(full_barrier_offset, (int, float))
+            or isinstance(full_barrier_offset, bool)
+            or not math.isfinite(float(full_barrier_offset))
+            or float(full_barrier_offset) < 0.0
+        ):
+            result.update(
+                verdict="UNKNOWN",
+                reason="placement_full_barrier_release_height_unavailable",
+                geometry_available=False,
+                infrastructure_error=True,
+                elapsed_s=time.monotonic() - started,
+            )
+            return result
+        release_z_offset = float(full_barrier_offset)
+        release_offset_evidence = {
+            **release_offset_evidence,
+            "source": "container_full_barrier_clearance",
+            "release_height_variant": release_height_variant,
+            "primary_effective_offset_m": primary_offset,
+            "effective_offset_m": release_z_offset,
+            "fallback_activated": release_z_offset > primary_offset + 1e-12,
+        }
+    elif release_height_variant == CONFIGURED_RELEASE_HEIGHT_FALLBACK:
         primary_offset = release_z_offset
         release_z_offset = configured_release_z_offset
         release_offset_evidence = {
@@ -1116,74 +1179,30 @@ def evaluate_placement_goal_legality(
             support_z is not None
             and int(release_offset_evidence.get("support_barrier_count") or 0) > 0
         ):
-            # A container task asks for a stable final state inside a region,
-            # not for the wrist to realize the model's post-gravity settled
-            # orientation while the object is still rigidly attached. Keep the
-            # model-selected in-plane destination, preserve the measured
-            # current object orientation during transport, and let the
-            # simulator settle the short final drop after detach. Pair
-            # legality and MoveIt still prove the complete gripper/payload
-            # state against every authoritative wall.
-            provisional_release: Transform = (
-                current_collision[0],
-                (collision_goal[1][0], collision_goal[1][1], 0.0),
-            )
-            provisional_geometry = _projected_body_geometry(
-                target_spec,
-                provisional_release,
-            )
-            if provisional_geometry:
-                provisional_bounds = compound_axis_aligned_bounds(
-                    provisional_geometry
-                )
-                desired_bottom_z = (
-                    support_z + release_clearance + release_z_offset
-                )
-                desired_release_collision: Transform = (
-                    current_collision[0],
-                    (
-                        collision_goal[1][0],
-                        collision_goal[1][1],
-                        desired_bottom_z - provisional_bounds.minimum_xyz[2],
-                    ),
-                )
-                release_delta = tuple(
-                    desired_release_collision[1][index]
-                    - current_collision[1][index]
-                    for index in range(3)
-                )
-                release_motion = (
-                    (
-                        (1.0, 0.0, 0.0),
-                        (0.0, 1.0, 0.0),
-                        (0.0, 0.0, 1.0),
-                    ),
-                    release_delta,
-                )
-                release_collision_goal = desired_release_collision
-                release_pointcloud_goal = _compose(
-                    release_motion,
-                    current_pointcloud,
-                )
-                release_correction = [0.0, 0.0, 0.0]
-                release_orientation_policy = (
-                    "preserve_current_orientation_for_container_drop"
-                )
-                binding_method = (
-                    "container_drop_translation_from_current_planning_scene_object"
-                )
-                container_drop = {
-                    "enabled": True,
-                    "reason": "authoritative_support_has_collision_barriers",
-                    "path_owner": "moveit",
-                    "settling_owner": "native_gravity",
-                    "model_destination_xy_preserved": True,
-                    "current_object_orientation_preserved": True,
-                    "release_bottom_z_m": desired_bottom_z,
-                    "support_barrier_count": int(
-                        release_offset_evidence.get("support_barrier_count") or 0
-                    ),
-                }
+            # AnyPlace owns the complete object SE(3) destination.  Container
+            # geometry only raises that model pose along world Z so the payload
+            # clears the proven entry boundary before detach.  Replacing the
+            # model orientation with the object's current orientation changes
+            # the measured attachment transform into a different EEF target;
+            # for long or off-centre grasps that can move every otherwise valid
+            # release outside the robot workspace.  Keep the model pose and let
+            # pair legality, IK, and MoveIt prove it against all authoritative
+            # walls.
+            desired_bottom_z = support_z + release_clearance + release_z_offset
+            binding_method = "model_settled_container_release_with_world_motion"
+            container_drop = {
+                "enabled": True,
+                "reason": "authoritative_support_has_collision_barriers",
+                "path_owner": "moveit",
+                "settling_owner": "native_gravity",
+                "model_destination_xy_preserved": True,
+                "model_destination_se3_preserved": True,
+                "current_object_orientation_preserved": False,
+                "release_bottom_z_m": desired_bottom_z,
+                "support_barrier_count": int(
+                    release_offset_evidence.get("support_barrier_count") or 0
+                ),
+            }
         result["checks"]["object_frame_binding"] = {
             "available": True,
             "method": binding_method,
@@ -1245,8 +1264,9 @@ def evaluate_placement_goal_legality(
         if prebound_container_drop:
             release_collision_goal = prebound_release_goal
             release_correction = [0.0, 0.0, 0.0]
-            release_orientation_policy = (
-                "preserve_current_orientation_for_container_drop"
+            release_orientation_policy = str(
+                candidate.get("release_orientation_policy")
+                or "model_settled_orientation"
             )
             binding_method = "prebound_container_drop_physical_goal"
         else:
@@ -1616,7 +1636,8 @@ def bind_qualified_placement_goal(
         and math.isfinite(float(release_z_offset))
     ):
         candidate["placement_release_z_offset_m"] = float(release_z_offset)
-    if release_orientation_policy == "preserve_current_orientation_for_container_drop":
+    container_drop = binding.get("container_drop")
+    if isinstance(container_drop, Mapping) and container_drop.get("enabled") is True:
         candidate["container_drop_release_prebound"] = True
     if isinstance(qualified_motion, Mapping):
         if _transform_matrix(qualified_motion.get("transform_matrix")) is None:
@@ -1638,6 +1659,11 @@ def bind_qualified_placement_goal(
 
     correction = _finite_vector(binding.get("release_target_translation_correction_xyz"), 3)
     if correction is not None and any(abs(value) > 1e-12 for value in correction):
+        # Frozen goals reach this point either as an unbound model terminal or
+        # after the goal-prebind RPC has already materialized the corrected
+        # release before candidate compilation.  Compare against the exact
+        # motion/contact chain so repeated binding stays idempotent.
+        expected_release = _expected_pair_eef_goal(candidate)
         stages_value = candidate.get("qualification_stages")
         if isinstance(stages_value, list):
             stages: list[object] = []
@@ -1647,10 +1673,32 @@ def bind_qualified_placement_goal(
                     continue
                 stage = dict(raw_stage)
                 if str(stage.get("name") or "") == "release":
-                    for key in ("xyz", "translation_xyz", "position"):
-                        xyz = _finite_vector(stage.get(key), 3)
-                        if xyz is not None:
-                            stage[key] = [xyz[index] + correction[index] for index in range(3)]
+                    stage_pose = rigid_pose(stage)
+                    correction_already_materialized = (
+                        expected_release is not None
+                        and stage_pose is not None
+                        and _transforms_aligned(stage_pose, expected_release)
+                    )
+                    previous_correction = _finite_vector(
+                        stage.get("release_target_translation_correction_xyz"),
+                        3,
+                    )
+                    translation_delta = (
+                        [
+                            correction[index] - previous_correction[index]
+                            for index in range(3)
+                        ]
+                        if previous_correction is not None
+                        else correction
+                    )
+                    if not correction_already_materialized:
+                        for key in ("xyz", "translation_xyz", "position"):
+                            xyz = _finite_vector(stage.get(key), 3)
+                            if xyz is not None:
+                                stage[key] = [
+                                    xyz[index] + translation_delta[index]
+                                    for index in range(3)
+                                ]
                     support_correction = _finite_vector(
                         binding.get("support_contact_translation_correction_xyz"), 3
                     )
@@ -1663,6 +1711,13 @@ def bind_qualified_placement_goal(
                         stage["placement_release_translation_xyz"] = release_translation
                         stage["placement_release_z_offset_m"] = release_translation[2]
                     stage["release_target_translation_correction_xyz"] = list(correction)
+                    stage["release_target_translation_correction_application"] = (
+                        "already_materialized_in_compiled_terminal"
+                        if correction_already_materialized
+                        else "rebound_compiled_terminal"
+                        if previous_correction is not None
+                        else "applied_to_unbound_terminal"
+                    )
                     stage["terminal_pose_source"] = (
                         "anyplace_se3_with_physical_support_and_release_offset"
                     )
@@ -1726,12 +1781,7 @@ def _pair_chain_check(
         }
     expected_rotation, expected_xyz = expected
     release_rotation, release_xyz = release
-    aligned = (
-        abs(release_xyz[0] - expected_xyz[0]) <= _POSE_TOLERANCE_M
-        and abs(release_xyz[1] - expected_xyz[1]) <= _POSE_TOLERANCE_M
-        and abs(release_xyz[2] - expected_xyz[2]) <= _POSE_TOLERANCE_M
-        and _rotation_distance(release_rotation, expected_rotation) <= _ORIENTATION_TOLERANCE
-    )
+    aligned = _transforms_aligned(release, expected)
     return {
         "available": True,
         "pass": aligned,

@@ -173,6 +173,7 @@ class ActiveVisionController:
     ) -> tuple[ToolResult, JsonDict | None]:
         params = context.parameters
         evidence_id = str(params.get("target_evidence_id") or "").strip()
+        semantic_target = str(params.get("semantic_target") or "").strip()
         semantic_role = str(params.get("semantic_role") or SUPPORTED_SEMANTIC_ROLE).strip()
         quality_profile = str(
             params.get("quality_profile") or SUPPORTED_QUALITY_PROFILE
@@ -183,10 +184,15 @@ class ActiveVisionController:
             maximum=MAX_MOTION_ATTEMPTS,
             field="max_motion_attempts",
         )
-        if not evidence_id or not _EVIDENCE_ID_RE.fullmatch(evidence_id):
+        if evidence_id and not _EVIDENCE_ID_RE.fullmatch(evidence_id):
             raise ActiveVisionError(
                 "invalid_target_evidence_id",
-                "target_evidence_id must be one selected SAM3 result id",
+                "target_evidence_id must be one selected SAM3 result id when supplied",
+            )
+        if not evidence_id and not semantic_target:
+            raise ActiveVisionError(
+                "missing_active_search_target",
+                "semantic_target is required when no selected SAM3 evidence exists",
             )
         if semantic_role != SUPPORTED_SEMANTIC_ROLE:
             raise ActiveVisionError(
@@ -207,45 +213,71 @@ class ActiveVisionController:
                 "active_vision v1 cannot move an attached object",
             )
 
-        evidence = _resolve_target_evidence(
-            evidence_id,
-            observation=observation,
-            artifact_root=self.artifact_root,
-            semantic_role=semantic_role,
-        )
-        current_quality, target_points_world = _target_quality(
-            evidence,
-            profile=self.quality_profile,
-        )
-        record.update(
-            {
-                "target_evidence": _evidence_receipt(evidence),
-                "current_quality": current_quality,
-            }
-        )
-        if current_quality["passed"] is True:
+        search_mode = not evidence_id
+        if search_mode:
+            target_center, target_extent, hint_receipt = _target_hint_world_geometry(
+                params.get("target_hint"),
+                observation=observation,
+                artifact_root=self.artifact_root,
+            )
+            target_point_count = 1
             record.update(
                 {
-                    "status": "reused",
-                    "stop_reason": "current_observation_quality_pass",
-                    "viewpoint_id": f"existing:{evidence.frame_id}",
-                    "motion_count": 0,
+                    "mode": "semantic_search",
+                    "semantic_target": semantic_target,
+                    "target_hint": hint_receipt,
                 }
             )
-            return (
-                self._result(
-                    context,
-                    success=True,
-                    status="reused",
-                    content="Current grounded RGB-D observation already passes grasp quality.",
-                    record=record,
-                    quality=current_quality,
-                    observation_bundle_id=evidence.perception_bundle_id,
-                    viewpoint_id=f"existing:{evidence.frame_id}",
-                    motion_count=0,
-                ),
-                None,
+        else:
+            evidence = _resolve_target_evidence(
+                evidence_id,
+                observation=observation,
+                artifact_root=self.artifact_root,
+                semantic_role=semantic_role,
             )
+            semantic_target = evidence.semantic_target
+            current_quality, target_points_world = _target_quality(
+                evidence,
+                profile=self.quality_profile,
+            )
+            record.update(
+                {
+                    "mode": "grounded_refinement",
+                    "target_evidence": _evidence_receipt(evidence),
+                    "current_quality": current_quality,
+                    "semantic_target": semantic_target,
+                }
+            )
+            if current_quality["passed"] is True:
+                record.update(
+                    {
+                        "status": "reused",
+                        "stop_reason": "current_observation_quality_pass",
+                        "viewpoint_id": f"existing:{evidence.frame_id}",
+                        "motion_count": 0,
+                    }
+                )
+                return (
+                    self._result(
+                        context,
+                        success=True,
+                        status="reused",
+                        content=(
+                            "Current grounded RGB-D observation already passes grasp quality."
+                        ),
+                        record=record,
+                        quality=current_quality,
+                        observation_bundle_id=evidence.perception_bundle_id,
+                        viewpoint_id=f"existing:{evidence.frame_id}",
+                        motion_count=0,
+                    ),
+                    None,
+                )
+            target_center = np.median(target_points_world, axis=0)
+            target_extent = np.quantile(target_points_world, 0.98, axis=0) - np.quantile(
+                target_points_world, 0.02, axis=0
+            )
+            target_point_count = int(len(target_points_world))
         if motion_budget == 0:
             raise ActiveVisionError(
                 "current_view_insufficient_motion_disabled",
@@ -273,10 +305,6 @@ class ActiveVisionController:
                 infrastructure=True,
             )
 
-        target_center = np.median(target_points_world, axis=0)
-        target_extent = np.quantile(target_points_world, 0.98, axis=0) - np.quantile(
-            target_points_world, 0.02, axis=0
-        )
         generated, rejection_counts = _generate_view_candidates(
             observation=observation,
             wrist=wrist,
@@ -289,7 +317,7 @@ class ActiveVisionController:
         record["target_geometry"] = {
             "center_world_xyz": _rounded_vector(target_center),
             "extent_world_xyz": _rounded_vector(target_extent),
-            "point_count": int(len(target_points_world)),
+            "point_count": target_point_count,
         }
         if not generated:
             raise ActiveVisionError(
@@ -382,7 +410,7 @@ class ActiveVisionController:
                 context,
                 observation=current_observation,
                 wrist=new_wrist,
-                semantic_target=evidence.semantic_target,
+                semantic_target=semantic_target,
                 scene_epoch=_scene_epoch(current_observation),
                 point_xy=point,
             )
@@ -429,6 +457,7 @@ class ActiveVisionController:
                     viewpoint_id=candidate_id,
                     motion_count=int(record["candidate_counts"]["executed"]),
                     environment_receipt=last_receipt,
+                    segmentation=sam_result.details,
                 ),
                 last_receipt,
             )
@@ -620,11 +649,44 @@ class ActiveVisionController:
         motion_count: int = 0,
         diagnostics: list[JsonDict] | None = None,
         environment_receipt: Mapping[str, Any] | None = None,
+        segmentation: Mapping[str, Any] | None = None,
     ) -> ToolResult:
+        attempt_fingerprint = _stable_hash(
+            {
+                "mode": record.get("mode"),
+                "semantic_role": context.parameters.get("semantic_role")
+                or SUPPORTED_SEMANTIC_ROLE,
+                "semantic_target": record.get("semantic_target"),
+                "scene_epoch": (
+                    _scene_epoch(context.observation)
+                    if context.observation is not None
+                    else None
+                ),
+                "target_evidence_id": context.parameters.get("target_evidence_id"),
+                "target_hint": context.parameters.get("target_hint"),
+            }
+        )
         outputs: JsonDict = {
             "schema_version": ACTIVE_VISION_SCHEMA,
             "status": status,
             "target_evidence_id": str(context.parameters.get("target_evidence_id") or ""),
+            "semantic_role": str(
+                context.parameters.get("semantic_role") or SUPPORTED_SEMANTIC_ROLE
+            ),
+            "semantic_target": str(record.get("semantic_target") or ""),
+            "scene_epoch": (
+                _scene_epoch(context.observation)
+                if context.observation is not None
+                else None
+            ),
+            "active_vision_mode": record.get("mode"),
+            "active_vision_attempt_id": f"active-observe-{attempt_fingerprint[:16]}",
+            "active_vision_attempt_fingerprint": attempt_fingerprint,
+            "target_hint": (
+                dict(record.get("target_hint") or {})
+                if isinstance(record.get("target_hint"), Mapping)
+                else None
+            ),
             "observation_bundle_id": observation_bundle_id or None,
             "viewpoint_id": viewpoint_id or None,
             "motion_count": int(motion_count),
@@ -633,6 +695,32 @@ class ActiveVisionController:
             "rejection_reason_counts": dict(record.get("rejection_reason_counts") or {}),
             "stop_reason": record.get("stop_reason"),
         }
+        if isinstance(segmentation, Mapping):
+            nested = segmentation.get("outputs")
+            source = nested if isinstance(nested, Mapping) else segmentation
+            for key in (
+                "result_id",
+                "detections",
+                "selected_detection",
+                "selection_bundle",
+                "selection_review",
+                "selection_required",
+                "source_image",
+                "source_frame_id",
+                "source_camera_role",
+                "prompt",
+                "semantic_role",
+                "semantic_target",
+                "segmentation_mode",
+                "scene_epoch",
+                "perception_bundle_id",
+                "observation_id",
+                "attempt_id",
+                "attempt_fingerprint",
+                "view_identity",
+            ):
+                if key in source:
+                    outputs[key] = source[key]
         return make_tool_result(
             context,
             success=success,
@@ -844,6 +932,137 @@ def _evidence_from_sam_result(
         observation_id=str(details.get("observation_id") or ""),
         scene_epoch=_scene_epoch(observation),
         bbox_xyxy=parsed_bbox,
+    )
+
+
+def _target_hint_world_geometry(
+    value: object,
+    *,
+    observation: EnvObservation,
+    artifact_root: Path,
+) -> tuple[np.ndarray, np.ndarray, JsonDict]:
+    """Lift one host-retained visual point into a coarse metric search target.
+
+    This path is used only when text and point segmentation could not produce a
+    mask.  The point comes from the bounded visual localizer; calibrated depth
+    supplies metric geometry.  It does not inspect simulator object identities
+    or inject scene-specific poses.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ActiveVisionError(
+            "active_search_hint_missing",
+            "target_hint with one current image point is required for semantic search",
+        )
+    source_rgb = _resolve_artifact_path(value.get("source_image"), artifact_root)
+    raw_points = value.get("positive_points") or value.get("points")
+    points = [item for item in raw_points or [] if isinstance(item, Mapping)]
+    if not points:
+        raise ActiveVisionError(
+            "active_search_point_missing",
+            "target_hint must contain one visual foreground point",
+        )
+    point = points[0]
+    try:
+        u = float(point.get("x"))
+        v = float(point.get("y"))
+    except (TypeError, ValueError) as exc:
+        raise ActiveVisionError(
+            "active_search_point_invalid",
+            "target_hint point coordinates must be finite numbers",
+        ) from exc
+    if not math.isfinite(u) or not math.isfinite(v):
+        raise ActiveVisionError(
+            "active_search_point_invalid",
+            "target_hint point coordinates must be finite numbers",
+        )
+    packet = _camera_packet_for_source(observation, source_rgb=source_rgb, frame_id="")
+    try:
+        depth_raw = np.asarray(Image.open(str(packet["depth"]["path"])))
+    except (OSError, ValueError) as exc:
+        raise ActiveVisionError("active_search_depth_unreadable", str(exc)) from exc
+    if depth_raw.ndim == 3:
+        depth_raw = depth_raw[..., 0]
+    if depth_raw.ndim != 2:
+        raise ActiveVisionError(
+            "active_search_depth_invalid",
+            "target_hint depth must be one calibrated two-dimensional image",
+        )
+    height, width = depth_raw.shape
+    x = int(round(u))
+    y = int(round(v))
+    if not 0 <= x < width or not 0 <= y < height:
+        raise ActiveVisionError(
+            "active_search_point_outside_image",
+            "target_hint point lies outside its source image",
+        )
+    camera = packet["camera"]
+    scale = float(camera.intrinsics.get("scale") or 1000.0)
+    if not math.isfinite(scale) or scale <= 0.0:
+        raise ActiveVisionError(
+            "active_search_depth_scale_invalid",
+            "target_hint depth scale is invalid",
+        )
+    depth = depth_raw.astype(np.float64) / scale
+    radius = max(2, int(round(min(width, height) * 0.01)))
+    x0, x1 = max(0, x - radius), min(width, x + radius + 1)
+    y0, y1 = max(0, y - radius), min(height, y + radius + 1)
+    window = depth[y0:y1, x0:x1]
+    valid_y, valid_x = np.nonzero(np.isfinite(window) & (window > 0.0))
+    if not len(valid_x):
+        raise ActiveVisionError(
+            "active_search_point_depth_missing",
+            "target_hint has no finite metric depth in its local image neighbourhood",
+        )
+    image_x = valid_x + x0
+    image_y = valid_y + y0
+    pixel_distance_sq = (image_x - u) ** 2 + (image_y - v) ** 2
+    nearest = int(np.argmin(pixel_distance_sq))
+    sample_x = float(image_x[nearest])
+    sample_y = float(image_y[nearest])
+    sample_depth = float(depth[int(image_y[nearest]), int(image_x[nearest])])
+    fx, fy, cx, cy = (
+        float(camera.intrinsics[name]) for name in ("fx", "fy", "cx", "cy")
+    )
+    if not all(math.isfinite(item) for item in (fx, fy, cx, cy)) or fx <= 0.0 or fy <= 0.0:
+        raise ActiveVisionError(
+            "active_search_intrinsics_invalid",
+            "target_hint camera intrinsics are invalid",
+        )
+    camera_point = np.array(
+        [
+            (sample_x - cx) * sample_depth / fx,
+            (sample_y - cy) * sample_depth / fy,
+            sample_depth,
+        ],
+        dtype=np.float64,
+    )
+    camera_to_world = _extrinsics_matrix(camera.extrinsics)
+    center = camera_to_world[:3, :3] @ camera_point + camera_to_world[:3, 3]
+    # The hint has no object mask, so express only the metric uncertainty of
+    # the local image neighbourhood.  View generation already enforces its own
+    # bounded camera distance and MoveIt proves the resulting poses.
+    lateral_uncertainty = max(
+        sample_depth * (2.0 * radius + 1.0) / min(fx, fy),
+        1e-3,
+    )
+    extent = np.array(
+        [lateral_uncertainty, lateral_uncertainty, lateral_uncertainty],
+        dtype=np.float64,
+    )
+    return (
+        center,
+        extent,
+        {
+            "source_image": str(source_rgb),
+            "source_frame_id": camera.frame_id,
+            "requested_point_xy": [round(u, 3), round(v, 3)],
+            "depth_sample_point_xy": [sample_x, sample_y],
+            "depth_m": round(sample_depth, 6),
+            "neighbourhood_radius_px": radius,
+            "center_world_xyz": _rounded_vector(center),
+            "metric_uncertainty_m": round(lateral_uncertainty, 6),
+        },
     )
 
 

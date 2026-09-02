@@ -1950,7 +1950,7 @@ def _rotated_container_goal() -> tuple[dict, dict]:
     return scene, candidate
 
 
-def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation():
+def test_container_drop_preserves_anyplace_se3_and_adds_release_height():
     scene, candidate = _rotated_container_goal()
     descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
 
@@ -1961,10 +1961,9 @@ def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation()
     settled = binding["collision_goal_pose"]
     release = binding["release_collision_goal_pose"]
     assert legality["verdict"] == "PASS"
-    assert binding["release_orientation_policy"] == (
-        "preserve_current_orientation_for_container_drop"
-    )
+    assert binding["release_orientation_policy"] == "model_settled_orientation"
     assert binding["container_drop"]["model_destination_xy_preserved"] is True
+    assert binding["container_drop"]["model_destination_se3_preserved"] is True
     assert settled["translation_xyz"][:2] == pytest.approx([0.48, -0.1])
     assert settled["rotation_matrix"] == [
         [0.0, -1.0, 0.0],
@@ -1973,8 +1972,8 @@ def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation()
     ]
     assert release["translation_xyz"][:2] == pytest.approx([0.48, -0.1])
     assert release["rotation_matrix"] == [
+        [0.0, -1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
     ]
     bound = descriptor["candidate"]
@@ -1985,8 +1984,8 @@ def test_container_drop_preserves_anyplace_xy_but_not_post_gravity_orientation()
     )
     release_motion = bound["object_motion_world_transform"]["transform_matrix"]
     assert [row[:3] for row in release_motion[:3]] == [
+        [0.0, -1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
     ]
 
@@ -2022,8 +2021,8 @@ def test_goal_prebind_rpc_freezes_container_release_before_pair_compilation():
     assert goals[0]["qualified_release_pointcloud_object_goal_pose"][
         "rotation_matrix"
     ] == [
+        [0.0, -1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
         [0.0, 0.0, 1.0],
     ]
 
@@ -2067,6 +2066,121 @@ def test_goal_prebind_can_materialize_configured_height_recovery_variant():
     )
 
 
+def test_goal_prebind_can_raise_release_above_every_exterior_barrier():
+    scene, candidate = _rotated_container_goal()
+    engine = _engine(clone_scene=lambda: scene)
+    qualifier = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: engine.qualify(request),
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+
+    primary, _ = qualifier.prebind_placement_goals(
+        [candidate],
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+    cleared, summary = qualifier.prebind_placement_goals(
+        primary,
+        scene_epoch=1,
+        planning_scene_revision=4,
+        release_height_variant="full_barrier_clearance",
+    )
+
+    primary_selection = primary[0]["placement_release_offset_selection"]
+    cleared_selection = cleared[0]["placement_release_offset_selection"]
+    assert primary_selection["effective_offset_m"] == pytest.approx(0.075)
+    assert primary_selection["full_barrier_clearance_offset_m"] == pytest.approx(
+        0.165
+    )
+    assert cleared_selection["source"] == "container_full_barrier_clearance"
+    assert cleared_selection["primary_effective_offset_m"] == pytest.approx(0.075)
+    assert cleared_selection["effective_offset_m"] == pytest.approx(0.165)
+    assert cleared_selection["fallback_activated"] is True
+    assert cleared[0]["qualified_release_object_goal_pose"]["translation_xyz"][
+        2
+    ] == pytest.approx(
+        primary[0]["qualified_release_object_goal_pose"]["translation_xyz"][2]
+        + 0.09
+    )
+    assert summary["frozen_goal_release_height_variant"] == (
+        "full_barrier_clearance"
+    )
+
+
+def test_full_barrier_release_clears_gripper_from_tall_container_wall():
+    scene, candidate = _rotated_container_goal()
+    scene["gripper_collision_boxes"] = [
+        {
+            "id": "mount_plate",
+            "shape": "box",
+            "size_xyz": [0.08, 0.08, 0.012],
+            "pose_xyz": [0.14, 0.0, 0.006],
+            "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+    ]
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": candidate["id"],
+            "compile_parameters": {
+                "attachment_transform": {
+                    "parent_frame": "eef",
+                    "child_frame": "object",
+                    "translation_xyz": [0.0, 0.0, 0.0],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            },
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.48, -0.1, 0.05],
+                    "rotation_matrix": [
+                        [0.0, -1.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            ],
+        }
+    )
+    engine = _engine(clone_scene=lambda: scene)
+    qualifier = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: engine.qualify(request),
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+    primary, _ = qualifier.prebind_placement_goals(
+        [candidate], scene_epoch=1, planning_scene_revision=4
+    )
+    cleared, _ = qualifier.prebind_placement_goals(
+        primary,
+        scene_epoch=1,
+        planning_scene_revision=4,
+        release_height_variant="full_barrier_clearance",
+    )
+
+    primary_pair = evaluate_grasp_placement_pair_legality(
+        {"candidate_id": "primary", "candidate": primary[0]},
+        scene=scene,
+        workspace_filter=None,
+    )
+    cleared_pair = evaluate_grasp_placement_pair_legality(
+        {"candidate_id": "cleared", "candidate": cleared[0]},
+        scene=scene,
+        workspace_filter=None,
+    )
+
+    assert primary_pair["verdict"] == "FAIL"
+    assert primary_pair["reason"] == "gripper_static_collision"
+    assert cleared_pair["verdict"] == "PASS"
+    assert cleared_pair["checks"]["eef_chain"]["pass"] is True
+
+
 def test_container_goal_prebind_is_idempotent_after_pair_compilation():
     scene, candidate = _rotated_container_goal()
     descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
@@ -2096,6 +2210,59 @@ def test_container_goal_prebind_is_idempotent_after_pair_compilation():
     assert descriptor["candidate"][
         "qualified_release_pointcloud_object_goal_pose"
     ] == first_release
+
+
+def test_prebound_container_release_stage_is_not_corrected_twice():
+    scene, candidate = _rotated_container_goal()
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "frozen_contact_pose": {
+                "frame": "world",
+                "xyz": [0.3, 0.0, 0.5],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+        }
+    )
+    descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
+
+    first = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, first)
+    bound = descriptor["candidate"]
+    release_motion = bound["object_motion_world_transform"]["transform_matrix"]
+    contact_xyz = bound["frozen_contact_pose"]["xyz"]
+    release_xyz = [
+        sum(release_motion[row][column] * contact_xyz[column] for column in range(3))
+        + release_motion[row][3]
+        for row in range(3)
+    ]
+    bound["qualification_stages"] = [
+        {
+            "name": "release",
+            "xyz": release_xyz,
+            "rotation_matrix": [row[:3] for row in release_motion[:3]],
+        }
+    ]
+
+    second = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, second)
+
+    stage = descriptor["candidate"]["qualification_stages"][0]
+    assert stage["xyz"] == pytest.approx(release_xyz)
+    assert stage["release_target_translation_correction_application"] == (
+        "already_materialized_in_compiled_terminal"
+    )
+    pair = evaluate_grasp_placement_pair_legality(
+        descriptor,
+        scene=scene,
+        workspace_filter=None,
+    )
+    assert pair["checks"]["eef_chain"]["pass"] is True
 
 
 def test_flat_support_keeps_configured_release_minimum():
@@ -3160,6 +3327,36 @@ def test_l5_failure_is_replanned_with_fixed_recovery_branch():
         attempt["stages"][0]["pure_ik_attempts"]
         for attempt in response["results"][0]["screening_attempts"]
     )
+
+
+def test_recovery_barrier_does_not_publish_unsubmitted_endpoint_as_pass():
+    plan_calls = 0
+
+    def plan(target, start, timeout, attempts):
+        nonlocal plan_calls
+        plan_calls += 1
+        # Both candidates fail in the fast layer.  The first recovery L5
+        # succeeds, so the second recovery screen is intentionally never sent
+        # to L5 even though the wave barrier has already completed it.
+        ok = plan_calls == 3
+        return {
+            "ok": ok,
+            "execution_started": False,
+            "trajectory_points": ([{}] if ok else []),
+            "end_joint_state": {"names": ["j1"], "positions": [0.2]},
+        }
+
+    response = _engine(plan_only=plan).qualify(
+        _request([_candidate(0, score=2.0), _candidate(1, score=1.0)])
+    )
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert plan_calls == 3
+    deferred = next(item for item in response["results"] if item["candidate_id"] == "c1")
+    assert deferred["verdict"] == "NOT_EVALUATED"
+    assert deferred["reason"] == "l5_not_submitted_after_success"
+    assert deferred["endpoint_pass"] is True
+    assert deferred["full_plan_submitted"] is False
 
 
 def test_pick_ik_uses_global_mode_only_for_recovery_and_restores_local():

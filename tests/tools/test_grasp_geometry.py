@@ -441,10 +441,10 @@ def test_placement_compiler_owns_container_drop_terminal_identity() -> None:
     )
 
     assert compiled["terminal_pose_source"] == (
-        "anyplace_xy_with_container_drop_orientation"
+        "anyplace_se3_with_container_release_offset"
     )
     assert compiled["release_pose"]["terminal_pose_source"] == (
-        "anyplace_xy_with_container_drop_orientation"
+        "anyplace_se3_with_container_release_offset"
     )
 
 

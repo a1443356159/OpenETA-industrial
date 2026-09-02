@@ -28,7 +28,6 @@ DEFAULT_MAX_TOOL_CALLS = 200
 DEFAULT_EPISODE_TIMEOUT_S = 3600.0
 DEFAULT_MAX_TOTAL_TOKENS = 5_000_000
 INTERRUPT_CLOSE_GRACE_S = 0.25
-MAX_AUTO_OBSERVE_ATTEMPTS = 3
 ENVIRONMENT_RECEIPT_SCHEMA_VERSION = "openeta.environment_receipt.v1"
 OBSERVATION_SNAPSHOT_SCHEMA_VERSION = "openeta.observation_snapshot.v1"
 
@@ -121,6 +120,7 @@ class OpenEtaEpisodeRunner:
         self.started_at_s = 0.0
         self.human_wait_s = 0.0
         self._human_wait_started_at_s: float | None = None
+        self._human_wait_depth = 0
         self.failure_reason: JsonDict = {}
         self.interrupt_cleanup: JsonDict = {}
         self.stop_reason = ""
@@ -170,6 +170,7 @@ class OpenEtaEpisodeRunner:
         self.guidance_intervention_count = 0
         self._resolved_question_fingerprints.clear()
         self._human_wait_started_at_s = None
+        self._human_wait_depth = 0
         self.failure_reason = {}
         self.interrupt_cleanup = {}
         self.stop_reason = ""
@@ -306,7 +307,15 @@ class OpenEtaEpisodeRunner:
             self._active_worker = worker
         worker.start()
         try:
-            worker.join(timeout=remaining_s)
+            # Supervision prompts execute inside the turn worker. Waiting for
+            # an operator is not agent execution time, so periodically
+            # recompute the effective deadline instead of applying one
+            # wall-clock join timeout.
+            while worker.is_alive():
+                remaining_s = self.timeout_s - self.elapsed_s
+                if remaining_s <= 0:
+                    break
+                worker.join(timeout=min(0.25, remaining_s))
         except BaseException:
             turn_cancelled.set()
             self._cancel_event.set()
@@ -356,8 +365,8 @@ class OpenEtaEpisodeRunner:
         self.waiting_for_human = is_agent_waiting_for_human(action) and not bool(
             interaction_resolution and interaction_resolution.get("resolved")
         )
-        if self.waiting_for_human and self._human_wait_started_at_s is None:
-            self._human_wait_started_at_s = self._clock()
+        if self.waiting_for_human:
+            self.begin_human_wait()
         self.stop_reason = (
             "ask_human" if self.waiting_for_human else _stop_reason_from_step_result(step_result)
         )
@@ -639,6 +648,28 @@ class OpenEtaEpisodeRunner:
         )
         return self.human_wait_s + active_wait_s
 
+    def begin_human_wait(self) -> None:
+        """Pause the effective episode clock while an operator is answering."""
+
+        self._human_wait_depth += 1
+        if self._human_wait_depth == 1:
+            self._human_wait_started_at_s = self._clock()
+
+    def end_human_wait(self) -> None:
+        """Resume the effective episode clock after an operator answer."""
+
+        if self._human_wait_depth <= 0:
+            return
+        self._human_wait_depth -= 1
+        if self._human_wait_depth > 0:
+            return
+        if self._human_wait_started_at_s is not None:
+            self.human_wait_s += max(
+                0.0,
+                self._clock() - self._human_wait_started_at_s,
+            )
+            self._human_wait_started_at_s = None
+
     def interrupt(
         self,
         *,
@@ -763,12 +794,7 @@ class OpenEtaEpisodeRunner:
         """Allow the next turn after the CLI records a human answer."""
 
         if self.waiting_for_human:
-            if self._human_wait_started_at_s is not None:
-                self.human_wait_s += max(
-                    0.0,
-                    self._clock() - self._human_wait_started_at_s,
-                )
-                self._human_wait_started_at_s = None
+            self.end_human_wait()
             self.waiting_for_human = False
             self.stop_reason = ""
 
@@ -900,17 +926,13 @@ class ToolFeedbackEpisodeEnvironment:
             and _trusted_receipt_flag(receipt, "environment_closed")
         )
         max_steps_reached = self.max_steps is not None and self.step_idx >= self.max_steps
-        refresh_exhausted = (
-            observation.metadata.get("fresh_observation_required") is True
-            and self.refresh_attempts >= MAX_AUTO_OBSERVE_ATTEMPTS
-        )
         # An explicit, host-authoritative close ends this episode even when the
         # remote simulator's close response does not repeat Gym's ``terminated``
         # flag.  Do not infer the same from a failed create/reset cleanup: that
         # receipt may also say the abandoned handle was closed, but the planner
         # must still be allowed to retry infrastructure startup.
         terminated = receipt_terminated or explicit_environment_close or max_steps_reached
-        truncated = receipt_truncated or refresh_exhausted
+        truncated = receipt_truncated
         info: JsonDict = {
             "step_idx": self.step_idx,
             "previous_action": self.last_action_summary,
@@ -933,14 +955,6 @@ class ToolFeedbackEpisodeEnvironment:
             )
         if rejected_receipts:
             info["rejected_environment_receipts"] = rejected_receipts
-        if refresh_exhausted:
-            info.update(
-                {
-                    "truncation_source": "environment_feedback",
-                    "truncation_reason": "fresh_observation_unavailable",
-                    "failure_class": "simulator_observation_unavailable",
-                }
-            )
         return StepResult(
             observation=observation,
             reward=reward,

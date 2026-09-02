@@ -29,8 +29,9 @@ from agent.runtime.release_evidence import ordered_native_release_proof
 
 PENDING_SAM3_SELECTION_KEY = "pending_sam3_selection"
 SELECTED_SAM3_DETECTION_KEY = "selected_sam3_detection"
-# Successful SAM3 results feed the shared selection flow.
-SELECTION_CAPTURE_TOOL_NAMES = frozenset({"sam3"})
+# Successful SAM3 results, including a point-grounded refresh performed inside
+# active_observe, feed the same shared selection flow.
+SELECTION_CAPTURE_TOOL_NAMES = frozenset({"sam3", "active_observe"})
 PENDING_REFERENCE_LOCALIZATION_KEY = "pending_reference_localization"
 REFERENCE_LOCALIZATION_FAILURE_KEY = "reference_localization_failure"
 TARGET_LOCALIZATION_BUDGET_KEY = "target_localization_budget"
@@ -504,6 +505,7 @@ class AgentMemory:
         environment_task_updated = self._capture_active_environment_task(action)
         self._capture_reference_localization_state(action)
         self._capture_sam3_selection_state(action)
+        self._capture_active_vision_state(action)
         target_mask_invalidated = self._invalidate_failed_anygrasp_target_mask(action)
         self._capture_anygrasp_candidate_policy(action)
         placement_candidates_updated = self._capture_placement_candidates(action)
@@ -2369,6 +2371,11 @@ class AgentMemory:
                 "view_identity": outputs.get("view_identity")
                 or parameters.get("view_identity"),
             }
+            positive_points = parameters.get("positive_points") or parameters.get("points")
+            if isinstance(positive_points, list) and positive_points:
+                base["positive_points"] = [
+                    dict(point) for point in positive_points if isinstance(point, dict)
+                ]
             selection_review = outputs.get("selection_review")
             if isinstance(selection_review, dict):
                 base["selection_review"] = dict(selection_review)
@@ -2547,6 +2554,58 @@ class AgentMemory:
                     {"result_id": result_id, "semantic_role": semantic_role},
                 )
             self._save_working_memory()
+
+    def _capture_active_vision_state(self, action: EnvAction) -> None:
+        """Retain one bounded active-search outcome without fabricating a SAM mask."""
+
+        call = _tool_call(action, "active_observe")
+        if not isinstance(call, dict):
+            return
+        result = call.get("result")
+        details = result.get("details") if isinstance(result, dict) else None
+        if not isinstance(details, dict):
+            return
+        outputs = details.get("outputs")
+        if not isinstance(outputs, dict):
+            return
+        mode = str(outputs.get("active_vision_mode") or "").strip()
+        status = str(outputs.get("status") or "").strip().lower()
+        if mode != "semantic_search" or status not in {
+            "acquired",
+            "exhausted",
+            "infrastructure_error",
+        }:
+            return
+        record = {
+            "result_id": outputs.get("result_id")
+            or outputs.get("active_vision_attempt_id"),
+            "semantic_role": outputs.get("semantic_role") or "grasp_target",
+            "target_prompt": outputs.get("semantic_target"),
+            "source_image": (
+                (outputs.get("target_hint") or {}).get("source_image")
+                if isinstance(outputs.get("target_hint"), dict)
+                else None
+            ),
+            "segmentation_mode": "active_search",
+            "scene_epoch": outputs.get("scene_epoch"),
+            "perception_bundle_id": outputs.get("observation_bundle_id"),
+            "observation_id": outputs.get("observation_id"),
+            "attempt_id": outputs.get("active_vision_attempt_id"),
+            "attempt_fingerprint": outputs.get("active_vision_attempt_fingerprint"),
+            "active_vision_status": status,
+            "active_vision_stop_reason": outputs.get("stop_reason"),
+        }
+        self._record_sam3_semantic_result(record, status=f"active_search_{status}")
+        self.record(
+            "active_vision_search_completed",
+            {
+                "semantic_role": record["semantic_role"],
+                "target_prompt": record["target_prompt"],
+                "status": status,
+                "stop_reason": record["active_vision_stop_reason"],
+            },
+        )
+        self._save_working_memory()
 
     def _capture_grasp_fallback_segmentation_failure(self, sam3_result: JsonDict) -> None:
         policy = self.grasp_candidate_policy()
@@ -4302,9 +4361,18 @@ class AgentMemory:
                 and str(attachment.get("verdict") or "").upper() == "PASS"
             )
         )
+        contact_displacement_can_rebase_frozen_frontier = bool(
+            str(rejection.get("source") or "") == "candidate_motion_rejected"
+            and str(rejection.get("grasp_stage") or "") == "contact"
+            and rejection.get("detached_target_rebase_safe") is True
+        )
+        target_pose_change_can_rebase_frozen_frontier = bool(
+            close_failure_can_rebase_frozen_frontier
+            or contact_displacement_can_rebase_frozen_frontier
+        )
         frozen_candidate_retry = (
             qualification_scene_changed
-            and not close_failure_can_rebase_frozen_frontier
+            and not target_pose_change_can_rebase_frozen_frontier
             and next_candidate is not None
             and next_candidate.get("grasp_place_joint_qualified") is True
             and isinstance(frozen_pool, dict)
@@ -4366,7 +4434,7 @@ class AgentMemory:
                 policy.get("frozen_grasp_frontier_remaining_count"),
                 default=0,
             )
-            if close_failure_can_rebase_frozen_frontier and not retry_exhausted:
+            if target_pose_change_can_rebase_frozen_frontier and not retry_exhausted:
                 # Every old IK/L5 proof is pose-bound after a failed close
                 # moves the detached target. Include unattempted qualified
                 # backups in the frozen requalification count instead of
@@ -4420,7 +4488,7 @@ class AgentMemory:
                     not qualification_invalidated
                     or rejection.get("execution_started") is False
                     or planning_scene_unchanged
-                    or close_failure_can_rebase_frozen_frontier
+                    or target_pose_change_can_rebase_frozen_frontier
                 )
             ):
                 policy.update(
@@ -4432,11 +4500,19 @@ class AgentMemory:
                         "stop_reason": "frozen_grasp_frontier_expansion_required",
                     }
                 )
-                if close_failure_can_rebase_frozen_frontier:
+                if target_pose_change_can_rebase_frozen_frontier:
                     policy["frozen_grasp_frontier_rebase_pending"] = {
                         "schema_version": ("openeta.frozen_grasp_frontier_rebase_pending.v1"),
-                        "reason_code": "FAILED_CLOSE_TARGET_POSE_SYNC_REQUIRED",
-                        "source_planning_scene_revision": policy_revision,
+                        "reason_code": (
+                            "FAILED_CONTACT_TARGET_POSE_SYNC_REQUIRED"
+                            if contact_displacement_can_rebase_frozen_frontier
+                            else "FAILED_CLOSE_TARGET_POSE_SYNC_REQUIRED"
+                        ),
+                        "source_planning_scene_revision": (
+                            rejection.get("source_planning_scene_revision")
+                            if contact_displacement_can_rebase_frozen_frontier
+                            else policy_revision
+                        ),
                         "physically_rejected_candidate_id": str(
                             active.get("id") or ""
                         ),
@@ -5731,20 +5807,32 @@ class AgentMemory:
     def _capture_planning_scene_target_pose_sync(self, action: EnvAction) -> bool:
         """Retain the bounded proof needed to rebase a frozen grasp frontier."""
 
-        call = _tool_call(action, "gripper_control")
+        command = action.command if isinstance(action.command, dict) else {}
+        request = command.get("request")
+        request_name = str(request.get("name") or "") if isinstance(request, dict) else ""
+        if request_name not in {
+            "gripper_control",
+            "move_to",
+            "follow_eef_trajectory",
+        }:
+            return False
+        call = _tool_call(action, request_name)
         if call is None:
             return False
         receipt = _environment_receipt(call)
         if not _call_result_success(call):
             rollback = receipt.get("planning_scene_rollback")
             detachable = receipt.get("detachable_joint")
-            if not (
+            close_rollback = bool(
                 receipt.get("candidate_rejection") is True
                 and receipt.get("infrastructure_error") is False
                 and isinstance(rollback, dict)
                 and rollback.get("state") == "detached"
                 and isinstance(detachable, dict)
                 and detachable.get("state") == "detached"
+            )
+            if not close_rollback and not _trusted_detached_target_displacement(
+                receipt
             ):
                 return False
         sync = receipt.get("planning_scene_target_pose_sync")
@@ -7816,15 +7904,24 @@ def _motion_rejection_fingerprint(call: JsonDict) -> JsonDict:
         if isinstance(revision, int) and not isinstance(revision, bool):
             evidence.setdefault("planning_scene_revision", revision)
     revision = evidence.get("planning_scene_revision")
+    receipt = _environment_receipt(call)
+    if _trusted_detached_target_displacement(receipt):
+        sync = receipt["planning_scene_target_pose_sync"]
+        evidence.update(
+            {
+                "detached_target_rebase_safe": True,
+                "source_planning_scene_revision": sync.get("source_revision"),
+            }
+        )
     if (
         isinstance(revision, int)
         and not isinstance(revision, bool)
         and _trusted_open_unattached_grasp_motion_failure(
-            _environment_receipt(call),
+            receipt,
             planning_scene_revision=revision,
         )
     ):
-        restart = _environment_receipt(call).get("current_state_restart")
+        restart = receipt.get("current_state_restart")
         evidence.update(
             {
                 "current_state_requalification_safe": True,
@@ -8372,6 +8469,38 @@ def _trusted_open_unattached_grasp_motion_failure(
     if isinstance(detachable, Mapping) and detachable.get("state") != "detached":
         return False
     return True
+
+
+def _trusted_detached_target_displacement(
+    receipt: Mapping[str, object],
+) -> bool:
+    """Trust one native post-motion target rebase without model inference."""
+
+    audit = receipt.get("detached_target_motion_audit")
+    sync = receipt.get("planning_scene_target_pose_sync")
+    detachable = receipt.get("detachable_joint")
+    return bool(
+        receipt.get("error_code") == "GRASP_CONTACT_TARGET_DISPLACED"
+        and receipt.get("failure_class") == "detached_target_displacement"
+        and receipt.get("candidate_rejection") is True
+        and receipt.get("infrastructure_error") is False
+        and receipt.get("execution_started") is True
+        and receipt.get("motion_outcome") == "failed"
+        and isinstance(audit, Mapping)
+        and audit.get("schema_version")
+        == "openeta.detached_target_motion_audit.v1"
+        and audit.get("valid") is False
+        and audit.get("reason_code") == "GRASP_CONTACT_TARGET_DISPLACED"
+        and isinstance(sync, Mapping)
+        and sync.get("schema_version")
+        == "openeta.planning_scene_target_pose_sync.v1"
+        and sync.get("operation") == "update_world_target"
+        and sync.get("topology_unchanged") is True
+        and sync.get("static_world_unchanged") is True
+        and receipt.get("planning_scene_revision") == sync.get("revision")
+        and isinstance(detachable, Mapping)
+        and detachable.get("state") == "detached"
+    )
 
 
 def _finite_robot_end_state(value: Mapping[str, object]) -> bool:

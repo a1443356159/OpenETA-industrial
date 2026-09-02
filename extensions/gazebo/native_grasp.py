@@ -173,6 +173,60 @@ def load_acceptance_scene_contract(
         ):
             raise ValueError("acceptance scene perception prompt is invalid")
 
+    model_pose_overrides = scene.get("model_pose_overrides")
+    if model_pose_overrides is not None:
+        if not isinstance(model_pose_overrides, list) or not model_pose_overrides:
+            raise ValueError("acceptance scene model pose overrides are invalid")
+        overridden_ids: set[str] = set()
+        for override in model_pose_overrides:
+            if not isinstance(override, Mapping):
+                raise ValueError("acceptance scene model pose override is invalid")
+            model_id = str(override.get("id") or "").strip()
+            if not model_id or model_id in overridden_ids:
+                raise ValueError(
+                    "acceptance scene model pose override identity is invalid"
+                )
+            overridden_ids.add(model_id)
+            vector(override, "pose_xyz", 3)
+            vector(override, "pose_rpy", 3)
+        layout_validation = scene.get("layout_validation")
+        if not isinstance(layout_validation, Mapping):
+            raise ValueError("acceptance randomized layout validation is missing")
+        if not str(layout_validation.get("support_object_id") or "").strip():
+            raise ValueError("acceptance randomized layout support is invalid")
+        for key in (
+            "support_margin_m",
+            "minimum_xy_clearance_m",
+            "maximum_initial_drop_m",
+        ):
+            value = layout_validation.get(key, 0.0)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or float(value) < 0.0
+            ):
+                raise ValueError("acceptance randomized layout clearance is invalid")
+        exclusions = layout_validation.get("exclusion_regions", [])
+        if not isinstance(exclusions, list):
+            raise ValueError("acceptance randomized layout exclusions are invalid")
+        exclusion_ids: set[str] = set()
+        for exclusion in exclusions:
+            if not isinstance(exclusion, Mapping):
+                raise ValueError("acceptance randomized layout exclusion is invalid")
+            exclusion_id = str(exclusion.get("id") or "").strip()
+            if not exclusion_id or exclusion_id in exclusion_ids:
+                raise ValueError(
+                    "acceptance randomized layout exclusion identity is invalid"
+                )
+            exclusion_ids.add(exclusion_id)
+            vector(exclusion, "center_xy", 2)
+            vector(exclusion, "size_xy_m", 2, positive=True)
+    elif scene.get("layout_validation") is not None:
+        raise ValueError(
+            "acceptance randomized layout validation has no model pose overrides"
+        )
+
     seen: set[str] = {"work_table", "target_object", "distractor_object"}
     for obstacle in obstacles:
         if not isinstance(obstacle, Mapping):
@@ -434,8 +488,10 @@ class PlacementReasonCode(StrEnum):
     OBSERVATION_TOO_SHORT = "PLACEMENT_OBSERVATION_TOO_SHORT"
     TERMINAL_DRIFT = "PLACEMENT_TERMINAL_DRIFT_EXCEEDED"
     HEIGHT_OUT_OF_RANGE = "PLACEMENT_SUPPORT_HEIGHT_OUT_OF_RANGE"
+    SUPPORT_PENETRATION = "PLACEMENT_SUPPORT_PENETRATION"
     FOOTPRINT_OUTSIDE_DESTINATION = "PLACEMENT_FOOTPRINT_OUTSIDE_DESTINATION"
     CENTROID_OUTSIDE_DESTINATION = "PLACEMENT_GEOMETRY_CENTROID_OUTSIDE_DESTINATION"
+    NO_DESTINATION_OVERLAP = "PLACEMENT_GEOMETRY_OUTSIDE_DESTINATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,20 +611,27 @@ class NativePickPlaceConfig(GazeboControlConfig):
     placement_terminal_window_s: float = 0.50
     maximum_placement_terminal_drift_m: float = 0.005
     placement_support_height_tolerance_m: float = 0.01
+    # Gazebo's native contact pose, the later TF/FK reconstruction, and the
+    # time-parameterized MoveIt samples do not share one numerical clock.
+    # Treat shallow support overlap as the physical contact band and require
+    # a larger penetration before geometry may veto an otherwise valid path.
+    # Non-support obstacles retain the tighter threshold below.
+    support_contact_penetration_tolerance_m: float = 0.005
+    static_collision_penetration_tolerance_m: float = 0.001
     # General motion profiles are selected from physical load state, never a
-    # scene/object identity.  The unloaded contact move can use more of the
-    # RM75 limits; a retained payload uses a gentler profile until release.
+    # scene/object identity. Keep separate unloaded and loaded fields so a
+    # later evidence-backed bake-off can tune them without changing semantics.
     # Keep both profiles inside the measured Gazebo tracking envelope. Under
-    # shared GPU/physics load, the previous profiles repeatedly exceeded the
-    # former 0.05 rad controller limit on joint 5. A later GUI-on run reached
-    # 0.060102 rad on joint 4 at 0.18/0.08, so the unloaded profile also keeps
-    # measured margin below the explicit 0.06 rad path envelope. A later
-    # GUI-on loaded trajectory reached 0.060016 rad at 0.12/0.06 and was
-    # correctly aborted mid-path. Keep payload transport more conservative
-    # instead of weakening that controller envelope. The unchanged 0.002 rad
-    # terminal goal continues to prove final settling.
-    unloaded_velocity_scaling: float = 0.16
-    unloaded_acceleration_scaling: float = 0.06
+    # shared GPU/physics load, 0.16/0.06 crossed the unchanged 0.06 rad path
+    # envelope by 0.000151 rad and aborted 38 mm before an otherwise qualified
+    # grasp target. Use the already proven loaded profile as the conservative
+    # baseline for both load states while stability is established. The
+    # controller path envelope remains unchanged, and the independent 0.002 rad
+    # terminal goal plus Cartesian terminal proof still decide success. A later
+    # performance bake-off may raise the unloaded profile only after repeated
+    # GUI-on execution evidence.
+    unloaded_velocity_scaling: float = 0.10
+    unloaded_acceleration_scaling: float = 0.04
     loaded_velocity_scaling: float = 0.10
     loaded_acceleration_scaling: float = 0.04
 
@@ -698,6 +761,16 @@ class NativePickPlaceConfig(GazeboControlConfig):
         ):
             raise ValueError("placement release Z offset must be finite and non-negative")
         if (
+            not math.isfinite(self.support_contact_penetration_tolerance_m)
+            or not math.isfinite(self.static_collision_penetration_tolerance_m)
+            or self.static_collision_penetration_tolerance_m <= 0.0
+            or self.support_contact_penetration_tolerance_m
+            < self.static_collision_penetration_tolerance_m
+            or self.support_contact_penetration_tolerance_m
+            > self.placement_support_height_tolerance_m
+        ):
+            raise ValueError("pick/place collision tolerance policy is invalid")
+        if (
             not self.attached_collision_filter_state_topic
             or not self.attached_collision_filter_state_request_topic
             or not self.attached_collision_filter_state_ack_topic
@@ -786,6 +859,10 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 self,
                 active_manipulation_target_index=index,
                 work_order_item=None,
+                # The catalog-level config has no selected destination, so
+                # its fallback must not override the physical semantics of a
+                # destination selected later by the work order.
+                placement_acceptance_semantics=None,
             )
             for index in range(len(self.manipulation_targets))
         )
@@ -850,6 +927,10 @@ class NativePickPlaceConfig(GazeboControlConfig):
                     self,
                     active_manipulation_target_index=target_index,
                     work_order_item=normalized,
+                    # Re-resolve this from the selected placement region.
+                    # dataclasses.replace otherwise carries the catalog
+                    # config's fallback (complete_footprint) into every bin.
+                    placement_acceptance_semantics=None,
                 )
             )
         return tuple(resolved)
@@ -1102,6 +1183,16 @@ def verify_stable_placement(
     centroid_x_margin_m = half_x - abs(geometry_centroid[0] - cfg.destination_center_xy[0])
     centroid_y_margin_m = half_y - abs(geometry_centroid[1] - cfg.destination_center_xy[1])
     support_height_error_m = abs(bounds.minimum_xyz[2] - cfg.destination_support_z_m)
+    support_penetration_m = max(
+        0.0,
+        cfg.destination_support_z_m - bounds.minimum_xyz[2],
+    )
+    destination_overlaps = not (
+        bounds.maximum_xyz[0] < cfg.destination_center_xy[0] - half_x
+        or bounds.minimum_xyz[0] > cfg.destination_center_xy[0] + half_x
+        or bounds.maximum_xyz[1] < cfg.destination_center_xy[1] - half_y
+        or bounds.minimum_xyz[1] > cfg.destination_center_xy[1] + half_y
+    )
     expected_link_origin_height_m = (
         final.xyz[2] + cfg.destination_support_z_m - bounds.minimum_xyz[2]
     )
@@ -1148,12 +1239,27 @@ def verify_stable_placement(
         "expected_link_origin_height_m": expected_link_origin_height_m,
         "support_height_tolerance_m": cfg.placement_support_height_tolerance_m,
         "support_height_error_m": support_height_error_m,
+        "support_penetration_m": support_penetration_m,
+        "maximum_support_penetration_m": (
+            cfg.placement_support_height_tolerance_m
+        ),
         "destination_center_xy": list(cfg.destination_center_xy),
         "destination_size_xy_m": list(cfg.destination_size_xy_m),
         "placement_acceptance_semantics": cfg.placement_acceptance_semantics,
+        "placement_acceptance_authority": (
+            "visual_primary_geometry_obvious_failure_guard"
+            if cfg.placement_acceptance_semantics
+            == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+            else "strict_geometry_contract"
+        ),
         "geometry_volume_centroid_xyz": list(geometry_centroid),
         "centroid_margin_xy_m": [centroid_x_margin_m, centroid_y_margin_m],
         "complete_footprint_inside": min(x_margin_m, y_margin_m) >= 0.0,
+        "destination_geometry_overlaps": destination_overlaps,
+        "complete_footprint_is_quality_only": (
+            cfg.placement_acceptance_semantics
+            == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+        ),
         "conservative_footprint_radius_m": radius_m,
         "projected_footprint_half_extent_xy_m": [
             (bounds.maximum_xyz[0] - bounds.minimum_xyz[0]) / 2.0,
@@ -1175,23 +1281,38 @@ def verify_stable_placement(
         )
     if terminal_drift_m > cfg.maximum_placement_terminal_drift_m:
         return PlacementVerification(Verdict.FAIL, PlacementReasonCode.TERMINAL_DRIFT, evidence)
-    if support_height_error_m > cfg.placement_support_height_tolerance_m and not math.isclose(
-        support_height_error_m,
-        cfg.placement_support_height_tolerance_m,
-        rel_tol=0.0,
-        abs_tol=_POSE_BOUNDARY_ABS_TOL_M,
-    ):
-        return PlacementVerification(
-            Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
-        )
     if (
         cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
-        and min(centroid_x_margin_m, centroid_y_margin_m) < 0.0
+        and support_penetration_m
+        > cfg.placement_support_height_tolerance_m + _POSE_BOUNDARY_ABS_TOL_M
     ):
         return PlacementVerification(
             Verdict.FAIL,
-            PlacementReasonCode.CENTROID_OUTSIDE_DESTINATION,
+            PlacementReasonCode.SUPPORT_PENETRATION,
             evidence,
+        )
+    if (
+        cfg.placement_acceptance_semantics
+        == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+        and not destination_overlaps
+    ):
+        return PlacementVerification(
+            Verdict.FAIL,
+            PlacementReasonCode.NO_DESTINATION_OVERLAP,
+            evidence,
+        )
+    if (
+        cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
+        and support_height_error_m > cfg.placement_support_height_tolerance_m
+        and not math.isclose(
+            support_height_error_m,
+            cfg.placement_support_height_tolerance_m,
+            rel_tol=0.0,
+            abs_tol=_POSE_BOUNDARY_ABS_TOL_M,
+        )
+    ):
+        return PlacementVerification(
+            Verdict.FAIL, PlacementReasonCode.HEIGHT_OUT_OF_RANGE, evidence
         )
     if (
         cfg.placement_acceptance_semantics == PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT
@@ -1256,22 +1377,38 @@ def validated_pickplace_motion_guidance(
             {
                 "tool": "gripper_control",
                 "position": 1,
-                "requires_receipt": ["detached_ack", "stable_placement"],
+                "requires_receipt": [
+                    "detached_ack",
+                    "post_release_visual_observation",
+                    "geometry_obvious_failure_guard",
+                ],
             },
         ],
         "success_evidence": {
             "grasp_admission": "bilateral_native_contact_and_attach_ack",
             "maximum_capture_relative_translation_m": (cfg.maximum_capture_relative_translation_m),
             "placement": {
+                "verification_authority": (
+                    "visual_primary_geometry_obvious_failure_guard"
+                    if cfg.placement_acceptance_semantics
+                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+                    else "strict_geometry_contract"
+                ),
+                "visual_source": "causal_post_release_rgbd",
                 "minimum_stability_duration_s": cfg.placement_stability_duration_s,
                 "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
                 "support_plane_height_m": cfg.destination_support_z_m,
-                "height_rule": "compound_collision_geometry_contacts_destination_plane",
+                "height_rule": (
+                    "reject_support_penetration_only"
+                    if cfg.placement_acceptance_semantics
+                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
+                    else "compound_collision_geometry_contacts_destination_plane"
+                ),
                 "support_height_tolerance_m": cfg.placement_support_height_tolerance_m,
                 "destination_center_xy": list(cfg.destination_center_xy),
                 "destination_size_xy_m": list(cfg.destination_size_xy_m),
                 "footprint_rule": (
-                    "stable_geometry_centroid_inside"
+                    "reject_only_no_destination_overlap"
                     if cfg.placement_acceptance_semantics
                     == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
                     else "compound_collision_projection_fully_inside"

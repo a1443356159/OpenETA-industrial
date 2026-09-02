@@ -18,7 +18,7 @@ GUI_CONFIG = (
 def test_gpu_gui_launcher_defaults_to_virtualgl_hd_antialiasing() -> None:
     text = LAUNCHER.read_text(encoding="utf-8")
 
-    assert "exec vglrun" in text
+    assert 'exec "${vglrun_bin}"' in text
     assert '-c "${OPENETA_VGL_TRANSPORT:-proxy}"' in text
     assert '-fps "${OPENETA_GAZEBO_GUI_FPS:-30}"' in text
     assert '-ms "${OPENETA_VGL_MSAA_SAMPLES:-8}"' in text
@@ -31,9 +31,11 @@ def test_gpu_gui_launcher_defaults_to_virtualgl_hd_antialiasing() -> None:
     assert '--gui-config "${gui_config}"' in text
     assert "/gui/move_to/pose" in text
     assert "wait_for_partition_server" in text
-    assert "gz service -l" in text
+    assert '"${gz_bin}" service -l' in text
+    assert "unset GEM_HOME GEM_PATH RUBYLIB RUBYOPT" in text
+    assert 'export PATH="/usr/bin:/bin:${PATH}"' in text
     assert text.index("wait_for_partition_server\nfocus_operator_view &") < text.index(
-        "exec vglrun"
+        'exec "${vglrun_bin}"'
     )
 
 
@@ -87,7 +89,11 @@ fi
     fake_vglrun.write_text(
         """#!/usr/bin/env bash
 set -euo pipefail
-printf '%s:%s\n' "${GZ_PARTITION}" "$(<"${FAKE_GZ_COUNTER}")" >"${FAKE_VGL_LOG}"
+printf '%s:%s:%s:%s\n' \
+  "${GZ_PARTITION}" \
+  "$(<"${FAKE_GZ_COUNTER}")" \
+  "${PATH%%:*}" \
+  "${GEM_HOME-unset}" >"${FAKE_VGL_LOG}"
 """,
         encoding="utf-8",
     )
@@ -100,6 +106,7 @@ printf '%s:%s\n' "${GZ_PARTITION}" "$(<"${FAKE_GZ_COUNTER}")" >"${FAKE_VGL_LOG}"
         "FAKE_VGL_LOG": str(client_log),
         "OPENETA_GAZEBO_GUI_CONFIG": str(GUI_CONFIG),
         "OPENETA_GAZEBO_DISPLAY": ":999",
+        "GEM_HOME": "/incompatible/conda/gems",
     }
 
     result = subprocess.run(
@@ -113,7 +120,7 @@ printf '%s:%s\n' "${GZ_PARTITION}" "$(<"${FAKE_GZ_COUNTER}")" >"${FAKE_VGL_LOG}"
 
     assert result.returncode == 0, result.stderr
     assert client_log.read_text(encoding="utf-8").strip() == (
-        "delayed-formal-case:3"
+        "delayed-formal-case:3:/usr/bin:unset"
     )
 
 

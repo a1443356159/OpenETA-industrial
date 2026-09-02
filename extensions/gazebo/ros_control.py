@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from xml.etree import ElementTree
 
 from .robot_control import (
@@ -222,7 +222,14 @@ def _canonical_l5_pose(value: object) -> object:
                 )
                 if first_nonzero < 0.0:
                     numeric = [-item for item in numeric]
-        canonical[field] = [round(item, L5_TRAJECTORY_POSE_DECIMALS) for item in numeric]
+        rounded = [round(item, L5_TRAJECTORY_POSE_DECIMALS) for item in numeric]
+        # JSON preserves the sign of IEEE-754 zero (``-0.0``), even though it
+        # has the same geometric and numeric value as ``0.0``.  Euler transport
+        # through the public tool boundary can introduce signed zero into the
+        # flange quaternion while private L5 qualification retains positive
+        # zero.  Normalize it before hashing so one proven pose cannot miss its
+        # exact trajectory solely because of a serialization artefact.
+        canonical[field] = [0.0 if item == 0.0 else item for item in rounded]
     return canonical
 
 
@@ -703,6 +710,141 @@ def _collision_spec_geometry(
     )
 
 
+def _detached_contact_approach_audit(
+    *,
+    joint_names: Sequence[str],
+    trajectory_positions: Sequence[Sequence[float]],
+    target_id: str,
+    target_touch_links: Sequence[str],
+    state_validity: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Prove that a MoveIt grasp route first touches its target at the endpoint.
+
+    MoveIt needs one request-local target/touch-link ACM exception to solve an
+    exact model-generated contact goal.  The exception applies to the whole
+    planning request, however, so the returned route needs an independent
+    strict-scene audit.  No synthetic approach pose is introduced: the route
+    remains entirely MoveIt-owned and only its non-terminal states are required
+    to be collision free.
+    """
+
+    names = tuple(str(name) for name in joint_names)
+    try:
+        points = [tuple(float(value) for value in row) for row in trajectory_positions]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("detached contact trajectory is invalid") from exc
+    normalized_target_id = str(target_id).strip()
+    normalized_touch_links = tuple(
+        sorted({str(link).strip() for link in target_touch_links if str(link).strip()})
+    )
+    if (
+        not names
+        or not points
+        or not normalized_target_id
+        or not normalized_touch_links
+        or any(len(point) != len(names) for point in points)
+        or any(not math.isfinite(value) for point in points for value in point)
+    ):
+        raise ValueError("detached contact trajectory is invalid")
+
+    # Check time-parameterized waypoints and the joint midpoint of every
+    # segment.  The exact final waypoint is the sole state allowed to use the
+    # model contact exception.
+    samples: list[tuple[int, str, tuple[float, ...], bool]] = []
+    for index, point in enumerate(points):
+        if index:
+            previous = points[index - 1]
+            samples.append(
+                (
+                    index,
+                    "midpoint",
+                    tuple(
+                        (previous[offset] + point[offset]) * 0.5
+                        for offset in range(len(names))
+                    ),
+                    False,
+                )
+            )
+        samples.append((index, "point", point, index == len(points) - 1))
+
+    allowed_terminal_pairs = {
+        tuple(sorted((normalized_target_id, link)))
+        for link in normalized_touch_links
+    }
+    checks: list[dict[str, Any]] = []
+    failure: dict[str, Any] | None = None
+    terminal_target_contact_links: list[str] = []
+    for point_index, sample_kind, positions, terminal in samples:
+        result = state_validity(
+            {
+                "names": list(names),
+                "positions": list(positions),
+                "qualification_gripper_state": "open",
+            }
+        )
+        if not isinstance(result, Mapping) or not isinstance(result.get("valid"), bool):
+            raise ValueError("detached contact state validity is unavailable")
+        raw_pairs = result.get("collision_pairs")
+        if not isinstance(raw_pairs, list):
+            raise ValueError("detached contact collision evidence is unavailable")
+        pairs = {
+            tuple(sorted((str(pair[0]), str(pair[1]))))
+            for pair in raw_pairs
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+        }
+        target_pairs = pairs & allowed_terminal_pairs
+        unexpected_pairs = pairs - allowed_terminal_pairs
+        check = {
+            "point_index": point_index,
+            "sample_kind": sample_kind,
+            "terminal": terminal,
+            "strict_valid": bool(result["valid"]),
+            "collision_pairs": [list(pair) for pair in sorted(pairs)],
+        }
+        checks.append(check)
+        if terminal:
+            terminal_target_contact_links = sorted(
+                link
+                for link in normalized_touch_links
+                if tuple(sorted((normalized_target_id, link))) in target_pairs
+            )
+            if result["valid"] is True and not pairs:
+                continue
+            if target_pairs and not unexpected_pairs:
+                continue
+            failure = {
+                "reason": "terminal_state_has_unapproved_collision",
+                **check,
+            }
+            break
+        if result["valid"] is not True or pairs:
+            failure = {
+                "reason": (
+                    "target_contact_before_terminal"
+                    if target_pairs and not unexpected_pairs
+                    else "strict_preterminal_state_invalid"
+                ),
+                **check,
+            }
+            break
+
+    return {
+        "schema_version": "openeta.detached_contact_approach.v1",
+        "applicable": True,
+        "valid": failure is None,
+        "target_object_id": normalized_target_id,
+        "target_touch_links": list(normalized_touch_links),
+        "trajectory_point_count": len(points),
+        "evaluated_sample_count": len(checks),
+        "sampling": "time_parameterized_points_and_joint_midpoints",
+        "terminal_contact_exception_scope": "exact_final_waypoint_only",
+        "terminal_target_contact_links": terminal_target_contact_links,
+        "route_owner": "moveit",
+        "host_offset_pose_generated": False,
+        **({"failure": failure} if failure is not None else {}),
+    }
+
+
 def _attached_support_departure_audit(
     *,
     joint_names: Sequence[str],
@@ -714,6 +856,8 @@ def _attached_support_departure_audit(
     support_spec: Mapping[str, Any],
     support_contact_reference_target_spec: Mapping[str, Any] | None = None,
     obstacle_specs: Mapping[str, Mapping[str, Any]] | None = None,
+    support_penetration_tolerance_m: float = 0.005,
+    static_penetration_tolerance_m: float = 0.001,
 ) -> dict[str, Any]:
     """Prove an L5 path leaves its initial physical support contact.
 
@@ -741,6 +885,13 @@ def _attached_support_departure_audit(
         or any(not math.isfinite(value) for point in points for value in point)
     ):
         raise ValueError("support-departure trajectory is invalid")
+    if (
+        not math.isfinite(support_penetration_tolerance_m)
+        or not math.isfinite(static_penetration_tolerance_m)
+        or static_penetration_tolerance_m <= 0.0
+        or support_penetration_tolerance_m < static_penetration_tolerance_m
+    ):
+        raise ValueError("support-departure collision tolerances are invalid")
     attached_relative_xyz = tuple(
         float(value) for value in attached_spec["pose_xyz"]
     )
@@ -838,16 +989,22 @@ def _attached_support_departure_audit(
         and support_contact_reference_target_spec
         else None
     )
-    # This is a measured physical boundary, not a task-specific tolerance.
     # Native attach and the later FK reconstruction are sampled on different
-    # clocks, so reuse the authority-wide pose synchronization uncertainty.
-    # Deeper penetration and tangential scraping still fail below.
+    # clocks.  Keep the exact pose-sync uncertainty as evidence, but judge a
+    # support-contact departure against the scene-wide physical contact band.
+    # This avoids turning micrometre interpolation noise into a collision
+    # while still rejecting material penetration and tangential scraping.
     support_contact_pose_uncertainty = max(
         geometry_numeric_band,
         _TARGET_POSE_POSITION_ABS_TOL_M,
     )
-    initial_clearance_floor = min(0.0, reference_clearance or 0.0) - (
-        support_contact_pose_uncertainty
+    support_contact_clearance_floor = min(0.0, reference_clearance or 0.0) - max(
+        support_contact_pose_uncertainty,
+        support_penetration_tolerance_m,
+    )
+    tangential_contact_tolerance = max(
+        support_contact_pose_uncertainty,
+        static_penetration_tolerance_m,
     )
 
     samples: list[tuple[int, str, tuple[float, ...]]] = [(0, "point", first)]
@@ -905,7 +1062,10 @@ def _attached_support_departure_audit(
                     if collision_primitives_penetrate(
                         target_primitive,
                         obstacle_primitive,
-                        tolerance_m=geometry_numeric_band,
+                        tolerance_m=max(
+                            geometry_numeric_band,
+                            static_penetration_tolerance_m,
+                        ),
                     ):
                         static_collision = (
                             object_id,
@@ -929,7 +1089,7 @@ def _attached_support_departure_audit(
             break
         if point_index == 0 and sample_kind == "point":
             initial_clearance = clearance
-            if clearance is not None and clearance < initial_clearance_floor:
+            if clearance is not None and clearance < support_contact_clearance_floor:
                 failure = {
                     "reason": "initial_support_penetration",
                     "point_index": point_index,
@@ -946,7 +1106,7 @@ def _attached_support_departure_audit(
             moving
             and clearance is not None
             and clearance <= geometry_numeric_band
-            and clearance < initial_clearance_floor
+            and clearance < support_contact_clearance_floor
         ):
             failure = {
                 "reason": "support_penetration_increased_after_attach",
@@ -967,7 +1127,7 @@ def _attached_support_departure_audit(
             moving
             and clearance is not None
             and clearance <= geometry_numeric_band
-            and tangential_surface_displacement > support_contact_pose_uncertainty
+            and tangential_surface_displacement > tangential_contact_tolerance
         ):
             failure = {
                 "reason": "support_contact_persists_after_departure",
@@ -999,8 +1159,11 @@ def _attached_support_departure_audit(
         "sampling": "time_parameterized_points_and_joint_midpoints",
         "initial_clearance_m": initial_clearance,
         "initial_support_reference_clearance_m": reference_clearance,
-        "initial_support_clearance_floor_m": initial_clearance_floor,
+        "initial_support_clearance_floor_m": support_contact_clearance_floor,
         "support_contact_pose_uncertainty_m": support_contact_pose_uncertainty,
+        "support_penetration_tolerance_m": support_penetration_tolerance_m,
+        "tangential_contact_tolerance_m": tangential_contact_tolerance,
+        "static_penetration_tolerance_m": static_penetration_tolerance_m,
         "support_departed": support_departed,
         "first_moving_clearance_m": first_moving_clearance,
         "minimum_clearance_m": (
@@ -1607,6 +1770,7 @@ class RosGazeboController(GazeboController):
         *,
         target_xyz: Sequence[float],
         target_quat_xyzw: Sequence[float],
+        departure_contact_object_id: str = "",
     ) -> int:
         """Rebind target/destination semantics inside one unchanged world."""
 
@@ -1623,6 +1787,7 @@ class RosGazeboController(GazeboController):
                 pose_quat_xyzw=target_quat_xyzw,
             ),
             support_object_id=str(config.source_support_object_id),
+            departure_contact_object_id=str(departure_contact_object_id),
         )
         self.config = config
         self.runtime.config = config
@@ -2175,8 +2340,13 @@ class _RosRuntime:
             "measured_start_max_delta_rad": measured_delta,
         }
 
-    def _l5_trajectory_safety(self, trajectory: Any) -> dict[str, Any]:
-        """Audit the support-contact exception for a real attached scene."""
+    def _l5_trajectory_safety(
+        self,
+        trajectory: Any,
+        *,
+        goal: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Audit request-local collision exceptions on the real MoveIt route."""
 
         scene = self.planning_scene
         target_id = str(getattr(scene, "target_id", "") or "")
@@ -2185,6 +2355,47 @@ class _RosRuntime:
         )
         attached_specs = getattr(scene, "attached_specs", {})
         world_specs = getattr(scene, "world_specs", {})
+        if (
+            goal.get("grasp_stage") == "contact"
+            and target_id
+            and target_id in world_specs
+        ):
+            allowed = goal.get("qualification_allowed_collisions")
+            touch_links = (
+                allowed.get(target_id)
+                if isinstance(allowed, Mapping)
+                else None
+            )
+            if not isinstance(touch_links, (list, tuple)) or not touch_links:
+                return {
+                    "schema_version": "openeta.detached_contact_approach.v1",
+                    "applicable": True,
+                    "valid": False,
+                    "reason": "contact_collision_policy_unavailable",
+                    "target_object_id": target_id,
+                }
+            names = tuple(str(value) for value in getattr(trajectory, "joint_names", ()))
+            points = list(getattr(trajectory, "points", ()))
+            try:
+                return _detached_contact_approach_audit(
+                    joint_names=names,
+                    trajectory_positions=[
+                        tuple(float(value) for value in point.positions)
+                        for point in points
+                    ],
+                    target_id=target_id,
+                    target_touch_links=[str(value) for value in touch_links],
+                    state_validity=self.qualification_state_validity,
+                )
+            except Exception as exc:  # noqa: BLE001 - missing proof fails closed.
+                return {
+                    "schema_version": "openeta.detached_contact_approach.v1",
+                    "applicable": True,
+                    "valid": False,
+                    "reason": "detached_contact_approach_audit_error",
+                    "target_object_id": target_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
         if not target_id or target_id not in attached_specs:
             return {
                 "schema_version": "openeta.attached_support_departure.v1",
@@ -2227,6 +2438,20 @@ class _RosRuntime:
                     for object_id, spec in world_specs.items()
                     if isinstance(spec, Mapping)
                 },
+                support_penetration_tolerance_m=float(
+                    getattr(
+                        self.config,
+                        "support_contact_penetration_tolerance_m",
+                        0.005,
+                    )
+                ),
+                static_penetration_tolerance_m=float(
+                    getattr(
+                        self.config,
+                        "static_collision_penetration_tolerance_m",
+                        0.001,
+                    )
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - missing proof must fail closed.
             return {
@@ -2996,8 +3221,20 @@ class _RosRuntime:
                 # support overlap as the calibrated contact uncertainty band,
                 # not a mathematical penetration proof.  Non-support static
                 # obstacles retain the tighter exact-box tolerance below.
-                "support_penetration_tolerance_m": 0.005,
-                "static_penetration_tolerance_m": 0.001,
+                "support_penetration_tolerance_m": float(
+                    getattr(
+                        self.config,
+                        "support_contact_penetration_tolerance_m",
+                        0.005,
+                    )
+                ),
+                "static_penetration_tolerance_m": float(
+                    getattr(
+                        self.config,
+                        "static_collision_penetration_tolerance_m",
+                        0.001,
+                    )
+                ),
                 "provenance": "acceptance_scene_contract",
             }
         return snapshot
@@ -3975,14 +4212,20 @@ class _RosRuntime:
                 }
                 if request.planning_options.plan_only:
                     trajectory_safety = self._l5_trajectory_safety(
-                        planned_joint_trajectory
+                        planned_joint_trajectory,
+                        goal=goal,
                     )
                     if trajectory_safety.get("valid") is not True:
                         return finish(
                             {
                                 "ok": False,
                                 "error_code": "MOTION_PLAN_FAILED",
-                                "reason": "authoritative_support_departure_failed",
+                                "reason": (
+                                    "detached_contact_approach_failed"
+                                    if trajectory_safety.get("schema_version")
+                                    == "openeta.detached_contact_approach.v1"
+                                    else "authoritative_support_departure_failed"
+                                ),
                                 "motion_outcome": "failed",
                                 "planned_point_count": len(planned_points),
                                 "execution_started": False,

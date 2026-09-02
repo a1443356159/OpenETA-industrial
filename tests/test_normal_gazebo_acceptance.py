@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent.backends.provider_config import ProviderEndpointConfig
 from scripts import normal_gazebo_acceptance as acceptance
 
 
@@ -84,7 +85,7 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
     metadata = acceptance._automation_metadata_for_backend("anygrasp")
     assert "planner_mode=agentic_closed_loop" in metadata
     assert f"environment_id={acceptance.ENV_ID}" in metadata
-    assert "initial_observe=required" in metadata
+    assert "initial_observe=" not in metadata
     assert "environment_task=" not in metadata
 
 
@@ -297,6 +298,51 @@ def test_multi_normal_prepares_one_human_request_with_private_verification_contr
     assert "placement_region=" not in metadata
 
 
+def test_seeded_random_scene_keeps_the_same_vlm_authored_multi_sort_contract(
+    tmp_path, monkeypatch
+) -> None:
+    allocation = acceptance.base.Allocation(84, "random-multi", 18768, "run-id")
+    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
+    monkeypatch.setattr(
+        acceptance.base,
+        "environment_receipt",
+        lambda *_args, **_kwargs: {
+            "schema_version": "openeta.gazebo_environment_receipt.v1",
+            "trusted": True,
+        },
+    )
+
+    paths = acceptance.prepare_case(
+        tmp_path,
+        tmp_path / "random-multi",
+        allocation,
+        dict(acceptance.DEFAULT_SERVICES),
+        scenario="multi_normal_random_12345",
+        grasp_backend="graspgenx",
+    )
+    receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
+    prompt = paths.instructions.read_text(encoding="utf-8")
+    metadata = acceptance._automation_metadata_for_backend(
+        "graspgenx", scenario="multi_normal_random_12345"
+    )
+
+    assert receipt["acceptance_scene"]["seed"] == 12345
+    assert receipt["acceptance_scene"]["scene_id"] == (
+        "multi_normal_random_12345"
+    )
+    assert receipt["acceptance_scene"]["acceptance_request_id"] == (
+        "multi_normal_random_12345:wrench-green-bolt-blue"
+    )
+    assert receipt["task_variant"] == "wrench-green-bolt-blue"
+    assert len(receipt["acceptance_scene"]["expected_work_order"]) == 2
+    assert "工作台物件的位置和朝向已经变化" in prompt
+    assert "environment_seed=12345" in metadata
+    assert "work_order_source=vlm_conversation" in metadata
+    assert acceptance._scenario_environment("multi_normal_random_12345") == {
+        "OPENETA_ACCEPTANCE_SCENE": "multi_normal_random_12345"
+    }
+
+
 def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> None:
     def call(parameters, outputs):
         return {
@@ -409,6 +455,9 @@ def test_multi_normal_task_variants_change_only_user_words_and_verification_cont
 
 
 def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
+    assert acceptance._scenario_environment("multi_normal_random_12345") == {
+        "OPENETA_ACCEPTANCE_SCENE": "multi_normal_random_12345"
+    }
     assert acceptance._scenario_environment("narrow-pick") == {
         "OPENETA_ACCEPTANCE_SCENE": "narrow-pick"
     }
@@ -447,15 +496,8 @@ def test_industrial_scene_prompts_bind_one_target_to_one_of_multiple_bins() -> N
     assert "yellow open end tool" not in tool and "green square area inside bin" not in tool
 
 
-def test_agentic_profile_uses_short_bounded_provider_retries() -> None:
-    assert acceptance.AGENTIC_PROVIDER_RESILIENCE_ENV == {
-        "OPENETA_LLM_TIMEOUT_S": "60",
-        "OPENETA_LLM_MAX_ATTEMPTS": "2",
-        "OPENETA_LLM_RETRY_BACKOFF_S": "0.5",
-        "OPENETA_LLM_MAX_TOKENS": "512",
-        "OPENETA_LLM_FALLBACK_MODEL": "gpt-5.6-luna",
-        "OPENETA_LLM_FALLBACK_TIMEOUT_S": "60",
-    }
+def test_agentic_profile_does_not_override_deployment_provider_policy() -> None:
+    assert acceptance.AGENTIC_PROVIDER_RESILIENCE_ENV == {}
 
 
 def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -> None:
@@ -469,6 +511,13 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
         retry_backoff_s=1.0,
         max_tokens=32_768,
         thinking_mode="disabled",
+        fallback=ProviderEndpointConfig(
+            provider="configured-fallback-provider",
+            model="configured-fallback-model",
+            api_base="https://configured-fallback.invalid/v1",
+            api_key="configured-fallback-secret",
+            timeout_s=45.0,
+        ),
     )
 
     environment = acceptance.base._tui_provider_environment(
@@ -488,18 +537,19 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
     assert environment["OPENETA_LLM_PROVIDER"] == "configured-provider"
     assert environment["OPENETA_LLM_MODEL"] == "configured-model"
     assert environment["OPENETA_LLM_API_KEY"] == "configured-secret"
-    assert environment["OPENETA_LLM_TIMEOUT_S"] == "60"
+    assert environment["OPENETA_LLM_TIMEOUT_S"] == "30.0"
     assert environment["OPENETA_LLM_MAX_ATTEMPTS"] == "2"
-    assert environment["OPENETA_LLM_RETRY_BACKOFF_S"] == "0.5"
-    assert environment["OPENETA_LLM_MAX_TOKENS"] == "512"
+    assert environment["OPENETA_LLM_RETRY_BACKOFF_S"] == "1.0"
+    assert environment["OPENETA_LLM_MAX_TOKENS"] == "32768"
     assert environment["OPENETA_LLM_THINKING_MODE"] == "disabled"
-    assert environment["OPENETA_LLM_FALLBACK_PROVIDER"] == "configured-provider"
-    assert environment["OPENETA_LLM_FALLBACK_MODEL"] == "gpt-5.6-luna"
-    assert environment["OPENETA_LLM_FALLBACK_API_BASE"] == (
-        "https://configured.invalid/v1"
+    assert environment["OPENETA_LLM_FALLBACK_PROVIDER"] == "configured-fallback-provider"
+    assert environment["OPENETA_LLM_FALLBACK_MODEL"] == "configured-fallback-model"
+    assert (
+        environment["OPENETA_LLM_FALLBACK_API_BASE"]
+        == "https://configured-fallback.invalid/v1"
     )
-    assert environment["OPENETA_LLM_FALLBACK_API_KEY"] == "configured-secret"
-    assert environment["OPENETA_LLM_FALLBACK_TIMEOUT_S"] == "60"
+    assert environment["OPENETA_LLM_FALLBACK_API_KEY"] == "configured-fallback-secret"
+    assert environment["OPENETA_LLM_FALLBACK_TIMEOUT_S"] == "45.0"
     assert "OPENETA_UNRELATED" not in environment
 
 
@@ -633,7 +683,7 @@ def test_pick_place_acceptance_parser_defaults_to_fast_v3() -> None:
 
 
 def test_task_variant_cannot_change_a_non_multi_physical_scene() -> None:
-    with pytest.raises(ValueError, match="only valid with --scenario multi_normal"):
+    with pytest.raises(ValueError, match="only valid with a multi-sort scenario"):
         acceptance._validated_task_variant("normal", "bolt-green-wrench-blue")
 
 
@@ -685,6 +735,18 @@ def test_normal_order_helper_requires_frozen_anyplace_pool_before_grasp() -> Non
     assert not acceptance._ordered(invalid, required)
 
 
+def test_acceptance_reports_agent_route_findings_without_failing_the_result() -> None:
+    assert acceptance._is_non_blocking_flow_finding(
+        "exactly one target-object and one placement-region SAM3 call is required"
+    )
+    assert acceptance._is_non_blocking_flow_finding(
+        "AnyPlace model inference count does not match assignments"
+    )
+    assert not acceptance._is_non_blocking_flow_finding(
+        "stable in-zone placement verification is missing per assignment"
+    )
+
+
 def _ordered_call(
     name: str,
     *,
@@ -708,7 +770,7 @@ def _ordered_call(
     }
 
 
-def test_assignment_order_ignores_failed_contact_and_uses_initial_create_observation() -> None:
+def test_assignment_order_uses_create_and_post_release_observations() -> None:
     first = "red_bolt_to_green_parts_bin"
     second = "yellow_wrench_to_blue_parts_bin"
     calls = [
@@ -743,7 +805,6 @@ def test_assignment_order_ignores_failed_contact_and_uses_initial_create_observa
             assignment_id=first,
         ),
         _ordered_call("gripper_control", parameters={"position": 1}, assignment_id=first),
-        _ordered_call("observe"),
         _ordered_call("anyplace", anyplace_inference=True),
         _ordered_call("graspgenx"),
         _ordered_call(
@@ -824,6 +885,7 @@ def test_normal_canonicalizes_public_grasp_tool_only_with_real_anygrasp_backend(
 
 def test_normal_requires_only_executable_public_grasp_tools() -> None:
     assert "grasp_pose_estimate" in acceptance.REQUIRED_REAL_PICK_PLACE_TOOLS
+    assert "observe" not in acceptance.REQUIRED_REAL_PICK_PLACE_TOOLS
     assert "anygrasp" not in acceptance.REQUIRED_REAL_PICK_PLACE_TOOLS
     assert "grasp_pose_estimate" not in acceptance._required_tools_for_backend("anygrasp")
     assert "anygrasp" in acceptance._required_tools_for_backend("anygrasp")

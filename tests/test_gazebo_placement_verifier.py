@@ -133,7 +133,7 @@ def test_stable_placement_requires_duration_drift_height_and_oriented_footprint(
     assert result.evidence["final_pose"]["quat_xyzw"] == [0.0, 0.0, 0.0, 1.0]
 
 
-def test_placement_rejects_terminal_drift_and_wrong_height() -> None:
+def test_visual_primary_placement_rejects_drift_and_support_penetration() -> None:
     config = NativePickPlaceConfig()
     center_x, center_y = config.destination_center_xy
     moving = [
@@ -145,21 +145,35 @@ def test_placement_rejects_terminal_drift_and_wrong_height() -> None:
     assert verify_stable_placement(moving).reason_code is PlacementReasonCode.TERMINAL_DRIFT
 
     expected = _supported_link_height(config)
-    wrong_height = [
+    penetrating = [
         _sample(
             stamp,
             (
                 center_x,
                 center_y - 0.035,
-                expected + config.placement_support_height_tolerance_m + 0.001,
+                expected
+                - config.placement_support_height_tolerance_m
+                - 0.001,
             ),
         )
         for stamp in (10.0, 10.3, 10.4, 10.5)
     ]
     assert (
-        verify_stable_placement(wrong_height).reason_code
-        is PlacementReasonCode.HEIGHT_OUT_OF_RANGE
+        verify_stable_placement(penetrating).reason_code
+        is PlacementReasonCode.SUPPORT_PENETRATION
     )
+
+    # A detached part may rest on another part or a bin feature. Geometry is
+    # only an obvious-failure veto for this visual-primary policy, so height
+    # above the nominal floor is not a millimetre-level rejection.
+    elevated = [
+        _sample(
+            stamp,
+            (center_x, center_y - 0.035, expected + 0.03),
+        )
+        for stamp in (10.0, 10.3, 10.4, 10.5)
+    ]
+    assert verify_stable_placement(elevated).verdict is Verdict.PASS
 
 
 def test_placement_height_follows_oriented_compound_support_geometry() -> None:
@@ -190,7 +204,10 @@ def test_placement_height_follows_oriented_compound_support_geometry() -> None:
 
 
 def test_placement_height_closed_boundary_tolerates_only_float_noise() -> None:
-    config = NativePickPlaceConfig()
+    config = replace(
+        NativePickPlaceConfig(),
+        placement_acceptance_semantics=PLACEMENT_ACCEPTANCE_COMPLETE_FOOTPRINT,
+    )
     center_x, center_y = config.destination_center_xy
     expected = _supported_link_height(config)
     boundary_noise = [
@@ -216,9 +233,9 @@ def test_placement_height_closed_boundary_tolerates_only_float_noise() -> None:
         for stamp in (10.0, 10.3, 10.4, 10.5)
     ]
 
-    assert verify_stable_placement(boundary_noise).reason_code is PlacementReasonCode.PLACED
+    assert verify_stable_placement(boundary_noise, config).reason_code is PlacementReasonCode.PLACED
     assert (
-        verify_stable_placement(outside_boundary).reason_code
+        verify_stable_placement(outside_boundary, config).reason_code
         is PlacementReasonCode.HEIGHT_OUT_OF_RANGE
     )
 
@@ -296,9 +313,13 @@ def test_physical_bin_accepts_stable_body_centroid_with_edge_overhang() -> None:
     assert result.evidence["placement_acceptance_semantics"] == (
         PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
     )
+    assert result.evidence["placement_acceptance_authority"] == (
+        "visual_primary_geometry_obvious_failure_guard"
+    )
+    assert result.evidence["complete_footprint_is_quality_only"] is True
 
 
-def test_physical_bin_rejects_stable_body_centroid_outside_region() -> None:
+def test_physical_bin_rejects_geometry_with_no_destination_overlap() -> None:
     center_x, center_y = NativePickPlaceConfig().destination_center_xy
     samples = [
         _sample(stamp, (center_x + 0.28, center_y - 0.035, 0.029))
@@ -307,8 +328,26 @@ def test_physical_bin_rejects_stable_body_centroid_outside_region() -> None:
 
     result = verify_stable_placement(samples)
 
-    assert result.reason_code is PlacementReasonCode.CENTROID_OUTSIDE_DESTINATION
+    assert result.reason_code is PlacementReasonCode.NO_DESTINATION_OVERLAP
     assert result.evidence["centroid_margin_xy_m"][0] < 0.0
+
+
+def test_visual_primary_bin_does_not_turn_small_boundary_error_into_failure() -> None:
+    config = NativePickPlaceConfig()
+    center_x, center_y = config.destination_center_xy
+    # The exact volume centroid is just outside the region, while the physical
+    # body still visibly overlaps it. This is intentionally left to the visual
+    # decision instead of a millimetre boundary gate.
+    samples = [
+        _sample(stamp, (center_x + config.destination_size_xy_m[0] / 2.0 + 0.002, center_y, 0.029))
+        for stamp in (10.0, 10.3, 10.4, 10.5)
+    ]
+
+    result = verify_stable_placement(samples, config)
+
+    assert result.verdict is Verdict.PASS
+    assert result.evidence["centroid_margin_xy_m"][0] < 0.0
+    assert result.evidence["destination_geometry_overlaps"] is True
 
 
 def test_offset_compound_body_uses_physical_bottom_after_tipping() -> None:

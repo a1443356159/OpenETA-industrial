@@ -2723,6 +2723,69 @@ def test_failed_contact_requalifies_frozen_frontier_from_proven_current_state() 
     assert memory.grasp_recovery() is None
 
 
+def test_displaced_contact_rebases_frozen_frontier_from_native_pose_sync() -> None:
+    active = {
+        **_candidate("grasp_000", 0.9),
+        "grasp_place_joint_qualified": True,
+    }
+    backup = {
+        **_candidate("grasp_001", 0.8),
+        "grasp_place_joint_qualified": True,
+    }
+    policy = {
+        "interaction_family": "rigid_object",
+        "status": "active",
+        "scene_epoch": 0,
+        "planning_scene_revision": 7,
+        "candidates": [active, backup],
+        "active_rank": 0,
+        "active_candidate": active,
+        "remaining_candidate_ids": [backup["id"]],
+        "rejected_candidates": [],
+        "failed_request_fingerprints": [],
+        "candidate_attempt_count": 0,
+        "max_candidate_attempts": 2,
+        "qualification_evidence": {"scene_epoch": 0},
+        "frozen_grasp_frontier_remaining_count": 12,
+    }
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "frozen_placement_goal_pool",
+        {"status": "ready"},
+        source="test",
+    )
+    memory.save_fact("scene_epoch", {"epoch": 3}, source="test")
+
+    assert memory._apply_anygrasp_candidate_rejection(
+        policy=policy,
+        active=active,
+        rejection={
+            "source": "candidate_motion_rejected",
+            "target_tool": "move_to",
+            "grasp_stage": "contact",
+            "reason": "GRASP_CONTACT_TARGET_DISPLACED",
+            "execution_started": True,
+            "planning_scene_revision": 8,
+            "source_planning_scene_revision": 7,
+            "detached_target_rebase_safe": True,
+        },
+    )
+
+    assert policy["status"] == "frozen_frontier_required"
+    assert policy["active_candidate"] is None
+    assert policy["frozen_grasp_frontier_rebase_pending"] == {
+        "schema_version": "openeta.frozen_grasp_frontier_rebase_pending.v1",
+        "reason_code": "FAILED_CONTACT_TARGET_POSE_SYNC_REQUIRED",
+        "source_planning_scene_revision": 7,
+        "physically_rejected_candidate_id": "grasp_000",
+        "required_proof": (
+            "detached_native_target_pose_sync_with_unchanged_static_scene"
+        ),
+        "model_inference_invoked": False,
+    }
+
+
 def test_native_target_pose_sync_is_retained_for_host_frozen_frontier_rebase() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick and place")
