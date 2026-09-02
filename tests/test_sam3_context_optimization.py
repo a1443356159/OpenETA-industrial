@@ -1644,6 +1644,7 @@ def _grasp_target_retry_obligation(
     attempts: list[dict[str, object]],
     *,
     prompt: str = "red rectangular block",
+    available_tool_names: set[str] | None = None,
 ) -> dict[str, object]:
     obligation = _semantic_perception_obligation(
         observation=EnvObservation(
@@ -1668,6 +1669,7 @@ def _grasp_target_retry_obligation(
                 "attempts": attempts,
             },
         },
+        available_tool_names=available_tool_names,
     )
     assert obligation is not None
     return obligation
@@ -1771,6 +1773,87 @@ def test_grasp_target_text_budget_advances_to_visual_point_localization() -> Non
     assert obligation["status"] == "required"
     assert obligation["required_tool"] == "molmopoint"
     assert obligation["fallback"] == "point_localization_after_bounded_text_views"
+
+
+def test_missing_molmopoint_advances_to_provider_grounded_active_view() -> None:
+    attempts = [
+        _failed_grasp_target_attempt(
+            source_image=source,
+            prompt=prompt,
+            attempt_id=attempt_id,
+        )
+        for source, prompt, attempt_id in (
+            ("/tmp/top.png", "red rectangular block", "top-exact"),
+            ("/tmp/wrist.png", "red rectangular block", "wrist-exact"),
+            ("/tmp/top.png", "red block", "top-simplified"),
+        )
+    ]
+
+    obligation = _grasp_target_retry_obligation(
+        attempts,
+        available_tool_names={"observe", "sam3", "active_observe"},
+    )
+
+    assert obligation["status"] == "required"
+    assert obligation["required_tool"] == "active_observe"
+    assert obligation["required_parameters"] == {
+        "semantic_target": "red rectangular block",
+        "semantic_role": "grasp_target",
+        "quality_profile": "grasp_rgbd",
+        "max_motion_attempts": 2,
+    }
+    assert obligation["fallback"] == (
+        "active_view_with_isolated_provider_grounding"
+    )
+
+    phase, legal = _model_phase_and_legal_tools(
+        {
+            "semantic_perception_obligation": obligation,
+            "active_environment_task": {"env_id": "openeta/test-v0"},
+            "tool_references": [
+                {"name": "observe"},
+                {"name": "sam3"},
+                {"name": "active_observe"},
+            ],
+        },
+        max_tools=8,
+    )
+    assert phase == "target_perception"
+    assert legal[0] == "active_observe"
+
+
+def test_missing_all_point_localizers_exhausts_instead_of_observe_loop() -> None:
+    attempts = [
+        _failed_grasp_target_attempt(
+            source_image=source,
+            prompt=prompt,
+            attempt_id=attempt_id,
+        )
+        for source, prompt, attempt_id in (
+            ("/tmp/top.png", "red rectangular block", "top-exact"),
+            ("/tmp/wrist.png", "red rectangular block", "wrist-exact"),
+            ("/tmp/top.png", "red block", "top-simplified"),
+        )
+    ]
+
+    obligation = _grasp_target_retry_obligation(
+        attempts,
+        available_tool_names={"observe", "sam3"},
+    )
+
+    assert obligation["status"] == "exhausted"
+    assert obligation["failure_code"] == (
+        "grasp_target_point_localizer_unavailable"
+    )
+    phase, legal = _model_phase_and_legal_tools(
+        {
+            "semantic_perception_obligation": obligation,
+            "tool_references": [{"name": "observe"}, {"name": "sam3"}],
+        },
+        max_tools=8,
+    )
+    assert phase == "semantic_perception_exhausted"
+    assert legal == []
 
 
 def test_failed_point_segmentation_advances_to_host_bound_active_view() -> None:

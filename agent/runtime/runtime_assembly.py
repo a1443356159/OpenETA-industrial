@@ -46,7 +46,9 @@ from agent.runtime.pipeline import ActionPipeline
 from agent.runtime.planner import PlannerContextConfig, ToolCallingPlanner
 from agent.runtime.reference_localization import (
     REFERENCE_POINT_LOCALIZATION_MAX_OUTPUT_TOKENS,
+    SEMANTIC_POINT_LOCALIZATION_MAX_OUTPUT_TOKENS,
     BackendReferencePointLocalizer,
+    BackendSemanticPointLocalizer,
 )
 from agent.runtime.runtime import OpenEtaAgentRuntime
 from agent.runtime.self_improvement import (
@@ -548,6 +550,12 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
             candidate_qualifier=qualifier,
             simulator_proxy=active_proxy,
             sam3_handler=tools.bound_handler("sam3"),
+            semantic_localizer=BackendSemanticPointLocalizer(
+                config.backend_factory(
+                    max_tokens=SEMANTIC_POINT_LOCALIZATION_MAX_OUTPUT_TOKENS,
+                    max_vision_images=1,
+                )
+            ),
             move_spec=tools.get("move_to"),
             observe_spec=tools.get("observe"),
             sam3_spec=tools.get("sam3"),

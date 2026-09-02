@@ -8,7 +8,9 @@ import numpy as np
 from PIL import Image
 
 from adapter.protocol import CameraFrame, EnvObservation, RobotState
+from agent.backends.planner import CallablePlannerBackend
 from agent.runtime.qualification_v3 import schedule_candidate_waves
+from agent.runtime.reference_localization import BackendSemanticPointLocalizer
 from agent.tools.active_vision import ActiveVisionController
 from agent.tools.registry import (
     TOOL_PROFILE_GAZEBO_INDUSTRIAL,
@@ -172,6 +174,7 @@ def _controller(
     *,
     proxy: Any = None,
     sam3_handler: Any = None,
+    semantic_localizer: Any = None,
 ) -> ActiveVisionController:
     tools = build_default_tool_registry()
     return ActiveVisionController(
@@ -179,6 +182,7 @@ def _controller(
         candidate_qualifier=None,
         simulator_proxy=proxy,
         sam3_handler=sam3_handler,
+        semantic_localizer=semantic_localizer,
         move_spec=tools.get("move_to"),
         observe_spec=tools.get("observe"),
         sam3_spec=tools.get("sam3"),
@@ -492,6 +496,103 @@ def test_active_observe_searches_from_calibrated_visual_point_without_mask(
     assert len(sam_calls) == 1
     assert sam_calls[0]["mode"] == "points"
     assert sam_calls[0]["semantic_target"] == "red hex bolt"
+
+
+def test_active_observe_can_seed_search_with_isolated_provider_point(
+    tmp_path: Path,
+) -> None:
+    top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
+    wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
+    _save_rgb(top_rgb)
+    _save_rgb(wrist_rgb)
+    target_depth = np.zeros((120, 160), dtype=bool)
+    target_depth[56:65, 76:85] = True
+    _save_depth(top_depth, millimetres=980, mask=target_depth)
+    _save_depth(wrist_depth)
+    observation = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=wrist_rgb,
+        wrist_depth=wrist_depth,
+    )
+    requests = []
+
+    def localize(request):
+        requests.append(request)
+        return {
+            "decision": "locate",
+            "point": {"x": 80.0, "y": 60.0},
+            "bbox_xyxy": [76.0, 56.0, 85.0, 65.0],
+            "confidence": 0.87,
+            "reason": "unique red bolt material remains visible",
+        }
+
+    semantic_localizer = BackendSemanticPointLocalizer(
+        CallablePlannerBackend(localize, provider="fixture-vlm", model="fixture-vision")
+    )
+    controller = _controller(tmp_path, semantic_localizer=semantic_localizer)
+    context = _search_context(controller, observation, source_image=top_rgb)
+    context.parameters.pop("target_hint")
+
+    result = controller.handler(context)
+
+    assert result.success is False
+    assert result.details["outputs"]["status"] == "infrastructure_error"
+    assert result.details["outputs"]["stop_reason"] == (
+        "active_vision_motion_backend_unavailable"
+    )
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.conversation_messages == []
+    assert request.tool_context["semantic_target"] == "red hex bolt"
+    assert request.tool_context["scene_image_size"] == {"width": 160, "height": 120}
+    assert request.tool_context["vision_image_paths"] == [str(top_rgb.resolve())]
+    localization = result.details["outputs"]["semantic_point_localization"]
+    assert localization["source"] == "isolated_provider_visual_grounding"
+    assert localization["point_xy"] == [80.0, 60.0]
+    assert localization["provider"] == "fixture-vlm"
+    assert result.details["outputs"]["target_hint"]["source_image"] == str(
+        top_rgb.resolve()
+    )
+
+
+def test_active_observe_records_provider_abstention_without_motion(
+    tmp_path: Path,
+) -> None:
+    top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
+    wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
+    _save_rgb(top_rgb)
+    _save_rgb(wrist_rgb)
+    _save_depth(top_depth, millimetres=980)
+    _save_depth(wrist_depth)
+    observation = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=wrist_rgb,
+        wrist_depth=wrist_depth,
+    )
+    semantic_localizer = BackendSemanticPointLocalizer(
+        CallablePlannerBackend(
+            lambda _: {
+                "decision": "abstain",
+                "point": None,
+                "bbox_xyxy": None,
+                "confidence": 0,
+                "reason": "target is fully occluded",
+            }
+        )
+    )
+    controller = _controller(tmp_path, semantic_localizer=semantic_localizer)
+    context = _search_context(controller, observation, source_image=top_rgb)
+    context.parameters.pop("target_hint")
+
+    result = controller.handler(context)
+
+    assert result.success is False
+    assert result.details["outputs"]["status"] == "exhausted"
+    assert result.details["outputs"]["stop_reason"] == (
+        "semantic_point_localization_abstained"
+    )
 
 
 def test_gazebo_industrial_profile_hides_irrelevant_tools_without_deleting_specs() -> None:

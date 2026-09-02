@@ -5474,6 +5474,7 @@ def _build_tool_context_payload(
             observation=observation,
             camera_artifacts=camera_artifacts,
             memory_context=memory_context,
+            available_tool_names={tool.name for tool in executable_tools},
         ),
         "grasp_view_selection_obligation": (
             {
@@ -6962,6 +6963,7 @@ def _semantic_perception_obligation(
     observation: EnvObservation,
     camera_artifacts: list[JsonDict],
     memory_context: JsonDict,
+    available_tool_names: set[str] | None = None,
 ) -> JsonDict | None:
     """Describe the one legal semantic role without asking the model to track phase."""
 
@@ -7357,6 +7359,12 @@ def _semantic_perception_obligation(
             )
             or semantic_role
         )
+        molmopoint_available = (
+            available_tool_names is None or "molmopoint" in available_tool_names
+        )
+        active_observe_available = (
+            available_tool_names is None or "active_observe" in available_tool_names
+        )
         if semantic_role == "grasp_target":
             active_search_attempts = [
                 attempt
@@ -7379,6 +7387,7 @@ def _semantic_perception_obligation(
                 and hint_points
                 and hint_source
                 and not active_search_attempts
+                and active_observe_available
             ):
                 return {
                     **base,
@@ -7424,12 +7433,40 @@ def _semantic_perception_obligation(
                     "fallback": "bounded_active_view_frontier_exhausted",
                     "infrastructure_error": infrastructure,
                 }
+            if not molmopoint_available and active_observe_available:
+                return {
+                    **base,
+                    "status": "required",
+                    "required_tool": "active_observe",
+                    "required_parameters": {
+                        "semantic_target": prompt,
+                        "semantic_role": "grasp_target",
+                        "quality_profile": "grasp_rgbd",
+                        "max_motion_attempts": 2,
+                    },
+                    "fallback": "active_view_with_isolated_provider_grounding",
+                    "attempt": 1,
+                    "rule": (
+                        "The configured point service is unavailable. active_observe "
+                        "may isolate the current provider for one bounded visual point, "
+                        "then owns calibrated depth, view geometry, SAM3, and MoveIt proof."
+                    ),
+                }
         if point_attempts >= 2:
             return {
                 **base,
                 "status": "exhausted",
                 "failure_code": f"{semantic_role}_localization_exhausted",
                 "attempts": point_attempts,
+            }
+        if not molmopoint_available:
+            return {
+                **base,
+                "status": "exhausted",
+                "failure_code": f"{semantic_role}_point_localizer_unavailable",
+                "attempts": point_attempts,
+                "fallback": "no_executable_semantic_localizer",
+                "infrastructure_error": True,
             }
         return {
             **base,

@@ -17,7 +17,7 @@ import math
 from pathlib import Path
 import re
 import threading
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 from PIL import Image
@@ -25,6 +25,10 @@ from PIL import Image
 from adapter.protocol import EnvObservation, JsonDict
 from agent.runtime.artifact_paths import artifact_session_id, artifact_session_root
 from agent.runtime.moveit_qualification import MoveItCandidateQualifier, QualificationCache
+from agent.runtime.reference_localization import (
+    ReferencePointLocalization,
+    SemanticPointLocalizationError,
+)
 from agent.tools.registry import (
     ToolExecutionContext,
     ToolHandler,
@@ -74,6 +78,19 @@ class TargetEvidence:
     bbox_xyxy: tuple[int, int, int, int] | None
 
 
+class SemanticPointLocalizer(Protocol):
+    """Fresh-context visual localizer used only to seed active perception."""
+
+    def localize(
+        self,
+        *,
+        semantic_target: str,
+        scene_image: Path,
+        image_size: tuple[int, int],
+    ) -> ReferencePointLocalization:
+        """Return one audited current-image foreground point or abstain."""
+
+
 class ActiveVisionError(RuntimeError):
     def __init__(self, code: str, message: str, *, infrastructure: bool = False) -> None:
         super().__init__(message)
@@ -91,6 +108,7 @@ class ActiveVisionController:
         candidate_qualifier: MoveItCandidateQualifier | None,
         simulator_proxy: SimulatorMcpToolProxy | None,
         sam3_handler: ToolHandler | None,
+        semantic_localizer: SemanticPointLocalizer | None = None,
         move_spec: ToolSpec,
         observe_spec: ToolSpec,
         sam3_spec: ToolSpec,
@@ -100,6 +118,7 @@ class ActiveVisionController:
         self.qualifier = _fast_observation_qualifier(candidate_qualifier)
         self.simulator_proxy = simulator_proxy
         self.sam3_handler = sam3_handler
+        self.semantic_localizer = semantic_localizer
         self.move_spec = move_spec
         self.observe_spec = observe_spec
         self.sam3_spec = sam3_spec
@@ -215,8 +234,42 @@ class ActiveVisionController:
 
         search_mode = not evidence_id
         if search_mode:
+            target_hint = params.get("target_hint")
+            if target_hint is None:
+                if self.semantic_localizer is None:
+                    raise ActiveVisionError(
+                        "semantic_point_localizer_unavailable",
+                        "semantic search requires either a host point or the isolated provider localizer",
+                        infrastructure=True,
+                    )
+                source_rgb, image_size = _semantic_search_source_image(observation)
+                try:
+                    localization = self.semantic_localizer.localize(
+                        semantic_target=semantic_target,
+                        scene_image=source_rgb,
+                        image_size=image_size,
+                    )
+                except SemanticPointLocalizationError as exc:
+                    raise ActiveVisionError(
+                        exc.code,
+                        str(exc),
+                        infrastructure=exc.infrastructure,
+                    ) from exc
+                except Exception as exc:  # noqa: BLE001 - custom localizer boundary.
+                    raise ActiveVisionError(
+                        "semantic_point_localization_provider_error",
+                        f"isolated visual localizer failed: {exc}",
+                        infrastructure=True,
+                    ) from exc
+                localization_receipt = _semantic_localization_receipt(localization)
+                target_hint = {
+                    "source_image": str(source_rgb),
+                    "positive_points": [localization.as_prompt_point()],
+                    "source": "isolated_provider_visual_grounding",
+                }
+                record["semantic_point_localization"] = localization_receipt
             target_center, target_extent, hint_receipt = _target_hint_world_geometry(
-                params.get("target_hint"),
+                target_hint,
                 observation=observation,
                 artifact_root=self.artifact_root,
             )
@@ -687,6 +740,11 @@ class ActiveVisionController:
                 if isinstance(record.get("target_hint"), Mapping)
                 else None
             ),
+            "semantic_point_localization": (
+                dict(record.get("semantic_point_localization") or {})
+                if isinstance(record.get("semantic_point_localization"), Mapping)
+                else None
+            ),
             "observation_bundle_id": observation_bundle_id or None,
             "viewpoint_id": viewpoint_id or None,
             "motion_count": int(motion_count),
@@ -764,6 +822,7 @@ def build_active_observe_handler(
     candidate_qualifier: MoveItCandidateQualifier | None,
     simulator_proxy: SimulatorMcpToolProxy | None,
     sam3_handler: ToolHandler | None,
+    semantic_localizer: SemanticPointLocalizer | None = None,
     move_spec: ToolSpec,
     observe_spec: ToolSpec,
     sam3_spec: ToolSpec,
@@ -775,6 +834,7 @@ def build_active_observe_handler(
         candidate_qualifier=candidate_qualifier,
         simulator_proxy=simulator_proxy,
         sam3_handler=sam3_handler,
+        semantic_localizer=semantic_localizer,
         move_spec=move_spec,
         observe_spec=observe_spec,
         sam3_spec=sam3_spec,
@@ -1195,6 +1255,71 @@ def _wrist_rgbd_packet(observation: EnvObservation) -> JsonDict:
         "wrist_rgbd_unavailable",
         "current observation has no complete calibrated wrist RGB-D packet",
     )
+
+
+def _semantic_search_source_image(
+    observation: EnvObservation,
+) -> tuple[Path, tuple[int, int]]:
+    """Choose one current calibrated scene RGB image without sample-specific hints."""
+
+    artifacts = observation.metadata.get("image_artifacts")
+    artifacts = artifacts if isinstance(artifacts, list) else []
+    camera_by_frame = {camera.frame_id: camera for camera in observation.cameras}
+    candidates: list[tuple[tuple[int, int, int], Path]] = []
+    for index, artifact in enumerate(artifacts):
+        if not (
+            isinstance(artifact, Mapping)
+            and artifact.get("kind") == "rgb"
+            and isinstance(artifact.get("path"), str)
+        ):
+            continue
+        path = Path(str(artifact["path"])).expanduser()
+        if not path.is_file():
+            continue
+        frame_id = str(artifact.get("frame_id") or "")
+        camera = camera_by_frame.get(frame_id)
+        if camera is None or not camera.intrinsics or not camera.extrinsics:
+            continue
+        role = f"{artifact.get('role') or ''} {camera.role or ''} {frame_id}".lower()
+        is_wrist = "wrist" in role
+        is_primary = "primary" in role
+        candidates.append(((int(is_wrist), int(not is_primary), index), path.resolve()))
+    for _, source_rgb in sorted(candidates, key=lambda item: item[0]):
+        try:
+            _camera_packet_for_source(observation, source_rgb=source_rgb, frame_id="")
+            with Image.open(source_rgb) as image:
+                width, height = image.size
+        except (ActiveVisionError, OSError, ValueError):
+            continue
+        if width > 0 and height > 0:
+            return source_rgb, (int(width), int(height))
+    raise ActiveVisionError(
+        "semantic_search_rgbd_unavailable",
+        "current observation has no complete calibrated RGB-D image for visual grounding",
+        infrastructure=True,
+    )
+
+
+def _semantic_localization_receipt(
+    localization: ReferencePointLocalization,
+) -> JsonDict:
+    details = localization.details if isinstance(localization.details, dict) else {}
+    return {
+        "schema_version": "openeta.semantic_point_localization.v1",
+        "source": "isolated_provider_visual_grounding",
+        "point_xy": [round(localization.x, 3), round(localization.y, 3)],
+        "bbox_xyxy": (
+            [round(value, 3) for value in localization.bbox_xyxy]
+            if localization.bbox_xyxy is not None
+            else None
+        ),
+        "confidence": round(localization.confidence, 6),
+        "reason": localization.reason,
+        "provider": localization.provider,
+        "model": localization.model,
+        "latency_s": details.get("latency_s"),
+        "provider_details": dict(details.get("provider_details") or {}),
+    }
 
 
 def _mechanical_camera_preflight(wrist: Mapping[str, Any]) -> JsonDict:

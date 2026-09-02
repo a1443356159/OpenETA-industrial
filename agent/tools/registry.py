@@ -909,8 +909,9 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             category="perception",
             description=(
                 "Acquire a grasp-quality RGB-D view of a grounded target, or recover "
-                "from bounded text/point segmentation failure using the retained "
-                "calibrated visual point. The host deterministically generates and "
+                "from bounded text/point segmentation failure using a retained "
+                "calibrated visual point or one isolated provider-grounded point. "
+                "The host deterministically generates and "
                 "MoveIt-qualifies wrist-camera viewpoints before executing at most "
                 "two frozen alternatives. It never reruns grasp or placement "
                 "generation and never invents manipulation waypoints."
@@ -918,14 +919,15 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             parameters={
                 "target_evidence_id": (
                     "selected SAM3 result_id for grounded refinement; omit only when "
-                    "the host supplies target_hint for semantic search"
+                    "the host selects semantic search"
                 ),
                 "semantic_target": (
                     "required target phrase when target_evidence_id is unavailable"
                 ),
                 "target_hint": (
-                    "host-retained current RGB path and foreground point from bounded "
-                    "visual localization; never an agent-authored pose"
+                    "optional host-retained current RGB path and foreground point; "
+                    "when omitted, the tool may isolate the configured VLM for one "
+                    "bounded point localization; never an agent-authored pose"
                 ),
                 "semantic_role": "grasp_target; v1 supports pre-contact grasp observation",
                 "quality_profile": "grasp_rgbd",
