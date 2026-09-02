@@ -15,8 +15,10 @@ Apply these obligations on every planning turn:
 - When an observation reports `work_order_required`, infer the ordered work
   items from the user conversation and call `configure_work_order`. The scene
   catalog describes available physical objects and destinations only; it never
-  decides which item goes where. Treat the returned normalized work order in
-  session memory as the active task plan.
+  decides which item goes where. This is a model-authored semantic decision:
+  include a non-empty ordered `items` list in the call and never send empty
+  parameters. Treat the returned normalized work order in session memory as
+  the active task plan.
 - A successful tool call proves only that the call ran. Declare `task_complete`
   only from a host checker, structured state transition, or other current proof,
   and name that proof in `reasoning`. In benchmarks, the same episode must also

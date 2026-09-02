@@ -2292,6 +2292,8 @@ def _validate_tool_batch(parameters: JsonDict, tools: ToolRegistry) -> list[str]
 
 
 def _validate_tool_parameters(tool_name: str, parameters: JsonDict) -> list[str]:
+    if tool_name == "configure_work_order":
+        return _validate_configure_work_order_parameters(parameters)
     if tool_name == "web_search":
         return _validate_web_search_parameters(parameters)
     if tool_name == "web_fetch":
@@ -2344,6 +2346,29 @@ def _validate_tool_parameters(tool_name: str, parameters: JsonDict) -> list[str]
                 + ", ".join(missing)
                 + ". Copy fx/fy/cx/cy/scale from the same observe/render camera metadata."
             )
+    return errors
+
+
+def _validate_configure_work_order_parameters(parameters: JsonDict) -> list[str]:
+    items = parameters.get("items")
+    if not isinstance(items, list) or not items:
+        return [
+            "configure_work_order is model-authored and requires a non-empty "
+            "`parameters.items` list inferred from the user's request; it is not "
+            "host_hydrated and parameters={} is invalid."
+        ]
+
+    errors: list[str] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            errors.append(f"configure_work_order item {index} must be an object.")
+            continue
+        for field in ("target_prompt", "placement_region_prompt"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value.strip():
+                errors.append(
+                    f"configure_work_order item {index} requires a non-empty `{field}`."
+                )
     return errors
 
 
@@ -2911,8 +2936,12 @@ def _default_tool_planner_system_prompt() -> str:
         "tool_context.controller gives the current phase and legal tools. In "
         "planner_mode=agentic_closed_loop, tool_context.obligations are host safety and "
         "geometry constraints, not decisions: explicitly choose the next legal tool and "
-        "when parameter_mode=host_hydrated return parameters={} so the host can inject "
-        "the immutable payload bound by parameter_binding_sha256. If more than one "
+        "only when an obligation explicitly declares parameter_mode=host_hydrated "
+        "return parameters={} so the host can inject the immutable payload bound by "
+        "parameter_binding_sha256. An absent parameter_mode, or "
+        "parameter_mode=model_authored, requires the model to supply the documented "
+        "semantic parameters; configure_work_order always requires a non-empty ordered "
+        "items list. If more than one "
         "binding exists for the chosen tool, return only "
         'parameters={"obligation_ref": "<parameter_binding_sha256>"}. Never invent '
         "or reconstruct host-owned paths, poses, or calibration. tool_context.state is the "
@@ -4493,9 +4522,11 @@ def _model_request_context(
             "phase": phase,
             "legal_tool_names": legal_tool_names,
             "rule": (
-                "Choose the next tool or terminal response explicitly. A typed "
-                "obligation with parameter_mode=host_hydrated requires parameters={}; "
-                "the host injects the immutable payload selected by its binding hash. "
+                "Choose the next tool or terminal response explicitly. Only an "
+                "obligation that explicitly declares parameter_mode=host_hydrated "
+                "requires parameters={}; the host injects the immutable payload selected "
+                "by its binding hash. If parameter_mode is absent or model_authored, "
+                "supply the required semantic parameters yourself. "
                 "When the chosen tool has multiple bindings, send only obligation_ref. "
                 "The host owns geometry, candidate joins, bounded infrastructure retries, "
                 "safety proofs, and execution details."
@@ -7108,13 +7139,15 @@ def _work_order_obligation(
     return {
         "schema_version": "openeta.work_order_obligation.v1",
         "status": "semantic_decision_required",
+        "parameter_mode": "model_authored",
         "required_tool": "configure_work_order",
         "manipulation_catalog": dict(catalog),
         "required_item_fields": ["target_prompt", "placement_region_prompt"],
         "rule": (
             "Read the user's current request, preserve its requested item order, and "
             "call configure_work_order with semantic target/destination prompts. The "
-            "environment may validate the catalog but must not choose the task."
+            "environment may validate the catalog but must not choose the task. Supply "
+            "a non-empty ordered items list; parameters={} is invalid."
         ),
     }
 

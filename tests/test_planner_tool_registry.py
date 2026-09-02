@@ -367,11 +367,71 @@ def test_vlm_configures_task_neutral_workcell_from_user_conversation() -> None:
     assert model_context["obligations"]["work_order_obligation"][
         "manipulation_catalog"
     ] == catalog
+    assert model_context["obligations"]["work_order_obligation"][
+        "parameter_mode"
+    ] == "model_authored"
+    assert "absent parameter_mode" in _default_tool_planner_system_prompt().lower()
     assert decision.action == "configure_work_order"
     assert decision.parameters["items"][0] == {
         "target_prompt": "red hex bolt",
         "placement_region_prompt": "blue parts bin",
     }
+
+
+def test_empty_work_order_is_rejected_before_tool_dispatch_and_replanned() -> None:
+    user_request = "put the bolt in the blue bin"
+    observation = EnvObservation(
+        task="normal pick and place",
+        cameras=[],
+        robot=RobotState(),
+        metadata={
+            "manipulation_catalog": {
+                "schema_version": "openeta.manipulation_catalog.v1",
+                "targets": [{"target_prompt": "red hex bolt"}],
+                "placement_regions": [{"prompt": "blue parts bin"}],
+            },
+            "work_order_required": True,
+        },
+    )
+    memory = AgentMemory()
+    memory.start_session(task=user_request)
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        parameters = {}
+        if len(requests) == 2:
+            parameters = {
+                "items": [
+                    {
+                        "target_prompt": "red hex bolt",
+                        "placement_region_prompt": "blue parts bin",
+                    }
+                ]
+            }
+        return {
+            "kind": "tool_call",
+            "name": "configure_work_order",
+            "parameters": parameters,
+        }
+
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(decide),
+        max_validation_retries=1,
+    )
+    decision = planner.plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert len(requests) == 2
+    assert requests[0].validation_errors == []
+    assert "model-authored" in requests[1].validation_errors[0]
+    assert decision.action == "configure_work_order"
+    assert decision.parameters["items"][0]["target_prompt"] == "red hex bolt"
+    assert decision.metadata["validation_attempts"] == 2
 
 
 def test_environment_normalized_work_order_is_persisted_in_memory() -> None:
