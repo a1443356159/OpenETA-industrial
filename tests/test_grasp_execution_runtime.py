@@ -204,7 +204,7 @@ def test_zero_moveit_pass_reestimates_same_grasp_backend_with_fresh_observation(
     assert reestimate["attempt_count"] == 1
 
 
-def test_zero_pass_frozen_model_pool_requests_fresh_agentic_cycle() -> None:
+def test_zero_pass_frozen_model_pool_requests_fresh_agentic_cycle(tmp_path: Path) -> None:
     memory = AgentMemory()
     memory.start_session(task="pick the red block and place it in the green zone")
     memory.add_observation(EnvObservation(task="pick and place", cameras=[], robot=RobotState()))
@@ -228,6 +228,10 @@ def test_zero_pass_frozen_model_pool_requests_fresh_agentic_cycle() -> None:
         {"status": "ready", "goal_count": 96},
         source="test",
     )
+    memory.artifacts["anyplace_placement_candidates_latest"] = {
+        "value": {"type": "placement_candidates", "candidate_count": 96},
+        "source": "test",
+    }
 
     outputs = {
         "result_id": "g0",
@@ -252,13 +256,177 @@ def test_zero_pass_frozen_model_pool_requests_fresh_agentic_cycle() -> None:
     reestimate = memory.grasp_reestimation()
     assert reestimate["status"] == "pending_observation"
     assert reestimate["reason"] == "moveit_qualification_zero_pass"
-    assert reestimate["invalidate_frozen_placement_pool"] is True
+    assert reestimate["invalidate_frozen_placement_pool"] is False
+    assert reestimate["preserve_frozen_placement_pool"] is True
+    assert reestimate["recovery_strategy"] == "passive_multiview_resegmentation"
     policy = memory.grasp_candidate_policy()
     assert policy["status"] == "exhausted"
     assert policy["stop_reason"] == "frozen_grasp_place_pool_exhausted"
     assert policy["model_inference_retry_allowed"] is True
     assert policy["frozen_pair_count"] == 384
     assert "reestimate_required" not in policy
+
+    memory.add_observation(
+        EnvObservation(
+            task="pick and place",
+            cameras=[
+                CameraFrame(
+                    frame_id="wrist",
+                    rgb=[[[0, 0, 0]]],
+                    depth=[[1.0]],
+                    intrinsics={"fx": 1.0, "fy": 1.0, "cx": 0.0, "cy": 0.0},
+                )
+            ],
+            robot=RobotState(),
+            metadata={
+                "image_artifacts": [
+                    {
+                        "kind": "rgb",
+                        "frame_id": "wrist",
+                        "path": str(tmp_path / "rgb.png"),
+                    },
+                    {
+                        "kind": "depth",
+                        "frame_id": "wrist",
+                        "path": str(tmp_path / "depth.png"),
+                    },
+                ]
+            },
+        )
+    )
+    assert memory.grasp_reestimation()["status"] == "ready"
+    assert memory.frozen_placement_goal_pool()["goal_count"] == 96
+    assert "anyplace_placement_candidates_latest" in memory.artifacts
+
+
+def test_geometry_mismatch_uses_active_view_without_rebuilding_anyplace() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red bolt and place it in the green bin")
+    memory.add_observation(EnvObservation(task="pick and place", cameras=[], robot=RobotState()))
+    memory.save_fact(
+        "placement_object_detection",
+        {"target_prompt": "red bolt"},
+        source="test",
+    )
+    memory.save_fact(
+        "frozen_placement_goal_pool",
+        {"status": "ready", "goal_count": 96},
+        source="test",
+    )
+    memory.artifacts["anyplace_placement_candidates_latest"] = {
+        "value": {"type": "placement_candidates", "candidate_count": 96},
+        "source": "test",
+    }
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "misaligned-grasps",
+                "selected_backend": "graspgenx",
+                "source_rgb": "top.png",
+                "camera_frame_id": "top",
+                "source": {"rgb": "top.png", "camera_frame_id": "top"},
+                "grasp_candidates": [],
+                "generated_candidate_count": 512,
+                "qualification_evidence": {
+                    "metrics": {
+                        "grasp_scene_alignment_evaluated_count": 512,
+                        "grasp_scene_alignment_aperture_risk_count": 512,
+                    },
+                },
+                "rejection_reason_counts": {
+                    "kinematic_ik_failed": 310,
+                    "collision_state_invalid": 176,
+                    "terminal_gripper_state_invalid": 26,
+                },
+                "frozen_pair_count": 384,
+                "frozen_pair_grasp_branch_limit": 4,
+                "frozen_pair_lookahead_grasp_count": 4,
+                "frozen_pair_full_plan_pass_count": 0,
+            },
+        )
+    )
+
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["recovery_strategy"] == "active_view_relocalization"
+    assert reestimate["requires_viewpoint_change"] is True
+    assert reestimate["preserve_frozen_placement_pool"] is True
+
+    detection = {
+        "id": "active-red-bolt",
+        "label": "red bolt",
+        "mask_ref": "active-red-bolt.mask.png",
+    }
+    memory.add_action(
+        _tool_action(
+            "active_observe",
+            {
+                "semantic_target": "red bolt",
+                "semantic_role": "grasp_target",
+                "quality_profile": "grasp_rgbd",
+                "max_motion_attempts": 2,
+            },
+            outputs={
+                "status": "acquired",
+                "active_vision_mode": "semantic_search",
+                "active_vision_attempt_id": "active-observe-red-bolt",
+                "active_vision_attempt_fingerprint": "active-fingerprint",
+                "result_id": "active-sam-red-bolt",
+                "semantic_role": "grasp_target",
+                "semantic_target": "red bolt",
+                "scene_epoch": 0,
+                "source_image": "active-wrist.png",
+                "source_frame_id": "wrist_camera_optical_frame",
+                "detections": [detection],
+                "selected_detection": detection,
+                "selection_review": {
+                    "decision": "select",
+                    "detection_id": "active-red-bolt",
+                    "selection_source": "active_vision_point_depth_geometry",
+                },
+            },
+        )
+    )
+
+    assert memory.grasp_reestimation()["status"] == "target_ready"
+    assert memory.selected_sam3_detection()["result_id"] == "active-sam-red-bolt"
+    assert memory.frozen_placement_goal_pool()["goal_count"] == 96
+    assert "anyplace_placement_candidates_latest" in memory.artifacts
+
+
+def test_geometry_mismatch_does_not_repeat_an_exhausted_active_view() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red bolt")
+    memory.save_fact(
+        "grasp_reestimation",
+        {
+            "status": "pending_observation",
+            "target_prompt": "red bolt",
+            "recovery_strategy": "active_view_relocalization",
+            "requires_viewpoint_change": True,
+        },
+        source="test",
+    )
+    memory.add_action(
+        _tool_action(
+            "active_observe",
+            {"semantic_target": "red bolt"},
+            success=False,
+            outputs={
+                "status": "exhausted",
+                "active_vision_mode": "semantic_search",
+                "active_vision_attempt_id": "active-observe-red-bolt",
+                "semantic_role": "grasp_target",
+                "semantic_target": "red bolt",
+                "stop_reason": "bounded_view_frontier_exhausted",
+            },
+        )
+    )
+
+    reestimate = memory.grasp_reestimation()
+    assert reestimate["status"] == "active_view_exhausted"
+    assert reestimate["active_vision_stop_reason"] == "bounded_view_frontier_exhausted"
 
 
 def test_zero_pass_reestimate_waits_for_a_new_complete_rgbd_packet(

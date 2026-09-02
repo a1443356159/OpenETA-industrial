@@ -493,10 +493,11 @@ class AgentMemory:
             "grasp_pose_estimate_grasp_candidates_latest",
             "graspgenx_grasp_candidates_latest",
             "contact_graspnet_grasp_candidates_latest",
-            "anyplace_placement_candidates_latest",
             "camera_pose_to_world_world_pose_latest",
         ):
             self.artifacts.pop(key, None)
+        if reestimate.get("invalidate_frozen_placement_pool") is True:
+            self.artifacts.pop("anyplace_placement_candidates_latest", None)
         self.record("grasp_reestimate_ready", dict(reestimate))
         self._save_working_memory()
         return True
@@ -2391,10 +2392,23 @@ class AgentMemory:
             }
             reestimate_segmentation = (
                 isinstance(reestimate, dict)
-                and reestimate.get("status") == "ready"
+                and (
+                    (
+                        reestimate.get("status") == "ready"
+                        and str(source_image or "") in reestimate_view_paths
+                    )
+                    or (
+                        segmenter_tool_name == "active_observe"
+                        and reestimate.get("status") == "pending_observation"
+                        and reestimate.get("recovery_strategy")
+                        == "active_view_relocalization"
+                        and str(outputs.get("active_vision_mode") or "")
+                        == "semantic_search"
+                        and str(outputs.get("status") or "").lower() == "acquired"
+                    )
+                )
                 and str(reestimate.get("target_prompt") or "").strip()
                 == str(target_prompt or "").strip()
-                and str(source_image or "") in reestimate_view_paths
             )
             if reestimate_segmentation:
                 reestimate.update(
@@ -2596,6 +2610,28 @@ class AgentMemory:
             "active_vision_stop_reason": outputs.get("stop_reason"),
         }
         self._record_sam3_semantic_result(record, status=f"active_search_{status}")
+        reestimate = self.grasp_reestimation()
+        if (
+            isinstance(reestimate, dict)
+            and reestimate.get("recovery_strategy") == "active_view_relocalization"
+            and status in {"exhausted", "infrastructure_error"}
+        ):
+            reestimate.update(
+                {
+                    "status": (
+                        "active_view_infrastructure_error"
+                        if status == "infrastructure_error"
+                        else "active_view_exhausted"
+                    ),
+                    "active_vision_stop_reason": outputs.get("stop_reason"),
+                    "active_vision_attempt_id": outputs.get("active_vision_attempt_id"),
+                    "active_vision_completed_at_s": time.time(),
+                }
+            )
+            self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                reestimate,
+                source="active_vision_grasp_reestimate",
+            )
         self.record(
             "active_vision_search_completed",
             {
@@ -3205,9 +3241,9 @@ class AgentMemory:
                                 ),
                                 "source_tool": source_tool,
                                 "source_backend": source_backend,
-                                "invalidate_frozen_placement_pool": (
-                                    frozen_pool_active
-                                ),
+                                "invalidate_frozen_placement_pool": False,
+                                "preserve_frozen_placement_pool": frozen_pool_active,
+                                **_zero_pass_grasp_recovery_route(outputs),
                                 "created_at_s": time.time(),
                             }
                             self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
@@ -3542,6 +3578,11 @@ class AgentMemory:
                         "previous_view": camera_frame_id,
                         "source_tool": source_tool,
                         "source_backend": source_backend,
+                        "invalidate_frozen_placement_pool": False,
+                        "preserve_frozen_placement_pool": isinstance(
+                            self.frozen_placement_goal_pool(), dict
+                        ),
+                        **_zero_pass_grasp_recovery_route(outputs),
                         "created_at_s": time.time(),
                     }
                     self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
@@ -8914,6 +8955,57 @@ def _optional_int(value: Any, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _zero_pass_grasp_recovery_route(outputs: Mapping[str, Any]) -> JsonDict:
+    """Choose the narrowest recovery layer justified by qualification proof."""
+
+    evidence = outputs.get("qualification_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    metrics = outputs.get("qualification_metrics")
+    if not isinstance(metrics, Mapping):
+        metrics = evidence.get("metrics")
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    reasons = outputs.get("rejection_reason_counts")
+    if not isinstance(reasons, Mapping):
+        reasons = evidence.get("rejection_reason_counts")
+    reasons = reasons if isinstance(reasons, Mapping) else {}
+
+    generated = _optional_int(outputs.get("generated_candidate_count"), default=0)
+    evaluated = _optional_int(
+        metrics.get("grasp_scene_alignment_evaluated_count"),
+        default=0,
+    )
+    aperture_risk = _optional_int(
+        metrics.get("grasp_scene_alignment_aperture_risk_count"),
+        default=0,
+    )
+    terminal_geometry_failures = _optional_int(
+        reasons.get("terminal_gripper_state_invalid"),
+        default=0,
+    )
+    complete_alignment_mismatch = (
+        generated > 0
+        and evaluated == generated
+        and aperture_risk == evaluated
+        and terminal_geometry_failures > 0
+    )
+    if complete_alignment_mismatch:
+        return {
+            "recovery_strategy": "active_view_relocalization",
+            "requires_viewpoint_change": True,
+            "recovery_evidence": {
+                "classification": "scene_target_alignment_mismatch",
+                "generated_candidate_count": generated,
+                "scene_alignment_evaluated_count": evaluated,
+                "scene_alignment_aperture_risk_count": aperture_risk,
+                "terminal_gripper_state_invalid_count": terminal_geometry_failures,
+            },
+        }
+    return {
+        "recovery_strategy": "passive_multiview_resegmentation",
+        "requires_viewpoint_change": False,
+    }
 
 
 def _is_anyplace_pose(parameters: JsonDict) -> bool:

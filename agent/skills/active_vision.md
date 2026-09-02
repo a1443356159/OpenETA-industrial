@@ -52,6 +52,11 @@ same fingerprint. In particular, `camera_self_occlusion_unusable` is a
 mechanical/calibration defect that arm motion cannot repair. On
 `infrastructure_error`, stop rather than recording the target as unreachable.
 
+When MoveIt reports that every generated grasp is inconsistent with the
+authoritative target geometry, follow the host-bound `active_observe` recovery.
+Rebuild only the target mask and grasp frontier from the acquired view; keep an
+unchanged frozen AnyPlace goal pool instead of rerunning placement inference.
+
 Never call active vision after attachment, without either selected evidence or
 a host-bound semantic-search obligation, or merely to obtain a prettier image. Preserve the
 frozen target and scene epoch. Rerun high-level perception only when the scene

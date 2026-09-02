@@ -410,6 +410,13 @@ class ToolCallingPlanner(BasePlanner):
                         tool_context=tool_context,
                     )
                 )
+            if not validation_errors:
+                validation_errors.extend(
+                    _validate_grasp_view_selection_obligation(
+                        decision,
+                        tool_context=tool_context,
+                    )
+                )
             required_skill = ""
             if not validation_errors:
                 required_skill = _required_skill_inspection_name(
@@ -4051,6 +4058,36 @@ def _validate_semantic_perception_obligation(
     ]
 
 
+def _validate_grasp_view_selection_obligation(
+    decision: PlannerDecision,
+    *,
+    tool_context: JsonDict,
+) -> list[str]:
+    """Require a changed viewpoint only for a complete geometry mismatch."""
+
+    obligation = tool_context.get("grasp_view_selection_obligation")
+    if not (
+        isinstance(obligation, dict)
+        and obligation.get("status") == "required"
+        and obligation.get("required_tool") == "active_observe"
+        and obligation.get("recovery_strategy") == "active_view_relocalization"
+    ):
+        return []
+    required = obligation.get("required_parameters")
+    if (
+        decision.action_type.lower().strip() == "tool_call"
+        and decision.action == "active_observe"
+        and isinstance(required, dict)
+        and decision.parameters == required
+    ):
+        return []
+    return [
+        "The complete grasp batch is inconsistent with the authoritative target "
+        "geometry. Call active_observe with the host-bound parameters; a passive "
+        "observe or repeated SAM3/AnyPlace/GraspGenX call would reuse the failed view."
+    ]
+
+
 def _validate_closed_gripper_recovery(
     decision: PlannerDecision,
     *,
@@ -4761,6 +4798,7 @@ def _model_phase_and_legal_tools(
         if tool_name and tool_name not in required:
             required.append(tool_name)
     semantic = context.get("semantic_perception_obligation")
+    grasp_view = context.get("grasp_view_selection_obligation")
     work_order = context.get("work_order_obligation")
     execution = context.get("grasp_execution")
     active_environment = context.get("active_environment_task")
@@ -4772,6 +4810,13 @@ def _model_phase_and_legal_tools(
     ):
         phase = "work_order_configuration"
         preferred = ["configure_work_order"]
+    elif (
+        isinstance(grasp_view, dict)
+        and grasp_view.get("status") == "required"
+        and grasp_view.get("required_tool") == "active_observe"
+    ):
+        phase = "grasp_active_view_relocalization"
+        preferred = ["active_observe"]
     elif isinstance(semantic, dict) and semantic.get("status") == "exhausted":
         # No tool can create new semantic evidence in the unchanged scene once
         # the bounded exact-view/simplified-view frontier is exhausted.  Keep
@@ -5090,6 +5135,10 @@ def _compact_model_state(key: str, value: object) -> object:
                 "observe_after_reopen",
                 "attachment_mode",
                 "target_id",
+                "recovery_strategy",
+                "requires_viewpoint_change",
+                "preserve_frozen_placement_pool",
+                "active_vision_stop_reason",
             )
             if name in value
         }
@@ -5447,6 +5496,7 @@ def _build_tool_context_payload(
     grasp_view_selection = _grasp_view_selection_obligation(
         reestimate,
         current_rgbd_views=current_rgbd_views,
+        active_observe_available=tools.can_execute("active_observe"),
     )
     if frozen_pool_required or reestimate_status in {
         "pending_observation",
@@ -5999,12 +6049,43 @@ def _grasp_view_selection_obligation(
     reestimate: object,
     *,
     current_rgbd_views: list[JsonDict],
+    active_observe_available: bool = True,
 ) -> JsonDict | None:
     """Offer only fresh, complete and not-yet-failed grasp re-estimation views."""
 
-    if not isinstance(reestimate, dict) or reestimate.get("status") != "ready":
+    if not isinstance(reestimate, dict):
         return None
     prompt = str(reestimate.get("target_prompt") or "").strip()
+    if (
+        prompt
+        and active_observe_available
+        and reestimate.get("status") == "pending_observation"
+        and reestimate.get("recovery_strategy") == "active_view_relocalization"
+        and reestimate.get("requires_viewpoint_change") is True
+    ):
+        return {
+            "schema_version": "openeta.grasp_view_selection.v2",
+            "status": "required",
+            "required_tool": "active_observe",
+            "required_parameters": {
+                "semantic_target": prompt,
+                "semantic_role": "grasp_target",
+                "quality_profile": "grasp_rgbd",
+                "max_motion_attempts": 2,
+            },
+            "recovery_strategy": "active_view_relocalization",
+            "preserve_frozen_placement_pool": reestimate.get(
+                "preserve_frozen_placement_pool"
+            )
+            is True,
+            "selection_rule": (
+                "Every model grasp is inconsistent with the authoritative target "
+                "geometry. Choose active_observe once so its host planner changes "
+                "viewpoint and rebuilds only target/grasp evidence."
+            ),
+        }
+    if reestimate.get("status") != "ready":
+        return None
     recorded_views = {
         str(view.get("rgb_path") or "")
         for view in reestimate.get("observation_views", [])

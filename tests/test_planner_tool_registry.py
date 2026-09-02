@@ -33,10 +33,13 @@ from agent.runtime.planner import (
     ToolCallingPlanner,
     _canonicalize_host_parameters,
     _default_tool_planner_system_prompt,
+    _grasp_view_selection_obligation,
     _host_parameter_binding_sha256,
     _host_obligation_decision,
     _hydrate_host_bound_parameters,
+    _model_phase_and_legal_tools,
     _validate_grasp_recovery_obligation,
+    _validate_grasp_view_selection_obligation,
     _validate_placement_release_obligation,
     _validate_semantic_perception_obligation,
     _validate_anyplace_parameters,
@@ -1387,6 +1390,54 @@ def test_zero_pass_grasp_reestimate_dispatches_fresh_observation() -> None:
     assert decision.action == "observe"
     assert decision.parameters == {}
     assert decision.metadata["host_obligation"]["stage"] == "fresh_rgbd_observation"
+
+
+def test_geometry_mismatch_exposes_one_host_bound_active_view_action() -> None:
+    obligation = _grasp_view_selection_obligation(
+        {
+            "status": "pending_observation",
+            "target_prompt": "red hex bolt",
+            "recovery_strategy": "active_view_relocalization",
+            "requires_viewpoint_change": True,
+            "preserve_frozen_placement_pool": True,
+        },
+        current_rgbd_views=[],
+    )
+    assert obligation["required_tool"] == "active_observe"
+    assert obligation["required_parameters"] == {
+        "semantic_target": "red hex bolt",
+        "semantic_role": "grasp_target",
+        "quality_profile": "grasp_rgbd",
+        "max_motion_attempts": 2,
+    }
+    assert obligation["preserve_frozen_placement_pool"] is True
+
+    context = {
+        "grasp_view_selection_obligation": obligation,
+        "tool_references": [
+            {"name": "active_observe"},
+            {"name": "observe"},
+            {"name": "sam3"},
+            {"name": "anyplace"},
+            {"name": "grasp_pose_estimate"},
+        ],
+    }
+    phase, legal = _model_phase_and_legal_tools(context, max_tools=8)
+    assert phase == "grasp_active_view_relocalization"
+    assert legal == ["active_observe"]
+
+    active = PlannerDecision(
+        action_type="tool_call",
+        action="active_observe",
+        parameters=dict(obligation["required_parameters"]),
+    )
+    passive = PlannerDecision(
+        action_type="tool_call",
+        action="observe",
+        parameters={},
+    )
+    assert _validate_grasp_view_selection_obligation(active, tool_context=context) == []
+    assert len(_validate_grasp_view_selection_obligation(passive, tool_context=context)) == 1
 
 
 def test_frozen_goal_reestimate_never_falls_back_to_stale_object_mask(
