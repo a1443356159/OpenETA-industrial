@@ -1261,16 +1261,32 @@ class GazeboController:
                 barrier_ordered_terminal_state = False
                 action_started_value = result.get("action_started_ros_time_s")
                 action_completed_value = result.get("action_completed_ros_time_s")
+                start_barrier_available = (
+                    isinstance(action_started_value, (int, float))
+                    and not isinstance(action_started_value, bool)
+                    and math.isfinite(float(action_started_value))
+                )
                 completion_barrier_available = (
                     isinstance(action_completed_value, (int, float))
                     and not isinstance(action_completed_value, bool)
                     and math.isfinite(float(action_completed_value))
                 )
-                action_barrier_value = (
-                    action_completed_value
-                    if completion_barrier_available
-                    else action_started_value
-                )
+                if result.get("ok") is True and start_barrier_available:
+                    # The controller's SUCCESS result is the completion proof.
+                    # Its latest causally post-start state may be stamped just
+                    # before the result ACK, especially when an idle hardware
+                    # driver stops publishing.  Accept that sample only after
+                    # the exact target and stationary checks below succeed.
+                    action_barrier_value = action_started_value
+                    action_barrier_source = "action_started_ros_time_s"
+                elif completion_barrier_available:
+                    # A failed action may still be braking at result time, so
+                    # recovery requires a state ordered after its completion.
+                    action_barrier_value = action_completed_value
+                    action_barrier_source = "action_completed_ros_time_s"
+                else:
+                    action_barrier_value = action_started_value
+                    action_barrier_source = "action_started_ros_time_s"
                 terminal_state_provider = (
                     self.barrier_ordered_terminal_state_provider
                     if result.get("ok") is True
@@ -1294,8 +1310,7 @@ class GazeboController:
                         barrier_ordered_terminal_state = True
                     except Exception:
                         # A generic latest-state fallback could predate the
-                        # completion ACK and turn an in-flight sample into a
-                        # terminal proof.  Missing post-barrier state remains
+                        # selected action barrier. Missing causal state remains
                         # an unknown outcome.
                         end = None
                 else:
@@ -1610,11 +1625,7 @@ class GazeboController:
                                 else "barrier_ordered_action_terminal_sample"
                             ),
                             "terminal_state_action_barrier_ros_time_s": float(action_barrier_value),
-                            "terminal_state_action_barrier_source": (
-                                "action_completed_ros_time_s"
-                                if completion_barrier_available
-                                else "action_started_ros_time_s"
-                            ),
+                            "terminal_state_action_barrier_source": action_barrier_source,
                             "terminal_state_stationary_verified": (
                                 terminal_state_stationary_verified
                             ),

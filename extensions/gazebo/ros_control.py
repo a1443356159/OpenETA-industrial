@@ -2118,23 +2118,49 @@ class RosGazeboControllerFactory:
         tf_buffer = Buffer(node=node)
         listener = TransformListener(tf_buffer, node, spin_thread=False)
         source = RosGazeboStateSource(node, tf_buffer, config=cfg)
+        # Do not put high-rate state evidence in the node's default mutually
+        # exclusive callback group with action and service bookkeeping.  A
+        # result callback can otherwise win the action-completion race and
+        # leave the default group unavailable while JointState packets keep
+        # arriving on DDS.  Reentrant groups are safe here: state writes are
+        # protected by RosGazeboStateSource's lock, and the environment
+        # serializes world-mutating controller calls.
+        state_callback_group = ReentrantCallbackGroup()
+        control_callback_group = ReentrantCallbackGroup()
         subscription = node.create_subscription(
-            JointState, "/joint_states", source.joint_state_callback, 10
+            JointState,
+            "/joint_states",
+            source.joint_state_callback,
+            10,
+            callback_group=state_callback_group,
         )
-        move_client = ActionClient(node, MoveGroup, "/move_action")
+        move_client = ActionClient(
+            node,
+            MoveGroup,
+            "/move_action",
+            callback_group=control_callback_group,
+        )
         gripper_client = ActionClient(
-            node, ParallelGripperCommand, "/parallel_gripper_controller/gripper_cmd"
+            node,
+            ParallelGripperCommand,
+            "/parallel_gripper_controller/gripper_cmd",
+            callback_group=control_callback_group,
         )
         trajectory_client = ActionClient(
             node,
             FollowJointTrajectory,
             "/rm_group_controller/follow_joint_trajectory",
+            callback_group=control_callback_group,
         )
         controller_list_client = node.create_client(
-            ListControllers, "/controller_manager/list_controllers"
+            ListControllers,
+            "/controller_manager/list_controllers",
+            callback_group=control_callback_group,
         )
         controller_parameter_client = node.create_client(
-            GetParameters, "/controller_manager/get_parameters"
+            GetParameters,
+            "/controller_manager/get_parameters",
+            callback_group=control_callback_group,
         )
         qualification_callback_group = ReentrantCallbackGroup()
         state_validity_client = node.create_client(
@@ -2152,8 +2178,16 @@ class RosGazeboControllerFactory:
             "/move_group/set_parameters_atomically",
             callback_group=qualification_callback_group,
         )
-        apply_scene_client = node.create_client(ApplyPlanningScene, "/apply_planning_scene")
-        get_scene_client = node.create_client(GetPlanningScene, "/get_planning_scene")
+        apply_scene_client = node.create_client(
+            ApplyPlanningScene,
+            "/apply_planning_scene",
+            callback_group=control_callback_group,
+        )
+        get_scene_client = node.create_client(
+            GetPlanningScene,
+            "/get_planning_scene",
+            callback_group=control_callback_group,
+        )
         shared_executor = executor is not None
         executor = executor or MultiThreadedExecutor(num_threads=12, context=context)
         executor.add_node(node)

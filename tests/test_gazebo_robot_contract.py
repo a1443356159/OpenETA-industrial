@@ -77,9 +77,15 @@ def test_controller_exposes_stationary_failed_motion_as_current_state_restart() 
     terminal = _bounded_state()
     terminal.joint_positions[5] = 2.2340483665
     terminal.end_effector_pose["xyz"] = [0.00639, 0.0, 0.5]
+    barriers: list[float] = []
+
+    def failed_terminal(barrier: float):
+        barriers.append(barrier)
+        return terminal
+
     controller = GazeboController(
         state_provider=lambda: start,
-        failed_motion_terminal_state_provider=lambda _barrier: terminal,
+        failed_motion_terminal_state_provider=failed_terminal,
         move_action=lambda _goal, _timeout: {
             "ok": False,
             "error_code": "MOTION_EXECUTION_FAILED",
@@ -87,6 +93,7 @@ def test_controller_exposes_stationary_failed_motion_as_current_state_restart() 
             "moveit_error_code": -4,
             "planned_point_count": 64,
             "execution_started": True,
+            "action_started_ros_time_s": 12.5,
             "action_completed_ros_time_s": 14.0,
         },
     )
@@ -104,6 +111,10 @@ def test_controller_exposes_stationary_failed_motion_as_current_state_restart() 
     assert receipt["ok"] is False
     assert receipt["error_code"] == "MOTION_EXECUTION_FAILED"
     assert receipt["motion_outcome"] == "failed"
+    assert barriers == [14.0]
+    assert receipt["terminal_state_action_barrier_source"] == (
+        "action_completed_ros_time_s"
+    )
     restart = receipt["current_state_restart"]
     assert restart["status"] == "PASS"
     assert restart["reason_code"] == "KNOWN_STATIONARY_TERMINAL_FAILURE"
@@ -1090,7 +1101,7 @@ def test_controller_timeout_and_missing_reconciliation_state_fail_closed() -> No
     assert unreconciled.payload["reconciliation_required"] is True
 
 
-def test_controller_accepts_stationary_action_ordered_terminal_after_success() -> None:
+def test_controller_accepts_post_start_terminal_sample_before_success_ack() -> None:
     calls = 0
 
     def state_then_fail():
@@ -1132,12 +1143,12 @@ def test_controller_accepts_stationary_action_ordered_terminal_after_success() -
     )
 
     assert result.ok is True
-    assert barriers == [14.0]
+    assert barriers == [12.5]
     assert result.payload["terminal_state_source"] == (
         "barrier_ordered_action_terminal_sample"
     )
     assert result.payload["terminal_state_action_barrier_source"] == (
-        "action_completed_ros_time_s"
+        "action_started_ros_time_s"
     )
     assert result.payload["terminal_state_stationary_verified"] is True
     assert result.payload["wall_elapsed_ms"] == pytest.approx(1523.4)
