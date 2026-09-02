@@ -738,7 +738,7 @@ def list_openai_compatible_model_info(
     missing = [field for field in ("api_base", "api_key") if not getattr(config, field)]
     if missing:
         raise ValueError(f"Missing OpenAI-compatible model-list fields: {missing}")
-    url = f"{config.api_base.rstrip('/')}/v1/models"
+    url = _openai_compatible_api_url(config.api_base, "models")
     headers = {"Authorization": f"Bearer {config.api_key}"}
     response = _get_json(url, headers, timeout_s or config.timeout_s)
     data = response.get("data", [])
@@ -1077,10 +1077,15 @@ def _provider_error_reports_capacity(exc: Exception) -> bool:
 
 
 def _chat_completions_url(api_base: str) -> str:
+    return _openai_compatible_api_url(api_base, "chat/completions")
+
+
+def _openai_compatible_api_url(api_base: str, resource: str) -> str:
+    """Join a provider base with one OpenAI v1 resource exactly once."""
+
     base = api_base.rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+    versioned_base = base if base.endswith("/v1") else f"{base}/v1"
+    return f"{versioned_base}/{resource.lstrip('/')}"
 
 
 def _post_json(url: str, body: JsonDict, headers: dict[str, str], timeout_s: float) -> JsonDict:

@@ -18,6 +18,7 @@ from agent.backends.planner import (
     ProviderHttpError,
     StaticPlannerBackend,
     extract_context_window_tokens,
+    list_openai_compatible_models,
 )
 from agent.runtime.actions import PipelineStatus
 from agent.backends.provider_config import PlannerProviderConfig, read_apikey_file
@@ -9912,6 +9913,69 @@ def test_openai_compatible_backend_uses_chat_completions_transport() -> None:
     assert result.details["usage"]["total_tokens"] == 42
     assert result.details["usage_source"] == "provider"
     assert result.details["provider_attempts"] == 1
+
+
+def test_openai_compatible_backend_does_not_duplicate_versioned_api_base() -> None:
+    captured = {}
+
+    def fake_transport(url, body, headers, timeout_s):
+        del body, headers, timeout_s
+        captured["url"] = url
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": (
+                            '{"kind":"response","name":"talk",'
+                            '"parameters":{"message":"ok"},'
+                            '"reasoning":"done"}'
+                        )
+                    },
+                }
+            ]
+        }
+
+    backend = OpenAICompatiblePlannerBackend(
+        OpenAICompatiblePlannerBackendConfig(
+            model="test-model",
+            api_base="https://api.example.test/v1/",
+            api_key="secret-key",
+        ),
+        transport=fake_transport,
+    )
+
+    result = backend.decide(
+        PlannerBackendRequest(tool_context={"task": "test"}, system_prompt="return json")
+    )
+
+    assert result.status == PipelineStatus.PLANNED
+    assert captured["url"] == "https://api.example.test/v1/chat/completions"
+
+
+def test_openai_compatible_model_list_does_not_duplicate_versioned_api_base(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    def fake_get(url, headers, timeout_s):
+        captured.update(url=url, headers=headers, timeout_s=timeout_s)
+        return {"data": [{"id": "test-model"}]}
+
+    monkeypatch.setattr("agent.backends.planner._get_json", fake_get)
+    config = OpenAICompatiblePlannerBackendConfig(
+        model="test-model",
+        api_base="https://api.example.test/v1/",
+        api_key="secret-key",
+        timeout_s=4.0,
+    )
+
+    assert list_openai_compatible_models(config) == ["test-model"]
+    assert captured == {
+        "url": "https://api.example.test/v1/models",
+        "headers": {"Authorization": "Bearer secret-key"},
+        "timeout_s": 4.0,
+    }
 
 
 @pytest.mark.parametrize("thinking_mode", ["enabled", "disabled"])
