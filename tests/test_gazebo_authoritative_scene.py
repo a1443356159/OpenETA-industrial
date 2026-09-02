@@ -37,10 +37,6 @@ def _compile(scene_id: str = "normal"):
         "normal",
         "multi_normal",
         "multi_normal_random_12345",
-        "narrow-pick",
-        "barrier-transfer",
-        "fastener-bin-sort",
-        "tool-bin-sort",
     ],
 )
 def test_authoritative_compiler_emits_the_same_object_set_for_gazebo_and_moveit(
@@ -66,6 +62,18 @@ def test_authoritative_compiler_emits_the_same_object_set_for_gazebo_and_moveit(
     ]
     assert compiled.evidence()["visual_policy"] == (
         "independent_high_fidelity_gazebo_assets"
+    )
+
+
+def test_acceptance_catalog_contains_only_release_scenes() -> None:
+    catalog = json.loads(
+        (_package() / "config/acceptance_scenes.json").read_text(encoding="utf-8")
+    )
+
+    assert tuple(catalog["scenes"]) == (
+        "normal",
+        "multi_normal",
+        "multi_normal_random_12345",
     )
 
 

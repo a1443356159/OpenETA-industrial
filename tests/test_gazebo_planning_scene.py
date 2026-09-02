@@ -287,52 +287,56 @@ def test_authoritative_geometry_proofs_survive_target_attach_diff() -> None:
     assert scene.attached_geometry_sha256 == "e" * 64
 
 
-def test_planning_scene_preserves_acceptance_obstacles_across_attachment() -> None:
+def test_planning_scene_preserves_authoritative_obstacles_across_attachment() -> None:
     scene = PlanningSceneSynchronizer()
     table, distractor, target = _boxes()
-    guard = CollisionBox("pick_guard_left", (0.18, 0.018, 0.07), (0.28, -0.164, 0.435))
+    bin_body = CollisionBox(
+        "green_parts_bin",
+        (0.32, 0.31, 0.18),
+        (0.62, -0.18, 0.09),
+    )
 
     scene.reset(
         table=table,
         distractor=distractor,
         target=target,
-        obstacles=(guard,),
+        obstacles=(bin_body,),
     )
-    assert scene.world_ids == {"table", "distractor", "target", "pick_guard_left"}
-    assert scene.world_specs["pick_guard_left"] == guard.to_dict()
+    assert scene.world_ids == {"table", "distractor", "target", "green_parts_bin"}
+    assert scene.world_specs["green_parts_bin"] == bin_body.to_dict()
 
     scene.attach_target(target=target)
-    assert scene.world_ids == {"table", "distractor", "pick_guard_left"}
+    assert scene.world_ids == {"table", "distractor", "green_parts_bin"}
     scene.detach_target(target=target)
-    assert scene.world_ids == {"table", "distractor", "target", "pick_guard_left"}
+    assert scene.world_ids == {"table", "distractor", "target", "green_parts_bin"}
 
 
-def test_planning_scene_can_replace_default_distractor_with_industrial_parts() -> None:
+def test_planning_scene_accepts_authoritative_world_without_legacy_distractor() -> None:
     scene = PlanningSceneSynchronizer()
     table, _, target = _boxes()
-    wrench = CollisionBox(
-        "yellow_open_end_wrench",
-        (0.13, 0.055, 0.028),
-        (0.275, 0.115, 0.414),
+    frame = CollisionBox(
+        "workbench_frame",
+        (1.0, 0.8, 0.7),
+        (0.35, 0.0, 0.02),
     )
-    pliers = CollisionBox(
-        "blue_handle_pliers",
-        (0.125, 0.060, 0.030),
-        (0.355, 0.015, 0.415),
+    bin_body = CollisionBox(
+        "green_parts_bin",
+        (0.32, 0.31, 0.18),
+        (0.62, -0.18, 0.09),
     )
 
     scene.reset(
         table=table,
         target=target,
         distractor=None,
-        obstacles=(wrench, pliers),
+        obstacles=(frame, bin_body),
     )
 
     assert scene.world_ids == {
         "table",
         "target",
-        "yellow_open_end_wrench",
-        "blue_handle_pliers",
+        "workbench_frame",
+        "green_parts_bin",
     }
     assert "distractor" not in scene.world_ids
 

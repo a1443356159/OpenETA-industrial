@@ -237,7 +237,8 @@ def test_scripted_acceptance_uses_the_versioned_scene_seed() -> None:
         task=(
             "[automation=scripted_tui; "
             f"environment_id={env_id}; environment_task=normal_pick_and_place; "
-            "environment_seed=17; acceptance_scene=narrow-pick] run the acceptance"
+            "environment_seed=12345; acceptance_scene=multi_normal_random_12345] "
+            "run the acceptance"
         )
     )
     tools = _tools_with_handlers("create_simulator_env")
@@ -251,7 +252,7 @@ def test_scripted_acceptance_uses_the_versioned_scene_seed() -> None:
 
     assert context["environment_start_obligation"]["required_parameters"] == {
         "env_id": env_id,
-        "seed": 17,
+        "seed": 12345,
         "task": "normal pick and place",
     }
 

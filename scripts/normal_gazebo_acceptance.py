@@ -113,17 +113,6 @@ MULTI_SORT_SCENARIOS = (
 SCENARIOS = (
     "normal",
     *MULTI_SORT_SCENARIOS,
-    "narrow-pick",
-    "barrier-transfer",
-    "fastener-bin-sort",
-    "tool-bin-sort",
-)
-COMPLEX_PHYSICAL_SCENARIOS = (
-    *MULTI_SORT_SCENARIOS,
-    "narrow-pick",
-    "barrier-transfer",
-    "fastener-bin-sort",
-    "tool-bin-sort",
 )
 EXECUTION_PROFILES = ("agentic_normal", "smoke_normal")
 DEFAULT_EXECUTION_PROFILE = "agentic_normal"
@@ -223,14 +212,6 @@ SCENARIO_INSTRUCTIONS = {
     "multi_normal_random_12345": (
         "工作台物件的位置和朝向已经变化。这是同一工作单元内的连续分拣；"
         "放好第一件后不要关闭环境，重新看清当前场景并继续第二件。"
-    ),
-    "narrow-pick": "目标旁边有两个橙色护栏，夹取时请别碰到它们。",
-    "barrier-transfer": "目标和料箱之间有一块黄色挡板，移动时请别碰到它。",
-    "fastener-bin-sort": (
-        "旁边还有扳手和钳子等物件，请别拿错。"
-    ),
-    "tool-bin-sort": (
-        "旁边还有螺栓、钳子和螺丝刀等物件，请别拿错。"
     ),
 }
 
@@ -1542,9 +1523,6 @@ def verify_case(
         )
         if receipt_operator_mode is not None and receipt_operator_mode != mode:
             errors.append("operator mode receipt does not match the requested TUI mode")
-        expected_obstacle_ids = [
-            str(obstacle["id"]) for obstacle in scene["static_obstacles"]
-        ]
         expected_scene_receipt = _scene_receipt(
             scene,
             scenario=scenario,
@@ -1960,31 +1938,6 @@ def verify_case(
         ]
         if _repeated_failed_motion_fingerprints(calls):
             errors.append("a failed motion request fingerprint was repeated")
-        # A normal run may reject a candidate-specific release plan and resume
-        # the frozen AnyPlace frontier. That is ordinary closed-loop recovery.
-        frozen_pair_qualification_blocks = [
-            block
-            for grasp_call in grasp_calls
-            for block in _qualification_blocks(grasp_call, artifact_root=paths.root)
-            if block.get("purpose") == "placement"
-        ]
-        if scenario in COMPLEX_PHYSICAL_SCENARIOS:
-            for obstacle_id in expected_obstacle_ids:
-                obstacle_recorded = any(
-                    obstacle_id
-                    in {
-                        str(item)
-                        for value in base._values(block, "evaluated_obstacle_ids")
-                        if isinstance(value, list)
-                        for item in value
-                    }
-                    for block in frozen_pair_qualification_blocks
-                )
-                if not obstacle_recorded:
-                    errors.append(
-                        "qualification evidence did not evaluate scene obstacle: "
-                        + obstacle_id
-                    )
         if not fingerprints:
             errors.append("motion request fingerprint evidence missing")
         scene_revisions = [

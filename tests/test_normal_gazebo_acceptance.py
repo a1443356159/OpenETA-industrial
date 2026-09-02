@@ -162,89 +162,6 @@ def test_human_tui_approval_requires_human_gated_provenance() -> None:
     assert acceptance.base._human_approved(scripted) is False
 
 
-def test_pick_place_complex_scenes_have_independent_seed_prompt_and_receipt(
-    tmp_path, monkeypatch
-) -> None:
-    allocation = acceptance.base.Allocation(81, "openeta-complex-scenes", 18765, "run-id")
-    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
-    monkeypatch.setattr(
-        acceptance.base,
-        "environment_receipt",
-        lambda *_args, **_kwargs: {
-            "schema_version": "openeta.gazebo_environment_receipt.v1",
-            "trusted": True,
-        },
-    )
-
-    expectations = {
-        "narrow-pick": (17, ["pick_guard_left", "pick_guard_right"]),
-        "barrier-transfer": (29, ["transfer_barrier"]),
-        "fastener-bin-sort": (
-            41,
-            [
-                "yellow_open_end_wrench",
-                "blue_handle_pliers",
-                "blue_bin_wall_left",
-                "blue_bin_wall_right",
-                "blue_bin_wall_near",
-                "blue_bin_wall_far",
-                "orange_bin_wall_left",
-                "orange_bin_wall_right",
-                "orange_bin_wall_near",
-                "orange_bin_wall_far",
-            ],
-        ),
-        "tool-bin-sort": (
-            53,
-            [
-                "silver_hex_bolt",
-                "blue_handle_pliers_tool_scene",
-                "red_screwdriver",
-                "purple_bin_wall_left",
-                "purple_bin_wall_right",
-                "purple_bin_wall_near",
-                "purple_bin_wall_far",
-                "green_bin_wall_left",
-                "green_bin_wall_right",
-                "green_bin_wall_near",
-                "green_bin_wall_far",
-            ],
-        ),
-    }
-    for scenario, (seed, obstacle_ids) in expectations.items():
-        paths = acceptance.prepare_case(
-            tmp_path,
-            tmp_path / scenario,
-            allocation,
-            dict(acceptance.DEFAULT_SERVICES),
-            scenario=scenario,
-        )
-        prompt = paths.instructions.read_text(encoding="utf-8")
-        receipt = json.loads(paths.receipt.read_text(encoding="utf-8"))
-        metadata = acceptance._automation_metadata_for_backend(
-            "anygrasp", scenario=scenario
-        )
-
-        assert f"environment_seed={seed}" in metadata
-        assert f"acceptance_scene={scenario}" in metadata
-        assert "验收场景" not in prompt
-        assert acceptance.SCENARIO_INSTRUCTIONS[scenario] in prompt
-        assert receipt["acceptance_scenario"] == scenario
-        assert receipt["acceptance_scene"]["scene_id"] == scenario
-        assert receipt["acceptance_scene"]["seed"] == seed
-        assert receipt["acceptance_scene"]["static_obstacle_ids"] == obstacle_ids
-        expected_destination = {
-            "barrier-transfer": [0.48, 0.10],
-            "fastener-bin-sort": [0.43, -0.13],
-            "tool-bin-sort": [0.43, 0.13],
-        }.get(scenario, [0.48, -0.10])
-        assert receipt["acceptance_scene"]["destination_center_xy"] == expected_destination
-        assert receipt["acceptance_scene"]["schema_version"] == (
-            "openeta.gazebo_acceptance_scene_receipt.v2"
-        )
-        assert len(receipt["acceptance_scene"]["contract_sha256"]) == 64
-
-
 def test_multi_normal_prepares_one_human_request_with_private_verification_contract(
     tmp_path, monkeypatch
 ) -> None:
@@ -458,46 +375,10 @@ def test_multi_normal_task_variants_change_only_user_words_and_verification_cont
     )
 
 
-def test_complex_scene_environment_is_not_a_qualification_fault() -> None:
+def test_randomized_release_scene_environment_is_not_a_qualification_fault() -> None:
     assert acceptance._scenario_environment("multi_normal_random_12345") == {
         "OPENETA_ACCEPTANCE_SCENE": "multi_normal_random_12345"
     }
-    assert acceptance._scenario_environment("narrow-pick") == {
-        "OPENETA_ACCEPTANCE_SCENE": "narrow-pick"
-    }
-    assert acceptance._scenario_environment("barrier-transfer") == {
-        "OPENETA_ACCEPTANCE_SCENE": "barrier-transfer"
-    }
-    assert acceptance._scenario_environment("fastener-bin-sort") == {
-        "OPENETA_ACCEPTANCE_SCENE": "fastener-bin-sort"
-    }
-    assert acceptance._scenario_environment("tool-bin-sort") == {
-        "OPENETA_ACCEPTANCE_SCENE": "tool-bin-sort"
-    }
-
-
-def test_industrial_scene_prompts_bind_one_target_to_one_of_multiple_bins() -> None:
-    fastener = acceptance._instructions_for_backend(
-        "graspgenx", scenario="fastener-bin-sort"
-    )
-    tool = acceptance._instructions_for_backend("graspgenx", scenario="tool-bin-sort")
-
-    # Keep the SAM3 query visually grounded; the scenario instruction below
-    # still binds that unique red instance to the industrial hex-bolt role.
-    fastener_metadata = acceptance._automation_metadata_for_backend(
-        "graspgenx", scenario="fastener-bin-sort"
-    )
-    assert "grasp_target=red_object" in fastener_metadata
-    assert "placement_region=blue_square_area_inside_bin" in fastener_metadata
-    assert "红色六角螺栓" in fastener and "蓝色零件箱" in fastener
-    assert "red object" not in fastener and "blue square area inside bin" not in fastener
-    tool_metadata = acceptance._automation_metadata_for_backend(
-        "graspgenx", scenario="tool-bin-sort"
-    )
-    assert "grasp_target=yellow_open_end_tool" in tool_metadata
-    assert "placement_region=green_square_area_inside_bin" in tool_metadata
-    assert "黄色开口扳手" in tool and "绿色工具箱" in tool
-    assert "yellow open end tool" not in tool and "green square area inside bin" not in tool
 
 
 def test_agentic_profile_does_not_override_deployment_provider_policy() -> None:
@@ -680,7 +561,11 @@ def test_pick_place_acceptance_parser_defaults_to_fast_v3() -> None:
     assert args.qualification_profile == "fast_v3"
     assert args.operator_mode == "scripted_tui"
     assert args.task_variant == "wrench-green-bolt-blue"
-    assert "multi_normal" in acceptance.SCENARIOS
+    assert acceptance.SCENARIOS == (
+        "normal",
+        "multi_normal",
+        "multi_normal_random_12345",
+    )
     assert not {"multi_normal1", "multi_normal2", "multi_normal3"}.intersection(
         acceptance.SCENARIOS
     )

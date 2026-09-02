@@ -1859,7 +1859,6 @@ class RosGazeboController(GazeboController):
         distractor = (
             None
             if isinstance(authoritative_table, Mapping)
-            or getattr(config, "replace_default_distractor", False)
             else CollisionBox(
                 config.distractor_id,
                 distractor_size,

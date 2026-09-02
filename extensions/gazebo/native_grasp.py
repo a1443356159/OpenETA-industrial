@@ -94,14 +94,17 @@ def load_acceptance_scene_contract(
     obstacles = scene.get("static_obstacles")
     if not isinstance(obstacles, list):
         raise ValueError("acceptance scene obstacle list is invalid")
+    if obstacles:
+        raise ValueError(
+            "acceptance catalog cannot inject geometry into the authoritative world"
+        )
     if "planning_scene_obstacles" in scene:
         raise ValueError(
             "legacy planning_scene_obstacles are forbidden; "
             "MoveIt geometry is compiled from the authoritative Gazebo world"
         )
-    canonical_world_complete = scene.get("canonical_world_complete")
-    if canonical_world_complete is not None and not isinstance(canonical_world_complete, bool):
-        raise ValueError("acceptance canonical-world flag is invalid")
+    if scene.get("canonical_world_complete") is not True:
+        raise ValueError("acceptance scene must use the authoritative world")
 
     def vector(
         owner: Mapping[str, Any],
@@ -227,22 +230,6 @@ def load_acceptance_scene_contract(
             "acceptance randomized layout validation has no model pose overrides"
         )
 
-    seen: set[str] = {"work_table", "target_object", "distractor_object"}
-    for obstacle in obstacles:
-        if not isinstance(obstacle, Mapping):
-            raise ValueError("acceptance scene obstacle is invalid")
-        obstacle_id = str(obstacle.get("id") or "")
-        if not obstacle_id or obstacle_id in seen:
-            raise ValueError("acceptance scene obstacle identity is invalid")
-        seen.add(obstacle_id)
-        for key, count, positive in (
-            ("size_xyz", 3, True),
-            ("pose_xyz", 3, False),
-            ("pose_rpy", 3, False),
-            ("rgba", 4, False),
-        ):
-            vector(obstacle, key, count, positive=positive)
-        validate_primitives(obstacle)
     task = scene.get("task")
     if task is not None:
         if not isinstance(task, Mapping) or any(
@@ -1077,15 +1064,11 @@ class NativePickPlaceConfig(GazeboControlConfig):
         return evidence
 
     @property
-    def replace_default_distractor(self) -> bool:
-        return self.acceptance_scene_contract.get("replace_default_distractor") is True
-
-    @property
     def reset_object_poses(self) -> Mapping[str, tuple[float, float, float]]:
-        poses = {self.target_id: self.target_initial_xyz}
-        if not self.replace_default_distractor:
-            poses[self.distractor_id] = self.distractor_initial_xyz
-        return poses
+        return {
+            self.target_id: self.target_initial_xyz,
+            self.distractor_id: self.distractor_initial_xyz,
+        }
 
     @property
     def ros_package_name(self) -> str:

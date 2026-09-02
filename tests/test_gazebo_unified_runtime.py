@@ -913,7 +913,7 @@ def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit
         "GZ_PARTITION": "locked",
         "OPENETA_GAZEBO_LAUNCH_ARGUMENTS": '["rviz:=false"]',
         "OPENETA_GAZEBO_CAMERA_EXTRINSICS": '{"camera_frame":"opencv"}',
-        "OPENETA_ACCEPTANCE_SCENE": "narrow-pick",
+        "OPENETA_ACCEPTANCE_SCENE": "multi_normal_random_12345",
     }
     config = GazeboDeploymentConfig.from_environment(source)
     source["ROS_DOMAIN_ID"] = "42"
@@ -922,7 +922,9 @@ def test_deployment_environment_is_snapshotted_and_child_environment_is_explicit
     assert config.launch_arguments == ("rviz:=false",)
     assert config.startup_timeout_s == 45.0
     assert config.process_environment["ROS2CLI_NO_DAEMON"] == "1"
-    assert config.process_environment["OPENETA_ACCEPTANCE_SCENE"] == "narrow-pick"
+    assert config.process_environment["OPENETA_ACCEPTANCE_SCENE"] == (
+        "multi_normal_random_12345"
+    )
 
 
 def test_deployment_sanitizes_host_ruby_for_the_vendor_gz_wrapper() -> None:
