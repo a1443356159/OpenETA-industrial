@@ -52,30 +52,52 @@ wait_for_partition_server() {
 
 focus_operator_view() {
   local camera_request
+  local camera_ready=false
   camera_request='pose: {position: {x: -1.0, y: -1.1, z: 1.2}, orientation: {x: -0.07846, y: 0.20781, z: 0.34439, w: 0.91217}}'
-  for _attempt in $(seq 1 60); do
-    if "${gz_bin}" service \
+  for _attempt in $(seq 1 120); do
+    if [[ "${camera_ready}" == false ]] && "${gz_bin}" service \
       -s /gui/move_to/pose \
       --reqtype gz.msgs.GUICamera \
       --reptype gz.msgs.Boolean \
       --timeout 250 \
       --req "${camera_request}" >/dev/null 2>&1; then
-      if command -v xdotool >/dev/null 2>&1; then
-        local window_id
-        window_id="$(xdotool search --onlyvisible --name 'Gazebo Sim' 2>/dev/null | tail -n 1 || true)"
-        if [[ -n "${window_id}" ]]; then
-          # Ask the window manager to maximize instead of assuming a fixed VNC
-          # framebuffer size.  This keeps the render texture native-sized on
-          # both 1080p and higher-resolution desktops.
-          xdotool windowactivate --sync "${window_id}" \
-            key --window "${window_id}" alt+F10 >/dev/null 2>&1 || true
-        fi
-      fi
-      return 0
+      camera_ready=true
     fi
+
+    # Gazebo can advertise its GUI service before Qt maps the main window.
+    # Search hidden windows as well, then explicitly map and raise the real
+    # viewport.  Returning as soon as the service responds can otherwise leave
+    # a healthy GPU client hidden behind the VNC desktop for the whole run.
+    if [[ "${camera_ready}" == true ]]; then
+      if ! command -v xdotool >/dev/null 2>&1; then
+        return 0
+      fi
+
+      local window_id
+      window_id="$(xdotool search --name '^Gazebo Sim$' 2>/dev/null | tail -n 1 || true)"
+      if [[ -n "${window_id}" ]]; then
+        xdotool windowmap --sync "${window_id}" >/dev/null 2>&1 || true
+        xdotool windowraise "${window_id}" >/dev/null 2>&1 || true
+        xdotool windowactivate --sync "${window_id}" >/dev/null 2>&1 || true
+
+        # Maximize only when needed; Alt+F10 is a toggle and blindly sending it
+        # can restore an already maximized viewport to stale saved dimensions.
+        if ! command -v xprop >/dev/null 2>&1 \
+          || ! xprop -id "${window_id}" _NET_WM_STATE 2>/dev/null \
+            | grep -q '_NET_WM_STATE_MAXIMIZED_VERT'; then
+          xdotool key --window "${window_id}" alt+F10 >/dev/null 2>&1 || true
+        fi
+        return 0
+      fi
+    fi
+
     sleep 0.25
   done
-  echo "Gazebo GUI started, but its camera service did not become ready." >&2
+  if [[ "${camera_ready}" == true ]]; then
+    echo "Gazebo GUI camera is ready, but its main window was not mapped." >&2
+  else
+    echo "Gazebo GUI started, but its camera service did not become ready." >&2
+  fi
 }
 
 wait_for_partition_server

@@ -25,6 +25,11 @@ def test_gpu_gui_launcher_defaults_to_virtualgl_hd_antialiasing() -> None:
     assert 'export DISPLAY="${OPENETA_GAZEBO_DISPLAY:-:3}"' in text
     assert 'export QT_OPENGL=desktop' in text
     assert 'export __GL_FSAA_MODE="${OPENETA_GAZEBO_FSAA_MODE:-5}"' in text
+    assert "xdotool search --name '^Gazebo Sim$'" in text
+    assert 'xdotool windowmap --sync "${window_id}"' in text
+    assert 'xdotool windowraise "${window_id}"' in text
+    assert 'xdotool windowactivate --sync "${window_id}"' in text
+    assert "_NET_WM_STATE_MAXIMIZED_VERT" in text
     assert 'key --window "${window_id}" alt+F10' in text
     assert "--render-engine-gui ogre2" in text
     assert "--render-engine-gui-api-backend opengl" in text
