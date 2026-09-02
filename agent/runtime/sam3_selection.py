@@ -24,7 +24,10 @@ from agent.backends.planner import PlannerBackend, PlannerBackendRequest
 SAM3_SELECTION_REVIEW_SCHEMA_VERSION = "openeta.sam3_selection_review.v1"
 SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS = 512
 SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS = 16_000
-SAM3_SELECTION_REVIEW_TIMEOUT_S = 30.0
+# Visual selection reviews carry two images and can have a longer provider tail
+# than ordinary text-only planner turns. Keep retries bounded, but allow one
+# request enough time to finish under shared inference load.
+SAM3_SELECTION_REVIEW_TIMEOUT_S = 60.0
 SAM3_SELECTION_REVIEW_MAX_ATTEMPTS = 2
 
 SAM3_SELECTION_REVIEW_SYSTEM_PROMPT = """You are an isolated OpenETA mask reviewer.

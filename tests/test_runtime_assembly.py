@@ -91,7 +91,7 @@ def test_sam3_selection_reviewer_has_one_shared_bounded_provider_budget() -> Non
         {
             "max_tokens": 512,
             "max_vision_images": 2,
-            "timeout_s": 30.0,
+            "timeout_s": 60.0,
             "max_attempts": 1,
         }
     ]
