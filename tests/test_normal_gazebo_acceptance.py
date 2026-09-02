@@ -29,6 +29,75 @@ def test_normal_acceptance_reserves_cold_startup_budget_for_native_endpoints() -
     assert acceptance.DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S == 180.0
 
 
+def test_cleanup_waits_for_exited_ros_participant_discovery_lease(monkeypatch) -> None:
+    from extensions.gazebo.ros2_ws import acceptance_isolation
+
+    stale = {
+        "state": "FAILED",
+        "ok": False,
+        "reason_code": "ROS_DOMAIN_NOT_EMPTY",
+        "observations": [
+            {
+                "availability": "AVAILABLE",
+                "nodes": [
+                    {"name": "openeta_gazebo_controller", "namespace": "/"}
+                ],
+            }
+        ],
+    }
+    clean = {
+        "state": "PASSED",
+        "ok": True,
+        "reason_code": "ROS_DOMAIN_EMPTY",
+        "observations": [{"availability": "AVAILABLE", "nodes": []}],
+    }
+    evidence = iter((stale, clean))
+    monkeypatch.setattr(
+        acceptance_isolation,
+        "candidate_domain_evidence",
+        lambda domain: next(evidence),
+    )
+
+    result = acceptance.base._ros_graph_cleanup(
+        83, timeout_s=1.0, poll_interval_s=0.0
+    )
+
+    assert result["state"] == "PASSED"
+    assert result["settle_attempts"] == 2
+    assert result["observed_node_sets"] == [
+        [{"name": "openeta_gazebo_controller", "namespace": "/"}],
+        [],
+    ]
+
+
+def test_cleanup_still_rejects_persistent_ros_participant(monkeypatch) -> None:
+    from extensions.gazebo.ros2_ws import acceptance_isolation
+
+    monkeypatch.setattr(
+        acceptance_isolation,
+        "candidate_domain_evidence",
+        lambda domain: {
+            "state": "FAILED",
+            "ok": False,
+            "reason_code": "ROS_DOMAIN_NOT_EMPTY",
+            "observations": [
+                {
+                    "availability": "AVAILABLE",
+                    "nodes": [{"name": "foreign_node", "namespace": "/"}],
+                }
+            ],
+        },
+    )
+
+    result = acceptance.base._ros_graph_cleanup(
+        83, timeout_s=0.0, poll_interval_s=0.0
+    )
+
+    assert result["state"] == "FAILED"
+    assert result["reason_code"] == "ROS_DOMAIN_NOT_EMPTY"
+    assert result["settle_attempts"] == 1
+
+
 def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, monkeypatch) -> None:
     allocation = acceptance.base.Allocation(81, "openeta-normal-test", 18765, "run-id")
     monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])

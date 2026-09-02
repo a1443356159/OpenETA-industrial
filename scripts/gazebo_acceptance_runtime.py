@@ -889,6 +889,65 @@ def _partition_cleanup(
         time.sleep(min(max(0.0, poll_interval_s), remaining_s))
 
 
+def _ros_graph_cleanup(
+    domain: int,
+    *,
+    timeout_s: float = 15.0,
+    poll_interval_s: float = 0.5,
+) -> dict[str, Any]:
+    """Wait for DDS discovery to forget endpoints from exited owned processes.
+
+    A process exit and an empty process snapshot are authoritative ownership
+    evidence, but remote DDS participants can remain visible for a short lease.
+    Retry only that explicit non-empty-domain result.  Probe failures, ros2cli
+    daemons, and a graph that remains non-empty at the deadline still fail
+    closed.
+    """
+
+    from extensions.gazebo.ros2_ws.acceptance_isolation import (
+        candidate_domain_evidence,
+    )
+
+    started = time.monotonic()
+    deadline = started + max(0.0, float(timeout_s))
+    attempts = 0
+    observed_node_sets: list[list[dict[str, str]]] = []
+    while True:
+        attempts += 1
+        evidence = candidate_domain_evidence(domain)
+        observations = evidence.get("observations")
+        nodes: list[dict[str, str]] = []
+        if isinstance(observations, Sequence) and observations:
+            latest = observations[-1]
+            if isinstance(latest, Mapping):
+                raw_nodes = latest.get("nodes")
+                if isinstance(raw_nodes, Sequence):
+                    nodes = [
+                        {"name": str(row.get("name", "")),
+                         "namespace": str(row.get("namespace", ""))}
+                        for row in raw_nodes
+                        if isinstance(row, Mapping)
+                    ]
+        if not observed_node_sets or observed_node_sets[-1] != nodes:
+            observed_node_sets.append(nodes)
+
+        elapsed_s = round(time.monotonic() - started, 3)
+        result = {
+            **evidence,
+            "settle_attempts": attempts,
+            "settle_duration_s": elapsed_s,
+            "observed_node_sets": observed_node_sets,
+        }
+        if evidence.get("state") == "PASSED":
+            return result
+        if evidence.get("reason_code") != "ROS_DOMAIN_NOT_EMPTY":
+            return result
+        remaining_s = deadline - time.monotonic()
+        if remaining_s <= 0:
+            return result
+        time.sleep(min(max(0.0, poll_interval_s), remaining_s))
+
+
 def scripted_tui_input(paths: CasePaths) -> str:
     """Return keystrokes forwarded to the real PTY for scripted automation."""
 
@@ -1673,14 +1732,9 @@ def run_case(
         after = _process_snapshot()
         owned_residuals = _owned_process_residuals(after, run_id=allocation.run_id)
     # DDS and Gazebo discovery can briefly retain endpoints after every owned
-    # process has exited. Give their leases one bounded settle interval before
-    # recording the authoritative graph/partition cleanup evidence.
-    if not owned_residuals:
-        time.sleep(2.0)
-    from extensions.gazebo.ros2_ws.acceptance_isolation import (
-        candidate_domain_evidence,
-        probe_ros_graph,
-    )
+    # process has exited. Their cleanup probes below each own a bounded settle
+    # loop, so no fixed delay is needed here.
+    from extensions.gazebo.ros2_ws.acceptance_isolation import probe_ros_graph
 
     protected_after = {
         str(domain): probe_ros_graph(domain) for domain in sorted(PROTECTED_DOMAINS)
@@ -1712,7 +1766,7 @@ def run_case(
         "owned_process_residuals": owned_residuals,
         "operator_gui": operator_gui_evidence,
         **process_continuity,
-        "ros_graph": candidate_domain_evidence(allocation.ros_domain_id),
+        "ros_graph": _ros_graph_cleanup(allocation.ros_domain_id),
         "gz_partition": _partition_cleanup(allocation.gz_partition),
         "protected_ros_graphs_after": protected_after,
         "protected_ros_graphs_unchanged": protected_graph_unchanged,
