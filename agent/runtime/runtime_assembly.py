@@ -2039,6 +2039,10 @@ class _FrozenGoalPairCoordinator:
         release_height_full_barrier_activated = False
         deferred_count = 0
         goal_pool_exhausted = False
+        deferred_pair_order: list[str] = []
+        deferred_pair_entries: dict[str, JsonDict] = {}
+        recovery_deferred_grasp_count = 0
+        recovery_batch_count = 0
 
         def retained_quality_order() -> list[str]:
             """Rank complete branches across every frozen-frontier batch."""
@@ -2053,21 +2057,30 @@ class _FrozenGoalPairCoordinator:
                 ),
             )
 
-        while True:
-            batch_input_grasps = current.details.get("grasp_candidates")
-            batch_input_grasps = (
-                [json.loads(json.dumps(candidate)) for candidate in batch_input_grasps]
-                if isinstance(batch_input_grasps, list)
-                else []
-            )
-            filtered = self._filter_grasp_batch(
-                current,
-                scene_epoch=scene_epoch,
-                planning_scene_revision=planning_scene_revision,
-                source=source,
-            )
-            if not filtered.success:
-                return filtered
+        def cached_grasp_entries(
+            grasps: Sequence[Mapping[str, object]],
+        ) -> dict[str, JsonDict]:
+            entries: dict[str, JsonDict] = {}
+            for grasp in grasps:
+                grasp_id = str(grasp.get("id") or "")
+                if not grasp_id:
+                    continue
+                entry = self.qualifier.cache.resolve(
+                    purpose="grasp",
+                    candidate_id=grasp_id,
+                    scene_epoch=scene_epoch,
+                    planning_scene_revision=planning_scene_revision,
+                )
+                if isinstance(entry, Mapping):
+                    entries[grasp_id] = json.loads(json.dumps(entry))
+            return entries
+
+        def absorb_filtered(filtered: ToolResult) -> bool:
+            """Merge one deterministic pair barrier into the aggregate."""
+
+            nonlocal reserve_activated
+            nonlocal release_height_fallback_activated
+            nonlocal release_height_full_barrier_activated
             for key in pair_totals:
                 value = filtered.details.get(key)
                 if isinstance(value, int) and not isinstance(value, bool):
@@ -2109,8 +2122,7 @@ class _FrozenGoalPairCoordinator:
                 filtered.details.get("frozen_goal_legality_screen_complete") is True
                 and not self.object_goals
             ):
-                goal_pool_exhausted = True
-                break
+                return True
 
             batch_goals = self.qualified_goals_by_grasp
             batch_grasps = filtered.details.get("grasp_candidates")
@@ -2132,13 +2144,127 @@ class _FrozenGoalPairCoordinator:
                 retained[grasp_id] = json.loads(json.dumps(grasp))
                 cached_candidate = entry.get("candidate")
                 if isinstance(cached_candidate, Mapping):
-                    retained_cache[grasp_id] = json.loads(json.dumps(cached_candidate))
+                    retained_cache[grasp_id] = json.loads(
+                        json.dumps(cached_candidate)
+                    )
                 proof = entry.get("proof")
                 if isinstance(proof, Mapping):
                     retained_proofs[grasp_id] = json.loads(json.dumps(proof))
                 goals = batch_goals.get(grasp_id)
                 if isinstance(goals, list):
                     retained_goals[grasp_id] = json.loads(json.dumps(goals))
+            return False
+
+        def recover_deferred_pairs() -> tuple[ToolResult, list[JsonDict]]:
+            """Spend fixed recovery seeds only after peer fast branches."""
+
+            candidates: list[JsonDict] = []
+            proofs: dict[str, Mapping[str, object]] = {}
+            for grasp_id in deferred_pair_order:
+                entry = deferred_pair_entries.get(grasp_id)
+                if not isinstance(entry, Mapping):
+                    continue
+                candidate = entry.get("candidate")
+                proof = entry.get("proof")
+                if not isinstance(candidate, Mapping) or not isinstance(proof, Mapping):
+                    continue
+                candidates.append(json.loads(json.dumps(candidate)))
+                proofs[grasp_id] = json.loads(json.dumps(proof))
+            if not candidates:
+                return (
+                    ToolResult(
+                        False,
+                        "Deferred pair recovery lost its frozen grasp proof.",
+                        {
+                            "reason": "frozen_pair_recovery_proof_missing",
+                            "execution_started": False,
+                        },
+                    ),
+                    [],
+                )
+            self.qualifier.cache.replace(
+                purpose="grasp",
+                candidates=candidates,
+                proofs=proofs,
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+            )
+            recovered = self._filter_grasp_batch(
+                ToolResult(
+                    True,
+                    "deferred frozen grasp/place recovery",
+                    {
+                        "grasp_candidates": json.loads(json.dumps(candidates)),
+                        "model_raw_candidate_count": len(candidates),
+                        "raw_candidate_count": len(candidates),
+                    },
+                ),
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+                source=source,
+                defer_pair_recovery=False,
+            )
+            return recovered, candidates
+
+        while True:
+            batch_input_grasps = current.details.get("grasp_candidates")
+            batch_input_grasps = (
+                [json.loads(json.dumps(candidate)) for candidate in batch_input_grasps]
+                if isinstance(batch_input_grasps, list)
+                else []
+            )
+            batch_entries = cached_grasp_entries(batch_input_grasps)
+            batch_ids = {
+                str(candidate.get("id") or "")
+                for candidate in batch_input_grasps
+                if isinstance(candidate, Mapping) and str(candidate.get("id") or "")
+            }
+            can_defer_batch = bool(batch_ids) and batch_ids.issubset(batch_entries)
+            filtered = self._filter_grasp_batch(
+                current,
+                scene_epoch=scene_epoch,
+                planning_scene_revision=planning_scene_revision,
+                source=source,
+                defer_pair_recovery=can_defer_batch,
+            )
+            if not filtered.success:
+                return filtered
+            if absorb_filtered(filtered):
+                goal_pool_exhausted = True
+                break
+
+            if not retained and can_defer_batch:
+                for grasp_id in sorted(
+                    batch_entries,
+                    key=lambda value: next(
+                        (
+                            index
+                            for index, candidate in enumerate(batch_input_grasps)
+                            if str(candidate.get("id") or "") == value
+                        ),
+                        len(batch_input_grasps),
+                    ),
+                ):
+                    if grasp_id not in deferred_pair_entries:
+                        deferred_pair_order.append(grasp_id)
+                        deferred_pair_entries[grasp_id] = batch_entries[grasp_id]
+                        recovery_deferred_grasp_count += 1
+
+            recovery_due = bool(deferred_pair_order) and (
+                len(deferred_pair_order) >= self.grasp_branch_limit
+                or not self.grasp_frontier_candidates
+            )
+            if not retained and recovery_due:
+                recovery_batch_count += 1
+                recovery_filtered, recovery_inputs = recover_deferred_pairs()
+                if not recovery_filtered.success:
+                    return recovery_filtered
+                if absorb_filtered(recovery_filtered):
+                    goal_pool_exhausted = True
+                    break
+                batch_input_grasps = recovery_inputs
+                deferred_pair_order.clear()
+                deferred_pair_entries.clear()
 
             if len(retained) >= target:
                 selected_ids = set(retained_quality_order()[:target])
@@ -2147,9 +2273,25 @@ class _FrozenGoalPairCoordinator:
                     for candidate in self.grasp_frontier_candidates
                     if isinstance(candidate, Mapping)
                 }
+                deferred_fast_inputs = [
+                    json.loads(json.dumps(entry["candidate"]))
+                    for grasp_id in deferred_pair_order
+                    if isinstance(
+                        (entry := deferred_pair_entries.get(grasp_id)), Mapping
+                    )
+                    and isinstance(entry.get("candidate"), Mapping)
+                ]
+                selection_inputs: list[JsonDict] = []
+                selection_input_ids: set[str] = set()
+                for candidate in [*deferred_fast_inputs, *batch_input_grasps]:
+                    candidate_id = str(candidate.get("id") or "")
+                    if not candidate_id or candidate_id in selection_input_ids:
+                        continue
+                    selection_input_ids.add(candidate_id)
+                    selection_inputs.append(candidate)
                 deferred = [
                     candidate
-                    for candidate in batch_input_grasps
+                    for candidate in selection_inputs
                     if isinstance(candidate, Mapping)
                     and str(candidate.get("id") or "")
                     and str(candidate.get("id") or "") not in selected_ids
@@ -2245,6 +2387,10 @@ class _FrozenGoalPairCoordinator:
                 ),
                 "frozen_pair_execution_target": primary_target,
                 "frozen_pair_deferred_grasp_count": deferred_count,
+                "frozen_pair_fast_recovery_deferred_grasp_count": (
+                    recovery_deferred_grasp_count
+                ),
+                "frozen_pair_deferred_recovery_batch_count": recovery_batch_count,
                 "frozen_pair_recovery_policy": ("resume_frozen_frontier_after_execution_failure"),
                 "frozen_pair_frontier_expansion_count": expansion_count,
                 "frozen_grasp_frontier_remaining_count": len(self.grasp_frontier_candidates),
@@ -2297,6 +2443,7 @@ class _FrozenGoalPairCoordinator:
         scene_epoch: int,
         planning_scene_revision: int,
         source: Mapping[str, object],
+        defer_pair_recovery: bool = False,
     ) -> ToolResult:
         grasps = result.details.get("grasp_candidates")
         if not isinstance(grasps, list) or not grasps:
@@ -2531,6 +2678,7 @@ class _FrozenGoalPairCoordinator:
                 qualification_mode="frozen_pair",
                 l5_pass_target=1,
                 l5_min_pass_target=1,
+                defer_recovery=defer_pair_recovery,
             )
 
         primary_joint = qualify_pairs(pairs)

@@ -736,6 +736,10 @@ def test_move_initializes_cache_diagnostic_before_any_finish_path() -> None:
     assert source.index("cache_lookup: dict[str, Any]") < source.index(
         "def finish"
     )
+    assert source.index("wall_started = time.monotonic()") < source.index(
+        "def finish"
+    )
+    assert 'payload["wall_elapsed_ms"]' in source
 
 
 def test_runtime_capability_hash_matches_offline_generator_contract() -> None:

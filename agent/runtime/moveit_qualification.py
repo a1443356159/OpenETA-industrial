@@ -558,11 +558,20 @@ class MoveItCandidateQualifier:
         qualification_mode: str = "standard",
         l5_pass_target: int | None = None,
         l5_min_pass_target: int | None = None,
+        defer_recovery: bool = False,
     ) -> ToolResult:
         if not result.success:
             return result
         if purpose not in {"grasp", "placement", "observation"}:
             raise ValueError("candidate qualification purpose is invalid")
+        if defer_recovery and not (
+            self.qualification_profile in {"fast_v3", "shadow"}
+            and purpose == "placement"
+            and qualification_mode == "frozen_pair"
+        ):
+            raise ValueError(
+                "recovery may be deferred only for a fast frozen grasp/place pair"
+            )
         details = result.details
         key = {
             "grasp": "grasp_candidates",
@@ -760,6 +769,14 @@ class MoveItCandidateQualifier:
                 # qualified frozen alternates, but continue L5 attempts until
                 # that PASS target is met or the deterministic pool exhausts.
                 funnel_config["qualification_mode"] = "frozen_pair"
+                if defer_recovery:
+                    # The host coordinates several independently L5-proven
+                    # grasp branches.  Let each branch traverse its complete
+                    # two-seed fast pool before any branch consumes the fixed
+                    # six-seed recovery budget.  The host retains the exact
+                    # frozen branch and later resubmits it without this flag,
+                    # so no model candidate or recovery seed is discarded.
+                    funnel_config["defer_recovery"] = True
             if self.qualification_profile == "shadow":
                 shadow_legacy_candidates = diversify_compiled_candidates(
                     [
@@ -2160,6 +2177,13 @@ class MoveItQualificationEngine:
         if target <= 0 or minimum_target <= 0 or minimum_target > target:
             raise ValueError("invalid fast_v3 L5 pass targets")
         qualification_mode = str(funnel.get("qualification_mode") or "")
+        defer_recovery = funnel.get("defer_recovery") is True
+        if defer_recovery and not (
+            purpose == "placement" and qualification_mode == "frozen_pair"
+        ):
+            raise ValueError(
+                "recovery may be deferred only for frozen grasp/place qualification"
+            )
 
         def pass_target_reached(required: int) -> bool:
             if len(l5_passes) < required:
@@ -2394,7 +2418,11 @@ class MoveItQualificationEngine:
                 if run_wave(wave, recovery=False):
                     break
 
-        if not infrastructure_error and not acceptable_target_reached():
+        if (
+            not infrastructure_error
+            and not acceptable_target_reached()
+            and not defer_recovery
+        ):
             # Only after the complete fast pool fails do the fixed remaining
             # six seeds become eligible.  Preserve the same waves and barriers.
             l5_pass_ids = {str(item.get("candidate_id") or "") for item in l5_passes}
@@ -2550,6 +2578,12 @@ class MoveItQualificationEngine:
             # preferred backup.  This is an explicit redundancy degradation,
             # never an early-success shortcut and never a relaxed IK/L5 proof.
             stop_reason = "complete_l5_pass_found_single_branch_exhaustive_fallback"
+        elif defer_recovery:
+            # This is a host-scheduled pause between the complete fast pool
+            # and its fixed recovery pool, not search exhaustion.  The frozen
+            # branch remains immutable and is resubmitted after its peer
+            # grasp branches have received the same fast opportunity.
+            stop_reason = "fast_pool_exhausted_recovery_deferred"
         else:
             stop_reason = "candidate_and_recovery_exhausted"
 
@@ -2735,11 +2769,19 @@ class MoveItQualificationEngine:
             "fast_pool_exhausted": completed_fast_wave_count == len(waves),
             "recovery_wave_count_expected": len(recovery_waves),
             "recovery_wave_count_completed": completed_recovery_wave_count,
-            "recovery_pool_exhausted": (completed_recovery_wave_count == len(recovery_waves)),
+            "recovery_pool_exhausted": (
+                not defer_recovery
+                and completed_recovery_wave_count == len(recovery_waves)
+            ),
             "preferred_grasp_branch_target": target if purpose == "grasp" else 0,
             "published_grasp_branch_count": (len(selected_ids) if purpose == "grasp" else 0),
             "redundancy_degraded": (
                 stop_reason == "complete_l5_pass_found_single_branch_exhaustive_fallback"
+            ),
+            **(
+                {"recovery_deferred": True}
+                if defer_recovery and not acceptable_target_reached()
+                else {}
             ),
         }
         return {

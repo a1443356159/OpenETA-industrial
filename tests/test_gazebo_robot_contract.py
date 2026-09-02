@@ -1113,6 +1113,7 @@ def test_controller_accepts_stationary_action_ordered_terminal_after_success() -
             "motion_outcome": "completed",
             "action_started_ros_time_s": 12.5,
             "action_completed_ros_time_s": 14.0,
+            "wall_elapsed_ms": 1523.4,
         },
     ).execute(
         {
@@ -1133,6 +1134,7 @@ def test_controller_accepts_stationary_action_ordered_terminal_after_success() -
         "action_completed_ros_time_s"
     )
     assert result.payload["terminal_state_stationary_verified"] is True
+    assert result.payload["wall_elapsed_ms"] == pytest.approx(1523.4)
 
 
 def test_controller_waits_for_stationary_state_after_success(

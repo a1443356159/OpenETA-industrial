@@ -1377,6 +1377,7 @@ class GazeboController:
                     for key in (
                         "action_started_ros_time_s",
                         "action_completed_ros_time_s",
+                        "wall_elapsed_ms",
                         "moveit_error_code",
                         "planned_point_count",
                         "execution_started",

@@ -3411,6 +3411,35 @@ def test_recovery_seeds_start_only_after_complete_fast_pool_failure():
     assert response["stop_reason"] == "candidate_and_recovery_exhausted"
 
 
+def test_frozen_pair_can_defer_fixed_recovery_after_complete_fast_pool():
+    sources = []
+    lock = threading.Lock()
+
+    def ik(target, seed, collision):
+        with lock:
+            sources.append(str(seed.get("seed_source") or ""))
+        return {"ok": False}
+
+    request = _request(
+        [_candidate(0), _candidate(1)],
+        overrides={
+            "qualification_mode": "frozen_pair",
+            "defer_recovery": True,
+            "l5_pass_target": 1,
+            "l5_min_pass_target": 1,
+        },
+    )
+    response = _engine(compute_ik=ik).qualify(request)
+
+    assert len(sources) == 4
+    assert not any(source.startswith("fixed_recovery") for source in sources)
+    assert response["selected_candidate_ids"] == []
+    assert response["stop_reason"] == "fast_pool_exhausted_recovery_deferred"
+    assert response["search_exhaustion"]["fast_pool_exhausted"] is True
+    assert response["search_exhaustion"]["recovery_deferred"] is True
+    assert response["search_exhaustion"]["recovery_pool_exhausted"] is False
+
+
 def test_repeated_service_timeout_aborts_as_infrastructure_error():
     calls = 0
 

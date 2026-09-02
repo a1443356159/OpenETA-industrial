@@ -561,6 +561,7 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     assert captured["funnel"]["l5_min_pass_target"] == 1
     assert "l5_submission_limit" not in captured["funnel"]
     assert captured["funnel"]["qualification_mode"] == "frozen_pair"
+    assert captured["funnel"]["defer_recovery"] is True
     rebased_pairs = [
         item["candidate"]
         for item in captured["candidates"]
@@ -1061,11 +1062,17 @@ def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(
     assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == ["g2"]
     assert result.details["frozen_pair_execution_target"] == 1
     assert result.details["frozen_pair_stop_reason"] == "complete_pair_found"
-    assert result.details["frozen_pair_deferred_grasp_count"] == 0
+    assert result.details["frozen_pair_deferred_grasp_count"] == 2
+    assert result.details["frozen_pair_fast_recovery_deferred_grasp_count"] == 2
+    assert result.details["frozen_pair_deferred_recovery_batch_count"] == 0
     assert result.details["frozen_pair_frontier_expansion_count"] == 1
-    assert result.details["frozen_grasp_frontier_remaining_count"] == 1
+    assert result.details["frozen_grasp_frontier_remaining_count"] == 3
     assert result.details["frozen_grasp_frontier_model_inference_invoked"] is False
-    assert [candidate["id"] for candidate in coordinator.grasp_frontier_candidates] == ["g3"]
+    assert [candidate["id"] for candidate in coordinator.grasp_frontier_candidates] == [
+        "g0",
+        "g1",
+        "g3",
+    ]
     assert result.details["ranking"] == "grasp_place_physical_quality"
     assert [
         candidate["grasp_place_frontier_quality_rank"]
@@ -1078,12 +1085,163 @@ def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(
         for call in calls
         if call["purpose"] == "placement" and not _is_goal_prebind(call)
     ] == [1, 1]
+    assert all(
+        call["funnel"]["defer_recovery"] is True
+        for call in calls
+        if call["purpose"] == "placement" and not _is_goal_prebind(call)
+    )
     assert sum(_is_goal_prebind(call) for call in calls) == 1
     assert [
         call["funnel"]["l5_pass_target"]
         for call in calls
         if call["purpose"] == "grasp"
     ] == [1]
+
+
+def test_frozen_pair_recovery_runs_after_four_peer_fast_branches(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        if _is_goal_prebind(request):
+            return _goal_prebind_response(request)
+        calls.append(request)
+        deferred = request["funnel"].get("defer_recovery") is True
+        results = []
+        selected = []
+        for item in request["candidates"]:
+            candidate = item["candidate"]
+            source_grasp_id = str(candidate.get("source_grasp_id") or "")
+            passed = not deferred and source_grasp_id == "g2" and not selected
+            if passed:
+                selected.append(item["candidate_id"])
+            result = {
+                "candidate_id": item["candidate_id"],
+                "candidate_pose_sha256": item["candidate_pose_sha256"],
+                "qualification_binding_sha256": request[
+                    "qualification_binding_sha256"
+                ],
+                "execution_started": False,
+                "verdict": "PASS" if passed else "FAIL",
+                "reason": "qualified" if passed else "no_pair_solution",
+                "stages": [_pass_stage()] if passed else [],
+                "endpoint_pass": passed,
+                "full_plan_submitted": passed,
+            }
+            if passed:
+                result["goal_legality"] = {
+                    "verdict": "PASS",
+                    "checks": {
+                        "object_frame_binding": {
+                            "collision_goal_pose": {
+                                "convention": "T_world_collision_object_goal",
+                                "frame": "world",
+                                "translation_xyz": [0.48, 0.0, 0.43],
+                                "rotation_matrix": [
+                                    [1.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0],
+                                    [0.0, 0.0, 1.0],
+                                ],
+                            }
+                        }
+                    },
+                }
+            results.append(result)
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "stop_reason": (
+                "complete_l5_pass_found"
+                if selected
+                else "fast_pool_exhausted_recovery_deferred"
+                if deferred
+                else "candidate_and_recovery_exhausted"
+            ),
+            "selected_candidate_ids": selected,
+            "results": results,
+        }
+
+    cache = QualificationCache()
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        cache=cache,
+        artifact_root=tmp_path,
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.48, 0.0, 0.50],
+                    "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                }
+            ]
+        },
+    )
+    grasps = [{"id": f"g{index}", "score": 1.0 - index * 0.1} for index in range(4)]
+    proofs = {
+        grasp["id"]: {
+            "verdict": "PASS",
+            "endpoint_pass": True,
+            "stages": [
+                {
+                    "name": "contact",
+                    "target_pose": {
+                        "xyz": [0.3, 0.0, 0.45],
+                        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                    },
+                    "end_joint_state": {"names": ["j1"], "positions": [0.0]},
+                }
+            ],
+        }
+        for grasp in grasps
+    }
+    cache.replace(
+        purpose="grasp",
+        candidates=grasps,
+        proofs=proofs,
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+    coordinator = _FrozenGoalPairCoordinator(qualifier, grasp_branch_limit=4)
+    coordinator.object_current_pose = {
+        "frame": "world",
+        "translation_xyz": [0.3, 0.0, 0.43],
+        "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    }
+    coordinator.object_goals = [
+        {
+            "id": "p0",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.48, 0.0, 0.43],
+                "rotation_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+            },
+        }
+    ]
+    coordinator.scene_epoch = 3
+    coordinator.planning_scene_revision = 7
+
+    result = coordinator.filter_grasps(
+        ToolResult(True, "qualified", {"grasp_candidates": grasps}),
+        scene_epoch=3,
+        planning_scene_revision=7,
+        source={},
+    )
+
+    assert [call["funnel"].get("defer_recovery") for call in calls] == [True, None]
+    assert [candidate["id"] for candidate in result.details["grasp_candidates"]] == [
+        "g2"
+    ]
+    assert result.details["frozen_pair_fast_recovery_deferred_grasp_count"] == 4
+    assert result.details["frozen_pair_deferred_recovery_batch_count"] == 1
+    assert [candidate["id"] for candidate in coordinator.grasp_frontier_candidates] == [
+        "g0",
+        "g1",
+        "g3",
+    ]
 
 
 def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:

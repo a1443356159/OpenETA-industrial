@@ -3963,6 +3963,7 @@ class _RosRuntime:
         from shape_msgs.msg import SolidPrimitive
 
         action_started = self.ros_time_s()
+        wall_started = time.monotonic()
         cache_lookup: dict[str, Any] = {
             "status": "not_applicable",
             "reason": "plan_only_request",
@@ -3972,6 +3973,13 @@ class _RosRuntime:
             payload["action_started_ros_time_s"] = action_started
             completed = self.ros_time_s()
             payload["action_completed_ros_time_s"] = completed
+            # Diagnostics only.  Human-gated TUI duration includes the time an
+            # operator spends reviewing the request, whereas this interval is
+            # measured strictly inside the controller service boundary.
+            payload["wall_elapsed_ms"] = round(
+                (time.monotonic() - wall_started) * 1000,
+                3,
+            )
             payload["motion_profile"] = str(goal.get("motion_profile") or "unloaded")
             payload["max_velocity_scaling_factor"] = float(
                 goal.get("max_velocity_scaling_factor", 0.3)
