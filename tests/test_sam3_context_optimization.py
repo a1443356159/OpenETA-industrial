@@ -180,6 +180,7 @@ def test_sam3_reviewer_forks_confirmed_bounded_parent_planner_context() -> None:
     review_rules = request.tool_context["selection_review_contract"]["rules"]
     assert any("target_prompt is authoritative" in rule for rule in review_rules)
     assert any("original RGB for colour" in rule for rule in review_rules)
+    assert any("raw RGB crop" in rule for rule in review_rules)
 
 
 def test_parent_fork_does_not_leak_previous_multi_object_step_into_review() -> None:

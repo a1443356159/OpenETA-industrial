@@ -810,6 +810,45 @@ def test_sam3_multiple_detections_require_explicit_selection(tmp_path: Path) -> 
     ]["mask_ref"]
 
 
+def test_sam3_selection_crop_preserves_raw_rgb_appearance(tmp_path: Path) -> None:
+    source = Image.new("RGB", (100, 80), (80, 80, 80))
+    for x in range(30, 70):
+        for y in range(25, 55):
+            source.putpixel((x, y), (220, 20, 30))
+    source_ref = tmp_path / "source.png"
+    source.save(source_ref)
+    mask = Image.new("L", source.size, 0)
+    mask.paste(255, (30, 25, 70, 55))
+    mask_ref = tmp_path / "mask.png"
+    mask.save(mask_ref)
+    output_dir = tmp_path / "selection"
+    output_dir.mkdir()
+
+    bundle, _artifacts = handlers_module._build_sam3_selection_artifacts(
+        source_image=source_ref,
+        detections=[
+            {
+                "id": "detection_000",
+                "label": "red part",
+                "score": 0.9,
+                "rank": 0,
+                "bbox_xyxy": [30, 25, 70, 55],
+                "area_px": 1200,
+                "mask_ref": str(mask_ref),
+            }
+        ],
+        output_dir=output_dir,
+        prompt="red part",
+    )
+
+    crop_ref = Path(bundle["candidates"][0]["crop_ref"])
+    overlay_ref = Path(bundle["candidates"][0]["overlay_ref"])
+    with Image.open(crop_ref).convert("RGB") as crop:
+        assert crop.getpixel((crop.width // 2, crop.height // 2)) == (220, 20, 30)
+    with Image.open(overlay_ref).convert("RGB") as overlay:
+        assert overlay.getpixel((50, 40)) != (220, 20, 30)
+
+
 def test_sam3_handler_runs_typed_selection_review_inside_same_tool_call(
     tmp_path: Path,
 ) -> None:

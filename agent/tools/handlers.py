@@ -3664,7 +3664,10 @@ def _build_sam3_selection_artifacts(
         overlay_ref = output_dir / f"{detection_id}.overlay.png"
         overlay.save(overlay_ref, format="PNG")
         crop_box = _sam3_padded_crop_box(bbox, image_size=original.size)
-        crop = overlay.crop(crop_box) if crop_box is not None else overlay.copy()
+        # The full-scene overlay proves mask location and coverage.  Preserve
+        # the raw RGB appearance in the close crop so a semantic reviewer does
+        # not mistake the annotation tint for object colour or material.
+        crop = original.crop(crop_box) if crop_box is not None else original.copy()
         crop_ref = output_dir / f"{detection_id}.crop.png"
         crop.save(crop_ref, format="PNG")
         detection["overlay_ref"] = str(overlay_ref)
@@ -3695,6 +3698,7 @@ def _build_sam3_selection_artifacts(
         candidate_panel.paste(crop_panel, ((360 - crop_panel.width) // 2, 300))
         panel_draw = ImageDraw.Draw(candidate_panel)
         panel_draw.text((10, 8), label, fill=(0, 0, 0))
+        panel_draw.text((10, 282), "raw RGB crop", fill=(0, 0, 0))
         panels.append((detection_id, candidate_panel))
         bundle_candidates.append(
             {

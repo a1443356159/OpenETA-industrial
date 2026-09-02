@@ -22,7 +22,7 @@ from agent.backends.planner import PlannerBackend, PlannerBackendRequest
 
 
 SAM3_SELECTION_REVIEW_SCHEMA_VERSION = "openeta.sam3_selection_review.v1"
-SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS = 256
+SAM3_SELECTION_REVIEW_MAX_OUTPUT_TOKENS = 512
 SAM3_SELECTION_REVIEW_MAX_INPUT_TOKENS = 16_000
 SAM3_SELECTION_REVIEW_TIMEOUT_S = 30.0
 SAM3_SELECTION_REVIEW_MAX_ATTEMPTS = 2
@@ -37,8 +37,9 @@ Rules:
 - tool_context.target_prompt is the only target for this review. Do not infer
   another target or workflow step from an earlier task or conversation.
 - Use the original RGB for object colour, material, and identity. Coloured
-  masks, borders, labels, and crops in the contact sheet are annotations and
-  may alter appearance; use them only to locate and judge mask coverage.
+  masks, borders, and labels in the contact sheet are annotations and may
+  alter appearance; use them only to locate and judge mask coverage. The
+  labelled raw RGB crop preserves the candidate's unmodified appearance.
 - grasp_target and placement_object must cover the complete intended object,
   not one face, a shadow, a neighbouring object, or broad background.
 - placement_region must cover the intended support/placement region, not the
@@ -383,8 +384,9 @@ class BackendSam3SelectionReviewer:
                         "Inspect both images; rank and score are tie-breakers only.",
                         (
                             "Use the original RGB for colour, material, and identity; "
-                            "contact-sheet masks, borders, labels, and crops are "
-                            "annotations used only for localization and coverage."
+                            "contact-sheet masks, borders, and labels are annotations "
+                            "used only for localization and coverage; the labelled "
+                            "raw RGB crop preserves unmodified appearance."
                         ),
                         (
                             "The selection obligation target_prompt is authoritative; "
