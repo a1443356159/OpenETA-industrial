@@ -416,6 +416,109 @@ def test_active_observe_acquires_point_grounded_view_and_caches_sam3(tmp_path: P
     assert sam_calls[0]["semantic_role"] == "grasp_target"
 
 
+def test_active_observe_selects_nested_point_mask_from_depth_without_vlm(
+    tmp_path: Path,
+) -> None:
+    top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
+    wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
+    new_rgb, new_depth = tmp_path / "new-wrist.png", tmp_path / "new-wrist-depth.png"
+    old_mask_path = tmp_path / "old-mask.png"
+    good_mask_path, broad_mask_path = tmp_path / "good-mask.png", tmp_path / "broad-mask.png"
+    for path in (top_rgb, wrist_rgb, new_rgb):
+        _save_rgb(path)
+    old_mask = np.zeros((120, 160), dtype=bool)
+    old_mask[50:70, 70:90] = True
+    good_mask = np.zeros((120, 160), dtype=bool)
+    good_mask[35:85, 60:100] = True
+    broad_mask = np.zeros((120, 160), dtype=bool)
+    broad_mask[5:115, 5:155] = True
+    _save_depth(top_depth, millimetres=980, mask=old_mask)
+    _save_depth(wrist_depth)
+    _save_depth(new_depth, millimetres=380, mask=good_mask)
+    Image.fromarray((old_mask * 255).astype(np.uint8)).save(old_mask_path)
+    Image.fromarray((good_mask * 255).astype(np.uint8)).save(good_mask_path)
+    Image.fromarray((broad_mask * 255).astype(np.uint8)).save(broad_mask_path)
+    artifact_root = tmp_path / "artifacts"
+    _write_evidence(
+        artifact_root,
+        result_id="sam-result-1",
+        source_rgb=top_rgb,
+        mask_path=old_mask_path,
+        area_px=int(old_mask.sum()),
+    )
+    initial = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=wrist_rgb,
+        wrist_depth=wrist_depth,
+    )
+    acquired = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=new_rgb,
+        wrist_depth=new_depth,
+        wrist_position=[0.3, 0.0, 0.4],
+        wrist_quaternion=[1.0, 0.0, 0.0, 0.0],
+    )
+    acquired.cameras = [
+        camera for camera in acquired.cameras if camera.frame_id == "wrist_camera_optical_frame"
+    ]
+    acquired.metadata["image_artifacts"] = [
+        artifact
+        for artifact in acquired.metadata["image_artifacts"]
+        if artifact["frame_id"] == "wrist_camera_optical_frame"
+    ]
+    proxy = _Proxy(acquired)
+    sam_contexts: list[ToolExecutionContext] = []
+
+    def sam3_handler(context: ToolExecutionContext) -> ToolResult:
+        sam_contexts.append(context)
+        return ToolResult(
+            True,
+            details={
+                "result_id": "active-multimask-result",
+                "source_image": str(new_rgb),
+                "source_frame_id": "wrist_camera_optical_frame",
+                "semantic_target": "yellow wrench",
+                "perception_bundle_id": "perception-active",
+                "observation_id": "observation-active",
+                "detections": [
+                    {
+                        "id": "detection_broad",
+                        "label": "point_prompt",
+                        "score": 0.95,
+                        "mask_ref": str(broad_mask_path),
+                        "bbox_xyxy": [5, 5, 155, 115],
+                    },
+                    {
+                        "id": "detection_target",
+                        "label": "point_prompt",
+                        "score": 0.80,
+                        "mask_ref": str(good_mask_path),
+                        "bbox_xyxy": [60, 35, 100, 85],
+                    },
+                ],
+                "selected_detection": None,
+            },
+        )
+
+    controller = _controller(tmp_path, proxy=proxy, sam3_handler=sam3_handler)
+    controller.qualifier = _PassQualifier()  # type: ignore[assignment]
+
+    result = controller.handler(_context(controller, initial))
+
+    assert result.success is True
+    assert result.details["outputs"]["selected_detection"]["id"] == ("detection_target")
+    review = result.details["outputs"]["selection_review"]
+    assert review["model_review_invoked"] is False
+    assert review["selection_source"] == "active_vision_point_depth_geometry"
+    assert proxy.calls == ["move_to", "observe"]
+    assert len(sam_contexts) == 1
+    assert sam_contexts[0].metadata["sam3_selection_policy"] == (
+        "active_vision_point_depth_geometry"
+    )
+
+
 def test_active_observe_searches_from_calibrated_visual_point_without_mask(
     tmp_path: Path,
 ) -> None:

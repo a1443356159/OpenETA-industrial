@@ -29,7 +29,11 @@ grounding context; the returned point is still checked against current calibrate
 depth before motion. The agent decides that another view is useful; the
 tool owns deterministic viewpoint generation, strict cheap legality, Beam-2
 IK/state validity, two L5 plan-only proofs, bounded motion, fresh RGB-D
-acquisition, and point-grounded target refresh.
+acquisition, and point-grounded target refresh. After motion it checks every
+current calibrated RGB-D view in deterministic order. Nested point-prompt SAM3
+masks are selected from aligned depth, the projected world target and the
+ordinary grasp-quality gate; this refresh does not spend another semantic VLM
+review for each view.
 
 For grounded refinement, copy `target_evidence_id` from the selected
 grasp-target SAM3 `result_id`. For semantic search, choose `active_observe`

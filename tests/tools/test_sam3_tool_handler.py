@@ -266,6 +266,46 @@ def test_sam3_point_mode_routes_and_materializes_three_candidates(tmp_path: Path
         assert '"base64":' not in path.read_text()
 
 
+def test_active_vision_point_mode_defers_to_geometry_without_vlm_review(
+    tmp_path: Path,
+) -> None:
+    image_size = Image.open(FIXTURE_IMAGE).size
+    reviewer_calls: list[dict] = []
+
+    def review(request: dict) -> dict:
+        reviewer_calls.append(request)
+        raise AssertionError("active vision point masks must not invoke the VLM reviewer")
+
+    handler = build_sam3_handler(
+        lambda _request: pytest.fail("text MCP must not be called"),
+        segment_points=lambda request: _point_response(request, image_size=image_size),
+        selection_reviewer=review,
+        output_root=tmp_path / "images",
+        result_output_root=tmp_path / "results",
+    )
+    context = _context(
+        {
+            "mode": "points",
+            "image": str(FIXTURE_IMAGE),
+            "points": [{"x": 50, "y": 60, "label": 1}],
+            "semantic_role": "grasp_target",
+            "semantic_target": "yellow wrench",
+        }
+    )
+    context.metadata["sam3_selection_policy"] = "active_vision_point_depth_geometry"
+
+    result = handler(context)
+
+    assert result.success is True
+    assert reviewer_calls == []
+    assert result.details["selected_detection"] is None
+    assert result.details["selection_required"] is True
+    assert result.details["selection_review"]["model_review_invoked"] is False
+    assert result.details["selection_review"]["selection_source"] == (
+        "active_vision_point_depth_geometry"
+    )
+
+
 def test_sam3_projected_point_review_inherits_exact_semantic_target(
     tmp_path: Path,
 ) -> None:

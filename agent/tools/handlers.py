@@ -217,6 +217,9 @@ def build_sam3_handler(
     )
 
     def handler(context: ToolExecutionContext) -> ToolResult:
+        active_vision_geometry_selection = (
+            context.metadata.get("sam3_selection_policy") == "active_vision_point_depth_geometry"
+        )
         session_id = artifact_session_id(context.metadata)
         run_dir = _create_run_dir(artifact_session_root(json_output_root, session_id))
         artifacts_dir = artifact_session_root(image_output_root, session_id) / run_dir.name
@@ -658,7 +661,12 @@ def build_sam3_handler(
                     "deterministic_singleton": True,
                     "model_review_invoked": False,
                 }
-            elif selection_reviewer is not None and isinstance(detections, list) and detections:
+            elif (
+                selection_reviewer is not None
+                and isinstance(detections, list)
+                and detections
+                and not active_vision_geometry_selection
+            ):
                 try:
                     review = selection_reviewer(
                         {
@@ -748,6 +756,25 @@ def build_sam3_handler(
                         }
                     )
                     details["diagnostics"] = diagnostics
+            elif active_vision_geometry_selection and isinstance(detections, list) and detections:
+                # active_observe supplies a calibrated projection of one
+                # already-grounded world point.  Its controller verifies the
+                # returned masks against aligned depth and that world point,
+                # which is both stronger and much cheaper than asking the VLM
+                # to semantically review SAM's nested point-prompt masks.
+                details["selected_detection"] = None
+                details["selection_required"] = len(detections) > 1
+                details["selection_review"] = {
+                    "schema_version": "openeta.sam3_selection_review.v1",
+                    "decision": "deferred",
+                    "selection_source": "active_vision_point_depth_geometry",
+                    "isolated_context": True,
+                    "model_review_invoked": False,
+                    "reason": (
+                        "Selection is delegated to active_observe's calibrated "
+                        "point/depth geometry gate."
+                    ),
+                }
             result.details = details
         reason = "" if result.success else _string_param(result.details.get("reason"))
         return finish(

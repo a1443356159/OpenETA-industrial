@@ -120,7 +120,9 @@ Grounding rules:
 - Put the point well inside visible target material, away from silhouettes,
   holes, glare, the robot, gripper, bins, table, and other occluders.
 - Use original-image pixel coordinates with top-left origin; x increases right
-  and y increases down. Never return normalized coordinates.
+  and y increases down. Never return normalized coordinates. Echo
+  coordinate_space="original_pixels" and the exact input image_size=[width,height]
+  so the host can reject coordinate-system mistakes before robot motion.
 - bbox_xyxy may tightly enclose the visible target or visible target fragment.
   The point must be inside that box. Use null when a reliable box is unavailable.
 - Abstain when the target is not visible or two candidates remain ambiguous.
@@ -128,7 +130,7 @@ Grounding rules:
 The host validates image bounds, calibrated depth, SAM3 segmentation, robot
 reachability, collision state, and motion planning after this call. Return
 exactly one JSON object and no prose:
-{"decision":"locate|abstain","point":{"x":0.0,"y":0.0},"bbox_xyxy":[0.0,0.0,1.0,1.0],"confidence":0.0,"reason":"concise visual evidence"}
+{"decision":"locate|abstain","coordinate_space":"original_pixels","image_size":[0,0],"point":{"x":0.0,"y":0.0},"bbox_xyxy":[0.0,0.0,1.0,1.0],"confidence":0.0,"reason":"concise visual evidence"}
 For abstain, use point=null, bbox_xyxy=null, and confidence=0.
 """
 
@@ -221,6 +223,21 @@ class BackendSemanticPointLocalizer:
                 )
             if decision != "locate":
                 raise ValueError("decision must be locate or abstain")
+            coordinate_space = str(payload.get("coordinate_space") or "").strip()
+            if coordinate_space and coordinate_space != "original_pixels":
+                raise ValueError("coordinate_space must be original_pixels")
+            declared_size = payload.get("image_size")
+            if declared_size is not None and not (
+                isinstance(declared_size, (list, tuple))
+                and len(declared_size) == 2
+                and all(
+                    isinstance(item, int | float) and not isinstance(item, bool)
+                    for item in declared_size
+                )
+                and int(declared_size[0]) == width
+                and int(declared_size[1]) == height
+            ):
+                raise ValueError("image_size does not match the original image")
             point = payload.get("point")
             if not isinstance(point, dict):
                 raise ValueError("locate decision must include point")
@@ -259,6 +276,8 @@ class BackendSemanticPointLocalizer:
             details={
                 "schema_version": SEMANTIC_POINT_LOCALIZATION_SCHEMA_VERSION,
                 "isolated_context": True,
+                "coordinate_space": "original_pixels",
+                "image_size": [width, height],
                 "latency_s": round(latency_s, 6),
                 "provider_details": _compact_provider_details(result.details),
             },

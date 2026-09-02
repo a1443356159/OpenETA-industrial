@@ -17,6 +17,7 @@ import math
 from pathlib import Path
 import re
 import threading
+import time
 from typing import Any, Protocol
 
 import numpy as np
@@ -127,6 +128,7 @@ class ActiveVisionController:
         self._sam_cache_lock = threading.Lock()
 
     def handler(self, context: ToolExecutionContext) -> ToolResult:
+        started = time.monotonic()
         record: JsonDict = {
             "schema_version": ACTIVE_VISION_ARTIFACT_SCHEMA,
             "request": dict(context.parameters),
@@ -139,6 +141,7 @@ class ActiveVisionController:
                 "executed": 0,
             },
             "rejection_reason_counts": {},
+            "timings_s": {},
         }
         receipt: JsonDict | None = None
         try:
@@ -177,6 +180,7 @@ class ActiveVisionController:
                     }
                 ],
             )
+        record["timings_s"]["total"] = round(time.monotonic() - started, 6)
         artifact = self._write_artifact(context, record)
         result.details.setdefault("artifacts", []).append(artifact)
         outputs = result.details.setdefault("outputs", {})
@@ -243,6 +247,7 @@ class ActiveVisionController:
                         infrastructure=True,
                     )
                 source_rgb, image_size = _semantic_search_source_image(observation)
+                phase_started = time.monotonic()
                 try:
                     localization = self.semantic_localizer.localize(
                         semantic_target=semantic_target,
@@ -250,21 +255,33 @@ class ActiveVisionController:
                         image_size=image_size,
                     )
                 except SemanticPointLocalizationError as exc:
+                    record["timings_s"]["semantic_localization"] = round(
+                        time.monotonic() - phase_started, 6
+                    )
                     raise ActiveVisionError(
                         exc.code,
                         str(exc),
                         infrastructure=exc.infrastructure,
                     ) from exc
                 except Exception as exc:  # noqa: BLE001 - custom localizer boundary.
+                    record["timings_s"]["semantic_localization"] = round(
+                        time.monotonic() - phase_started, 6
+                    )
                     raise ActiveVisionError(
                         "semantic_point_localization_provider_error",
                         f"isolated visual localizer failed: {exc}",
                         infrastructure=True,
                     ) from exc
+                record["timings_s"]["semantic_localization"] = round(
+                    time.monotonic() - phase_started, 6
+                )
                 localization_receipt = _semantic_localization_receipt(localization)
                 target_hint = {
                     "source_image": str(source_rgb),
                     "positive_points": [localization.as_prompt_point()],
+                    "bbox_xyxy": (
+                        list(localization.bbox_xyxy) if localization.bbox_xyxy is not None else None
+                    ),
                     "source": "isolated_provider_visual_grounding",
                 }
                 record["semantic_point_localization"] = localization_receipt
@@ -358,12 +375,14 @@ class ActiveVisionController:
                 infrastructure=True,
             )
 
+        phase_started = time.monotonic()
         generated, rejection_counts = _generate_view_candidates(
             observation=observation,
             wrist=wrist,
             target_center_world=target_center,
             target_extent_world=target_extent,
         )
+        record["timings_s"]["candidate_generation"] = round(time.monotonic() - phase_started, 6)
         record["candidate_counts"]["generated"] = sum(rejection_counts.values()) + len(generated)
         record["candidate_counts"]["cheap_legal"] = len(generated)
         record["rejection_reason_counts"] = dict(sorted(rejection_counts.items()))
@@ -380,12 +399,14 @@ class ActiveVisionController:
 
         scene_epoch = _scene_epoch(observation)
         revision = _planning_scene_revision(observation)
+        phase_started = time.monotonic()
         qualified, qualification = self._qualify(
             generated,
             scene_epoch=scene_epoch,
             planning_scene_revision=revision,
             pass_target=min(2, motion_budget),
         )
+        record["timings_s"]["initial_qualification"] = round(time.monotonic() - phase_started, 6)
         record["qualification"] = qualification
         record["candidate_counts"]["moveit_l5_pass"] = len(qualified)
         if qualification.get("infrastructure_error") is True:
@@ -407,12 +428,16 @@ class ActiveVisionController:
             candidate_id = str(selected.get("id") or "")
             candidate = originals[candidate_id]
             if attempt_index > 0:
+                phase_started = time.monotonic()
                 refreshed, refreshed_summary = self._qualify(
                     [candidate],
                     scene_epoch=_scene_epoch(current_observation),
                     planning_scene_revision=_planning_scene_revision(current_observation),
                     pass_target=1,
                 )
+                record["motion_attempts"][-1].setdefault("timings_s", {})[
+                    "next_candidate_requalification"
+                ] = round(time.monotonic() - phase_started, 6)
                 record["motion_attempts"][-1]["alternate_requalification"] = refreshed_summary
                 if not refreshed:
                     continue
@@ -421,9 +446,12 @@ class ActiveVisionController:
                 "attempt_index": attempt_index,
                 "viewpoint_id": candidate_id,
                 "moveit_l5_qualified": True,
+                "timings_s": {},
             }
             record["motion_attempts"].append(attempt)
+            phase_started = time.monotonic()
             move = self._move_to_view(context, selected)
+            attempt["timings_s"]["move"] = round(time.monotonic() - phase_started, 6)
             attempt["motion_success"] = move.success
             attempt["motion_diagnostics"] = list(move.details.get("diagnostics") or [])
             if not move.success:
@@ -436,7 +464,9 @@ class ActiveVisionController:
                 attempt["stop_reason"] = "known_motion_failure"
                 break
             record["candidate_counts"]["executed"] += 1
+            phase_started = time.monotonic()
             observed = self._observe_after_motion(context)
+            attempt["timings_s"]["observe"] = round(time.monotonic() - phase_started, 6)
             if not observed.success:
                 raise ActiveVisionError(
                     "active_view_observation_failed",
@@ -445,75 +475,107 @@ class ActiveVisionController:
                 )
             last_receipt = _environment_receipt(observed)
             current_observation = _observation_from_result(observed)
-            new_wrist = _wrist_rgbd_packet(current_observation)
-            new_self_occlusion = _mechanical_camera_preflight(new_wrist)
-            attempt["camera_self_occlusion"] = new_self_occlusion
-            if new_self_occlusion["passed"] is not True:
-                attempt["quality_rejection"] = "camera_self_occlusion_unusable"
-                continue
-            point = _project_world_point(
-                target_center,
-                extrinsics=new_wrist["camera"].extrinsics,
-                intrinsics=new_wrist["camera"].intrinsics,
-            )
-            if point is None:
-                attempt["quality_rejection"] = "target_outside_active_view"
-                continue
-            sam_result, cache_hit = self._segment_new_view(
-                context,
-                observation=current_observation,
-                wrist=new_wrist,
-                semantic_target=semantic_target,
-                scene_epoch=_scene_epoch(current_observation),
-                point_xy=point,
-            )
-            attempt["sam3_cache_hit"] = cache_hit
-            attempt["sam3_success"] = sam_result.success
-            if not sam_result.success:
-                attempt["quality_rejection"] = "sam3_refresh_failed"
-                continue
-            refreshed_evidence = _evidence_from_sam_result(
-                sam_result,
-                observation=current_observation,
-                artifact_root=self.artifact_root,
-            )
-            if refreshed_evidence is None:
-                attempt["quality_rejection"] = "sam3_refresh_ambiguous_or_empty"
-                continue
-            quality, _ = _target_quality(
-                refreshed_evidence,
-                profile=self.quality_profile,
-            )
-            attempt["quality"] = quality
-            if quality["passed"] is not True:
-                attempt["quality_rejection"] = "active_view_quality_failed"
-                continue
-            record.update(
-                {
-                    "status": "acquired",
-                    "stop_reason": "active_observation_quality_pass",
-                    "viewpoint_id": candidate_id,
-                    "motion_count": int(record["candidate_counts"]["executed"]),
-                    "final_quality": quality,
-                    "observation_bundle_id": refreshed_evidence.perception_bundle_id,
+            attempt["camera_evaluations"] = []
+            last_rejection = "active_view_quality_failed"
+            for packet in _active_rgbd_packets(current_observation):
+                camera = packet["camera"]
+                evaluation: JsonDict = {
+                    "frame_id": camera.frame_id,
+                    "role": camera.role,
+                    "is_wrist": packet["is_wrist"],
                 }
-            )
-            return (
-                self._result(
+                attempt["camera_evaluations"].append(evaluation)
+                if packet["is_wrist"] is True:
+                    self_occlusion = _mechanical_camera_preflight(packet)
+                    evaluation["camera_self_occlusion"] = self_occlusion
+                    if self_occlusion["passed"] is not True:
+                        evaluation["rejection"] = "camera_self_occlusion_unusable"
+                        last_rejection = str(evaluation["rejection"])
+                        continue
+                point = _project_world_point(
+                    target_center,
+                    extrinsics=camera.extrinsics,
+                    intrinsics=camera.intrinsics,
+                )
+                if point is None:
+                    evaluation["rejection"] = "target_outside_active_view"
+                    last_rejection = str(evaluation["rejection"])
+                    continue
+                evaluation["projected_target_point_xy"] = [
+                    round(point[0], 3),
+                    round(point[1], 3),
+                ]
+                phase_started = time.monotonic()
+                sam_result, cache_hit = self._segment_new_view(
                     context,
-                    success=True,
-                    status="acquired",
-                    content="Active wrist RGB-D observation acquired and quality-gated.",
-                    record=record,
-                    quality=quality,
-                    observation_bundle_id=refreshed_evidence.perception_bundle_id,
-                    viewpoint_id=candidate_id,
-                    motion_count=int(record["candidate_counts"]["executed"]),
-                    environment_receipt=last_receipt,
-                    segmentation=sam_result.details,
-                ),
-                last_receipt,
-            )
+                    observation=current_observation,
+                    packet=packet,
+                    semantic_target=semantic_target,
+                    scene_epoch=_scene_epoch(current_observation),
+                    point_xy=point,
+                )
+                evaluation["sam3_elapsed_s"] = round(time.monotonic() - phase_started, 6)
+                evaluation["sam3_cache_hit"] = cache_hit
+                evaluation["sam3_success"] = sam_result.success
+                if not sam_result.success:
+                    evaluation["rejection"] = "sam3_refresh_failed"
+                    last_rejection = str(evaluation["rejection"])
+                    continue
+                phase_started = time.monotonic()
+                refreshed_evidence, quality, selection = _select_point_grounded_evidence(
+                    sam_result,
+                    observation=current_observation,
+                    artifact_root=self.artifact_root,
+                    profile=self.quality_profile,
+                    target_center_world=target_center,
+                    target_extent_world=target_extent,
+                    point_xy=point,
+                )
+                evaluation["geometry_selection_elapsed_s"] = round(
+                    time.monotonic() - phase_started, 6
+                )
+                evaluation["selection"] = selection
+                if refreshed_evidence is None or quality is None:
+                    evaluation["rejection"] = "sam3_point_depth_geometry_rejected"
+                    last_rejection = str(evaluation["rejection"])
+                    continue
+                evaluation["quality"] = quality
+                evaluation["accepted"] = True
+                attempt["sam3_cache_hit"] = cache_hit
+                attempt["sam3_success"] = True
+                attempt["quality"] = quality
+                attempt["selected_camera_frame_id"] = camera.frame_id
+                record.update(
+                    {
+                        "status": "acquired",
+                        "stop_reason": "active_observation_quality_pass",
+                        "viewpoint_id": candidate_id,
+                        "motion_count": int(record["candidate_counts"]["executed"]),
+                        "final_quality": quality,
+                        "observation_bundle_id": (refreshed_evidence.perception_bundle_id),
+                        "selected_camera_frame_id": camera.frame_id,
+                    }
+                )
+                return (
+                    self._result(
+                        context,
+                        success=True,
+                        status="acquired",
+                        content=(
+                            "Active calibrated RGB-D observation acquired and "
+                            "point/depth quality-gated."
+                        ),
+                        record=record,
+                        quality=quality,
+                        observation_bundle_id=(refreshed_evidence.perception_bundle_id),
+                        viewpoint_id=candidate_id,
+                        motion_count=int(record["candidate_counts"]["executed"]),
+                        environment_receipt=last_receipt,
+                        segmentation=sam_result.details,
+                    ),
+                    last_receipt,
+                )
+            attempt["quality_rejection"] = last_rejection
 
         record.update(
             {
@@ -636,13 +698,13 @@ class ActiveVisionController:
         outer_context: ToolExecutionContext,
         *,
         observation: EnvObservation,
-        wrist: JsonDict,
+        packet: JsonDict,
         semantic_target: str,
         scene_epoch: int,
         point_xy: tuple[float, float],
     ) -> tuple[ToolResult, bool]:
         assert self.sam3_handler is not None
-        rgb_path = str(wrist["rgb"]["path"])
+        rgb_path = str(packet["rgb"]["path"])
         point = {"x": round(point_xy[0], 3), "y": round(point_xy[1], 3), "label": 1}
         image_sha = _file_sha256(Path(rgb_path))
         fingerprint = _stable_hash(
@@ -675,7 +737,10 @@ class ActiveVisionController:
                 "attempt_id": f"active-sam3-{fingerprint[:16]}",
             },
             observation=observation,
-            metadata=dict(outer_context.metadata),
+            metadata={
+                **dict(outer_context.metadata),
+                "sam3_selection_policy": "active_vision_point_depth_geometry",
+            },
         )
         result = self.sam3_handler(sam_context)
         if not isinstance(result, ToolResult):
@@ -995,6 +1060,253 @@ def _evidence_from_sam_result(
     )
 
 
+def _point_grounded_evidence_candidates(
+    result: ToolResult,
+    *,
+    observation: EnvObservation,
+    artifact_root: Path,
+) -> list[tuple[TargetEvidence, JsonDict]]:
+    """Materialize every SAM point-mask without invoking semantic review."""
+
+    details = result.details
+    selected = details.get("selected_detection")
+    raw_candidates = (
+        [selected]
+        if isinstance(selected, Mapping)
+        else details.get("detections")
+        if isinstance(details.get("detections"), list)
+        else []
+    )
+    source_rgb = _resolve_artifact_path(details.get("source_image"), artifact_root)
+    frame_id = str(details.get("source_frame_id") or "")
+    packet = _camera_packet_for_source(
+        observation,
+        source_rgb=source_rgb,
+        frame_id=frame_id,
+    )
+    candidates: list[tuple[TargetEvidence, JsonDict]] = []
+    for value in raw_candidates:
+        if not isinstance(value, Mapping):
+            continue
+        detection = dict(value)
+        try:
+            mask = _resolve_artifact_path(detection.get("mask_ref"), artifact_root)
+        except ActiveVisionError:
+            continue
+        bbox = detection.get("bbox_xyxy")
+        parsed_bbox = (
+            tuple(int(round(float(item))) for item in bbox)
+            if isinstance(bbox, list)
+            and len(bbox) == 4
+            and all(isinstance(item, int | float) and not isinstance(item, bool) for item in bbox)
+            else None
+        )
+        candidates.append(
+            (
+                TargetEvidence(
+                    result_id=str(details.get("result_id") or ""),
+                    detection_id=str(detection.get("id") or ""),
+                    semantic_target=str(
+                        details.get("semantic_target") or detection.get("label") or "target"
+                    ),
+                    semantic_role=SUPPORTED_SEMANTIC_ROLE,
+                    source_rgb=source_rgb,
+                    source_depth=Path(str(packet["depth"]["path"])),
+                    mask=mask,
+                    frame_id=str(packet["camera"].frame_id),
+                    intrinsics=dict(packet["camera"].intrinsics),
+                    extrinsics=dict(packet["camera"].extrinsics),
+                    perception_bundle_id=str(details.get("perception_bundle_id") or ""),
+                    observation_id=str(details.get("observation_id") or ""),
+                    scene_epoch=_scene_epoch(observation),
+                    bbox_xyxy=parsed_bbox,
+                ),
+                detection,
+            )
+        )
+    return candidates
+
+
+def _point_depth_geometry_audit(
+    evidence: TargetEvidence,
+    *,
+    target_center_world: np.ndarray,
+    target_extent_world: np.ndarray,
+    point_xy: tuple[float, float],
+    world_points: np.ndarray,
+) -> JsonDict:
+    """Prove that a point-prompt mask lies on the expected 3D target surface."""
+
+    try:
+        mask = np.asarray(Image.open(evidence.mask).convert("L")) > 0
+        depth_raw = np.asarray(Image.open(evidence.source_depth))
+    except (OSError, ValueError) as exc:
+        raise ActiveVisionError("target_rgbd_artifact_unreadable", str(exc)) from exc
+    if depth_raw.ndim == 3:
+        depth_raw = depth_raw[..., 0]
+    if mask.ndim != 2 or depth_raw.ndim != 2 or mask.shape != depth_raw.shape:
+        raise ActiveVisionError(
+            "target_rgbd_alignment_invalid",
+            "point-grounded mask and depth must be aligned two-dimensional images",
+        )
+    x, y = int(round(point_xy[0])), int(round(point_xy[1]))
+    reasons: list[str] = []
+    if not (0 <= x < mask.shape[1] and 0 <= y < mask.shape[0]):
+        reasons.append("projected_target_outside_image")
+    elif not bool(mask[y, x]):
+        reasons.append("projected_target_point_outside_mask")
+    scale = float(evidence.intrinsics.get("scale") or 1000.0)
+    measured_depth = (
+        float(depth_raw[y, x]) / scale
+        if not reasons and math.isfinite(float(depth_raw[y, x])) and depth_raw[y, x] > 0
+        else math.nan
+    )
+    if not math.isfinite(measured_depth):
+        reasons.append("projected_target_depth_missing")
+    camera_from_world = np.linalg.inv(_extrinsics_matrix(evidence.extrinsics))
+    target_camera = camera_from_world[:3, :3] @ target_center_world + camera_from_world[:3, 3]
+    expected_depth = float(target_camera[2])
+    if not math.isfinite(expected_depth) or expected_depth <= 0.0:
+        reasons.append("projected_target_behind_camera")
+    fx = float(evidence.intrinsics.get("fx") or 0.0)
+    fy = float(evidence.intrinsics.get("fy") or 0.0)
+    if not math.isfinite(scale) or scale <= 0.0 or fx <= 0.0 or fy <= 0.0:
+        raise ActiveVisionError(
+            "target_intrinsics_invalid",
+            "point-grounded depth geometry requires calibrated pinhole intrinsics",
+        )
+    half_extent_along_ray = float(
+        np.abs(camera_from_world[2, :3]) @ (np.maximum(target_extent_world, 0.0) * 0.5)
+    )
+    pixel_footprint_m = expected_depth / min(fx, fy) if expected_depth > 0.0 else 0.0
+    depth_tolerance_m = half_extent_along_ray + max(1.0 / scale, 2.0 * pixel_footprint_m)
+    depth_residual_m = (
+        abs(measured_depth - expected_depth)
+        if math.isfinite(measured_depth) and expected_depth > 0.0
+        else math.inf
+    )
+    if math.isfinite(depth_residual_m) and depth_residual_m > depth_tolerance_m:
+        reasons.append("projected_target_depth_mismatch")
+    centroid_distance_m = math.inf
+    centroid_tolerance_m = 0.5 * float(np.linalg.norm(target_extent_world)) + depth_tolerance_m
+    if len(world_points):
+        centroid = np.median(world_points, axis=0)
+        centroid_distance_m = float(np.linalg.norm(centroid - target_center_world))
+        if centroid_distance_m > centroid_tolerance_m:
+            reasons.append("mask_centroid_misses_target_geometry")
+    else:
+        reasons.append("mask_has_no_metric_points")
+    return {
+        "schema_version": "openeta.active_vision_point_depth_geometry.v1",
+        "passed": not reasons,
+        "reason_codes": reasons,
+        "point_xy": [round(point_xy[0], 3), round(point_xy[1], 3)],
+        "expected_depth_m": round(expected_depth, 6),
+        "measured_depth_m": (round(measured_depth, 6) if math.isfinite(measured_depth) else None),
+        "depth_residual_m": (
+            round(depth_residual_m, 6) if math.isfinite(depth_residual_m) else None
+        ),
+        "depth_tolerance_m": round(depth_tolerance_m, 6),
+        "mask_centroid_distance_m": (
+            round(centroid_distance_m, 6) if math.isfinite(centroid_distance_m) else None
+        ),
+        "mask_centroid_tolerance_m": round(centroid_tolerance_m, 6),
+    }
+
+
+def _select_point_grounded_evidence(
+    result: ToolResult,
+    *,
+    observation: EnvObservation,
+    artifact_root: Path,
+    profile: GraspRgbdQualityProfile,
+    target_center_world: np.ndarray,
+    target_extent_world: np.ndarray,
+    point_xy: tuple[float, float],
+) -> tuple[TargetEvidence | None, JsonDict | None, JsonDict]:
+    """Select one nested SAM mask using only calibrated RGB-D evidence."""
+
+    audits: list[JsonDict] = []
+    passed: list[tuple[tuple[Any, ...], TargetEvidence, JsonDict, JsonDict, JsonDict]] = []
+    for evidence, detection in _point_grounded_evidence_candidates(
+        result,
+        observation=observation,
+        artifact_root=artifact_root,
+    ):
+        quality, points = _target_quality(evidence, profile=profile)
+        geometry = _point_depth_geometry_audit(
+            evidence,
+            target_center_world=target_center_world,
+            target_extent_world=target_extent_world,
+            point_xy=point_xy,
+            world_points=points,
+        )
+        accepted = quality.get("passed") is True and geometry.get("passed") is True
+        audit = {
+            "detection_id": evidence.detection_id,
+            "accepted": accepted,
+            "quality": quality,
+            "point_depth_geometry": geometry,
+        }
+        audits.append(audit)
+        if not accepted:
+            continue
+        score = detection.get("score")
+        score_value = (
+            float(score)
+            if isinstance(score, int | float) and not isinstance(score, bool)
+            else -math.inf
+        )
+        depth_residual = geometry.get("depth_residual_m")
+        centroid_distance = geometry.get("mask_centroid_distance_m")
+        passed.append(
+            (
+                (
+                    float(depth_residual) if depth_residual is not None else math.inf,
+                    float(centroid_distance) if centroid_distance is not None else math.inf,
+                    float(quality.get("mask_area_fraction") or math.inf),
+                    -score_value,
+                    evidence.detection_id,
+                ),
+                evidence,
+                quality,
+                geometry,
+                detection,
+            )
+        )
+    selection = {
+        "schema_version": "openeta.active_vision_mask_selection.v1",
+        "model_review_invoked": False,
+        "candidate_count": len(audits),
+        "candidate_audits": audits,
+        "decision": "reject",
+    }
+    if not passed:
+        return None, None, selection
+    _, evidence, quality, geometry, detection = min(passed, key=lambda item: item[0])
+    selected = {
+        **detection,
+        "selection_source": "active_vision_point_depth_geometry",
+        "selection_reason": (
+            "Calibrated projected point, aligned depth, target geometry, and "
+            "grasp RGB-D quality all passed."
+        ),
+    }
+    result.details = {
+        **dict(result.details),
+        "selected_detection": selected,
+        "selection_required": False,
+        "selection_review": {
+            **selection,
+            "decision": "select",
+            "detection_id": evidence.detection_id,
+            "selection_source": "active_vision_point_depth_geometry",
+        },
+    }
+    quality = {**quality, "point_depth_geometry": geometry}
+    return evidence, quality, result.details["selection_review"]
+
+
 def _target_hint_world_geometry(
     value: object,
     *,
@@ -1099,17 +1411,59 @@ def _target_hint_world_geometry(
     )
     camera_to_world = _extrinsics_matrix(camera.extrinsics)
     center = camera_to_world[:3, :3] @ camera_point + camera_to_world[:3, 3]
-    # The hint has no object mask, so express only the metric uncertainty of
-    # the local image neighbourhood.  View generation already enforces its own
-    # bounded camera distance and MoveIt proves the resulting poses.
+    # A tight visual box supplies lateral target scale even when segmentation
+    # is unavailable.  It cannot prove depth thickness, so retain the local
+    # metric uncertainty along the optical axis and rotate that conservative
+    # camera-frame box into a world-axis extent.  Without a valid box, keep the
+    # historical isotropic point uncertainty.
     lateral_uncertainty = max(
         sample_depth * (2.0 * radius + 1.0) / min(fx, fy),
         1e-3,
     )
-    extent = np.array(
-        [lateral_uncertainty, lateral_uncertainty, lateral_uncertainty],
-        dtype=np.float64,
-    )
+    bbox = value.get("bbox_xyxy")
+    parsed_bbox: tuple[float, float, float, float] | None = None
+    if bbox is not None:
+        if not (
+            isinstance(bbox, (list, tuple))
+            and len(bbox) == 4
+            and all(
+                isinstance(item, int | float)
+                and not isinstance(item, bool)
+                and math.isfinite(float(item))
+                for item in bbox
+            )
+        ):
+            raise ActiveVisionError(
+                "active_search_bbox_invalid",
+                "target_hint bbox_xyxy must contain four finite pixel coordinates",
+            )
+        left, top, right, bottom = (float(item) for item in bbox)
+        if not (
+            0.0 <= left < right <= width
+            and 0.0 <= top < bottom <= height
+            and left <= u <= right
+            and top <= v <= bottom
+        ):
+            raise ActiveVisionError(
+                "active_search_bbox_invalid",
+                "target_hint bbox must lie inside the image and contain its point",
+            )
+        parsed_bbox = left, top, right, bottom
+        camera_extent = np.array(
+            [
+                (right - left) * sample_depth / fx,
+                (bottom - top) * sample_depth / fy,
+                lateral_uncertainty,
+            ],
+            dtype=np.float64,
+        )
+        extent = np.abs(camera_to_world[:3, :3]) @ camera_extent
+        extent = np.maximum(extent, lateral_uncertainty)
+    else:
+        extent = np.array(
+            [lateral_uncertainty, lateral_uncertainty, lateral_uncertainty],
+            dtype=np.float64,
+        )
     return (
         center,
         extent,
@@ -1122,6 +1476,10 @@ def _target_hint_world_geometry(
             "neighbourhood_radius_px": radius,
             "center_world_xyz": _rounded_vector(center),
             "metric_uncertainty_m": round(lateral_uncertainty, 6),
+            "bbox_xyxy": (
+                [round(item, 3) for item in parsed_bbox] if parsed_bbox is not None else None
+            ),
+            "extent_world_xyz": _rounded_vector(extent),
         },
     )
 
@@ -1218,13 +1576,14 @@ def _masked_world_points(
     return camera_points @ transform[:3, :3].T + transform[:3, 3]
 
 
-def _wrist_rgbd_packet(observation: EnvObservation) -> JsonDict:
+def _active_rgbd_packets(observation: EnvObservation) -> list[JsonDict]:
+    """Return complete calibrated views in deterministic utility order."""
+
     artifacts = observation.metadata.get("image_artifacts")
     artifacts = artifacts if isinstance(artifacts, list) else []
+    packets: list[tuple[tuple[int, int, str], JsonDict]] = []
     for camera in observation.cameras:
-        role = str(camera.role or "").lower()
-        if "wrist" not in role and "wrist" not in camera.frame_id.lower():
-            continue
+        role = f"{camera.role or ''} {camera.frame_id}".lower()
         rgb = next(
             (
                 value
@@ -1250,7 +1609,26 @@ def _wrist_rgbd_packet(observation: EnvObservation) -> JsonDict:
             None,
         )
         if rgb is not None and depth is not None and camera.intrinsics and camera.extrinsics:
-            return {"camera": camera, "rgb": dict(rgb), "depth": dict(depth)}
+            is_wrist = "wrist" in role
+            is_primary = "primary" in role
+            packets.append(
+                (
+                    (int(not is_primary), int(is_wrist), camera.frame_id),
+                    {
+                        "camera": camera,
+                        "rgb": dict(rgb),
+                        "depth": dict(depth),
+                        "is_wrist": is_wrist,
+                    },
+                )
+            )
+    return [packet for _, packet in sorted(packets, key=lambda item: item[0])]
+
+
+def _wrist_rgbd_packet(observation: EnvObservation) -> JsonDict:
+    for packet in _active_rgbd_packets(observation):
+        if packet["is_wrist"] is True:
+            return packet
     raise ActiveVisionError(
         "wrist_rgbd_unavailable",
         "current observation has no complete calibrated wrist RGB-D packet",
