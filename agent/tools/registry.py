@@ -911,6 +911,8 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                 "Acquire a grasp-quality RGB-D view of a grounded target, or recover "
                 "from bounded text/point segmentation failure using a retained "
                 "calibrated visual point or one isolated provider-grounded point. "
+                "For a placement region it grounds one point and reruns SAM3 on the "
+                "current calibrated scene view without moving the robot. "
                 "The host deterministically generates and "
                 "MoveIt-qualifies wrist-camera viewpoints before executing at most "
                 "two frozen alternatives. It never reruns grasp or placement "
@@ -929,8 +931,8 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                     "when omitted, the tool may isolate the configured VLM for one "
                     "bounded point localization; never an agent-authored pose"
                 ),
-                "semantic_role": "grasp_target; v1 supports pre-contact grasp observation",
-                "quality_profile": "grasp_rgbd",
+                "semantic_role": "grasp_target or placement_region; both are pre-contact",
+                "quality_profile": "grasp_rgbd or placement_rgbd, matching semantic_role",
                 "max_motion_attempts": "optional integer 0-2; defaults to 2",
             },
             effect=ToolEffect.WORLD_MUTATING,

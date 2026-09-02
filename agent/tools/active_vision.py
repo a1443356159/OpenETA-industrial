@@ -44,6 +44,8 @@ ACTIVE_VISION_SCHEMA = "openeta.active_vision.v1"
 ACTIVE_VISION_ARTIFACT_SCHEMA = "openeta.active_vision_artifact.v1"
 SUPPORTED_SEMANTIC_ROLE = "grasp_target"
 SUPPORTED_QUALITY_PROFILE = "grasp_rgbd"
+PLACEMENT_REGION_SEMANTIC_ROLE = "placement_region"
+PLACEMENT_REGION_QUALITY_PROFILE = "placement_rgbd"
 MAX_MOTION_ATTEMPTS = 2
 MAX_VIEW_CANDIDATES = 24
 SELF_OCCLUSION_NEAR_M = 0.20
@@ -217,15 +219,24 @@ class ActiveVisionController:
                 "missing_active_search_target",
                 "semantic_target is required when no selected SAM3 evidence exists",
             )
-        if semantic_role != SUPPORTED_SEMANTIC_ROLE:
+        supported_profiles = {
+            SUPPORTED_SEMANTIC_ROLE: SUPPORTED_QUALITY_PROFILE,
+            PLACEMENT_REGION_SEMANTIC_ROLE: PLACEMENT_REGION_QUALITY_PROFILE,
+        }
+        if semantic_role not in supported_profiles:
             raise ActiveVisionError(
                 "unsupported_active_vision_semantic_role",
-                "active_vision v1 is pre-contact and supports only grasp_target",
+                "active_vision supports pre-contact grasp_target and placement_region",
             )
-        if quality_profile != SUPPORTED_QUALITY_PROFILE:
+        if quality_profile != supported_profiles[semantic_role]:
             raise ActiveVisionError(
                 "unsupported_active_vision_quality_profile",
                 f"unsupported quality profile: {quality_profile}",
+            )
+        if evidence_id and semantic_role != SUPPORTED_SEMANTIC_ROLE:
+            raise ActiveVisionError(
+                "unsupported_active_vision_evidence_role",
+                "target_evidence_id refinement is supported only for grasp_target",
             )
         observation = context.observation
         if observation is None:
@@ -290,7 +301,6 @@ class ActiveVisionController:
                 observation=observation,
                 artifact_root=self.artifact_root,
             )
-            target_point_count = 1
             record.update(
                 {
                     "mode": "semantic_search",
@@ -298,6 +308,17 @@ class ActiveVisionController:
                     "target_hint": hint_receipt,
                 }
             )
+            if semantic_role == PLACEMENT_REGION_SEMANTIC_ROLE:
+                requested_point = hint_receipt["requested_point_xy"]
+                return self._ground_current_placement_region(
+                    context,
+                    record=record,
+                    observation=observation,
+                    semantic_target=semantic_target,
+                    source_rgb=Path(str(hint_receipt["source_image"])),
+                    point_xy=(float(requested_point[0]), float(requested_point[1])),
+                )
+            target_point_count = 1
         else:
             evidence = _resolve_target_evidence(
                 evidence_id,
@@ -598,6 +619,130 @@ class ActiveVisionController:
             last_receipt,
         )
 
+    def _ground_current_placement_region(
+        self,
+        context: ToolExecutionContext,
+        *,
+        record: JsonDict,
+        observation: EnvObservation,
+        semantic_target: str,
+        source_rgb: Path,
+        point_xy: tuple[float, float],
+    ) -> tuple[ToolResult, None]:
+        """Reground one destination on the current calibrated scene view.
+
+        Placement-region recovery does not need an invented arm viewpoint: the
+        authoritative top RGB-D frame already contains the destination. A
+        clean-context VLM supplies one visual point, SAM3 expands it into a
+        mask, and the ordinary SAM selection review remains authoritative.
+        """
+
+        if self.sam3_handler is None:
+            raise ActiveVisionError(
+                "active_vision_sam3_unavailable",
+                "SAM3 is required to reground the placement region",
+                infrastructure=True,
+            )
+        phase_started = time.monotonic()
+        sam_result, cache_hit = self._segment_point_view(
+            context,
+            observation=observation,
+            source_rgb=source_rgb,
+            semantic_target=semantic_target,
+            semantic_role=PLACEMENT_REGION_SEMANTIC_ROLE,
+            scene_epoch=_scene_epoch(observation),
+            point_xy=point_xy,
+        )
+        record["timings_s"]["current_view_segmentation"] = round(
+            time.monotonic() - phase_started,
+            6,
+        )
+        record["sam3_cache_hit"] = cache_hit
+        record["sam3_success"] = sam_result.success
+        details = sam_result.details if isinstance(sam_result.details, Mapping) else {}
+        detections = details.get("detections")
+        detection_count = len(detections) if isinstance(detections, list) else 0
+        record["candidate_counts"]["generated"] = detection_count
+        selected = details.get("selected_detection")
+        if not sam_result.success:
+            reason = str(details.get("reason") or "placement_region_point_segmentation_failed")
+            raise ActiveVisionError(
+                reason,
+                "placement-region point segmentation failed",
+                infrastructure=reason
+                in {
+                    "mcp_call_failed",
+                    "point_backend_unavailable",
+                    "point_prompt_not_configured",
+                },
+            )
+        if not isinstance(selected, Mapping):
+            review = details.get("selection_review")
+            review = review if isinstance(review, Mapping) else {}
+            infrastructure = bool(review.get("infrastructure_retry_exhausted"))
+            status = "infrastructure_error" if infrastructure else "exhausted"
+            stop_reason = (
+                "placement_region_selection_review_infrastructure_error"
+                if infrastructure
+                else "placement_region_point_masks_rejected"
+            )
+            record.update({"status": status, "stop_reason": stop_reason, "motion_count": 0})
+            return (
+                self._result(
+                    context,
+                    success=False,
+                    status=status,
+                    content=(
+                        "Current-view placement-region grounding did not produce "
+                        "an accepted point-prompt mask."
+                    ),
+                    record=record,
+                    motion_count=0,
+                    diagnostics=[{"code": stop_reason}],
+                    segmentation=details,
+                ),
+                None,
+            )
+        source_frame_id = str(details.get("source_frame_id") or "")
+        quality = {
+            "schema_version": "openeta.active_vision_quality.v1",
+            "profile": PLACEMENT_REGION_QUALITY_PROFILE,
+            "passed": True,
+            "point_grounded": True,
+            "detection_id": str(selected.get("id") or ""),
+        }
+        viewpoint_id = f"existing:{source_frame_id or source_rgb.name}"
+        record["candidate_counts"]["cheap_legal"] = 1
+        record.update(
+            {
+                "status": "acquired",
+                "stop_reason": "current_scene_point_grounding_pass",
+                "viewpoint_id": viewpoint_id,
+                "motion_count": 0,
+                "final_quality": quality,
+                "observation_bundle_id": details.get("perception_bundle_id"),
+                "selected_camera_frame_id": source_frame_id,
+            }
+        )
+        return (
+            self._result(
+                context,
+                success=True,
+                status="acquired",
+                content=(
+                    "Placement region grounded in the current calibrated RGB-D "
+                    "view without robot motion."
+                ),
+                record=record,
+                quality=quality,
+                observation_bundle_id=str(details.get("perception_bundle_id") or ""),
+                viewpoint_id=viewpoint_id,
+                motion_count=0,
+                segmentation=details,
+            ),
+            None,
+        )
+
     def _qualify(
         self,
         candidates: Sequence[Mapping[str, Any]],
@@ -703,15 +848,38 @@ class ActiveVisionController:
         scene_epoch: int,
         point_xy: tuple[float, float],
     ) -> tuple[ToolResult, bool]:
+        return self._segment_point_view(
+            outer_context,
+            observation=observation,
+            source_rgb=Path(str(packet["rgb"]["path"])),
+            semantic_target=semantic_target,
+            semantic_role=SUPPORTED_SEMANTIC_ROLE,
+            scene_epoch=scene_epoch,
+            point_xy=point_xy,
+            selection_policy="active_vision_point_depth_geometry",
+        )
+
+    def _segment_point_view(
+        self,
+        outer_context: ToolExecutionContext,
+        *,
+        observation: EnvObservation,
+        source_rgb: Path,
+        semantic_target: str,
+        semantic_role: str,
+        scene_epoch: int,
+        point_xy: tuple[float, float],
+        selection_policy: str = "",
+    ) -> tuple[ToolResult, bool]:
         assert self.sam3_handler is not None
-        rgb_path = str(packet["rgb"]["path"])
+        rgb_path = str(source_rgb)
         point = {"x": round(point_xy[0], 3), "y": round(point_xy[1], 3), "label": 1}
         image_sha = _file_sha256(Path(rgb_path))
         fingerprint = _stable_hash(
             {
                 "image_sha256": image_sha,
                 "semantic_target": semantic_target,
-                "semantic_role": SUPPORTED_SEMANTIC_ROLE,
+                "semantic_role": semantic_role,
                 "scene_epoch": scene_epoch,
                 "point": point,
             }
@@ -729,7 +897,7 @@ class ActiveVisionController:
                 "mode": "points",
                 "image": rgb_path,
                 "points": [point],
-                "semantic_role": SUPPORTED_SEMANTIC_ROLE,
+                "semantic_role": semantic_role,
                 "semantic_target": semantic_target,
                 "scene_epoch": scene_epoch,
                 "observation_id": observation_id,
@@ -739,7 +907,7 @@ class ActiveVisionController:
             observation=observation,
             metadata={
                 **dict(outer_context.metadata),
-                "sam3_selection_policy": "active_vision_point_depth_geometry",
+                **({"sam3_selection_policy": selection_policy} if selection_policy else {}),
             },
         )
         result = self.sam3_handler(sam_context)

@@ -1976,6 +1976,110 @@ def test_missing_molmopoint_advances_to_provider_grounded_active_view() -> None:
     assert legal[0] == "active_observe"
 
 
+def test_missing_placement_point_service_uses_one_current_view_active_grounding() -> None:
+    failed_attempt = {
+        "semantic_role": "placement_region",
+        "status": "rejected",
+        "source_image": "/tmp/top.png",
+        "mode": "text",
+        "target_prompt": "blue square area inside bin",
+        "scene_epoch": 4,
+        "attempt_id": "blue-bin-text",
+        "attempt_fingerprint": "fingerprint-blue-bin-text",
+    }
+
+    def obligation_for(attempts):
+        value = _semantic_perception_obligation(
+            observation=EnvObservation(
+                task="sort parts",
+                cameras=[],
+                robot=RobotState(),
+                metadata={"step_idx": 2},
+            ),
+            camera_artifacts=[
+                {
+                    "kind": "rgb",
+                    "frame_id": "top_camera_optical_frame",
+                    "role": "scene_primary",
+                    "path": "/tmp/top.png",
+                }
+            ],
+            memory_context={
+                "scene_epoch": 4,
+                "selected_sam3_detection": {"id": "red-bolt"},
+                "placement_object_detection": {
+                    "id": "red-bolt-object",
+                    "source_image": "/tmp/top.png",
+                    "scene_epoch": 4,
+                    "perception_bundle_id": "bundle-4",
+                },
+                "multi_sort_progress": {
+                    "active_assignment": {
+                        "placement_region_prompt": "blue parts bin",
+                        "placement_region_perception_prompt": (
+                            "blue square area inside bin"
+                        ),
+                    }
+                },
+                "sam3_semantic_state": {
+                    "roles": {
+                        "placement_region": {
+                            "canonical_prompt": "blue square area inside bin",
+                            "scene_epoch": 4,
+                        }
+                    },
+                    "attempts": attempts,
+                },
+            },
+            available_tool_names={"observe", "sam3", "active_observe"},
+        )
+        assert value is not None
+        return value
+
+    obligation = obligation_for([failed_attempt])
+
+    assert obligation["status"] == "required"
+    assert obligation["required_tool"] == "active_observe"
+    assert obligation["required_parameters"] == {
+        "semantic_target": "blue square area inside bin",
+        "semantic_role": "placement_region",
+        "quality_profile": "placement_rgbd",
+        "max_motion_attempts": 0,
+    }
+    assert obligation["fallback"] == "current_view_provider_grounded_region"
+    phase, legal = _model_phase_and_legal_tools(
+        {
+            "semantic_perception_obligation": obligation,
+            "active_environment_task": {"env_id": "openeta/test-v0"},
+            "tool_references": [
+                {"name": "observe"},
+                {"name": "sam3"},
+                {"name": "active_observe"},
+            ],
+        },
+        max_tools=8,
+    )
+    assert phase == "target_perception"
+    assert legal[0] == "active_observe"
+
+    exhausted = obligation_for(
+        [
+            failed_attempt,
+            {
+                "semantic_role": "placement_region",
+                "status": "active_search_exhausted",
+                "source_image": "/tmp/top.png",
+                "mode": "active_search",
+                "target_prompt": "blue square area inside bin",
+                "scene_epoch": 4,
+                "attempt_id": "active-blue-bin",
+            },
+        ]
+    )
+    assert exhausted["status"] == "exhausted"
+    assert exhausted["failure_code"] == "placement_region_localization_exhausted"
+
+
 def test_missing_all_point_localizers_exhausts_instead_of_observe_loop() -> None:
     attempts = [
         _failed_grasp_target_attempt(
@@ -2200,6 +2304,73 @@ def test_active_observe_detection_enters_shared_sam3_selection_memory() -> None:
     assert pending["candidates"] == [detection]
     attempts = memory.sam3_semantic_state()["attempts"]
     assert any(item["mode"] == "active_search" for item in attempts)
+
+
+def test_active_observe_placement_detection_enters_anyplace_memory() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="place the bolt in the blue bin")
+    detection = {
+        "id": "detection_region",
+        "label": "point_prompt",
+        "mask_ref": "/tmp/blue-bin-mask.png",
+    }
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "tool_calls": [
+                    {
+                        "name": "active_observe",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "parameters": {
+                                    "semantic_target": "blue parts bin interior",
+                                    "semantic_role": "placement_region",
+                                },
+                                "outputs": {
+                                    "status": "acquired",
+                                    "active_vision_mode": "semantic_search",
+                                    "active_vision_attempt_id": "active-placement-1",
+                                    "active_vision_attempt_fingerprint": (
+                                        "active-placement-fingerprint-1"
+                                    ),
+                                    "result_id": "active-placement-result",
+                                    "semantic_role": "placement_region",
+                                    "semantic_target": "blue parts bin interior",
+                                    "prompt": "blue parts bin interior",
+                                    "scene_epoch": 0,
+                                    "source_image": "/tmp/top.png",
+                                    "source_frame_id": "top_camera_optical_frame",
+                                    "segmentation_mode": "point_prompt",
+                                    "attempt_id": "active-placement-sam",
+                                    "attempt_fingerprint": (
+                                        "active-placement-sam-fingerprint"
+                                    ),
+                                    "perception_bundle_id": "placement-bundle",
+                                    "observation_id": "placement-observation",
+                                    "detections": [detection],
+                                    "selected_detection": detection,
+                                    "selection_review": {
+                                        "decision": "select",
+                                        "detection_id": "detection_region",
+                                        "selection_source": "isolated_main_vlm",
+                                    },
+                                },
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+    )
+
+    region = memory.placement_region_detection()
+    assert region is not None
+    assert region["id"] == "detection_region"
+    assert region["perception_bundle_id"] == "placement-bundle"
+    assert memory.pending_sam3_selection() is None
 
 
 def _semantic_view_observation(

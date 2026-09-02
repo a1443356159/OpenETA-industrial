@@ -7613,6 +7613,52 @@ def _semantic_perception_obligation(
                         "then owns calibrated depth, view geometry, SAM3, and MoveIt proof."
                     ),
                 }
+        if (
+            semantic_role == "placement_region"
+            and not molmopoint_available
+            and active_observe_available
+        ):
+            active_search_attempts = [
+                attempt
+                for attempt in role_attempts
+                if str(attempt.get("mode") or "") == "active_search"
+            ]
+            if active_search_attempts:
+                latest_active = active_search_attempts[-1]
+                infrastructure = str(latest_active.get("status") or "").endswith(
+                    "infrastructure_error"
+                )
+                return {
+                    **base,
+                    "status": "exhausted",
+                    "failure_code": (
+                        "placement_region_active_vision_infrastructure_error"
+                        if infrastructure
+                        else "placement_region_localization_exhausted"
+                    ),
+                    "attempts": len(role_attempts),
+                    "fallback": "bounded_current_view_grounding_exhausted",
+                    "infrastructure_error": infrastructure,
+                }
+            return {
+                **base,
+                "status": "required",
+                "required_tool": "active_observe",
+                "required_parameters": {
+                    "semantic_target": prompt,
+                    "semantic_role": "placement_region",
+                    "quality_profile": "placement_rgbd",
+                    "max_motion_attempts": 0,
+                },
+                "fallback": "current_view_provider_grounded_region",
+                "attempt": 1,
+                "rule": (
+                    "The text masks do not isolate the destination and the configured "
+                    "point service is unavailable. Choose active_observe once: it uses "
+                    "one isolated provider-grounded point and SAM3 on the current "
+                    "calibrated scene RGB-D view without moving the robot."
+                ),
+            }
         if point_attempts >= 2:
             return {
                 **base,

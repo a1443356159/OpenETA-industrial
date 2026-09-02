@@ -659,6 +659,106 @@ def test_active_observe_can_seed_search_with_isolated_provider_point(
     )
 
 
+def test_active_observe_grounds_placement_region_without_robot_motion(
+    tmp_path: Path,
+) -> None:
+    top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
+    wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
+    mask_path = tmp_path / "placement-mask.png"
+    _save_rgb(top_rgb)
+    _save_rgb(wrist_rgb)
+    _save_depth(top_depth, millimetres=980)
+    _save_depth(wrist_depth)
+    mask = np.zeros((120, 160), dtype=np.uint8)
+    mask[35:90, 45:115] = 255
+    Image.fromarray(mask).save(mask_path)
+    observation = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=wrist_rgb,
+        wrist_depth=wrist_depth,
+    )
+    localization_requests = []
+
+    def localize(request):
+        localization_requests.append(request)
+        return {
+            "decision": "locate",
+            "point": {"x": 80.0, "y": 60.0},
+            "bbox_xyxy": [45.0, 35.0, 115.0, 90.0],
+            "confidence": 0.91,
+            "reason": "the point lies on the unobstructed bin floor",
+        }
+
+    semantic_localizer = BackendSemanticPointLocalizer(
+        CallablePlannerBackend(localize, provider="fixture-vlm", model="fixture-vision")
+    )
+    sam_contexts: list[ToolExecutionContext] = []
+
+    def sam3_handler(context: ToolExecutionContext) -> ToolResult:
+        sam_contexts.append(context)
+        detection = {
+            "id": "detection_region",
+            "label": "point_prompt",
+            "mask_ref": str(mask_path),
+            "bbox_xyxy": [45, 35, 115, 90],
+        }
+        return ToolResult(
+            True,
+            details={
+                "result_id": "active-placement-result",
+                "source_image": str(top_rgb.resolve()),
+                "source_frame_id": "top_camera_optical_frame",
+                "semantic_role": "placement_region",
+                "semantic_target": "blue parts bin interior",
+                "perception_bundle_id": "perception-placement-active",
+                "observation_id": "observation-placement-active",
+                "segmentation_mode": "point_prompt",
+                "scene_epoch": 1,
+                "detections": [detection],
+                "selected_detection": detection,
+                "selection_review": {
+                    "decision": "select",
+                    "detection_id": "detection_region",
+                },
+            },
+        )
+
+    controller = _controller(
+        tmp_path,
+        sam3_handler=sam3_handler,
+        semantic_localizer=semantic_localizer,
+    )
+    tools = build_default_tool_registry()
+    context = ToolExecutionContext(
+        name="active_observe",
+        spec=tools.get("active_observe"),
+        parameters={
+            "semantic_target": "blue parts bin interior",
+            "semantic_role": "placement_region",
+            "quality_profile": "placement_rgbd",
+            "max_motion_attempts": 0,
+        },
+        observation=observation,
+        metadata={"session_id": "unit-session"},
+    )
+
+    result = controller.handler(context)
+
+    assert result.success is True
+    outputs = result.details["outputs"]
+    assert outputs["status"] == "acquired"
+    assert outputs["semantic_role"] == "placement_region"
+    assert outputs["motion_count"] == 0
+    assert outputs["quality"]["profile"] == "placement_rgbd"
+    assert outputs["selected_detection"]["id"] == "detection_region"
+    assert len(localization_requests) == 1
+    assert len(sam_contexts) == 1
+    assert sam_contexts[0].parameters["mode"] == "points"
+    assert sam_contexts[0].parameters["semantic_role"] == "placement_region"
+    assert "sam3_selection_policy" not in sam_contexts[0].metadata
+
+
 def test_active_observe_records_provider_abstention_without_motion(
     tmp_path: Path,
 ) -> None:

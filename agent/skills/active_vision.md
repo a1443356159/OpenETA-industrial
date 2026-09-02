@@ -1,12 +1,13 @@
 ---
 name: active_vision
-description: Guidance for acquiring a better pre-contact grasp RGB-D view.
+description: Guidance for pre-contact grasp-view and placement-region recovery.
 version: v1
 editable: true
 task_patterns:
   - active observation
   - inspect occluded object
   - improve grasp view
+  - recover placement region
   - 主动感知
   - 主动观察
   - 遮挡目标
@@ -26,7 +27,9 @@ no mask, the host may bind a retained calibrated image point for one
 semantic-search attempt. When the configured point service is unavailable, the
 tool may instead use the configured provider once in a clean, low-token visual
 grounding context; the returned point is still checked against current calibrated
-depth before motion. The agent decides that another view is useful; the
+depth. For `placement_region`, that point seeds SAM3 on the existing primary
+scene RGB-D frame and the robot does not move. For `grasp_target`, the agent
+decides that another view is useful and the
 tool owns deterministic viewpoint generation, strict cheap legality, Beam-2
 IK/state validity, two L5 plan-only proofs, bounded motion, fresh RGB-D
 acquisition, and point-grounded target refresh. After motion it checks every
@@ -44,10 +47,17 @@ host supplies `semantic_target` and, when already available, `target_hint`. Use
 joint state. Observation poses are sensing states only and never modify a
 model contact or release terminal.
 
+When the host binds placement-region recovery, use the same empty-parameter
+call. It supplies `semantic_role=placement_region`,
+`quality_profile=placement_rgbd`, and `max_motion_attempts=0`. The isolated
+visual point and the resulting SAM3 mask remain model- and geometry-driven;
+the agent must not invent a bin coordinate or task-specific pixel.
+
 A `reused` result means the existing calibrated RGB-D packet already passes the
-quality gate and no motion/model call occurred. An `acquired` result supplies a
-new observation bundle after bounded motion. Continue grasp generation from
-that bundle. On `exhausted`, inspect the compact stop reason; do not repeat the
+quality gate and no motion/model call occurred. An `acquired` grasp result supplies a
+new observation bundle after bounded motion; an acquired placement-region result
+supplies a point-grounded mask from the unchanged scene view. Continue the normal
+grasp or AnyPlace flow from that evidence. On `exhausted`, inspect the compact stop reason; do not repeat the
 same fingerprint. In particular, `camera_self_occlusion_unusable` is a
 mechanical/calibration defect that arm motion cannot repair. On
 `infrastructure_error`, stop rather than recording the target as unreachable.
