@@ -61,6 +61,10 @@ class GraspRgbdQualityProfile:
     max_mask_area_fraction: float = 0.35
     min_valid_depth_fraction: float = 0.85
     min_border_margin_px: int = 3
+    # A fixed three-pixel margin is meaningful for tiny unit-test images but
+    # accepted almost-clipped masks at the 640x480 wrist-camera resolution.
+    # Keep the absolute floor and add a resolution-independent framing gate.
+    min_border_margin_fraction: float = 0.02
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,58 +517,122 @@ class ActiveVisionController:
                         evaluation["rejection"] = "camera_self_occlusion_unusable"
                         last_rejection = str(evaluation["rejection"])
                         continue
-                point = _project_world_point(
-                    target_center,
-                    extrinsics=camera.extrinsics,
-                    intrinsics=camera.intrinsics,
-                )
-                if point is None:
-                    evaluation["rejection"] = "target_outside_active_view"
-                    last_rejection = str(evaluation["rejection"])
-                    continue
-                evaluation["projected_target_point_xy"] = [
-                    round(point[0], 3),
-                    round(point[1], 3),
-                ]
+
+                # The coarse visual point is sufficient to plan a view, but
+                # it is not authoritative target geometry.  In particular a
+                # VLM point can land in an articulated object's opening or on
+                # the support surface.  Once motion has changed visibility,
+                # semantically reground the target in the fresh image before
+                # falling back to the projected seed.
                 phase_started = time.monotonic()
-                sam_result, cache_hit = self._segment_new_view(
+                semantic_result, semantic_cache_hit = self._segment_semantic_view(
                     context,
                     observation=current_observation,
                     packet=packet,
                     semantic_target=semantic_target,
                     scene_epoch=_scene_epoch(current_observation),
-                    point_xy=point,
                 )
-                evaluation["sam3_elapsed_s"] = round(time.monotonic() - phase_started, 6)
+                evaluation["semantic_sam3_elapsed_s"] = round(
+                    time.monotonic() - phase_started,
+                    6,
+                )
+                evaluation["semantic_sam3_cache_hit"] = semantic_cache_hit
+                evaluation["semantic_sam3_success"] = semantic_result.success
+                sam_result = semantic_result
+                cache_hit = semantic_cache_hit
+                refreshed_evidence: TargetEvidence | None = None
+                quality: JsonDict | None = None
+                selection: JsonDict = {}
+                grounding_mode = "semantic_text"
+                if semantic_result.success:
+                    refreshed_evidence = _evidence_from_sam_result(
+                        semantic_result,
+                        observation=current_observation,
+                        artifact_root=self.artifact_root,
+                    )
+                    if refreshed_evidence is not None:
+                        quality, _ = _target_quality(
+                            refreshed_evidence,
+                            profile=self.quality_profile,
+                        )
+                        evaluation["semantic_quality"] = quality
+                        review = semantic_result.details.get("selection_review")
+                        selection = dict(review) if isinstance(review, Mapping) else {
+                            "decision": "select",
+                            "detection_id": refreshed_evidence.detection_id,
+                            "selection_source": "fresh_semantic_regrounding",
+                        }
+                        if quality.get("passed") is not True:
+                            refreshed_evidence = None
+                            quality = None
+
+                if refreshed_evidence is None:
+                    point = _project_world_point(
+                        target_center,
+                        extrinsics=camera.extrinsics,
+                        intrinsics=camera.intrinsics,
+                    )
+                    if point is None:
+                        evaluation["rejection"] = (
+                            "semantic_refresh_failed_and_seed_outside_view"
+                        )
+                        last_rejection = str(evaluation["rejection"])
+                        continue
+                    evaluation["projected_target_point_xy"] = [
+                        round(point[0], 3),
+                        round(point[1], 3),
+                    ]
+                    phase_started = time.monotonic()
+                    sam_result, cache_hit = self._segment_point_view(
+                        context,
+                        observation=current_observation,
+                        source_rgb=Path(str(packet["rgb"]["path"])),
+                        semantic_target=semantic_target,
+                        semantic_role=SUPPORTED_SEMANTIC_ROLE,
+                        scene_epoch=_scene_epoch(current_observation),
+                        point_xy=point,
+                        selection_policy="active_vision_point_depth_geometry",
+                    )
+                    evaluation["point_sam3_elapsed_s"] = round(
+                        time.monotonic() - phase_started,
+                        6,
+                    )
+                    evaluation["point_sam3_cache_hit"] = cache_hit
+                    evaluation["point_sam3_success"] = sam_result.success
+                    if not sam_result.success:
+                        evaluation["rejection"] = "sam3_refresh_failed"
+                        last_rejection = str(evaluation["rejection"])
+                        continue
+                    phase_started = time.monotonic()
+                    refreshed_evidence, quality, selection = _select_point_grounded_evidence(
+                        sam_result,
+                        observation=current_observation,
+                        artifact_root=self.artifact_root,
+                        profile=self.quality_profile,
+                        target_center_world=target_center,
+                        target_extent_world=target_extent,
+                        point_xy=point,
+                    )
+                    evaluation["geometry_selection_elapsed_s"] = round(
+                        time.monotonic() - phase_started,
+                        6,
+                    )
+                    grounding_mode = "projected_point_fallback"
+
                 evaluation["sam3_cache_hit"] = cache_hit
                 evaluation["sam3_success"] = sam_result.success
-                if not sam_result.success:
-                    evaluation["rejection"] = "sam3_refresh_failed"
-                    last_rejection = str(evaluation["rejection"])
-                    continue
-                phase_started = time.monotonic()
-                refreshed_evidence, quality, selection = _select_point_grounded_evidence(
-                    sam_result,
-                    observation=current_observation,
-                    artifact_root=self.artifact_root,
-                    profile=self.quality_profile,
-                    target_center_world=target_center,
-                    target_extent_world=target_extent,
-                    point_xy=point,
-                )
-                evaluation["geometry_selection_elapsed_s"] = round(
-                    time.monotonic() - phase_started, 6
-                )
                 evaluation["selection"] = selection
                 if refreshed_evidence is None or quality is None:
                     evaluation["rejection"] = "sam3_point_depth_geometry_rejected"
                     last_rejection = str(evaluation["rejection"])
                     continue
                 evaluation["quality"] = quality
+                evaluation["grounding_mode"] = grounding_mode
                 evaluation["accepted"] = True
                 attempt["sam3_cache_hit"] = cache_hit
                 attempt["sam3_success"] = True
                 attempt["quality"] = quality
+                attempt["grounding_mode"] = grounding_mode
                 attempt["selected_camera_frame_id"] = camera.frame_id
                 record.update(
                     {
@@ -838,7 +906,7 @@ class ActiveVisionController:
         )
         return self.simulator_proxy.call(context, tool_name="observe")
 
-    def _segment_new_view(
+    def _segment_semantic_view(
         self,
         outer_context: ToolExecutionContext,
         *,
@@ -846,18 +914,50 @@ class ActiveVisionController:
         packet: JsonDict,
         semantic_target: str,
         scene_epoch: int,
-        point_xy: tuple[float, float],
     ) -> tuple[ToolResult, bool]:
-        return self._segment_point_view(
-            outer_context,
-            observation=observation,
-            source_rgb=Path(str(packet["rgb"]["path"])),
-            semantic_target=semantic_target,
-            semantic_role=SUPPORTED_SEMANTIC_ROLE,
-            scene_epoch=scene_epoch,
-            point_xy=point_xy,
-            selection_policy="active_vision_point_depth_geometry",
+        assert self.sam3_handler is not None
+        rgb_path = str(packet["rgb"]["path"])
+        fingerprint = _stable_hash(
+            {
+                "mode": "text",
+                "image_sha256": _file_sha256(Path(rgb_path)),
+                "semantic_target": semantic_target,
+                "semantic_role": SUPPORTED_SEMANTIC_ROLE,
+                "scene_epoch": scene_epoch,
+            }
         )
+        with self._sam_cache_lock:
+            cached = self._sam_cache.get(fingerprint)
+        if cached is not None:
+            return cached, True
+        result = self.sam3_handler(
+            ToolExecutionContext(
+                name="sam3",
+                spec=self.sam3_spec,
+                parameters={
+                    "mode": "text",
+                    "image": rgb_path,
+                    "prompt": semantic_target,
+                    "semantic_role": SUPPORTED_SEMANTIC_ROLE,
+                    "semantic_target": semantic_target,
+                    "scene_epoch": scene_epoch,
+                    "observation_id": f"observation-{fingerprint[:16]}",
+                    "perception_bundle_id": f"perception-{fingerprint[16:32]}",
+                    "attempt_id": f"active-sam3-text-{fingerprint[:16]}",
+                },
+                observation=observation,
+                metadata=dict(outer_context.metadata),
+            )
+        )
+        if not isinstance(result, ToolResult):
+            raise ActiveVisionError(
+                "active_vision_sam3_contract_invalid",
+                "SAM3 handler returned a non-ToolResult value",
+                infrastructure=True,
+            )
+        with self._sam_cache_lock:
+            self._sam_cache.setdefault(fingerprint, result)
+        return result, False
 
     def _segment_point_view(
         self,
@@ -877,6 +977,7 @@ class ActiveVisionController:
         image_sha = _file_sha256(Path(rgb_path))
         fingerprint = _stable_hash(
             {
+                "mode": "points",
                 "image_sha256": image_sha,
                 "semantic_target": semantic_target,
                 "semantic_role": semantic_role,
@@ -1692,7 +1793,11 @@ def _target_quality(
         reasons.append("mask_oversegmented")
     if valid_fraction < profile.min_valid_depth_fraction:
         reasons.append("insufficient_target_depth")
-    if border_margin < profile.min_border_margin_px:
+    required_border_margin = max(
+        profile.min_border_margin_px,
+        int(math.ceil(min(mask.shape) * profile.min_border_margin_fraction)),
+    )
+    if border_margin < required_border_margin:
         reasons.append("target_touches_image_border")
     points = _masked_world_points(
         mask=valid,
@@ -1710,6 +1815,8 @@ def _target_quality(
         "mask_area_fraction": round(area_fraction, 8),
         "valid_depth_fraction": round(valid_fraction, 6),
         "border_margin_px": int(border_margin),
+        "required_border_margin_px": int(required_border_margin),
+        "required_border_margin_fraction": profile.min_border_margin_fraction,
         "bbox_xyxy": list(bbox),
         "metric_point_count": int(len(points)),
         "source_frame_id": evidence.frame_id,

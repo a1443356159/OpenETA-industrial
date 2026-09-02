@@ -11,7 +11,12 @@ from adapter.protocol import CameraFrame, EnvObservation, RobotState
 from agent.backends.planner import CallablePlannerBackend
 from agent.runtime.qualification_v3 import schedule_candidate_waves
 from agent.runtime.reference_localization import BackendSemanticPointLocalizer
-from agent.tools.active_vision import ActiveVisionController
+from agent.tools.active_vision import (
+    ActiveVisionController,
+    GraspRgbdQualityProfile,
+    TargetEvidence,
+    _target_quality,
+)
 from agent.tools.registry import (
     TOOL_PROFILE_GAZEBO_INDUSTRIAL,
     ToolExecutionContext,
@@ -336,7 +341,9 @@ class _Proxy:
         )
 
 
-def test_active_observe_acquires_point_grounded_view_and_caches_sam3(tmp_path: Path) -> None:
+def test_active_observe_semantically_regrounds_fresh_view_and_caches_sam3(
+    tmp_path: Path,
+) -> None:
     top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
     wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
     new_rgb, new_depth = tmp_path / "new-wrist.png", tmp_path / "new-wrist-depth.png"
@@ -412,7 +419,8 @@ def test_active_observe_acquires_point_grounded_view_and_caches_sam3(tmp_path: P
     assert first.details["outputs"]["observation_bundle_id"] == "perception-active"
     assert proxy.calls == ["move_to", "observe", "move_to", "observe"]
     assert len(sam_calls) == 1
-    assert sam_calls[0]["mode"] == "points"
+    assert sam_calls[0]["mode"] == "text"
+    assert sam_calls[0]["prompt"] == "yellow wrench"
     assert sam_calls[0]["semantic_role"] == "grasp_target"
 
 
@@ -513,8 +521,11 @@ def test_active_observe_selects_nested_point_mask_from_depth_without_vlm(
     assert review["model_review_invoked"] is False
     assert review["selection_source"] == "active_vision_point_depth_geometry"
     assert proxy.calls == ["move_to", "observe"]
-    assert len(sam_contexts) == 1
-    assert sam_contexts[0].metadata["sam3_selection_policy"] == (
+    assert [context.parameters["mode"] for context in sam_contexts] == [
+        "text",
+        "points",
+    ]
+    assert sam_contexts[1].metadata["sam3_selection_policy"] == (
         "active_vision_point_depth_geometry"
     )
 
@@ -571,7 +582,7 @@ def test_active_observe_searches_from_calibrated_visual_point_without_mask(
                 "semantic_target": "red hex bolt",
                 "perception_bundle_id": "perception-active-search",
                 "observation_id": "observation-active-search",
-                "segmentation_mode": "point_prompt",
+                "segmentation_mode": "text",
                 "scene_epoch": 1,
                 "attempt_id": "active-point-attempt",
                 "attempt_fingerprint": "active-point-fingerprint",
@@ -597,8 +608,57 @@ def test_active_observe_searches_from_calibrated_visual_point_without_mask(
     )
     assert proxy.calls == ["move_to", "observe"]
     assert len(sam_calls) == 1
-    assert sam_calls[0]["mode"] == "points"
+    assert sam_calls[0]["mode"] == "text"
     assert sam_calls[0]["semantic_target"] == "red hex bolt"
+
+
+def test_grasp_rgbd_quality_requires_resolution_scaled_border_margin(
+    tmp_path: Path,
+) -> None:
+    rgb = tmp_path / "rgb.png"
+    depth = tmp_path / "depth.png"
+    mask_path = tmp_path / "mask.png"
+    Image.fromarray(np.full((480, 640, 3), 96, dtype=np.uint8)).save(rgb)
+    mask = np.zeros((480, 640), dtype=bool)
+    mask[180:280, 3:103] = True
+    Image.fromarray(np.full((480, 640), 500, dtype=np.uint16)).save(depth)
+    Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
+    evidence = TargetEvidence(
+        result_id="sam-result",
+        detection_id="detection",
+        semantic_target="industrial part",
+        semantic_role="grasp_target",
+        source_rgb=rgb,
+        source_depth=depth,
+        mask=mask_path,
+        frame_id="camera",
+        intrinsics={
+            "fx": 500.0,
+            "fy": 500.0,
+            "cx": 320.0,
+            "cy": 240.0,
+            "width": 640,
+            "height": 480,
+            "scale": 1000.0,
+        },
+        extrinsics={
+            "camera_frame": "opencv",
+            "frame_transform": "camera_to_world",
+            "pos": [0.0, 0.0, 0.0],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        },
+        perception_bundle_id="bundle",
+        observation_id="observation",
+        scene_epoch=1,
+        bbox_xyxy=(3, 180, 103, 280),
+    )
+
+    quality, _ = _target_quality(evidence, profile=GraspRgbdQualityProfile())
+
+    assert quality["passed"] is False
+    assert quality["border_margin_px"] == 3
+    assert quality["required_border_margin_px"] == 10
+    assert "target_touches_image_border" in quality["reason_codes"]
 
 
 def test_active_observe_can_seed_search_with_isolated_provider_point(

@@ -33,10 +33,14 @@ decides that another view is useful and the
 tool owns deterministic viewpoint generation, strict cheap legality, Beam-2
 IK/state validity, two L5 plan-only proofs, bounded motion, fresh RGB-D
 acquisition, and point-grounded target refresh. After motion it checks every
-current calibrated RGB-D view in deterministic order. Nested point-prompt SAM3
-masks are selected from aligned depth, the projected world target and the
-ordinary grasp-quality gate; this refresh does not spend another semantic VLM
-review for each view.
+current calibrated RGB-D view in deterministic order. It first semantically
+regrounds the target in each fresh image, because the coarse localization point
+may lie in an articulated object's opening or on its support surface. Only when
+fresh text segmentation cannot select a quality mask does it fall back to the
+projected point and choose among nested point-prompt SAM3 masks using aligned
+depth and the ordinary grasp-quality gate. Mask framing uses a
+resolution-scaled border margin, so a nearly clipped mask cannot seed an
+expensive grasp frontier.
 
 For grounded refinement, copy `target_evidence_id` from the selected
 grasp-target SAM3 `result_id`. For semantic search, choose `active_observe`
