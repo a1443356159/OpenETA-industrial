@@ -156,11 +156,17 @@ def test_pickplace_physics_and_contact_rates_match_controller_budget() -> None:
     control_rate_hz = controllers["controller_manager"]["ros__parameters"]["update_rate"]
     assert step_s == pytest.approx(0.002)
     assert control_rate_hz == pytest.approx(1.0 / step_s)
+    state_rate_hz = controllers["joint_state_broadcaster"]["ros__parameters"][
+        "update_rate"
+    ]
+    assert state_rate_hz == 100
+    assert state_rate_hz >= 5 * 20  # Five samples per 20 Hz gripper servo decision.
     contact_rates = [
         float(sensor.findtext("update_rate"))
         for sensor in robot.findall(".//sensor[@type='contact']")
     ]
-    assert contact_rates == [250.0, 250.0]
+    assert contact_rates == [125.0, 125.0]
+    assert all(rate * 0.1 >= 4 * 3 for rate in contact_rates)
     assert all(rate <= control_rate_hz for rate in contact_rates)
 
 

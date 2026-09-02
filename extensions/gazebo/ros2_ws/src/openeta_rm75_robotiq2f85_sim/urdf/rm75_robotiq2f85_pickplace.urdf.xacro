@@ -34,16 +34,17 @@
        from the real vendor fingertip collision meshes. -->
   <gazebo reference="robotiq_85_left_finger_tip_link">
     <sensor name="openeta_native_grasp_left_pad_contact" type="contact">
-      <!-- 250 Hz retains 25 samples in the 100 ms bilateral proof window,
-           far above the three-sample gate, without saturating the bridge. -->
-      <always_on>true</always_on><update_rate>250</update_rate>
+      <!-- 125 Hz retains at least twelve samples in the 100 ms bilateral proof
+           window, four times the three-sample gate, while avoiding needless
+           contact serialization during every arm trajectory. -->
+      <always_on>true</always_on><update_rate>125</update_rate>
       <topic>/openeta/native_grasp/contacts/left_pad</topic>
       <contact><collision>robotiq_85_left_finger_tip_link_collision</collision></contact>
     </sensor>
   </gazebo>
   <gazebo reference="robotiq_85_right_finger_tip_link">
     <sensor name="openeta_native_grasp_right_pad_contact" type="contact">
-      <always_on>true</always_on><update_rate>250</update_rate>
+      <always_on>true</always_on><update_rate>125</update_rate>
       <topic>/openeta/native_grasp/contacts/right_pad</topic>
       <contact><collision>robotiq_85_right_finger_tip_link_collision</collision></contact>
     </sensor>
