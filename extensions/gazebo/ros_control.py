@@ -73,6 +73,26 @@ _QUALIFICATION_POSE_FIELDS = (
 )
 
 
+def _sim_clock_diagnostics(
+    *,
+    started_ros_time_s: float,
+    completed_ros_time_s: float,
+    wall_elapsed_s: float,
+) -> dict[str, float]:
+    """Describe simulator-clock progress without influencing control success."""
+
+    values = (started_ros_time_s, completed_ros_time_s, wall_elapsed_s)
+    if not all(math.isfinite(value) for value in values) or wall_elapsed_s <= 0.0:
+        return {}
+    sim_elapsed_s = completed_ros_time_s - started_ros_time_s
+    if sim_elapsed_s < 0.0:
+        return {}
+    return {
+        "sim_clock_elapsed_ms": round(sim_elapsed_s * 1000.0, 3),
+        "observed_sim_clock_ratio": round(sim_elapsed_s / wall_elapsed_s, 6),
+    }
+
+
 def _qualification_pose_target(target: Mapping[str, Any]) -> dict[str, Any]:
     """Project private qualification evidence onto the pose-goal contract."""
 
@@ -3975,9 +3995,14 @@ class _RosRuntime:
             # Diagnostics only.  Human-gated TUI duration includes the time an
             # operator spends reviewing the request, whereas this interval is
             # measured strictly inside the controller service boundary.
-            payload["wall_elapsed_ms"] = round(
-                (time.monotonic() - wall_started) * 1000,
-                3,
+            wall_elapsed_s = time.monotonic() - wall_started
+            payload["wall_elapsed_ms"] = round(wall_elapsed_s * 1000, 3)
+            payload.update(
+                _sim_clock_diagnostics(
+                    started_ros_time_s=action_started,
+                    completed_ros_time_s=completed,
+                    wall_elapsed_s=wall_elapsed_s,
+                )
             )
             payload["motion_profile"] = str(goal.get("motion_profile") or "unloaded")
             payload["max_velocity_scaling_factor"] = float(
@@ -4318,7 +4343,15 @@ class _RosRuntime:
             payload["action_completed_ros_time_s"] = completed
             # Diagnostics only: wall-clock duration and terminal status do
             # not affect the strict success predicate below.
-            payload["wall_elapsed_ms"] = round((time.monotonic() - wall_started) * 1000, 3)
+            wall_elapsed_s = time.monotonic() - wall_started
+            payload["wall_elapsed_ms"] = round(wall_elapsed_s * 1000, 3)
+            payload.update(
+                _sim_clock_diagnostics(
+                    started_ros_time_s=action_started,
+                    completed_ros_time_s=completed,
+                    wall_elapsed_s=wall_elapsed_s,
+                )
+            )
             return payload
 
         self.state_source.clear(min_ros_timestamp_s=action_started)

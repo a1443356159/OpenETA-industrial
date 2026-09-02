@@ -750,6 +750,8 @@ def test_robot_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> No
             "terminal_status": "succeeded",
             "terminal_status_code": 4,
             "wall_elapsed_ms": 123.456,
+            "sim_clock_elapsed_ms": 100.0,
+            "observed_sim_clock_ratio": 0.81,
         },
     )
 
@@ -759,6 +761,8 @@ def test_robot_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> No
     assert receipt["terminal_status"] == "succeeded"
     assert receipt["terminal_status_code"] == 4
     assert receipt["wall_elapsed_ms"] == pytest.approx(123.456)
+    assert receipt["sim_clock_elapsed_ms"] == pytest.approx(100.0)
+    assert receipt["observed_sim_clock_ratio"] == pytest.approx(0.81)
 
 
 def test_attached_transport_hold_opens_one_common_driver_after_attach() -> None:
@@ -1114,6 +1118,8 @@ def test_controller_accepts_stationary_action_ordered_terminal_after_success() -
             "action_started_ros_time_s": 12.5,
             "action_completed_ros_time_s": 14.0,
             "wall_elapsed_ms": 1523.4,
+            "sim_clock_elapsed_ms": 1500.0,
+            "observed_sim_clock_ratio": 0.984646,
         },
     ).execute(
         {
@@ -1135,6 +1141,8 @@ def test_controller_accepts_stationary_action_ordered_terminal_after_success() -
     )
     assert result.payload["terminal_state_stationary_verified"] is True
     assert result.payload["wall_elapsed_ms"] == pytest.approx(1523.4)
+    assert result.payload["sim_clock_elapsed_ms"] == pytest.approx(1500.0)
+    assert result.payload["observed_sim_clock_ratio"] == pytest.approx(0.984646)
 
 
 def test_controller_waits_for_stationary_state_after_success(

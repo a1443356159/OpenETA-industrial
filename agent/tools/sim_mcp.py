@@ -87,6 +87,13 @@ CONTROL_RECEIPT_FIELDS = (
     "reached_goal",
     "terminal_status",
     "terminal_status_code",
+    # Bounded controller-clock diagnostics make slow simulator time visible
+    # without trusting model-authored timing or reopening the raw response.
+    "action_started_ros_time_s",
+    "action_completed_ros_time_s",
+    "wall_elapsed_ms",
+    "sim_clock_elapsed_ms",
+    "observed_sim_clock_ratio",
     # Compact terminal diagnostics used to distinguish an empty planning
     # rejection from a completed-but-missed controller trajectory.  The full
     # joint-state proof remains in the host-only observation snapshot.

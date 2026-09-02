@@ -1035,6 +1035,8 @@ class GazeboController:
                     "terminal_status",
                     "terminal_status_code",
                     "wall_elapsed_ms",
+                    "sim_clock_elapsed_ms",
+                    "observed_sim_clock_ratio",
                 )
                 if key in result
             },
@@ -1378,6 +1380,8 @@ class GazeboController:
                         "action_started_ros_time_s",
                         "action_completed_ros_time_s",
                         "wall_elapsed_ms",
+                        "sim_clock_elapsed_ms",
+                        "observed_sim_clock_ratio",
                         "moveit_error_code",
                         "planned_point_count",
                         "execution_started",
@@ -1867,6 +1871,8 @@ class GazeboController:
                                 "terminal_gripper_joint_state",
                                 "stall_accepted_for_command",
                                 "wall_elapsed_ms",
+                                "sim_clock_elapsed_ms",
+                                "observed_sim_clock_ratio",
                             )
                             if key in result
                         },

@@ -746,6 +746,11 @@ def test_worker_proxy_retains_native_control_proof_in_trusted_receipt(tmp_path: 
         "execution_started": True,
         "planning_scene_revision": 2,
         "request_fingerprint": "move-fingerprint",
+        "action_started_ros_time_s": 10.0,
+        "action_completed_ros_time_s": 11.5,
+        "wall_elapsed_ms": 2000.0,
+        "sim_clock_elapsed_ms": 1500.0,
+        "observed_sim_clock_ratio": 0.75,
         "detachable_joint": {"state": "attached"},
         "attachment_transform": {
             "schema_version": "openeta.attachment_transform.v1",

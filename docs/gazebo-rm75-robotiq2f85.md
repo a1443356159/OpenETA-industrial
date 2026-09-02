@@ -58,8 +58,13 @@ PlanningScene receipt.
 The complete launch starts Gazebo Harmonic, spawns
 `rm75_robotiq_2f85_sim_v1`, activates the three ros2_control controllers in
 dependency order, then starts MoveIt and the RGB-D bridge with simulation
-time. Arm trajectories use collision-enabled MoveIt planning at 30% of the
-declared joint velocity and acceleration limits. DART
+time. Arm trajectories use collision-enabled MoveIt planning; the conservative
+release profile currently scales declared velocity to 10% and acceleration to
+4%. Gazebo retains a 2 ms physics step and 500 Hz control loop. Non-control
+telemetry is decimated to 100 Hz joint states and 125 Hz native pad contacts;
+each 100 ms contact proof still receives about twelve samples for its
+three-sample gate. Motion receipts record simulator-clock elapsed time and its
+wall-clock ratio for performance diagnosis. DART
 (`gz-physics-dartsim-plugin`) is the stable default physics engine; Bullet
 remains an explicit development override through `OPENETA_GZ_PHYSICS_ENGINE`
 and is not the validated release default. Run the final task-neutral

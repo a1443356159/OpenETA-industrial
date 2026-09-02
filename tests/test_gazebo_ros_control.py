@@ -24,6 +24,7 @@ from extensions.gazebo.ros_control import (
     QUALIFIED_JOINT_GOAL_TOLERANCE_RAD,
     RosGazeboStateSource,
     _RosRuntime,
+    _sim_clock_diagnostics,
     _attached_support_departure_audit,
     _detached_contact_approach_audit,
     _collision_message_geometry_record,
@@ -47,6 +48,22 @@ from extensions.gazebo.ros_control import (
     _urdf_reach_upper_bound_m,
 )
 from agent.runtime.capability_map import generate_sparse_capability_map, robot_model_hash
+
+
+def test_sim_clock_diagnostics_reports_ratio_without_affecting_invalid_clocks() -> None:
+    assert _sim_clock_diagnostics(
+        started_ros_time_s=10.0,
+        completed_ros_time_s=11.5,
+        wall_elapsed_s=2.0,
+    ) == {
+        "sim_clock_elapsed_ms": 1500.0,
+        "observed_sim_clock_ratio": 0.75,
+    }
+    assert not _sim_clock_diagnostics(
+        started_ros_time_s=11.0,
+        completed_ros_time_s=10.0,
+        wall_elapsed_s=1.0,
+    )
 
 
 def _pose(xyz=(0.0, 0.0, 0.0), quat=(0.0, 0.0, 0.0, 1.0)):
