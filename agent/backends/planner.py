@@ -1081,10 +1081,22 @@ def _chat_completions_url(api_base: str) -> str:
 
 
 def _openai_compatible_api_url(api_base: str, resource: str) -> str:
-    """Join a provider base with one OpenAI v1 resource exactly once."""
+    """Join a provider base with one OpenAI-compatible API version exactly once.
+
+    Most endpoints expose ``/v1`` and accept an unversioned base.  Some
+    compatible providers publish another explicit numeric version, such as
+    ``/v4``.  Preserve any caller-supplied numeric version instead of silently
+    appending ``/v1`` after it.
+    """
 
     base = api_base.rstrip("/")
-    versioned_base = base if base.endswith("/v1") else f"{base}/v1"
+    final_segment = base.rsplit("/", 1)[-1].lower()
+    has_explicit_version = (
+        len(final_segment) > 1
+        and final_segment.startswith("v")
+        and final_segment[1:].isdigit()
+    )
+    versioned_base = base if has_explicit_version else f"{base}/v1"
     return f"{versioned_base}/{resource.lstrip('/')}"
 
 

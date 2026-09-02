@@ -9991,7 +9991,23 @@ def test_openai_compatible_backend_uses_chat_completions_transport() -> None:
     assert result.details["provider_attempts"] == 1
 
 
-def test_openai_compatible_backend_does_not_duplicate_versioned_api_base() -> None:
+@pytest.mark.parametrize(
+    ("api_base", "expected_url"),
+    [
+        (
+            "https://api.example.test/v1/",
+            "https://api.example.test/v1/chat/completions",
+        ),
+        (
+            "https://api.example.test/api/paas/v4/",
+            "https://api.example.test/api/paas/v4/chat/completions",
+        ),
+    ],
+)
+def test_openai_compatible_backend_preserves_versioned_api_base(
+    api_base,
+    expected_url,
+) -> None:
     captured = {}
 
     def fake_transport(url, body, headers, timeout_s):
@@ -10015,7 +10031,7 @@ def test_openai_compatible_backend_does_not_duplicate_versioned_api_base() -> No
     backend = OpenAICompatiblePlannerBackend(
         OpenAICompatiblePlannerBackendConfig(
             model="test-model",
-            api_base="https://api.example.test/v1/",
+            api_base=api_base,
             api_key="secret-key",
         ),
         transport=fake_transport,
@@ -10026,7 +10042,7 @@ def test_openai_compatible_backend_does_not_duplicate_versioned_api_base() -> No
     )
 
     assert result.status == PipelineStatus.PLANNED
-    assert captured["url"] == "https://api.example.test/v1/chat/completions"
+    assert captured["url"] == expected_url
 
 
 def test_openai_compatible_model_list_does_not_duplicate_versioned_api_base(
