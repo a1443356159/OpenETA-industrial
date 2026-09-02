@@ -481,7 +481,14 @@ def test_agentic_anyplace_hydrates_frozen_parameters_in_one_model_call(
 
     def decide(request):
         requests.append(request)
-        return {"kind": "tool_call", "name": "anyplace", "parameters": {}}
+        return {
+            "kind": "tool_call",
+            "name": "anyplace",
+            "parameters": {
+                "reuse_frozen_goal_pool": True,
+                "scene_revision": 999,
+            },
+        }
 
     memory = AgentMemory()
     memory.start_session(task=tool_context["task"])
@@ -508,7 +515,7 @@ def test_agentic_anyplace_hydrates_frozen_parameters_in_one_model_call(
     assert decision.metadata["validation_attempts"] == 1
     hydration = decision.metadata["host_parameter_hydrations"][0]
     assert hydration["source"] == "placement_obligation"
-    assert hydration["hydration_mode"] == "empty_parameters"
+    assert hydration["hydration_mode"] == "unique_binding_override"
     assert hydration["parameter_binding_sha256"] == obligation["parameter_binding_sha256"]
 
 
@@ -591,7 +598,7 @@ def test_agentic_anyplace_hydrates_frozen_reuse_in_one_model_call(
     assert hydration["hydration_mode"] == "empty_parameters"
 
 
-def test_host_parameter_hydration_rejects_altered_nonempty_payload() -> None:
+def test_host_parameter_hydration_overrides_altered_unique_payload() -> None:
     exact = {"reuse_frozen_goal_pool": True, "scene_revision": 4}
     supplied = {"reuse_frozen_goal_pool": True, "scene_revision": 5}
     decision = PlannerDecision("tool_call", "anyplace", supplied)
@@ -604,6 +611,36 @@ def test_host_parameter_hydration_rejects_altered_nonempty_payload() -> None:
                 "required_tool": "anyplace",
                 "required_parameters": exact,
             }
+        },
+    )
+
+    assert decision.parameters == exact
+    assert hydrations[0]["hydration_mode"] == "unique_binding_override"
+    assert hydrations[0]["supplied_parameter_keys"] == [
+        "reuse_frozen_goal_pool",
+        "scene_revision",
+    ]
+
+
+def test_host_parameter_hydration_does_not_guess_between_multiple_bindings() -> None:
+    supplied = {"target_pose": {"stage": "invented"}}
+    decision = PlannerDecision("tool_call", "move_to", supplied)
+
+    hydrations = _hydrate_host_bound_parameters(
+        decision,
+        tool_context={
+            "grasp_execution": {
+                "status": "required",
+                "required_action": {
+                    "name": "move_to",
+                    "parameters": {"target_pose": {"stage": "contact"}},
+                },
+            },
+            "placement_motion_guidance": {
+                "status": "required",
+                "required_tool": "move_to",
+                "required_parameters": {"target_pose": {"stage": "release"}},
+            },
         },
     )
 

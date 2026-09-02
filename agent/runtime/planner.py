@@ -3703,10 +3703,11 @@ def _hydrate_host_bound_parameters(
 ) -> list[JsonDict]:
     """Inject one uniquely selected immutable host payload before schema validation.
 
-    The model continues to choose the tool.  Empty parameters select the sole active
+    The model continues to choose the tool. Empty parameters select the sole active
     binding for that tool; an ``obligation_ref`` selects by digest when more than one
-    binding exists.  Any other non-empty payload remains untouched and therefore must
-    pass the existing exact-value validators on its own.
+    binding exists. When exactly one immutable binding exists, its host-owned payload
+    overrides any model-authored parameters. This prevents invented paths or geometry
+    from entering execution while preserving an auditable canonicalization record.
     """
 
     if decision.action_type.lower().strip() != "tool_call":
@@ -3755,21 +3756,25 @@ def _hydrate_host_bound_parameters(
                 elif len(candidates) == 1:
                     selected = candidates[0]
                     hydration_mode = "host_hydrated_marker"
+        if selected is None and len(candidates) == 1:
+            selected = candidates[0]
+            hydration_mode = "unique_binding_override"
     if selected is None:
         return []
 
     decision.parameters = dict(selected["parameters"])
-    return [
-        {
-            "schema_version": _HOST_PARAMETER_BINDING_SCHEMA_VERSION,
-            "source": selected["source"],
-            "sources": list(selected["sources"]),
-            "tool": selected["tool"],
-            "parameter_binding_sha256": selected["parameter_binding_sha256"],
-            "parameter_keys": list(selected["parameter_keys"]),
-            "hydration_mode": hydration_mode,
-        }
-    ]
+    hydration = {
+        "schema_version": _HOST_PARAMETER_BINDING_SCHEMA_VERSION,
+        "source": selected["source"],
+        "sources": list(selected["sources"]),
+        "tool": selected["tool"],
+        "parameter_binding_sha256": selected["parameter_binding_sha256"],
+        "parameter_keys": list(selected["parameter_keys"]),
+        "hydration_mode": hydration_mode,
+    }
+    if hydration_mode == "unique_binding_override":
+        hydration["supplied_parameter_keys"] = sorted(str(key) for key in supplied)
+    return [hydration]
 
 
 def _project_host_bound_parameters(
