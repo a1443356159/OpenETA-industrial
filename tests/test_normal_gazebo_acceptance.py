@@ -438,6 +438,57 @@ def test_profile_can_tune_request_bounds_without_replacing_provider_identity() -
     assert "OPENETA_UNRELATED" not in environment
 
 
+def test_provider_preflight_uses_direct_smoke_when_model_list_is_incomplete(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = acceptance.base.PlannerProviderConfig(
+        provider="compatible-vision-provider",
+        model="callable-vision-model",
+        api_base="https://provider.invalid/v4",
+        api_key="configured-secret",
+    )
+    monkeypatch.setattr(
+        acceptance.base,
+        "_root_provider_config",
+        lambda *_args, **_kwargs: config,
+    )
+    monkeypatch.setattr(
+        acceptance.base,
+        "list_openai_compatible_models",
+        lambda *_args, **_kwargs: ["advertised-text-model"],
+    )
+
+    class FakeBackend:
+        def __init__(self, _config):
+            pass
+
+        def decide(self, _request):
+            return SimpleNamespace(
+                status=acceptance.base.PipelineStatus.PLANNED,
+                payload=(
+                    '{"kind":"response","name":"ask_human",'
+                    '"parameters":{"message":"provider preflight"},'
+                    '"reasoning":"structured provider preflight"}'
+                ),
+                details={},
+            )
+
+    monkeypatch.setattr(acceptance.base, "OpenAICompatiblePlannerBackend", FakeBackend)
+
+    result = acceptance.base._provider_preflight_result(tmp_path, environ={})
+
+    assert result["status"] == "passed"
+    assert result["reason_code"] == "PROVIDER_PREFLIGHT_PASSED"
+    assert result["planner_smoke"]["status"] == "passed"
+    assert result["model_list"] == {
+        "status": "inconclusive",
+        "latency_ms": result["model_list"]["latency_ms"],
+        "selected_model_found": False,
+        "reason_code": "SELECTED_MODEL_NOT_ADVERTISED",
+    }
+
+
 def test_service_preflight_pool_expectations_follow_runtime_environment(
     monkeypatch,
 ) -> None:

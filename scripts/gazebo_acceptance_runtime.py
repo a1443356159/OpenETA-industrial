@@ -1253,10 +1253,14 @@ def _provider_preflight_result(
 ) -> dict[str, Any]:
     """Run the no-Gazebo, primary-only scripted-provider preflight.
 
-    This checks the exact selected model through `/v1/models`, then makes one
-    constrained planner request which can only return an `ask_human` response.
-    It neither starts the MCP server nor offers a simulator tool, and it never
-    persists provider request/response payloads.
+    This queries the provider's advertised model list, then makes one request
+    to the exact selected model which can only return an ``ask_human``
+    response. Some compatible providers omit callable multimodal models from
+    their list endpoint, so a missing advertisement is retained as
+    inconclusive evidence while the direct structured request remains the
+    authoritative compatibility gate. It neither starts the MCP server nor
+    offers a simulator tool, and it never persists provider request/response
+    payloads.
     """
 
     started = time.monotonic()
@@ -1350,25 +1354,14 @@ def _provider_preflight_result(
             }
         )
         return result
-    if config.model not in models:
-        result.update(
-            {
-                "status": "failed",
-                "reason_code": "PROVIDER_MODEL_NOT_FOUND",
-                "model_list": {
-                    "status": "failed",
-                    "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
-                    "selected_model_found": False,
-                },
-                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-            }
-        )
-        return result
+    selected_model_found = config.model in models
     result["model_list"] = {
-        "status": "passed",
+        "status": "passed" if selected_model_found else "inconclusive",
         "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
-        "selected_model_found": True,
+        "selected_model_found": selected_model_found,
     }
+    if not selected_model_found:
+        result["model_list"]["reason_code"] = "SELECTED_MODEL_NOT_ADVERTISED"
 
     smoke_started = time.monotonic()
     try:
