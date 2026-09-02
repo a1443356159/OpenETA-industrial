@@ -256,6 +256,50 @@ def test_seeded_layout_rejects_an_unsupported_floating_model(tmp_path: Path) -> 
         )
 
 
+@pytest.mark.parametrize(
+    "scene_id",
+    ["narrow-pick", "barrier-transfer", "fastener-bin-sort", "tool-bin-sort"],
+)
+def test_generated_scene_geometry_is_supported_by_the_authoritative_table(
+    scene_id: str,
+) -> None:
+    compiled = _compile(scene_id)
+    contract = load_acceptance_scene_contract(scene_id)
+    by_id = {item.object_id: item for item in compiled.objects}
+    table_top = by_id["work_table"].world_bounds()[1][2]
+    obstacle_ids = {item["id"] for item in contract["static_obstacles"]}
+
+    for item in compiled.objects:
+        if item.gazebo_static and item.object_id not in obstacle_ids:
+            continue
+        bottom = item.world_bounds()[0][2]
+        if item.gazebo_static:
+            assert bottom == pytest.approx(table_top, abs=1e-6)
+        else:
+            assert table_top - 1e-6 <= bottom <= table_top + 0.005
+
+
+def test_generated_scene_rejects_a_floating_static_object(tmp_path: Path) -> None:
+    package = _package()
+    source = package / "config/acceptance_scenes.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["scenes"]["tool-bin-sort"]["static_obstacles"][1]["pose_xyz"][
+        2
+    ] += 0.4
+    catalog = tmp_path / "acceptance_scenes.json"
+    catalog.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        RuntimeError,
+        match="acceptance tabletop object is unsupported: blue_handle_pliers_tool_scene",
+    ):
+        compile_authoritative_scene(
+            base_world=package / "worlds/rm75_robotiq2f85_pickplace.sdf",
+            catalog_path=catalog,
+            scene_id="tool-bin-sort",
+        )
+
+
 def test_authoritative_compiler_keeps_detailed_visual_independent_from_collision(
     tmp_path: Path,
 ) -> None:

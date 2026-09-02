@@ -19,6 +19,7 @@ AUTHORITATIVE_SCENE_SCHEMA_VERSION = "openeta.authoritative_scene.v3"
 ROBOT_COLLISION_FILTER_MASK = 0x0001
 DETACHED_TARGET_COLLISION_FILTER_MASK = 0xFFFF
 ATTACHED_TARGET_COLLISION_FILTER_MASK = 0x0002
+MAXIMUM_INITIAL_SUPPORT_DROP_M = 0.005
 ATTACHED_COLLISION_FILTER_STATE_TOPIC = (
     "/openeta/native_grasp/detachable_joint/target/collision_filter_state"
 )
@@ -549,10 +550,18 @@ def _replace_placement_regions(
     marker = world.find("model[@name='placement_zone_marker']")
     if marker is None:
         raise RuntimeError("canonical placement marker is invalid")
-    for marker_name in ("placement_zone_marker", "blue_destination_marker"):
-        existing_marker = world.find(f"model[@name='{marker_name}']")
-        if existing_marker is not None:
-            world.remove(existing_marker)
+    # A generated region set replaces the canonical pair completely.  Keeping
+    # either old physical bin would leave invisible duplicate support geometry
+    # underneath the new scene's independently modelled walls.
+    for replaced_id in (
+        "green_parts_bin",
+        "blue_parts_bin",
+        "placement_zone_marker",
+        "blue_destination_marker",
+    ):
+        existing = world.find(f"model[@name='{replaced_id}']")
+        if existing is not None:
+            world.remove(existing)
     for raw_region in regions:
         if not isinstance(raw_region, Mapping):
             raise RuntimeError("acceptance scene placement region is invalid")
@@ -560,6 +569,11 @@ def _replace_placement_regions(
         center = _numbers(raw_region.get("center_xy"), 2)
         size = _numbers(raw_region.get("size_xy_m"), 2, positive=True)
         rgba = _numbers(raw_region.get("rgba"), 4)
+        support_z = float(raw_region.get("support_z_m", math.nan))
+        if not math.isfinite(support_z):
+            raise RuntimeError(
+                "generated placement region support height is invalid"
+            )
         if not region_id:
             raise RuntimeError("acceptance scene placement region identity is invalid")
         # The canonical industrial world contains physical green/blue bins.
@@ -571,7 +585,7 @@ def _replace_placement_regions(
         model = ET.SubElement(world, "model", {"name": region_id})
         ET.SubElement(model, "static").text = "true"
         ET.SubElement(model, "pose").text = _text(
-            [*center, 0.4005, 0.0, 0.0, 0.0]
+            [*center, support_z + 0.0005, 0.0, 0.0, 0.0]
         )
         link = ET.SubElement(model, "link", {"name": f"{region_id}_floor_link"})
         visual = ET.SubElement(
@@ -622,11 +636,18 @@ def _render_scene_tree(
             _replace_placement_regions(world, regions=placement_regions)
         elif destination_value is not None:
             destination = _numbers(destination_value, 2)
+            destination_support_z = float(
+                scene.get("destination_support_z_m", math.nan)
+            )
+            if not math.isfinite(destination_support_z):
+                raise RuntimeError(
+                    "acceptance destination support height is invalid"
+                )
             marker = world.find("model[@name='placement_zone_marker']")
             if marker is None or marker.find("pose") is None:
                 raise RuntimeError("canonical placement marker is invalid")
             marker.find("pose").text = _text(
-                [*destination, 0.4005, 0.0, 0.0, 0.0]
+                [*destination, destination_support_z + 0.0005, 0.0, 0.0, 0.0]
             )
         if isinstance(target_value, Mapping):
             _replace_target_model(world, raw=target_value)
@@ -1037,6 +1058,56 @@ def _validate_overridden_dynamic_layout(
                 )
 
 
+def _validate_tabletop_scene_support(
+    *,
+    scene: Mapping[str, object],
+    objects: Sequence[AuthoritativeObject],
+) -> None:
+    """Keep generated scene geometry on the authoritative table surface."""
+
+    if scene.get("canonical_world_complete") is True:
+        return
+    by_id = {item.object_id: item for item in objects}
+    support = by_id.get("work_table")
+    if support is None or not support.gazebo_static:
+        raise RuntimeError("acceptance tabletop support is invalid")
+    support_lower, support_upper = support.world_bounds()
+    support_z = support_upper[2]
+    obstacle_ids = {
+        str(raw.get("id") or "")
+        for raw in scene.get("static_obstacles", [])
+        if isinstance(raw, Mapping)
+    }
+    tabletop_objects = [
+        item
+        for item in objects
+        if not item.gazebo_static or item.object_id in obstacle_ids
+    ]
+    for item in tabletop_objects:
+        lower, upper = item.world_bounds()
+        supported = (
+            math.isclose(lower[2], support_z, rel_tol=0.0, abs_tol=1e-6)
+            if item.gazebo_static
+            else (
+                support_z - 1e-6
+                <= lower[2]
+                <= support_z + MAXIMUM_INITIAL_SUPPORT_DROP_M
+            )
+        )
+        if not supported:
+            raise RuntimeError(
+                f"acceptance tabletop object is unsupported: {item.object_id}"
+            )
+        if any(
+            lower[axis] < support_lower[axis] - 1e-6
+            or upper[axis] > support_upper[axis] + 1e-6
+            for axis in range(2)
+        ):
+            raise RuntimeError(
+                f"acceptance tabletop object leaves support bounds: {item.object_id}"
+            )
+
+
 def _same_numbers(
     left: Sequence[float], right: Sequence[float], *, tolerance: float = 1e-9
 ) -> bool:
@@ -1242,6 +1313,7 @@ def compile_authoritative_scene(
     _validate_attached_collision_filter_contract(world, bindings=target_bindings)
     objects = _authoritative_objects(world)
     _validate_overridden_dynamic_layout(scene=raw_scene, objects=objects)
+    _validate_tabletop_scene_support(scene=raw_scene, objects=objects)
     required_ids = {"work_table", *(item.target_model for item in target_bindings)}
     object_ids = {item.object_id for item in objects}
     if not required_ids <= object_ids:

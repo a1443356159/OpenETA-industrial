@@ -169,14 +169,14 @@
         {
           "id": "pick_guard_left",
           "size_xyz": [0.18, 0.018, 0.025],
-          "pose_xyz": [0.28, -0.191, 0.4125],
+          "pose_xyz": [0.28, -0.191, 0.0125],
           "pose_rpy": [0.0, 0.0, 0.0],
           "rgba": [0.88, 0.48, 0.08, 1.0]
         },
         {
           "id": "pick_guard_right",
           "size_xyz": [0.18, 0.018, 0.025],
-          "pose_xyz": [0.28, -0.009, 0.4125],
+          "pose_xyz": [0.28, -0.009, 0.0125],
           "pose_rpy": [0.0, 0.0, 0.0],
           "rgba": [0.88, 0.48, 0.08, 1.0]
         }
@@ -187,11 +187,12 @@
       "seed": 29,
       "description": "A raised barrier blocks the direct diagonal target-to-destination transfer corridor while leaving both endpoint grasps collision-free.",
       "destination_center_xy": [0.48, 0.10],
+      "destination_support_z_m": 0.0,
       "static_obstacles": [
         {
           "id": "transfer_barrier",
           "size_xyz": [0.025, 0.08, 0.12],
-          "pose_xyz": [0.38, 0.0, 0.46],
+          "pose_xyz": [0.38, 0.0, 0.06],
           "pose_rpy": [0.0, 0.0, 0.0],
           "rgba": [0.92, 0.72, 0.10, 1.0]
         }
@@ -212,7 +213,7 @@
         "shape_class": "hex_bolt",
         "bounding_box_xyz": [0.11, 0.046, 0.046],
         "mass_kg": 0.16,
-        "pose_xyz": [0.245, -0.09, 0.423],
+        "pose_xyz": [0.245, -0.09, 0.023],
         "pose_rpy": [0.0, 0.0, 0.35],
         "primitives": [
           {
@@ -238,6 +239,7 @@
           "prompt": "blue square area inside bin",
           "center_xy": [0.43, -0.13],
           "size_xy_m": [0.18, 0.18],
+          "support_z_m": 0.0,
           "acceptance_semantics": "stable_geometry_centroid_inside",
           "rgba": [0.05, 0.28, 0.90, 0.95],
           "selected": true
@@ -247,6 +249,7 @@
           "prompt": "orange square area inside bin",
           "center_xy": [0.43, 0.13],
           "size_xy_m": [0.18, 0.18],
+          "support_z_m": 0.0,
           "acceptance_semantics": "stable_geometry_centroid_inside",
           "rgba": [0.95, 0.33, 0.04, 0.95],
           "selected": false
@@ -257,7 +260,7 @@
           "id": "yellow_open_end_wrench",
           "shape_class": "open_end_wrench",
           "size_xyz": [0.13, 0.055, 0.028],
-          "pose_xyz": [0.15, 0.20, 0.414],
+          "pose_xyz": [0.15, 0.20, 0.014],
           "pose_rpy": [0.0, 0.0, -0.30],
           "rgba": [0.95, 0.68, 0.05, 1.0],
           "primitives": [
@@ -270,7 +273,7 @@
           "id": "blue_handle_pliers",
           "shape_class": "combination_pliers",
           "size_xyz": [0.125, 0.060, 0.030],
-          "pose_xyz": [0.08, 0.30, 0.415],
+          "pose_xyz": [0.08, 0.30, 0.015],
           "pose_rpy": [0.0, 0.0, 0.72],
           "rgba": [0.04, 0.22, 0.78, 1.0],
           "primitives": [
@@ -279,14 +282,14 @@
             {"shape": "cylinder", "radius": 0.023, "length": 0.030, "pose_xyz": [0.025, 0.0, 0.0], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.38, 0.42, 0.48, 1.0]}
           ]
         },
-        {"id": "blue_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "blue_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "blue_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "blue_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "orange_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
+        {"id": "blue_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, -0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "blue_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, -0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "blue_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.226, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "blue_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.034, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, 0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, 0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.034, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "orange_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.226, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
       ]
     },
     "tool-bin-sort": {
@@ -304,7 +307,7 @@
         "shape_class": "open_end_wrench",
         "bounding_box_xyz": [0.13, 0.060, 0.036],
         "mass_kg": 0.20,
-        "pose_xyz": [0.23, -0.16, 0.418],
+        "pose_xyz": [0.23, -0.16, 0.018],
         "pose_rpy": [0.0, 0.0, 0.42],
         "primitives": [
           {"shape": "box", "size_xyz": [0.095, 0.024, 0.036], "pose_xyz": [-0.012, 0.0, 0.0], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.96, 0.68, 0.04, 1.0]},
@@ -313,15 +316,15 @@
         ]
       },
       "placement_regions": [
-        {"id": "purple_tool_bin", "prompt": "purple square area inside bin", "center_xy": [0.43, -0.13], "size_xy_m": [0.18, 0.18], "acceptance_semantics": "stable_geometry_centroid_inside", "rgba": [0.48, 0.08, 0.72, 0.95], "selected": false},
-        {"id": "green_tool_bin", "prompt": "green square area inside bin", "center_xy": [0.43, 0.13], "size_xy_m": [0.18, 0.18], "acceptance_semantics": "stable_geometry_centroid_inside", "rgba": [0.04, 0.62, 0.20, 0.95], "selected": true}
+        {"id": "purple_tool_bin", "prompt": "purple square area inside bin", "center_xy": [0.43, -0.13], "size_xy_m": [0.18, 0.18], "support_z_m": 0.0, "acceptance_semantics": "stable_geometry_centroid_inside", "rgba": [0.48, 0.08, 0.72, 0.95], "selected": false},
+        {"id": "green_tool_bin", "prompt": "green square area inside bin", "center_xy": [0.43, 0.13], "size_xy_m": [0.18, 0.18], "support_z_m": 0.0, "acceptance_semantics": "stable_geometry_centroid_inside", "rgba": [0.04, 0.62, 0.20, 0.95], "selected": true}
       ],
       "static_obstacles": [
         {
           "id": "silver_hex_bolt",
           "shape_class": "hex_bolt",
           "size_xyz": [0.11, 0.046, 0.046],
-          "pose_xyz": [0.17, 0.16, 0.423],
+          "pose_xyz": [0.17, 0.16, 0.023],
           "pose_rpy": [0.0, 0.0, -0.38],
           "rgba": [0.70, 0.74, 0.80, 1.0],
           "primitives": [
@@ -333,7 +336,7 @@
           "id": "blue_handle_pliers_tool_scene",
           "shape_class": "combination_pliers",
           "size_xyz": [0.125, 0.060, 0.030],
-          "pose_xyz": [0.15, -0.02, 0.415],
+          "pose_xyz": [0.15, -0.02, 0.015],
           "pose_rpy": [0.0, 0.0, 0.78],
           "rgba": [0.04, 0.22, 0.78, 1.0],
           "primitives": [
@@ -346,7 +349,7 @@
           "id": "red_screwdriver",
           "shape_class": "screwdriver",
           "size_xyz": [0.12, 0.035, 0.035],
-          "pose_xyz": [0.27, 0.06, 0.4175],
+          "pose_xyz": [0.27, 0.06, 0.0175],
           "pose_rpy": [0.0, 0.0, -0.65],
           "rgba": [0.86, 0.05, 0.04, 1.0],
           "primitives": [
@@ -354,14 +357,14 @@
             {"shape": "cylinder", "radius": 0.006, "length": 0.060, "pose_xyz": [0.0375, 0.0, 0.0], "pose_rpy": [0.0, 1.57079632679, 0.0], "rgba": [0.72, 0.75, 0.80, 1.0]}
           ]
         },
-        {"id": "purple_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "purple_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, -0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "purple_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "purple_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, 0.13, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.034, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
-        {"id": "green_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.226, 0.415], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
+        {"id": "purple_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, -0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "purple_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, -0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "purple_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.226, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "purple_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, -0.034, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_left", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.334, 0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_right", "size_xyz": [0.012, 0.204, 0.030], "pose_xyz": [0.526, 0.13, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_near", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.034, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]},
+        {"id": "green_bin_wall_far", "size_xyz": [0.18, 0.012, 0.030], "pose_xyz": [0.43, 0.226, 0.015], "pose_rpy": [0.0, 0.0, 0.0], "rgba": [0.22, 0.24, 0.29, 1.0]}
       ]
     }
   }

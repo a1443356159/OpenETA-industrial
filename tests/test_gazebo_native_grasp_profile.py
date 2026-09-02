@@ -186,8 +186,8 @@ def test_native_grasp_narrow_pick_corridor_is_constrained_without_excluding_the_
     # finger opening.  A 164 mm corridor still rejects oblique approaches but
     # preserves the model's physically useful side-contact family.
     assert 0.16 <= inner_gap <= 0.17
-    assert left["pose_xyz"][2] + left["size_xyz"][2] / 2.0 == pytest.approx(0.425)
-    assert right["pose_xyz"][2] + right["size_xyz"][2] / 2.0 == pytest.approx(0.425)
+    assert left["pose_xyz"][2] + left["size_xyz"][2] / 2.0 == pytest.approx(0.025)
+    assert right["pose_xyz"][2] + right["size_xyz"][2] / 2.0 == pytest.approx(0.025)
 
 
 def test_native_grasp_barrier_transfer_blocks_only_the_diagonal_path_not_its_endpoints() -> None:
@@ -320,11 +320,20 @@ def test_native_grasp_industrial_renderer_materializes_real_parts_and_bin_floors
         assert target is not None
         assert len(target.findall("link/collision")) == target_collision_count
         assert len(target.findall("link/visual")) == target_collision_count
+        assert world.find("model[@name='green_parts_bin']") is None
+        assert world.find("model[@name='blue_parts_bin']/link/collision") is None
         for placement_id in placement_ids:
             floor = world.find(f"model[@name='{placement_id}']")
             assert floor is not None
             assert floor.find("link/collision") is None
             assert floor.find("link/visual/geometry/box/size") is not None
+            pose = [float(value) for value in floor.findtext("pose", "").split()]
+            region = next(
+                item
+                for item in config.acceptance_scene_contract["placement_regions"]
+                if item["id"] == placement_id
+            )
+            assert pose[2] == pytest.approx(region["support_z_m"] + 0.0005)
         for obstacle in config.acceptance_scene_contract["static_obstacles"]:
             model = world.find(f"model[@name='{obstacle['id']}']")
             assert model is not None
