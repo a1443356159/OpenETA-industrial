@@ -385,9 +385,48 @@ def _inject_render_frame(env, obs: dict) -> None:
 
 
 def _env_obs_to_mcp(obs: dict) -> dict:
-    """Convert a UnifiedEnv obs dict to MCP-serialisable EnvObservation."""
-    from adapter.protocol import EnvObservation
-    return EnvObservation.from_dict(obs).to_mcp_dict()
+    """Convert a UnifiedEnv observation without materialising pixel lists.
+
+    Gazebo supplies high-resolution RGB-D frames as NumPy arrays.  The
+    generic replay path intentionally normalises arbitrary array-like values
+    to nested Python lists, but doing that immediately before PNG encoding is
+    redundant and dominates post-action latency.  Preserve the generic path
+    for serialized/list camera packets and encode unified array-backed camera
+    entries directly; both paths still use ``CameraFrame.to_mcp_dict`` and
+    therefore produce the same MCP wire contract.
+    """
+
+    from adapter.protocol import CameraFrame, EnvObservation
+
+    cameras = obs.get("cameras") if isinstance(obs, dict) else None
+    if not isinstance(cameras, dict):
+        return EnvObservation.from_dict(obs).to_mcp_dict()
+
+    observation_without_cameras = dict(obs)
+    observation_without_cameras["cameras"] = {}
+    observation = EnvObservation.from_dict(observation_without_cameras)
+    observation.cameras = [
+        CameraFrame(
+            frame_id=str(camera.get("frame_id") or frame_id),
+            rgb=(camera.get("rgb") if camera.get("rgb") is not None else []),
+            depth=camera.get("depth"),
+            intrinsics=(
+                dict(camera["intrinsics"])
+                if isinstance(camera.get("intrinsics"), dict)
+                else {}
+            ),
+            extrinsics=(
+                dict(camera["extrinsics"])
+                if isinstance(camera.get("extrinsics"), dict)
+                else {}
+            ),
+            timestamp_s=camera.get("timestamp_s"),
+            role=str(camera.get("role") or ""),
+        )
+        for frame_id, camera in cameras.items()
+        if isinstance(camera, dict)
+    ]
+    return observation.to_mcp_dict()
 
 
 def _terminated_step_result(handle: str) -> dict:
@@ -398,17 +437,18 @@ def _terminated_step_result(handle: str) -> dict:
     instead of an HTTP 500 from robosuite's "terminated episode" guard.
     Caller must hold the per-handle obs lock.
     """
-    from adapter.protocol import EnvObservation, StepResult
-
     obs = _last_obs.get(handle, {})
     try:
-        env_obs = EnvObservation.from_dict(obs) if obs else EnvObservation.from_dict({})
+        observation = _env_obs_to_mcp(obs if obs else {})
     except Exception:
-        env_obs = EnvObservation.from_dict({})
-    return StepResult(
-        observation=env_obs, reward=0.0, terminated=True, truncated=False,
-        info={"note": "episode already terminated — call reset_env to continue"},
-    ).to_mcp_dict()
+        observation = _env_obs_to_mcp({})
+    return {
+        "observation": observation,
+        "reward": 0.0,
+        "terminated": True,
+        "truncated": False,
+        "info": {"note": "episode already terminated — call reset_env to continue"},
+    }
 
 
 def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
@@ -424,8 +464,6 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
     the live view updated independently.  Skipping the render here makes
     each control step ~5-8x faster.
     """
-    from adapter.protocol import EnvObservation, StepResult
-
     # LIBERO/robosuite step renders camera obs (agentview_image etc.) INSIDE
     # env.step when use_camera_obs=True, so the step touches the GL context.
     # Hold the GL lock across step AND its render injection so another env's
@@ -457,7 +495,7 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
             _last_obs[handle] = obs
             if term or trunc:
                 _done_handles.add(handle)
-        env_obs = EnvObservation.from_dict(obs)
+        observation_payload = _env_obs_to_mcp(obs)
     # Sanitise info: drop non-serialisable values
     safe_info: dict = {}
     receipt: dict = {}
@@ -473,13 +511,13 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
                 safe_info[k] = str(v)
     else:
         safe_info = {"raw_info": str(info)}
-    payload = StepResult(
-        observation=env_obs,
-        reward=float(rew),
-        terminated=bool(term),
-        truncated=bool(trunc),
-        info=safe_info,
-    ).to_mcp_dict()
+    payload = {
+        "observation": observation_payload,
+        "reward": float(rew),
+        "terminated": bool(term),
+        "truncated": bool(trunc),
+        "info": safe_info,
+    }
     # Generic control codec: DirectEnv receipts are internal Gym info fields;
     # the established MCP wire contract exposes their fields at top level.
     if receipt:
@@ -493,8 +531,6 @@ def _step_with_image(env, act, handle: str = "", render: bool = True) -> dict:
 
 def _reset_with_image(env, seed=None, handle: str = "") -> dict:
     """Reset env, return EnvObservation as MCP dict."""
-    from adapter.protocol import EnvObservation
-
     # reset likewise renders camera obs internally — serialise on the GL lock.
     # Guard the shared obs dict with the per-handle lock (obs-lock → gl-lock).
     _obs_ctx = _obs_lock_for(handle) if handle else contextlib.nullcontext()
@@ -505,7 +541,7 @@ def _reset_with_image(env, seed=None, handle: str = "") -> dict:
         if handle:
             _last_obs[handle] = obs
             _done_handles.discard(handle)  # fresh episode — stepping allowed again
-        return EnvObservation.from_dict(obs).to_mcp_dict()
+        return _env_obs_to_mcp(obs)
 
 
 def _observe_with_image(env, handle: str = "") -> dict:
@@ -515,8 +551,6 @@ def _observe_with_image(env, handle: str = "") -> dict:
     If the cache contains MCP-format data (e.g. from a prior render_all
     that was incorrectly written back), falls back to re-rendering only.
     """
-    from adapter.protocol import EnvObservation
-
     capabilities = frozenset(getattr(env, "openeta_capabilities", ()))
     if "fresh_observation" in capabilities:
         # A direct Gazebo ``env.step`` owns one atomic control receipt plus
@@ -532,7 +566,7 @@ def _observe_with_image(env, handle: str = "") -> dict:
             obs = env.observe()
             if handle:
                 _last_obs[handle] = obs
-            return EnvObservation.from_dict(obs).to_mcp_dict()
+            return _env_obs_to_mcp(obs)
 
     obs = _last_obs.get(handle, {})
     if not obs:
@@ -553,7 +587,7 @@ def _observe_with_image(env, handle: str = "") -> dict:
     _obs_ctx = _obs_lock_for(handle) if handle else contextlib.nullcontext()
     with _obs_ctx:
         _inject_render_frame(env, obs)
-        return EnvObservation.from_dict(obs).to_mcp_dict()
+        return _env_obs_to_mcp(obs)
 
 
 def _render_to_mcp(env) -> dict:

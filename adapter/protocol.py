@@ -179,6 +179,23 @@ def _depth_range(depth_pixels: Any) -> tuple[float, float]:
     return float(finite.min()), float(finite.max())
 
 
+def _has_pixel_data(pixels: Any) -> bool:
+    """Return whether a list- or array-backed image contains any pixels."""
+
+    if pixels is None:
+        return False
+    size = getattr(pixels, "size", None)
+    if size is not None:
+        try:
+            return int(size) > 0
+        except (TypeError, ValueError):
+            return False
+    try:
+        return len(pixels) > 0
+    except TypeError:
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════
 # Protocol data classes
 # ══════════════════════════════════════════════════════════════════════
@@ -204,8 +221,12 @@ class CameraFrame:
         """Convert to a plain JSON-serialisable dict."""
         d: JsonDict = {
             "frame_id": self.frame_id,
-            "rgb": self.rgb,
-            "depth": self.depth,
+            "rgb": self.rgb.tolist() if hasattr(self.rgb, "tolist") else self.rgb,
+            "depth": (
+                self.depth.tolist()
+                if self.depth is not None and hasattr(self.depth, "tolist")
+                else self.depth
+            ),
             "intrinsics": self.intrinsics,
             "extrinsics": self.extrinsics,
         }
@@ -318,7 +339,7 @@ class CameraFrame:
             d["role"] = self.role
 
         # RGB → base64 PNG
-        if self.rgb:
+        if _has_pixel_data(self.rgb):
             try:
                 enc, w, h = _encode_pixels_to_base64(self.rgb, mode="RGB")
                 if enc:
@@ -331,7 +352,7 @@ class CameraFrame:
         # Depth → uint16 PNG in fixed millimetres. depth_min/depth_max remain
         # informational scene-range hints; reconstruction is always
         # depth_m = pixel / 1000.0.
-        if self.depth:
+        if _has_pixel_data(self.depth):
             try:
                 _dmin, _dmax = _depth_range(self.depth)
                 denc, dw, dh = _encode_pixels_to_base64(self.depth, mode="depth")

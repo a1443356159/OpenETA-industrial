@@ -387,10 +387,15 @@ class RosRgbdCameraSource:
             frame = CameraFrame(
                 frame_id=self.config.frame_id,
                 role=self.config.role,
-                rgb=decode_ros_rgb(rgb).tolist(),
+                # Keep native arrays through the local runtime. The worker's
+                # MCP encoder consumes them directly as PNG, avoiding two
+                # full nested-list materializations per post-action frame.
+                # ``CameraFrame.to_dict`` still produces plain lists for
+                # callers that explicitly request JSON replay form.
+                rgb=decode_ros_rgb(rgb),
                 depth=decode_ros_depth(
                     depth, units_per_metre=self.config.depth_units_per_metre
-                ).tolist(),
+                ),
                 intrinsics=camera_info_intrinsics(info),
                 extrinsics=extrinsics,
                 # Use the older member of the pair.  A consumer comparing this

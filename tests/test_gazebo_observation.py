@@ -110,7 +110,10 @@ def test_live_camera_capture_consumes_new_rgb_and_depth_timestamps(monkeypatch) 
             encoding="16UC1", array=np.array([[500]], dtype=np.uint16), timestamp=1.0
         )
     )
-    assert source.capture(timeout_s=0.01).timestamp_s == 1.0
+    first = source.capture(timeout_s=0.01)
+    assert first.timestamp_s == 1.0
+    assert isinstance(first.rgb, np.ndarray)
+    assert isinstance(first.depth, np.ndarray)
     with pytest.raises(GazeboObservationError, match="fresh"):
         source.capture(timeout_s=0.01)
 

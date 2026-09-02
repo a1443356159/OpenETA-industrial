@@ -4,6 +4,8 @@ import threading
 
 import numpy as np
 
+from adapter.protocol import EnvObservation
+
 from extensions.gazebo.direct_env import GazeboDirectEnv, build_gazebo_control_spec
 from extensions.gazebo.profiles import CONTROL, STRUCTURED_RECEIPT, gazebo_profile
 from sim import bench_worker
@@ -65,6 +67,69 @@ def test_structured_receipt_raw_observation_never_clobbers_the_mcp_observation()
     assert payload["ok"] is True
     assert isinstance(payload["observation"]["cameras"], list)
     assert payload["observation"]["cameras"] == []
+
+
+def test_worker_numpy_rgbd_fast_path_preserves_mcp_camera_contract() -> None:
+    observation = {
+        "task": "inspect",
+        "cameras": {
+            "top": {
+                "rgb": np.array(
+                    [[[1, 2, 3], [4, 5, 6]], [[7, 8, 9], [10, 11, 12]]],
+                    dtype=np.uint8,
+                ),
+                "depth": np.array([[0.5, 1.0], [1.5, 2.0]], dtype=np.float32),
+                "intrinsics": {"fx": 100.0, "fy": 100.0},
+                "extrinsics": {
+                    "camera_frame": "opencv",
+                    "normalized_from": "gazebo_ros",
+                },
+                "timestamp_s": 12.5,
+                "role": "scene_primary",
+            }
+        },
+        "robot": {},
+        "objects": [],
+        "metadata": {"scene_epoch": 3},
+    }
+
+    expected = EnvObservation.from_dict(observation).to_mcp_dict()
+    actual = bench_worker._env_obs_to_mcp(observation)
+
+    assert actual == expected
+
+
+def test_worker_numpy_rgbd_fast_path_skips_nested_list_conversion(
+    monkeypatch,
+) -> None:
+    import adapter.protocol as protocol
+
+    def reject_list_materialization(_value):
+        raise AssertionError("array-backed camera must not materialize nested lists")
+
+    monkeypatch.setattr(protocol, "_to_int_list3d", reject_list_materialization)
+    monkeypatch.setattr(protocol, "_to_float_list2d", reject_list_materialization)
+    observation = {
+        "task": "inspect",
+        "cameras": {
+            "top": {
+                "rgb": np.zeros((2, 3, 3), dtype=np.uint8),
+                "depth": np.ones((2, 3), dtype=np.float32),
+                "intrinsics": {},
+                "extrinsics": {},
+            }
+        },
+        "robot": {},
+        "objects": [],
+        "metadata": {},
+    }
+
+    payload = bench_worker._env_obs_to_mcp(observation)
+
+    assert payload["cameras"][0]["width"] == 3
+    assert payload["cameras"][0]["height"] == 2
+    assert payload["cameras"][0]["rgb_base64"]
+    assert payload["cameras"][0]["depth_base64"]
 
 
 def test_dashboard_fresh_observation_waits_for_atomic_physical_step() -> None:

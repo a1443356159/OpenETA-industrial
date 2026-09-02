@@ -6,6 +6,8 @@ import base64
 import json
 from pathlib import Path
 
+import numpy as np
+
 from adapter.protocol import CameraFrame
 from agent.runtime.image_artifacts import DEFAULT_MCP_IMAGE_OUTPUT_ROOT, materialize_mcp_images
 from agent.runtime.runtime import OpenEtaAgentRuntime
@@ -85,6 +87,24 @@ def test_camera_role_round_trips_through_mcp_camera_packet() -> None:
     assert mcp_payload["depth_encoding"] == "uint16_png"
     assert mcp_payload["depth_scale"] == 1000.0
     assert restored.role == "scene_primary"
+
+
+def test_array_backed_camera_keeps_json_and_mcp_serialization_contracts() -> None:
+    camera = CameraFrame(
+        frame_id="top",
+        rgb=np.array([[[1, 2, 3], [4, 5, 6]]], dtype=np.uint8),
+        depth=np.array([[0.5, 1.25]], dtype=np.float32),
+    )
+
+    serialized = camera.to_dict()
+    mcp_payload = camera.to_mcp_dict()
+
+    assert serialized["rgb"] == [[[1, 2, 3], [4, 5, 6]]]
+    assert serialized["depth"] == [[0.5, 1.25]]
+    assert mcp_payload["width"] == 2
+    assert mcp_payload["height"] == 1
+    assert mcp_payload["rgb_base64"]
+    assert mcp_payload["depth_base64"]
 
 
 def test_legacy_opengl_camera_keeps_existing_mcp_depth_shape() -> None:
