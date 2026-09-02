@@ -4362,8 +4362,15 @@ def _model_request_context(
         )
         for key in sorted(obligation_keys)
     }
-    exact_obligation = _model_has_exact_obligation(obligations)
-    if exact_obligation:
+    host_bindings = _host_parameter_bindings(full_context)
+    legal_host_bindings = [
+        binding
+        for binding in host_bindings
+        if len(legal_tool_names) == 1 and binding["tool"] == legal_tool_names[0]
+    ]
+    exact_host_binding = len(legal_host_bindings) == 1
+    exact_atomic_action = _model_has_exact_obligation(obligations) or exact_host_binding
+    if exact_atomic_action:
         tool_references = [
             _compact_tool_reference_for_model(reference, hard=True) for reference in tool_references
         ]
@@ -4419,7 +4426,7 @@ def _model_request_context(
                     "version",
                     "selection_reason",
                 }
-                and (key != "content" or not exact_obligation)
+                and (key != "content" or not exact_atomic_action)
             }
         )
     memory_context = full_context.get("memory")
@@ -4453,6 +4460,21 @@ def _model_request_context(
                 else "Choose only a listed legal tool. The host owns phase transitions, "
                 "candidate joins, retries, safety proofs, and exact execution parameters."
             ),
+            **(
+                {
+                    "host_parameter_binding": {
+                        "tool": legal_host_bindings[0]["tool"],
+                        "parameter_mode": _HOST_HYDRATED_PARAMETER_MODE,
+                        "parameter_binding_sha256": legal_host_bindings[0][
+                            "parameter_binding_sha256"
+                        ],
+                        "parameter_keys": legal_host_bindings[0]["parameter_keys"],
+                        "sources": legal_host_bindings[0]["sources"],
+                    }
+                }
+                if exact_host_binding
+                else {}
+            ),
         },
         "observation": _compact_observation_for_model(full_context.get("observation")),
         "vision_image_paths": (
@@ -4484,7 +4506,7 @@ def _model_request_context(
         "selected_skill_guidance": selected_skills,
         "skill_usage": _compact_skill_usage_for_model(
             full_context.get("skill_usage"),
-            defer_recommendation=exact_obligation,
+            defer_recommendation=exact_atomic_action,
         ),
     }
     initial_budget = _model_projection_budget(

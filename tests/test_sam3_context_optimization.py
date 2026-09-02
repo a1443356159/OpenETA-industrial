@@ -914,6 +914,160 @@ def test_model_projection_deduplicates_task_and_omits_images_for_typed_action() 
     assert "required_parameters" not in obligation
 
 
+def test_model_projection_compacts_unique_host_bound_atomic_action() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block")
+    skill_content = "Use the complete manipulation playbook. " * 200
+    full_context = {
+        "task": "pick the red block",
+        "planner_mode": "agentic_closed_loop",
+        "observation": {"camera_ids": ["top"]},
+        "active_environment_task": {"status": "running"},
+        "selected_sam3_detection": {"id": "target-mask"},
+        "frozen_placement_goal_pool": {"status": "frozen"},
+        "grasp_candidate_policy": {"status": "accepted"},
+        "grasp_execution": {
+            "status": "required",
+            "stage": "contact",
+            "required_action": {
+                "name": "move_to",
+                "parameters": {
+                    "target_pose": {"frame_id": "world", "position": [0.4, 0.1, 0.3]},
+                    "collision_check": True,
+                },
+            },
+        },
+        "tool_references": [
+            {
+                "name": "move_to",
+                "description": "Move to the host-qualified target. " * 100,
+                "parameters": {"target_pose": "pose", "collision_check": "boolean"},
+            },
+            {"name": "observe", "description": "observe", "parameters": {}},
+        ],
+        "memory": {"metadata": {}},
+        "selected_skill_guidance": [
+            {
+                "name": "pick",
+                "description": "Pick an object safely.",
+                "allowed_tools": ["move_to", "observe"],
+                "content": skill_content,
+                "version": "1",
+            }
+        ],
+        "skill_usage": {"inspection_recommended": ["pick"]},
+    }
+
+    projected, _messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    assert projected["controller"]["legal_tool_names"] == ["move_to"]
+    binding = projected["controller"]["host_parameter_binding"]
+    assert binding["tool"] == "move_to"
+    assert binding["parameter_mode"] == "host_hydrated"
+    assert binding["parameter_keys"] == ["collision_check", "target_pose"]
+    assert len(binding["parameter_binding_sha256"]) == 64
+    assert binding["sources"] == ["grasp_execution"]
+    assert "content" not in projected["selected_skill_guidance"][0]
+    assert len(projected["tool_references"][0]["description"]) <= 240
+    required_action = projected["state"]["grasp_execution"]["required_action"]
+    assert "parameters" not in required_action
+    assert required_action["parameter_binding_sha256"] == binding[
+        "parameter_binding_sha256"
+    ]
+
+
+def test_model_projection_keeps_skill_for_unbound_semantic_decision() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block")
+    skill_content = "Inspect the image and ground the requested object."
+    full_context = {
+        "task": "pick the red block",
+        "planner_mode": "agentic_closed_loop",
+        "observation": {"camera_ids": ["top"]},
+        "active_environment_task": {"status": "running"},
+        "tool_references": [
+            {"name": "observe", "description": "observe", "parameters": {}},
+            {"name": "sam3", "description": "segment", "parameters": {}},
+        ],
+        "memory": {"metadata": {}},
+        "selected_skill_guidance": [
+            {
+                "name": "pick",
+                "description": "Pick an object safely.",
+                "allowed_tools": ["observe", "sam3"],
+                "content": skill_content,
+                "version": "1",
+            }
+        ],
+        "skill_usage": {},
+    }
+
+    projected, _messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    assert projected["controller"]["legal_tool_names"] == ["observe", "sam3"]
+    assert "host_parameter_binding" not in projected["controller"]
+    assert projected["selected_skill_guidance"][0]["content"] == skill_content
+
+
+def test_model_projection_keeps_skill_when_host_binding_is_ambiguous() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block")
+    skill_content = "Choose the correct host-qualified branch."
+    full_context = {
+        "task": "pick the red block",
+        "planner_mode": "agentic_closed_loop",
+        "observation": {"camera_ids": ["top"]},
+        "active_environment_task": {"status": "running"},
+        "selected_sam3_detection": {"id": "target-mask"},
+        "frozen_placement_goal_pool": {"status": "frozen"},
+        "grasp_candidate_policy": {
+            "status": "required",
+            "required_action": {
+                "name": "move_to",
+                "parameters": {"candidate_id": "candidate-a"},
+            },
+        },
+        "grasp_execution": {
+            "status": "required",
+            "stage": "contact",
+            "required_action": {
+                "name": "move_to",
+                "parameters": {"candidate_id": "candidate-b"},
+            },
+        },
+        "tool_references": [
+            {"name": "move_to", "description": "move", "parameters": {}}
+        ],
+        "memory": {"metadata": {}},
+        "selected_skill_guidance": [
+            {
+                "name": "pick",
+                "allowed_tools": ["move_to"],
+                "content": skill_content,
+            }
+        ],
+        "skill_usage": {},
+    }
+
+    projected, _messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    assert projected["controller"]["legal_tool_names"] == ["move_to"]
+    assert "host_parameter_binding" not in projected["controller"]
+    assert projected["selected_skill_guidance"][0]["content"] == skill_content
+
+
 def test_model_projection_summarizes_durable_evidence_and_keeps_only_latest_feedback() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick and place")
