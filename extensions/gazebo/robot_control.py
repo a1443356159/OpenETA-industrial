@@ -1394,6 +1394,7 @@ class GazeboController:
                         "l5_trajectory_cache_status",
                         "l5_trajectory_cache_reason",
                         "l5_trajectory_cache_entry_count",
+                        "l5_trajectory_cache_lookup_key",
                         "l5_trajectory_cache_requested_scene_revision",
                         "l5_trajectory_cache_current_scene_revision",
                         "l5_trajectory_cache_requested_start_max_delta_rad",

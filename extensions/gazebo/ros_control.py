@@ -58,7 +58,13 @@ from agent.runtime.collision_geometry import (
 QUALIFIED_JOINT_GOAL_TOLERANCE_RAD = 0.001
 L5_TRAJECTORY_START_TOLERANCE_RAD = 0.001
 L5_TRAJECTORY_CACHE_LIMIT = 64
-L5_TRAJECTORY_POSE_DECIMALS = 6
+# Public tool poses may make a rotation-matrix -> quaternion round trip while
+# private L5 qualification keeps the original quaternion.  The conversion can
+# differ by a few 1e-7 and straddle a six-decimal rounding boundary even though
+# the two poses are physically identical.  Five decimals still binds position
+# to 10 micrometres and orientation far more tightly than the execution goal,
+# while making this representation-only noise deterministic.
+L5_TRAJECTORY_POSE_DECIMALS = 5
 
 _QUALIFICATION_POSE_FIELDS = (
     "xyz",

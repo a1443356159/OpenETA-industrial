@@ -563,6 +563,62 @@ def test_l5_trajectory_cache_accepts_euler_roundtrip_pose_noise_only() -> None:
     ) != private_key
 
 
+def test_l5_trajectory_cache_accepts_rotation_matrix_roundtrip_at_rounding_boundary() -> None:
+    joint_state = {
+        "names": list(ARM_JOINTS),
+        "positions": [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7],
+    }
+    normalized_joint_state = _qualification_joint_state_with_sha256(joint_state)
+    assert normalized_joint_state is not None
+    _, joint_state_sha256 = normalized_joint_state
+    common_target = {
+        "purpose": "placement",
+        "compiled_placement_id": "placement-proof-0058",
+        "placement_candidate_id": "placement_058",
+        "placement_stage": "release",
+        "scene_revision": 7,
+        "qualification_goal_joint_state": joint_state,
+        "qualification_goal_joint_state_sha256": joint_state_sha256,
+        "qualification_binding_sha256": "d" * 64,
+        "xyz": [0.482856399529, -0.202627937266, 0.167001544279],
+    }
+    private_target = {
+        **common_target,
+        "quat_xyzw": [
+            0.4339098350565701,
+            0.5047491257329079,
+            0.5575297682108553,
+            0.4960952105859497,
+        ],
+    }
+    public_target = {
+        **common_target,
+        # The equivalent quaternion recovered from the public rotation matrix.
+        "quat_xyzw": [
+            0.43391016558578605,
+            0.5047492641241786,
+            0.5575296853152479,
+            0.4960955538600368,
+        ],
+    }
+
+    private_goal = make_move_group_goal(private_target)
+    public_goal = make_move_group_goal(public_target)
+    for goal in (private_goal, public_goal):
+        goal.update(
+            {
+                "model_id": "rm75_robotiq_2f85_pickplace_sim_v1",
+                "planning_scene_revision": 7,
+            }
+        )
+
+    assert _l5_trajectory_cache_key(
+        private_goal, scene_revision=7, scene_sha256="scene"
+    ) == _l5_trajectory_cache_key(
+        public_goal, scene_revision=7, scene_sha256="scene"
+    )
+
+
 def test_l5_trajectory_cache_normalizes_euler_signed_zero() -> None:
     private_goal = {
         "qualification_cache_binding_sha256": "b" * 64,
