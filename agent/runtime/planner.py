@@ -5382,30 +5382,10 @@ def _build_tool_context_payload(
     elif reestimate_status == "target_ready":
         grasp_target_selection = memory_context.get("selected_sam3_detection")
     else:
-        grasp_target_selection = (
-            memory_context.get("placement_object_detection")
-            if isinstance(memory_context.get("frozen_placement_goal_pool"), dict)
-            else memory_context.get("selected_sam3_detection")
-        )
-    # AnyPlace freezes a placement-object copy of the target detection before
-    # grasp inference. Backend retry state is recorded on the live selected
-    # detection, so carry that circuit state onto the frozen geometry copy.
-    # Otherwise host_macro repeatedly rebuilds the same grasp request after
-    # the two-attempt circuit is already exhausted.
-    live_target_selection = memory_context.get("selected_sam3_detection")
-    if (
-        isinstance(grasp_target_selection, dict)
-        and isinstance(live_target_selection, dict)
-        and grasp_target_selection is not live_target_selection
-    ):
-        for failure_field in (
-            "grasp_estimator_backend_failure",
-            "anygrasp_backend_failure",
-        ):
-            if isinstance(live_target_selection.get(failure_field), dict):
-                grasp_target_selection = dict(grasp_target_selection)
-                grasp_target_selection[failure_field] = dict(live_target_selection[failure_field])
-                break
+        # Placement-object segmentation is owned exclusively by AnyPlace.
+        # It may be refreshed after active vision and therefore must never
+        # replace the selected grasp-target mask used by grasp estimation.
+        grasp_target_selection = memory_context.get("selected_sam3_detection")
     grasp_visual_stage = _grasp_visual_stage_for_context(execution)
     initial_pick_perception = (
         "pick" in selected_skill_names

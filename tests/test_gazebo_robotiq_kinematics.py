@@ -21,6 +21,7 @@ from extensions.gazebo.robotiq_kinematics import (
     minimum_feasible_active_position,
     six_joint_positions,
     solve_four_bar,
+    stroke_scaled_ramp_duration,
 )
 
 
@@ -47,6 +48,21 @@ def test_attached_transport_relief_fails_near_open_boundary() -> None:
             minimum_active_rad=0.04,
             terminal_tolerance_rad=0.02,
         )
+
+
+def test_gripper_ramp_duration_scales_internal_relief_without_changing_full_stroke() -> None:
+    assert stroke_scaled_ramp_duration(
+        full_stroke_duration_s=1.0,
+        stroke_rad=0.8,
+        full_stroke_rad=0.8,
+        minimum_duration_s=0.25,
+    ) == pytest.approx(1.0)
+    assert stroke_scaled_ramp_duration(
+        full_stroke_duration_s=1.0,
+        stroke_rad=-0.04,
+        full_stroke_rad=0.8,
+        minimum_duration_s=0.25,
+    ) == pytest.approx(0.25)
 
 
 def test_functional_full_open_accepts_stationary_bounded_passive_deflection() -> None:

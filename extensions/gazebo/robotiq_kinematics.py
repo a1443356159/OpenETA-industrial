@@ -282,6 +282,39 @@ def attached_transport_relief_position(
     return measured - required_travel
 
 
+def stroke_scaled_ramp_duration(
+    *,
+    full_stroke_duration_s: float,
+    stroke_rad: float,
+    full_stroke_rad: float,
+    minimum_duration_s: float,
+) -> float:
+    """Scale a full-stroke servo ramp to the commanded driver travel.
+
+    The public actuator has one angular coordinate.  Giving a two-terminal-band
+    transport-relief move the same normalized duration as a complete open/close
+    stroke needlessly serializes every post-attach clearance attempt.  Preserve
+    the configured full-stroke profile while scaling shorter moves linearly and
+    retaining a bounded minimum interval for fresh state feedback.
+    """
+
+    values = (
+        full_stroke_duration_s,
+        stroke_rad,
+        full_stroke_rad,
+        minimum_duration_s,
+    )
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("gripper ramp inputs must be finite")
+    full_duration = float(full_stroke_duration_s)
+    full_stroke = float(full_stroke_rad)
+    minimum_duration = float(minimum_duration_s)
+    if min(full_duration, full_stroke, minimum_duration) <= 0.0:
+        raise ValueError("gripper ramp durations and full stroke must be positive")
+    fraction = min(1.0, abs(float(stroke_rad)) / full_stroke)
+    return max(minimum_duration, full_duration * fraction)
+
+
 def functional_opening_complete(
     positions: Mapping[str, float],
     velocities: Mapping[str, float],

@@ -757,6 +757,7 @@ def _attached_release_env(*, detach_fails: bool = False):
 
     class Attachment:
         state = "attached"
+        placement_sample_duration_s = None
 
         @staticmethod
         def native_target_mount_poses():
@@ -778,10 +779,10 @@ def _attached_release_env(*, detach_fails: bool = False):
                 raise RuntimeError("detach ACK unavailable")
             self.state = "detached"
 
-        @staticmethod
-        def sample_detached_target_poses(*, duration_s, interval_s):
+        def sample_detached_target_poses(self, *, duration_s, interval_s):
             assert duration_s >= 0.5
             assert interval_s > 0.0
+            self.placement_sample_duration_s = duration_s
             events.append("sample_released_target")
             return [
                 PlacementPoseSample(
@@ -886,6 +887,13 @@ def test_release_ack_triggers_open_while_planning_scene_detach_runs() -> None:
         "planning_scene_sync_concurrent_with_open_dispatch": True,
     }
     assert receipt["placement_verification"]["verdict"] == "PASS"
+    assert env.runtime.attachment.placement_sample_duration_s == pytest.approx(
+        env._native_grasp_config.placement_settling_observation_s
+        + max(
+            env._native_grasp_config.placement_stability_duration_s,
+            env._native_grasp_config.placement_terminal_window_s,
+        )
+    )
     assert raw["metadata"]["planning_scene_revision"] == 9
 
 

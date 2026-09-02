@@ -5134,6 +5134,81 @@ def test_targeted_grasp_obligation_joins_selected_mask_to_current_rgbd(
     assert after_pool["targeted_grasp_obligation"] is not None
 
 
+def test_targeted_grasp_obligation_keeps_active_grasp_mask_after_placement_segmentation(
+    tmp_path: Path,
+) -> None:
+    rgb = tmp_path / "active" / "wrist.rgb.png"
+    depth = tmp_path / "active" / "wrist.depth.png"
+    grasp_mask = tmp_path / "active" / "grasp-mask.png"
+    placement_mask = tmp_path / "active" / "placement-mask.png"
+    rgb.parent.mkdir()
+    for path in (rgb, depth, grasp_mask, placement_mask):
+        path.write_bytes(path.name.encode())
+    observation = _rgbd_observation(
+        task="place the selected tool in the parts bin",
+        views=[("wrist", rgb, depth)],
+    )
+    memory = AgentMemory()
+    memory.start_session(task=observation.task)
+    grasp_target = {
+        "result_id": "active-vision-grasp-result",
+        "id": "detection_001",
+        "target_prompt": "selected tool",
+        "source_image": str(rgb),
+        "source_frame_id": "wrist",
+        "mask_ref": str(grasp_mask),
+        "semantic_role": "grasp_target",
+        "selection_source": "active_vision_point_depth_geometry",
+    }
+    placement_object = {
+        "result_id": "placement-object-result",
+        "id": "detection_000",
+        "target_prompt": "selected tool",
+        "source_image": str(rgb),
+        "source_frame_id": "wrist",
+        "mask_ref": str(placement_mask),
+        "semantic_role": "placement_object",
+        "selection_source": "main_agent_vlm",
+    }
+    memory.save_fact("selected_sam3_detection", grasp_target, source="active_observe")
+    memory.save_fact(
+        "placement_object_detection",
+        placement_object,
+        source="select_sam3_detection",
+    )
+    memory.save_fact(
+        "frozen_placement_goal_pool",
+        {"status": "ready", "goal_count": 96, "scene_epoch": 0},
+        source="anyplace",
+    )
+    memory.save_fact(
+        "sam3_semantic_state",
+        {
+            "roles": {
+                "grasp_target": {"selected_detection": grasp_target},
+                "placement_object": {"selected_detection": placement_object},
+            }
+        },
+        source="test",
+    )
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("grasp_pose_estimate"),
+        skills=build_default_skill_registry(),
+    )
+
+    obligation = context["targeted_grasp_obligation"]
+    assert obligation["sam3_result_id"] == "active-vision-grasp-result"
+    assert obligation["required_parameters"]["object_mask"] == {
+        "mask_ref": str(grasp_mask),
+        "source_image": str(rgb),
+        "result_id": "active-vision-grasp-result",
+        "detection_id": "detection_001",
+    }
+
+
 def test_targeted_grasp_obligation_recovers_paired_session_depth_path(
     tmp_path: Path,
 ) -> None:

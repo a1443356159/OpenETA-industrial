@@ -41,6 +41,7 @@ def _load_robotiq_kinematics():
             linkage_terminal_metrics,
             minimum_feasible_active_position,
             six_joint_positions,
+            stroke_scaled_ramp_duration,
         )
 
         return (
@@ -50,6 +51,7 @@ def _load_robotiq_kinematics():
             bounded_contact_hold_position,
             functional_opening_complete,
             minimum_feasible_active_position,
+            stroke_scaled_ramp_duration,
         )
     except ImportError:
         pass
@@ -63,6 +65,7 @@ def _load_robotiq_kinematics():
                 linkage_terminal_metrics,
                 minimum_feasible_active_position,
                 six_joint_positions,
+                stroke_scaled_ramp_duration,
             )
 
             return (
@@ -72,6 +75,7 @@ def _load_robotiq_kinematics():
                 bounded_contact_hold_position,
                 functional_opening_complete,
                 minimum_feasible_active_position,
+                stroke_scaled_ramp_duration,
             )
     raise RuntimeError("extensions/gazebo/robotiq_kinematics.py not found relative to the adapter")
 
@@ -110,15 +114,14 @@ TERMINAL_LINKAGE_MAX_VELOCITY_RAD_S: Final = (
 # The controller target remains strictly inside a hard joint stop while the
 # action result stays referenced to the original requested endpoint.
 CONTROLLER_BOUNDARY_INSET_RAD: Final = GOAL_TOLERANCE_RAD / 2.0
-# Servo the six Gazebo position systems through a short simulator-time ramp instead of
-# step-commanding the full stroke.  A step command slams the pads into a
-# grasped object at full PID authority and the impact ejects light targets
-# before the stall detector can settle.  The stroke runs fast across the
-# free-space part and slows for the final part where contact happens; a
-# uniformly slow ramp lets the linkage bind and produces false stalls.
+# Servo the six Gazebo position systems through a simulator-time ramp instead
+# of step-commanding the full stroke.  ``RAMP_S`` describes a complete driver
+# stroke; shorter internal relief moves scale with their actual travel and keep
+# at least one terminal-settle interval for fresh linkage feedback.
 RAMP_S: Final = 1.0
 SLOW_TAIL_FRACTION: Final = 0.55
 SLOW_TAIL_FACTOR: Final = 0.25
+MIN_STROKE_RAMP_SIM_S: Final = TERMINAL_LINKAGE_SETTLE_DWELL_SIM_S
 # The single public driver is never commanded more than three terminal bands
 # ahead of the slower mirrored side.  This bounds simulated squeeze while
 # preserving enough finite preload for a supported workpiece to self-centre.
@@ -158,6 +161,7 @@ class RobotiqGripperActionAdapter(Node):
             self._bounded_contact_hold_position,
             self._functional_opening_complete,
             self._minimum_feasible_active_position,
+            self._stroke_scaled_ramp_duration,
         ) = _load_robotiq_kinematics()
         self._allow_stalling = bool(self.get_parameter("allow_stalling").value)
         self._action_timeout_s = float(self.get_parameter("action_timeout_s").value)
@@ -361,6 +365,12 @@ class RobotiqGripperActionAdapter(Node):
         stroke = effective_active_position - start_active_position
         closing_goal = stroke > GOAL_TOLERANCE_RAD
         opening_goal = stroke < -GOAL_TOLERANCE_RAD
+        motion_ramp_s = self._stroke_scaled_ramp_duration(
+            full_stroke_duration_s=ramp_s,
+            stroke_rad=stroke,
+            full_stroke_rad=MAX_POSITION_RAD - MIN_POSITION_RAD,
+            minimum_duration_s=MIN_STROKE_RAMP_SIM_S,
+        )
         # A recovery open can begin in an already functionally open but
         # passively deflected linkage state after a rejected close.  Classify
         # the requested endpoint itself, not the signed stroke inferred from
@@ -410,10 +420,19 @@ class RobotiqGripperActionAdapter(Node):
 
             sim_dt = max(0.0, sim_now_s - last_sim_tick_s)
             last_sim_tick_s = max(last_sim_tick_s, sim_now_s)
-            rate_factor = 1.0 if alpha < SLOW_TAIL_FRACTION else SLOW_TAIL_FACTOR
+            # Closing retains the low-impact terminal tail and slows further
+            # on first pad contact. Opening moves away from the workpiece; its
+            # existing common-driver lead bound already prevents an unbounded
+            # step or asymmetric linkage command, so a second slow tail adds
+            # no physical protection.
+            rate_factor = (
+                SLOW_TAIL_FACTOR
+                if closing_goal and alpha >= SLOW_TAIL_FRACTION
+                else 1.0
+            )
             if closing_goal and fresh_contact_sides:
                 rate_factor = min(rate_factor, CONTACT_CLOSING_RATE_FACTOR)
-            alpha += sim_dt / ramp_s * rate_factor
+            alpha += sim_dt / motion_ramp_s * rate_factor
             alpha = min(1.0, max(alpha, 0.0))
             nominal_active_position = start_active_position + stroke * alpha
             try:

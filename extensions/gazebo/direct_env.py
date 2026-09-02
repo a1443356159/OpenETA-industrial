@@ -1179,8 +1179,10 @@ class GazeboDirectEnv(Env):
                         samples = attachment.sample_detached_target_poses(
                             duration_s=(
                                 self._native_grasp_config.placement_settling_observation_s
-                                + self._native_grasp_config.placement_stability_duration_s
-                                + self._native_grasp_config.placement_terminal_window_s
+                                + max(
+                                    self._native_grasp_config.placement_stability_duration_s,
+                                    self._native_grasp_config.placement_terminal_window_s,
+                                )
                             ),
                             interval_s=self._native_grasp_config.placement_sample_interval_s,
                         )
