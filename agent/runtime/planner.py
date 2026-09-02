@@ -621,8 +621,27 @@ class ToolCallingPlanner(BasePlanner):
             embedded_review.get("decision") == "deferred"
             and embedded_review.get("infrastructure_retry_exhausted") is True
         )
+        retry_question = (
+            "The bounded SAM3 semantic reviewer exhausted its retry. Check the "
+            "planner/VLM service, then answer here to retry this unchanged candidate "
+            "bundle."
+        )
+        memory_context = tool_context.get("memory")
+        memory_context = memory_context if isinstance(memory_context, Mapping) else {}
+        latest_human_interaction = memory_context.get("latest_human_interaction")
+        latest_human_interaction = (
+            latest_human_interaction
+            if isinstance(latest_human_interaction, Mapping)
+            else {}
+        )
+        operator_authorized_retry = (
+            retry_exhausted
+            and str(latest_human_interaction.get("question") or "").strip()
+            == retry_question
+            and bool(str(latest_human_interaction.get("answer") or "").strip())
+        )
         review: JsonDict | None = None
-        if retry_exhausted:
+        if retry_exhausted and not operator_authorized_retry:
             embedded_failures = embedded_review.get("failures")
             failures = (
                 [dict(item) for item in embedded_failures if isinstance(item, Mapping)]
@@ -721,13 +740,9 @@ class ToolCallingPlanner(BasePlanner):
             action_type="response",
             action="ask_human",
             parameters={
-                "question": (
-                    "The bounded SAM3 semantic reviewer exhausted its retry. Check the "
-                    "planner/VLM service before resuming this unchanged candidate bundle."
-                ),
+                "question": retry_question,
                 "failure_code": "sam3_selection_infrastructure_failure",
                 "sam3_result_id": selection.get("result_id"),
-                "terminal_handoff": True,
             },
             reasoning=(
                 "Repeated bounded-review exceptions are infrastructure failures, not evidence "
@@ -741,6 +756,7 @@ class ToolCallingPlanner(BasePlanner):
                 ),
                 "execution_model": "isolated_semantic_selection",
                 "infrastructure_failures": failures,
+                "operator_authorized_retry": operator_authorized_retry,
             },
         )
 

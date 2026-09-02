@@ -417,7 +417,7 @@ def test_isolated_sam3_reviewer_defaults_missing_confidence_without_retry() -> N
     assert review["review_attempt_count"] == 1
 
 
-def test_exhausted_embedded_review_does_not_start_second_retry_layer() -> None:
+def test_exhausted_embedded_review_waits_for_operator_before_new_retry_cycle() -> None:
     reviewer_calls = 0
 
     def unexpected_review(_request):
@@ -455,6 +455,66 @@ def test_exhausted_embedded_review_does_not_start_second_retry_layer() -> None:
     assert decision.parameters["failure_code"] == (
         "sam3_selection_infrastructure_failure"
     )
+    assert decision.parameters.get("terminal_handoff") is not True
+
+
+def test_operator_answer_starts_new_bounded_review_for_unchanged_sam3_bundle() -> None:
+    reviewer_calls = 0
+
+    def review(_request):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        return {
+            "decision": "select",
+            "detection_id": "detection_000",
+            "confidence": 0.9,
+            "reason": "The complete red block is visible in the first tile.",
+            "target_geometry_family": "boxed_item",
+            "provider": "fixture-provider",
+            "model": "fixture-vlm",
+            "provider_details": {},
+        }
+
+    planner = ToolCallingPlanner(
+        CallablePlannerBackend(lambda _request: pytest.fail("main backend must not run")),
+        sam3_selection_reviewer=review,
+    )
+    question = (
+        "The bounded SAM3 semantic reviewer exhausted its retry. Check the "
+        "planner/VLM service, then answer here to retry this unchanged candidate bundle."
+    )
+    decision = planner._plan_isolated_sam3_selection(
+        {
+            "result_id": "sam3-result-exhausted",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red block",
+            "candidates": [{"id": "detection_000"}],
+            "selection_bundle": {
+                "original_image_ref": "/tmp/original.png",
+                "contact_sheet_ref": "/tmp/contact-sheet.png",
+            },
+            "selection_review": {
+                "decision": "deferred",
+                "attempt_count": 2,
+                "infrastructure_retry_exhausted": True,
+                "error_type": "Sam3SelectionReviewError",
+                "reason": "provider timed out twice",
+            },
+        },
+        tool_context={
+            "memory": {
+                "latest_human_interaction": {
+                    "question": question,
+                    "answer": "The VLM service is healthy now; continue.",
+                }
+            }
+        },
+    )
+
+    assert reviewer_calls == 1
+    assert decision.action == "select_sam3_detection"
+    assert decision.parameters["sam3_result_id"] == "sam3-result-exhausted"
+    assert decision.parameters["detection_id"] == "detection_000"
 
 
 def test_isolated_selection_charges_provider_usage_to_episode_action() -> None:
