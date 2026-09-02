@@ -25,6 +25,10 @@ def test_normal_runner_enables_case_owned_operator_gui_by_default() -> None:
     )
 
 
+def test_normal_acceptance_reserves_cold_startup_budget_for_native_endpoints() -> None:
+    assert acceptance.DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S == 180.0
+
+
 def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, monkeypatch) -> None:
     allocation = acceptance.base.Allocation(81, "openeta-normal-test", 18765, "run-id")
     monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])

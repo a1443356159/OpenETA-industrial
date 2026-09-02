@@ -131,6 +131,7 @@ DEFAULT_EXECUTION_PROFILE = "agentic_normal"
 # the general runtime keeps its conservative `legacy` default and instant
 # environment-variable rollback.
 DEFAULT_QUALIFICATION_PROFILE = "fast_v3"
+DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S = 180.0
 GAZEBO_SIM_PACKAGE = "openeta_rm75_robotiq2f85_sim"
 
 EXECUTION_PROFILE_PLANNER_MODES = {
@@ -2221,11 +2222,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 task_variant=task_variant,
                 operator_mode=args.operator_mode,
             ),
-            # Cold software-rendered Gazebo launches occasionally need more
-            # than the deployment default before the documented world-control
-            # service is discoverable.  This affects startup only; motion,
-            # planning, execution, and verification deadlines stay unchanged.
-            "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": "90",
+            # A cold or shared-GPU launch must still leave time to prove the
+            # stock DetachableJoint endpoints after world-control discovery.
+            # This affects startup only; motion, planning, execution, and
+            # verification deadlines stay unchanged.  Preserve an explicit
+            # operator/deployment override when one is supplied.
+            "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": os.environ.get(
+                "OPENETA_GAZEBO_STARTUP_TIMEOUT_S",
+                f"{DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S:g}",
+            ),
             # Share the deployment runtime's bounded perception budget.  GPU
             # contention may make a healthy cold inference much slower than
             # its usual latency; qualification, IK, planning, and execution
