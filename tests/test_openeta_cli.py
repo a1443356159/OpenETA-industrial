@@ -1276,6 +1276,31 @@ def test_cli_confirm_denies_without_tty(monkeypatch, capsys) -> None:
     assert "permission required" in capsys.readouterr().out
 
 
+def test_cli_confirm_pauses_episode_clock(monkeypatch) -> None:
+    class Tty:
+        def isatty(self) -> bool:
+            return True
+
+    class Runner:
+        def __init__(self) -> None:
+            self.events = []
+
+        def begin_human_wait(self) -> None:
+            self.events.append("begin")
+
+        def end_human_wait(self) -> None:
+            self.events.append("end")
+
+    monkeypatch.setattr("agent.cli.openeta_cli.sys.stdin", Tty())
+    cli = OpenEtaCli()
+    runner = Runner()
+    cli.state.episode_runner = runner
+    monkeypatch.setattr(cli, "_prompt_text", lambda prompt: "y")
+
+    assert cli.confirm("move_to?") is True
+    assert runner.events == ["begin", "end"]
+
+
 def test_cli_ask_human_prints_question(monkeypatch, capsys) -> None:
     cli = OpenEtaCli()
     monkeypatch.setattr(cli, "_prompt_text", lambda prompt: "openeta/libero_libero_10_task0-v0")
