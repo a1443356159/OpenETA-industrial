@@ -4382,6 +4382,7 @@ def _model_request_context(
     state_keys = (
         "active_environment_task",
         "work_order",
+        "multi_sort_progress",
         "task_completion_evidence",
         "selected_sam3_detection",
         "placement_object_detection",
@@ -4959,6 +4960,78 @@ def _compact_model_state(key: str, value: object) -> object:
             "roles": role_summary,
             "attempt_count": len(attempts) if isinstance(attempts, list) else 0,
         }
+    if key == "work_order":
+        items = value.get("items")
+        assignments = (
+            [item for item in items if isinstance(item, dict)]
+            if isinstance(items, list)
+            else []
+        )
+        return {
+            "schema_version": value.get("schema_version"),
+            "source": value.get("source"),
+            "assignment_count": len(assignments),
+            "assignments": [
+                {
+                    name: item[name]
+                    for name in (
+                        "id",
+                        "target_prompt",
+                        "placement_region_prompt",
+                    )
+                    if name in item
+                }
+                for item in assignments[:6]
+            ],
+        }
+    if key == "multi_sort_progress":
+        active = value.get("active_assignment")
+        active = active if isinstance(active, dict) else {}
+        completed_count = value.get("completed_count")
+        assignment_count = value.get("assignment_count")
+        target = str(active.get("target_prompt") or "").strip()
+        destination = str(active.get("placement_region_prompt") or "").strip()
+        summary = ""
+        if isinstance(completed_count, int) and isinstance(assignment_count, int):
+            summary = f"{completed_count}/{assignment_count} assignments complete."
+        if target and destination:
+            summary = f"{summary} Current assignment: {target} -> {destination}.".strip()
+        compact = {
+            name: value[name]
+            for name in (
+                "schema_version",
+                "active_assignment_index",
+                "assignment_count",
+                "completed_count",
+                "remaining_count",
+                "all_completed",
+                "fresh_observation_required",
+                "fresh_observation_satisfied",
+                "completed_assignment_ids",
+            )
+            if name in value
+        }
+        compact["active_assignment"] = {
+            name: active[name]
+            for name in (
+                "id",
+                "target_prompt",
+                "target_perception_prompt",
+                "target_object_id",
+                "placement_region_prompt",
+                "placement_region_perception_prompt",
+                "placement_region_id",
+            )
+            if name in active
+        }
+        if summary:
+            compact["status_summary"] = summary
+        return _bounded_model_value(
+            compact,
+            text_limit=800,
+            item_limit=28,
+            depth=0,
+        )
     if key == "grasp_candidate_policy":
         compact = {name: value[name] for name in _MODEL_GRASP_POLICY_FIELDS if name in value}
         for name in ("active_candidate", "accepted_candidate"):

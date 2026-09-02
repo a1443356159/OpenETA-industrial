@@ -417,6 +417,110 @@ def test_environment_normalized_work_order_is_persisted_in_memory() -> None:
     assert memory.planning_context()["work_order"] == work_order
 
 
+def test_model_context_preserves_current_multi_sort_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active_assignment = {
+        "id": "yellow_wrench_to_green_parts_bin",
+        "target_prompt": "yellow wrench",
+        "target_perception_prompt": "yellow wrench",
+        "target_object_id": "target_object",
+        "placement_region_prompt": "green parts bin",
+        "placement_region_perception_prompt": "green parts bin",
+        "placement_region_id": "green_parts_bin",
+    }
+    tool_context = {
+        "schema_version": "openeta.planner_context.v1",
+        "task": "sort two parts",
+        "planner_mode": "agentic_closed_loop",
+        "active_environment_task": {"status": "running"},
+        "work_order": {
+            "schema_version": "openeta.work_order.v1",
+            "source": "vlm_tool_call",
+            "items": [
+                {
+                    "id": "red_bolt_to_blue_parts_bin",
+                    "target_prompt": "red hex bolt",
+                    "placement_region_prompt": "blue parts bin",
+                },
+                active_assignment,
+            ],
+        },
+        "multi_sort_progress": {
+            "schema_version": "openeta.multi_sort_progress.v1",
+            "active_assignment_index": 1,
+            "assignment_count": 2,
+            "completed_count": 1,
+            "remaining_count": 1,
+            "all_completed": False,
+            "fresh_observation_required": False,
+            "completed_assignment_ids": ["red_bolt_to_blue_parts_bin"],
+            "active_assignment": active_assignment,
+        },
+        "semantic_perception_obligation": {
+            "status": "required",
+            "required_tool": "sam3",
+            "semantic_role": "placement_region",
+            "semantic_target": "green parts bin",
+            "required_parameters": {"prompt": "green parts bin"},
+        },
+        "selected_skill_guidance": [{"name": "pick"}, {"name": "place"}],
+        "skill_usage": {},
+        "memory": {"metadata": {}},
+        "tool_references": [
+            {
+                "name": "sam3",
+                "category": "perception",
+                "description": "Segment the current semantic target.",
+                "parameters": {},
+                "effect": "perception",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "agent.runtime.planner.build_tool_context",
+        lambda **_kwargs: tool_context,
+    )
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        return {
+            "kind": "response",
+            "name": "talk",
+            "parameters": {"message": "context captured"},
+        }
+
+    memory = AgentMemory()
+    memory.start_session(task=tool_context["task"])
+    planner = ToolCallingPlanner(CallablePlannerBackend(decide))
+
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("sam3"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "talk"
+    projected_state = requests[0].tool_context["state"]
+    assert projected_state["work_order"]["assignment_count"] == 2
+    assert projected_state["multi_sort_progress"] == {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "active_assignment_index": 1,
+        "assignment_count": 2,
+        "completed_count": 1,
+        "remaining_count": 1,
+        "all_completed": False,
+        "fresh_observation_required": False,
+        "completed_assignment_ids": ["red_bolt_to_blue_parts_bin"],
+        "active_assignment": active_assignment,
+        "status_summary": (
+            "1/2 assignments complete. Current assignment: yellow wrench -> green parts bin."
+        ),
+    }
+
+
 def test_agentic_anyplace_hydrates_frozen_parameters_in_one_model_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
