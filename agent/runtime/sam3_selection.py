@@ -2,9 +2,9 @@
 
 The ordinary planner owns task progression, while this reviewer owns exactly
 one narrow semantic question: which materialized SAM3 mask matches the stated
-role and prompt.  The reviewer forks the first provider-confirmed planner
-checkpoint so providers see a stable request shape, then replaces its phase and
-visual evidence with a typed two-image comparison.
+role and prompt.  The reviewer can reuse the first provider-confirmed planner
+protocol, but deliberately removes its task and conversation state before
+installing a typed two-image comparison.
 """
 
 from __future__ import annotations
@@ -34,6 +34,11 @@ best matches tool_context.target_prompt for tool_context.semantic_role.
 
 Rules:
 - Inspect the images; scores and ranks are tie-breakers, never semantic proof.
+- tool_context.target_prompt is the only target for this review. Do not infer
+  another target or workflow step from an earlier task or conversation.
+- Use the original RGB for object colour, material, and identity. Coloured
+  masks, borders, labels, and crops in the contact sheet are annotations and
+  may alter appearance; use them only to locate and judge mask coverage.
 - grasp_target and placement_object must cover the complete intended object,
   not one face, a shadow, a neighbouring object, or broad background.
 - placement_region must cover the intended support/placement region, not the
@@ -87,11 +92,9 @@ class Sam3SelectionParentContext:
     """Thread-safe confirmed planner checkpoint used as a reviewer fork.
 
     The first provider-confirmed planner request is intentionally retained for
-    the lifetime of one runtime session.  Host-dispatched turns can accumulate
-    large qualification and motion evidence even though none of it is relevant
-    to a two-image mask choice.  Keeping the first confirmed request gives the
-    reviewer a provider-proven coding-agent request envelope whose size does
-    not grow with the embodied episode.
+    the lifetime of one runtime session.  Its system protocol gives the
+    reviewer a provider-proven action envelope.  Task text, conversation state,
+    and ordinary planner context are never copied into the narrow review.
     """
 
     def __init__(self) -> None:
@@ -337,15 +340,10 @@ class BackendSam3SelectionReviewer:
                 "isolated_minimal",
             )
 
-        fork_context = deepcopy(parent.tool_context)
-        for key in (
-            "current_camera_artifacts",
-            "current_rgbd_views",
-            "grasp_view_selection_obligation",
-            "obligations",
-            "semantic_perception_obligation",
-        ):
-            fork_context.pop(key, None)
+        # Build this context from an allowlist.  Copying the parent task,
+        # conversation, memory, or skill state can make a multi-step planner
+        # override the frozen bundle's current semantic target.
+        fork_context: JsonDict = {}
         selection_bundle = {
             "original_image_ref": original,
             "contact_sheet_ref": contact_sheet,
@@ -362,8 +360,10 @@ class BackendSam3SelectionReviewer:
                         "reject_sam3_detections",
                     ],
                     "rule": (
-                        "Choose only a listed legal tool. Inspect both attached images; "
-                        "scores and ranks are never semantic proof."
+                        "Choose only a listed legal tool. The current selection "
+                        "obligation is the only authoritative task for this review. "
+                        "Inspect both attached images; scores and ranks are never "
+                        "semantic proof."
                     ),
                 },
                 "selection_obligation": {
@@ -381,6 +381,15 @@ class BackendSam3SelectionReviewer:
                     ],
                     "rules": [
                         "Inspect both images; rank and score are tie-breakers only.",
+                        (
+                            "Use the original RGB for colour, material, and identity; "
+                            "contact-sheet masks, borders, labels, and crops are "
+                            "annotations used only for localization and coverage."
+                        ),
+                        (
+                            "The selection obligation target_prompt is authoritative; "
+                            "do not infer another workflow step or target."
+                        ),
                         (
                             "grasp_target and placement_object must cover the complete "
                             "intended object, not one face or broad background."
@@ -404,10 +413,8 @@ class BackendSam3SelectionReviewer:
             PlannerBackendRequest(
                 system_prompt=parent.system_prompt,
                 tool_context=fork_context,
-                conversation_messages=_bounded_parent_messages(
-                    parent.conversation_messages
-                ),
-                conversation_summary=parent.conversation_summary,
+                conversation_messages=[],
+                conversation_summary="",
                 metadata={
                     "schema_version": SAM3_SELECTION_REVIEW_SCHEMA_VERSION,
                     "parent_context_fork": True,
@@ -459,13 +466,6 @@ def _selection_tool_references() -> list[JsonDict]:
             },
         },
     ]
-
-
-def _bounded_parent_messages(messages: list[JsonDict]) -> list[JsonDict]:
-    copied = deepcopy(messages)
-    if len(copied) <= 5:
-        return copied
-    return [copied[0], *copied[-4:]]
 
 
 def _candidate_summary(candidate: Mapping[str, Any]) -> JsonDict:

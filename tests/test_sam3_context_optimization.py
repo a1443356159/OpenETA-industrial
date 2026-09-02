@@ -156,10 +156,8 @@ def test_sam3_reviewer_forks_confirmed_bounded_parent_planner_context() -> None:
     assert len(requests) == 1
     request = requests[0]
     assert request.system_prompt == "parent planner system contract"
-    assert request.conversation_messages == [
-        {"role": "user", "content": "pick and place the red block"}
-    ]
-    assert request.conversation_summary == "bounded parent summary"
+    assert request.conversation_messages == []
+    assert request.conversation_summary == ""
     assert request.metadata["parent_context_fork"] is True
     assert request.tool_context["vision_image_paths"] == [
         "/tmp/original.png",
@@ -173,7 +171,83 @@ def test_sam3_reviewer_forks_confirmed_bounded_parent_planner_context() -> None:
     assert "current_camera_artifacts" not in request.tool_context
     assert "current_rgbd_views" not in request.tool_context
     assert "semantic_perception_obligation" not in request.tool_context
-    assert request.tool_context["selected_skill_guidance"] == [{"name": "pick"}]
+    assert "task" not in request.tool_context
+    assert "selected_skill_guidance" not in request.tool_context
+    assert (
+        request.tool_context["selection_obligation"]["target_prompt"]
+        == "red rectangular block"
+    )
+    review_rules = request.tool_context["selection_review_contract"]["rules"]
+    assert any("target_prompt is authoritative" in rule for rule in review_rules)
+    assert any("original RGB for colour" in rule for rule in review_rules)
+
+
+def test_parent_fork_does_not_leak_previous_multi_object_step_into_review() -> None:
+    parent_context = Sam3SelectionParentContext()
+    parent_context.capture(
+        PlannerBackendRequest(
+            system_prompt="parent planner system contract",
+            tool_context={
+                "task": "first move the yellow wrench, then move the red bolt",
+                "memory": {"current_step": "yellow adjustable wrench"},
+                "selected_skill_guidance": [{"name": "pick", "target": "wrench"}],
+            },
+            conversation_messages=[
+                {
+                    "role": "user",
+                    "content": "First move the yellow wrench, then the red bolt.",
+                }
+            ],
+            conversation_summary="The yellow wrench is the first requested item.",
+        )
+    )
+    requests: list[PlannerBackendRequest] = []
+
+    def decide(request: PlannerBackendRequest) -> PlannerBackendResult:
+        requests.append(request)
+        return PlannerBackendResult(
+            payload={
+                "kind": "tool_call",
+                "name": "select_sam3_detection",
+                "parameters": {
+                    "sam3_result_id": "red-bolt-result",
+                    "detection_id": "detection_000",
+                    "reason": "The mask covers the complete red bolt in the RGB.",
+                },
+                "reasoning": "The frozen bundle defines the current target.",
+            }
+        )
+
+    review = BackendSam3SelectionReviewer(
+        CallablePlannerBackend(decide),
+        parent_context=parent_context,
+    ).review(
+        {
+            "result_id": "red-bolt-result",
+            "semantic_role": "grasp_target",
+            "target_prompt": "red hex bolt",
+            "candidates": [{"id": "detection_000", "rank": 0}],
+            "selection_bundle": {
+                "original_image_ref": "/tmp/original.png",
+                "contact_sheet_ref": "/tmp/contact-sheet.png",
+            },
+        }
+    )
+
+    assert review["decision"] == "select"
+    request = requests[0]
+    serialized = json.dumps(
+        {
+            "tool_context": request.tool_context,
+            "messages": request.conversation_messages,
+            "summary": request.conversation_summary,
+        }
+    )
+    assert "yellow wrench" not in serialized
+    assert "current_step" not in serialized
+    assert request.tool_context["selection_obligation"]["target_prompt"] == (
+        "red hex bolt"
+    )
 
 
 def test_sam3_parent_context_retains_first_confirmed_checkpoint() -> None:
