@@ -34,6 +34,7 @@ from agent.runtime.moveit_qualification import (
 )
 from agent.runtime.qualification_legality import (
     CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+    FULL_BARRIER_RELEASE_HEIGHT,
 )
 from agent.runtime.qualification_v3 import (
     candidate_physical_quality_key,
@@ -2035,6 +2036,7 @@ class _FrozenGoalPairCoordinator:
         }
         reserve_activated = False
         release_height_fallback_activated = False
+        release_height_full_barrier_activated = False
         deferred_count = 0
         goal_pool_exhausted = False
 
@@ -2077,6 +2079,13 @@ class _FrozenGoalPairCoordinator:
                 release_height_fallback_activated
                 or filtered.details.get(
                     "frozen_pair_release_height_fallback_activated"
+                )
+                is True
+            )
+            release_height_full_barrier_activated = (
+                release_height_full_barrier_activated
+                or filtered.details.get(
+                    "frozen_pair_release_height_full_barrier_activated"
                 )
                 is True
             )
@@ -2230,6 +2239,9 @@ class _FrozenGoalPairCoordinator:
                 "frozen_pair_reserve_activated": reserve_activated,
                 "frozen_pair_release_height_fallback_activated": (
                     release_height_fallback_activated
+                ),
+                "frozen_pair_release_height_full_barrier_activated": (
+                    release_height_full_barrier_activated
                 ),
                 "frozen_pair_execution_target": primary_target,
                 "frozen_pair_deferred_grasp_count": deferred_count,
@@ -2528,70 +2540,107 @@ class _FrozenGoalPairCoordinator:
         passed_pairs = joint.details.get("placement_candidates")
         passed_pairs = passed_pairs if isinstance(passed_pairs, list) else []
         primary_artifact = joint.details.get("qualification_artifact")
-        fallback_pairs: list[JsonDict] = []
-        fallback_prebind_summary: JsonDict = {}
-        fallback_activated = False
+        variant_pairs: dict[str, list[JsonDict]] = {}
+        variant_prebind_summaries: dict[str, JsonDict] = {}
+        variant_joints: dict[str, ToolResult] = {}
 
-        def has_lower_configured_release(goal: Mapping[str, object]) -> bool:
+        def release_offsets(goal: Mapping[str, object]) -> tuple[float, float, float] | None:
             selection = goal.get("placement_release_offset_selection")
             if not isinstance(selection, Mapping):
-                return False
-            effective = selection.get("effective_offset_m")
-            configured = selection.get("configured_drop_height_m")
-            return (
-                isinstance(effective, (int, float))
-                and not isinstance(effective, bool)
-                and math.isfinite(float(effective))
-                and isinstance(configured, (int, float))
-                and not isinstance(configured, bool)
-                and math.isfinite(float(configured))
-                and float(effective) > float(configured) + 1e-12
-            )
-
-        fallback_goals_requested = [
-            goal for goal in current_goals if has_lower_configured_release(goal)
-        ]
-        if not passed_pairs and fallback_goals_requested and callable(prebind):
+                return None
             try:
-                fallback_goals, fallback_prebind_summary = prebind(
-                    fallback_goals_requested,
+                configured = float(selection["configured_drop_height_m"])
+                effective = float(selection["effective_offset_m"])
+                full_barrier = float(
+                    selection.get("full_barrier_clearance_offset_m", effective)
+                )
+            except (KeyError, TypeError, ValueError):
+                return None
+            values = (configured, effective, full_barrier)
+            return values if all(math.isfinite(value) for value in values) else None
+
+        def needs_variant(goal: Mapping[str, object], variant: str) -> bool:
+            offsets = release_offsets(goal)
+            if offsets is None:
+                return False
+            configured, effective, full_barrier = offsets
+            if variant == FULL_BARRIER_RELEASE_HEIGHT:
+                return full_barrier > effective + 1e-12
+            return effective > configured + 1e-12
+
+        for variant in (
+            FULL_BARRIER_RELEASE_HEIGHT,
+            CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+        ):
+            if passed_pairs or not callable(prebind):
+                break
+            requested_goals = [
+                goal for goal in current_goals if needs_variant(goal, variant)
+            ]
+            if not requested_goals:
+                continue
+            try:
+                variant_goals, prebind_summary = prebind(
+                    requested_goals,
                     scene_epoch=scene_epoch,
                     planning_scene_revision=planning_scene_revision,
                     source=source,
-                    release_height_variant=CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+                    release_height_variant=variant,
                 )
             except Exception as exc:  # noqa: BLE001 - private scene boundary.
                 return ToolResult(
                     False,
-                    f"Placement release-height fallback failed: {exc}",
+                    f"Placement release-height variant {variant} failed: {exc}",
                     {
                         "reason": "qualification_infrastructure_error",
                         "infrastructure_error": True,
                         "qualification_infrastructure_reason": (
-                            "placement_release_height_fallback_prebind_failed"
+                            "placement_release_height_variant_prebind_failed"
                         ),
+                        "release_height_variant": variant,
                         "error_type": type(exc).__name__,
                         "execution_started": False,
                     },
                 )
-            fallback_pairs = build_pairs(
-                fallback_goals,
-                release_height_variant=CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+            candidate_pairs = build_pairs(
+                variant_goals,
+                release_height_variant=variant,
             )
-            if fallback_pairs:
-                fallback_activated = True
-                joint = qualify_pairs(fallback_pairs)
-                if _qualification_infrastructure_reason(joint):
-                    return _qualification_infrastructure_failure(joint)
-                passed_pairs = joint.details.get("placement_candidates")
-                passed_pairs = (
-                    passed_pairs if isinstance(passed_pairs, list) else []
-                )
-                if passed_pairs:
-                    self.object_goals = [
-                        json.loads(json.dumps(goal)) for goal in fallback_goals
-                    ]
-        evaluated_pairs = fallback_pairs if fallback_activated else pairs
+            if not candidate_pairs:
+                continue
+            variant_pairs[variant] = candidate_pairs
+            variant_prebind_summaries[variant] = prebind_summary
+            joint = qualify_pairs(candidate_pairs)
+            variant_joints[variant] = joint
+            if _qualification_infrastructure_reason(joint):
+                return _qualification_infrastructure_failure(joint)
+            passed = joint.details.get("placement_candidates")
+            passed_pairs = passed if isinstance(passed, list) else []
+            if passed_pairs:
+                self.object_goals = [
+                    json.loads(json.dumps(goal)) for goal in variant_goals
+                ]
+
+        full_barrier_pairs = variant_pairs.get(FULL_BARRIER_RELEASE_HEIGHT, [])
+        full_barrier_prebind_summary = variant_prebind_summaries.get(
+            FULL_BARRIER_RELEASE_HEIGHT,
+            {},
+        )
+        full_barrier_joint = variant_joints.get(FULL_BARRIER_RELEASE_HEIGHT)
+        full_barrier_activated = bool(full_barrier_pairs)
+        fallback_pairs = variant_pairs.get(CONFIGURED_RELEASE_HEIGHT_FALLBACK, [])
+        fallback_prebind_summary = variant_prebind_summaries.get(
+            CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+            {},
+        )
+        fallback_activated = bool(fallback_pairs)
+        evaluated_pairs = (
+            fallback_pairs
+            if fallback_activated
+            else full_barrier_pairs
+            if full_barrier_activated
+            else pairs
+        )
         goal_legality_summary = self._cache_goal_legality_frontier(
             joint,
             pairs=evaluated_pairs,
@@ -2658,9 +2707,13 @@ class _FrozenGoalPairCoordinator:
             if isinstance(entry.get("proof"), Mapping):
                 proofs[grasp_id] = entry["proof"]
         qualification_joints = [primary_joint]
+        if full_barrier_joint is not None:
+            qualification_joints.append(full_barrier_joint)
         if fallback_activated:
             qualification_joints.append(joint)
-        result.details["frozen_pair_count"] = len(pairs) + len(fallback_pairs)
+        result.details["frozen_pair_count"] = (
+            len(pairs) + len(full_barrier_pairs) + len(fallback_pairs)
+        )
         result.details["frozen_pair_grasp_branch_limit"] = self.grasp_branch_limit
         result.details["frozen_pair_lookahead_grasp_count"] = len(retained_entries)
         result.details["frozen_pair_primary_grasp_count"] = min(2, len(retained_entries))
@@ -2685,12 +2738,25 @@ class _FrozenGoalPairCoordinator:
         result.details["frozen_pair_release_height_fallback_activated"] = (
             fallback_activated
         )
+        result.details["frozen_pair_release_height_full_barrier_activated"] = (
+            full_barrier_activated
+        )
         result.details["frozen_pair_release_height_primary_pair_count"] = len(
             pairs
+        )
+        result.details["frozen_pair_release_height_full_barrier_pair_count"] = len(
+            full_barrier_pairs
         )
         result.details["frozen_pair_release_height_fallback_pair_count"] = len(
             fallback_pairs
         )
+        if full_barrier_prebind_summary:
+            result.details["frozen_pair_release_height_full_barrier_goal_count"] = (
+                full_barrier_prebind_summary.get(
+                    "frozen_goal_legality_frontier_count",
+                    0,
+                )
+            )
         if fallback_prebind_summary:
             result.details["frozen_pair_release_height_fallback_goal_count"] = (
                 fallback_prebind_summary.get(
@@ -2731,6 +2797,14 @@ class _FrozenGoalPairCoordinator:
             result.details["frozen_pair_primary_qualification_artifact"] = (
                 json.loads(json.dumps(primary_artifact))
             )
+        if full_barrier_joint is not None:
+            full_barrier_artifact = full_barrier_joint.details.get(
+                "qualification_artifact"
+            )
+            if isinstance(full_barrier_artifact, Mapping):
+                result.details[
+                    "frozen_pair_release_height_full_barrier_artifact"
+                ] = json.loads(json.dumps(full_barrier_artifact))
         if fallback_activated and qualification_artifacts:
             fallback_artifact = joint.details.get("qualification_artifact")
             if isinstance(fallback_artifact, Mapping):

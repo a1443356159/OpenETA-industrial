@@ -28,6 +28,7 @@ PAIR_LEGALITY_SCHEMA = "openeta.grasp_placement_pair_legality.v1"
 GRASP_TARGET_CLOSING_SCHEMA = "openeta.grasp_target_closing_alignment.v1"
 RELEASE_HEIGHT_VARIANT_FIELD = "_openeta_release_height_variant"
 CONFIGURED_RELEASE_HEIGHT_FALLBACK = "configured_drop_height_fallback"
+FULL_BARRIER_RELEASE_HEIGHT = "full_barrier_clearance"
 _ROTATION_TOLERANCE = 1e-4
 _POSE_TOLERANCE_M = 1e-5
 _ORIENTATION_TOLERANCE = 1e-4
@@ -718,6 +719,19 @@ def _effective_release_z_offset(
         if exterior_entry_top_z_values
         else 0.0
     )
+    maximum_entry_height = (
+        max(0.0, exterior_entry_top_z_values[-1] - support_z_m)
+        if exterior_entry_top_z_values
+        else 0.0
+    )
+    full_barrier_clearance_offset = (
+        max(
+            configured_drop_height_m,
+            maximum_entry_height + max(0.0, clearance_m),
+        )
+        if exterior_entry_top_z_values
+        else configured_drop_height_m
+    )
     effective_offset = (
         max(
             configured_drop_height_m,
@@ -760,6 +774,13 @@ def _effective_release_z_offset(
                 else support_z_m
             ),
             "support_entry_height_above_surface_m": minimum_entry_height,
+            "support_entry_maximum_z_m": (
+                exterior_entry_top_z_values[-1]
+                if exterior_entry_top_z_values
+                else support_z_m
+            ),
+            "support_entry_maximum_height_above_surface_m": maximum_entry_height,
+            "full_barrier_clearance_offset_m": full_barrier_clearance_offset,
             "entry_clearance_above_edge_m": (
                 max(0.0, effective_offset - minimum_entry_height)
                 if entry_geometry_proven
@@ -965,7 +986,35 @@ def evaluate_placement_goal_legality(
     release_height_variant = str(
         candidate.get(RELEASE_HEIGHT_VARIANT_FIELD) or "geometry_primary"
     )
-    if release_height_variant == CONFIGURED_RELEASE_HEIGHT_FALLBACK:
+    if release_height_variant == FULL_BARRIER_RELEASE_HEIGHT:
+        primary_offset = release_z_offset
+        full_barrier_offset = release_offset_evidence.get(
+            "full_barrier_clearance_offset_m"
+        )
+        if (
+            not isinstance(full_barrier_offset, (int, float))
+            or isinstance(full_barrier_offset, bool)
+            or not math.isfinite(float(full_barrier_offset))
+            or float(full_barrier_offset) < 0.0
+        ):
+            result.update(
+                verdict="UNKNOWN",
+                reason="placement_full_barrier_release_height_unavailable",
+                geometry_available=False,
+                infrastructure_error=True,
+                elapsed_s=time.monotonic() - started,
+            )
+            return result
+        release_z_offset = float(full_barrier_offset)
+        release_offset_evidence = {
+            **release_offset_evidence,
+            "source": "container_full_barrier_clearance",
+            "release_height_variant": release_height_variant,
+            "primary_effective_offset_m": primary_offset,
+            "effective_offset_m": release_z_offset,
+            "fallback_activated": release_z_offset > primary_offset + 1e-12,
+        }
+    elif release_height_variant == CONFIGURED_RELEASE_HEIGHT_FALLBACK:
         primary_offset = release_z_offset
         release_z_offset = configured_release_z_offset
         release_offset_evidence = {
@@ -1630,12 +1679,25 @@ def bind_qualified_placement_goal(
                         and stage_pose is not None
                         and _transforms_aligned(stage_pose, expected_release)
                     )
+                    previous_correction = _finite_vector(
+                        stage.get("release_target_translation_correction_xyz"),
+                        3,
+                    )
+                    translation_delta = (
+                        [
+                            correction[index] - previous_correction[index]
+                            for index in range(3)
+                        ]
+                        if previous_correction is not None
+                        else correction
+                    )
                     if not correction_already_materialized:
                         for key in ("xyz", "translation_xyz", "position"):
                             xyz = _finite_vector(stage.get(key), 3)
                             if xyz is not None:
                                 stage[key] = [
-                                    xyz[index] + correction[index] for index in range(3)
+                                    xyz[index] + translation_delta[index]
+                                    for index in range(3)
                                 ]
                     support_correction = _finite_vector(
                         binding.get("support_contact_translation_correction_xyz"), 3
@@ -1652,6 +1714,8 @@ def bind_qualified_placement_goal(
                     stage["release_target_translation_correction_application"] = (
                         "already_materialized_in_compiled_terminal"
                         if correction_already_materialized
+                        else "rebound_compiled_terminal"
+                        if previous_correction is not None
                         else "applied_to_unbound_terminal"
                     )
                     stage["terminal_pose_source"] = (

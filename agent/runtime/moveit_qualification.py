@@ -25,6 +25,7 @@ from agent.tools.registry import ToolResult
 from agent.runtime.capability_map import SparseCapabilityMap, target_pose
 from agent.runtime.qualification_legality import (
     CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+    FULL_BARRIER_RELEASE_HEIGHT,
     RELEASE_HEIGHT_VARIANT_FIELD,
     bind_qualified_placement_goal,
     evaluate_grasp_target_closing_alignment,
@@ -427,6 +428,7 @@ class MoveItCandidateQualifier:
         if release_height_variant not in {
             None,
             CONFIGURED_RELEASE_HEIGHT_FALLBACK,
+            FULL_BARRIER_RELEASE_HEIGHT,
         }:
             raise ValueError("placement release-height variant is invalid")
         descriptors = []

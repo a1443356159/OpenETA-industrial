@@ -656,7 +656,13 @@ def test_frozen_pair_search_materializes_full_pool_round_robin_and_filters_grasp
     ) is None
 
 
-def test_frozen_pair_uses_configured_release_height_before_expanding_grasps() -> None:
+@pytest.mark.parametrize(
+    "passing_variant",
+    ["full_barrier_clearance", "configured_drop_height_fallback"],
+)
+def test_frozen_pair_tries_geometry_release_heights_before_expanding_grasps(
+    passing_variant: str,
+) -> None:
     calls: list[tuple[str, str]] = []
 
     def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
@@ -668,16 +674,19 @@ def test_frozen_pair_uses_configured_release_height_before_expanding_grasps() ->
                 candidate = row["prebound_candidate"]
                 candidate["placement_release_offset_selection"] = {
                     "configured_drop_height_m": 0.05,
-                    "effective_offset_m": (
-                        0.05
-                        if variant == "configured_drop_height_fallback"
-                        else 0.075
-                    ),
-                    "source": (
-                        "configured_drop_height_fallback"
-                        if variant == "configured_drop_height_fallback"
-                        else "container_exterior_entry_clearance"
-                    ),
+                    "effective_offset_m": {
+                        "geometry_primary": 0.075,
+                        "full_barrier_clearance": 0.165,
+                        "configured_drop_height_fallback": 0.05,
+                    }[variant],
+                    "full_barrier_clearance_offset_m": 0.165,
+                    "source": {
+                        "geometry_primary": "container_exterior_entry_clearance",
+                        "full_barrier_clearance": "container_full_barrier_clearance",
+                        "configured_drop_height_fallback": (
+                            "configured_drop_height_fallback"
+                        ),
+                    }[variant],
                 }
             return response
 
@@ -686,10 +695,9 @@ def test_frozen_pair_uses_configured_release_height_before_expanding_grasps() ->
             "geometry_primary",
         )
         calls.append(("pair", variant))
-        fallback = variant == "configured_drop_height_fallback"
         rows = []
         for index, item in enumerate(request["candidates"]):
-            passed = fallback and index == 0
+            passed = variant == passing_variant and index == 0
             rows.append(
                 {
                     "candidate_id": item["candidate_id"],
@@ -726,7 +734,9 @@ def test_frozen_pair_uses_configured_release_height_before_expanding_grasps() ->
             "planning_scene_revision": request["planning_scene_revision"],
             "execution_started": False,
             "selected_candidate_ids": (
-                [request["candidates"][0]["candidate_id"]] if fallback else []
+                [request["candidates"][0]["candidate_id"]]
+                if variant == passing_variant
+                else []
             ),
             "results": rows,
         }
@@ -818,19 +828,33 @@ def test_frozen_pair_uses_configured_release_height_before_expanding_grasps() ->
 
     assert result.success is True
     assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0"]
-    assert result.details["frozen_pair_release_height_fallback_activated"] is True
-    assert result.details["frozen_pair_count"] == 2
+    assert result.details["frozen_pair_release_height_full_barrier_activated"] is True
+    assert result.details["frozen_pair_release_height_fallback_activated"] is (
+        passing_variant == "configured_drop_height_fallback"
+    )
+    assert result.details["frozen_pair_count"] == (
+        3 if passing_variant == "configured_drop_height_fallback" else 2
+    )
     assert result.details["frozen_pair_frontier_expansion_count"] == 0
-    assert calls == [
+    expected_calls = [
         ("prebind", "geometry_primary"),
         ("pair", "geometry_primary"),
-        ("prebind", "configured_drop_height_fallback"),
-        ("pair", "configured_drop_height_fallback"),
+        ("prebind", "full_barrier_clearance"),
+        ("pair", "full_barrier_clearance"),
     ]
+    if passing_variant == "configured_drop_height_fallback":
+        expected_calls.extend(
+            [
+                ("prebind", "configured_drop_height_fallback"),
+                ("pair", "configured_drop_height_fallback"),
+            ]
+        )
+    assert calls == expected_calls
     selected = coordinator.qualified_goals_by_grasp["g0"][0]
-    assert selected["placement_release_offset_selection"]["source"] == (
-        "configured_drop_height_fallback"
-    )
+    assert selected["placement_release_offset_selection"]["source"] == {
+        "full_barrier_clearance": "container_full_barrier_clearance",
+        "configured_drop_height_fallback": "configured_drop_height_fallback",
+    }[passing_variant]
 
 
 def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(

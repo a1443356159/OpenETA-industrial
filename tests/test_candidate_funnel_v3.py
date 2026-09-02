@@ -2066,6 +2066,121 @@ def test_goal_prebind_can_materialize_configured_height_recovery_variant():
     )
 
 
+def test_goal_prebind_can_raise_release_above_every_exterior_barrier():
+    scene, candidate = _rotated_container_goal()
+    engine = _engine(clone_scene=lambda: scene)
+    qualifier = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: engine.qualify(request),
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+
+    primary, _ = qualifier.prebind_placement_goals(
+        [candidate],
+        scene_epoch=1,
+        planning_scene_revision=4,
+    )
+    cleared, summary = qualifier.prebind_placement_goals(
+        primary,
+        scene_epoch=1,
+        planning_scene_revision=4,
+        release_height_variant="full_barrier_clearance",
+    )
+
+    primary_selection = primary[0]["placement_release_offset_selection"]
+    cleared_selection = cleared[0]["placement_release_offset_selection"]
+    assert primary_selection["effective_offset_m"] == pytest.approx(0.075)
+    assert primary_selection["full_barrier_clearance_offset_m"] == pytest.approx(
+        0.165
+    )
+    assert cleared_selection["source"] == "container_full_barrier_clearance"
+    assert cleared_selection["primary_effective_offset_m"] == pytest.approx(0.075)
+    assert cleared_selection["effective_offset_m"] == pytest.approx(0.165)
+    assert cleared_selection["fallback_activated"] is True
+    assert cleared[0]["qualified_release_object_goal_pose"]["translation_xyz"][
+        2
+    ] == pytest.approx(
+        primary[0]["qualified_release_object_goal_pose"]["translation_xyz"][2]
+        + 0.09
+    )
+    assert summary["frozen_goal_release_height_variant"] == (
+        "full_barrier_clearance"
+    )
+
+
+def test_full_barrier_release_clears_gripper_from_tall_container_wall():
+    scene, candidate = _rotated_container_goal()
+    scene["gripper_collision_boxes"] = [
+        {
+            "id": "mount_plate",
+            "shape": "box",
+            "size_xyz": [0.08, 0.08, 0.012],
+            "pose_xyz": [0.14, 0.0, 0.006],
+            "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+    ]
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": candidate["id"],
+            "compile_parameters": {
+                "attachment_transform": {
+                    "parent_frame": "eef",
+                    "child_frame": "object",
+                    "translation_xyz": [0.0, 0.0, 0.0],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            },
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.48, -0.1, 0.05],
+                    "rotation_matrix": [
+                        [0.0, -1.0, 0.0],
+                        [1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            ],
+        }
+    )
+    engine = _engine(clone_scene=lambda: scene)
+    qualifier = MoveItCandidateQualifier(
+        lambda _name, request, _timeout: engine.qualify(request),
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+    primary, _ = qualifier.prebind_placement_goals(
+        [candidate], scene_epoch=1, planning_scene_revision=4
+    )
+    cleared, _ = qualifier.prebind_placement_goals(
+        primary,
+        scene_epoch=1,
+        planning_scene_revision=4,
+        release_height_variant="full_barrier_clearance",
+    )
+
+    primary_pair = evaluate_grasp_placement_pair_legality(
+        {"candidate_id": "primary", "candidate": primary[0]},
+        scene=scene,
+        workspace_filter=None,
+    )
+    cleared_pair = evaluate_grasp_placement_pair_legality(
+        {"candidate_id": "cleared", "candidate": cleared[0]},
+        scene=scene,
+        workspace_filter=None,
+    )
+
+    assert primary_pair["verdict"] == "FAIL"
+    assert primary_pair["reason"] == "gripper_static_collision"
+    assert cleared_pair["verdict"] == "PASS"
+    assert cleared_pair["checks"]["eef_chain"]["pass"] is True
+
+
 def test_container_goal_prebind_is_idempotent_after_pair_compilation():
     scene, candidate = _rotated_container_goal()
     descriptor = {"candidate_id": candidate["id"], "candidate": candidate}
