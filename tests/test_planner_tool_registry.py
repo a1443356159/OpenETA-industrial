@@ -41,6 +41,7 @@ from agent.runtime.planner import (
     _validate_semantic_perception_obligation,
     _validate_anyplace_parameters,
     _matching_depth_enhancement,
+    _model_request_context,
     _grasp_sensor_safety_obligation,
     _placement_release_obligation,
     build_tool_context,
@@ -417,9 +418,7 @@ def test_environment_normalized_work_order_is_persisted_in_memory() -> None:
     assert memory.planning_context()["work_order"] == work_order
 
 
-def test_model_context_preserves_current_multi_sort_assignment(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_model_context_preserves_current_multi_sort_assignment() -> None:
     active_assignment = {
         "id": "yellow_wrench_to_green_parts_bin",
         "target_prompt": "yellow wrench",
@@ -429,7 +428,7 @@ def test_model_context_preserves_current_multi_sort_assignment(
         "placement_region_perception_prompt": "green parts bin",
         "placement_region_id": "green_parts_bin",
     }
-    tool_context = {
+    full_context = {
         "schema_version": "openeta.planner_context.v1",
         "task": "sort two parts",
         "planner_mode": "agentic_closed_loop",
@@ -457,53 +456,18 @@ def test_model_context_preserves_current_multi_sort_assignment(
             "completed_assignment_ids": ["red_bolt_to_blue_parts_bin"],
             "active_assignment": active_assignment,
         },
-        "semantic_perception_obligation": {
-            "status": "required",
-            "required_tool": "sam3",
-            "semantic_role": "placement_region",
-            "semantic_target": "green parts bin",
-            "required_parameters": {"prompt": "green parts bin"},
-        },
-        "selected_skill_guidance": [{"name": "pick"}, {"name": "place"}],
-        "skill_usage": {},
         "memory": {"metadata": {}},
-        "tool_references": [
-            {
-                "name": "sam3",
-                "category": "perception",
-                "description": "Segment the current semantic target.",
-                "parameters": {},
-                "effect": "perception",
-            }
-        ],
+        "tool_references": [],
     }
-    monkeypatch.setattr(
-        "agent.runtime.planner.build_tool_context",
-        lambda **_kwargs: tool_context,
-    )
-    requests = []
-
-    def decide(request):
-        requests.append(request)
-        return {
-            "kind": "response",
-            "name": "talk",
-            "parameters": {"message": "context captured"},
-        }
-
     memory = AgentMemory()
-    memory.start_session(task=tool_context["task"])
-    planner = ToolCallingPlanner(CallablePlannerBackend(decide))
-
-    decision = planner.plan(
-        _observation(),
+    memory.start_session(task=full_context["task"])
+    model_context, _messages = _model_request_context(
+        full_context,
         memory=memory,
-        tools=_tools_with_handlers("sam3"),
-        skills=build_default_skill_registry(),
+        config=PlannerContextConfig(),
     )
 
-    assert decision.action == "talk"
-    projected_state = requests[0].tool_context["state"]
+    projected_state = model_context["state"]
     assert projected_state["work_order"]["assignment_count"] == 2
     assert projected_state["multi_sort_progress"] == {
         "schema_version": "openeta.multi_sort_progress.v1",
