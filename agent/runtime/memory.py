@@ -3097,6 +3097,7 @@ class AgentMemory:
             )
             if not raw_candidates:
                 if isinstance(outputs.get("qualification_evidence"), dict):
+                    qualification_evidence = dict(outputs["qualification_evidence"])
                     source_backend = str(outputs.get("selected_backend") or source_tool)
                     frozen_pool_active = isinstance(self.frozen_placement_goal_pool(), dict)
                     frozen_pair_count = _optional_int(outputs.get("frozen_pair_count"), default=0)
@@ -3135,8 +3136,25 @@ class AgentMemory:
                         "active_candidate": None,
                         "remaining_candidate_ids": [],
                         "candidates": [],
-                        "qualification_evidence": dict(outputs["qualification_evidence"]),
+                        "qualification_evidence": qualification_evidence,
                     }
+                    planning_scene_revision = _optional_int(
+                        outputs.get("planning_scene_revision"),
+                        default=_optional_int(
+                            qualification_evidence.get("planning_scene_revision"),
+                            default=-1,
+                        ),
+                    )
+                    if planning_scene_revision >= 0:
+                        # Frozen-frontier continuation is permitted only at
+                        # the exact PlanningScene revision proved by the last
+                        # qualification wave.  Preserve that revision at the
+                        # policy level even when the pair join exposes no
+                        # executable candidate yet; otherwise the explicit
+                        # continuation obligation cannot be formed and the
+                        # agent is left with observation tools that cannot
+                        # advance the immutable provider queue.
+                        policy["planning_scene_revision"] = planning_scene_revision
                     if frozen_pool_active:
                         policy.update(
                             {

@@ -170,6 +170,47 @@ def test_zero_moveit_pass_schedules_fresh_observation_without_backend_switch() -
     assert recovery["required_action"] == {"name": "observe", "parameters": {}}
 
 
+def test_zero_pair_pass_preserves_revision_for_frozen_frontier_resume() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "frozen_placement_goal_pool",
+        {
+            "schema_version": "openeta.frozen_placement_goal_pool.v1",
+            "status": "ready",
+            "goal_count": 96,
+        },
+        source="test",
+    )
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "g0",
+                "selected_backend": "graspgenx",
+                "grasp_candidates": [],
+                "generated_candidate_count": 512,
+                "frozen_pair_count": 0,
+                "frozen_grasp_frontier_remaining_count": 260,
+                "frozen_grasp_frontier_generation": 2,
+                "qualification_evidence": {
+                    "schema_version": "openeta.moveit_candidate_funnel.v3",
+                    "planning_scene_revision": 6,
+                    "results": [],
+                },
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "frozen_frontier_required"
+    assert policy["planning_scene_revision"] == 6
+    assert policy["frozen_grasp_frontier_remaining_count"] == 260
+    assert "reestimate_required" not in policy
+
+
 def test_zero_moveit_pass_reestimates_same_grasp_backend_with_fresh_observation() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick the block")
