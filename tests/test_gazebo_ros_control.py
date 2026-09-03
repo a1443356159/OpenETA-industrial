@@ -1768,7 +1768,7 @@ class _RequestType:
             self.names = []
 
 
-def _readiness_runtime(*, command_limits: bool):
+def _readiness_runtime(*, command_limits: bool, action_server_count: int | None = None):
     action = _ReadyActionClient()
     controllers = SimpleNamespace(
         controller=[
@@ -1795,6 +1795,10 @@ def _readiness_runtime(*, command_limits: bool):
         controller_parameter_service_type=_RequestType,
         state_source=SimpleNamespace(wait_fresh=lambda timeout_s: _arm_state(0.0)),
     )
+    if action_server_count is not None:
+        runtime.node = SimpleNamespace(
+            count_services=lambda _name: action_server_count,
+        )
     runtime._await = lambda future, timeout_s: future
     return runtime
 
@@ -1804,6 +1808,14 @@ def test_runtime_readiness_requires_limits_trajectory_and_state_validity() -> No
 
     with pytest.raises(RuntimeError, match="ROS_NOT_READY"):
         _readiness_runtime(command_limits=False).wait_ready(0.001)
+
+
+def test_runtime_readiness_rejects_duplicate_action_servers() -> None:
+    with pytest.raises(RuntimeError, match="ROS_NOT_READY"):
+        _readiness_runtime(
+            command_limits=True,
+            action_server_count=2,
+        ).wait_ready(0.001)
 
 
 def test_runtime_readiness_retries_a_transient_service_response_timeout() -> None:

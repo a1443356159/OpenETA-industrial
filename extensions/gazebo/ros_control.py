@@ -3922,6 +3922,25 @@ class _RosRuntime:
         now = self.node.get_clock().now()
         return float(now.nanoseconds) * 1e-9
 
+    def _action_server_is_unique(self, action_name: str) -> bool:
+        """Require one live action server before the first control command.
+
+        DDS endpoint departure is asynchronous.  During a rapid environment
+        restart a client can otherwise receive a goal-acceptance response from
+        an outgoing server and wait forever for its result.  Counting the
+        action's ``send_goal`` service is an explicit graph-level ownership
+        check; a client never advertises that service.
+        """
+
+        count_services = getattr(getattr(self, "node", None), "count_services", None)
+        if not callable(count_services):
+            # ROS-free contract doubles do not model the discovery graph.
+            return True
+        try:
+            return int(count_services(f"{action_name}/_action/send_goal")) == 1
+        except Exception:
+            return False
+
     def wait_ready(self, timeout_s: float) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
@@ -3932,6 +3951,15 @@ class _RosRuntime:
                 and self.trajectory_client.wait_for_server(timeout_sec=min(0.2, remaining))
             )
             if actions_ready:
+                if not all(
+                    self._action_server_is_unique(action_name)
+                    for action_name in (
+                        "/move_action",
+                        "/parallel_gripper_controller/gripper_cmd",
+                        "/rm_group_controller/follow_joint_trajectory",
+                    )
+                ):
+                    continue
                 services = tuple(
                     client
                     for client in (
