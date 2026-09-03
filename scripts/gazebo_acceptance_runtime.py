@@ -1506,7 +1506,7 @@ def _without_provider_environment(environ: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def _provider_preflight_failure_code(exc: Exception, *, stage: str) -> tuple[str, str]:
+def _provider_preflight_failure_code(exc: Exception) -> tuple[str, str]:
     """Classify a provider failure without materializing provider text.
 
     Provider error bodies are untrusted and can contain echoed credentials or
@@ -1526,8 +1526,6 @@ def _provider_preflight_failure_code(exc: Exception, *, stage: str) -> tuple[str
         return "blocked", "PROVIDER_NETWORK_OR_TIMEOUT"
     if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
         return "failed", "PROVIDER_RESPONSE_JSON_INCOMPATIBLE"
-    if stage == "models":
-        return "blocked", "PROVIDER_MODEL_LIST_UNAVAILABLE"
     return "blocked", "PROVIDER_PLANNER_SMOKE_UNAVAILABLE"
 
 
@@ -1538,14 +1536,14 @@ def _provider_preflight_result(
 ) -> dict[str, Any]:
     """Run the no-Gazebo, primary-only scripted-provider preflight.
 
-    This queries the provider's advertised model list, then makes one request
-    to the exact selected model which can only return an ``ask_human``
-    response. Some compatible providers omit callable multimodal models from
-    their list endpoint, so a missing advertisement is retained as
-    inconclusive evidence while the direct structured request remains the
-    authoritative compatibility gate. It neither starts the MCP server nor
-    offers a simulator tool, and it never persists provider request/response
-    payloads.
+    This makes a best-effort query to the provider's advertised model list,
+    then makes one request to the exact selected model which can only return
+    an ``ask_human`` response. Some compatible providers omit callable
+    multimodal models from their list endpoint or do not expose that endpoint
+    at all. Model discovery is therefore auxiliary evidence; the direct
+    structured request remains the authoritative compatibility gate. It
+    neither starts the MCP server nor offers a simulator tool, and it never
+    persists provider request/response payloads.
     """
 
     started = time.monotonic()
@@ -1612,41 +1610,33 @@ def _provider_preflight_result(
     try:
         models = list_openai_compatible_models(backend_config)
     except Exception as exc:  # noqa: BLE001 - provider failures are evidence, not crashes.
-        status, reason_code = _provider_preflight_failure_code(exc, stage="models")
-        result.update(
-            {
-                "status": status,
-                "reason_code": reason_code,
-                "error_type": type(exc).__name__,
-                "model_list": {
-                    "status": "failed",
-                    "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
-                },
-                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        # OpenAI-compatible providers often authorize chat completions but do
+        # not implement /models for every workspace.  Do not mistake that
+        # optional discovery failure for a failure of the explicitly selected
+        # model; the direct, primary-only structured request below is the
+        # actual acceptance gate.
+        result["model_list"] = {
+            "status": "inconclusive",
+            "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
+            "reason_code": "MODEL_LIST_UNAVAILABLE",
+            "error_type": type(exc).__name__,
+        }
+    else:
+        if not isinstance(models, list) or not all(isinstance(model, str) for model in models):
+            result["model_list"] = {
+                "status": "inconclusive",
+                "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
+                "reason_code": "MODEL_LIST_RESPONSE_INCOMPATIBLE",
             }
-        )
-        return result
-    if not isinstance(models, list) or not all(isinstance(model, str) for model in models):
-        result.update(
-            {
-                "status": "failed",
-                "reason_code": "PROVIDER_MODEL_LIST_RESPONSE_INCOMPATIBLE",
-                "model_list": {
-                    "status": "failed",
-                    "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
-                },
-                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+        else:
+            selected_model_found = config.model in models
+            result["model_list"] = {
+                "status": "passed" if selected_model_found else "inconclusive",
+                "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
+                "selected_model_found": selected_model_found,
             }
-        )
-        return result
-    selected_model_found = config.model in models
-    result["model_list"] = {
-        "status": "passed" if selected_model_found else "inconclusive",
-        "latency_ms": round((time.monotonic() - models_started) * 1000, 3),
-        "selected_model_found": selected_model_found,
-    }
-    if not selected_model_found:
-        result["model_list"]["reason_code"] = "SELECTED_MODEL_NOT_ADVERTISED"
+            if not selected_model_found:
+                result["model_list"]["reason_code"] = "SELECTED_MODEL_NOT_ADVERTISED"
 
     smoke_started = time.monotonic()
     try:
@@ -1664,7 +1654,7 @@ def _provider_preflight_result(
             )
         )
     except Exception as exc:  # noqa: BLE001 - retain a redacted, bounded failure only.
-        status, reason_code = _provider_preflight_failure_code(exc, stage="planner")
+        status, reason_code = _provider_preflight_failure_code(exc)
         result.update(
             {
                 "status": status,
@@ -1686,9 +1676,7 @@ def _provider_preflight_result(
         # misleadingly reported as a structured-response incompatibility.
         details = smoke.details if isinstance(smoke.details, Mapping) else {}
         error_text = str(details.get("error") or "")
-        status, reason_code = _provider_preflight_failure_code(
-            RuntimeError(error_text), stage="planner"
-        )
+        status, reason_code = _provider_preflight_failure_code(RuntimeError(error_text))
         result.update(
             {
                 "status": status,

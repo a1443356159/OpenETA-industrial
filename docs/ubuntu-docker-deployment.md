@@ -149,8 +149,10 @@ OpenAI-compatible Vision API. The official endpoint form and model capability
 are documented by [Alibaba Cloud Model Studio](https://help.aliyun.com/zh/model-studio/qwen-vl-compatible-with-openai)
 and [the qwen3-vl-flash model page](https://help.aliyun.com/zh/model-studio/qwen3-vl-flash).
 The OpenETA provider preflight records the endpoint and model with the key
-redacted; a provider or service failure is an infrastructure failure, never a
-candidate rejection.
+redacted. Its `/models` lookup is diagnostic only because workspace-scoped
+OpenAI-compatible endpoints may omit it; a direct structured chat request to
+the configured model is the compatibility gate. A provider or service failure
+is an infrastructure failure, never a candidate rejection.
 
 The final Docker profile freezes 512 GraspGenX candidates once and consumes
 them in the `fast_v3` small-wave funnel. It does not issue 512 eager IK or L5

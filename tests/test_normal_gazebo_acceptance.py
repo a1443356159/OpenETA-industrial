@@ -873,6 +873,63 @@ def test_provider_preflight_uses_direct_smoke_when_model_list_is_incomplete(
     }
 
 
+def test_provider_preflight_uses_direct_smoke_when_model_list_is_unavailable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Model discovery is optional for workspace-scoped compatible endpoints."""
+
+    config = acceptance.base.PlannerProviderConfig(
+        provider="compatible-vision-provider",
+        model="callable-vision-model",
+        api_base="https://provider.invalid/v1",
+        api_key="configured-secret",
+    )
+    monkeypatch.setattr(
+        acceptance.base,
+        "_root_provider_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    def unavailable_models(*_args, **_kwargs):
+        raise RuntimeError("model discovery endpoint disabled")
+
+    monkeypatch.setattr(
+        acceptance.base,
+        "list_openai_compatible_models",
+        unavailable_models,
+    )
+
+    class FakeBackend:
+        def __init__(self, _config):
+            pass
+
+        def decide(self, _request):
+            return SimpleNamespace(
+                status=acceptance.base.PipelineStatus.PLANNED,
+                payload=(
+                    '{"kind":"response","name":"ask_human",'
+                    '"parameters":{"message":"provider preflight"},'
+                    '"reasoning":"structured provider preflight"}'
+                ),
+                details={},
+            )
+
+    monkeypatch.setattr(acceptance.base, "OpenAICompatiblePlannerBackend", FakeBackend)
+
+    result = acceptance.base._provider_preflight_result(tmp_path, environ={})
+
+    assert result["status"] == "passed"
+    assert result["reason_code"] == "PROVIDER_PREFLIGHT_PASSED"
+    assert result["planner_smoke"]["status"] == "passed"
+    assert result["model_list"] == {
+        "status": "inconclusive",
+        "latency_ms": result["model_list"]["latency_ms"],
+        "reason_code": "MODEL_LIST_UNAVAILABLE",
+        "error_type": "RuntimeError",
+    }
+
+
 def test_service_preflight_pool_expectations_follow_runtime_environment(
     monkeypatch,
 ) -> None:
