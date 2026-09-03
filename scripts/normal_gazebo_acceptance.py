@@ -650,7 +650,15 @@ def service_preflight(services: Mapping[str, str]) -> dict[str, Any]:
 def _ros_python_import_error() -> str:
     try:
         import rclpy  # noqa: F401 - explicit ABI/import preflight.
-        from rosgraph_msgs.msg import Clock  # noqa: F401
+        from rosgraph_msgs.msg import Clock
+
+        # Importing a generated message class is lazy and does not prove that
+        # its native ROS libraries share the same ABI.  Force the exact load
+        # rclpy performs when it creates a /clock subscription so a mixed ROS
+        # underlay fails before provider preflight or a TUI episode begins.
+        Clock.__class__.__import_type_support__()
+        if Clock.__class__._TYPE_SUPPORT is None:
+            raise RuntimeError("rosgraph_msgs Clock type support is unavailable")
     except Exception as exc:  # noqa: BLE001 - bounded preflight diagnostic.
         return f"{type(exc).__name__}: {exc}"[:500]
     return ""

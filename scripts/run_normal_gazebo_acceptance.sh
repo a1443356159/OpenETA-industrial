@@ -55,8 +55,8 @@ source "${SYSTEM_ROS_SETUP}"
 source "${OVERLAY_SETUP}"
 set -u
 
-if ! "${PYTHON_BIN}" -c "import rclpy; from rosgraph_msgs.msg import Clock" >/dev/null 2>&1; then
-  echo "OPENETA_ROS_PYTHON_ABI_UNAVAILABLE: Jazzy rclpy/typesupport import failed" >&2
+if ! "${PYTHON_BIN}" -c "import rclpy; from rosgraph_msgs.msg import Clock; Clock.__class__.__import_type_support__(); assert Clock.__class__._TYPE_SUPPORT is not None" >/dev/null 2>&1; then
+  echo "OPENETA_ROS_PYTHON_ABI_UNAVAILABLE: Jazzy rclpy/typesupport load failed" >&2
   exit 3
 fi
 if ! command -v ros2 >/dev/null 2>&1 || ! command -v gz >/dev/null 2>&1; then

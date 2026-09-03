@@ -906,6 +906,31 @@ def test_normal_health_url_preserves_service_root() -> None:
     assert acceptance._health_url("http://127.0.0.1:8778/sse") == "http://127.0.0.1:8778/"
 
 
+def test_normal_runtime_preflight_forces_generated_type_support(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    class BrokenClockMeta(type):
+        _TYPE_SUPPORT = None
+
+        @classmethod
+        def __import_type_support__(cls) -> None:
+            raise ImportError("mixed ROS ABI")
+
+    class BrokenClock(metaclass=BrokenClockMeta):
+        pass
+
+    rosgraph_msgs = ModuleType("rosgraph_msgs")
+    rosgraph_msgs.__path__ = []  # type: ignore[attr-defined]
+    rosgraph_msgs_msg = ModuleType("rosgraph_msgs.msg")
+    rosgraph_msgs_msg.Clock = BrokenClock  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "rclpy", ModuleType("rclpy"))
+    monkeypatch.setitem(sys.modules, "rosgraph_msgs", rosgraph_msgs)
+    monkeypatch.setitem(sys.modules, "rosgraph_msgs.msg", rosgraph_msgs_msg)
+
+    assert acceptance._ros_python_import_error() == "ImportError: mixed ROS ABI"
+
+
 def test_normal_runtime_preflight_accepts_the_selected_overlay(tmp_path, monkeypatch) -> None:
     overlay = tmp_path / "external-overlay"
     package_prefix = overlay / acceptance.GAZEBO_SIM_PACKAGE
@@ -949,6 +974,8 @@ def test_normal_canonical_runner_sources_ros_and_executes_normal() -> None:
     assert 'source "${SYSTEM_ROS_SETUP}"' in source
     assert 'source "${OVERLAY_SETUP}"' in source
     assert "import rclpy; from rosgraph_msgs.msg import Clock" in source
+    assert "Clock.__class__.__import_type_support__()" in source
+    assert "Clock.__class__._TYPE_SUPPORT is not None" in source
     assert "ros2 pkg prefix openeta_rm75_robotiq2f85_sim" in source
     assert 'normal_gazebo_acceptance.py" "$@"' in source
 
