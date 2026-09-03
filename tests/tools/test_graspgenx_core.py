@@ -22,7 +22,6 @@ from tools.graspgenx_core import (
     MODEL_INFERENCE_DRAWS,
     MODEL_INFERENCE_DRAW_SPECS,
     RECALL_BASE_DRAW_SPECS,
-    _ExactKDTreeCollisionFilter,
     _centering_variant_order,
     _parallel_gripper_centering_metrics,
     _se3_mmr_order,
@@ -826,27 +825,6 @@ def test_collision_selection_amortizes_gpu_uploads_without_growing_cdist_chunks(
     assert inner_sizes == [16, 16]
     assert metadata["collision_filter_call_count"] == 2
     assert metadata["collision_checked_count"] == 512
-
-
-def test_exact_kdtree_filter_preserves_strict_distance_predicate() -> None:
-    class Tree:
-        def query(self, points, *, k, distance_upper_bound, workers):
-            assert k == 1
-            assert workers == 3
-            distances = np.linalg.norm(np.asarray(points), axis=1).astype(np.float64)
-            distances[distances > distance_upper_bound] = np.inf
-            return distances, np.zeros(len(distances), dtype=np.int64)
-
-    collision_filter = _ExactKDTreeCollisionFilter(
-        tree=Tree(),
-        surface_points=np.zeros((1, 3), dtype=np.float32),
-        threshold=0.001,
-        worker_count=3,
-    )
-    poses = np.tile(np.eye(4), (3, 1, 1))
-    poses[:, 0, 3] = [0.0005, 0.001, 0.002]
-
-    assert collision_filter(poses).tolist() == [False, True, True]
 
 
 def test_collision_selection_reports_all_grasps_colliding(tmp_path: Path) -> None:

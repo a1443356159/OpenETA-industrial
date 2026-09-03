@@ -104,7 +104,6 @@ NUM_COLLISION_SAMPLES = 2000
 # larger request.
 COLLISION_BATCH_SIZE = 16
 COLLISION_REQUEST_BATCH_SIZE = 256
-COLLISION_KDTREE_MAX_WORKERS = 16
 MMR_TRANSLATION_SCALE_M = 0.03
 MMR_ROTATION_SCALE_RAD = math.radians(30.0)
 MMR_ROTATION_WEIGHT = 1.0
@@ -1722,40 +1721,12 @@ class GraspGenXBackend:
             ).choice(len(collision_scene), MAX_COLLISION_SCENE_POINTS, replace=False)
             collision_scene = np.ascontiguousarray(collision_scene[indices])
 
-        exact_kdtree_filter = (
-            _build_exact_kdtree_collision_filter(
-                scene_points=collision_scene,
-                gripper_surface_points=sampler_entry["collision_surface_points"],
-                collision_threshold=COLLISION_THRESHOLD,
-            )
-            if loaded.get("torch") is not None
-            else None
-        )
-        collision_filter_backend = (
-            "scipy_ckdtree_exact"
-            if exact_kdtree_filter is not None
-            else "upstream_torch_cdist"
-        )
-
         recall_base: list[int] = []
         checked = 0
         rejected = 0
         diversity_rejected = 0
         collision_filter_call_count = 0
         filter_fn = loaded["filter_collisions"]
-
-        def collision_free_mask(batch_poses: Any) -> Any:
-            if exact_kdtree_filter is not None:
-                return exact_kdtree_filter(batch_poses)
-            return filter_fn(
-                scene_pc=collision_scene,
-                grasp_poses=batch_poses,
-                collision_threshold=COLLISION_THRESHOLD,
-                gripper_surface_points=sampler_entry["collision_surface_points"],
-                batch_size=COLLISION_BATCH_SIZE,
-                device=self.device,
-            )
-
         recall_request_size = min(
             COLLISION_REQUEST_BATCH_SIZE,
             max(COLLISION_BATCH_SIZE, recall_base_limit),
@@ -1763,7 +1734,16 @@ class GraspGenXBackend:
         for offset in range(0, len(inspection_order), recall_request_size):
             batch_indices = inspection_order[offset : offset + recall_request_size]
             batch_poses = camera_native_grasps[batch_indices]
-            free_mask = np.asarray(collision_free_mask(batch_poses))
+            free_mask = np.asarray(
+                filter_fn(
+                    scene_pc=collision_scene,
+                    grasp_poses=batch_poses,
+                    collision_threshold=COLLISION_THRESHOLD,
+                    gripper_surface_points=sampler_entry["collision_surface_points"],
+                    batch_size=COLLISION_BATCH_SIZE,
+                    device=self.device,
+                )
+            )
             collision_filter_call_count += 1
             if free_mask.shape != (len(batch_indices),) or free_mask.dtype.kind != "b":
                 raise GraspGenXInputError("inconsistent_grasp_outputs")
@@ -1814,7 +1794,16 @@ class GraspGenXBackend:
         for offset in range(0, len(ordered_variants), reserve_request_size):
             batch_indices = ordered_variants[offset : offset + reserve_request_size]
             batch_poses = camera_native_grasps[batch_indices]
-            free_mask = np.asarray(collision_free_mask(batch_poses))
+            free_mask = np.asarray(
+                filter_fn(
+                    scene_pc=collision_scene,
+                    grasp_poses=batch_poses,
+                    collision_threshold=COLLISION_THRESHOLD,
+                    gripper_surface_points=sampler_entry["collision_surface_points"],
+                    batch_size=COLLISION_BATCH_SIZE,
+                    device=self.device,
+                )
+            )
             collision_filter_call_count += 1
             if free_mask.shape != (len(batch_indices),) or free_mask.dtype.kind != "b":
                 raise GraspGenXInputError("inconsistent_grasp_outputs")
@@ -1843,14 +1832,8 @@ class GraspGenXBackend:
             "collision_checked_count": checked,
             "collision_rejected_count": rejected,
             "collision_filter_call_count": collision_filter_call_count,
-            "collision_filter_backend": collision_filter_backend,
             "collision_filter_request_batch_size": COLLISION_REQUEST_BATCH_SIZE,
             "collision_filter_internal_batch_size": COLLISION_BATCH_SIZE,
-            "collision_filter_worker_count": (
-                exact_kdtree_filter.worker_count
-                if exact_kdtree_filter is not None
-                else 0
-            ),
             "candidate_selection": selection_name,
             "mmr_diversity_order_count": diversity_order_count,
             "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,
@@ -1867,6 +1850,7 @@ class GraspGenXBackend:
                 variant_parent_evidence(recall_base, reserve)
             ),
         }
+
     def _metadata_base(self, *, gripper_name: Any) -> dict[str, Any]:
         return {
             "frame": FRAME,
@@ -1932,64 +1916,6 @@ class GraspGenXBackend:
             "deterministic": True,
             "model_loaded": True,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class _ExactKDTreeCollisionFilter:
-    tree: Any
-    surface_points: Any
-    threshold: float
-    worker_count: int
-
-    def __call__(self, grasp_poses: Any) -> Any:
-        np, _Image = _load_image_dependencies()
-        poses = np.asarray(grasp_poses, dtype=np.float32)
-        if len(poses) == 0:
-            return np.zeros((0,), dtype=bool)
-        rotations = poses[:, :3, :3]
-        translations = poses[:, :3, 3]
-        world_points = (
-            np.einsum("kij,mj->kmi", rotations, self.surface_points)
-            + translations[:, None, :]
-        )
-        distances, _indices = self.tree.query(
-            world_points.reshape(-1, 3),
-            k=1,
-            # The upstream predicate is strictly ``distance < threshold``.
-            distance_upper_bound=math.nextafter(self.threshold, 0.0),
-            workers=self.worker_count,
-        )
-        collisions = np.isfinite(distances).reshape(
-            len(poses), len(self.surface_points)
-        ).any(axis=1)
-        return ~collisions
-
-
-def _build_exact_kdtree_collision_filter(
-    *,
-    scene_points: Any,
-    gripper_surface_points: Any,
-    collision_threshold: float,
-) -> _ExactKDTreeCollisionFilter | None:
-    """Build the exact CPU nearest-neighbour predicate when SciPy is present.
-
-    This is equivalent to the upstream all-pairs ``torch.cdist`` predicate,
-    but indexes the unchanged scene once.  The upstream implementation remains
-    the dependency-free fallback for lightweight installations and tests.
-    """
-
-    try:
-        from scipy.spatial import cKDTree
-    except ImportError:
-        return None
-    np, _Image = _load_image_dependencies()
-    workers = min(COLLISION_KDTREE_MAX_WORKERS, max(1, os.cpu_count() or 1))
-    return _ExactKDTreeCollisionFilter(
-        tree=cKDTree(np.asarray(scene_points, dtype=np.float32)),
-        surface_points=np.ascontiguousarray(gripper_surface_points, dtype=np.float32),
-        threshold=float(collision_threshold),
-        worker_count=workers,
-    )
 
 
 def validate_cuda_device_name(device: Any) -> str:
