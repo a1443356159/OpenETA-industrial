@@ -1131,9 +1131,11 @@ class _Tf:
     def __init__(self, *, fail: bool = False, stamp_s: float | None = None):
         self.fail = fail
         self.stamp_s = stamp_s
+        self.lookup_times = []
 
     def lookup_transform(self, base, child, stamp):
         assert (base, child) == ("base_link", "gripper_mount_link")
+        self.lookup_times.append(stamp)
         if self.fail:
             raise LookupError
         stamp = None
@@ -1275,6 +1277,19 @@ def test_ros_state_source_rejects_cached_tf_from_before_action_boundary() -> Non
     state = source.state()
     assert state.metadata["joint_state_timestamp_s"] == pytest.approx(10.1)
     assert state.metadata["tf_timestamp_s"] == pytest.approx(10.1)
+
+
+def test_ros_state_source_queries_tf_at_the_joint_state_timestamp() -> None:
+    pytest.importorskip("rclpy.time")
+    tf = _Tf(stamp_s=10.1)
+    source = RosGazeboStateSource(_Node(), tf, config=GazeboControlConfig())
+    source.joint_state_callback(_joint_message(10.1))
+
+    state = source.state()
+
+    assert state.metadata["tf_lookup_policy"] == "joint_state_timestamp"
+    assert state.metadata["joint_tf_synchronized"] is True
+    assert getattr(tf.lookup_times[-1], "nanoseconds", None) == 10_100_000_000
 
 
 def test_recovery_ros_messages_preserve_all_seven_measured_joint_positions() -> None:

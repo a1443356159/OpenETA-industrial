@@ -1679,14 +1679,35 @@ class RosGazeboStateSource:
         ):
             raise RuntimeError("JOINT_STATE_TIMEOUT")
         try:
-            # A zero ROS time asks tf2 for the latest transform. This avoids
-            # wall-clock vs Gazebo `/clock` extrapolation while the node is
-            # still receiving simulated time ticks.
+            # Pair the geometric transform with the exact JointState sample
+            # that supplies the arm positions.  Asking tf2 for its latest
+            # transform here can combine a newly received terminal joint
+            # sample with an older transform while Gazebo is catching up.  The
+            # resulting hybrid state is neither a real robot configuration nor
+            # valid evidence for a Cartesian target check.
+            #
+            # A stamped lookup also naturally waits (via the callers' bounded
+            # retry loops) until robot_state_publisher has caught up with that
+            # JointState.  Header-less state streams retain the prior latest-TF
+            # behavior; they cannot be used across an action timestamp barrier
+            # below in any case.
+            tf_lookup_policy = "joint_state_timestamp"
             try:
+                from rclpy.clock import ClockType
                 from rclpy.time import Time
 
-                lookup_time = Time()
+                if joint_stamp is not None and math.isfinite(joint_stamp):
+                    lookup_time = Time(
+                        nanoseconds=int(round(joint_stamp * 1_000_000_000)),
+                        clock_type=ClockType.ROS_TIME,
+                    )
+                else:
+                    tf_lookup_policy = "latest_tf_for_unstamped_joint_state"
+                    lookup_time = Time()
             except ImportError:
+                # The ROS-free test fallback has no timestamp-aware tf2 time
+                # representation.  Production uses the branch above.
+                tf_lookup_policy = "node_clock_fallback"
                 lookup_time = self.node.get_clock().now()
             stamped_transform = self.tf_buffer.lookup_transform(
                 self.config.base_link, self.config.mount_child, lookup_time
@@ -1697,6 +1718,17 @@ class RosGazeboStateSource:
         tf_stamp = _stamp_seconds(
             getattr(getattr(stamped_transform, "header", None), "stamp", None)
         )
+        # An explicitly stamped lookup must return the transform for that same
+        # observation.  A microsecond tolerance only absorbs float conversion
+        # of ROS nanosecond stamps; it is not a geometric acceptance margin.
+        synchronized = (
+            tf_lookup_policy != "joint_state_timestamp"
+            or joint_stamp is None
+            or tf_stamp is None
+            or abs(tf_stamp - joint_stamp) <= 1e-6
+        )
+        if not synchronized:
+            raise RuntimeError("JOINT_TF_STATE_DESYNCHRONIZED")
         if minimum_stamp is not None and (
             joint_stamp is None
             or tf_stamp is None
@@ -1734,6 +1766,8 @@ class RosGazeboStateSource:
                     else "wall_fresh"
                 ),
                 "tf_timestamp_s": tf_stamp,
+                "tf_lookup_policy": tf_lookup_policy,
+                "joint_tf_synchronized": synchronized,
             }
         )
         return state
