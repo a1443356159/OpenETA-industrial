@@ -141,6 +141,13 @@ CONTROL_RECEIPT_FIELDS = (
     # needed by the host state machine, not by the model context.
     "detached_target_motion_audit",
     "planning_scene_target_pose_sync",
+    # A frozen grasp frontier can resume only after the simulator has
+    # detached the target and synchronized its measured world pose.  This is
+    # controller-authored recovery authorization, so retain it alongside the
+    # accompanying target-pose sync proof; otherwise the runtime would see a
+    # valid sync but be unable to distinguish an ordinary open from the
+    # bounded frozen-frontier recovery protocol.
+    "frozen_grasp_frontier_recovery",
     "planning_scene_rollback",
     # Camera refresh is downstream of the control mutation. Preserve its
     # independent state while keeping a stale observation out of the trusted

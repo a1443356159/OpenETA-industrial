@@ -731,6 +731,13 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
         "operation": "update_world_target",
         "revision": 4,
     }
+    frozen_frontier_recovery = {
+        "schema_version": "openeta.frozen_grasp_frontier_recovery.v1",
+        "status": "ready",
+        "model_inference_invoked": False,
+        "source_planning_scene_revision": 3,
+        "planning_scene_revision": 4,
+    }
     multi_sort_progress = {
         "schema_version": "openeta.multi_sort_progress.v1",
         "assignment_count": 2,
@@ -759,6 +766,7 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
         "release_sequence": release_sequence,
         "release_coordination": release_coordination,
         "planning_scene_target_pose_sync": target_pose_sync,
+        "frozen_grasp_frontier_recovery": frozen_frontier_recovery,
         "native_target_binding": native_target_binding,
         "multi_sort_progress": multi_sort_progress,
         "next_assignment_planning_scene_revision": 5,
@@ -788,6 +796,7 @@ def test_worker_proxy_retains_ordered_release_proof_in_trusted_receipt(
     assert receipt["release_sequence"] == release_sequence
     assert receipt["release_coordination"] == release_coordination
     assert receipt["planning_scene_target_pose_sync"] == target_pose_sync
+    assert receipt["frozen_grasp_frontier_recovery"] == frozen_frontier_recovery
     assert receipt["native_target_binding"] == native_target_binding
     assert receipt["multi_sort_progress"] == multi_sort_progress
     assert receipt["next_assignment_planning_scene_revision"] == 5
