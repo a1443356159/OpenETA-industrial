@@ -15,7 +15,6 @@ allowed_tools:
   - anyplace
   - move_to
   - gripper_control
-  - close_simulator_env
 ---
 # Place
 
@@ -53,8 +52,8 @@ and MoveIt owns complete robot paths.
    PlanningScene detach synchronization; repeated simulator pose polling and a
    fixed stability dwell are not part of this action.
 7. Review the causal post-release RGB-D observation with the VLM. Continue the
-   next assignment or close the environment when the part is visibly acceptable
-   in its container; observe again if ambiguous. A pre-execution planning
+   next assignment or finish the task when the part is visibly acceptable in
+   its container; observe again if ambiguous. A pre-execution planning
    rejection consumes only that pair. Resume a known safe state from the frozen
    frontier; observe unknown transport state on the same handle. Infrastructure
    errors are never candidate failures.

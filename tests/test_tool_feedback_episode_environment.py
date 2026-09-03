@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
-from adapter.protocol import EnvAction, JsonDict
+from adapter.protocol import EnvAction, EnvObservation, JsonDict
 from agent.backends.planner import StaticPlannerBackend
 from agent.runtime.episode import (
     EpisodeResult,
@@ -100,6 +100,46 @@ def _observation_response(*, reward: float = 0.0, terminated: bool = False) -> d
         "terminated": terminated,
         "truncated": False,
     }
+
+
+def test_launcher_bootstrap_is_the_first_tui_observation() -> None:
+    initial = EnvObservation.from_dict(
+        {
+            "task": "static scene description",
+            "cameras": [
+                {
+                    "frame_id": "top_camera",
+                    "rgb": [[[1, 2, 3]]],
+                    "depth": [[0.7]],
+                }
+            ],
+            "robot": {"end_effector_pose": {"xyz": [0.1, 0.2, 0.3]}},
+            "objects": [{"name": "yellow wrench"}],
+            "metadata": {
+                "image_artifacts": [
+                    {"kind": "rgb", "frame_id": "top_camera", "path": "/tmp/top.png"}
+                ]
+            },
+        }
+    )
+    environment = ToolFeedbackEpisodeEnvironment(
+        initial_observation=initial,
+        simulator_session_id="sim-session-1",
+        handle="env-1",
+    )
+
+    observation = environment.reset(
+        task="把黄色扳手放进绿色料箱",
+        metadata={"execution_id": "episode-1", "agent_session_id": "agent-1"},
+    )
+
+    assert observation.task == "把黄色扳手放进绿色料箱"
+    assert [camera.frame_id for camera in observation.cameras] == ["top_camera"]
+    assert observation.objects == [{"name": "yellow wrench"}]
+    assert observation.metadata["observation_fresh"] is True
+    assert observation.metadata["environment_lifecycle_owner"] == "host"
+    assert environment.simulator_session_id == "sim-session-1"
+    assert environment.handle == "env-1"
 
 
 def test_untrusted_tool_cannot_publish_environment_receipt() -> None:
@@ -283,123 +323,6 @@ def test_failed_refresh_attempts_remain_visible_without_truncating_episode() -> 
         assert step.truncated is False
         assert step.observation.metadata["fresh_observation_required"] is True
     assert "truncation_reason" not in step.info
-
-
-def test_successful_explicit_close_latches_episode_terminal_state(tmp_path: Path) -> None:
-    transport = SequencedSimulatorMcpTransport([{"ok": True}])
-    tools = bind_simulator_mcp_tool_handlers(
-        build_default_tool_registry(),
-        transport=transport,
-        config=SimulatorMcpToolProxyConfig(
-            session_id="sim-session",
-            handle="env-1",
-            image_output_root=tmp_path / "images",
-            response_output_root=tmp_path / "responses",
-        ),
-        tool_names=("close_simulator_env",),
-    )
-    environment = ToolFeedbackEpisodeEnvironment()
-    environment.reset(
-        task="pick cube",
-        metadata={"execution_id": "episode-1", "agent_session_id": "agent-1"},
-    )
-    with tools.execution_scope(
-        {"execution_id": "episode-1", "session_id": "agent-1"}
-    ):
-        result = tools.call("close_simulator_env", {})
-
-    step = environment.step(_action("close_simulator_env", result))
-
-    assert step.terminated is True
-    assert step.truncated is False
-    assert step.info["environment_receipt_trusted"] is True
-    assert step.info["termination_source"] == "trusted_environment_receipt"
-    assert step.info["termination_reason"] == "simulator_environment_closed"
-
-
-def test_reset_failure_cleanup_does_not_latch_episode_terminal_state() -> None:
-    environment = ToolFeedbackEpisodeEnvironment()
-    environment.reset(
-        task="pick cube",
-        metadata={"execution_id": "episode-1", "agent_session_id": "agent-1"},
-    )
-    failed_create = EnvAction(
-        action_type="tool_call",
-        command={
-            "request": {
-                "kind": "tool_call",
-                "name": "create_simulator_env",
-                "parameters": {},
-            },
-            "tool_calls": [
-                {
-                    "name": "create_simulator_env",
-                    "result": {
-                        "success": False,
-                        "details": {
-                            "host_provenance": {"authority": "environment"},
-                            "environment_receipt": {
-                                "schema_version": "openeta.environment_receipt.v1",
-                                "execution_id": "episode-1",
-                                "agent_session_id": "agent-1",
-                                "simulator_session_id": "sim-session",
-                                "handle": "abandoned-env",
-                                "reward_present": False,
-                                "observation_fresh": False,
-                                "environment_closed": True,
-                            },
-                        },
-                    },
-                }
-            ],
-        },
-    )
-
-    step = environment.step(failed_create)
-
-    assert step.terminated is False
-    assert step.truncated is False
-    assert environment.simulator_session_id == ""
-    assert environment.handle == ""
-
-    successful_retry = EnvAction(
-        action_type="tool_call",
-        command={
-            "request": {
-                "kind": "tool_call",
-                "name": "create_simulator_env",
-                "parameters": {},
-            },
-            "tool_calls": [
-                {
-                    "name": "create_simulator_env",
-                    "result": {
-                        "success": True,
-                        "details": {
-                            "host_provenance": {"authority": "environment"},
-                            "environment_receipt": {
-                                "schema_version": "openeta.environment_receipt.v1",
-                                "execution_id": "episode-1",
-                                "agent_session_id": "agent-1",
-                                "simulator_session_id": "replacement-session",
-                                "handle": "replacement-env",
-                                "reward_present": False,
-                                "observation_fresh": False,
-                                "environment_closed": False,
-                            },
-                        },
-                    },
-                }
-            ],
-        },
-    )
-
-    retry_step = environment.step(successful_retry)
-
-    assert retry_step.info["environment_receipt_trusted"] is True
-    assert "rejected_environment_receipts" not in retry_step.info
-    assert environment.simulator_session_id == "replacement-session"
-    assert environment.handle == "replacement-env"
 
 
 def test_libero_success_requires_same_execution_trusted_receipt(

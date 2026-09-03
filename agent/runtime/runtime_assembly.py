@@ -469,7 +469,6 @@ def assemble_runtime(config: RuntimeAssemblyConfig) -> RuntimeAssembly:
             tools,
             transport=config.simulator_transport,
             config=simulator_proxy_config,
-            response_callback=config.mcp_response_callback,
             replace=True,
         )
 

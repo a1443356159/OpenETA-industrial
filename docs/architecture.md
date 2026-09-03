@@ -22,10 +22,10 @@ controller expansion, action clipping, and backend action vectors. Low-level
 simulator state is therefore not required in the agent-facing observation
 contract merely to execute control tools.
 
-Current remote simulator MCP mappings used by the agent runtime:
+The launcher owns `create_env -> reset_env` before TUI startup and `close_env`
+after TUI exit. These lifecycle calls are not agent tools. Current remote
+simulator MCP mappings used inside the agent task loop are:
 
-- `create_simulator_env` -> `create_env` then `reset_env`
-- `close_simulator_env` -> `close_env`
 - `observe` -> `render_env`
 - `move_to` -> `move_to`
 - `gripper_control(position=1)` -> `gripper_open`

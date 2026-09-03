@@ -14,11 +14,14 @@ import agent.cli.experiment as experiment_cli
 import agent.runtime.runtime_assembly as runtime_assembly
 from adapter.protocol import CameraFrame, EnvAction, EnvObservation, RobotState, StepResult
 from agent.cli.openeta_cli import (
+    HOST_SIMULATOR_BOOTSTRAP_ENV,
     OpenEtaCli,
     SLASH_COMMANDS,
     SlashCommandCompleter,
-    _cancel_active_completion,
+    _bootstrap_initial_observation,
     _build_cli_checker_config,
+    _cancel_active_completion,
+    _load_host_simulator_bootstrap,
     _load_mcp_url,
     _load_sim_mcp_url,
     _parse_promote_memory_args,
@@ -64,6 +67,42 @@ def test_main_dispatches_non_tui_command_without_building_cli(monkeypatch) -> No
 
     assert exit_code == 7
     assert captured == ["inspect", "--experiment-id", "experiment-1"]
+
+
+def test_cli_loads_launcher_owned_bootstrap_and_initial_observation(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "host-simulator-bootstrap.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "openeta.host_simulator_bootstrap.v1",
+                "lifecycle_owner": "host",
+                "status": "active",
+                "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+                "handle": "env-1",
+                "session_id": "sim-session-1",
+                "mcp_url": "http://127.0.0.1:18765/mcp",
+                "initial_observation": {
+                    "task": "task-neutral scene",
+                    "cameras": [{"frame_id": "top", "rgb": [[[1, 2, 3]]]}],
+                    "robot": {},
+                    "objects": [{"name": "wrench"}],
+                    "metadata": {"observation_fresh": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(HOST_SIMULATOR_BOOTSTRAP_ENV, str(path))
+
+    bootstrap = _load_host_simulator_bootstrap()
+    observation = _bootstrap_initial_observation(bootstrap)
+
+    assert bootstrap["bootstrap_path"] == str(path.resolve())
+    assert observation is not None
+    assert observation.cameras[0].frame_id == "top"
+    assert observation.objects == [{"name": "wrench"}]
 
 
 @pytest.mark.parametrize(
@@ -1049,7 +1088,9 @@ def test_cli_binds_perception_mcp_handlers_from_registry(monkeypatch, tmp_path) 
     assert anyplace.details["outputs"]["candidate_count"] == 10
 
 
-def test_cli_reuses_simulator_mcp_state_for_stable_control_tools(monkeypatch) -> None:
+def test_cli_reuses_launcher_bootstrap_for_stable_control_tools(
+    tmp_path, monkeypatch
+) -> None:
     class FakeTransport:
         def __init__(self, url: str) -> None:
             self.url = url
@@ -1074,12 +1115,30 @@ def test_cli_reuses_simulator_mcp_state_for_stable_control_tools(monkeypatch) ->
 
     monkeypatch.setattr("agent.cli.openeta_cli._load_sim_mcp_url", lambda: "http://sim/mcp")
     monkeypatch.setattr("agent.cli.openeta_cli.simulator_mcp_transport_for_url", fake_transport)
-    cli = OpenEtaCli()
-    cli._sync_simulator_mcp_response(
-        "create_env",
-        {"env_id": "openeta/libero_libero_10_task0-v0"},
-        {"handle": "env-1", "session_id": "session-1"},
+    bootstrap_path = tmp_path / "host-simulator-bootstrap.json"
+    bootstrap_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "openeta.host_simulator_bootstrap.v1",
+                "lifecycle_owner": "host",
+                "status": "active",
+                "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+                "handle": "env-1",
+                "session_id": "session-1",
+                "mcp_url": "http://sim/mcp",
+                "initial_observation": {
+                    "task": "task-neutral scene",
+                    "cameras": [],
+                    "robot": {},
+                    "objects": [],
+                    "metadata": {},
+                },
+            }
+        ),
+        encoding="utf-8",
     )
+    monkeypatch.setenv(HOST_SIMULATOR_BOOTSTRAP_ENV, str(bootstrap_path))
+    cli = OpenEtaCli()
 
     result = cli._require_runtime().tools.call(
         "move_to",
@@ -1098,66 +1157,28 @@ def test_cli_reuses_simulator_mcp_state_for_stable_control_tools(monkeypatch) ->
     }
 
 
-def test_cli_close_closes_active_mcp_environment_once(monkeypatch, capsys) -> None:
-    class FakeTransport:
-        def __init__(self) -> None:
-            self.calls = []
+def test_cli_close_leaves_launcher_owned_environment_open() -> None:
+    class UnexpectedTransport:
+        def call_tool(self, *_args, **_kwargs):
+            raise AssertionError("the TUI must not close the launcher-owned environment")
 
-        def call_tool(self, name, arguments, *, timeout_s=None):
-            self.calls.append(
-                {
-                    "name": name,
-                    "arguments": dict(arguments),
-                    "timeout_s": timeout_s,
-                }
-            )
-            return {"ok": True, "already_closed": False, "cleanup_errors": []}
-
-    monkeypatch.setattr(cli_module, "_load_sim_mcp_url", lambda: "")
     cli = OpenEtaCli()
-    transport = FakeTransport()
-    cli.state.simulator_mcp_transport = transport
+    cli.state.simulator_mcp_transport = UnexpectedTransport()
     cli.state.simulator_mcp_config.handle = "env-1"
     cli.state.simulator_mcp_config.session_id = "session-1"
-    cli.state.simulator_mcp_config.image_bundle_id = "session-1"
-    cli.state.simulator_mcp_config.timeout_s = 120.0
 
     first = cli.close()
     second = cli.close()
 
-    assert first["ok"] is True and first["closed"] is True
+    assert first == {
+        "ok": True,
+        "closed": False,
+        "skipped": True,
+        "reason": "simulator_lifecycle_owned_by_launcher",
+    }
     assert second == first
-    assert transport.calls == [
-        {
-            "name": "close_env",
-            "arguments": {"handle": "env-1", "session_id": "session-1"},
-            "timeout_s": 30.0,
-        }
-    ]
-    assert cli.state.simulator_mcp_config.handle == ""
-    assert cli.state.simulator_mcp_config.session_id == ""
-    assert cli.state.simulator_mcp_config.image_bundle_id == ""
-    assert "active MCP environment closed" in capsys.readouterr().out
-
-
-def test_cli_close_preserves_active_state_when_cleanup_fails(monkeypatch, capsys) -> None:
-    class FailingTransport:
-        def call_tool(self, name, arguments, *, timeout_s=None):
-            raise TimeoutError("close timed out")
-
-    monkeypatch.setattr(cli_module, "_load_sim_mcp_url", lambda: "")
-    cli = OpenEtaCli()
-    cli.state.simulator_mcp_transport = FailingTransport()
-    cli.state.simulator_mcp_config.handle = "env-1"
-    cli.state.simulator_mcp_config.session_id = "session-1"
-
-    result = cli.close()
-
-    assert result["ok"] is False
-    assert result["error"] == "close timed out"
     assert cli.state.simulator_mcp_config.handle == "env-1"
     assert cli.state.simulator_mcp_config.session_id == "session-1"
-    assert "could not close active MCP environment" in capsys.readouterr().out
 
 
 def test_cli_does_not_sync_failed_simulator_mcp_response(tmp_path: Path) -> None:
@@ -1169,8 +1190,8 @@ def test_cli_does_not_sync_failed_simulator_mcp_response(tmp_path: Path) -> None
     cli = OpenEtaCli()
 
     cli._sync_simulator_mcp_response(
-        "create_env",
-        {"env_id": "openeta/libero_libero_10_task0-v0"},
+        "render_env",
+        {"handle": "env-1", "session_id": "session-1"},
         {
             "success": False,
             "response_path": str(response_path),
@@ -1192,8 +1213,8 @@ def test_cli_syncs_simulator_mcp_state_from_response_artifact(tmp_path: Path) ->
     cli.state.simulator_mcp_url = "http://sim.example/sse"
 
     cli._sync_simulator_mcp_response(
-        "create_env",
-        {"env_id": "openeta/libero_libero_10_task0-v0"},
+        "render_env",
+        {"handle": "env-from-file", "session_id": "session-from-file"},
         {
             "response_path": str(response_path),
             "response_omitted": True,
@@ -1434,41 +1455,33 @@ def test_cli_tool_trace_collapses_large_result_to_key_facts(monkeypatch, capsys)
             "status": "executed",
             "request": {
                 "kind": "tool_call",
-                "name": "create_simulator_env",
+                "name": "grasp_pose_estimate",
                 "parameters": {
-                    "env_id": "openeta/libero_libero_10_task0-v0",
+                    "image": "/tmp/top-rgb.png",
                     "debug": huge,
                 },
-                "reasoning": "Create one simulator environment.",
+                "reasoning": "Generate grasp candidates.",
             },
             "tool_calls": [
                 {
-                    "name": "create_simulator_env",
+                    "name": "grasp_pose_estimate",
                     "status": "executed",
                     "result": {
                         "success": True,
-                        "content": "Simulator environment created and reset.",
+                        "content": "Generated grasp candidates.",
                         "details": {
                             "outputs": {
-                                "environment": {
-                                    "env_id": "openeta/libero_libero_10_task0-v0",
-                                    "handle": "env-1",
-                                    "session_id": "session-1",
-                                    "dashboard_url": "http://sim/session/session-1",
-                                },
-                                "initial_observation": {
-                                    "response_path": "tmp/tool_result/reset-response.json",
-                                    "cameras": [{"rgb_base64": huge}],
-                                },
+                                "result_id": "grasp-result-1",
+                                "candidate_count": 512,
+                                "best_grasp_candidate": {"id": "grasp_000"},
                                 "raw_backend_payload": huge,
                             },
                             "artifacts": [
-                                {"path": "tmp/image/agentview-rgb.png"},
-                                {"path": "tmp/tool_result/create-response.json"},
+                                {"path": "tmp/grasp/candidates.json"},
+                                {"path": "tmp/grasp/preview.png"},
                             ],
                             "state_delta": {
-                                "simulator_environment": {"handle": "env-1"},
-                                "observation": {"raw": huge},
+                                "grasp_candidates": {"count": 512},
                             },
                             "diagnostics": [],
                         },
@@ -1484,9 +1497,9 @@ def test_cli_tool_trace_collapses_large_result_to_key_facts(monkeypatch, capsys)
     output = capsys.readouterr().out
     result_lines = output.split("    result ", 1)[1].splitlines()
     assert len(result_lines) <= cli_module.TOOL_RESULT_MAX_LINES
-    assert "Simulator environment created and reset." in output
+    assert "Generated grasp candidates." in output
     assert "artifacts=2" in output
-    assert "env_id" in output
+    assert "grasp-result-1" in output
     assert "full result retained in session trace" in output
     assert huge not in output
     assert '"raw_backend_payload"' not in output

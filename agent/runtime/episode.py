@@ -807,16 +807,24 @@ class ToolFeedbackEpisodeEnvironment:
     official episode reward or terminal state.
     """
 
-    def __init__(self, *, max_steps: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_steps: int | None = None,
+        initial_observation: EnvObservation | None = None,
+        simulator_session_id: str = "",
+        handle: str = "",
+    ) -> None:
         self.max_steps = max_steps
+        self.initial_observation = initial_observation
         self.task = ""
         self.step_idx = 0
         self.last_action_summary: JsonDict = {}
         self.current_observation: EnvObservation | None = None
         self.execution_id = ""
         self.agent_session_id = ""
-        self.simulator_session_id = ""
-        self.handle = ""
+        self.simulator_session_id = simulator_session_id
+        self.handle = handle
         self.refresh_attempts = 0
 
     def reset(self, *, task: str, metadata: JsonDict | None = None) -> EnvObservation:
@@ -826,17 +834,31 @@ class ToolFeedbackEpisodeEnvironment:
         reset_metadata = dict(metadata or {})
         self.execution_id = str(reset_metadata.get("execution_id") or "")
         self.agent_session_id = str(reset_metadata.get("agent_session_id") or "")
-        self.simulator_session_id = ""
-        self.handle = ""
         self.refresh_attempts = 0
-        self.current_observation = _neutral_tool_feedback_observation(
-            task=self.task,
-            metadata={
-                "step_idx": self.step_idx,
-                "source": type(self).__name__,
-                **reset_metadata,
-            },
-        )
+        initial_metadata = {
+            "step_idx": self.step_idx,
+            "source": type(self).__name__,
+            **reset_metadata,
+        }
+        if self.initial_observation is None:
+            self.current_observation = _neutral_tool_feedback_observation(
+                task=self.task,
+                metadata=initial_metadata,
+            )
+        else:
+            initial = self.initial_observation
+            self.current_observation = EnvObservation(
+                task=self.task,
+                cameras=list(initial.cameras),
+                robot=initial.robot,
+                objects=[dict(row) for row in initial.objects],
+                metadata={
+                    **initial.metadata,
+                    **initial_metadata,
+                    "observation_fresh": True,
+                    "environment_lifecycle_owner": "host",
+                },
+            )
         return self.current_observation
 
     def step(self, action: EnvAction) -> StepResult:
@@ -849,18 +871,7 @@ class ToolFeedbackEpisodeEnvironment:
             simulator_session_id=self.simulator_session_id,
             handle=self.handle,
         )
-        abandoned_start_cleanup = bool(
-            receipt
-            and _action_request_name(action) == "create_simulator_env"
-            and receipt.get("environment_closed") is True
-        )
-        if abandoned_start_cleanup:
-            # A failed start may return the identity of the temporary
-            # environment it already closed.  That identity is evidence for
-            # this receipt, not the identity of the next startup attempt.
-            self.simulator_session_id = ""
-            self.handle = ""
-        elif receipt:
+        if receipt:
             self.simulator_session_id = str(
                 receipt.get("simulator_session_id") or self.simulator_session_id
             )
@@ -921,17 +932,8 @@ class ToolFeedbackEpisodeEnvironment:
         reward = _trusted_receipt_reward(receipt)
         receipt_terminated = _trusted_receipt_flag(receipt, "terminated")
         receipt_truncated = _trusted_receipt_flag(receipt, "truncated")
-        explicit_environment_close = (
-            _action_request_name(action) == "close_simulator_env"
-            and _trusted_receipt_flag(receipt, "environment_closed")
-        )
         max_steps_reached = self.max_steps is not None and self.step_idx >= self.max_steps
-        # An explicit, host-authoritative close ends this episode even when the
-        # remote simulator's close response does not repeat Gym's ``terminated``
-        # flag.  Do not infer the same from a failed create/reset cleanup: that
-        # receipt may also say the abandoned handle was closed, but the planner
-        # must still be allowed to retry infrastructure startup.
-        terminated = receipt_terminated or explicit_environment_close or max_steps_reached
+        terminated = receipt_terminated or max_steps_reached
         truncated = receipt_truncated
         info: JsonDict = {
             "step_idx": self.step_idx,
@@ -946,13 +948,6 @@ class ToolFeedbackEpisodeEnvironment:
             motion = receipt.get("motion")
             if isinstance(motion, dict):
                 info["motion"] = dict(motion)
-        if explicit_environment_close:
-            info.update(
-                {
-                    "termination_source": "trusted_environment_receipt",
-                    "termination_reason": "simulator_environment_closed",
-                }
-            )
         if rejected_receipts:
             info["rejected_environment_receipts"] = rejected_receipts
         return StepResult(

@@ -14,8 +14,6 @@ task_patterns:
   - 探索机型参数
   - 建立具身 profile
 allowed_tools:
-  - create_simulator_env
-  - close_simulator_env
   - observe
   - python_exec
   - sam3

@@ -243,7 +243,7 @@ def test_python_exec_rejects_simulator_environment_creation() -> None:
     )
 
     assert result.success is False
-    assert "create_simulator_env agent tool" in result.content
+    assert "lifecycle is owned by the host launcher" in result.content
     assert transport.calls == []
 
 
@@ -342,7 +342,7 @@ def test_python_exec_mcp_call_materializes_images_before_long_text(tmp_path: Pat
 
     result = runtime.handler(
         _context(
-            "response = mcp.call_tool('reset_env', {})\n"
+            "response = mcp.call_tool('render_env', {})\n"
             "images = artifacts.materialize_images(response, bundle_id='again')\n"
             "camera = images['payload']['cameras'][0]\n"
             "full_response = artifacts.read_json(response['response_path'])\n"
@@ -400,7 +400,7 @@ def test_python_exec_mcp_call_exposes_anygrasp_intrinsics(tmp_path: Path) -> Non
 
     result = runtime.handler(
         _context(
-            "response = mcp.call_tool('reset_env', {})\n"
+            "response = mcp.call_tool('render_env', {})\n"
             "full_response = artifacts.read_json(response['response_path'])\n"
             "result = {\n"
             "    'inline_intrinsics': response['cameras'][0]['anygrasp_intrinsics'],\n"

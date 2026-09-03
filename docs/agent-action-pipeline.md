@@ -362,13 +362,13 @@ server maps `observe -> render_env`, `move_to -> move_to`; and
 `gripper_control` is routed to `gripper_open` or `gripper_close` according to
 the requested gripper position.
 
-Environment creation is a stable AgentTool operation. `create_simulator_env`
-is the only planner-facing creation path and owns the MCP
-`create_env -> reset_env` sequence, 512x512 defaults, artifact materialization,
-and active handle/session synchronization. The generic `python_exec` MCP helper
-rejects direct `create_env` calls so creation cannot bypass this lifecycle.
-Low-frequency discovery and experimental MCP calls such as `search_envs` may
-still use `mcp.call_tool(name, arguments)` from restricted `python_exec`.
+Environment lifecycle is outside the agent loop. The launcher completes MCP
+`create_env -> reset_env`, materializes the first observation, and makes the
+Gazebo GUI visible before starting the TUI; after TUI exit it closes the exact
+bound handle in a `finally` path. The generic `python_exec` helper rejects
+`create_env`, `reset_env`, and `close_env`, so the model cannot bypass this
+ownership boundary. Low-frequency read-only discovery calls may still use the
+restricted helper.
 
 `python_exec` defaults to the restricted in-process globals. A request for
 `sandbox="outside_sandbox"` requires explicit approval for each invocation and

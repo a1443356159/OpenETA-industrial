@@ -18,12 +18,12 @@ from agent.runtime.planner import (
     _model_request_context,
     _model_phase_and_legal_tools,
     _operator_control_metadata,
-    _operator_environment_start_obligation,
     _operator_planner_mode,
     _operator_semantic_prompts,
     _sam3_request_identity,
     _semantic_camera_view_identity,
     _semantic_perception_obligation,
+    _validate_sam3_parameters,
 )
 from agent.runtime.runtime import OpenEtaAgentRuntime
 from agent.runtime.sam3_selection import (
@@ -1522,57 +1522,17 @@ def test_same_materialized_rgb_keeps_bundle_across_agent_step_numbers() -> None:
     assert identities[0]["perception_bundle_id"] == identities[1]["perception_bundle_id"]
 
 
-def test_explicit_post_create_observe_precedes_semantic_perception() -> None:
-    observation = EnvObservation(
-        task="normal",
-        cameras=[],
-        robot=RobotState(),
-        metadata={"step_idx": 2},
-    )
-    camera_artifacts = [
-        {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/reset.png"}
-    ]
-    memory_context = {
-        "scene_epoch": 1,
-        "current_user_request": (
-            "创建环境后先 observe；create 返回的 initial observation 不计作显式 observe。"
-        ),
-        "latest_environment_receipt": {
-            "info": {
-                "previous_action": {"request_name": "create_simulator_env"}
-            }
-        },
-        "sam3_semantic_state": {"roles": {}, "attempts": []},
-    }
-
-    obligation = _semantic_perception_obligation(
-        observation=observation,
-        camera_artifacts=camera_artifacts,
-        memory_context=memory_context,
-    )
-
-    assert obligation["required_tool"] == "observe"
-    assert obligation["required_parameters"] == {
-        "reason": "explicit_post_create_observation_required"
-    }
-
-
 def test_out_of_band_scripted_metadata_keeps_human_task_natural(monkeypatch) -> None:
     monkeypatch.setenv(
         "OPENETA_SCRIPTED_TASK_METADATA",
         "[automation=scripted_tui; planner_mode=agentic_closed_loop; "
-        "initial_observe=required; grasp_target=yellow_adjustable_wrench]",
+        "grasp_target=yellow_adjustable_wrench]",
     )
     memory_context = {
         "scene_epoch": 1,
         "current_user_request": (
             "环境打开以后先看一眼工作台，再把黄色活动扳手放进绿色料箱。"
         ),
-        "latest_environment_receipt": {
-            "info": {
-                "previous_action": {"request_name": "create_simulator_env"}
-            }
-        },
         "sam3_semantic_state": {"roles": {}, "attempts": []},
     }
 
@@ -1590,39 +1550,8 @@ def test_out_of_band_scripted_metadata_keeps_human_task_natural(monkeypatch) -> 
     )
 
     assert "automation=" not in memory_context["current_user_request"]
-    assert obligation["required_tool"] == "observe"
+    assert obligation["required_tool"] == "sam3"
     assert obligation["semantic_role"] == "grasp_target"
-
-
-def test_out_of_band_human_tui_metadata_binds_only_environment(monkeypatch) -> None:
-    human_request = "把黄色活动扳手放进绿色料箱，然后把红色螺栓放进蓝色料箱。"
-    monkeypatch.setenv(
-        "OPENETA_OPERATOR_TASK_METADATA",
-        "[operator=human_tui; planner_mode=agentic_closed_loop; "
-        "environment_id=openeta/gazebo-test-v0; environment_seed=7; "
-        "work_order_source=vlm_conversation]",
-    )
-
-    control = _operator_control_metadata(human_request)
-    obligation = _operator_environment_start_obligation(
-        task=control,
-        active_environment_task=None,
-    )
-
-    assert human_request not in control
-    assert _operator_planner_mode(control) == "agentic_closed_loop"
-    assert obligation == {
-        "schema_version": "openeta.environment_start_obligation.v1",
-        "status": "required",
-        "required_tool": "create_simulator_env",
-        "required_parameters": {
-            "env_id": "openeta/gazebo-test-v0",
-            "seed": 7,
-        },
-        "environment_id": "openeta/gazebo-test-v0",
-        "source": "human_tui_environment_binding",
-    }
-    assert _operator_semantic_prompts(control) == {}
 
 
 def test_scripted_fixed_semantics_dispatch_sam3_without_model_routing_turn() -> None:
@@ -1792,6 +1721,194 @@ def test_work_order_uses_catalog_perception_prompt_for_placement_segmentation() 
     assert obligation["required_parameters"]["prompt"] == (
         "blue square area inside bin"
     )
+
+
+def test_vlm_work_order_batches_target_and_region_on_one_frozen_observation() -> None:
+    observation = EnvObservation(
+        task="sort two industrial parts",
+        cameras=[],
+        robot=RobotState(),
+        metadata={"step_idx": 2, "observation_id": "capture-42"},
+    )
+    obligation = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=[
+            {
+                "kind": "rgb",
+                "frame_id": "top_camera_optical_frame",
+                "role": "scene_primary",
+                "path": "/tmp/top.png",
+            }
+        ],
+        memory_context={
+            "scene_epoch": 7,
+            "work_order": {
+                "schema_version": "openeta.work_order.v1",
+                "source": "vlm_tool_call",
+                "items": [
+                    {
+                        "target_prompt": "yellow adjustable wrench",
+                        "placement_region_prompt": "green parts bin",
+                    }
+                ],
+            },
+            "multi_sort_progress": {
+                "active_assignment": {
+                    "target_perception_prompt": "yellow adjustable wrench",
+                    "placement_region_perception_prompt": "green parts bin interior",
+                }
+            },
+            "sam3_semantic_state": {"roles": {}, "attempts": []},
+        },
+    )
+
+    assert obligation is not None
+    assert obligation["required_tool"] == "sam3"
+    assert obligation["semantic_roles"] == ["grasp_target", "placement_region"]
+    parameters = obligation["required_parameters"]
+    assert parameters["mode"] == "assignment_batch"
+    requests = parameters["requests"]
+    assert [request["semantic_role"] for request in requests] == [
+        "grasp_target",
+        "placement_region",
+    ]
+    assert [request["prompt"] for request in requests] == [
+        "yellow adjustable wrench",
+        "green parts bin interior",
+    ]
+    assert len({request["image"] for request in requests}) == 1
+    assert len({request["perception_bundle_id"] for request in requests}) == 1
+    assert len({request["observation_id"] for request in requests}) == 1
+    assert len({request["attempt_id"] for request in requests}) == 2
+    assert _validate_sam3_parameters(parameters) == []
+
+    mismatched = {
+        **parameters,
+        "requests": [dict(requests[0]), {**requests[1], "image": "/tmp/other.png"}],
+    }
+    assert any("same `image`" in error for error in _validate_sam3_parameters(mismatched))
+
+
+def test_assignment_batch_requires_vlm_authored_work_order() -> None:
+    obligation = _semantic_perception_obligation(
+        observation=EnvObservation(
+            task="pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"step_idx": 1},
+        ),
+        camera_artifacts=[
+            {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/top.png"}
+        ],
+        memory_context={
+            "scene_epoch": 1,
+            "multi_sort_progress": {
+                "active_assignment": {
+                    "target_perception_prompt": "yellow wrench",
+                    "placement_region_perception_prompt": "green bin interior",
+                }
+            },
+            "sam3_semantic_state": {"roles": {}, "attempts": []},
+        },
+    )
+
+    assert obligation is not None
+    assert obligation["required_parameters"]["mode"] == "text"
+    assert obligation["semantic_role"] == "grasp_target"
+
+
+def test_memory_expands_assignment_batch_into_two_independent_sam3_records() -> None:
+    def child(role: str, result_id: str, prompt: str, mask_ref: str) -> dict:
+        parameters = {
+            "mode": "text",
+            "image": "/tmp/top.png",
+            "prompt": prompt,
+            "semantic_role": role,
+            "semantic_target": prompt,
+            "perception_bundle_id": "bundle-1",
+            "observation_id": "observation-1",
+            "scene_epoch": 0,
+            "attempt_id": f"{role}-attempt",
+        }
+        detection = {
+            "id": "detection_000",
+            "label": prompt,
+            "score": 0.9,
+            "mask_ref": mask_ref,
+        }
+        return {
+            "success": True,
+            "content": "SAM3 segmentation completed.",
+            "details": {
+                "parameters": parameters,
+                "outputs": {
+                    **parameters,
+                    "result_id": result_id,
+                    "source_image": "/tmp/top.png",
+                    "detection_count": 1,
+                    "detections": [detection],
+                    "selected_detection": detection,
+                    "selection_required": False,
+                    "selection_review": {
+                        "decision": "select",
+                        "detection_id": "detection_000",
+                        "selection_source": "host_singleton_text_detection",
+                    },
+                },
+                "artifacts": [],
+            },
+        }
+
+    target = child("grasp_target", "target-result", "yellow wrench", "/tmp/target.png")
+    region = child(
+        "placement_region",
+        "region-result",
+        "green bin interior",
+        "/tmp/region.png",
+    )
+    memory = AgentMemory()
+    memory.start_session(task="sort one part")
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "tool_calls": [
+                    {
+                        "name": "sam3",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "outputs": {
+                                    "schema_version": "openeta.sam3.assignment_batch.v1",
+                                    "semantic_batch_results": [
+                                        {
+                                            "index": 0,
+                                            "semantic_role": "grasp_target",
+                                            "result": target,
+                                        },
+                                        {
+                                            "index": 1,
+                                            "semantic_role": "placement_region",
+                                            "result": region,
+                                        },
+                                    ],
+                                }
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+    )
+
+    assert memory.selected_sam3_detection()["mask_ref"] == "/tmp/target.png"
+    assert memory.placement_object_detection()["mask_ref"] == "/tmp/target.png"
+    assert memory.placement_region_detection()["mask_ref"] == "/tmp/region.png"
+    assert memory.pending_sam3_selection() is None
+    assert [
+        attempt["semantic_role"] for attempt in memory.sam3_semantic_state()["attempts"]
+    ] == ["grasp_target", "placement_region"]
 
 
 def _grasp_target_retry_obligation(

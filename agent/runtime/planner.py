@@ -98,18 +98,6 @@ _OPERATOR_TASK_MARKER_RE = re.compile(
     r"(?P<body>[^\]]+)\]",
     flags=re.IGNORECASE,
 )
-_OPERATOR_ENVIRONMENT_ID_RE = re.compile(
-    r"(?:^|;)\s*environment_id=(?P<value>[A-Za-z0-9._:/-]+)\s*(?:;|$)",
-    flags=re.IGNORECASE,
-)
-_OPERATOR_ENVIRONMENT_TASK_RE = re.compile(
-    r"(?:^|;)\s*environment_task=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
-    flags=re.IGNORECASE,
-)
-_OPERATOR_ENVIRONMENT_SEED_RE = re.compile(
-    r"(?:^|;)\s*environment_seed=(?P<value>[0-9]+)\s*(?:;|$)",
-    flags=re.IGNORECASE,
-)
 _OPERATOR_PLANNER_MODE_RE = re.compile(
     r"(?:^|;)\s*planner_mode=(?P<value>[A-Za-z0-9_-]+)\s*(?:;|$)",
     flags=re.IGNORECASE,
@@ -777,57 +765,42 @@ def _host_obligation_decision(
 
     agentic_closed_loop = _agentic_closed_loop_enabled(tool_context)
     completion = tool_context.get("task_completion_evidence")
+    host_owned_completion = bool(
+        isinstance(completion, dict)
+        and completion.get("lifecycle_owner") == "host"
+        and completion.get("host_cleanup_pending") is True
+    )
     if (
         not agentic_closed_loop
         and isinstance(completion, dict)
         and completion.get("status") == "proven"
         and completion.get("outcome") == "success"
-        and completion.get("environment_closed") is True
+        and (
+            completion.get("environment_closed") is True
+            or host_owned_completion
+        )
     ):
         return PlannerDecision(
             action_type="response",
             action="task_complete",
             parameters={
                 "success": True,
-                "summary": "The embodied task completed and its environment was closed.",
+                "summary": (
+                    "The embodied task completed; the launcher will close Gazebo."
+                    if host_owned_completion
+                    else "The embodied task completed and its environment was closed."
+                ),
             },
             reasoning=(
                 "The host retained the ordered native release, causal visual-review "
-                "evidence, and a successful environment close; no further tool action "
-                "or human input is required."
+                "evidence. Environment cleanup is either already proven or owned by "
+                "the launcher after TUI exit; no further agent action is required."
             ),
             metadata={
                 "host_obligation": {
                     "schema_version": completion.get("schema_version"),
                     "stage": "task_complete",
                     "source": completion.get("source"),
-                }
-            },
-        )
-
-    environment_start = tool_context.get("environment_start_obligation")
-    if (
-        not agentic_closed_loop
-        and isinstance(environment_start, dict)
-        and environment_start.get("status") == "required"
-        and environment_start.get("required_tool") == "create_simulator_env"
-        and isinstance(environment_start.get("required_parameters"), dict)
-        and tools.can_execute("create_simulator_env")
-    ):
-        return PlannerDecision(
-            action_type="tool_call",
-            action="create_simulator_env",
-            parameters=dict(environment_start["required_parameters"]),
-            reasoning=(
-                "The scripted acceptance task declares one exact environment ID; "
-                "start that environment deterministically without a model routing turn."
-            ),
-            metadata={
-                "host_obligation": {
-                    "schema_version": environment_start.get("schema_version"),
-                    "tool": "create_simulator_env",
-                    "environment_id": environment_start.get("environment_id"),
-                    "source": environment_start.get("source"),
                 }
             },
         )
@@ -1119,7 +1092,7 @@ def _host_obligation_decision(
         # decision; they are not a hidden executable task macro.  The host may
         # still force fresh observation/reconciliation above and may terminate
         # unsafe or exhausted states, but semantic perception, planning-tool
-        # selection, every AtomAction, lifecycle completion, and recovery
+        # selection, every AtomAction, task completion, and recovery
         # progression must fall through to the configured Planner backend.
         return None
     if isinstance(recovery, dict) and recovery.get("status") == "required":
@@ -1838,7 +1811,6 @@ def _host_obligation_decision(
             in {
                 "gripper_control",
                 "move_to",
-                "close_simulator_env",
                 "observe",
             }
             and isinstance(required.get("parameters"), dict)
@@ -2240,8 +2212,7 @@ def _validate_planner_decision(
             if not decision.code:
                 errors.append(
                     "code_policy is reserved for bounded policy snippets and requires a "
-                    "top-level `code` string. Use tool_call::create_simulator_env for "
-                    "environment creation and stable simulator tools for control."
+                    "top-level `code` string."
                 )
         elif decision.action in {"sense"}:
             pass
@@ -2365,11 +2336,11 @@ def _validate_configure_work_order_parameters(parameters: JsonDict) -> list[str]
         if not isinstance(item, dict):
             errors.append(f"configure_work_order item {index} must be an object.")
             continue
-        for field in ("target_prompt", "placement_region_prompt"):
-            value = item.get(field)
+        for field_name in ("target_prompt", "placement_region_prompt"):
+            value = item.get(field_name)
             if not isinstance(value, str) or not value.strip():
                 errors.append(
-                    f"configure_work_order item {index} requires a non-empty `{field}`."
+                    f"configure_work_order item {index} requires a non-empty `{field_name}`."
                 )
     return errors
 
@@ -2426,6 +2397,57 @@ def _validate_web_fetch_parameters(parameters: JsonDict) -> list[str]:
 
 
 def _validate_sam3_parameters(parameters: JsonDict) -> list[str]:
+    mode = str(parameters.get("mode") or "").strip().lower()
+    if mode == "assignment_batch":
+        requests = parameters.get("requests")
+        if not isinstance(requests, list) or len(requests) != 2:
+            return [
+                "sam3 assignment_batch requires exactly two ordered `parameters.requests`."
+            ]
+        expected_roles = ("grasp_target", "placement_region")
+        errors: list[str] = []
+        child_parameters: list[JsonDict] = []
+        for index, (request, expected_role) in enumerate(
+            zip(requests, expected_roles, strict=True)
+        ):
+            if not isinstance(request, dict):
+                errors.append(f"sam3 assignment_batch request {index} must be an object.")
+                continue
+            child = dict(request)
+            child_mode = str(child.get("mode") or "text").strip().lower()
+            if child_mode != "text":
+                errors.append(
+                    f"sam3 assignment_batch request {index} must use mode=text."
+                )
+            if str(child.get("semantic_role") or "").strip().lower() != expected_role:
+                errors.append(
+                    f"sam3 assignment_batch request {index} must use semantic_role="
+                    f"{expected_role}."
+                )
+            if child_mode != "assignment_batch":
+                errors.extend(
+                    f"sam3 assignment_batch request {index}: {error}"
+                    for error in _validate_sam3_parameters(child)
+                )
+            child_parameters.append(child)
+        if len(child_parameters) == 2:
+            shared_fields = (
+                "image",
+                "perception_bundle_id",
+                "observation_id",
+                "scene_epoch",
+                "view_identity",
+            )
+            for field_name in shared_fields:
+                first = child_parameters[0].get(field_name)
+                second = child_parameters[1].get(field_name)
+                if first != second:
+                    errors.append(
+                        "sam3 assignment_batch requests must share the same "
+                        f"`{field_name}`."
+                    )
+        return errors
+
     errors: list[str] = []
     semantic_role = str(parameters.get("semantic_role") or "").strip().lower()
     if semantic_role and semantic_role not in {
@@ -2934,7 +2956,7 @@ def _default_tool_planner_system_prompt() -> str:
         "top-level kinds are tool_call and response. For tool_call, choose one currently "
         "executable tool by exact name from tool_context.tool_references. For response, "
         "use ask_human, talk, or task_complete; never use it as a generic final status, "
-        "and finish with task_complete only after host-proven success and cleanup. "
+        "and finish with task_complete only after host-proven task success. "
         "tool_context.controller gives the current phase and legal tools. In "
         "planner_mode=agentic_closed_loop, tool_context.obligations are host safety and "
         "geometry constraints, not decisions: explicitly choose the next legal tool and "
@@ -2950,10 +2972,8 @@ def _default_tool_planner_system_prompt() -> str:
         "single current state summary. Runtime-discovered catalogs, docstrings, schemas, "
         "receipts, and errors are authoritative over examples and skill text. Selected "
         "skills are editable text guidance, not executable macros; inspect "
-        "tool_context.skill_usage.inspection_required before world-mutating control. "
-        "Use create_simulator_env and close_simulator_env only when those lifecycle "
-        "tools are currently executable; do not bypass their host-owned lifecycle with "
-        "ad-hoc calls. Continue tool_context.state.active_environment_task unless the "
+        "tool_context.skill_usage.inspection_required before world-mutating control. Continue "
+        "tool_context.state.active_environment_task unless the "
         "latest real user message revises or cancels it. Tool contracts are host-owned "
         "and immutable. Use web tools only for public external facts or requested research, "
         "never as current environment evidence."
@@ -3926,6 +3946,11 @@ def _canonicalize_host_parameters(
         ]
     if decision.action != "sam3":
         return []
+    if str(decision.parameters.get("mode") or "").strip().lower() == "assignment_batch":
+        # The complete ordered payload was generated by the semantic obligation
+        # and injected through an immutable host binding.  Canonicalizing it as
+        # one ordinary role would destroy the two independent child identities.
+        return []
     obligation = tool_context.get("semantic_perception_obligation")
     if not isinstance(obligation, dict):
         return []
@@ -4883,10 +4908,8 @@ def _model_phase_and_legal_tools(
         }
         preferred = stage_tools.get(stage, [])
     elif not isinstance(active_environment, dict):
-        phase = "environment_start"
+        phase = "environment_unavailable"
         preferred = [
-            "create_simulator_env",
-            "list_simulator_envs",
             "observe",
             "sense",
         ]
@@ -5051,6 +5074,12 @@ def _compact_model_state(key: str, value: object) -> object:
             "schema_version": value.get("schema_version"),
             "roles": role_summary,
             "attempt_count": len(attempts) if isinstance(attempts, list) else 0,
+        }
+    if key == "task_completion_evidence":
+        return {
+            name: value[name]
+            for name in ("schema_version", "status", "outcome", "source")
+            if name in value
         }
     if key == "work_order":
         items = value.get("items")
@@ -5612,10 +5641,6 @@ def _build_tool_context_payload(
         "task": effective_task,
         "planner_mode": _operator_planner_mode(operator_task) or "default",
         "active_environment_task": memory_context.get("active_environment_task"),
-        "environment_start_obligation": _operator_environment_start_obligation(
-            task=operator_task,
-            active_environment_task=memory_context.get("active_environment_task"),
-        ),
         "work_order_obligation": _work_order_obligation(
             observation,
             memory_context=memory_context,
@@ -7258,19 +7283,6 @@ def _semantic_perception_obligation(
     else:
         return None
 
-    if semantic_role == "grasp_target" and _explicit_post_create_observe_required(memory_context):
-        return {
-            "schema_version": "openeta.semantic_perception_obligation.v1",
-            "status": "required",
-            "semantic_role": semantic_role,
-            "required_tool": "observe",
-            "required_parameters": {"reason": "explicit_post_create_observation_required"},
-            "rule": (
-                "The task explicitly excludes create_simulator_env.initial_observation; "
-                "acquire one observe receipt before target perception."
-            ),
-        }
-
     semantic_state = memory_context.get("sam3_semantic_state")
     semantic_state = semantic_state if isinstance(semantic_state, dict) else {}
     roles = semantic_state.get("roles")
@@ -7735,6 +7747,77 @@ def _semantic_perception_obligation(
             "attempt": point_attempts + 1,
         }
     if prompt:
+        region_prompt = next(
+            (
+                str(active_assignment[key]).strip()
+                for key in (
+                    "placement_region_perception_prompt",
+                    "placement_region_prompt",
+                )
+                if isinstance(active_assignment.get(key), str)
+                and str(active_assignment[key]).strip()
+            ),
+            "",
+        )
+        work_order = memory_context.get("work_order")
+        vlm_work_order = bool(
+            isinstance(work_order, dict)
+            and work_order.get("schema_version") == "openeta.work_order.v1"
+            and work_order.get("source") == "vlm_tool_call"
+        )
+        if (
+            semantic_role == "grasp_target"
+            and not role_attempts
+            and region_prompt
+            and vlm_work_order
+        ):
+            region_identity = _sam3_request_identity(
+                observation=observation,
+                scene_epoch=scene_epoch,
+                source_image=source_image,
+                semantic_role="placement_region",
+                semantic_target=region_prompt,
+                mode="text",
+                prompt=region_prompt,
+                points=[],
+                roi_bbox_xyxy=None,
+                view_identity=source_view_identity,
+            )
+            target_parameters = {
+                "mode": "text",
+                "image": source_image,
+                "prompt": prompt,
+                "semantic_role": "grasp_target",
+                "semantic_target": prompt,
+                **identity,
+            }
+            region_parameters = {
+                "mode": "text",
+                "image": source_image,
+                "prompt": region_prompt,
+                "semantic_role": "placement_region",
+                "semantic_target": region_prompt,
+                **region_identity,
+            }
+            return {
+                **base,
+                "semantic_roles": ["grasp_target", "placement_region"],
+                "semantic_targets": {
+                    "grasp_target": prompt,
+                    "placement_region": region_prompt,
+                },
+                "required_tool": "sam3",
+                "required_parameters": {
+                    "mode": "assignment_batch",
+                    "requests": [target_parameters, region_parameters],
+                },
+                "batch_policy": "ordered_same_observation_independent_evidence",
+                "rule": (
+                    "The model chose the ordered work assignment. The host now runs its "
+                    "target and destination text prompts on one frozen observation in "
+                    "fixed order and retains two independent SAM3 evidence records."
+                ),
+            }
         return {
             **base,
             "required_tool": "sam3",
@@ -7748,53 +7831,6 @@ def _semantic_perception_obligation(
             },
         }
     return base
-
-
-def _operator_environment_start_obligation(
-    *,
-    task: str,
-    active_environment_task: object,
-) -> JsonDict | None:
-    """Return the exact environment creation call declared by an operator runner.
-
-    This route is intentionally opt-in: ordinary user prose cannot trigger it.
-    Scripted acceptance and the interactive human TUI runner each supply one
-    out-of-band marker with an explicit environment ID.  The marker selects the
-    physical workcell only; the operator's natural-language work order remains
-    the source of task intent.
-    """
-
-    if isinstance(active_environment_task, Mapping):
-        return None
-    marker = _OPERATOR_TASK_MARKER_RE.search(task)
-    if marker is None:
-        return None
-    body = marker.group("body")
-    environment_match = _OPERATOR_ENVIRONMENT_ID_RE.search(body)
-    if environment_match is None:
-        return None
-    environment_id = environment_match.group("value")
-    parameters: JsonDict = {"env_id": environment_id, "seed": 0}
-    seed_match = _OPERATOR_ENVIRONMENT_SEED_RE.search(body)
-    if seed_match is not None:
-        parameters["seed"] = int(seed_match.group("value"))
-    task_match = _OPERATOR_ENVIRONMENT_TASK_RE.search(body)
-    if task_match is not None:
-        assigned_task = task_match.group("value").replace("_", " ").strip()
-        if assigned_task:
-            parameters["task"] = assigned_task
-    return {
-        "schema_version": "openeta.environment_start_obligation.v1",
-        "status": "required",
-        "required_tool": "create_simulator_env",
-        "required_parameters": parameters,
-        "environment_id": environment_id,
-        "source": (
-            "human_tui_environment_binding"
-            if marker.group("origin").lower() == "operator=human_tui"
-            else "scripted_task_marker"
-        ),
-    }
 
 
 def _operator_control_metadata(task: str) -> str:
@@ -7973,33 +8009,6 @@ def _semantic_detection_is_current(
     return any(
         _same_local_artifact(artifact.get("path"), source_image) for artifact in camera_artifacts
     )
-
-
-def _explicit_post_create_observe_required(memory_context: JsonDict) -> bool:
-    task = str(
-        memory_context.get("current_user_request") or memory_context.get("task") or ""
-    )
-    control_task = _operator_control_metadata(task).lower()
-    explicitly_requested = (
-        "initial_observe=required" in control_task
-        or "先 observe" in control_task
-        or "first observe" in control_task
-        or (
-            "initial observation" in control_task
-            and any(
-                token in control_task for token in ("不计", "does not count", "excluded")
-            )
-        )
-    )
-    if not explicitly_requested:
-        return False
-    receipt = memory_context.get("latest_environment_receipt")
-    info = receipt.get("info") if isinstance(receipt, dict) else None
-    previous_action = info.get("previous_action") if isinstance(info, dict) else None
-    request_name = (
-        str(previous_action.get("request_name") or "") if isinstance(previous_action, dict) else ""
-    )
-    return request_name == "create_simulator_env"
 
 
 def _semantic_detections_share_bundle(first: object, second: object) -> bool:
@@ -8363,25 +8372,13 @@ def _placement_release_obligation(
                 "The previous item was released and the same simulator session is "
                 "already bound to the next assignment. Observe the changed scene "
                 "once, visually review the prior placement, then continue with the "
-                "next target; do not recreate or close the environment."
+                "next target."
             ),
         }
-    return {
-        "schema_version": "openeta.placement_release_obligation.v1",
-        "status": "required",
-        "stage": "close",
-        "required_action": {
-            "name": "close_simulator_env",
-            "parameters": {},
-        },
-        "rule": (
-            "The exact release completed and the current observation is causal and "
-            "post-release. Visually confirm the part is acceptably inside its target "
-            "container, then close the simulator. If the view is ambiguous, another "
-            "observe is allowed; no post-release retreat waypoint is required."
-        ),
-        "allowed_review_actions": ["observe", "active_observe"],
-    }
+    # The final causal observation is enough for the agent to report task
+    # completion. The launcher closes Gazebo after the TUI process exits, so
+    # lifecycle cleanup must not consume an agent decision turn.
+    return None
 
 
 def _pose_xyz(value: object) -> list[float] | None:
@@ -8627,12 +8624,6 @@ def _observation_environment_id(observation: EnvObservation) -> str | None:
     ):
         if isinstance(value, str) and value:
             return value
-    created = observation.metadata.get("create_env")
-    if isinstance(created, dict):
-        for key in ("env_id", "environment"):
-            value = created.get(key)
-            if isinstance(value, str) and value:
-                return value
     return None
 
 
@@ -9256,6 +9247,11 @@ def _skill_environment_identity_text(observation: EnvObservation, memory: AgentM
 
 
 def _effective_task_text(observation: EnvObservation, memory: AgentMemory) -> str:
+    active = memory.active_environment_task()
+    if isinstance(active, dict) and active.get("lifecycle_owner") == "host":
+        operator_task = str(memory.current_user_request or memory.task or "").strip()
+        if operator_task:
+            return operator_task
     catalog = observation.metadata.get("manipulation_catalog")
     if (
         isinstance(catalog, dict)
@@ -9264,7 +9260,6 @@ def _effective_task_text(observation: EnvObservation, memory: AgentMemory) -> st
         user_request = str(memory.current_user_request or memory.task or "").strip()
         if user_request:
             return user_request
-    active = memory.active_environment_task()
     task = active.get("task") if isinstance(active, dict) else None
     if isinstance(task, str) and task.strip():
         return task.strip()

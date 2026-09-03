@@ -50,6 +50,12 @@ wait_for_partition_server() {
   done
 }
 
+mark_operator_gui_ready() {
+  if [[ -n "${OPENETA_GAZEBO_GUI_READY_FILE:-}" ]]; then
+    touch -- "${OPENETA_GAZEBO_GUI_READY_FILE}"
+  fi
+}
+
 focus_operator_view() {
   local camera_request
   local camera_ready=false
@@ -70,6 +76,7 @@ focus_operator_view() {
     # a healthy GPU client hidden behind the VNC desktop for the whole run.
     if [[ "${camera_ready}" == true ]]; then
       if ! command -v xdotool >/dev/null 2>&1; then
+        mark_operator_gui_ready
         return 0
       fi
 
@@ -87,6 +94,7 @@ focus_operator_view() {
             | grep -q '_NET_WM_STATE_MAXIMIZED_VERT'; then
           xdotool key --window "${window_id}" alt+F10 >/dev/null 2>&1 || true
         fi
+        mark_operator_gui_ready
         return 0
       fi
     fi

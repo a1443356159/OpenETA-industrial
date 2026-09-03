@@ -36,8 +36,6 @@ DEFAULT_TOOL_PROFILE = TOOL_PROFILE_FULL
 _GAZEBO_INDUSTRIAL_TOOL_NAMES = frozenset(
     {
         "observe",
-        "create_simulator_env",
-        "close_simulator_env",
         "configure_work_order",
         "sam3",
         "select_sam3_detection",
@@ -1017,39 +1015,6 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
             batchable=False,
         ),
         ToolSpec(
-            name="create_simulator_env",
-            category="environment",
-            description=(
-                "Create exactly one remote simulator environment and reset it to obtain "
-                "the initial observation. This is the only agent-facing environment "
-                "creation path; do not call simulator create_env through python_exec."
-            ),
-            parameters={
-                "env_id": "required OpenETA simulator environment id",
-                "seed": "optional deterministic reset seed; defaults to 0",
-                "task": "optional task text forwarded to the simulator",
-                "render_mode": "optional render mode; defaults to rgb_array",
-                "image_width": "optional camera width; defaults to 512",
-                "image_height": "optional camera height; defaults to 512",
-                "session_id": "optional session id for dashboard and trace correlation",
-                "include_objects": "optional object-metadata toggle",
-            },
-            effect=ToolEffect.WORLD_MUTATING,
-            batchable=False,
-        ),
-        ToolSpec(
-            name="close_simulator_env",
-            category="environment",
-            description=(
-                "Close the currently active remote simulator environment and clear "
-                "its bound handle. This is the only agent-facing environment cleanup "
-                "path; do not call simulator close_env through python_exec."
-            ),
-            parameters={},
-            effect=ToolEffect.WORLD_MUTATING,
-            batchable=False,
-        ),
-        ToolSpec(
             name="python_exec",
             category="coding",
             description=(
@@ -1127,10 +1092,20 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                 "Segment objects or regions from RGB observations using text, one to "
                 "64 foreground/background pixel points, or an optional full-frame "
                 "pixel ROI. Rank detections and provide candidate visuals for explicit "
-                "VLM selection while preserving original camera coordinates."
+                "VLM selection while preserving original camera coordinates. A host-bound "
+                "assignment batch may run the current work item's target and destination "
+                "prompts once each on the same frozen observation."
             ),
             parameters={
-                "mode": "text | points; defaults to text for backward compatibility",
+                "mode": (
+                    "text | points; defaults to text for backward compatibility. "
+                    "assignment_batch is reserved for an immutable host obligation"
+                ),
+                "requests": (
+                    "host-only for mode=assignment_batch: exactly two ordered text "
+                    "requests with roles grasp_target then placement_region, sharing "
+                    "one image, observation id, scene epoch, and perception bundle"
+                ),
                 "semantic_role": (
                     "required planner role: grasp_target | placement_object | "
                     "placement_region; point prompts must preserve the role of the "

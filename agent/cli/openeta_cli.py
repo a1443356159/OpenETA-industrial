@@ -26,7 +26,7 @@ from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 
-from adapter.protocol import EnvAction, JsonDict
+from adapter.protocol import EnvAction, EnvObservation, JsonDict
 from agent.backends.planner import (
     OpenAICompatiblePlannerBackend,
     OpenAICompatiblePlannerBackendConfig,
@@ -82,7 +82,6 @@ from agent.tools.registry import (
 from agent.tools.sim_mcp import (
     SimulatorMcpTransport,
     SimulatorMcpToolProxyConfig,
-    close_environment_mcp_env,
     mcp_dashboard_url,
     mcp_server_url_from_endpoint,
     simulator_mcp_transport_for_url,
@@ -92,6 +91,8 @@ from agent.tools.sim_mcp import (
 TOOL_RESULT_MAX_LINES = 5
 TOOL_RESULT_FALLBACK_WIDTH = 120
 DEFAULT_SIM_MCP_TIMEOUT_S = 300.0
+HOST_SIMULATOR_BOOTSTRAP_ENV = "OPENETA_SIMULATOR_BOOTSTRAP_PATH"
+HOST_SIMULATOR_BOOTSTRAP_SCHEMA_VERSION = "openeta.host_simulator_bootstrap.v1"
 
 
 class Theme:
@@ -284,6 +285,7 @@ class ConsoleState:
         default_factory=SimulatorMcpToolProxyConfig
     )
     simulator_mcp_tool_catalog: JsonDict = field(default_factory=dict)
+    simulator_bootstrap: JsonDict = field(default_factory=dict)
     mcp_registry: JsonDict = field(default_factory=dict)
     supervision_profile: SupervisionProfile = field(
         default_factory=lambda: _configured_supervision_profile()
@@ -310,6 +312,7 @@ class OpenEtaCli:
         self._activity_status = "idle"
         self._tool_started_at: dict[str, list[float]] = {}
         self._shutdown_result: JsonDict | None = None
+        self.state.simulator_bootstrap = _load_host_simulator_bootstrap()
         if model_override:
             self.state.config.model = model_override
         self.state.calibration_profile_path = calibration_profile
@@ -370,58 +373,16 @@ class OpenEtaCli:
                 print(Theme.dim("current run stopped; type /quit to exit"))
 
     def close(self) -> JsonDict:
-        """Close the active MCP environment once before the console exits."""
+        """Finish local console bookkeeping; the launcher owns Gazebo cleanup."""
 
         if self._shutdown_result is not None:
             return dict(self._shutdown_result)
-        config = self.state.simulator_mcp_config
-        with config.lifecycle_lock:
-            transport = self.state.simulator_mcp_transport
-            handle = config.handle
-            session_id = config.session_id
-            timeout_s = min(config.timeout_s, 30.0)
-        if transport is None or not handle:
-            self._shutdown_result = {
-                "ok": True,
-                "closed": False,
-                "skipped": True,
-            }
-            return dict(self._shutdown_result)
-
-        arguments: JsonDict = {"handle": handle}
-        if session_id:
-            arguments["session_id"] = session_id
-        response = close_environment_mcp_env(
-            transport,
-            handle=handle,
-            session_id=session_id,
-            timeout_s=timeout_s,
-        )
-        payload = _load_response_payload(response)
-        success = (
-            payload.get("success") is not False
-            and payload.get("ok") is not False
-            and "error" not in payload
-        )
-        if success:
-            try:
-                self._sync_simulator_mcp_response("close_env", arguments, response)
-            except Exception as exc:  # noqa: BLE001 - shutdown must not mask CLI exit.
-                print(Theme.warn(f"MCP environment closed; local state sync failed: {exc}"))
-            print(Theme.dim("active MCP environment closed"))
-        else:
-            error = payload.get("error") or payload.get("content") or "unknown cleanup error"
-            print(Theme.warn(f"could not close active MCP environment: {error}"))
         self._shutdown_result = {
-            "ok": success,
-            "closed": success,
-            "handle": handle,
-            "session_id": session_id,
+            "ok": True,
+            "closed": False,
+            "skipped": True,
+            "reason": "simulator_lifecycle_owned_by_launcher",
         }
-        if not success:
-            self._shutdown_result["error"] = str(
-                payload.get("error") or payload.get("content") or "unknown cleanup error"
-            )
         return dict(self._shutdown_result)
 
     def _key_bindings(self) -> KeyBindings:
@@ -494,7 +455,15 @@ class OpenEtaCli:
         runtime = self._require_runtime()
         self.state.episode_runner = OpenEtaEpisodeRunner(
             runtime=runtime,
-            environment=ToolFeedbackEpisodeEnvironment(),
+            environment=ToolFeedbackEpisodeEnvironment(
+                initial_observation=_bootstrap_initial_observation(
+                    self.state.simulator_bootstrap
+                ),
+                simulator_session_id=str(
+                    self.state.simulator_bootstrap.get("session_id") or ""
+                ),
+                handle=str(self.state.simulator_bootstrap.get("handle") or ""),
+            ),
             interaction_resolver=self._interaction_resolver(),
         )
         self._begin_agent_activity()
@@ -1283,6 +1252,7 @@ class OpenEtaCli:
         proxy_config.response_output_root = workspace.artifacts_dir / "responses"
         self._refresh_mcp_registry()
         transport = _ensure_simulator_mcp_transport(self)
+        self._apply_host_simulator_bootstrap()
         policy = SupervisionPolicy.for_profile(self.state.supervision_profile)
         assembly = assemble_runtime(
             RuntimeAssemblyConfig(
@@ -1334,9 +1304,51 @@ class OpenEtaCli:
             policy.to_dict(),
             source="runtime_assembly",
         )
+        if self.state.simulator_bootstrap:
+            bootstrap = self.state.simulator_bootstrap
+            self.state.runtime.memory.save_fact(
+                "active_environment_task",
+                {
+                    "status": "running",
+                    "env_id": bootstrap["env_id"],
+                    "handle": bootstrap["handle"],
+                    "session_id": bootstrap["session_id"],
+                    "source": "launcher_bootstrap",
+                    "lifecycle_owner": "host",
+                    "host_cleanup_pending": True,
+                },
+                source="launcher_bootstrap",
+            )
+            self.state.runtime.memory.save_fact(
+                "simulator_lifecycle",
+                {
+                    "schema_version": HOST_SIMULATOR_BOOTSTRAP_SCHEMA_VERSION,
+                    "owner": "host",
+                    "status": "active",
+                    "bootstrap_path": bootstrap["bootstrap_path"],
+                },
+                source="launcher_bootstrap",
+            )
         self._save_mcp_registry_to_memory()
         self._save_simulator_mcp_tool_catalog_to_memory()
         self.state.episode_runner = None
+
+    def _apply_host_simulator_bootstrap(self) -> None:
+        bootstrap = self.state.simulator_bootstrap
+        if not bootstrap:
+            return
+        configured_base = mcp_server_url_from_endpoint(self.state.simulator_mcp_url)
+        bootstrap_base = mcp_server_url_from_endpoint(str(bootstrap["mcp_url"]))
+        if not configured_base or configured_base != bootstrap_base:
+            raise RuntimeError(
+                "host simulator bootstrap does not match the configured simulator MCP endpoint"
+            )
+        with self.state.simulator_mcp_config.lifecycle_lock:
+            self.state.simulator_mcp_config.handle = str(bootstrap["handle"])
+            self.state.simulator_mcp_config.session_id = str(bootstrap["session_id"])
+            self.state.simulator_mcp_config.image_bundle_id = str(
+                bootstrap["session_id"]
+            )
 
     def _require_runtime(self) -> OpenEtaAgentRuntime:
         if self.state.runtime is None:
@@ -1350,40 +1362,10 @@ class OpenEtaCli:
         arguments: JsonDict,
         response: JsonDict,
     ) -> None:
-        if tool_name not in {
-            "create_env",
-            "reset_env",
-            "render_env",
-            "move_to",
-            "close_env",
-        }:
+        if tool_name not in {"render_env", "move_to"}:
             return
         payload = _load_response_payload(response)
         if payload.get("success") is False or payload.get("ok") is False or "error" in payload:
-            return
-        if tool_name == "close_env":
-            with self.state.simulator_mcp_config.lifecycle_lock:
-                self.state.simulator_mcp_config.handle = ""
-                self.state.simulator_mcp_config.session_id = ""
-                self.state.simulator_mcp_config.image_bundle_id = ""
-            if self.state.runtime is not None:
-                closed = {
-                    "type": "simulator_mcp_state",
-                    "tool": tool_name,
-                    "handle": arguments.get("handle"),
-                    "session_id": arguments.get("session_id"),
-                    "status": "closed",
-                }
-                self.state.runtime.memory.save_fact(
-                    "simulator_mcp_state",
-                    closed,
-                    source="simulator_agent_tool",
-                )
-                self.state.runtime.memory.save_artifact(
-                    "simulator_mcp_state",
-                    closed,
-                    source="simulator_agent_tool",
-                )
             return
         handle = payload.get("handle") or arguments.get("handle")
         session_id = payload.get("session_id") or arguments.get("session_id")
@@ -1874,6 +1856,41 @@ def _load_response_payload(response: JsonDict) -> JsonDict:
         merged.update(payload)
         return merged
     return payload
+
+
+def _load_host_simulator_bootstrap() -> JsonDict:
+    """Load the launcher-owned live environment handed to this TUI process."""
+
+    configured = os.environ.get(HOST_SIMULATOR_BOOTSTRAP_ENV, "").strip()
+    if not configured:
+        return {}
+    path = Path(configured).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid host simulator bootstrap {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("host simulator bootstrap must be a JSON object")
+    if payload.get("schema_version") != HOST_SIMULATOR_BOOTSTRAP_SCHEMA_VERSION:
+        raise RuntimeError("unsupported host simulator bootstrap schema")
+    if payload.get("lifecycle_owner") != "host" or payload.get("status") != "active":
+        raise RuntimeError("host simulator bootstrap is not an active host-owned environment")
+    for key in ("env_id", "handle", "session_id", "mcp_url"):
+        if not isinstance(payload.get(key), str) or not str(payload[key]).strip():
+            raise RuntimeError(f"host simulator bootstrap requires non-empty {key}")
+    observation = payload.get("initial_observation")
+    if not isinstance(observation, dict):
+        raise RuntimeError("host simulator bootstrap requires an initial_observation")
+    payload = dict(payload)
+    payload["bootstrap_path"] = str(path)
+    return payload
+
+
+def _bootstrap_initial_observation(bootstrap: JsonDict) -> EnvObservation | None:
+    observation = bootstrap.get("initial_observation") if bootstrap else None
+    if not isinstance(observation, dict):
+        return None
+    return EnvObservation.from_dict(observation)
 
 
 def _python_exec_approval_summary(context: ToolExecutionContext) -> JsonDict:

@@ -332,12 +332,14 @@ class AgentMemory:
         )
         reconciliation_updated = self._reconcile_unknown_motion(observation)
         attachment_updated = self._capture_attachment_observation_verdict(observation)
+        host_completion_updated = self._capture_host_owned_task_completion()
         if (
             multi_sort_updated
             or post_release_visual_updated
             or placement_release_reobserved
             or reconciliation_updated
             or attachment_updated
+            or host_completion_updated
         ):
             self._save_working_memory()
 
@@ -1603,181 +1605,134 @@ class AgentMemory:
     def active_environment_task(self) -> JsonDict | None:
         return _memory_fact_value(self.facts.get(ACTIVE_ENVIRONMENT_TASK_KEY))
 
+    def _capture_host_owned_task_completion(self) -> bool:
+        """Prove task completion before the launcher performs lifecycle cleanup."""
+
+        active = self.active_environment_task()
+        if not (
+            isinstance(active, dict)
+            and active.get("lifecycle_owner") == "host"
+            and active.get("host_cleanup_pending") is True
+        ):
+            return False
+        release = self.placement_release()
+        visual = (
+            release.get("post_release_visual_observation")
+            if isinstance(release, dict)
+            else None
+        )
+        if not (
+            isinstance(release, dict)
+            and release.get("status") == "released"
+            and isinstance(visual, dict)
+            and visual.get("available") is True
+        ):
+            return False
+        multi_sort = _memory_fact_value(self.facts.get(MULTI_SORT_PROGRESS_KEY))
+        completed = _memory_fact_value(
+            self.facts.get(COMPLETED_PLACEMENT_SUBGOALS_KEY)
+        )
+        completed_items = (
+            list(completed.get("items") or []) if isinstance(completed, dict) else []
+        )
+        if isinstance(multi_sort, dict):
+            try:
+                remaining_count = int(multi_sort.get("remaining_count", -1))
+                assignment_count = int(multi_sort.get("assignment_count") or 0)
+            except (TypeError, ValueError):
+                return False
+            if not (
+                multi_sort.get("all_completed") is True
+                and remaining_count == 0
+                and assignment_count > 0
+                and len(completed_items) >= assignment_count
+            ):
+                return False
+        evidence: JsonDict = {
+            "schema_version": "openeta.task_completion_evidence.v2",
+            "status": "proven",
+            "outcome": "success",
+            "source": "vlm_post_release_observation",
+            "environment_closed": False,
+            "lifecycle_owner": "host",
+            "host_cleanup_pending": True,
+            "candidate_id": release.get("candidate_id"),
+            "placement_pose_id": release.get("placement_pose_id"),
+            "post_release_visual_observation": dict(visual),
+            "completed_at_s": time.time(),
+        }
+        if isinstance(multi_sort, dict):
+            evidence.update(
+                {
+                    "multi_sort_progress": dict(multi_sort),
+                    "completed_placement_subgoals": completed_items,
+                }
+            )
+        previous = self.task_completion_evidence()
+        if (
+            isinstance(previous, dict)
+            and previous.get("status") == "proven"
+            and previous.get("outcome") == "success"
+            and previous.get("lifecycle_owner") == "host"
+        ):
+            return False
+        self.facts[TASK_COMPLETION_EVIDENCE_KEY] = _memory_fact_entry(
+            evidence,
+            source="host_owned_environment_completion",
+        )
+        self.record("task_completion_proven", dict(evidence))
+        return True
+
     def task_completion_evidence(self) -> JsonDict | None:
-        """Return host-proven evidence that a closed task finished successfully."""
+        """Return host-proven evidence that the embodied task finished successfully."""
 
         return _memory_fact_value(self.facts.get(TASK_COMPLETION_EVIDENCE_KEY))
 
     def _capture_active_environment_task(self, action: EnvAction) -> bool:
-        close_call = _successful_tool_call(action, "close_simulator_env")
-        if close_call is not None:
-            release = self.placement_release()
-            multi_sort = _memory_fact_value(self.facts.get(MULTI_SORT_PROGRESS_KEY))
-            multi_sort = multi_sort if isinstance(multi_sort, dict) else None
-            completed = _memory_fact_value(
-                self.facts.get(COMPLETED_PLACEMENT_SUBGOALS_KEY)
-            )
-            completed_items = (
-                list(completed.get("items") or []) if isinstance(completed, dict) else []
-            )
-            visual_observation = (
-                release.get("post_release_visual_observation")
-                if isinstance(release, dict)
-                else None
-            )
-            legacy_verification = (
-                release.get("placement_verification")
-                if isinstance(release, dict)
-                else None
-            )
-            visual_review_available = bool(
-                isinstance(visual_observation, dict)
-                and visual_observation.get("available") is True
-            )
-            legacy_placement_proven = bool(
-                isinstance(legacy_verification, dict)
-                and legacy_verification.get("placement_confirmed") is True
-                and legacy_verification.get("verdict") == "PASS"
-            )
-            completion_recorded = False
-            if (
-                isinstance(release, dict)
-                and release.get("status") == "released"
-                and (visual_review_available or legacy_placement_proven)
-                and (
-                    multi_sort is None
-                    or (
-                        multi_sort.get("all_completed") is True
-                        and int(multi_sort.get("remaining_count", -1)) == 0
-                        and len(completed_items)
-                        >= int(multi_sort.get("assignment_count") or 0)
-                    )
-                )
-            ):
-                evidence = {
-                    "schema_version": "openeta.task_completion_evidence.v1",
-                    "status": "proven",
-                    "outcome": "success",
-                    "source": (
-                        "vlm_post_release_observation"
-                        if visual_review_available
-                        else "legacy_placement_verification"
-                    ),
-                    "environment_closed": True,
-                    "candidate_id": release.get("candidate_id"),
-                    "placement_pose_id": release.get("placement_pose_id"),
-                    **(
-                        {
-                            "post_release_visual_observation": dict(
-                                visual_observation
-                            )
-                        }
-                        if visual_review_available
-                        else {
-                            "placement_verification": dict(
-                                legacy_verification
-                            )
-                        }
-                    ),
-                    **(
-                        {
-                            "multi_sort_progress": dict(multi_sort),
-                            "completed_placement_subgoals": completed_items,
-                        }
-                        if multi_sort is not None
-                        else {}
-                    ),
-                    "closed_at_s": time.time(),
-                }
-                self.facts[TASK_COMPLETION_EVIDENCE_KEY] = _memory_fact_entry(
-                    evidence,
-                    source="successful_environment_close",
-                )
-                self.record("task_completion_proven", dict(evidence))
-                completion_recorded = True
-            removed = self.facts.pop(ACTIVE_ENVIRONMENT_TASK_KEY, None)
-            gripper_removed = self.facts.pop(GRIPPER_COMMAND_STATE_KEY, None)
-            release_removed = self.facts.pop(PLACEMENT_RELEASE_KEY, None)
-            multi_sort_removed = self.facts.pop(MULTI_SORT_PROGRESS_KEY, None)
-            work_order_removed = self.facts.pop(WORK_ORDER_KEY, None)
-            self.record(
-                "active_environment_task_cleared",
-                {"reason": "simulator_environment_closed"},
-            )
-            return (
-                removed is not None
-                or gripper_removed is not None
-                or release_removed is not None
-                or multi_sort_removed is not None
-                or work_order_removed is not None
-                or completion_recorded
-            )
+        """Refresh task identity from observations inside a host-bound environment."""
 
-        gripper_removed = False
-        call = _successful_tool_call(action, "create_simulator_env")
-        if call is not None:
-            gripper_removed = self.facts.pop(GRIPPER_COMMAND_STATE_KEY, None) is not None
-            self.facts.pop(TASK_COMPLETION_EVIDENCE_KEY, None)
-        if call is None:
-            call = _successful_tool_call(action, "observe")
+        previous = self.active_environment_task() or {}
+        if previous.get("lifecycle_owner") == "host":
+            # A launcher-owned Gazebo world is task-neutral. Its observation
+            # text describes the scene and must not replace operator intent.
+            return False
+        call = _successful_tool_call(action, "observe")
         if call is None:
             return False
-
+        extracted = _assigned_task_from_tool_call(call)
+        if extracted is None:
+            return False
+        task, source_field = extracted
+        if previous.get("task") == task:
+            return False
         outputs = _tool_call_outputs(call)
         environment = outputs.get("environment")
         environment = environment if isinstance(environment, dict) else {}
         mcp = outputs.get("mcp")
         mcp = mcp if isinstance(mcp, dict) else {}
-        previous = self.active_environment_task() or {}
-        source_tool = str(call.get("name") or "")
-        extracted = _assigned_task_from_tool_call(call)
-        if extracted is None:
-            if source_tool != "create_simulator_env":
-                return False
-            # Task-neutral workcells keep only their lifecycle
-            # identity here; the user request stays in conversation memory and
-            # the VLM-authored structured work order has its own fact.
-            value = {
-                "env_id": environment.get("env_id"),
-                "handle": environment.get("handle") or mcp.get("handle"),
-                "session_id": environment.get("session_id") or mcp.get("session_id"),
-                "source_tool": source_tool,
-                "source_field": "outputs.environment",
-                "scene_epoch": self.scene_epoch(),
-                "updated_at_s": time.time(),
-            }
-            value = {key: item for key, item in value.items() if item not in (None, "")}
-            self.facts[ACTIVE_ENVIRONMENT_TASK_KEY] = _memory_fact_entry(
-                value,
-                source="simulator_tool_result",
-            )
-            if previous != value:
-                self.record("active_environment_updated", value)
-            return previous != value or gripper_removed
-
-        task, source_field = extracted
-        if source_tool == "observe" and previous.get("task") == task:
-            return False
         value = {
             "task": task,
             "env_id": environment.get("env_id") or previous.get("env_id"),
-            "handle": (environment.get("handle") or mcp.get("handle") or previous.get("handle")),
+            "handle": environment.get("handle") or mcp.get("handle") or previous.get("handle"),
             "session_id": (
-                environment.get("session_id") or mcp.get("session_id") or previous.get("session_id")
+                environment.get("session_id")
+                or mcp.get("session_id")
+                or previous.get("session_id")
             ),
-            "source_tool": source_tool,
+            "source_tool": "observe",
             "source_field": source_field,
             "scene_epoch": self.scene_epoch(),
             "updated_at_s": time.time(),
+            "lifecycle_owner": previous.get("lifecycle_owner"),
+            "host_cleanup_pending": previous.get("host_cleanup_pending"),
         }
         value = {key: item for key, item in value.items() if item not in (None, "")}
         self.facts[ACTIVE_ENVIRONMENT_TASK_KEY] = _memory_fact_entry(
             value,
             source="simulator_tool_result",
         )
-        if previous != value:
-            self.record("active_environment_task_updated", value)
-        return previous != value or gripper_removed
+        self.record("active_environment_task_updated", value)
+        return True
 
     def grasp_candidate_gate_error(
         self,
@@ -2319,7 +2274,7 @@ class AgentMemory:
 
     def _capture_sam3_selection_state(self, action: EnvAction) -> None:
         command = action.command if isinstance(action.command, dict) else {}
-        for call in command.get("tool_calls", []) or []:
+        for call in _expanded_sam3_selection_calls(command.get("tool_calls", []) or []):
             if not isinstance(call, dict):
                 continue
             segmenter_tool_name = str(call.get("name") or "")
@@ -8415,6 +8370,44 @@ def _tool_call(action: EnvAction, name: str) -> JsonDict | None:
     )
 
 
+def _expanded_sam3_selection_calls(calls: object) -> list[JsonDict]:
+    """Expose ordered batch children to the existing single-result state machine."""
+
+    if not isinstance(calls, list):
+        return []
+    expanded: list[JsonDict] = []
+    for call in calls:
+        if not isinstance(call, dict) or str(call.get("name") or "") != "sam3":
+            if isinstance(call, dict):
+                expanded.append(call)
+            continue
+        outputs = _tool_call_outputs(call)
+        children = outputs.get("semantic_batch_results")
+        if (
+            outputs.get("schema_version") != "openeta.sam3.assignment_batch.v1"
+            or not isinstance(children, list)
+        ):
+            expanded.append(call)
+            continue
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            result = child.get("result")
+            if not isinstance(result, dict):
+                continue
+            details = result.get("details")
+            parameters = details.get("parameters") if isinstance(details, dict) else None
+            expanded.append(
+                {
+                    "name": "sam3",
+                    "status": call.get("status"),
+                    "parameters": dict(parameters) if isinstance(parameters, dict) else {},
+                    "result": result,
+                }
+            )
+    return expanded
+
+
 def _successful_tool_call(action: EnvAction, name: str) -> JsonDict | None:
     call = _tool_call(action, name)
     if not isinstance(call, dict) or not _call_result_success(call):
@@ -10474,6 +10467,11 @@ def _compact_tool_result_details(details: JsonDict) -> JsonDict:
             "query",
             "answer",
             "answer_truncated",
+            "status",
+            "requested_roles",
+            "completed_roles",
+            "barrier_order",
+            "stop_reason",
             "result_count",
             "results",
             "search_call_count",

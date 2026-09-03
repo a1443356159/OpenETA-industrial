@@ -47,12 +47,10 @@ DEFAULT_SERVICES = {
     for name in ("openeta-sam3", "openeta-graspgenx", "openeta-anyplace")
 }
 REQUIRED_REAL_PICK_PLACE_TOOLS = (
-    "create_simulator_env",
     "sam3",
     "grasp_pose_estimate",
     "gripper_control",
     "anyplace",
-    "close_simulator_env",
 )
 DEFAULT_MULTI_NORMAL_TASK_VARIANT = "wrench-green-bolt-blue"
 # Acceptance-only user requests. These are written to the TUI as ordinary
@@ -490,8 +488,6 @@ def _automation_metadata_for_backend(
         f"[{'automation=scripted_tui' if mode == base.SCRIPTED_TUI else 'operator=human_tui'}; "
         f"planner_mode={planner_mode}; "
         f"execution_profile={profile}; qualification_profile={funnel_profile}; "
-        f"environment_id={ENV_ID}; "
-        f"environment_seed={int(scene['seed'])}; "
         f"acceptance_scene={str(scene['scene_id'])}; "
         f"{semantic_metadata}]"
     )
@@ -804,6 +800,87 @@ def _name(call: Mapping[str, Any]) -> str:
     return name
 
 
+def _host_lifecycle_evidence(
+    paths: base.CasePaths,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], list[str]]:
+    """Load and validate the launcher-owned create/reset/close chain."""
+
+    errors: list[str] = []
+    lifecycle_path = paths.root / "host-simulator-lifecycle.json"
+    if not lifecycle_path.is_file():
+        return {}, {}, ["launcher-owned Gazebo lifecycle evidence is missing"]
+    try:
+        lifecycle = base._json_load(lifecycle_path)
+    except (OSError, ValueError) as exc:
+        return {}, {}, [f"launcher-owned Gazebo lifecycle evidence is unreadable: {exc}"]
+    if not isinstance(lifecycle, Mapping):
+        return {}, {}, ["launcher-owned Gazebo lifecycle evidence is not an object"]
+    if lifecycle.get("schema_version") != "openeta.host_simulator_lifecycle.v1":
+        errors.append("launcher-owned Gazebo lifecycle schema is invalid")
+    if lifecycle.get("lifecycle_owner") != "host":
+        errors.append("Gazebo lifecycle was not owned by the launcher")
+    if lifecycle.get("status") != "closed" or lifecycle.get("closed") is not True:
+        errors.append("launcher did not prove Gazebo close after TUI exit")
+    try:
+        ready_at_s = float(lifecycle["ready_at_s"])
+        tui_started_at_s = float(lifecycle["tui_started_at_s"])
+        tui_exited_at_s = float(lifecycle["tui_exited_at_s"])
+        closed_at_s = float(lifecycle["closed_at_s"])
+    except (KeyError, TypeError, ValueError):
+        errors.append("launcher Gazebo/TUI lifecycle ordering timestamps are missing")
+    else:
+        if ready_at_s > tui_started_at_s:
+            errors.append("TUI started before Gazebo was ready")
+        if lifecycle.get("operator_gui_requested") is True:
+            try:
+                gui_ready_at_s = float(lifecycle["gui_ready_at_s"])
+            except (KeyError, TypeError, ValueError):
+                errors.append("Gazebo GUI ready timestamp is missing")
+            else:
+                if not ready_at_s <= gui_ready_at_s <= tui_started_at_s:
+                    errors.append("TUI started before the Gazebo GUI was ready")
+        if tui_exited_at_s < tui_started_at_s:
+            errors.append("TUI exit timestamp predates TUI startup")
+        if closed_at_s < tui_exited_at_s:
+            errors.append("launcher closed Gazebo before the TUI exited")
+    if not str(lifecycle.get("handle") or "") or not str(
+        lifecycle.get("session_id") or ""
+    ):
+        errors.append("launcher Gazebo handle/session identity is missing")
+    close_attempts = lifecycle.get("close_attempts")
+    if not (
+        isinstance(close_attempts, list)
+        and close_attempts
+        and isinstance(close_attempts[-1], Mapping)
+        and base._response_succeeded(close_attempts[-1])
+    ):
+        errors.append("launcher Gazebo close_env receipt is missing or failed")
+    if int(lifecycle.get("initial_rgb_artifact_count") or 0) < 1:
+        errors.append("launcher did not provide an initial RGB observation before TUI")
+
+    reset_payload: Mapping[str, Any] = {}
+    reset_path_value = lifecycle.get("reset_response_path")
+    if not isinstance(reset_path_value, str) or not reset_path_value:
+        errors.append("launcher Gazebo reset response path is missing")
+    else:
+        reset_path = Path(reset_path_value).resolve()
+        try:
+            reset_path.relative_to(paths.root.resolve())
+        except ValueError:
+            errors.append("launcher Gazebo reset response escapes the case directory")
+        else:
+            try:
+                loaded = base._json_load(reset_path)
+            except (OSError, ValueError) as exc:
+                errors.append(f"launcher Gazebo reset response is unreadable: {exc}")
+            else:
+                if isinstance(loaded, Mapping):
+                    reset_payload = loaded
+                else:
+                    errors.append("launcher Gazebo reset response is not an object")
+    return lifecycle, reset_payload, errors
+
+
 def _has_minimum_int_value(payload: object, key: str, minimum: int) -> bool:
     return any(
         value >= minimum
@@ -841,6 +918,28 @@ def _candidate_pass_counts_consistent(
 def _parameters(call: Mapping[str, Any]) -> Mapping[str, Any]:
     value = call.get("parameters")
     return value if isinstance(value, Mapping) else {}
+
+
+def _sam3_semantic_requests(
+    calls: Sequence[Mapping[str, Any]],
+) -> list[tuple[int, Mapping[str, Any]]]:
+    """Return ordinary and host-batched SAM3 semantic requests in execution order."""
+
+    requests: list[tuple[int, Mapping[str, Any]]] = []
+    for call_index, call in enumerate(calls):
+        if _name(call) != "sam3":
+            continue
+        parameters = _parameters(call)
+        if str(parameters.get("mode") or "").strip().lower() != "assignment_batch":
+            requests.append((call_index, parameters))
+            continue
+        children = parameters.get("requests")
+        if not isinstance(children, list):
+            continue
+        requests.extend(
+            (call_index, child) for child in children if isinstance(child, Mapping)
+        )
+    return requests
 
 
 def _anyplace_model_inference_calls(
@@ -1560,7 +1659,7 @@ def verify_case(
         )
         names = [_name(call) for call in calls]
         observed_simulator_tools = frozenset(
-            name for name in names if name in base.SIX_SIMULATOR_TOOLS
+            name for name in names if name in base.SIMULATOR_TASK_TOOLS
         )
         payloads, mcp_errors = base._mcp_response_payloads(
             calls,
@@ -1568,6 +1667,12 @@ def verify_case(
             required_tools=observed_simulator_tools,
         )
         errors.extend(mcp_errors)
+        host_lifecycle, host_reset_payload, lifecycle_errors = (
+            _host_lifecycle_evidence(paths)
+        )
+        errors.extend(lifecycle_errors)
+        if host_reset_payload:
+            payloads.insert(0, host_reset_payload)
         for required in _required_tools_for_backend(backend, scenario=scenario):
             if required not in names:
                 errors.append(f"required real pick-place tool call missing: {required}")
@@ -1593,20 +1698,17 @@ def verify_case(
                 errors.append(
                     "VLM-authored work order does not match the user-requested task"
                 )
-            if base._contains(create := next(
-                (call for call in calls if _name(call) == "create_simulator_env"),
-                {},
-            ), "sort_assignments"):
+            if base._contains(host_lifecycle, "sort_assignments"):
                 errors.append("physical scene injected a static sort assignment")
-        if names.count("sam3") != 2 * assignment_count:
+        sam3_semantic_requests = _sam3_semantic_requests(calls)
+        if len(sam3_semantic_requests) != 2 * assignment_count:
             errors.append(
                 "exactly one target-object and one placement-region SAM3 call "
                 "are required per sort assignment"
             )
         sam3_prompts = [
-            str(_parameters(call).get("prompt") or "")
-            for call in calls
-            if _name(call) == "sam3"
+            str(parameters.get("prompt") or "")
+            for _call_index, parameters in sam3_semantic_requests
         ]
         expected_prompts = [
             prompt
@@ -1621,7 +1723,7 @@ def verify_case(
         if sam3_prompts != expected_prompts:
             errors.append("SAM3 semantic prompts do not match the selected scene task")
         grasp_indices = [index for index, name in enumerate(names) if name == backend]
-        sam_indices = [index for index, name in enumerate(names) if name == "sam3"]
+        sam_indices = [index for index, _parameters in sam3_semantic_requests]
         if (
             assignment_count == 1
             and grasp_indices
@@ -1647,12 +1749,15 @@ def verify_case(
             for event in events
         ):
             errors.append("agent-visible motion preview evidence is forbidden")
-        create = next((call for call in calls if _name(call) == "create_simulator_env"), {})
-        if not base._contains(create, "env_id", ENV_ID):
+        if str(host_lifecycle.get("env_id") or "") != ENV_ID:
             errors.append("pick-place Gazebo environment identity missing")
-        if not base._contains(create, "scene_id", str(scene["world_scene"])):
+        if not base._contains(host_reset_payload, "scene_id", str(scene["world_scene"])):
             errors.append("created Gazebo environment lacks the selected scene identity")
-        if not base._contains(create, "contract_sha256", str(scene["contract_sha256"])):
+        if not base._contains(
+            host_reset_payload,
+            "contract_sha256",
+            str(scene["contract_sha256"]),
+        ):
             errors.append("created Gazebo environment lacks the selected scene hash")
         if not any(
             base._contains(event, "schema_version", "openeta.host_candidate_compilation.v1")
@@ -2165,6 +2270,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo,
         paths,
         allocation,
+        environment_config={
+            "env_id": ENV_ID,
+            "seed": int(_scene_contract(args.scenario)["seed"]),
+            "render_mode": "rgb_array",
+            "image_width": 512,
+            "image_height": 512,
+        },
         calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
         extra_environment={
             "OPENETA_GRASP_BACKEND": args.grasp_backend,

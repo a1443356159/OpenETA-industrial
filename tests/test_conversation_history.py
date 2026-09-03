@@ -43,70 +43,25 @@ def _action(name: str, *, index: int = 0, payload: str = "") -> EnvAction:
     )
 
 
-def _environment_action(
-    task: str,
+def _bind_host_environment(
+    memory: AgentMemory,
     *,
-    env_id: str = "openeta/libero-task0-v0",
+    env_id: str = "openeta/gazebo-pickplace-v0",
     handle: str = "env-1",
     session_id: str = "sim-session-1",
-) -> EnvAction:
-    return EnvAction(
-        action_type="tool_call",
-        command={
-            "status": "executed",
-            "request": {
-                "kind": "tool_call",
-                "name": "create_simulator_env",
-                "parameters": {"env_id": env_id},
-            },
-            "tool_calls": [
-                {
-                    "name": "create_simulator_env",
-                    "status": "executed",
-                    "result": {
-                        "success": True,
-                        "content": "Simulator environment created and reset.",
-                        "details": {
-                            "outputs": {
-                                "assigned_task": task,
-                                "environment": {
-                                    "env_id": env_id,
-                                    "handle": handle,
-                                    "session_id": session_id,
-                                },
-                                "observation_summary": {"task": task},
-                            },
-                            "state_delta": {"observation": {"task": task}},
-                        },
-                    },
-                }
-            ],
+) -> None:
+    memory.save_fact(
+        "active_environment_task",
+        {
+            "status": "running",
+            "env_id": env_id,
+            "handle": handle,
+            "session_id": session_id,
+            "source": "launcher_bootstrap",
+            "lifecycle_owner": "host",
+            "host_cleanup_pending": True,
         },
-    )
-
-
-def _close_environment_action() -> EnvAction:
-    return EnvAction(
-        action_type="tool_call",
-        command={
-            "status": "executed",
-            "request": {
-                "kind": "tool_call",
-                "name": "close_simulator_env",
-                "parameters": {},
-            },
-            "tool_calls": [
-                {
-                    "name": "close_simulator_env",
-                    "status": "executed",
-                    "result": {
-                        "success": True,
-                        "content": "Simulator environment closed.",
-                        "details": {"outputs": {"closed": True}},
-                    },
-                }
-            ],
-        },
+        source="launcher_bootstrap",
     )
 
 
@@ -134,11 +89,10 @@ def test_user_constraint_survives_many_operational_events() -> None:
     assert all(event["type"] != "user_message" for event in context["recent_events"])
 
 
-def test_environment_assigned_task_survives_many_tool_calls() -> None:
+def test_launcher_environment_identity_survives_many_tool_calls() -> None:
     memory = AgentMemory()
-    memory.start_session(task="Create an environment and complete its assigned task.")
-    assigned_task = "pick up alphabet soup and place it into basket"
-    memory.add_action(_environment_action(assigned_task))
+    memory.start_session(task="Sort the requested parts.")
+    _bind_host_environment(memory)
 
     for index in range(30):
         memory.add_action(_action("move_to", index=index))
@@ -148,60 +102,31 @@ def test_environment_assigned_task_survives_many_tool_calls() -> None:
     context = memory.planning_context(max_events=8)
 
     assert active is not None
-    assert active["task"] == assigned_task
-    assert active["env_id"] == "openeta/libero-task0-v0"
+    assert "task" not in active
+    assert active["env_id"] == "openeta/gazebo-pickplace-v0"
+    assert active["lifecycle_owner"] == "host"
     assert context["active_environment_task"] == active
-    assert assigned_task not in json.dumps(context["recent_events"])
+    assert "launcher_bootstrap" not in json.dumps(context["recent_events"])
 
 
 def test_task_neutral_environment_keeps_identity_without_injecting_a_task() -> None:
     memory = AgentMemory()
     memory.start_session(task="把扳手放入与我对话中指定的料箱。")
-    action = _environment_action("")
-
-    memory.add_action(action)
+    _bind_host_environment(memory)
 
     active = memory.active_environment_task()
     assert active is not None
     assert "task" not in active
-    assert active["env_id"] == "openeta/libero-task0-v0"
+    assert active["env_id"] == "openeta/gazebo-pickplace-v0"
     assert active["handle"] == "env-1"
-    assert active["source_field"] == "outputs.environment"
+    assert active["source"] == "launcher_bootstrap"
 
 
-def test_environment_assigned_task_replaces_and_clears_with_environment_lifecycle() -> None:
-    memory = AgentMemory()
-    memory.start_session(task="Run simulator tasks.")
-    memory.add_action(_environment_action("pick milk", handle="env-1"))
-    memory.add_action(_close_environment_action())
-
-    assert memory.active_environment_task() is None
-
-    memory.add_action(
-        _environment_action(
-            "pick cube",
-            env_id="openeta/libero-task1-v0",
-            handle="env-2",
-            session_id="sim-session-2",
-        )
-    )
-
-    active = memory.active_environment_task()
-    assert active is not None
-    assert active["task"] == "pick cube"
-    assert active["env_id"] == "openeta/libero-task1-v0"
-    assert active["handle"] == "env-2"
-    assert active["session_id"] == "sim-session-2"
-    assert active["source_tool"] == "create_simulator_env"
-    assert active["source_field"] == "outputs.assigned_task"
-    assert active["scene_epoch"] == 0
-
-
-def test_environment_assigned_task_survives_compaction_and_resume(tmp_path) -> None:
+def test_launcher_environment_identity_survives_compaction_and_resume(tmp_path) -> None:
     root = tmp_path / ".openeta_memory"
     memory = AgentMemory(store=JsonMemoryStore(root))
-    memory.start_session(task="Create an environment and complete its assigned task.")
-    memory.add_action(_environment_action("pick up alphabet soup"))
+    memory.start_session(task="Sort the requested parts.")
+    _bind_host_environment(memory)
     for index in range(20):
         memory.add_action(_action("observe", index=index))
     memory.compact(max_events=2)
@@ -211,7 +136,7 @@ def test_environment_assigned_task_survives_compaction_and_resume(tmp_path) -> N
     resumed = AgentMemory(store=JsonMemoryStore(root))
     resumed.resume_session(session_id, max_events=1)
 
-    assert resumed.active_environment_task()["task"] == "pick up alphabet soup"
+    assert resumed.active_environment_task()["lifecycle_owner"] == "host"
     assert resumed.planning_context()["active_environment_task"]["handle"] == "env-1"
 
 

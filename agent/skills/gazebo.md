@@ -12,8 +12,6 @@ task_patterns:
   - robotiq2f85
   - live_rgbd
 allowed_tools:
-  - create_simulator_env
-  - close_simulator_env
   - observe
   - active_observe
   - move_to
@@ -70,6 +68,4 @@ context and the runtime profile expose it. Never switch to Oracle merely because
 visual perception failed; inspect the failure and use only the recovery path
 advertised by the runtime.
 
-Keep user intent and the host-owned active environment task across turns.
-Create or close an environment only through the exposed lifecycle AgentTools,
-and use the exact runtime schema and `env_id` supplied by the host.
+Keep user intent and the already-bound active environment identity across turns.

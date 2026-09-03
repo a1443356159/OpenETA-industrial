@@ -73,6 +73,14 @@ from agent.backends.provider_config import (
 
 
 from agent.runtime.actions import PipelineStatus
+from agent.tools.sim_mcp import (
+    SimulatorMcpEpisodeConfig,
+    SimulatorMcpEpisodeEnvironment,
+    close_environment_mcp_env,
+    mcp_dashboard_url,
+    mcp_server_url_from_endpoint,
+    simulator_mcp_transport_for_url,
+)
 
 
 SCRIPTED_TUI = "scripted_tui"
@@ -87,8 +95,6 @@ DOMAIN_CANDIDATES = tuple(i for i in range(80, 102) if i not in PROTECTED_DOMAIN
 
 MUTATING_TOOLS = frozenset(
     {
-        "create_simulator_env",
-        "close_simulator_env",
         "move_to",
         "follow_eef_trajectory",
         "gripper_control",
@@ -96,10 +102,8 @@ MUTATING_TOOLS = frozenset(
 )
 
 
-SIX_SIMULATOR_TOOLS = frozenset(
+SIMULATOR_TASK_TOOLS = frozenset(
     {
-        "create_simulator_env",
-        "close_simulator_env",
         "observe",
         "move_to",
         "follow_eef_trajectory",
@@ -131,6 +135,9 @@ _PROVIDER_PROFILE_KEYS = frozenset(
 
 
 _OPERATOR_GUI_ENV = "OPENETA_GAZEBO_OPERATOR_GUI"
+_HOST_BOOTSTRAP_ENV = "OPENETA_SIMULATOR_BOOTSTRAP_PATH"
+_HOST_BOOTSTRAP_SCHEMA_VERSION = "openeta.host_simulator_bootstrap.v1"
+_HOST_LIFECYCLE_SCHEMA_VERSION = "openeta.host_simulator_lifecycle.v1"
 
 
 _MCP_EVIDENCE_REQUEST_ID = "__openeta_acceptance_mcp_request_id"
@@ -164,6 +171,16 @@ class CasePaths:
     instructions: Path
     mcp_config: Path
     pid_record: Path
+
+
+@dataclass(slots=True)
+class HostSimulatorLifecycle:
+    """One launcher-owned Gazebo environment shared with a child TUI."""
+
+    environment: SimulatorMcpEpisodeEnvironment
+    lifecycle_path: Path
+    bootstrap_path: Path
+    evidence: dict[str, Any]
 
 
 def _json_dump(path: Path, value: Any, *, exclusive: bool = False) -> None:
@@ -564,6 +581,198 @@ def _wait_ready(port: int, process: subprocess.Popen[Any], timeout_s: float = 30
     raise AcceptanceError("MCP_NOT_READY")
 
 
+def _response_succeeded(response: Mapping[str, Any]) -> bool:
+    return bool(
+        response
+        and response.get("success") is not False
+        and response.get("ok") is not False
+        and not response.get("error")
+    )
+
+
+def _start_host_simulator_environment(
+    paths: CasePaths,
+    allocation: Allocation,
+    *,
+    environment_config: Mapping[str, Any],
+    timeout_s: float,
+) -> HostSimulatorLifecycle:
+    """Create/reset Gazebo before the TUI and persist its first observation."""
+
+    env_id = str(environment_config.get("env_id") or "").strip()
+    if not env_id:
+        raise AcceptanceError("TUI_NOT_READY: host environment config requires env_id")
+    try:
+        seed = int(environment_config.get("seed", 0))
+        image_width = int(environment_config.get("image_width", 512))
+        image_height = int(environment_config.get("image_height", 512))
+    except (TypeError, ValueError) as exc:
+        raise AcceptanceError(
+            "TUI_NOT_READY: invalid host environment seed or image dimensions"
+        ) from exc
+    if image_width <= 0 or image_height <= 0:
+        raise AcceptanceError("TUI_NOT_READY: host environment dimensions must be positive")
+
+    mcp_url = f"http://127.0.0.1:{allocation.port}/mcp"
+    dashboard_url = mcp_dashboard_url(
+        mcp_server_url_from_endpoint(mcp_url), allocation.run_id
+    )
+    episode_config = SimulatorMcpEpisodeConfig(
+        env_id=env_id,
+        render_mode=str(environment_config.get("render_mode") or "rgb_array"),
+        seed=seed,
+        image_width=image_width,
+        image_height=image_height,
+        session_id=allocation.run_id,
+        artifact_session_id="host-launcher",
+        timeout_s=timeout_s,
+        image_output_root=paths.root / "host-artifacts" / "images",
+        startup_attempts=2,
+        startup_retry_delay_s=0.5,
+    )
+    environment = SimulatorMcpEpisodeEnvironment(
+        transport=simulator_mcp_transport_for_url(mcp_url),
+        config=episode_config,
+    )
+    lifecycle_path = paths.root / "host-simulator-lifecycle.json"
+    bootstrap_path = paths.root / "host-simulator-bootstrap.json"
+    started_at_s = time.time()
+    try:
+        observation = environment.reset(
+            task="",
+            metadata={
+                "execution_id": f"host-launcher-{allocation.run_id}",
+                "agent_session_id": "host-launcher",
+            },
+        )
+    except Exception as exc:
+        cleanup: Mapping[str, Any] = {"ok": True, "skipped": True}
+        if episode_config.handle:
+            cleanup = close_environment_mcp_env(
+                environment.transport,
+                handle=episode_config.handle,
+                session_id=episode_config.session_id,
+                timeout_s=min(timeout_s, 30.0),
+            )
+        _json_dump(
+            lifecycle_path,
+            {
+                "schema_version": _HOST_LIFECYCLE_SCHEMA_VERSION,
+                "lifecycle_owner": "host",
+                "status": "start_failed",
+                "env_id": env_id,
+                "session_id": episode_config.session_id,
+                "handle": episode_config.handle,
+                "mcp_url": mcp_url,
+                "started_at_s": started_at_s,
+                "failed_at_s": time.time(),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "cleanup": dict(cleanup),
+            },
+        )
+        raise AcceptanceError(
+            f"TUI_NOT_READY: launcher could not create/reset Gazebo: {exc}"
+        ) from exc
+
+    reset_path = paths.root / "host-artifacts" / "reset-response.json"
+    _json_dump(reset_path, environment.last_payload)
+    initial_observation = observation.to_dict()
+    initial_metadata = initial_observation.get("metadata")
+    if isinstance(initial_metadata, dict):
+        # The full reset response is already a host artifact. Keep only the
+        # small environment identity in the bootstrap consumed by the TUI.
+        initial_metadata.pop("create_env", None)
+        initial_metadata.update(
+            {
+                "environment_lifecycle_owner": "host",
+                "host_reset_response_path": str(reset_path.resolve()),
+            }
+        )
+    bootstrap = {
+        "schema_version": _HOST_BOOTSTRAP_SCHEMA_VERSION,
+        "lifecycle_owner": "host",
+        "status": "active",
+        "env_id": env_id,
+        "handle": episode_config.handle,
+        "session_id": episode_config.session_id,
+        "mcp_url": mcp_url,
+        "dashboard_url": dashboard_url,
+        "initial_observation": initial_observation,
+    }
+    _json_dump(bootstrap_path, bootstrap)
+    evidence: dict[str, Any] = {
+        "schema_version": _HOST_LIFECYCLE_SCHEMA_VERSION,
+        "lifecycle_owner": "host",
+        "status": "active",
+        "env_id": env_id,
+        "seed": seed,
+        "session_id": episode_config.session_id,
+        "handle": episode_config.handle,
+        "mcp_url": mcp_url,
+        "dashboard_url": dashboard_url,
+        "started_at_s": started_at_s,
+        "ready_at_s": time.time(),
+        "startup_elapsed_s": round(time.time() - started_at_s, 3),
+        "startup_attempt_count": environment.startup_attempt_count,
+        "reset_response_path": str(reset_path.resolve()),
+        "bootstrap_path": str(bootstrap_path.resolve()),
+        "initial_rgb_artifact_count": sum(
+            1
+            for artifact in observation.metadata.get("image_artifacts", [])
+            if isinstance(artifact, Mapping) and artifact.get("kind") == "rgb"
+        ),
+    }
+    _json_dump(lifecycle_path, evidence)
+    return HostSimulatorLifecycle(
+        environment=environment,
+        lifecycle_path=lifecycle_path,
+        bootstrap_path=bootstrap_path,
+        evidence=evidence,
+    )
+
+
+def _close_host_simulator_environment(
+    lifecycle: HostSimulatorLifecycle,
+) -> dict[str, Any]:
+    """Close the exact launcher-owned handle after the child TUI exits."""
+
+    config = lifecycle.environment.config
+    handle = str(config.handle or lifecycle.evidence.get("handle") or "")
+    session_id = str(config.session_id or lifecycle.evidence.get("session_id") or "")
+    attempts: list[dict[str, Any]] = []
+    for _attempt in range(2):
+        response = close_environment_mcp_env(
+            lifecycle.environment.transport,
+            handle=handle,
+            session_id=session_id,
+            timeout_s=min(config.timeout_s, 30.0),
+        )
+        attempts.append(dict(response))
+        if _response_succeeded(response):
+            break
+    success = bool(attempts and _response_succeeded(attempts[-1]))
+    config.handle = ""
+    lifecycle.evidence.update(
+        {
+            "status": "closed" if success else "close_failed",
+            "closed_at_s": time.time(),
+            "close_attempt_count": len(attempts),
+            "close_attempts": attempts,
+            "closed": success,
+        }
+    )
+    _json_dump(lifecycle.lifecycle_path, lifecycle.evidence)
+    return {
+        "ok": success,
+        "closed": success,
+        "handle": handle,
+        "session_id": session_id,
+        "attempt_count": len(attempts),
+        **({} if success else {"error": attempts[-1].get("error", "close_env failed")}),
+    }
+
+
 def _terminate_owned_group(
     process: subprocess.Popen[Any], pgid: int, *, label: str = "MCP"
 ) -> None:
@@ -601,27 +810,42 @@ def _launch_operator_gui(
             f"TUI_NOT_READY: operator GUI launcher is unavailable: {script}"
         )
     gui_log = (paths.root / "operator-gui.log").open("w", encoding="utf-8")
+    ready_path = paths.root / "operator-gui.ready"
+    ready_path.unlink(missing_ok=True)
+    gui_environment = dict(environment)
+    gui_environment["OPENETA_GAZEBO_GUI_READY_FILE"] = str(ready_path.resolve())
+    process: subprocess.Popen[Any] | None = None
     try:
         process = subprocess.Popen(
             [str(script)],
             cwd=repo,
-            env=dict(environment),
+            env=gui_environment,
             stdout=gui_log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
             text=True,
         )
         pgid = os.getpgid(process.pid)
-        # Catch missing VNC / VirtualGL prerequisites before the planner starts
-        # an otherwise unobservable formal episode. Gazebo discovery itself
-        # remains asynchronous until create_simulator_env starts the server.
-        time.sleep(0.25)
-        if process.poll() is not None:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AcceptanceError(
+                    "TUI_NOT_READY: case-owned Gazebo operator GUI exited during startup"
+                )
+            if ready_path.is_file():
+                break
+            time.sleep(0.1)
+        else:
             raise AcceptanceError(
-                "TUI_NOT_READY: case-owned Gazebo operator GUI exited during startup"
+                "TUI_NOT_READY: Gazebo operator GUI was not visible within 60 seconds"
             )
         return process, pgid, gui_log
     except Exception:
+        if process is not None and process.poll() is None:
+            try:
+                _terminate_owned_group(process, os.getpgid(process.pid), label="operator GUI")
+            except Exception:
+                pass
         gui_log.close()
         raise
 
@@ -1524,6 +1748,7 @@ def run_case(
     paths: CasePaths,
     allocation: Allocation,
     *,
+    environment_config: Mapping[str, Any],
     calibration_profile: Path | None = None,
     extra_environment: Mapping[str, str] | None = None,
 ) -> int:
@@ -1634,8 +1859,34 @@ def run_case(
         "requested": _operator_gui_requested(env),
         "started": False,
     }
+    host_lifecycle: HostSimulatorLifecycle | None = None
+    host_lifecycle_cleanup: dict[str, Any] = {
+        "ok": False,
+        "closed": False,
+        "skipped": True,
+    }
+    tui_started_at_s: float | None = None
+    tui_exited_at_s: float | None = None
     try:
         _wait_ready(allocation.port, process)
+        try:
+            startup_timeout_s = float(
+                env.get("OPENETA_GAZEBO_STARTUP_TIMEOUT_S", "180")
+            )
+        except ValueError as exc:
+            raise AcceptanceError(
+                "TUI_NOT_READY: OPENETA_GAZEBO_STARTUP_TIMEOUT_S must be numeric"
+            ) from exc
+        host_lifecycle = _start_host_simulator_environment(
+            paths,
+            allocation,
+            environment_config=environment_config,
+            timeout_s=max(1.0, startup_timeout_s),
+        )
+        host_lifecycle.evidence["operator_gui_requested"] = bool(
+            operator_gui_evidence["requested"]
+        )
+        tui_env[_HOST_BOOTSTRAP_ENV] = str(host_lifecycle.bootstrap_path.resolve())
         if operator_gui_evidence["requested"]:
             (
                 operator_gui_process,
@@ -1645,6 +1896,7 @@ def run_case(
             operator_gui_evidence.update(
                 {
                     "started": True,
+                    "ready_at_s": time.time(),
                     "pid": operator_gui_process.pid,
                     "pgid": operator_gui_pgid,
                     "display": str(env.get("OPENETA_GAZEBO_DISPLAY") or ":3"),
@@ -1653,6 +1905,9 @@ def run_case(
                     "log": "operator-gui.log",
                 }
             )
+            host_lifecycle.evidence["gui_ready_at_s"] = operator_gui_evidence[
+                "ready_at_s"
+            ]
         print(f"\n=== {paths.root.name} ===")
         print(paths.instructions.read_text(encoding="utf-8"))
         command = f"{shlex.quote(str(python))} -m agent.cli.openeta_cli"
@@ -1663,6 +1918,7 @@ def run_case(
             )
         if shutil.which("script") is None:
             raise AcceptanceError("TUI_NOT_READY: util-linux script is missing")
+        tui_started_at_s = time.time()
         if scripted:
             tui_code = _run_scripted_tui(command, paths, tui_env)
         else:
@@ -1673,7 +1929,19 @@ def run_case(
                 check=False,
             )
             tui_code = int(completed.returncode)
+        tui_exited_at_s = time.time()
     finally:
+        if host_lifecycle is not None:
+            host_lifecycle.evidence.update(
+                {
+                    "tui_started_at_s": tui_started_at_s,
+                    "tui_exited_at_s": tui_exited_at_s or time.time(),
+                    "tui_returncode": tui_code,
+                }
+            )
+            host_lifecycle_cleanup = _close_host_simulator_environment(
+                host_lifecycle
+            )
         if operator_gui_process is not None:
             operator_gui_evidence["live_until_case_cleanup"] = (
                 operator_gui_process.poll() is None
@@ -1764,6 +2032,7 @@ def run_case(
             item.get("group_exited") is True for item in residual_groups
         ),
         "owned_process_residuals": owned_residuals,
+        "host_simulator_lifecycle": host_lifecycle_cleanup,
         "operator_gui": operator_gui_evidence,
         **process_continuity,
         "ros_graph": _ros_graph_cleanup(allocation.ros_domain_id),
@@ -1774,6 +2043,10 @@ def run_case(
     _json_dump(paths.root / "cleanup.json", cleanup)
     if mcp_termination_error:
         raise AcceptanceError(f"MCP_CLEANUP_FAILED: {mcp_termination_error}")
+    if not host_lifecycle_cleanup.get("closed"):
+        raise AcceptanceError(
+            "GAZEBO_CLEANUP_FAILED: launcher could not prove close_env completion"
+        )
     return tui_code
 
 
@@ -1939,6 +2212,13 @@ def _base_errors(paths: CasePaths, events: Sequence[Mapping[str, Any]]) -> list[
             errors.append("owned bench-worker process groups lack clean-exit evidence")
         if cleanup.get("owned_process_residuals"):
             errors.append("owned ROS/Gazebo worker residuals remain")
+        host_lifecycle = cleanup.get("host_simulator_lifecycle")
+        if not (
+            isinstance(host_lifecycle, Mapping)
+            and host_lifecycle.get("closed") is True
+            and host_lifecycle.get("ok") is True
+        ):
+            errors.append("launcher-owned Gazebo lifecycle cleanup proof failed")
         unmanaged_continuity = cleanup.get(
             "preexisting_unmanaged_process_snapshot_unchanged"
         )
@@ -1981,16 +2261,16 @@ def _mcp_response_payloads(
     calls: Sequence[Mapping[str, Any]],
     paths: CasePaths,
     *,
-    required_tools: frozenset[str] = SIX_SIMULATOR_TOOLS,
+    required_tools: frozenset[str] = SIMULATOR_TASK_TOOLS,
 ) -> tuple[list[Mapping[str, Any]], list[str]]:
     """Validate every required simulator MCP call.
 
     The proxy emits a local MCP request descriptor, a response file rooted in
     this case, and an environment receipt carrying the same request id.  A
-    create call contains two linked RPCs (``create_env`` then its automatic
-    ``reset_env``); all other simulator tools contain exactly one.  This is
-    intentionally strict: a formal case cannot pass with a raw response, a
-    trace-only request, or a receipt associated with a different RPC.
+    task action contains exactly one RPC. This is intentionally strict: a
+    formal case cannot pass with a raw response, a trace-only request, or a
+    receipt associated with a different RPC. Launcher lifecycle evidence is
+    validated separately and never appears as an agent tool call.
     """
 
     payloads: list[Mapping[str, Any]] = []
@@ -2010,7 +2290,7 @@ def _mcp_response_payloads(
         if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
             errors.append(f"{agent_tool} lacks MCP request/response/receipt evidence")
             continue
-        expected_count = 2 if agent_tool == "create_simulator_env" else 1
+        expected_count = 1
         if len(entries) != expected_count:
             errors.append(
                 f"{agent_tool} requires {expected_count} correlated MCP RPC evidence entries"

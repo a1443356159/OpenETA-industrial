@@ -14,6 +14,10 @@ from scripts import normal_gazebo_acceptance as acceptance
 
 NORMAL_RUNNER = Path(__file__).resolve().parents[1] / "scripts/run_normal_gazebo_acceptance.sh"
 PICK_PLACE_RUNNER = Path(__file__).resolve().parents[1] / "scripts/run_pick_place_acceptance.sh"
+PNG_1X1 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42Y"
+    "AAAAASUVORK5CYII="
+)
 
 
 def test_normal_runner_enables_case_owned_operator_gui_by_default() -> None:
@@ -27,6 +31,146 @@ def test_normal_runner_enables_case_owned_operator_gui_by_default() -> None:
 
 def test_normal_acceptance_reserves_cold_startup_budget_for_native_endpoints() -> None:
     assert acceptance.DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S == 180.0
+
+
+def test_launcher_creates_before_tui_and_closes_exact_environment_after_exit(
+    tmp_path, monkeypatch
+) -> None:
+    class RecordingTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def call_tool(self, name, arguments, *, timeout_s=None):
+            self.calls.append((name, dict(arguments), timeout_s))
+            if name == "create_env":
+                return {
+                    "success": True,
+                    "env_id": arguments["env_id"],
+                    "handle": "env-host-1",
+                    "session_id": arguments["session_id"],
+                }
+            if name == "reset_env":
+                return {
+                    "success": True,
+                    "observation": {
+                        "task": "task-neutral industrial workcell",
+                        "cameras": [
+                            {
+                                "frame_id": "top_camera",
+                                "rgb_base64": PNG_1X1,
+                                "width": 1,
+                                "height": 1,
+                            }
+                        ],
+                        "robot": {},
+                        "objects": [{"name": "yellow wrench"}],
+                    },
+                }
+            if name == "close_env":
+                return {"success": True, "closed": True}
+            raise AssertionError(f"unexpected MCP tool: {name}")
+
+    transport = RecordingTransport()
+    monkeypatch.setattr(
+        acceptance.base,
+        "simulator_mcp_transport_for_url",
+        lambda _url: transport,
+    )
+    paths = acceptance.base.case_paths(tmp_path, "pick-place", "human_tui")
+    allocation = acceptance.base.Allocation(83, "host-lifecycle", 18767, "run-1")
+
+    lifecycle = acceptance.base._start_host_simulator_environment(
+        paths,
+        allocation,
+        environment_config={
+            "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+            "seed": 7,
+            "image_width": 512,
+            "image_height": 512,
+        },
+        timeout_s=30.0,
+    )
+
+    assert [call[0] for call in transport.calls] == ["create_env", "reset_env"]
+    bootstrap = json.loads(lifecycle.bootstrap_path.read_text(encoding="utf-8"))
+    assert bootstrap["lifecycle_owner"] == "host"
+    assert bootstrap["handle"] == "env-host-1"
+    assert bootstrap["dashboard_url"] == "http://127.0.0.1:18767/session/run-1"
+    assert bootstrap["initial_observation"]["cameras"][0]["frame_id"] == "top_camera"
+    assert bootstrap["initial_observation"]["metadata"]["image_artifacts"][0][
+        "kind"
+    ] == "rgb"
+
+    ready_at_s = float(lifecycle.evidence["ready_at_s"])
+    lifecycle.evidence.update(
+        {
+            "operator_gui_requested": True,
+            "gui_ready_at_s": ready_at_s,
+            "tui_started_at_s": ready_at_s,
+            "tui_exited_at_s": max(ready_at_s, acceptance.base.time.time()),
+        }
+    )
+    cleanup = acceptance.base._close_host_simulator_environment(lifecycle)
+
+    assert cleanup == {
+        "ok": True,
+        "closed": True,
+        "handle": "env-host-1",
+        "session_id": "run-1",
+        "attempt_count": 1,
+    }
+    assert [call[0] for call in transport.calls] == [
+        "create_env",
+        "reset_env",
+        "close_env",
+    ]
+    assert transport.calls[-1][1] == {
+        "handle": "env-host-1",
+        "session_id": "run-1",
+    }
+    evidence = json.loads(lifecycle.lifecycle_path.read_text(encoding="utf-8"))
+    assert evidence["status"] == "closed"
+    assert evidence["closed"] is True
+    assert evidence["tui_exited_at_s"] >= ready_at_s
+    _, reset_payload, lifecycle_errors = acceptance._host_lifecycle_evidence(paths)
+    assert reset_payload["observation"]["cameras"][0]["frame_id"] == "top_camera"
+    assert lifecycle_errors == []
+
+
+def test_operator_gui_launcher_waits_for_visible_ready_marker(tmp_path, monkeypatch) -> None:
+    paths = acceptance.base.case_paths(tmp_path, "pick-place", "human_tui")
+    paths.root.mkdir(parents=True)
+    captured = {}
+
+    class Process:
+        pid = 4321
+
+        @staticmethod
+        def poll():
+            return None
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["environment"] = kwargs["env"]
+        return Process()
+
+    monkeypatch.setattr(acceptance.base.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(acceptance.base.os, "getpgid", lambda _pid: 4321)
+
+    def mark_ready(_seconds):
+        Path(captured["environment"]["OPENETA_GAZEBO_GUI_READY_FILE"]).touch()
+
+    monkeypatch.setattr(acceptance.base.time, "sleep", mark_ready)
+    process, pgid, log = acceptance.base._launch_operator_gui(
+        Path(__file__).resolve().parents[1],
+        paths,
+        {"GZ_PARTITION": "openeta-tui-test", "OPENETA_GAZEBO_DISPLAY": ":3"},
+    )
+    log.close()
+
+    assert process.pid == 4321
+    assert pgid == 4321
+    assert Path(captured["environment"]["OPENETA_GAZEBO_GUI_READY_FILE"]).is_file()
 
 
 def test_cleanup_waits_for_exited_ros_participant_discovery_lease(monkeypatch) -> None:
@@ -157,7 +301,8 @@ def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, 
 
     metadata = acceptance._automation_metadata_for_backend("anygrasp")
     assert "planner_mode=agentic_closed_loop" in metadata
-    assert f"environment_id={acceptance.ENV_ID}" in metadata
+    assert "environment_id=" not in metadata
+    assert "environment_seed=" not in metadata
     assert "initial_observe=" not in metadata
     assert "environment_task=" not in metadata
 
@@ -326,7 +471,7 @@ def test_seeded_random_scene_keeps_the_same_vlm_authored_multi_sort_contract(
     assert receipt["task_variant"] == "wrench-green-bolt-blue"
     assert len(receipt["acceptance_scene"]["expected_work_order"]) == 2
     assert "工作台物件的位置和朝向已经变化" in prompt
-    assert "environment_seed=12345" in metadata
+    assert "environment_seed=" not in metadata
     assert "work_order_source=vlm_conversation" in metadata
     assert acceptance._scenario_environment("multi_normal_random_12345") == {
         "OPENETA_ACCEPTANCE_SCENE": "multi_normal_random_12345"
@@ -754,6 +899,52 @@ def test_acceptance_reports_agent_route_findings_without_failing_the_result() ->
     assert not acceptance._is_non_blocking_flow_finding(
         "native release plus causal VLM observation is missing per assignment"
     )
+
+
+def test_sam3_semantic_requests_expand_host_assignment_batch_in_order() -> None:
+    calls = [
+        {"name": "observe", "parameters": {}},
+        {
+            "name": "sam3",
+            "parameters": {
+                "mode": "assignment_batch",
+                "requests": [
+                    {
+                        "mode": "text",
+                        "semantic_role": "grasp_target",
+                        "prompt": "yellow wrench",
+                    },
+                    {
+                        "mode": "text",
+                        "semantic_role": "placement_region",
+                        "prompt": "green bin interior",
+                    },
+                ],
+            },
+        },
+        {
+            "name": "sam3",
+            "parameters": {
+                "mode": "text",
+                "semantic_role": "grasp_target",
+                "prompt": "red bolt",
+            },
+        },
+    ]
+
+    requests = acceptance._sam3_semantic_requests(calls)
+
+    assert [index for index, _parameters in requests] == [1, 1, 2]
+    assert [parameters["semantic_role"] for _index, parameters in requests] == [
+        "grasp_target",
+        "placement_region",
+        "grasp_target",
+    ]
+    assert [parameters["prompt"] for _index, parameters in requests] == [
+        "yellow wrench",
+        "green bin interior",
+        "red bolt",
+    ]
 
 
 def _ordered_call(

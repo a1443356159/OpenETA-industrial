@@ -528,16 +528,14 @@ def test_default_simulator_mcp_binding_uses_remote_stable_tools() -> None:
     )
 
     assert DEFAULT_SIMULATOR_MCP_TOOL_NAMES == (
-        "create_simulator_env",
-        "close_simulator_env",
         "observe",
         "configure_work_order",
         "move_to",
         "follow_eef_trajectory",
         "gripper_control",
     )
-    assert tools.can_execute("create_simulator_env")
-    assert tools.can_execute("close_simulator_env")
+    assert "create_simulator_env" not in {spec.name for spec in tools.list()}
+    assert "close_simulator_env" not in {spec.name for spec in tools.list()}
     assert tools.can_execute("observe")
     assert tools.can_execute("configure_work_order")
     assert tools.can_execute("move_to")
@@ -594,118 +592,6 @@ def test_configure_work_order_proxy_forwards_only_vlm_items_and_session_binding(
         }
     ]
     assert result.details["environment_receipt"]["work_order"] == work_order
-
-
-def test_create_simulator_env_is_atomic_create_reset_and_state_sync(tmp_path: Path) -> None:
-    transport = SequencedSimulatorMcpTransport(
-        [
-            {
-                "success": True,
-                "handle": "env-1",
-                "session_id": "session-1",
-                "env_id": "openeta/demo-v0",
-                "name": "Gazebo 仿真环境",
-                "control_spec": {"validated_relative_motion": {"targets": ["low", "high"]}},
-            },
-            {
-                "success": True,
-                "handle": "env-1",
-                "session_id": "session-1",
-                "task": "pick up alphabet soup and place it into basket",
-                "cameras": [
-                    {
-                        "frame_id": "agentview",
-                        "rgb_base64": PNG_1X1,
-                        "depth_base64": PNG_1X1,
-                        "intrinsics": {"fx": 618, "fy": 618, "cx": 256, "cy": 256},
-                    }
-                ],
-                "robot": {},
-            },
-        ],
-        url="http://sim.example/sse",
-    )
-    config = SimulatorMcpToolProxyConfig(
-        image_output_root=tmp_path / "images",
-        response_output_root=tmp_path / "responses",
-    )
-    callbacks: list[JsonDict] = []
-    tools = bind_simulator_mcp_tool_handlers(
-        build_default_tool_registry(),
-        transport=transport,
-        config=config,
-        tool_names=("create_simulator_env",),
-        response_callback=lambda name, arguments, response: callbacks.append(
-            {"name": name, "arguments": arguments, "response": response}
-        ),
-    )
-
-    result = tools.call(
-        "create_simulator_env",
-        {
-            "env_id": "openeta/demo-v0",
-            "seed": 7,
-            "session_id": "session-1",
-            "include_objects": True,
-        },
-        observation=EnvObservation(
-            task="user-authored task stays in agent memory",
-            cameras=[],
-            robot=RobotState(),
-        ),
-        metadata={"session_id": "agent-session-1"},
-    )
-
-    assert result.success is True
-    assert [call["name"] for call in transport.calls] == ["create_env", "reset_env"]
-    assert transport.calls[0]["arguments"] == {
-        "env_id": "openeta/demo-v0",
-        "render_mode": "rgb_array",
-        "seed": 7,
-        "image_width": 512,
-        "image_height": 512,
-        "session_id": "session-1",
-        "include_objects": True,
-    }
-    assert transport.calls[1]["arguments"] == {
-        "handle": "env-1",
-        "seed": 7,
-        "session_id": "session-1",
-    }
-    assert config.handle == "env-1"
-    assert config.session_id == "session-1"
-    assert result.content.endswith("Assigned task: pick up alphabet soup and place it into basket")
-    assert result.details["outputs"]["assigned_task"] == (
-        "pick up alphabet soup and place it into basket"
-    )
-    environment = result.details["outputs"]["environment"]
-    assert environment["assigned_task"] == ("pick up alphabet soup and place it into basket")
-    assert environment["display_name"] == "Gazebo 仿真环境"
-    assert environment["control_spec"] == {
-        "validated_relative_motion": {"targets": ["low", "high"]}
-    }
-    assert environment["dashboard_url"] == "http://sim.example/session/session-1"
-    camera = result.details["outputs"]["initial_observation"]["cameras"][0]
-    assert camera["anygrasp_intrinsics"]["scale"] == 1000.0
-    assert Path(camera["rgb_path"]).exists()
-    assert Path(camera["rgb_path"]).relative_to(tmp_path / "images").parts[0] == ("agent-session-1")
-    assert (
-        Path(result.details["outputs"]["create_response"]["response_path"])
-        .relative_to(tmp_path / "responses")
-        .parts[0]
-        == "agent-session-1"
-    )
-    rpc_evidence = result.details["outputs"]["mcp_calls"]
-    assert [entry["request"]["tool"] for entry in rpc_evidence] == [
-        "create_env", "reset_env"
-    ]
-    for entry in rpc_evidence:
-        request_id = entry["request"]["request_id"]
-        assert entry["response"]["request_id"] == request_id
-        assert entry["environment_receipt"]["mcp_request_id"] == request_id
-        assert Path(entry["response"]["response_path"]).is_file()
-    assert result.details["state_delta"]["simulator_environment"]["handle"] == "env-1"
-    assert [callback["name"] for callback in callbacks] == ["create_env", "reset_env"]
 
 
 def test_worker_proxy_carries_existing_control_spec_into_observation_metadata() -> None:
@@ -952,218 +838,6 @@ def test_worker_proxy_retains_moveit_rejection_in_trusted_receipt(tmp_path: Path
     receipt = result.details["environment_receipt"]
     for key, value in response.items():
         assert receipt[key] == value
-
-
-def test_create_simulator_env_requires_env_id() -> None:
-    transport = FakeSimulatorMcpTransport({"success": True})
-    tools = bind_simulator_mcp_tool_handlers(
-        build_default_tool_registry(),
-        transport=transport,
-        tool_names=("create_simulator_env",),
-    )
-
-    result = tools.call("create_simulator_env", {})
-
-    assert result.success is False
-    assert result.details["diagnostics"][0]["code"] == "missing_env_id"
-    assert transport.calls == []
-
-
-def test_create_simulator_env_rolls_back_failed_reset_before_next_create(
-    tmp_path: Path,
-) -> None:
-    transport = SequencedSimulatorMcpTransport(
-        [
-            {
-                "success": True,
-                "handle": "env-failed-reset",
-                "session_id": "session-failed-reset",
-            },
-            {
-                "success": False,
-                "error": "Reset failed: controller readiness timeout",
-                "fatal": True,
-            },
-            {"ok": True},
-            {
-                "success": True,
-                "handle": "env-retry",
-                "session_id": "session-retry",
-            },
-            {"success": True, "cameras": [], "robot": {}},
-        ]
-    )
-    config = SimulatorMcpToolProxyConfig(
-        image_output_root=tmp_path / "images",
-        response_output_root=tmp_path / "responses",
-    )
-    tools = bind_simulator_mcp_tool_handlers(
-        build_default_tool_registry(),
-        transport=transport,
-        config=config,
-        tool_names=("create_simulator_env",),
-    )
-
-    failed = tools.call(
-        "create_simulator_env",
-        {"env_id": "openeta/demo-v0", "seed": 0},
-    )
-
-    assert failed.success is False
-    assert [call["name"] for call in transport.calls] == [
-        "create_env",
-        "reset_env",
-        "close_env",
-    ]
-    assert failed.details["outputs"]["reset_failure_cleanup"] == {
-        "attempted": True,
-        "success": True,
-        "handle": "env-failed-reset",
-        "response": {"ok": True},
-    }
-    assert failed.details["state_delta"]["simulator_environment"]["status"] == (
-        "closed_after_reset_failure"
-    )
-    assert failed.details["environment_receipt"]["environment_closed"] is True
-    assert config.handle == ""
-    assert config.session_id == ""
-
-    retried = tools.call(
-        "create_simulator_env",
-        {"env_id": "openeta/demo-v0", "seed": 0},
-    )
-
-    assert retried.success is True
-    assert [call["name"] for call in transport.calls] == [
-        "create_env",
-        "reset_env",
-        "close_env",
-        "create_env",
-        "reset_env",
-    ]
-    assert config.handle == "env-retry"
-
-
-def test_create_simulator_env_retries_transient_detach_ack_inside_one_tool_call(
-    tmp_path: Path,
-) -> None:
-    transport = SequencedSimulatorMcpTransport(
-        [
-            {
-                "success": True,
-                "handle": "env-detach-race",
-                "session_id": "session-detach-race",
-            },
-            {
-                "success": False,
-                "error": "Reset failed: NATIVE_GRASP_DETACH_ACK_MISSING",
-                "fatal": True,
-            },
-            {"ok": True},
-            {
-                "success": True,
-                "handle": "env-recovered",
-                "session_id": "session-recovered",
-            },
-            {
-                "success": True,
-                "cameras": [],
-                "robot": {},
-                "observation": {"task": "pick and place", "cameras": [], "robot": {}},
-            },
-        ]
-    )
-    config = SimulatorMcpToolProxyConfig(
-        image_output_root=tmp_path / "images",
-        response_output_root=tmp_path / "responses",
-    )
-    tools = bind_simulator_mcp_tool_handlers(
-        build_default_tool_registry(),
-        transport=transport,
-        config=config,
-        tool_names=("create_simulator_env",),
-    )
-
-    result = tools.call(
-        "create_simulator_env",
-        {"env_id": "openeta/demo-v0", "seed": 0},
-    )
-
-    assert result.success is True
-    assert [call["name"] for call in transport.calls] == [
-        "create_env",
-        "reset_env",
-        "close_env",
-        "create_env",
-        "reset_env",
-    ]
-    retry = result.details["outputs"]["startup_retry"]
-    assert retry["attempt_count"] == 2
-    assert retry["reason"] == "NATIVE_GRASP_DETACH_ACK_MISSING"
-    assert retry["first_environment_closed"] is True
-    assert retry["final_success"] is True
-    assert len(result.details["outputs"]["mcp_calls"]) == 4
-    assert result.details["environment_receipt"]["startup_attempt_count"] == 2
-    assert result.details["environment_receipt"]["startup_retry_count"] == 1
-    assert config.handle == "env-recovered"
-    assert config.session_id == "session-recovered"
-
-
-def test_close_simulator_env_closes_and_clears_bound_handle() -> None:
-    transport = FakeSimulatorMcpTransport({"ok": True})
-    config = SimulatorMcpToolProxyConfig(
-        session_id="session-close",
-        handle="env-close",
-    )
-    tools = bind_simulator_mcp_tool_handlers(
-        build_default_tool_registry(),
-        transport=transport,
-        config=config,
-        tool_names=("close_simulator_env",),
-    )
-
-    result = tools.call("close_simulator_env")
-
-    assert result.success is True
-    assert result.details["outputs"]["closed"] is True
-    assert config.handle == ""
-    assert transport.calls == [
-        {
-            "name": "close_env",
-            "arguments": {
-                "handle": "env-close",
-                "session_id": "session-close",
-            },
-            "timeout_s": 30.0,
-        }
-    ]
-    evidence = result.details["outputs"]["mcp_calls"]
-    assert len(evidence) == 1
-    assert evidence[0]["request"]["tool"] == "close_env"
-    assert evidence[0]["response"]["request_id"] == evidence[0]["request"]["request_id"]
-    assert (
-        evidence[0]["environment_receipt"]["mcp_request_id"]
-        == evidence[0]["request"]["request_id"]
-    )
-    assert Path(evidence[0]["response"]["response_path"]).is_file()
-
-
-def test_create_simulator_env_rejects_invalid_dimensions() -> None:
-    transport = FakeSimulatorMcpTransport({"success": True})
-    tools = bind_simulator_mcp_tool_handlers(
-        build_default_tool_registry(),
-        transport=transport,
-        tool_names=("create_simulator_env",),
-    )
-
-    result = tools.call(
-        "create_simulator_env",
-        {"env_id": "openeta/demo-v0", "image_width": -1},
-    )
-
-    assert result.success is False
-    assert result.details["diagnostics"][0]["code"] == "simulator_mcp_argument_error"
-    assert transport.calls == []
 
 
 def test_observe_proxy_uses_remote_render_env_tool() -> None:
@@ -1862,7 +1536,7 @@ def test_control_tool_proxy_fails_fast_without_active_handle() -> None:
     assert transport.calls == []
     diagnostic = result.details["diagnostics"][0]
     assert diagnostic["code"] == "simulator_mcp_argument_error"
-    assert "No active simulator MCP environment handle" in diagnostic["message"]
+    assert "No launcher-bound simulator MCP environment handle" in diagnostic["message"]
 
 
 def test_follow_eef_trajectory_proxy_forwards_to_simulator_mcp() -> None:

@@ -11,8 +11,16 @@ precontact, lift, carry, descent, clearance, or retreat pose.
 
 ## Frozen perception and candidate pools
 
-A release run acquires one calibrated grasp RGB-D observation and performs the
-target SAM3 selection once. GraspGenX returns contact EEF poses;
+A release run acquires one calibrated grasp RGB-D observation. After the VLM
+creates the work order, the host binds its current target and destination
+phrases into one ordered SAM3 assignment call over that frozen observation.
+The target and placement-region children still have distinct semantic roles,
+attempt IDs, masks, selection reviews, and artifacts. They execute in fixed
+target-then-region order because the current SAM3 service serializes GPU
+inference; this removes a planner round without pretending to add GPU
+parallelism. If target segmentation has no selected result, the batch stops
+before the region child so the normal typed target recovery remains intact.
+GraspGenX returns contact EEF poses;
 camera/world and configured TCP representation transforms are the only allowed
 pose conversions. Scores and capability evidence may order candidates but may
 not edit their translation or rotation.
@@ -20,8 +28,10 @@ not edit their translation or rotation.
 AnyGrasp remains an optional backend for development compatibility, but it is
 not part of the final `multi_normal` release gate.
 
-The placement object and placement region each use their own calibrated RGB-D
-packet and SAM3 mask. AnyPlace returns up to 96 settled world-object goals.
+The selected target mask is also retained as the placement-object mask, while
+the independently selected placement-region mask shares the same calibrated
+RGB-D packet and perception-bundle identity. AnyPlace returns up to 96 settled
+world-object goals.
 The host preserves each goal's rotation and horizontal translation, and adds
 only the configured vertical gravity-drop distance. A completely proven
 exterior container edge may define a higher preferred entry terminal. If that
@@ -112,7 +122,7 @@ invalidate prior qualification evidence.
 ## VLM contract
 
 The VLM runs the observe-decide-act loop: it explicitly chooses each semantic,
-lifecycle, recovery, and motion tool after inspecting current feedback. Typed
+recovery, and motion tool after inspecting current feedback. Typed
 host obligations constrain exact parameters, geometry, joins, and safety but
 do not act as a hidden task macro. The VLM identifies the requested target and
 placement region, chooses among host-provided calibrated observations, and
@@ -187,6 +197,8 @@ the environment.
 
 The validated 2026-08-31 release baseline is implementation commit `3a70294`.
 Three consecutive GPU-GUI `human_tui` runs of the representative two-item work
-order passed with 22 agent-selected tools each and zero host dispatches; exact
-paths, timings, token counts, approval procedure, and cleanup checks are
-recorded in the [operator reproduction guide](multi-normal-tui-reproduction.md).
+order passed with 22 agent-selected tools each and zero host dispatches. Those
+records predate launcher-owned Gazebo lifecycle and assignment-batched SAM3, so
+22 is historical evidence rather than a current required count. Exact paths,
+timings, token counts, approval procedure, and cleanup checks are recorded in
+the [operator reproduction guide](multi-normal-tui-reproduction.md).

@@ -12,6 +12,7 @@
 - 使用 `fast_v3` 资格漏斗和 GraspGenX；本发行验收不启动 AnyGrasp。
 - Gazebo GUI 在 GPU VNC 桌面上保持开启，Dashboard 仅用于观察。
 - 每件物品只运行一次模型推理；物理失败优先从冻结候选前沿恢复。
+- VLM 配置工单后，每件物品用一次宿主绑定的 SAM3 assignment 调用依次完成目标和料箱分割；两份 mask、选择审核、attempt ID 和 artifact 仍相互独立。当前 GPU 服务内部串行执行这两个 prompt，不以并发争抢显存。
 - 人类只描述任务、处理真正的语义澄清，并确认世界状态变更；不输入末端位姿、偏移量、候选编号或工具调用顺序。
 - Agent 保留正常工程闭环的决策自由；验收脚本不规定回合数、工具调用数、观察/重试次数或恢复顺序，也不使用跨观察、GraspGenX 或 AnyPlace 的全局失败熔断器。
 
@@ -66,9 +67,9 @@ scripts/run_multi_normal_gazebo_acceptance.sh \
   --run-root "$RUN_ROOT"
 ```
 
-启动器会完成 Python、ROS、Gazebo overlay、模型服务和 Provider 预检，创建隔离的 ROS domain、Gazebo partition、MCP 端口及报告目录，然后进入真实交互式 TUI。Gazebo GUI 启动器会等待**本轮 partition** 的 server 服务出现后才连接，避免窗口先连到空分区或其他运行。此时物理场景已由运行器绑定，但抓取任务尚未配置。
+启动器会完成 Python、ROS、Gazebo overlay、模型服务和 Provider 预检，创建隔离的 ROS domain、Gazebo partition、MCP 端口及报告目录；随后由宿主创建并 reset Gazebo、保存首帧，再连接本轮 GUI。GUI 的窗口和相机服务都就绪后，才进入真实交互式 TUI。因此操作员看到 `›` 提示符时，RealVNC 中已经能看到本轮场景。环境生命周期不占用智能体回合或 VLM token，物理场景已绑定，但抓取任务尚未配置。
 
-TUI 必须运行在 PTY 中。按上面的方式先 `ssh hhh` 再执行脚本即可；若要从本机写成一条命令，必须使用 `ssh -tt hhh '…'`，不要通过无 PTY 的后台 SSH 或日志重定向启动。创建环境成功后，TUI 结果中会显示本轮 Dashboard URL；可在 VNC 桌面的浏览器中打开它。Gazebo 窗口未出现时，保持环境运行并检查：
+TUI 必须运行在 PTY 中。按上面的方式先 `ssh hhh` 再执行脚本即可；若要从本机写成一条命令，必须使用 `ssh -tt hhh '…'`，不要通过无 PTY 的后台 SSH 或日志重定向启动。Dashboard 对应本轮启动器分配的 session；地址和环境身份记录在 `$RUN_ROOT/pick-place/human_tui/host-simulator-lifecycle.json`。Gazebo 窗口未出现时，保持脚本运行并检查：
 
 ```bash
 tail -f "$RUN_ROOT/pick-place/human_tui/operator-gui.log"
@@ -93,7 +94,7 @@ tail -f "$RUN_ROOT/pick-place/human_tui/operator-gui.log"
 
 ## 4. 操作期间
 
-`human_tui` 会在以下世界状态变更前询问确认：创建/关闭环境、机械臂运动和夹爪开合。确认 TUI 中的工具名与当前阶段一致，并在 Gazebo GUI 中没有明显异常后输入 `y`。感知、模型推理、IK、状态有效性检查和 L5 plan-only 不需要人工确认。
+`human_tui` 只会为任务中的世界状态变更询问确认，例如机械臂运动和夹爪开合。Gazebo 的创建、reset 和关闭由启动脚本负责，不会出现在 TUI 工具列表、Prompt 或审批对话里。确认 TUI 中的动作与当前阶段一致，并在 Gazebo GUI 中没有明显异常后输入 `y`。感知、模型推理、IK、状态有效性检查和 L5 plan-only 不需要人工确认。
 
 如果智能体确实提出语义问题，像普通操作员一样简短回答目标物品或料箱；不要给出候选编号、坐标或关节值。共享 GPU 负载可能使 TUI 一段时间没有新输出，看到模型或资格筛选仍在运行时不要重复提交任务。
 
@@ -109,13 +110,13 @@ grasp_pose_estimate mode=frozen_frontier model_inference=False
 
 只有动作后状态仍无法被仿真回执或后续观测证明时才应出现 `ask_human`。此时像普通现场操作员一样依据 Gazebo 画面简短回答“夹爪已打开、机械臂已停止，可以从当前状态继续”或“现场状态不清楚，请重新观察”；不要代替系统给坐标、候选编号或跳过安全证明。实际工程不禁止重新观察或重新推理，验收只是在冻结证据仍有效时优先选择低成本恢复。
 
-任务成功时，TUI 应显示环境已终止。此后输入：
+任务成功时，TUI 应显示任务完成；此时 Gazebo 仍保持可见，方便操作员核对最终画面。此后输入：
 
 ```text
 /quit
 ```
 
-不要在第二件物品完成前输入 `/quit`。退出后启动器才会完成进程清理和正式证据校验。
+不要在第二件物品完成前输入 `/quit`。TUI 进程退出后，启动器会关闭它预先创建的精确环境 handle，再关闭 GUI/MCP 并进行正式证据校验。不要另开终端手工关闭 Gazebo，否则会破坏本轮生命周期证据。
 
 ## 5. 判断 PASS
 
@@ -129,6 +130,7 @@ jq '{status,scenario,task_variant,operator_mode,tool_call_count,
   "$RUN_ROOT/acceptance-report.json"
 
 jq '{mcp_group_exited,port_free,
+     host_simulator_lifecycle,
      owned_process_residuals,owned_residual_groups,
      operator_gui:{started:.operator_gui.started,
                    group_exited:.operator_gui.group_exited,
@@ -144,7 +146,8 @@ jq '{mcp_group_exited,port_free,
 - `operator_mode` 为 `human_tui`；
 - `planner_mode` 为 `agentic_closed_loop`；
 - `host_dispatch_count` 为 `0`；
-- 两个物品各有一次 SAM3、AnyPlace 和 GraspGenX 模型链证据；
+- `host_simulator_lifecycle.closed` 和 `host_simulator_lifecycle.ok` 均为 `true`，且 `host-simulator-lifecycle.json` 证明先于 TUI 完成 reset、晚于 TUI 退出执行关闭；
+- 两个物品各有一次 SAM3 assignment、一次 AnyPlace 和一次 GraspGenX 模型链；每个 SAM3 assignment 必须包含按 `grasp_target → placement_region` 排列的两份独立语义证据；
 - 最终放置具有 MoveIt 状态有效性、L5 plan-only、原生 attach/detach，以及供 VLM 判断目标箱、正面/朝向和明显物理失败的因果 post-release RGB-D；释放工具不再阻塞等待固定时长的仿真落稳采样；多物体切换复用一次 Gazebo 位姿快照，并以一次原子 PlanningScene 事务同步已释放物体和下一目标；
 - `cleanup.json` 中 `mcp_group_exited`、`port_free`、GUI lifecycle 和 protected ROS graph 检查均通过，且 owned residual 列表为空。
 
@@ -210,4 +213,4 @@ scripts/run_random_multi_normal_gazebo_acceptance.sh \
 .cache/reports/final-vlm-repro-20260831-physical-rebase/run3/acceptance-report.json
 ```
 
-三次均为 `agentic_closed_loop`、`host_dispatch_count=0`、22 次工具调用，并完成两个物品的连续入箱。每轮 `cleanup.json` 都证明 MCP 进程组退出、端口释放、Gazebo GUI 从本轮 partition 启动并随本轮退出、owned residual 为空且受保护 ROS graph 未变化。复测期间服务器存在显著共享 GPU/CPU 负载，因此这些时间用于稳定性记录，不作为独占算力下的性能基线。当前状态恢复、动作终态判定和物体重基另由完整测试集覆盖；物理恢复不要求为了“制造失败”而污染三次发行 PASS。
+三次均为 `agentic_closed_loop`、`host_dispatch_count=0`、22 次工具调用，并完成两个物品的连续入箱。这是迁移前的历史发行证据：当时环境创建/关闭仍各占一个 agent 工具回合，SAM3 的目标与料箱也分别占一个顶层工具回合。当前版本已把环境生命周期移到启动器，并把同一 assignment 的两次 SAM3 请求合并为一个有序宿主批次，因此不再以 22 作为固定门槛；仍要求子请求证据完整且 VLM 对任务动作作出决定。每轮 `cleanup.json` 都证明 MCP 进程组退出、端口释放、Gazebo GUI 从本轮 partition 启动并随本轮退出、owned residual 为空且受保护 ROS graph 未变化。复测期间服务器存在显著共享 GPU/CPU 负载，因此这些时间用于稳定性记录，不作为独占算力下的性能基线。当前状态恢复、动作终态判定和物体重基另由完整测试集覆盖；物理恢复不要求为了“制造失败”而污染三次发行 PASS。

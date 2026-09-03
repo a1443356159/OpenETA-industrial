@@ -7,17 +7,11 @@ task_patterns:
   - simulator
   - simulation
   - sim mcp
-  - create environment
-  - create a libero environment
-  - create a metaworld environment
   - move robot arm
   - move the end effector
   - 机械臂
   - 仿真环境
-  - 创建环境
 allowed_tools:
-  - create_simulator_env
-  - close_simulator_env
   - python_exec
   - observe
   - camera_pose_to_world
@@ -33,14 +27,8 @@ The simulator boundary is MCP-only. Do not call REST endpoints or raw simulator
 APIs from the agent loop. The planner must choose one atomic `tool_call` at a
 time, inspect the result, and then decide the next tool call.
 
-Use `create_simulator_env` as the only environment-creation operation. It owns
-the simulator MCP `create_env -> reset_env` sequence, default render resolution,
-artifact materialization, and active handle/session synchronization. Do not call
-`create_env` through `python_exec`, raw MCP clients, REST, or `code_policy`.
-
-Use `close_simulator_env` as the only environment-cleanup operation. It closes
-the currently bound handle and clears runtime state atomically. Do not route
-`close_env` through `python_exec` or ask the planner to rediscover the handle.
+Use the already-bound environment supplied with the initial observation. The
+agent tool registry contains task actions only.
 
 The MCP server's live catalog, tool docstrings, and input schemas are
 authoritative for simulator operations that do not have a stable AgentTool.
@@ -143,12 +131,6 @@ Classify failures before retrying:
 Never convert infrastructure failure into candidate rejection, and never spend
 the episode turn budget repeatedly calling an unchanged failing backend.
 
-When creating a simulator environment, call `create_simulator_env` with an
-explicit `env_id`. It defaults camera renders to 512x512 and seed 0, then resets
-the new handle and returns `initial_observation`. Use that result as the first
-observation frame. Only call `reset_env` explicitly when a new episode reset is
-intentionally requested.
-
 If the user asks for local execution result image paths, inspect the latest MCP
 tool result or list materialized images:
 
@@ -166,12 +148,6 @@ report the missing dependency to the user in natural language or switch to an
 already configured dedicated tool/server. Heavy simulator or robotics
 dependencies such as LIBERO, robosuite, torch, or OpenCV should live in their
 own simulator/tool runtime rather than inside the lightweight planner sandbox.
-
-## Cleanup
-
-When a planner-created simulator environment is no longer needed, release it
-with `close_simulator_env`. Remote MCP environments must not be left open waiting
-for TTL cleanup.
 
 For explicit robot, controller, sensor, or environment characterization, use
 the `embodiment_explore` skill. Normal simulator tasks consume the active

@@ -192,118 +192,6 @@ def _tools_with_handlers(*names: str) -> ToolRegistry:
     return tools
 
 
-def test_scripted_acceptance_starts_exact_environment_without_model_routing() -> None:
-    env_id = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
-    memory = AgentMemory()
-    memory.start_session(
-        task=(
-            "[automation=scripted_tui; "
-            f"environment_id={env_id}; environment_task=normal_pick_and_place] "
-            "run the acceptance"
-        )
-    )
-    tools = _tools_with_handlers("create_simulator_env")
-
-    context = build_tool_context(
-        observation=_observation(),
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-
-    assert context["environment_start_obligation"] == {
-        "schema_version": "openeta.environment_start_obligation.v1",
-        "status": "required",
-        "required_tool": "create_simulator_env",
-        "required_parameters": {
-            "env_id": env_id,
-            "seed": 0,
-            "task": "normal pick and place",
-        },
-        "environment_id": env_id,
-        "source": "scripted_task_marker",
-    }
-    decision = _host_obligation_decision(context, tools=tools)
-    assert decision is not None
-    assert decision.action == "create_simulator_env"
-    assert decision.parameters == {
-        "env_id": env_id,
-        "seed": 0,
-        "task": "normal pick and place",
-    }
-    assert decision.metadata["host_obligation"]["source"] == "scripted_task_marker"
-
-
-def test_scripted_acceptance_uses_the_versioned_scene_seed() -> None:
-    env_id = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
-    memory = AgentMemory()
-    memory.start_session(
-        task=(
-            "[automation=scripted_tui; "
-            f"environment_id={env_id}; environment_task=normal_pick_and_place; "
-            "environment_seed=12345; acceptance_scene=multi_normal_random_12345] "
-            "run the acceptance"
-        )
-    )
-    tools = _tools_with_handlers("create_simulator_env")
-
-    context = build_tool_context(
-        observation=_observation(),
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-
-    assert context["environment_start_obligation"]["required_parameters"] == {
-        "env_id": env_id,
-        "seed": 12345,
-        "task": "normal pick and place",
-    }
-
-
-def test_agentic_acceptance_routes_exact_environment_choice_through_model() -> None:
-    env_id = "openeta/gazebo_rm75_robotiq2f85_pickplace-v0"
-    memory = AgentMemory()
-    memory.start_session(
-        task=(
-            "[automation=scripted_tui; planner_mode=agentic_closed_loop; "
-            f"environment_id={env_id}; environment_task=normal_pick_and_place] "
-            "run the acceptance"
-        )
-    )
-    tools = _tools_with_handlers("create_simulator_env")
-    requests = []
-
-    def decide(request):
-        requests.append(request)
-        return {
-            "kind": "tool_call",
-            "name": "create_simulator_env",
-            "parameters": {
-                "env_id": env_id,
-                "seed": 0,
-                "task": "normal pick and place",
-            },
-        }
-
-    planner = ToolCallingPlanner(CallablePlannerBackend(decide))
-    decision = planner.plan(
-        _observation(),
-        memory=memory,
-        tools=tools,
-        skills=build_default_skill_registry(),
-    )
-
-    assert len(requests) == 1
-    assert requests[0].tool_context["planner_mode"] == "agentic_closed_loop"
-    assert requests[0].tool_context["controller"]["architecture"] == (
-        "agentic_closed_loop_with_host_execution_gates"
-    )
-    assert decision.action == "create_simulator_env"
-    assert decision.metadata["execution_model"] == "closed_loop_tool_calling"
-    assert decision.metadata["planner_mode"] == "agentic_closed_loop"
-
-
 def test_vlm_configures_task_neutral_workcell_from_user_conversation() -> None:
     user_request = "请先把红色六角螺栓放进蓝色零件箱，再把黄色活动扳手放进绿色零件箱。"
     catalog = {
@@ -1231,11 +1119,14 @@ def test_environment_id_in_ordinary_prose_does_not_trigger_host_creation() -> No
     context = build_tool_context(
         observation=_observation(),
         memory=memory,
-        tools=_tools_with_handlers("create_simulator_env"),
+        tools=build_default_tool_registry(),
         skills=build_default_skill_registry(),
     )
 
-    assert context["environment_start_obligation"] is None
+    assert "environment_start_obligation" not in context
+    assert "create_simulator_env" not in {
+        tool["name"] for tool in context["tool_references"]
+    }
 
 
 def test_exhausted_placement_pool_hands_off_without_new_inference() -> None:
@@ -1337,7 +1228,7 @@ def test_multi_sort_release_reuses_causal_post_action_observation() -> None:
     assert obligation is None
 
 
-def test_multi_sort_release_closes_only_after_every_assignment_passes() -> None:
+def test_multi_sort_release_finishes_without_an_agent_cleanup_turn() -> None:
     obligation = _placement_release_obligation(
         _observation(),
         release={
@@ -1360,14 +1251,10 @@ def test_multi_sort_release_closes_only_after_every_assignment_passes() -> None:
         },
     )
 
-    assert obligation["stage"] == "close"
-    assert obligation["required_action"] == {
-        "name": "close_simulator_env",
-        "parameters": {},
-    }
+    assert obligation is None
 
 
-def test_current_release_requires_visual_observation_before_close() -> None:
+def test_current_release_requires_visual_observation_before_completion() -> None:
     waiting = _placement_release_obligation(
         _observation(),
         release={
@@ -1401,9 +1288,7 @@ def test_current_release_requires_visual_observation_before_close() -> None:
         },
     )
 
-    assert ready["stage"] == "close"
-    assert ready["required_action"]["name"] == "close_simulator_env"
-    assert ready["allowed_review_actions"] == ["observe", "active_observe"]
+    assert ready is None
 
 
 def test_host_macro_stops_after_irreversible_release_failure() -> None:
@@ -2326,41 +2211,22 @@ def test_planner_backend_failure_does_not_repeat_as_schema_validation() -> None:
     assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
 
 
-def test_planner_context_uses_environment_assigned_task_as_active_objective() -> None:
+def test_planner_context_keeps_operator_task_with_launcher_owned_environment() -> None:
     memory = AgentMemory()
-    memory.start_session(task="Create an environment and complete its assigned task.")
-    assigned_task = "pick up alphabet soup and place it into basket"
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "status": "executed",
-                "request": {
-                    "kind": "tool_call",
-                    "name": "create_simulator_env",
-                    "parameters": {"env_id": "openeta/libero-task0-v0"},
-                },
-                "tool_calls": [
-                    {
-                        "name": "create_simulator_env",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {
-                                "outputs": {
-                                    "assigned_task": assigned_task,
-                                    "environment": {
-                                        "env_id": "openeta/libero-task0-v0",
-                                        "handle": "env-1",
-                                        "session_id": "sim-session-1",
-                                    },
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
+    operator_task = "pick up alphabet soup and place it into basket"
+    memory.start_session(task=operator_task)
+    memory.save_fact(
+        "active_environment_task",
+        {
+            "status": "running",
+            "env_id": "openeta/gazebo-pickplace-v0",
+            "handle": "env-1",
+            "session_id": "sim-session-1",
+            "source": "launcher_bootstrap",
+            "lifecycle_owner": "host",
+            "host_cleanup_pending": True,
+        },
+        source="launcher_bootstrap",
     )
 
     context = build_tool_context(
@@ -2370,11 +2236,10 @@ def test_planner_context_uses_environment_assigned_task_as_active_objective() ->
         skills=build_default_skill_registry(),
     )
 
-    assert context["task"] == assigned_task
-    assert context["active_environment_task"]["task"] == assigned_task
-    assert context["memory"]["current_user_request"] == (
-        "Create an environment and complete its assigned task."
-    )
+    assert context["task"] == operator_task
+    assert "task" not in context["active_environment_task"]
+    assert context["active_environment_task"]["lifecycle_owner"] == "host"
+    assert context["memory"]["current_user_request"] == operator_task
 
 
 def test_planner_validation_exhaustion_returns_structured_internal_failure() -> None:
@@ -2466,13 +2331,14 @@ def test_noop_response_is_not_planner_facing() -> None:
     assert "Unsupported response name" in decision.parameters["validation_errors"][0]
 
 
-def test_default_planner_prompt_preserves_generic_lifecycle_boundaries() -> None:
+def test_default_planner_prompt_omits_environment_lifecycle_actions() -> None:
     prompt = _default_tool_planner_system_prompt()
 
     assert "tool_context.tool_references" in prompt
     assert "currently executable tool" in prompt
-    assert "create_simulator_env and close_simulator_env" in prompt
-    assert "host-owned lifecycle" in prompt
+    assert "creation, reset, and cleanup" not in prompt
+    assert "create_simulator_env" not in prompt
+    assert "close_simulator_env" not in prompt
     assert "never use it as a generic final status" in prompt
     assert "finish with task_complete" in prompt
     assert "skills are editable text guidance, not executable macros" in prompt.lower()
@@ -2781,7 +2647,7 @@ def test_host_keeps_ambiguous_verified_sam3_masks_for_model_review() -> None:
     assert decision.metadata["execution_model"] == "closed_loop_tool_calling"
 
 
-def test_code_policy_validation_feedback_points_to_simulator_creation_tool() -> None:
+def test_code_policy_validation_feedback_requires_top_level_code() -> None:
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
             {
@@ -2806,7 +2672,7 @@ def test_code_policy_validation_feedback_points_to_simulator_creation_tool() -> 
     assert decision.action == "talk"
     assert decision.parameters["code"] == "planner_validation_failed"
     validation_error = decision.parameters["validation_errors"][0]
-    assert "tool_call::create_simulator_env" in validation_error
+    assert "requires a top-level `code` string" in validation_error
 
 
 def test_sam3_point_validation_rejects_molmopoint_fields_then_accepts_xy() -> None:
@@ -3531,7 +3397,8 @@ def test_planner_context_selects_sim_mcp_skill_for_chinese_sim_task() -> None:
 
     selected = {skill["name"]: skill for skill in context["selected_skill_guidance"]}
     assert "sim_mcp" in selected
-    assert "create_simulator_env" in selected["sim_mcp"]["allowed_tools"]
+    assert "create_simulator_env" not in selected["sim_mcp"]["allowed_tools"]
+    assert "close_simulator_env" not in selected["sim_mcp"]["allowed_tools"]
     assert "python_exec" in selected["sim_mcp"]["allowed_tools"]
 
 
@@ -3685,7 +3552,7 @@ def test_planner_rejects_registered_tool_without_handler() -> None:
     ]
 
 
-def test_current_sim_creation_task_accepts_first_valid_world_mutating_decision() -> None:
+def test_sim_creation_is_not_an_agent_tool() -> None:
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
             {
@@ -3693,7 +3560,8 @@ def test_current_sim_creation_task_accepts_first_valid_world_mutating_decision()
                 "name": "create_simulator_env",
                 "parameters": {"env_id": "openeta/libero_libero_10_task0-v0"},
             }
-        )
+        ),
+        max_validation_retries=0,
     )
     memory = AgentMemory()
     memory.start_session(task="请帮我创建一个libero仿真环境")
@@ -3703,14 +3571,15 @@ def test_current_sim_creation_task_accepts_first_valid_world_mutating_decision()
     decision = planner.plan(
         observation,
         memory=memory,
-        tools=_tools_with_handlers("create_simulator_env"),
+        tools=build_default_tool_registry(),
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action_type == "tool_call"
-    assert decision.action == "create_simulator_env"
+    assert decision.action_type == "response"
+    assert decision.action == "talk"
+    assert decision.parameters["code"] == "planner_validation_failed"
+    assert "Unknown tool" in decision.parameters["validation_errors"][0]
     assert decision.metadata["validation_attempts"] == 1
-    assert decision.metadata["validation_attempt_history"][0]["validation_errors"] == []
 
 
 def test_planner_context_compacts_previous_action_metadata() -> None:
@@ -3769,31 +3638,6 @@ def test_planner_context_preserves_bounded_control_contract_values() -> None:
     observation.metadata["control_spec"] = control_spec
     memory = AgentMemory()
     memory.start_session(task="exercise the advertised gazebo motion envelope")
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request_name": "create_simulator_env",
-                "tool_calls": [
-                    {
-                        "name": "create_simulator_env",
-                        "status": "executed",
-                        "result": {
-                            "success": True,
-                            "details": {
-                                "state_delta": {
-                                    "simulator_environment": {
-                                        "control_spec": control_spec,
-                                    }
-                                }
-                            },
-                        },
-                    }
-                ],
-            },
-        )
-    )
-
     context = build_tool_context(
         observation=observation,
         memory=memory,
@@ -3806,15 +3650,6 @@ def test_planner_context_preserves_bounded_control_contract_values() -> None:
         context["observation"]["metadata"]["control_spec"]["validated_relative_motion"]["targets"]
         == expected_targets
     )
-    action = next(item for item in context["memory"]["recent_events"] if item["type"] == "action")
-    assert (
-        action["payload"]["command"]["tool_calls"][0]["result"]["details"]["state_delta"][
-            "simulator_environment"
-        ]["control_spec"]["validated_relative_motion"]["targets"]
-        == expected_targets
-    )
-
-
 def test_planner_context_bounds_selected_skill_guidance_content() -> None:
     memory = AgentMemory()
     memory.start_session(task="inspect long skill")
@@ -7292,9 +7127,33 @@ def test_placement_selection_is_not_a_public_planner_obligation() -> None:
     assert all(tool["name"] != "compile_placement_seed" for tool in context["tool_references"])
 
 
-@pytest.mark.parametrize("verdict", ["FAIL", "UNKNOWN"])
-def test_close_does_not_prove_task_completion_without_placement_pass(verdict: str) -> None:
+def _bind_launcher_owned_environment(memory: AgentMemory) -> None:
+    memory.save_fact(
+        "active_environment_task",
+        {
+            "status": "running",
+            "env_id": "openeta/gazebo-pickplace-v0",
+            "handle": "env-1",
+            "session_id": "sim-session-1",
+            "source": "launcher_bootstrap",
+            "lifecycle_owner": "host",
+            "host_cleanup_pending": True,
+        },
+        source="launcher_bootstrap",
+    )
+
+
+def _post_release_rgb_observation() -> EnvObservation:
+    observation = _observation()
+    observation.metadata["image_artifacts"] = [
+        {"kind": "rgb", "frame_id": "front", "path": "/tmp/post-release.png"}
+    ]
+    return observation
+
+
+def test_host_owned_completion_waits_for_post_release_visual_observation() -> None:
     memory = AgentMemory()
+    _bind_launcher_owned_environment(memory)
     memory.save_fact(
         "placement_release",
         {
@@ -7302,41 +7161,25 @@ def test_close_does_not_prove_task_completion_without_placement_pass(verdict: st
             "status": "released",
             "candidate_id": "placement_000",
             "placement_pose_id": "place_grasp_000",
-            "placement_verification": {
-                "placement_confirmed": False,
-                "verdict": verdict,
-            },
         },
         source="test",
     )
 
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "close_simulator_env",
-                    "parameters": {},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "close_simulator_env",
-                        "status": "executed",
-                        "result": {"success": True, "content": "closed"},
-                    }
-                ],
-            },
-        )
-    )
-
-    assert memory.placement_release() is None
     assert memory.task_completion_evidence() is None
 
+    memory.add_observation(_post_release_rgb_observation())
 
-def test_close_does_not_prove_multi_sort_completion_after_only_first_item() -> None:
+    evidence = memory.task_completion_evidence()
+    assert evidence is not None
+    assert evidence["status"] == "proven"
+    assert evidence["environment_closed"] is False
+    assert evidence["lifecycle_owner"] == "host"
+    assert evidence["host_cleanup_pending"] is True
+
+
+def test_host_owned_completion_waits_for_all_multi_sort_assignments() -> None:
     memory = AgentMemory()
+    _bind_launcher_owned_environment(memory)
     progress = {
         "schema_version": "openeta.multi_sort_progress.v1",
         "assignment_count": 2,
@@ -7364,26 +7207,7 @@ def test_close_does_not_prove_multi_sort_completion_after_only_first_item() -> N
         source="test",
     )
 
-    memory.add_action(
-        EnvAction(
-            action_type="tool_call",
-            command={
-                "request": {
-                    "kind": "tool_call",
-                    "name": "close_simulator_env",
-                    "parameters": {},
-                },
-                "status": "executed",
-                "tool_calls": [
-                    {
-                        "name": "close_simulator_env",
-                        "status": "executed",
-                        "result": {"success": True, "content": "closed"},
-                    }
-                ],
-            },
-        )
-    )
+    memory.add_observation(_post_release_rgb_observation())
 
     assert memory.task_completion_evidence() is None
 
@@ -10132,13 +9956,13 @@ def test_episode_runner_excludes_human_wait_from_timeout_budget() -> None:
                 },
                 {
                     "kind": "tool_call",
-                    "name": "close_simulator_env",
-                    "parameters": {},
+                    "name": "scene_detector",
+                    "parameters": {"image": "front"},
                 },
             ]
         )
     )
-    tools = _tools_with_handlers("close_simulator_env")
+    tools = _tools_with_handlers("scene_detector")
     runtime = OpenEtaAgentRuntime(planner=planner, tools=tools)
     runner = OpenEtaEpisodeRunner(
         runtime=runtime,
@@ -10154,7 +9978,7 @@ def test_episode_runner_excludes_human_wait_from_timeout_budget() -> None:
         {
             "type": "human_answer",
             "question": "Should I pick the cube?",
-            "answer": "No, close this simulator environment.",
+            "answer": "No; inspect the current scene instead.",
         }
     )
     runner.resume_after_human()
@@ -10164,7 +9988,7 @@ def test_episode_runner_excludes_human_wait_from_timeout_budget() -> None:
     assert continued.metadata["failure_reason"] == {}
     assert continued.metadata["usage"]["elapsed_s"] == 0.0
     assert continued.metadata["usage"]["human_wait_s"] == 120.0
-    assert continued.steps[0].action.command["request"]["name"] == ("close_simulator_env")
+    assert continued.steps[0].action.command["request"]["name"] == "scene_detector"
 
 
 def test_episode_runner_truncates_at_safety_turn_limit() -> None:

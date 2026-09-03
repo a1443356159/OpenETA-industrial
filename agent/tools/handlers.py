@@ -216,7 +216,7 @@ def build_sam3_handler(
         else image_output_root
     )
 
-    def handler(context: ToolExecutionContext) -> ToolResult:
+    def single_handler(context: ToolExecutionContext) -> ToolResult:
         active_vision_geometry_selection = (
             context.metadata.get("sam3_selection_policy") == "active_vision_point_depth_geometry"
         )
@@ -782,6 +782,174 @@ def build_sam3_handler(
             mcp_called=not cache_hit or fallback_attempted,
             response=response,
             reason=reason,
+        )
+
+    def handler(context: ToolExecutionContext) -> ToolResult:
+        mode = _string_param(context.parameters.get("mode")).strip().lower()
+        if mode != "assignment_batch":
+            return single_handler(context)
+
+        requests = context.parameters.get("requests")
+        if not isinstance(requests, list) or len(requests) != 2:
+            return make_tool_result(
+                context,
+                success=False,
+                content="SAM3 assignment batch failed: exactly two requests are required.",
+                outputs={
+                    "schema_version": "openeta.sam3.assignment_batch.v1",
+                    "status": "invalid",
+                    "stop_reason": "invalid_request_count",
+                    "semantic_batch_results": [],
+                },
+                diagnostics=[{"code": "invalid_assignment_batch"}],
+            )
+
+        expected_roles = ("grasp_target", "placement_region")
+        shared_fields = (
+            "image",
+            "perception_bundle_id",
+            "observation_id",
+            "scene_epoch",
+            "view_identity",
+        )
+        valid_requests = all(
+            isinstance(request, Mapping)
+            and _string_param(request.get("mode") or "text").strip().lower() == "text"
+            and _string_param(request.get("semantic_role")).strip().lower() == expected_role
+            for request, expected_role in zip(requests, expected_roles, strict=True)
+        )
+        if valid_requests:
+            valid_requests = all(
+                requests[0].get(field) == requests[1].get(field) for field in shared_fields
+            )
+        if not valid_requests:
+            return make_tool_result(
+                context,
+                success=False,
+                content=(
+                    "SAM3 assignment batch failed: ordered target and placement-region "
+                    "requests must share one frozen observation."
+                ),
+                outputs={
+                    "schema_version": "openeta.sam3.assignment_batch.v1",
+                    "status": "invalid",
+                    "stop_reason": "invalid_order_or_observation",
+                    "semantic_batch_results": [],
+                },
+                diagnostics=[{"code": "invalid_assignment_batch"}],
+            )
+        child_results: list[JsonDict] = []
+        artifacts: list[JsonDict] = []
+        stop_reason = "completed"
+        for index, expected_role in enumerate(expected_roles):
+            child_parameters = requests[index]
+            if not isinstance(child_parameters, Mapping) or (
+                _string_param(child_parameters.get("semantic_role")).strip().lower()
+                != expected_role
+            ):
+                stop_reason = f"invalid_{expected_role}_request"
+                break
+            child_context = ToolExecutionContext(
+                name=context.name,
+                spec=context.spec,
+                parameters=dict(child_parameters),
+                observation=context.observation,
+                metadata={
+                    **context.metadata,
+                    "sam3_assignment_batch": {
+                        "index": index,
+                        "semantic_role": expected_role,
+                        "barrier_order": list(expected_roles),
+                    },
+                },
+            )
+            raw_result = single_handler(child_context)
+            raw_details = dict(raw_result.details)
+            child_artifacts = [
+                dict(artifact)
+                for artifact in _list_or_empty(raw_details.get("artifacts"))
+                if isinstance(artifact, Mapping)
+            ]
+            standard_result = make_tool_result(
+                child_context,
+                success=raw_result.success,
+                content=raw_result.content,
+                outputs=raw_details,
+                artifacts=child_artifacts,
+            )
+            serialized_result = {
+                "success": standard_result.success,
+                "content": standard_result.content,
+                "details": standard_result.details,
+            }
+            child_results.append(
+                {
+                    "index": index,
+                    "semantic_role": expected_role,
+                    "result": serialized_result,
+                }
+            )
+            for artifact in child_artifacts:
+                batch_artifact = dict(artifact)
+                batch_artifact["semantic_role"] = expected_role
+                batch_artifact["index"] = (
+                    f"{expected_role}:{artifact.get('index')}"
+                    if artifact.get("index") is not None
+                    else expected_role
+                )
+                artifacts.append(batch_artifact)
+
+            if not raw_result.success:
+                stop_reason = f"{expected_role}_tool_failed"
+                break
+            if index == 0:
+                selected = raw_details.get("selected_detection")
+                if isinstance(selected, Mapping):
+                    continue
+                if raw_details.get("selection_rejected") is True:
+                    stop_reason = "grasp_target_rejected"
+                elif raw_details.get("selection_required") is True:
+                    stop_reason = "grasp_target_selection_deferred"
+                elif not _list_or_empty(raw_details.get("detections")):
+                    stop_reason = "grasp_target_no_detection"
+                else:
+                    stop_reason = "grasp_target_not_selected"
+                break
+
+        completed_roles = [
+            str(child.get("semantic_role") or "") for child in child_results
+        ]
+        success = not stop_reason.startswith("invalid_") and bool(child_results) and all(
+            bool(child.get("result", {}).get("success"))
+            for child in child_results
+            if isinstance(child.get("result"), Mapping)
+        )
+        status = "complete" if len(child_results) == len(expected_roles) else "partial"
+        content = (
+            "SAM3 assignment batch completed for target and placement region."
+            if status == "complete" and success
+            else f"SAM3 assignment batch stopped after {len(child_results)} role(s): "
+            f"{stop_reason}."
+        )
+        return make_tool_result(
+            context,
+            success=success,
+            content=content,
+            outputs={
+                "schema_version": "openeta.sam3.assignment_batch.v1",
+                "status": status,
+                "requested_roles": list(expected_roles),
+                "completed_roles": completed_roles,
+                "barrier_order": list(expected_roles),
+                "stop_reason": stop_reason,
+                "semantic_batch_results": child_results,
+            },
+            artifacts=artifacts,
+            diagnostics=(
+                []
+                if stop_reason == "completed"
+                else [{"code": stop_reason, "completed_roles": completed_roles}]
+            ),
         )
 
     return handler

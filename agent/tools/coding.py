@@ -373,10 +373,10 @@ class _McpApi:
         if self.transport is None:
             raise RuntimeError("No MCP transport is configured for python_exec.")
         args = dict(arguments or {})
-        if str(name) == "create_env":
+        if str(name) in {"create_env", "reset_env", "close_env"}:
             raise RuntimeError(
-                "Simulator environment creation is only available through the "
-                "create_simulator_env agent tool."
+                "Simulator environment lifecycle is owned by the host launcher, "
+                "not by python_exec or the TUI agent."
             )
         response_ref, materialized_response = self._call_and_record_mcp_tool(
             str(name),

@@ -156,6 +156,161 @@ def test_sam3_spec_exposes_text_and_point_modes() -> None:
     assert "label=1" in spec.parameters["points"]
 
 
+def test_sam3_assignment_batch_runs_two_roles_in_fixed_order(tmp_path: Path) -> None:
+    prompts: list[str] = []
+
+    def segment(request: dict) -> dict:
+        prompt = str(request["prompt"])
+        prompts.append(prompt)
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 1,
+                "detections": [
+                    {
+                        "label": prompt,
+                        "score": 0.9,
+                        "bbox_xyxy": [0, 0, 1, 1],
+                        "mask": {"format": "png", "base64": PNG_1X1},
+                        "area_px": 1,
+                    }
+                ],
+                "artifacts": [],
+            },
+        }
+
+    shared = {
+        "mode": "text",
+        "image": str(FIXTURE_IMAGE),
+        "perception_bundle_id": "bundle-1",
+        "observation_id": "observation-1",
+        "scene_epoch": 1,
+        "view_identity": "view-1",
+    }
+    handler = build_sam3_handler(
+        segment,
+        output_root=tmp_path / "images",
+        result_output_root=tmp_path / "results",
+    )
+
+    result = handler(
+        _context(
+            {
+                "mode": "assignment_batch",
+                "requests": [
+                    {
+                        **shared,
+                        "prompt": "yellow adjustable wrench",
+                        "semantic_role": "grasp_target",
+                        "semantic_target": "yellow adjustable wrench",
+                        "attempt_id": "target-attempt",
+                    },
+                    {
+                        **shared,
+                        "prompt": "green parts bin interior",
+                        "semantic_role": "placement_region",
+                        "semantic_target": "green parts bin interior",
+                        "attempt_id": "region-attempt",
+                    },
+                ],
+            },
+            session_id="assignment-batch",
+        )
+    )
+
+    assert result.success is True
+    assert prompts == ["yellow adjustable wrench", "green parts bin interior"]
+    outputs = result.details["outputs"]
+    assert outputs["status"] == "complete"
+    assert outputs["completed_roles"] == ["grasp_target", "placement_region"]
+    children = outputs["semantic_batch_results"]
+    assert [child["semantic_role"] for child in children] == outputs["barrier_order"]
+    child_outputs = [child["result"]["details"]["outputs"] for child in children]
+    assert all(child["selected_detection"]["id"] == "detection_000" for child in child_outputs)
+    assert child_outputs[0]["result_id"] != child_outputs[1]["result_id"]
+    assert {
+        child["result"]["details"]["parameters"]["attempt_id"] for child in children
+    } == {"target-attempt", "region-attempt"}
+    assert {
+        artifact["semantic_role"] for artifact in result.details["artifacts"]
+    } == {"grasp_target", "placement_region"}
+
+
+def test_sam3_assignment_batch_stops_before_region_when_target_review_defers(
+    tmp_path: Path,
+) -> None:
+    prompts: list[str] = []
+    valid_mask = base64.b64encode(FIXTURE_IMAGE.read_bytes()).decode("ascii")
+
+    def segment(request: dict) -> dict:
+        prompts.append(str(request["prompt"]))
+        return {
+            "success": True,
+            "details": {
+                "detection_count": 2,
+                "detections": [
+                    {
+                        "label": "candidate-a",
+                        "score": 0.9,
+                        "bbox_xyxy": [0, 0, 1, 1],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 1,
+                    },
+                    {
+                        "label": "candidate-b",
+                        "score": 0.8,
+                        "bbox_xyxy": [0, 0, 1, 1],
+                        "mask": {"format": "png", "base64": valid_mask},
+                        "area_px": 1,
+                    },
+                ],
+                "artifacts": [],
+            },
+        }
+
+    def unavailable_reviewer(_request: dict) -> dict:
+        raise RuntimeError("review service unavailable")
+
+    shared = {
+        "mode": "text",
+        "image": str(FIXTURE_IMAGE),
+        "perception_bundle_id": "bundle-1",
+        "observation_id": "observation-1",
+        "scene_epoch": 1,
+    }
+    result = build_sam3_handler(
+        segment,
+        selection_reviewer=unavailable_reviewer,
+        output_root=tmp_path,
+    )(
+        _context(
+            {
+                "mode": "assignment_batch",
+                "requests": [
+                    {
+                        **shared,
+                        "prompt": "target",
+                        "semantic_role": "grasp_target",
+                    },
+                    {
+                        **shared,
+                        "prompt": "destination",
+                        "semantic_role": "placement_region",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert result.success is True
+    assert prompts == ["target"]
+    assert result.details["outputs"]["status"] == "partial"
+    assert result.details["outputs"]["completed_roles"] == ["grasp_target"]
+    assert result.details["outputs"]["stop_reason"] == (
+        "grasp_target_selection_deferred"
+    )
+
+
 def test_stdio_sam3_builder_can_target_segment_points(monkeypatch) -> None:
     calls = []
 
