@@ -281,6 +281,7 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
         "id": "frozen-pair",
         "object_goal_pose": physical_goal,
         "world_object_goal_pose": physical_goal,
+        "qualified_world_collision_object_goal_pose": physical_goal,
         "model_pointcloud_object_goal_pose": model_goal,
         "predicted_attachment_transform": attachment,
         "qualification_start_joint_state": {"names": ["j1"], "positions": [0.0]},
@@ -306,6 +307,12 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
     assert predicted["qualification_stages"][0][
         "qualification_post_transition_gripper_state"
     ] == "open"
+    assert predicted["qualification_stages"][0][
+        "qualification_settled_object_pose"
+    ]["xyz"] == pytest.approx([0.475, -0.101, 0.431])
+    assert predicted["compile_parameters"][
+        "qualified_settled_object_pose_sha256"
+    ]
     assert predicted["compile_parameters"]["placement_candidate"][
         "object_goal_pose"
     ] == model_goal

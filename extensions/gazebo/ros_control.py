@@ -3370,6 +3370,27 @@ class _RosRuntime:
                 "pose_xyz": list(world_xyz),
                 "pose_quat_xyzw": list(world_quat),
             }
+            detached_probe = world
+            settled_pose = target.get("qualification_settled_object_pose")
+            if isinstance(settled_pose, Mapping):
+                settled_xyz = settled_pose.get("xyz")
+                settled_quat = settled_pose.get("quat_xyzw")
+                if not (
+                    isinstance(settled_xyz, list)
+                    and len(settled_xyz) == 3
+                    and isinstance(settled_quat, list)
+                    and len(settled_quat) == 4
+                ):
+                    return {
+                        "ok": False,
+                        "reason": "virtual_detach_settled_pose_invalid",
+                    }
+                detached_probe = {
+                    **world,
+                    "pose_xyz": [float(value) for value in settled_xyz],
+                    "pose_quat_xyzw": [float(value) for value in settled_quat],
+                    "qualification_pose_role": "predicted_settled_collision_body",
+                }
             scene["attached_specs"] = {}
             scene.setdefault("world_specs", {})[target_id] = world
             planning_diff = {
@@ -3377,9 +3398,11 @@ class _RosRuntime:
                 "world_objects": [world],
                 # See qualification_state_validity: the public
                 # GetStateValidity service cannot carry world-object diffs.
-                # Preserve the exact released geometry for its request-local
-                # post-open collision probe.
-                "detached_collision_probe_objects": [world],
+                # Preserve the exact model/geometry-derived settled body for
+                # its request-local post-open collision probe.  When an older
+                # candidate has no settled goal, retain the historical exact
+                # release-pose probe for artifact compatibility.
+                "detached_collision_probe_objects": [detached_probe],
             }
         scene.setdefault("transitions", []).append(transition)
         scene_hash = hashlib.sha256(

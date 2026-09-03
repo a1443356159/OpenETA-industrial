@@ -546,10 +546,25 @@ def test_ros_virtual_scene_diff_is_clone_only_and_payload_aware():
     detached = runtime.qualification_scene_transition(
         clone,
         "virtual_detach",
-        {"xyz": [0.4, 0.0, 0.3], "quat_xyzw": [0.0, 0.0, 0.0, 1.0]},
+        {
+            "xyz": [0.4, 0.0, 0.3],
+            "quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+            "qualification_settled_object_pose": {
+                "xyz": [0.6, -0.1, 0.12],
+                "quat_xyzw": [0.0, 0.0, 1.0, 0.0],
+            },
+        },
     )
     assert detached["planning_scene_diff"]["remove_attached_ids"] == ["target"]
     assert detached["planning_scene_diff"]["world_objects"][0]["pose_xyz"][0] == pytest.approx(0.4)
+    settled_probe = detached["planning_scene_diff"][
+        "detached_collision_probe_objects"
+    ][0]
+    assert settled_probe["pose_xyz"] == pytest.approx([0.6, -0.1, 0.12])
+    assert settled_probe["pose_quat_xyzw"] == pytest.approx([0.0, 0.0, 1.0, 0.0])
+    assert settled_probe["qualification_pose_role"] == (
+        "predicted_settled_collision_body"
+    )
     assert scene.revision == revision
     assert scene.attached_ids == set()
 

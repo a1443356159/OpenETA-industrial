@@ -1058,18 +1058,40 @@ def _candidate_qualification_compiler(
                 profile_sha256=profile_sha256,
             )
             compiled_pose_chain = [dict(compiled["release_pose"])]
-            stages = [
-                {
-                    **_qualification_pose("release", compiled["release_pose"]),
-                    "scene_transition": "virtual_detach",
-                    # Releasing changes both the planning scene and the hand
-                    # geometry.  Validate the exact planned arm endpoint with
-                    # the gripper fully open after the virtual detach so that
-                    # a goal next to a bin wall cannot pass qualification and
-                    # then fail during the irreversible physical release.
-                    "qualification_post_transition_gripper_state": "open",
-                },
-            ]
+            release_stage = {
+                **_qualification_pose("release", compiled["release_pose"]),
+                "scene_transition": "virtual_detach",
+                # Releasing changes both the planning scene and the hand
+                # geometry.  Validate the exact planned arm endpoint with
+                # the gripper fully open after the virtual detach so that
+                # a goal next to a bin wall cannot pass qualification and
+                # then fail during the irreversible physical release.
+                "qualification_post_transition_gripper_state": "open",
+            }
+            settled_goal = candidate.get(
+                "qualified_world_collision_object_goal_pose"
+            )
+            if isinstance(settled_goal, Mapping):
+                # The EEF remains at the release endpoint while the object
+                # settles under physics.  The prior virtual-detach proof used
+                # only the elevated release pose, so a long part could settle
+                # into the wrist/camera volume after an irreversible open.
+                # Carry the legality layer's model/geometry-derived settled
+                # collision-body pose into that same endpoint proof.  This is
+                # candidate data, not a scene-specific clearance heuristic.
+                settled_pose = _qualification_pose(
+                    "settled_object",
+                    settled_goal,
+                )
+                release_stage["qualification_settled_object_pose"] = settled_pose
+                parameters["qualified_settled_object_pose_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        settled_pose,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            stages = [release_stage]
         else:
             extrinsics = source.get("camera_extrinsics")
             if not isinstance(extrinsics, dict):
@@ -1176,6 +1198,8 @@ def _qualification_pose(name: str, pose: object) -> JsonDict:
     if not isinstance(pose, Mapping):
         raise ValueError("compiled qualification pose is invalid")
     result = {"name": name, **dict(pose)}
+    if "xyz" not in result and isinstance(result.get("translation_xyz"), list):
+        result["xyz"] = list(result["translation_xyz"])
     rotation = result.get("rotation_matrix")
     if not isinstance(rotation, list) or len(rotation) != 3:
         raise ValueError("compiled qualification rotation is missing")
