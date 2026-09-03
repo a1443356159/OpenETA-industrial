@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import os
 import math
 import re
@@ -1050,18 +1050,80 @@ class GazeboDetachableJointControl:
             raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
         return matches[0]
 
+    @classmethod
+    def _target_model_pose_from_snapshot(
+        cls,
+        poses: dict[str, GazeboNativePose],
+        *,
+        child_model: str,
+        child_link: str,
+    ) -> GazeboNativePose:
+        """Resolve a target link world pose under the validated SDF contract."""
+
+        child_local = cls._named_pose(poses, child_link)
+        local_quat = child_local.quat_xyzw
+        if (
+            any(abs(component) > 1e-6 for component in child_local.xyz)
+            or any(abs(component) > 1e-6 for component in local_quat[:3])
+            or abs(abs(local_quat[3]) - 1.0) > 1e-6
+        ):
+            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
+        return cls._named_pose(poses, child_model)
+
+    def native_target_model_poses_with_retry(
+        self,
+        target_links: Mapping[str, str],
+        *,
+        max_attempts: int = 2,
+    ) -> tuple[dict[str, GazeboNativePose], int]:
+        """Read several detachable targets from one validated Pose_V snapshot."""
+
+        bindings = {
+            str(model).strip(): str(link).strip()
+            for model, link in target_links.items()
+        }
+        if (
+            isinstance(max_attempts, bool)
+            or max_attempts < 1
+            or not bindings
+            or any(not model or not link for model, link in bindings.items())
+        ):
+            raise ValueError("native target pose request is invalid")
+        last_error: Exception | None = None
+        for attempt in range(1, int(max_attempts) + 1):
+            try:
+                poses = self._world_link_poses()
+                return (
+                    {
+                        model: self._target_model_pose_from_snapshot(
+                            poses,
+                            child_model=model,
+                            child_link=link,
+                        )
+                        for model, link in bindings.items()
+                    },
+                    attempt,
+                )
+            except GazeboProcessError as exc:
+                last_error = exc
+                if (
+                    str(exc) != "NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE"
+                    or attempt >= max_attempts
+                ):
+                    raise
+        raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE") from last_error
+
     def native_target_mount_poses(
         self,
     ) -> tuple[GazeboNativePose, GazeboNativePose]:
         """Read full native world poses for planning-scene attach/detach."""
 
         poses = self._world_link_poses()
-        child_local = self._named_pose(poses, self.child_link)
-        if any(abs(component) > 1e-6 for component in child_local.xyz):
-            raise GazeboProcessError("NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE")
-        return self._named_pose(poses, self.child_model), self._named_pose(
-            poses, self.parent_link
-        )
+        return self._target_model_pose_from_snapshot(
+            poses,
+            child_model=self.child_model,
+            child_link=self.child_link,
+        ), self._named_pose(poses, self.parent_link)
 
     def native_target_mount_poses_with_retry(
         self,

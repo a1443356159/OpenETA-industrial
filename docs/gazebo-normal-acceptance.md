@@ -97,8 +97,12 @@ Execution is:
    `T_world_eef_release = T_world_object_release × inverse(T_eef_object_attached)`.
 4. MoveIt plans the complete attached current state → exact release EEF pose.
 5. Detach and open, then let the VLM review the causal post-release RGB-D
-   observation. The release transaction does not block on repeated simulator
-   pose polling or a fixed stability dwell.
+   observation for destination membership, requested face/orientation, and
+   obvious physical failure. The release transaction does not block on repeated
+   simulator pose polling or a fixed stability dwell. In a multi-object work
+   order, the released pose and next target pose come from one validated Gazebo
+   snapshot and enter MoveIt through one atomic scene diff and one state-validity
+   check.
 
 There is no post-close lift waypoint and no agent-authored release offset. The
 attached object is present in the MoveIt PlanningScene during placement. Scene revision,

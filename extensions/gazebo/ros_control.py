@@ -1797,15 +1797,48 @@ class RosGazeboController(GazeboController):
         target_xyz: Sequence[float],
         target_quat_xyzw: Sequence[float],
         departure_contact_object_id: str = "",
+        departure_target_xyz: Sequence[float] | None = None,
+        departure_target_quat_xyzw: Sequence[float] | None = None,
     ) -> int:
-        """Rebind target/destination semantics inside one unchanged world."""
+        """Rebind semantics and optionally synchronize the prior target once."""
 
+        previous_config = self.config
+        previous_target_id = str(self.planning_scene.target_id)
+        previous_support_object_id = str(
+            self.planning_scene.support_contact_object_id
+        )
+        previous_target_spec = self.planning_scene.world_specs.get(
+            previous_target_id
+        )
         target_xyz = tuple(float(value) for value in target_xyz)
         target_quat_xyzw = _normalized_quaternion(
             tuple(float(value) for value in target_quat_xyzw)
         )
         if len(target_xyz) != 3 or not all(math.isfinite(value) for value in target_xyz):
             raise ValueError("active sort target pose is invalid")
+        if (departure_target_xyz is None) != (
+            departure_target_quat_xyzw is None
+        ):
+            raise ValueError("departure target position and orientation must be paired")
+        departure_target = None
+        if departure_target_xyz is not None:
+            if departure_target_quat_xyzw is None:  # paired above; narrow the type.
+                raise ValueError(
+                    "departure target position and orientation must be paired"
+                )
+            departure_xyz = tuple(float(value) for value in departure_target_xyz)
+            departure_quat = _normalized_quaternion(
+                tuple(float(value) for value in departure_target_quat_xyzw)
+            )
+            if len(departure_xyz) != 3 or not all(
+                math.isfinite(value) for value in departure_xyz
+            ):
+                raise ValueError("departure sort target pose is invalid")
+            departure_target = _target_collision_geometry(
+                self.config,
+                pose_xyz=departure_xyz,
+                pose_quat_xyzw=departure_quat,
+            )
         revision = self.planning_scene.activate_target(
             target=_target_collision_geometry(
                 config,
@@ -1814,12 +1847,48 @@ class RosGazeboController(GazeboController):
             ),
             support_object_id=str(config.source_support_object_id),
             departure_contact_object_id=str(departure_contact_object_id),
+            departure_target=departure_target,
         )
+        self.runtime._l5_trajectory_cache.clear()
+        try:
+            self._require_current_planning_state_valid()
+        except Exception as activation_error:
+            try:
+                rollback_target = None
+                if (
+                    departure_target is not None
+                    and departure_target.object_id == previous_target_id
+                ):
+                    rollback_target = departure_target
+                elif isinstance(previous_target_spec, Mapping):
+                    rollback_target = _target_collision_geometry(
+                        previous_config,
+                        pose_xyz=previous_target_spec["pose_xyz"],
+                        pose_quat_xyzw=previous_target_spec[
+                            "pose_quat_xyzw"
+                        ],
+                    )
+                if rollback_target is None or not previous_support_object_id:
+                    raise PlanningSceneError(
+                        "prior target activation state is unavailable"
+                    )
+                rollback_revision = self.planning_scene.activate_target(
+                    target=rollback_target,
+                    support_object_id=previous_support_object_id,
+                )
+                self.runtime.scene_revision = rollback_revision
+                self.runtime.planning_scene_ready = self.planning_scene.ready
+            except Exception as rollback_error:
+                self.planning_scene.ready = False
+                self.runtime.planning_scene_ready = False
+                raise PlanningSceneError(
+                    f"{activation_error}; target activation rollback failed: "
+                    f"{rollback_error}"
+                ) from activation_error
+            raise
         self.config = config
         self.runtime.config = config
         self.runtime.state_source.config = config
-        self.runtime._l5_trajectory_cache.clear()
-        self._require_current_planning_state_valid()
         self.runtime.scene_revision = revision
         self.runtime.planning_scene_ready = self.planning_scene.ready
         return revision

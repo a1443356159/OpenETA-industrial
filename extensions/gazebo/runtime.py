@@ -701,14 +701,22 @@ class GazeboRuntime:
             DetachableJointState.DETACHED
         ):
             raise GazeboProcessError("MULTI_SORT_TARGET_NOT_DETACHED")
-        self._completed_work_order_item_ids.append(assignment_id)
+        if self._active_work_order_index != len(
+            self._completed_work_order_item_ids
+        ):
+            raise GazeboProcessError("MULTI_SORT_ASSIGNMENT_STATE_INVALID")
+        current_attachment = self.attachment
+        current_target_id = str(getattr(current, "target_id", ""))
+        if not current_target_id:
+            raise GazeboProcessError("MULTI_SORT_TARGET_BINDING_UNAVAILABLE")
+        transition_started = time.monotonic()
         transition: dict[str, Any] = {
             "completed_assignment_id": assignment_id,
             "world_recreated": False,
             "model_inference_invoked": False,
         }
-        if len(self._completed_work_order_item_ids) < len(self._work_order_configs):
-            next_index = len(self._completed_work_order_item_ids)
+        next_index = self._active_work_order_index + 1
+        if next_index < len(self._work_order_configs):
             next_config = self._work_order_configs[next_index]
             next_target_id = str(getattr(next_config, "target_id", ""))
             next_attachment = self.attachments.get(next_target_id)
@@ -716,10 +724,43 @@ class GazeboRuntime:
                 next_attachment, "state", None
             ) != DetachableJointState.DETACHED:
                 raise GazeboProcessError("MULTI_SORT_NEXT_TARGET_NOT_DETACHED")
+            pose_read_started = time.monotonic()
+            shared_pose_reader = getattr(
+                current_attachment,
+                "native_target_model_poses_with_retry",
+                None,
+            )
             try:
-                target_pose, _mount_pose, pose_attempts = (
-                    next_attachment.native_target_mount_poses_with_retry(max_attempts=2)
-                )
+                if callable(shared_pose_reader):
+                    model_poses, shared_pose_attempts = shared_pose_reader(
+                        {
+                            current_target_id: str(
+                                getattr(current, "target_link", "")
+                            ),
+                            next_target_id: str(
+                                getattr(next_config, "target_link", "")
+                            ),
+                        },
+                        max_attempts=2,
+                    )
+                    released_pose = model_poses[current_target_id]
+                    target_pose = model_poses[next_target_id]
+                    released_pose_attempts = target_pose_attempts = int(
+                        shared_pose_attempts
+                    )
+                    pose_snapshot_shared = True
+                else:
+                    released_pose, _mount_pose, released_pose_attempts = (
+                        current_attachment.native_target_mount_poses_with_retry(
+                            max_attempts=2
+                        )
+                    )
+                    target_pose, _mount_pose, target_pose_attempts = (
+                        next_attachment.native_target_mount_poses_with_retry(
+                            max_attempts=2
+                        )
+                    )
+                    pose_snapshot_shared = False
             except Exception as exc:
                 raise GazeboProcessError(
                     f"MULTI_SORT_NEXT_TARGET_POSE_UNAVAILABLE: {exc}"
@@ -727,14 +768,22 @@ class GazeboRuntime:
             activate = getattr(self.controller, "activate_pick_place_config", None)
             if not callable(activate):
                 raise GazeboProcessError("MULTI_SORT_PLANNING_SCENE_SWITCH_UNAVAILABLE")
+            scene_commit_started = time.monotonic()
             revision = activate(
                 next_config,
                 target_xyz=tuple(float(value) for value in target_pose.xyz),
                 target_quat_xyzw=tuple(
                     float(value) for value in target_pose.quat_xyzw
                 ),
-                departure_contact_object_id=str(getattr(current, "target_id", "")),
+                departure_contact_object_id=current_target_id,
+                departure_target_xyz=tuple(
+                    float(value) for value in released_pose.xyz
+                ),
+                departure_target_quat_xyzw=tuple(
+                    float(value) for value in released_pose.quat_xyzw
+                ),
             )
+            self._completed_work_order_item_ids.append(assignment_id)
             self._active_work_order_index = next_index
             self.attachment = next_attachment
             self._last_observation = None
@@ -744,12 +793,74 @@ class GazeboRuntime:
                     "activated_assignment_index": next_index,
                     "activated_target_id": next_target_id,
                     "planning_scene_revision": int(revision),
-                    "target_pose_read_attempt_count": int(pose_attempts),
-                    "departure_contact_object_id": str(
-                        getattr(current, "target_id", "")
+                    "planning_scene_transition_mode": (
+                        "atomic_release_and_next_target"
+                    ),
+                    "target_pose_read_attempt_count": int(target_pose_attempts),
+                    "released_target_pose_read_attempt_count": int(
+                        released_pose_attempts
+                    ),
+                    "next_target_pose_read_attempt_count": int(
+                        target_pose_attempts
+                    ),
+                    "pose_snapshot_shared": pose_snapshot_shared,
+                    "pose_snapshot_wall_time_ms": round(
+                        (scene_commit_started - pose_read_started) * 1000.0, 3
+                    ),
+                    "planning_scene_commit_and_validation_wall_time_ms": round(
+                        (time.monotonic() - scene_commit_started) * 1000.0, 3
+                    ),
+                    "departure_contact_object_id": current_target_id,
+                }
+            )
+        else:
+            pose_read_started = time.monotonic()
+            try:
+                released_pose, _mount_pose, released_pose_attempts = (
+                    current_attachment.native_target_mount_poses_with_retry(
+                        max_attempts=2
+                    )
+                )
+            except Exception as exc:
+                raise GazeboProcessError(
+                    f"MULTI_SORT_RELEASED_TARGET_POSE_UNAVAILABLE: {exc}"
+                ) from exc
+            sync_target_pose = getattr(
+                self.controller, "sync_planning_scene_target_pose", None
+            )
+            if not callable(sync_target_pose):
+                raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
+            scene_commit_started = time.monotonic()
+            revision = sync_target_pose(
+                current,
+                target_xyz=tuple(float(value) for value in released_pose.xyz),
+                target_quat_xyzw=tuple(
+                    float(value) for value in released_pose.quat_xyzw
+                ),
+                allow_target_touch=True,
+            )
+            self._completed_work_order_item_ids.append(assignment_id)
+            transition.update(
+                {
+                    "planning_scene_revision": int(revision),
+                    "planning_scene_transition_mode": (
+                        "final_released_target_pose_sync"
+                    ),
+                    "released_target_pose_read_attempt_count": int(
+                        released_pose_attempts
+                    ),
+                    "pose_snapshot_shared": False,
+                    "pose_snapshot_wall_time_ms": round(
+                        (scene_commit_started - pose_read_started) * 1000.0, 3
+                    ),
+                    "planning_scene_commit_and_validation_wall_time_ms": round(
+                        (time.monotonic() - scene_commit_started) * 1000.0, 3
                     ),
                 }
             )
+        transition["total_wall_time_ms"] = round(
+            (time.monotonic() - transition_started) * 1000.0, 3
+        )
         progress = self.multi_sort_progress()
         if progress is None:
             raise GazeboProcessError("MULTI_SORT_PROGRESS_UNAVAILABLE")
@@ -773,6 +884,9 @@ class GazeboRuntime:
             }
             post_release_observation.metadata = {
                 **post_release_observation.metadata,
+                "planning_scene_revision": int(
+                    transition["planning_scene_revision"]
+                ),
                 "multi_sort_progress": dict(progress),
             }
             self._last_observation = post_release_observation

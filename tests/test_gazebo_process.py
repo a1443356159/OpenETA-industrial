@@ -312,6 +312,64 @@ def test_authoritative_dynamic_models_use_one_complete_native_pose_snapshot() ->
     assert poses["silver_box_wrench"].xyz == (0.31, 0.105, 0.009)
 
 
+def test_multiple_detachable_targets_share_one_validated_native_pose_snapshot() -> None:
+    snapshots = []
+    control = gazebo_process.GazeboDetachableJointControl()
+
+    def poses():
+        snapshots.append("read")
+        return {
+            "target_object": gazebo_process.GazeboNativePose(
+                (0.52, 0.18, 0.06), (0.0, 0.0, 0.0, 1.0)
+            ),
+            "target_link": gazebo_process.GazeboNativePose(
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+            ),
+            "red_m24_hex_bolt": gazebo_process.GazeboNativePose(
+                (0.31, -0.11, 0.02), (0.0, 0.0, 0.1, 0.994987437)
+            ),
+            "red_m24_hex_bolt_link": gazebo_process.GazeboNativePose(
+                (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)
+            ),
+        }
+
+    control._world_link_poses = poses  # type: ignore[method-assign]
+
+    targets, attempts = control.native_target_model_poses_with_retry(
+        {
+            "target_object": "target_link",
+            "red_m24_hex_bolt": "red_m24_hex_bolt_link",
+        },
+        max_attempts=2,
+    )
+
+    assert attempts == 1
+    assert snapshots == ["read"]
+    assert targets["target_object"].xyz == (0.52, 0.18, 0.06)
+    assert targets["red_m24_hex_bolt"].xyz == (0.31, -0.11, 0.02)
+
+
+def test_shared_target_snapshot_rejects_nonidentity_target_link_pose() -> None:
+    control = gazebo_process.GazeboDetachableJointControl()
+    control._world_link_poses = lambda: {
+        "target_object": gazebo_process.GazeboNativePose(
+            (0.52, 0.18, 0.06), (0.0, 0.0, 0.0, 1.0)
+        ),
+        "target_link": gazebo_process.GazeboNativePose(
+            (0.0, 0.0, 0.0), (0.0, 0.0, 0.1, 0.994987437)
+        ),
+    }  # type: ignore[method-assign]
+
+    with pytest.raises(
+        gazebo_process.GazeboProcessError,
+        match="NATIVE_GRASP_CHILD_LINK_STATE_UNAVAILABLE",
+    ):
+        control.native_target_model_poses_with_retry(
+            {"target_object": "target_link"},
+            max_attempts=1,
+        )
+
+
 def test_authoritative_dynamic_pose_snapshot_fails_closed_when_one_model_is_missing() -> (
     None
 ):

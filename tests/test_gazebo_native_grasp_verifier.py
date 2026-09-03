@@ -896,6 +896,11 @@ def test_release_ack_triggers_open_while_planning_scene_detach_runs() -> None:
             "source": "fresh_observation_required",
             "camera_frame_ids": [],
             "review_authority": "vlm",
+            "review_scope": [
+                "requested_destination_membership",
+                "requested_face_and_orientation",
+                "obvious_physical_failure",
+            ],
         },
         "geometry_obvious_failure_guard": {
             "blocking_stability_polling": False,
@@ -905,6 +910,50 @@ def test_release_ack_triggers_open_while_planning_scene_detach_runs() -> None:
     }
     assert "placement_verification" not in receipt
     assert env.runtime.attachment.placement_sample_duration_s is None
+    assert raw["metadata"]["planning_scene_revision"] == 9
+
+
+def test_multi_sort_release_uses_one_runtime_owned_scene_transition() -> None:
+    env, events = _attached_release_env()
+    pending = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "all_completed": False,
+        "active_assignment_index": 0,
+    }
+    completed = {
+        **pending,
+        "all_completed": True,
+        "active_assignment_index": None,
+        "transition": {
+            "planning_scene_revision": 9,
+            "planning_scene_transition_mode": "final_released_target_pose_sync",
+            "released_target_pose_read_attempt_count": 1,
+        },
+    }
+    env.runtime.multi_sort_progress = lambda: dict(pending)
+
+    def advance(*, release_evidence, post_release_observation):
+        assert release_evidence["detached_confirmed"] is True
+        assert post_release_observation is None
+        events.append("atomic_scene_transition")
+        return dict(completed)
+
+    env.runtime.complete_active_work_order_item = advance
+
+    raw, _, _, _, result = env.step({"action_type": "gripper_open"})
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is True
+    assert "planning_scene_pose_sync_ack" not in events
+    assert events[-1] == "atomic_scene_transition"
+    assert receipt["released_target_pose_read_attempt_count"] == 1
+    assert receipt["planning_scene_transition"] == completed["transition"]
+    assert receipt["release_sequence"][-1] == {
+        "sequence": 4,
+        "event": "released_target_pose_sync_ack",
+        "revision": 9,
+        "transition_mode": "final_released_target_pose_sync",
+    }
     assert raw["metadata"]["planning_scene_revision"] == 9
 
 

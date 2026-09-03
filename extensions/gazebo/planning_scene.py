@@ -308,8 +308,15 @@ class PlanningSceneSynchronizer:
         target: CollisionGeometry,
         support_object_id: str,
         departure_contact_object_id: str = "",
+        departure_target: CollisionGeometry | None = None,
     ) -> int:
-        """Switch the qualification target while retaining one physical world."""
+        """Switch targets and optionally commit the released pose atomically.
+
+        A same-session sort releases one object immediately before activating
+        the next one.  Both bodies are described by the same authoritative
+        Gazebo pose generation, so publishing them in one PlanningScene diff
+        avoids an intermediate scene revision which no planner may consume.
+        """
 
         if self.attached_ids:
             return self._fail("sort target cannot change while an object is attached")
@@ -324,12 +331,45 @@ class PlanningSceneSynchronizer:
             return self._fail(
                 "departure contact object does not match the completed sort target"
             )
+        departure_spec: dict[str, Any] | None = None
+        departure_target_id = ""
+        departure_geometry_changed = False
+        if departure_target is not None:
+            if not departure_object_id:
+                return self._fail(
+                    "departure target requires scoped departure contact"
+                )
+            if departure_target.object_id != previous_target_id:
+                return self._fail(
+                    "departure target does not match the completed sort target"
+                )
+            if departure_target.object_id in self.attached_ids:
+                return self._fail("departure target is still attached")
+            if departure_target.object_id not in self.world_ids:
+                return self._fail("departure target is missing from the world scene")
+            departure_target_id = departure_target.object_id
+            departure_spec = departure_target.to_dict()
+            existing_departure = self.world_specs.get(departure_target.object_id)
+            departure_geometry_changed = not (
+                isinstance(existing_departure, Mapping)
+                and _same_collision_geometry_pose(
+                    existing_departure, departure_spec
+                )
+            )
         target_spec = target.to_dict()
         existing = self.world_specs.get(target.object_id)
         geometry_changed = not (
             isinstance(existing, Mapping)
             and _same_collision_geometry_pose(existing, target_spec)
         )
+        changed_world_objects = [
+            *(
+                [departure_spec]
+                if departure_spec is not None and departure_geometry_changed
+                else []
+            ),
+            *([target_spec] if geometry_changed else []),
+        ]
         allowed_collisions = {
             target.object_id: [support],
             **(
@@ -347,7 +387,11 @@ class PlanningSceneSynchronizer:
         revision = self._commit(
             {
                 "operation": "activate_target",
-                **({"world_objects": [target_spec]} if geometry_changed else {}),
+                **(
+                    {"world_objects": changed_world_objects}
+                    if changed_world_objects
+                    else {}
+                ),
                 # The active object starts in measured support contact. Replace
                 # the prior target's owned ACM row so a same-session sort does
                 # not mistake the next object's ordinary support for a crash.
@@ -356,6 +400,8 @@ class PlanningSceneSynchronizer:
             expected_world=set(self.world_ids),
             expected_attached=set(),
         )
+        if departure_spec is not None and departure_geometry_changed:
+            self.world_specs[departure_target_id] = departure_spec
         if geometry_changed:
             self.world_specs[target.object_id] = target_spec
         self.target_id = target.object_id

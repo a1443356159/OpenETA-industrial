@@ -164,6 +164,63 @@ def test_multi_sort_departure_touch_is_scoped_until_next_attach() -> None:
     assert scene.transient_departure_contact_object_id == ""
 
 
+def test_multi_sort_commits_released_and_next_target_poses_atomically() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        return {
+            "applied": True,
+            "world_ids": ["table", "distractor", "target"],
+            "attached_ids": [],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
+    table, next_target, completed_target = _boxes()
+    scene.reset(table=table, distractor=next_target, target=completed_target)
+    released_target = CollisionBox(
+        completed_target.object_id,
+        completed_target.size_xyz,
+        (0.52, 0.18, 0.06),
+    )
+    measured_next_target = CollisionBox(
+        next_target.object_id,
+        next_target.size_xyz,
+        (0.31, 0.11, 0.44),
+    )
+
+    scene.activate_target(
+        target=measured_next_target,
+        support_object_id=table.object_id,
+        departure_contact_object_id=completed_target.object_id,
+        departure_target=released_target,
+    )
+
+    assert calls[1]["world_objects"] == [
+        released_target.to_dict(),
+        measured_next_target.to_dict(),
+    ]
+    assert calls[1]["allowed_collisions"] == {
+        next_target.object_id: [table.object_id],
+        completed_target.object_id: list(TARGET_TOUCH_LINKS),
+    }
+    assert scene.world_specs[completed_target.object_id] == released_target.to_dict()
+    assert scene.world_specs[next_target.object_id] == measured_next_target.to_dict()
+
+
+def test_atomic_departure_pose_requires_scoped_touch_identity() -> None:
+    scene = PlanningSceneSynchronizer()
+    table, next_target, completed_target = _boxes()
+    scene.reset(table=table, distractor=next_target, target=completed_target)
+
+    with pytest.raises(PlanningSceneError, match="scoped departure contact"):
+        scene.activate_target(
+            target=next_target,
+            support_object_id=table.object_id,
+            departure_target=completed_target,
+        )
+
+
 def test_multi_sort_departure_contact_must_name_completed_target() -> None:
     scene = PlanningSceneSynchronizer()
     table, next_target, completed_target = _boxes()

@@ -22,6 +22,7 @@ from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.ros_control import (
     L5_TRAJECTORY_START_TOLERANCE_RAD,
     QUALIFIED_JOINT_GOAL_TOLERANCE_RAD,
+    RosGazeboController,
     RosGazeboStateSource,
     _RosRuntime,
     _sim_clock_diagnostics,
@@ -47,7 +48,77 @@ from extensions.gazebo.ros_control import (
     _qualification_robot_model_sha256,
     _urdf_reach_upper_bound_m,
 )
+from extensions.gazebo.planning_scene import (
+    CollisionBox,
+    PlanningSceneError,
+    PlanningSceneSynchronizer,
+)
 from agent.runtime.capability_map import generate_sparse_capability_map, robot_model_hash
+
+
+def test_target_activation_rolls_back_after_post_commit_validity_failure() -> None:
+    calls = []
+
+    def apply(diff):
+        calls.append(diff)
+        return {
+            "applied": True,
+            "world_ids": ["work_table", "target_object", "red_m24_hex_bolt"],
+            "attached_ids": [],
+        }
+
+    scene = PlanningSceneSynchronizer(apply)
+    scene.reset(
+        table=CollisionBox("work_table", (1.0, 1.0, 0.05), (0.3, 0.0, -0.025)),
+        distractor=CollisionBox(
+            "red_m24_hex_bolt", (0.12, 0.04, 0.04), (0.24, -0.19, 0.02)
+        ),
+        target=CollisionBox(
+            "target_object", (0.22, 0.06, 0.03), (0.06, -0.24, 0.015)
+        ),
+    )
+    base_config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    previous_config, next_config = base_config.manipulation_target_configs
+    runtime = SimpleNamespace(
+        planning_scene=scene,
+        config=previous_config,
+        state_source=SimpleNamespace(config=previous_config),
+        _l5_trajectory_cache={"qualified": object()},
+        scene_revision=scene.revision,
+        planning_scene_ready=True,
+    )
+    controller = object.__new__(RosGazeboController)
+    controller.runtime = runtime
+    controller.config = previous_config
+
+    def reject_current_state():
+        scene.ready = False
+        raise PlanningSceneError("planning-scene current state is invalid")
+
+    controller._require_current_planning_state_valid = reject_current_state
+
+    with pytest.raises(PlanningSceneError, match="current state is invalid"):
+        controller.activate_pick_place_config(
+            next_config,
+            target_xyz=(0.25, -0.18, 0.02),
+            target_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+            departure_contact_object_id="target_object",
+            departure_target_xyz=(0.62, 0.18, 0.07),
+            departure_target_quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+        )
+
+    assert [call["operation"] for call in calls] == [
+        "reset",
+        "activate_target",
+        "activate_target",
+    ]
+    assert scene.target_id == previous_config.target_id
+    assert scene.ready is True
+    assert controller.config is previous_config
+    assert runtime.config is previous_config
+    assert runtime.state_source.config is previous_config
+    assert runtime.scene_revision == scene.revision == 3
+    assert runtime._l5_trajectory_cache == {}
 
 
 def test_sim_clock_diagnostics_reports_ratio_without_affecting_invalid_clocks() -> None:

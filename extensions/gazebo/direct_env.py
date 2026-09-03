@@ -1195,6 +1195,11 @@ class GazeboDirectEnv(Env):
                                 str(camera.frame_id) for camera in observation.cameras
                             ],
                             "review_authority": "vlm",
+                            "review_scope": [
+                                "requested_destination_membership",
+                                "requested_face_and_orientation",
+                                "obvious_physical_failure",
+                            ],
                         }
                         release_evidence = {
                             "schema_version": "openeta.native_release_evidence.v1",
@@ -1210,79 +1215,31 @@ class GazeboDirectEnv(Env):
                             },
                         }
                         receipt["release_evidence"] = release_evidence
-                        # MoveIt still needs the released body at its measured
-                        # world pose before another motion can be planned. One
-                        # finite authoritative read is sufficient for that
-                        # synchronization; repeated pose polling and a fixed
-                        # stability dwell belong to visual adjudication, not
-                        # to the gripper-open transaction.
-                        post_release_stage = "released_target_pose_read"
-                        pose_reader = getattr(
-                            attachment,
-                            "native_target_mount_poses_with_retry",
-                            None,
-                        )
-                        if callable(pose_reader):
-                            target_pose, _mount_pose, pose_attempts = pose_reader(
-                                max_attempts=2
-                            )
-                        else:
-                            target_pose, _mount_pose = (
-                                attachment.native_target_mount_poses()
-                            )
-                            pose_attempts = 1
-                        receipt["released_target_pose_read_attempt_count"] = int(
-                            pose_attempts
-                        )
-                        sync_target_pose = getattr(
-                            self.controller,
-                            "sync_planning_scene_target_pose",
-                            None,
-                        )
-                        if not callable(sync_target_pose):
-                            raise GazeboProcessError("PLANNING_SCENE_UNAVAILABLE")
-                        post_release_stage = "released_target_pose_sync"
-                        scene_revision = sync_target_pose(
-                            self._native_grasp_config,
-                            target_xyz=target_pose.xyz,
-                            target_quat_xyzw=target_pose.quat_xyzw,
-                            # Detach is intentionally acknowledged before the
-                            # fingers open. Permit only transient
-                            # target-to-gripper touch while synchronizing the
-                            # current state; every other robot/world collision
-                            # remains a hard failure.
-                            allow_target_touch=True,
-                        )
-                        release_sequence.append(
-                            {
-                                "sequence": len(release_sequence) + 1,
-                                "event": "released_target_pose_sync_ack",
-                                "revision": int(scene_revision),
-                            }
-                        )
-                        record = release_before_open["record"]
-                        receipt["planning_scene_revision"] = scene_revision
-                        receipt["release_sequence"] = release_sequence
-                        receipt["native_target_binding"] = {
-                            "target_id": self._native_grasp_config.target_id,
-                            "target_link": self._native_grasp_config.target_link,
-                            "assignment_id": (
-                                self._native_grasp_config.work_order_item.get("id")
-                                if self._native_grasp_config.work_order_item is not None
-                                else None
-                            ),
-                        }
-                        raw.setdefault("metadata", {})[
-                            "planning_scene_revision"
-                        ] = scene_revision
-                        post_release_stage = "work_order_transition"
+                        released_config = self._native_grasp_config
                         advance = getattr(
                             self.runtime,
                             "complete_active_work_order_item",
                             None,
                         )
-                        progress = (
-                            advance(
+                        current_progress = getattr(
+                            self.runtime, "multi_sort_progress", lambda: None
+                        )()
+                        progress = None
+                        transition: Mapping[str, Any] = {}
+                        if isinstance(current_progress, Mapping):
+                            post_release_stage = "work_order_transition"
+                            if not callable(advance):
+                                raise GazeboProcessError(
+                                    "WORK_ORDER_CONFIGURATION_UNAVAILABLE"
+                                )
+                            # The runtime owns one atomic transition: it reads
+                            # the released and next target from one Gazebo pose
+                            # generation, applies one MoveIt diff, and performs
+                            # one current-state validity check.  Running a
+                            # separate pose sync here would duplicate every
+                            # service round trip and expose an intermediate
+                            # scene revision to no useful consumer.
+                            progress = advance(
                                 release_evidence=release_evidence,
                                 post_release_observation=(
                                     observation
@@ -1290,9 +1247,113 @@ class GazeboDirectEnv(Env):
                                     else None
                                 ),
                             )
-                            if callable(advance)
-                            else None
+                            if not isinstance(progress, Mapping):
+                                raise GazeboProcessError(
+                                    "MULTI_SORT_PROGRESS_UNAVAILABLE"
+                                )
+                            progress = dict(progress)
+                            raw_transition = progress.get("transition")
+                            transition = (
+                                dict(raw_transition)
+                                if isinstance(raw_transition, Mapping)
+                                else {}
+                            )
+                            scene_revision = transition.get(
+                                "planning_scene_revision"
+                            )
+                            if not isinstance(scene_revision, int) or isinstance(
+                                scene_revision, bool
+                            ):
+                                raise GazeboProcessError(
+                                    "MULTI_SORT_PLANNING_SCENE_REVISION_UNAVAILABLE"
+                                )
+                            pose_attempts = transition.get(
+                                "released_target_pose_read_attempt_count"
+                            )
+                            if isinstance(pose_attempts, int) and not isinstance(
+                                pose_attempts, bool
+                            ):
+                                receipt[
+                                    "released_target_pose_read_attempt_count"
+                                ] = pose_attempts
+                            receipt["planning_scene_transition"] = dict(
+                                transition
+                            )
+                        else:
+                            # Single-object profiles retain the same one-shot
+                            # authoritative pose synchronization. Repeated
+                            # polling and a stability dwell belong to VLM
+                            # visual adjudication, not gripper release.
+                            post_release_stage = "released_target_pose_read"
+                            pose_reader = getattr(
+                                attachment,
+                                "native_target_mount_poses_with_retry",
+                                None,
+                            )
+                            if callable(pose_reader):
+                                target_pose, _mount_pose, pose_attempts = pose_reader(
+                                    max_attempts=2
+                                )
+                            else:
+                                target_pose, _mount_pose = (
+                                    attachment.native_target_mount_poses()
+                                )
+                                pose_attempts = 1
+                            receipt[
+                                "released_target_pose_read_attempt_count"
+                            ] = int(pose_attempts)
+                            sync_target_pose = getattr(
+                                self.controller,
+                                "sync_planning_scene_target_pose",
+                                None,
+                            )
+                            if not callable(sync_target_pose):
+                                raise GazeboProcessError(
+                                    "PLANNING_SCENE_UNAVAILABLE"
+                                )
+                            post_release_stage = "released_target_pose_sync"
+                            scene_revision = sync_target_pose(
+                                released_config,
+                                target_xyz=target_pose.xyz,
+                                target_quat_xyzw=target_pose.quat_xyzw,
+                                # Detach is acknowledged before the fingers
+                                # open. Permit only transient target-to-gripper
+                                # touch during this state check.
+                                allow_target_touch=True,
+                            )
+                        release_sequence.append(
+                            {
+                                "sequence": len(release_sequence) + 1,
+                                "event": "released_target_pose_sync_ack",
+                                "revision": int(scene_revision),
+                                **(
+                                    {
+                                        "transition_mode": transition.get(
+                                            "planning_scene_transition_mode"
+                                        )
+                                    }
+                                    if transition.get(
+                                        "planning_scene_transition_mode"
+                                    )
+                                    else {}
+                                ),
+                            }
                         )
+                        record = release_before_open["record"]
+                        receipt["planning_scene_revision"] = scene_revision
+                        receipt["release_sequence"] = release_sequence
+                        receipt["native_target_binding"] = {
+                            "target_id": released_config.target_id,
+                            "target_link": released_config.target_link,
+                            "assignment_id": (
+                                released_config.work_order_item.get("id")
+                                if released_config.work_order_item is not None
+                                else None
+                            ),
+                        }
+                        raw.setdefault("metadata", {})[
+                            "planning_scene_revision"
+                        ] = scene_revision
                         if isinstance(progress, Mapping):
                             progress = dict(progress)
                             receipt["multi_sort_progress"] = progress
@@ -1327,6 +1388,9 @@ class GazeboDirectEnv(Env):
                                     "validated_pickplace_motion"
                                 ] = validated_pickplace_motion_guidance(
                                     next_config
+                                )
+                                raw["metadata"]["attachment_target"] = (
+                                    next_config.target_id
                                 )
                                 raw["metadata"]["control_spec"] = dict(
                                     self.openeta_control_spec

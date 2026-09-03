@@ -195,6 +195,7 @@ class _ResetController:
 
 def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None:
     attachments = {}
+    shared_pose_reads = []
 
     class Attachment:
         def __init__(self, *, child_model, **_kwargs):
@@ -210,6 +211,29 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
                     quat_xyzw=(0.0, 0.0, 0.5646424734, 0.8253356149),
                 ),
                 SimpleNamespace(xyz=(0.0, 0.0, 0.9), quat_xyzw=(0.0, 0.0, 0.0, 1.0)),
+                1,
+            )
+
+        def native_target_model_poses_with_retry(
+            self, target_links, *, max_attempts
+        ):
+            assert max_attempts == 2
+            assert target_links == {
+                "target_object": "target_link",
+                "red_m24_hex_bolt": "red_m24_hex_bolt_link",
+            }
+            shared_pose_reads.append(dict(target_links))
+            return (
+                {
+                    "target_object": SimpleNamespace(
+                        xyz=(0.60, 0.18, 0.08),
+                        quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                    ),
+                    "red_m24_hex_bolt": SimpleNamespace(
+                        xyz=(0.18, -0.22, 0.02),
+                        quat_xyzw=(0.0, 0.0, 0.1, 0.994987437),
+                    ),
+                },
                 1,
             )
 
@@ -274,6 +298,9 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
     ]
     assert "departure_contact_object_id" not in activations[0][1]
     assert activations[1][1]["departure_contact_object_id"] == "target_object"
+    assert activations[1][1]["departure_target_xyz"] == (0.60, 0.18, 0.08)
+    assert activations[1][1]["target_xyz"] == (0.18, -0.22, 0.02)
+    assert len(shared_pose_reads) == 1
     assert configured["source"] == "vlm_work_order"
     assert configured["transition"]["configured_by"] == "vlm_tool_call"
     assert progress["completed_assignment_ids"] == [
@@ -286,6 +313,152 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
     assert runtime._last_observation is post_release
     assert post_release.metadata["multi_sort_progress"]["active_assignment_index"] == 1
     assert progress["transition"]["world_recreated"] is False
+    assert progress["transition"]["planning_scene_transition_mode"] == (
+        "atomic_release_and_next_target"
+    )
+    assert progress["transition"]["pose_snapshot_shared"] is True
+    assert post_release.metadata["planning_scene_revision"] == 7
+
+
+def test_failed_atomic_work_order_transition_does_not_advance_progress() -> None:
+    attachments = {}
+
+    class Attachment:
+        def __init__(self, *, child_model, child_link, **_kwargs):
+            self.child_model = child_model
+            self.child_link = child_link
+            self.state = "detached"
+            attachments[child_model] = self
+
+        def native_target_model_poses_with_retry(
+            self, target_links, *, max_attempts
+        ):
+            assert max_attempts == 2
+            return (
+                {
+                    model: SimpleNamespace(
+                        xyz=(0.2, 0.1 if index == 0 else -0.1, 0.02),
+                        quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                    )
+                    for index, model in enumerate(target_links)
+                },
+                1,
+            )
+
+    profile = replace(
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
+        model_config=NativePickPlaceConfig(acceptance_scene_id="multi_normal"),
+    )
+    runtime = GazeboRuntime(
+        _deployment(),
+        profile,
+        world_control=_World(),
+        attachment_factory=Attachment,
+    )
+    configs = profile.model_config.work_order_configs(
+        [
+            {
+                "target_prompt": "yellow wrench",
+                "placement_region_prompt": "green parts bin",
+            },
+            {
+                "target_prompt": "red hex bolt",
+                "placement_region_prompt": "blue parts bin",
+            },
+        ]
+    )
+    runtime._work_order_configs = configs
+    runtime._active_work_order_index = 0
+    runtime.attachment = attachments[configs[0].target_id]
+    runtime.controller = SimpleNamespace(
+        activate_pick_place_config=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("scene validation failed")
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="scene validation failed"):
+        runtime.complete_active_work_order_item(
+            release_evidence={
+                "schema_version": "openeta.native_release_evidence.v1",
+                "detached_confirmed": True,
+                "gripper_open_confirmed": True,
+            }
+        )
+
+    assert runtime._completed_work_order_item_ids == []
+    assert runtime._active_work_order_index == 0
+    assert runtime.attachment is attachments[configs[0].target_id]
+
+
+def test_final_work_order_item_synchronizes_released_pose_once() -> None:
+    attachments = {}
+
+    class Attachment:
+        def __init__(self, *, child_model, **_kwargs):
+            self.state = "detached"
+            attachments[child_model] = self
+
+        @staticmethod
+        def native_target_mount_poses_with_retry(*, max_attempts):
+            assert max_attempts == 2
+            return (
+                SimpleNamespace(
+                    xyz=(0.61, 0.18, 0.07),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                SimpleNamespace(
+                    xyz=(0.0, 0.0, 0.9),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                1,
+            )
+
+    profile = replace(
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
+        model_config=NativePickPlaceConfig(acceptance_scene_id="multi_normal"),
+    )
+    runtime = GazeboRuntime(
+        _deployment(),
+        profile,
+        world_control=_World(),
+        attachment_factory=Attachment,
+    )
+    configs = profile.model_config.work_order_configs(
+        [
+            {
+                "target_prompt": "yellow wrench",
+                "placement_region_prompt": "green parts bin",
+            }
+        ]
+    )
+    calls = []
+    runtime._work_order_configs = configs
+    runtime.attachment = attachments[configs[0].target_id]
+    runtime.controller = SimpleNamespace(
+        sync_planning_scene_target_pose=lambda config, **pose: (
+            calls.append((config, pose)) or 4
+        )
+    )
+
+    progress = runtime.complete_active_work_order_item(
+        release_evidence={
+            "schema_version": "openeta.native_release_evidence.v1",
+            "detached_confirmed": True,
+            "gripper_open_confirmed": True,
+        }
+    )
+
+    assert progress["all_completed"] is True
+    assert progress["completed_count"] == 1
+    assert len(calls) == 1
+    assert calls[0][1] == {
+        "target_xyz": (0.61, 0.18, 0.07),
+        "target_quat_xyzw": (0.0, 0.0, 0.0, 1.0),
+        "allow_target_touch": True,
+    }
+    assert progress["transition"]["planning_scene_transition_mode"] == (
+        "final_released_target_pose_sync"
+    )
 
 
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:

@@ -145,7 +145,7 @@ jq '{mcp_group_exited,port_free,
 - `planner_mode` 为 `agentic_closed_loop`；
 - `host_dispatch_count` 为 `0`；
 - 两个物品各有一次 SAM3、AnyPlace 和 GraspGenX 模型链证据；
-- 最终放置具有 MoveIt 状态有效性、L5 plan-only、原生 attach/detach，以及供 VLM 审阅的因果 post-release RGB-D；释放工具不再阻塞等待固定时长的仿真落稳采样；
+- 最终放置具有 MoveIt 状态有效性、L5 plan-only、原生 attach/detach，以及供 VLM 判断目标箱、正面/朝向和明显物理失败的因果 post-release RGB-D；释放工具不再阻塞等待固定时长的仿真落稳采样；多物体切换复用一次 Gazebo 位姿快照，并以一次原子 PlanningScene 事务同步已释放物体和下一目标；
 - `cleanup.json` 中 `mcp_group_exited`、`port_free`、GUI lifecycle 和 protected ROS graph 检查均通过，且 owned residual 列表为空。
 
 运行失败时保留整个 `RUN_ROOT`，不要覆盖或删除。可用相同参数加 `--verify-only` 重新读取证据；新的物理复测必须换一个新目录。
