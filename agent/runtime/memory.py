@@ -2392,6 +2392,20 @@ class AgentMemory:
                 or (details.get("source_frame_id") if source_camera_role else None)
                 or parameters.get("frame_id")
             )
+            evidence_scene_epoch = _optional_int(
+                outputs.get("scene_epoch") or parameters.get("scene_epoch"),
+                default=self.scene_epoch(),
+            )
+            if segmenter_tool_name == "active_observe":
+                # active_observe is a composite host action: it may execute a
+                # MoveIt-qualified camera motion, acquire a fresh simulator
+                # receipt, and run SAM3 before returning.  The nested simulator
+                # observation carries the environment's scene epoch, which can
+                # lag the agent's logical epoch after earlier acknowledged
+                # motions.  The result is captured synchronously in this
+                # session, so bind its evidence to the current authoritative
+                # memory epoch instead of making a fresh mask stale immediately.
+                evidence_scene_epoch = self.scene_epoch()
             base = {
                 "result_id": result_id,
                 "target_prompt": target_prompt,
@@ -2402,10 +2416,7 @@ class AgentMemory:
                 "candidates": candidates,
                 "selection_bundle": dict(selection_bundle),
                 "segmentation_mode": outputs.get("segmentation_mode"),
-                "scene_epoch": _optional_int(
-                    outputs.get("scene_epoch") or parameters.get("scene_epoch"),
-                    default=self.scene_epoch(),
-                ),
+                "scene_epoch": evidence_scene_epoch,
                 "semantic_role": semantic_role,
                 "semantic_role_source": semantic_role_source or "explicit",
                 "semantic_target": target_prompt,

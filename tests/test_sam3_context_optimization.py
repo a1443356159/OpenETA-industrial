@@ -2423,6 +2423,91 @@ def test_active_observe_detection_enters_shared_sam3_selection_memory() -> None:
     assert any(item["mode"] == "active_search" for item in attempts)
 
 
+def test_active_observe_rebinds_nested_environment_epoch_to_current_session() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="sort several tools")
+    for _ in range(4):
+        memory.add_action(
+            EnvAction(
+                action_type="tool_call",
+                command={
+                    "request": {"name": "move_to", "parameters": {}},
+                    "tool_calls": [
+                        {
+                            "name": "move_to",
+                            "status": "executed",
+                            "result": {"success": True, "details": {}},
+                        }
+                    ],
+                },
+            )
+        )
+    assert memory.scene_epoch() == 4
+
+    detection = {
+        "id": "detection_002",
+        "label": "point_prompt",
+        "mask_ref": "/tmp/active-target-mask.png",
+    }
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "tool_calls": [
+                    {
+                        "name": "active_observe",
+                        "status": "executed",
+                        "result": {
+                            "success": True,
+                            "details": {
+                                "parameters": {
+                                    "semantic_target": "silver tool",
+                                    "semantic_role": "grasp_target",
+                                },
+                                "outputs": {
+                                    "status": "acquired",
+                                    "active_vision_mode": "semantic_search",
+                                    "active_vision_attempt_id": "active-observe-current",
+                                    "active_vision_attempt_fingerprint": "active-current-fp",
+                                    "result_id": "active-sam-current",
+                                    "semantic_role": "grasp_target",
+                                    "semantic_target": "silver tool",
+                                    "prompt": "silver tool",
+                                    # The nested environment does not know about
+                                    # the agent's four acknowledged mutations.
+                                    "scene_epoch": 0,
+                                    "source_image": "/tmp/active-top.png",
+                                    "source_frame_id": "top_camera_optical_frame",
+                                    "segmentation_mode": "point_prompt",
+                                    "attempt_id": "active-sam-attempt-current",
+                                    "attempt_fingerprint": "active-sam-fp-current",
+                                    "detections": [detection],
+                                    "selected_detection": detection,
+                                    "selection_review": {
+                                        "decision": "select",
+                                        "detection_id": "detection_002",
+                                        "selection_source": (
+                                            "active_vision_point_depth_geometry"
+                                        ),
+                                    },
+                                },
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+    )
+
+    selected = memory.selected_sam3_detection()
+    placement_object = memory.placement_object_detection()
+    assert selected is not None
+    assert placement_object is not None
+    assert selected["scene_epoch"] == 4
+    assert placement_object["scene_epoch"] == 4
+    assert memory.pending_sam3_selection() is None
+
+
 def test_active_observe_placement_detection_enters_anyplace_memory() -> None:
     memory = AgentMemory()
     memory.start_session(task="place the bolt in the blue bin")
