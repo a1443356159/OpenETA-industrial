@@ -6,6 +6,7 @@ OpenETA on a non-ROS test machine remains supported.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import copy
 from dataclasses import dataclass
 from functools import lru_cache
@@ -530,6 +531,26 @@ def _configured_qualification_solver_profile() -> str:
     return solver_profile
 
 
+def _configured_qualification_max_state_validity_concurrency() -> int:
+    """Use the same bounded service concurrency configured for the funnel."""
+
+    raw = os.environ.get(
+        "OPENETA_QUALIFICATION_MAX_STATE_VALIDITY_CONCURRENCY",
+        "8",
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "OPENETA_QUALIFICATION_MAX_STATE_VALIDITY_CONCURRENCY must be an integer"
+        ) from exc
+    if value < 1 or value > 64:
+        raise ValueError(
+            "OPENETA_QUALIFICATION_MAX_STATE_VALIDITY_CONCURRENCY must be between 1 and 64"
+        )
+    return value
+
+
 @lru_cache(maxsize=8)
 def _qualification_solver_version(solver_profile: str) -> str:
     """Read the installed ROS package version for artifact provenance."""
@@ -743,6 +764,7 @@ def _detached_contact_approach_audit(
     target_id: str,
     target_touch_links: Sequence[str],
     state_validity: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+    max_concurrency: int = 1,
 ) -> dict[str, Any]:
     """Prove that a MoveIt grasp route first touches its target at the endpoint.
 
@@ -772,6 +794,12 @@ def _detached_contact_approach_audit(
         or any(not math.isfinite(value) for point in points for value in point)
     ):
         raise ValueError("detached contact trajectory is invalid")
+    if (
+        isinstance(max_concurrency, bool)
+        or not isinstance(max_concurrency, int)
+        or max_concurrency <= 0
+    ):
+        raise ValueError("detached contact audit concurrency is invalid")
 
     # Check time-parameterized waypoints and the joint midpoint of every
     # segment.  The exact final waypoint is the sole state allowed to use the
@@ -800,59 +828,101 @@ def _detached_contact_approach_audit(
     checks: list[dict[str, Any]] = []
     failure: dict[str, Any] | None = None
     terminal_target_contact_links: list[str] = []
-    for point_index, sample_kind, positions, terminal in samples:
-        result = state_validity(
+
+    def evaluate(
+        sample: tuple[int, str, tuple[float, ...], bool],
+    ) -> Mapping[str, Any]:
+        _, _, positions, _ = sample
+        return state_validity(
             {
                 "names": list(names),
                 "positions": list(positions),
                 "qualification_gripper_state": "open",
+                # The ROS response deadline covers a complete admitted batch
+                # even when MoveGroup serializes its service callbacks.
+                "qualification_state_validity_queue_depth": max_concurrency,
             }
         )
-        if not isinstance(result, Mapping) or not isinstance(result.get("valid"), bool):
-            raise ValueError("detached contact state validity is unavailable")
-        raw_pairs = result.get("collision_pairs")
-        if not isinstance(raw_pairs, list):
-            raise ValueError("detached contact collision evidence is unavailable")
-        pairs = {
-            tuple(sorted((str(pair[0]), str(pair[1]))))
-            for pair in raw_pairs
-            if isinstance(pair, (list, tuple)) and len(pair) == 2
-        }
-        target_pairs = pairs & allowed_terminal_pairs
-        unexpected_pairs = pairs - allowed_terminal_pairs
-        check = {
-            "point_index": point_index,
-            "sample_kind": sample_kind,
-            "terminal": terminal,
-            "strict_valid": bool(result["valid"]),
-            "collision_pairs": [list(pair) for pair in sorted(pairs)],
-        }
-        checks.append(check)
-        if terminal:
-            terminal_target_contact_links = sorted(
-                link
-                for link in normalized_touch_links
-                if tuple(sorted((normalized_target_id, link))) in target_pairs
-            )
-            if result["valid"] is True and not pairs:
-                continue
-            if target_pairs and not unexpected_pairs:
-                continue
-            failure = {
-                "reason": "terminal_state_has_unapproved_collision",
-                **check,
-            }
-            break
-        if result["valid"] is not True or pairs:
-            failure = {
-                "reason": (
-                    "target_contact_before_terminal"
-                    if target_pairs and not unexpected_pairs
-                    else "strict_preterminal_state_invalid"
-                ),
-                **check,
-            }
-            break
+
+    # Keep the complete points-and-midpoints proof, but admit independent
+    # read-only state checks in bounded batches.  Results are always consumed
+    # in canonical trajectory order, so callback completion order cannot alter
+    # the first failure or the evidence.  A failed batch may have evaluated a
+    # few later states already; ``rpc_sample_count`` reports that honestly.
+    rpc_sample_count = 0
+    executor = (
+        ThreadPoolExecutor(
+            max_workers=min(max_concurrency, len(samples)),
+            thread_name_prefix="openeta-l5-route-audit",
+        )
+        if max_concurrency > 1 and len(samples) > 1
+        else None
+    )
+    try:
+        batch_width = max_concurrency if executor is not None else 1
+        for offset in range(0, len(samples), batch_width):
+            batch = samples[offset : offset + batch_width]
+            if executor is None:
+                results = [evaluate(batch[0])]
+            else:
+                futures = [executor.submit(evaluate, sample) for sample in batch]
+                results = [future.result() for future in futures]
+            rpc_sample_count += len(results)
+            for (point_index, sample_kind, _, terminal), result in zip(
+                batch, results, strict=True
+            ):
+                if not isinstance(result, Mapping) or not isinstance(
+                    result.get("valid"), bool
+                ):
+                    raise ValueError("detached contact state validity is unavailable")
+                raw_pairs = result.get("collision_pairs")
+                if not isinstance(raw_pairs, list):
+                    raise ValueError("detached contact collision evidence is unavailable")
+                pairs = {
+                    tuple(sorted((str(pair[0]), str(pair[1]))))
+                    for pair in raw_pairs
+                    if isinstance(pair, (list, tuple)) and len(pair) == 2
+                }
+                target_pairs = pairs & allowed_terminal_pairs
+                unexpected_pairs = pairs - allowed_terminal_pairs
+                check = {
+                    "point_index": point_index,
+                    "sample_kind": sample_kind,
+                    "terminal": terminal,
+                    "strict_valid": bool(result["valid"]),
+                    "collision_pairs": [list(pair) for pair in sorted(pairs)],
+                }
+                checks.append(check)
+                if terminal:
+                    terminal_target_contact_links = sorted(
+                        link
+                        for link in normalized_touch_links
+                        if tuple(sorted((normalized_target_id, link))) in target_pairs
+                    )
+                    if result["valid"] is True and not pairs:
+                        continue
+                    if target_pairs and not unexpected_pairs:
+                        continue
+                    failure = {
+                        "reason": "terminal_state_has_unapproved_collision",
+                        **check,
+                    }
+                    break
+                if result["valid"] is not True or pairs:
+                    failure = {
+                        "reason": (
+                            "target_contact_before_terminal"
+                            if target_pairs and not unexpected_pairs
+                            else "strict_preterminal_state_invalid"
+                        ),
+                        **check,
+                    }
+                    break
+            if failure is not None:
+                break
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
     return {
         "schema_version": "openeta.detached_contact_approach.v1",
@@ -862,6 +932,8 @@ def _detached_contact_approach_audit(
         "target_touch_links": list(normalized_touch_links),
         "trajectory_point_count": len(points),
         "evaluated_sample_count": len(checks),
+        "rpc_sample_count": rpc_sample_count,
+        "max_state_validity_concurrency": min(max_concurrency, len(samples)),
         "sampling": "time_parameterized_points_and_joint_midpoints",
         "terminal_contact_exception_scope": "exact_final_waypoint_only",
         "terminal_target_contact_links": terminal_target_contact_links,
@@ -2514,6 +2586,9 @@ class _RosRuntime:
                     target_id=target_id,
                     target_touch_links=[str(value) for value in touch_links],
                     state_validity=self.qualification_state_validity,
+                    max_concurrency=(
+                        _configured_qualification_max_state_validity_concurrency()
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - missing proof fails closed.
                 return {

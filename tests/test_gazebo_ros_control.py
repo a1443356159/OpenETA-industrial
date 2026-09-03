@@ -195,6 +195,79 @@ def test_detached_contact_approach_allows_target_touch_only_at_endpoint() -> Non
     assert calls == [[0.0], [0.5], [1.0]]
 
 
+def test_detached_contact_approach_parallelizes_complete_proof_deterministically() -> None:
+    barrier = threading.Barrier(3)
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def state_validity(state):
+        nonlocal active, maximum_active
+        positions = list(state["positions"])
+        assert state["qualification_state_validity_queue_depth"] == 3
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            barrier.wait(timeout=1.0)
+            terminal = positions == [1.0]
+            return {
+                "valid": not terminal,
+                "collision_pairs": (
+                    [["target", "left_tip"], ["target", "right_tip"]]
+                    if terminal
+                    else []
+                ),
+            }
+        finally:
+            with lock:
+                active -= 1
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [1.0]],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+        max_concurrency=3,
+    )
+
+    assert evidence["valid"] is True
+    assert evidence["evaluated_sample_count"] == 3
+    assert evidence["rpc_sample_count"] == 3
+    assert evidence["max_state_validity_concurrency"] == 3
+    assert maximum_active == 3
+
+
+def test_detached_contact_parallel_batch_reports_earliest_failure_in_route_order() -> None:
+    def state_validity(state):
+        position = state["positions"][0]
+        # Let a later invalid state finish first.  The verdict must still bind
+        # to the earliest invalid sample in canonical trajectory order.
+        if position == 0.25:
+            time.sleep(0.02)
+            return {"valid": False, "collision_pairs": [["target", "left_tip"]]}
+        if position == 0.5:
+            return {"valid": False, "collision_pairs": [["arm", "table"]]}
+        return {"valid": True, "collision_pairs": []}
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0], [0.5], [1.0]],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+        max_concurrency=3,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["failure"]["reason"] == "target_contact_before_terminal"
+    assert evidence["failure"]["sample_kind"] == "midpoint"
+    assert evidence["failure"]["point_index"] == 1
+    assert evidence["evaluated_sample_count"] == 2
+    assert evidence["rpc_sample_count"] == 3
+
+
 def test_detached_contact_approach_rejects_preterminal_target_contact() -> None:
     def state_validity(state):
         contact = state["positions"] == [0.5]
