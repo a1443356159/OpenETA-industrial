@@ -24,7 +24,6 @@ from .native_grasp import (
     NativeGraspVerifier,
     ReasonCode,
     validated_pickplace_motion_guidance,
-    verify_stable_placement,
 )
 from .profiles import CONTROL, PHYSICS, STRUCTURED_RECEIPT, GazeboProfile, gazebo_profile
 from .process import GazeboProcessError
@@ -606,6 +605,8 @@ class GazeboDirectEnv(Env):
                                 "mode": "detach_confirmation_triggers_open",
                                 "native_detach_confirmed_before_open_dispatch": True,
                                 "planning_scene_sync_concurrent_with_open_dispatch": True,
+                                "blocking_stability_polling": False,
+                                "placement_review": "vlm_post_release_observation",
                             },
                         }
                     except Exception as exc:
@@ -1151,8 +1152,8 @@ class GazeboDirectEnv(Env):
                         )
                         # Detach and the physical open are already irreversible
                         # at this point. Publish their complete causal proof
-                        # before any pose sampling, PlanningScene bookkeeping,
-                        # or multi-sort transition can fail independently.
+                        # before PlanningScene bookkeeping or a multi-sort
+                        # transition can fail independently.
                         receipt["release_sequence"] = release_sequence
                         receipt["gripper_open_executed"] = True
                         receipt["release_coordination"] = dict(
@@ -1175,22 +1176,64 @@ class GazeboDirectEnv(Env):
                                     "attached_collision_filter"
                                 ]
                             )
-                        post_release_stage = "placement_pose_sampling"
-                        samples = attachment.sample_detached_target_poses(
-                            duration_s=(
-                                self._native_grasp_config.placement_settling_observation_s
-                                + max(
-                                    self._native_grasp_config.placement_stability_duration_s,
-                                    self._native_grasp_config.placement_terminal_window_s,
-                                )
+                        visual_observation_available = bool(
+                            observation.cameras
+                            and observation.metadata.get("observation_stale") is not True
+                        )
+                        post_release_visual_observation = {
+                            "schema_version": (
+                                "openeta.post_release_visual_observation.v1"
                             ),
-                            interval_s=self._native_grasp_config.placement_sample_interval_s,
+                            "required": True,
+                            "available": visual_observation_available,
+                            "source": (
+                                "causal_post_release_rgbd"
+                                if visual_observation_available
+                                else "fresh_observation_required"
+                            ),
+                            "camera_frame_ids": [
+                                str(camera.frame_id) for camera in observation.cameras
+                            ],
+                            "review_authority": "vlm",
+                        }
+                        release_evidence = {
+                            "schema_version": "openeta.native_release_evidence.v1",
+                            "detached_confirmed": True,
+                            "gripper_open_confirmed": True,
+                            "post_release_visual_observation": (
+                                post_release_visual_observation
+                            ),
+                            "geometry_obvious_failure_guard": {
+                                "blocking_stability_polling": False,
+                                "native_attachment_state": "detached",
+                                "review_authority": "vlm",
+                            },
+                        }
+                        receipt["release_evidence"] = release_evidence
+                        # MoveIt still needs the released body at its measured
+                        # world pose before another motion can be planned. One
+                        # finite authoritative read is sufficient for that
+                        # synchronization; repeated pose polling and a fixed
+                        # stability dwell belong to visual adjudication, not
+                        # to the gripper-open transaction.
+                        post_release_stage = "released_target_pose_read"
+                        pose_reader = getattr(
+                            attachment,
+                            "native_target_mount_poses_with_retry",
+                            None,
                         )
-                        placement = verify_stable_placement(
-                            samples, self._native_grasp_config
+                        if callable(pose_reader):
+                            target_pose, _mount_pose, pose_attempts = pose_reader(
+                                max_attempts=2
+                            )
+                        else:
+                            target_pose, _mount_pose = (
+                                attachment.native_target_mount_poses()
+                            )
+                            pose_attempts = 1
+                        receipt["released_target_pose_read_attempt_count"] = int(
+                            pose_attempts
                         )
-                        receipt["placement_verification"] = placement.to_dict()
-                        target_pose = samples[-1]
                         sync_target_pose = getattr(
                             self.controller,
                             "sync_planning_scene_target_pose",
@@ -1204,12 +1247,10 @@ class GazeboDirectEnv(Env):
                             target_xyz=target_pose.xyz,
                             target_quat_xyzw=target_pose.quat_xyzw,
                             # Detach is intentionally acknowledged before the
-                            # fingers open.  A just-released part can therefore
-                            # remain in transient fingertip contact at the
-                            # terminal sample even after it has settled inside
-                            # its container.  Permit only target-to-gripper
-                            # touch for this current-state proof; every other
-                            # robot/world collision remains a hard failure.
+                            # fingers open. Permit only transient
+                            # target-to-gripper touch while synchronizing the
+                            # current state; every other robot/world collision
+                            # remains a hard failure.
                             allow_target_touch=True,
                         )
                         release_sequence.append(
@@ -1234,67 +1275,62 @@ class GazeboDirectEnv(Env):
                         raw.setdefault("metadata", {})[
                             "planning_scene_revision"
                         ] = scene_revision
-                        if placement.verdict.value == "PASS":
-                            post_release_stage = "work_order_transition"
-                            advance = getattr(
-                                self.runtime,
-                                "complete_active_work_order_item",
-                                None,
+                        post_release_stage = "work_order_transition"
+                        advance = getattr(
+                            self.runtime,
+                            "complete_active_work_order_item",
+                            None,
+                        )
+                        progress = (
+                            advance(
+                                release_evidence=release_evidence,
+                                post_release_observation=(
+                                    observation
+                                    if visual_observation_available
+                                    else None
+                                ),
                             )
-                            progress = (
-                                advance(
-                                    placement_verification=placement.to_dict(),
-                                    post_release_observation=(
-                                        observation
-                                        if observation.cameras
-                                        and observation.metadata.get(
-                                            "observation_stale"
-                                        )
-                                        is not True
-                                        else None
-                                    ),
-                                )
-                                if callable(advance)
-                                else None
+                            if callable(advance)
+                            else None
+                        )
+                        if isinstance(progress, Mapping):
+                            progress = dict(progress)
+                            receipt["multi_sort_progress"] = progress
+                            raw["metadata"]["multi_sort_progress"] = progress
+                            next_revision = (progress.get("transition") or {}).get(
+                                "planning_scene_revision"
                             )
-                            if isinstance(progress, Mapping):
-                                progress = dict(progress)
-                                receipt["multi_sort_progress"] = progress
-                                raw["metadata"]["multi_sort_progress"] = progress
-                                next_revision = (progress.get("transition") or {}).get(
-                                    "planning_scene_revision"
+                            if isinstance(next_revision, int) and not isinstance(
+                                next_revision, bool
+                            ):
+                                raw["metadata"]["planning_scene_revision"] = next_revision
+                                receipt[
+                                    "next_assignment_planning_scene_revision"
+                                ] = next_revision
+                            if progress.get("all_completed") is not True:
+                                next_config = getattr(
+                                    self.runtime,
+                                    "active_pick_place_config",
+                                    None,
                                 )
-                                if isinstance(next_revision, int) and not isinstance(
-                                    next_revision, bool
+                                if not isinstance(
+                                    next_config, NativePickPlaceConfig
                                 ):
-                                    raw["metadata"]["planning_scene_revision"] = next_revision
-                                    receipt[
-                                        "next_assignment_planning_scene_revision"
-                                    ] = next_revision
-                                if progress.get("all_completed") is not True:
-                                    next_config = getattr(
-                                        self.runtime,
-                                        "active_pick_place_config",
-                                        None,
+                                    raise GazeboProcessError(
+                                        "MULTI_SORT_ACTIVE_CONFIG_UNAVAILABLE"
                                     )
-                                    if not isinstance(
-                                        next_config, NativePickPlaceConfig
-                                    ):
-                                        raise GazeboProcessError(
-                                            "MULTI_SORT_ACTIVE_CONFIG_UNAVAILABLE"
-                                        )
-                                    self._native_grasp_config = next_config
-                                    self._native_grasp_verifier = NativeGraspVerifier(
-                                        next_config
-                                    )
-                                    self.openeta_control_spec[
-                                        "validated_pickplace_motion"
-                                    ] = validated_pickplace_motion_guidance(
-                                        next_config
-                                    )
-                                    raw["metadata"]["control_spec"] = dict(
-                                        self.openeta_control_spec
-                                    )
+                                self._native_grasp_config = next_config
+                                self._native_grasp_verifier = NativeGraspVerifier(
+                                    next_config
+                                )
+                                self.openeta_control_spec[
+                                    "validated_pickplace_motion"
+                                ] = validated_pickplace_motion_guidance(
+                                    next_config
+                                )
+                                raw["metadata"]["control_spec"] = dict(
+                                    self.openeta_control_spec
+                                )
                         post_release_stage = "complete"
                     except Exception as exc:
                         record = release_before_open["record"]

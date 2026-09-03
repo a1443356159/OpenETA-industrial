@@ -752,7 +752,7 @@ def test_acceptance_reports_agent_route_findings_without_failing_the_result() ->
         "AnyPlace model inference count does not match assignments"
     )
     assert not acceptance._is_non_blocking_flow_finding(
-        "stable in-zone placement verification is missing per assignment"
+        "native release plus causal VLM observation is missing per assignment"
     )
 
 

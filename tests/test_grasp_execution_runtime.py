@@ -1913,11 +1913,17 @@ def test_release_uses_ordered_detach_revision_then_stops_reopening() -> None:
                 "revision": 4,
             },
         ],
-        "placement_verification": {
-            "schema_version": "openeta.gazebo.placement_verification.v1",
-            "placement_confirmed": True,
-            "verdict": "PASS",
-            "reason_code": "PLACEMENT_STABLE_IN_DESTINATION",
+        "release_evidence": {
+            "schema_version": "openeta.native_release_evidence.v1",
+            "detached_confirmed": True,
+            "gripper_open_confirmed": True,
+            "post_release_visual_observation": {
+                "schema_version": "openeta.post_release_visual_observation.v1",
+                "required": True,
+                "available": True,
+                "source": "causal_post_release_rgbd",
+                "review_authority": "vlm",
+            },
         },
     }
 
@@ -1933,7 +1939,8 @@ def test_release_uses_ordered_detach_revision_then_stops_reopening() -> None:
     assert release["status"] == "released"
     assert release["planning_scene_revision"] == 3
     assert release["released_target_pose_revision"] == 4
-    assert release["placement_verification"]["verdict"] == "PASS"
+    assert release["post_release_visual_observation"]["available"] is True
+    assert "placement_verification" not in release
     assert release["attached_collision_filter"]["state"] == "full"
     assert release["attached_collision_filter"][
         "target_robot_collision_enabled"

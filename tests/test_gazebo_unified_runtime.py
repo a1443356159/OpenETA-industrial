@@ -251,7 +251,17 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
         metadata={"observation_provenance": "gazebo_ros_live"},
     )
     progress = runtime.complete_active_work_order_item(
-        placement_verification={"placement_confirmed": True, "verdict": "PASS"},
+        release_evidence={
+            "schema_version": "openeta.native_release_evidence.v1",
+            "detached_confirmed": True,
+            "gripper_open_confirmed": True,
+            "post_release_visual_observation": {
+                "schema_version": "openeta.post_release_visual_observation.v1",
+                "required": True,
+                "available": True,
+                "review_authority": "vlm",
+            },
+        },
         post_release_observation=post_release,
     )
 

@@ -36,10 +36,11 @@ def test_native_grasp_profile_constructs_without_starting_a_worker() -> None:
             "attached_ack",
         ]
         assert motion["success_evidence"]["placement"] == {
-            "verification_authority": "visual_primary_geometry_obvious_failure_guard",
+            "verification_authority": "vlm_post_release_observation",
             "visual_source": "causal_post_release_rgbd",
-            "minimum_stability_duration_s": 0.5,
-            "maximum_terminal_drift_m": 0.005,
+            "blocking_simulator_stability_poll": False,
+            "release_completion": "native_detach_and_gripper_open_ack",
+            "geometry_role": "obvious_failure_veto_only",
             "support_plane_height_m": 0.02,
             "height_rule": "reject_support_penetration_only",
             "support_height_tolerance_m": 0.01,

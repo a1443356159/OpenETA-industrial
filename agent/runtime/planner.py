@@ -792,9 +792,9 @@ def _host_obligation_decision(
                 "summary": "The embodied task completed and its environment was closed.",
             },
             reasoning=(
-                "The host retained a PASS stable in-zone release verification and a "
-                "successful environment close; no further tool action or human input "
-                "is required."
+                "The host retained the ordered native release, causal visual-review "
+                "evidence, and a successful environment close; no further tool action "
+                "or human input is required."
             ),
             metadata={
                 "host_obligation": {
@@ -1839,6 +1839,7 @@ def _host_obligation_decision(
                 "gripper_control",
                 "move_to",
                 "close_simulator_env",
+                "observe",
             }
             and isinstance(required.get("parameters"), dict)
             and tools.can_execute(required_name)
@@ -1854,8 +1855,9 @@ def _host_obligation_decision(
                     "selection."
                     if stage == "release"
                     else (
-                        "The exact release and native stability checks passed; close the "
-                        "simulator environment without inserting a retreat waypoint."
+                        "The native release completed; use the causal post-release "
+                        "observation for visual review without inserting a retreat "
+                        "waypoint."
                     )
                 ),
                 metadata={
@@ -4211,6 +4213,20 @@ def _validate_placement_release_obligation(
         and decision.action == required["name"]
         and decision.parameters == required["parameters"]
     ):
+        return []
+    allowed_review_actions = obligation.get("allowed_review_actions")
+    if (
+        str(obligation.get("stage") or "") == "close"
+        and decision.action_type.lower().strip() == "tool_call"
+        and isinstance(allowed_review_actions, list)
+        and decision.action in {
+            str(name) for name in allowed_review_actions if isinstance(name, str)
+        }
+    ):
+        # After an irreversible release the VLM owns visual adjudication. It
+        # may request a clearer view instead of being forced to close on the
+        # first causal frame; replaying release or placement motion remains
+        # forbidden by the surrounding state machine.
         return []
     stage = str(obligation.get("stage") or "release")
     return [
@@ -8281,13 +8297,32 @@ def _placement_release_obligation(
         }
     if status != "released":
         return None
-    verification = release.get("placement_verification")
-    if not (
-        isinstance(verification, dict)
-        and verification.get("placement_confirmed") is True
-        and verification.get("verdict") == "PASS"
-    ):
-        return None
+    visual_observation = release.get("post_release_visual_observation")
+    visual_available = bool(
+        isinstance(visual_observation, dict)
+        and visual_observation.get("available") is True
+    )
+    legacy_verification = release.get("placement_verification")
+    if not visual_available and isinstance(legacy_verification, dict):
+        visual_available = bool(
+            legacy_verification.get("placement_confirmed") is True
+            and legacy_verification.get("verdict") == "PASS"
+        )
+    if not visual_available:
+        return {
+            "schema_version": "openeta.placement_release_obligation.v1",
+            "status": "required",
+            "stage": "post_release_visual_observation",
+            "required_action": {
+                "name": "observe",
+                "parameters": {"reason": "verify_released_placement"},
+            },
+            "rule": (
+                "Native detach and gripper opening completed. Obtain one fresh "
+                "scene view before deciding whether the placement succeeded; do "
+                "not replay the irreversible release."
+            ),
+        }
     progress = release.get("multi_sort_progress")
     if not isinstance(progress, dict):
         progress = observation.metadata.get("multi_sort_progress")
@@ -8325,10 +8360,10 @@ def _placement_release_obligation(
             "multi_sort_progress": dict(progress),
             "active_assignment": active_assignment,
             "rule": (
-                "The previous item has a complete native placement proof and the "
-                "same simulator session is already bound to the next assignment. "
-                "Observe the changed scene once, then continue with the next target; "
-                "do not recreate or close the environment."
+                "The previous item was released and the same simulator session is "
+                "already bound to the next assignment. Observe the changed scene "
+                "once, visually review the prior placement, then continue with the "
+                "next target; do not recreate or close the environment."
             ),
         }
     return {
@@ -8340,10 +8375,12 @@ def _placement_release_obligation(
             "parameters": {},
         },
         "rule": (
-            "The exact release completed and native physics proved a stable in-zone "
-            "placement. Close this simulator environment exactly once; no post-release "
-            "retreat waypoint is part of the task contract."
+            "The exact release completed and the current observation is causal and "
+            "post-release. Visually confirm the part is acceptably inside its target "
+            "container, then close the simulator. If the view is ambiguous, another "
+            "observe is allowed; no post-release retreat waypoint is required."
         ),
+        "allowed_review_actions": ["observe", "active_observe"],
     }
 
 

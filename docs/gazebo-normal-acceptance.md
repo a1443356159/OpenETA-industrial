@@ -96,7 +96,9 @@ Execution is:
    the host-owned vertical gravity-drop terminal, and compute
    `T_world_eef_release = T_world_object_release × inverse(T_eef_object_attached)`.
 4. MoveIt plans the complete attached current state → exact release EEF pose.
-5. Open, detach, and verify object stability in the declared placement region.
+5. Detach and open, then let the VLM review the causal post-release RGB-D
+   observation. The release transaction does not block on repeated simulator
+   pose polling or a fixed stability dwell.
 
 There is no post-close lift waypoint and no agent-authored release offset. The
 attached object is present in the MoveIt PlanningScene during placement. Scene revision,

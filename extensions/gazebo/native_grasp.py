@@ -1362,8 +1362,8 @@ def validated_pickplace_motion_guidance(
                 "position": 1,
                 "requires_receipt": [
                     "detached_ack",
+                    "gripper_open_ack",
                     "post_release_visual_observation",
-                    "geometry_obvious_failure_guard",
                 ],
             },
         ],
@@ -1371,37 +1371,18 @@ def validated_pickplace_motion_guidance(
             "grasp_admission": "bilateral_native_contact_and_attach_ack",
             "maximum_capture_relative_translation_m": (cfg.maximum_capture_relative_translation_m),
             "placement": {
-                "verification_authority": (
-                    "visual_primary_geometry_obvious_failure_guard"
-                    if cfg.placement_acceptance_semantics
-                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
-                    else "strict_geometry_contract"
-                ),
+                "verification_authority": "vlm_post_release_observation",
                 "visual_source": "causal_post_release_rgbd",
-                "minimum_stability_duration_s": cfg.placement_stability_duration_s,
-                "maximum_terminal_drift_m": cfg.maximum_placement_terminal_drift_m,
+                "blocking_simulator_stability_poll": False,
+                "release_completion": "native_detach_and_gripper_open_ack",
+                "geometry_role": "obvious_failure_veto_only",
                 "support_plane_height_m": cfg.destination_support_z_m,
-                "height_rule": (
-                    "reject_support_penetration_only"
-                    if cfg.placement_acceptance_semantics
-                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
-                    else "compound_collision_geometry_contacts_destination_plane"
-                ),
+                "height_rule": "reject_support_penetration_only",
                 "support_height_tolerance_m": cfg.placement_support_height_tolerance_m,
                 "destination_center_xy": list(cfg.destination_center_xy),
                 "destination_size_xy_m": list(cfg.destination_size_xy_m),
-                "footprint_rule": (
-                    "reject_only_no_destination_overlap"
-                    if cfg.placement_acceptance_semantics
-                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
-                    else "compound_collision_projection_fully_inside"
-                ),
-                "complete_footprint_margin_role": (
-                    "ordering_and_evidence_only"
-                    if cfg.placement_acceptance_semantics
-                    == PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID
-                    else "acceptance_gate"
-                ),
+                "footprint_rule": "reject_only_no_destination_overlap",
+                "complete_footprint_margin_role": "ordering_and_evidence_only",
             },
         },
         "on_rejection": "observe_and_report; do_not_bypass_native_receipt_gates",

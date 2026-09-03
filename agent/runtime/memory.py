@@ -322,6 +322,9 @@ class AgentMemory:
         summary["runtime_camera_sources"] = runtime_sources
         summary["current_camera_sources"] = current_sources
         self.record("observation", summary)
+        post_release_visual_updated = (
+            self._capture_post_release_visual_observation(observation)
+        )
         multi_sort_updated = self._capture_multi_sort_progress(observation)
         self._capture_grasp_reestimation_observation(observation)
         placement_release_reobserved = self._capture_failed_placement_release_reobservation(
@@ -331,11 +334,69 @@ class AgentMemory:
         attachment_updated = self._capture_attachment_observation_verdict(observation)
         if (
             multi_sort_updated
+            or post_release_visual_updated
             or placement_release_reobserved
             or reconciliation_updated
             or attachment_updated
         ):
             self._save_working_memory()
+
+    def _capture_post_release_visual_observation(
+        self, observation: EnvObservation
+    ) -> bool:
+        """Bind one fresh RGB view to an already completed native release."""
+
+        release = self.placement_release()
+        if not (
+            isinstance(release, dict)
+            and release.get("status") == "released"
+        ):
+            return False
+        visual = release.get("post_release_visual_observation")
+        if isinstance(visual, dict) and visual.get("available") is True:
+            return False
+        if observation.metadata.get("observation_stale") is True:
+            return False
+        rgb_artifacts = [
+            dict(artifact)
+            for artifact in observation.metadata.get("image_artifacts", [])
+            if isinstance(artifact, dict)
+            and artifact.get("kind") == "rgb"
+            and isinstance(artifact.get("path"), str)
+            and artifact["path"]
+        ]
+        if not rgb_artifacts:
+            return False
+        visual = {
+            "schema_version": "openeta.post_release_visual_observation.v1",
+            "required": True,
+            "available": True,
+            "source": "fresh_observe_after_release",
+            "review_authority": "vlm",
+            "camera_frame_ids": [
+                str(artifact.get("frame_id") or "") for artifact in rgb_artifacts
+            ],
+            "captured_at_s": time.time(),
+        }
+        release["post_release_visual_observation"] = visual
+        evidence = release.get("release_evidence")
+        if isinstance(evidence, dict):
+            evidence = dict(evidence)
+            evidence["post_release_visual_observation"] = dict(visual)
+            release["release_evidence"] = evidence
+        self.facts[PLACEMENT_RELEASE_KEY] = _memory_fact_entry(
+            release,
+            source="post_release_visual_observation",
+        )
+        self.record(
+            "post_release_visual_observation_available",
+            {
+                "candidate_id": release.get("candidate_id"),
+                "placement_pose_id": release.get("placement_pose_id"),
+                "camera_frame_ids": visual["camera_frame_ids"],
+            },
+        )
+        return True
 
     def _capture_multi_sort_progress(self, observation: EnvObservation) -> bool:
         progress = observation.metadata.get("multi_sort_progress")
@@ -1559,16 +1620,30 @@ class AgentMemory:
             completed_items = (
                 list(completed.get("items") or []) if isinstance(completed, dict) else []
             )
-            verification = (
-                release.get("placement_verification") if isinstance(release, dict) else None
+            visual_observation = (
+                release.get("post_release_visual_observation")
+                if isinstance(release, dict)
+                else None
+            )
+            legacy_verification = (
+                release.get("placement_verification")
+                if isinstance(release, dict)
+                else None
+            )
+            visual_review_available = bool(
+                isinstance(visual_observation, dict)
+                and visual_observation.get("available") is True
+            )
+            legacy_placement_proven = bool(
+                isinstance(legacy_verification, dict)
+                and legacy_verification.get("placement_confirmed") is True
+                and legacy_verification.get("verdict") == "PASS"
             )
             completion_recorded = False
             if (
                 isinstance(release, dict)
                 and release.get("status") == "released"
-                and isinstance(verification, dict)
-                and verification.get("placement_confirmed") is True
-                and verification.get("verdict") == "PASS"
+                and (visual_review_available or legacy_placement_proven)
                 and (
                     multi_sort is None
                     or (
@@ -1583,11 +1658,27 @@ class AgentMemory:
                     "schema_version": "openeta.task_completion_evidence.v1",
                     "status": "proven",
                     "outcome": "success",
-                    "source": "placement_verification",
+                    "source": (
+                        "vlm_post_release_observation"
+                        if visual_review_available
+                        else "legacy_placement_verification"
+                    ),
                     "environment_closed": True,
                     "candidate_id": release.get("candidate_id"),
                     "placement_pose_id": release.get("placement_pose_id"),
-                    "placement_verification": dict(verification),
+                    **(
+                        {
+                            "post_release_visual_observation": dict(
+                                visual_observation
+                            )
+                        }
+                        if visual_review_available
+                        else {
+                            "placement_verification": dict(
+                                legacy_verification
+                            )
+                        }
+                    ),
                     **(
                         {
                             "multi_sort_progress": dict(multi_sort),
@@ -6096,20 +6187,64 @@ class AgentMemory:
                 or (target_pose_revision is None and final_revision != detach_revision)
             ):
                 return False
-        verification = receipt.get("placement_verification")
-        placement_confirmed = (
-            isinstance(verification, dict)
-            and verification.get("placement_confirmed") is True
-            and str(verification.get("verdict") or "").upper() == "PASS"
+        release_evidence = receipt.get("release_evidence")
+        release_proven = bool(
+            isinstance(release_evidence, dict)
+            and release_evidence.get("schema_version")
+            == "openeta.native_release_evidence.v1"
+            and release_evidence.get("detached_confirmed") is True
+            and release_evidence.get("gripper_open_confirmed") is True
+            and isinstance(
+                release_evidence.get("post_release_visual_observation"), dict
+            )
         )
-        if not placement_confirmed:
-            failure_code = "PLACEMENT_RELEASE_VERIFICATION_FAILED"
+        # Historical receipts used a blocking geometry stability verdict.
+        # Keep those artifacts readable, but never generate that criterion in
+        # the live release path.
+        legacy_verification = receipt.get("placement_verification")
+        legacy_release_proven = bool(
+            isinstance(legacy_verification, dict)
+            and legacy_verification.get("placement_confirmed") is True
+            and str(legacy_verification.get("verdict") or "").upper() == "PASS"
+        )
+        if not release_proven and legacy_release_proven:
+            release_evidence = {
+                "schema_version": "openeta.native_release_evidence.v1",
+                "detached_confirmed": True,
+                "gripper_open_confirmed": True,
+                "post_release_visual_observation": {
+                    "schema_version": (
+                        "openeta.post_release_visual_observation.v1"
+                    ),
+                    "required": True,
+                    "available": True,
+                    "source": "legacy_post_release_receipt",
+                    "review_authority": "vlm",
+                },
+                "legacy_placement_verification": dict(legacy_verification),
+            }
+            release_proven = True
+        if not release_proven:
+            legacy_verification_failed = bool(
+                isinstance(legacy_verification, dict)
+                and not legacy_release_proven
+            )
+            failure_code = (
+                "PLACEMENT_RELEASE_VERIFICATION_FAILED"
+                if legacy_verification_failed
+                else "PLACEMENT_RELEASE_EVIDENCE_INVALID"
+            )
             return self._record_failed_placement_release(
                 release,
                 failure_code=failure_code,
                 failure_reason=(
-                    "The object was released, but its settled pose did not pass "
-                    "destination verification. A fresh observation is required."
+                    "The historical placement receipt reported a failed geometry "
+                    "verdict. A fresh observation is required."
+                    if legacy_verification_failed
+                    else (
+                        "The object release did not contain both native detach and "
+                        "gripper-open acknowledgements. A fresh observation is required."
+                    )
                 ),
                 evidence={
                     "schema_version": "openeta.placement_release_failure.v1",
@@ -6118,19 +6253,35 @@ class AgentMemory:
                     "detachable_joint": (dict(detached) if isinstance(detached, dict) else {}),
                     "gripper_open_executed": receipt.get("gripper_open_executed"),
                     "release_sequence": ordered_release,
-                    "placement_verification": (
-                        dict(verification) if isinstance(verification, dict) else None
+                    "release_evidence": (
+                        dict(release_evidence)
+                        if isinstance(release_evidence, dict)
+                        else None
+                    ),
+                    **(
+                        {"placement_verification": dict(legacy_verification)}
+                        if legacy_verification_failed
+                        else {}
                     ),
                 },
-                source="placement_release_verification_failed",
+                source="placement_release_evidence_invalid",
                 event_type="placement_release_failed_after_detach",
             )
+        post_release_visual = release_evidence[
+            "post_release_visual_observation"
+        ]
         release.update(
             {
                 "status": "released",
                 "scene_epoch": self.scene_epoch(),
                 "released_at_s": time.time(),
-                "placement_verification": dict(verification),
+                "release_evidence": dict(release_evidence),
+                "post_release_visual_observation": dict(post_release_visual),
+                **(
+                    {"placement_verification": dict(legacy_verification)}
+                    if legacy_release_proven
+                    else {}
+                ),
                 **(
                     {"planning_scene_revision": detach_revision}
                     if policy.get("revision_provenance") == "native_attachment_gate"
@@ -6234,6 +6385,11 @@ class AgentMemory:
             "gripper_open_executed": True,
             "release_sequence": ordered,
             **(
+                {"release_evidence": dict(receipt["release_evidence"])}
+                if isinstance(receipt.get("release_evidence"), dict)
+                else {}
+            ),
+            **(
                 {"placement_verification": dict(receipt["placement_verification"])}
                 if isinstance(receipt.get("placement_verification"), dict)
                 else {}
@@ -6244,8 +6400,8 @@ class AgentMemory:
             failure_code=failure_code,
             failure_reason=(
                 "The object was detached and the gripper-open command ran, but "
-                "the call did not finish with a valid placement proof. A fresh "
-                "observation is required."
+                "the call did not finish its post-release world synchronization. "
+                "A fresh observation is required."
             ),
             evidence=evidence,
             source="irreversible_placement_release_failure",

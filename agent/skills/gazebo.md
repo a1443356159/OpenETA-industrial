@@ -59,8 +59,10 @@ unadvertised target to continue.
 When a physical-verification observation or receipt exposes its pick-place
 contract, use the model-terminal version exactly: provider contact pose, close
 and native attach proof, one MoveIt attached path to the AnyPlace-derived exact
-release pose, open/detach, and stable in-zone verification. The contract contains
-no named pregrasp, hover, lift, clearance-offset, or retreat pose.
+release pose, native detach/open, and VLM review of causal post-release RGB-D.
+Do not block release on repeated simulator pose polling or a fixed stability
+dwell. The contract contains no named pregrasp, hover, lift, clearance-offset,
+or retreat pose.
 
 Use real RGB-D observations as the default perception basis. Oracle or
 ground-truth perception is allowed only when an explicit test or debugging

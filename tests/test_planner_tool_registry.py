@@ -1367,6 +1367,45 @@ def test_multi_sort_release_closes_only_after_every_assignment_passes() -> None:
     }
 
 
+def test_current_release_requires_visual_observation_before_close() -> None:
+    waiting = _placement_release_obligation(
+        _observation(),
+        release={
+            "status": "released",
+            "post_release_visual_observation": {
+                "schema_version": "openeta.post_release_visual_observation.v1",
+                "required": True,
+                "available": False,
+                "review_authority": "vlm",
+            },
+        },
+    )
+
+    assert waiting["stage"] == "post_release_visual_observation"
+    assert waiting["required_action"] == {
+        "name": "observe",
+        "parameters": {"reason": "verify_released_placement"},
+    }
+
+    ready = _placement_release_obligation(
+        _observation(),
+        release={
+            "status": "released",
+            "post_release_visual_observation": {
+                "schema_version": "openeta.post_release_visual_observation.v1",
+                "required": True,
+                "available": True,
+                "source": "causal_post_release_rgbd",
+                "review_authority": "vlm",
+            },
+        },
+    )
+
+    assert ready["stage"] == "close"
+    assert ready["required_action"]["name"] == "close_simulator_env"
+    assert ready["allowed_review_actions"] == ["observe", "active_observe"]
+
+
 def test_host_macro_stops_after_irreversible_release_failure() -> None:
     decision = _host_obligation_decision(
         {

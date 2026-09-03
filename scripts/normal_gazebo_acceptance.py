@@ -1883,24 +1883,28 @@ def verify_case(
             for sequence in release_sequences
         ):
             errors.append("detach-before-open ordered release evidence missing")
-        placements = [
+        release_evidence = [
             value
             for payload in payloads
-            for value in base._values(payload, "placement_verification")
+            for value in base._values(payload, "release_evidence")
             if isinstance(value, Mapping)
         ]
-        valid_placements = [
+        visually_reviewable_releases = [
             value
-            for value in placements
-            if value.get("placement_confirmed") is True
-            and value.get("verdict") == "PASS"
-            and float((value.get("evidence") or {}).get("stable_duration_s", 0.0))
-            >= 0.5
-            and float((value.get("evidence") or {}).get("terminal_drift_m", 1.0))
-            <= 0.005
+            for value in release_evidence
+            if value.get("schema_version")
+            == "openeta.native_release_evidence.v1"
+            and value.get("detached_confirmed") is True
+            and value.get("gripper_open_confirmed") is True
+            and isinstance(value.get("post_release_visual_observation"), Mapping)
+            and value["post_release_visual_observation"].get("available") is True
+            and value["post_release_visual_observation"].get("review_authority")
+            == "vlm"
         ]
-        if len(valid_placements) < assignment_count:
-            errors.append("stable in-zone placement verification is missing per assignment")
+        if len(visually_reviewable_releases) < assignment_count:
+            errors.append(
+                "native release plus causal VLM observation is missing per assignment"
+            )
         if assignment_count > 1:
             final_progress = next(
                 (
@@ -1933,14 +1937,8 @@ def verify_case(
                 assignment["target_object_id"] for assignment in assignments
             } <= observed_target_ids:
                 errors.append("native target binding evidence is missing per assignment")
-        if not any(
-            value.get("placement_confirmed") is True
-            and value.get("verdict") == "PASS"
-            and float((value.get("evidence") or {}).get("stable_duration_s", 0.0)) >= 0.5
-            and float((value.get("evidence") or {}).get("terminal_drift_m", 1.0)) <= 0.005
-            for value in placements
-        ) and assignment_count == 1:
-            errors.append("stable in-zone placement verification missing")
+        if not visually_reviewable_releases and assignment_count == 1:
+            errors.append("native release plus causal VLM observation is missing")
         fingerprints = [
             str(value) for value in base._values(events, "request_fingerprint") if value
         ]

@@ -869,10 +869,7 @@ def test_release_ack_triggers_open_while_planning_scene_detach_runs() -> None:
     assert receipt["ok"] is True
     assert events[0] == "native_detach_ack"
     assert set(events[1:3]) == {"gripper_open", "planning_scene_detach_ack"}
-    assert events[3:] == [
-        "sample_released_target",
-        "planning_scene_pose_sync_ack",
-    ]
+    assert events[3:] == ["planning_scene_pose_sync_ack"]
     assert [item["event"] for item in receipt["release_sequence"]] == [
         "native_detach_ack",
         "planning_scene_detach_ack",
@@ -885,15 +882,29 @@ def test_release_ack_triggers_open_while_planning_scene_detach_runs() -> None:
         "mode": "detach_confirmation_triggers_open",
         "native_detach_confirmed_before_open_dispatch": True,
         "planning_scene_sync_concurrent_with_open_dispatch": True,
+        "blocking_stability_polling": False,
+        "placement_review": "vlm_post_release_observation",
     }
-    assert receipt["placement_verification"]["verdict"] == "PASS"
-    assert env.runtime.attachment.placement_sample_duration_s == pytest.approx(
-        env._native_grasp_config.placement_settling_observation_s
-        + max(
-            env._native_grasp_config.placement_stability_duration_s,
-            env._native_grasp_config.placement_terminal_window_s,
-        )
-    )
+    assert receipt["release_evidence"] == {
+        "schema_version": "openeta.native_release_evidence.v1",
+        "detached_confirmed": True,
+        "gripper_open_confirmed": True,
+        "post_release_visual_observation": {
+            "schema_version": "openeta.post_release_visual_observation.v1",
+            "required": True,
+            "available": False,
+            "source": "fresh_observation_required",
+            "camera_frame_ids": [],
+            "review_authority": "vlm",
+        },
+        "geometry_obvious_failure_guard": {
+            "blocking_stability_polling": False,
+            "native_attachment_state": "detached",
+            "review_authority": "vlm",
+        },
+    }
+    assert "placement_verification" not in receipt
+    assert env.runtime.attachment.placement_sample_duration_s is None
     assert raw["metadata"]["planning_scene_revision"] == 9
 
 
@@ -924,7 +935,8 @@ def test_irreversible_release_proof_survives_later_scene_sync_failure() -> None:
     assert receipt["post_release_failure_stage"] == "released_target_pose_sync"
     assert receipt["error_code"] == "TimeoutError"
     assert receipt["error_type"] == "TimeoutError"
-    assert receipt["placement_verification"]["verdict"] == "PASS"
+    assert receipt["release_evidence"]["detached_confirmed"] is True
+    assert "placement_verification" not in receipt
     assert [item["event"] for item in receipt["release_sequence"]] == [
         "native_detach_ack",
         "planning_scene_detach_ack",
@@ -932,10 +944,7 @@ def test_irreversible_release_proof_survives_later_scene_sync_failure() -> None:
     ]
     assert events[0] == "native_detach_ack"
     assert set(events[1:3]) == {"gripper_open", "planning_scene_detach_ack"}
-    assert events[3:] == [
-        "sample_released_target",
-        "planning_scene_pose_sync_failed",
-    ]
+    assert events[3:] == ["planning_scene_pose_sync_failed"]
 
 
 def test_release_detach_failure_forbids_gripper_open() -> None:

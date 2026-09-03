@@ -34,17 +34,12 @@ and MoveIt owns complete robot paths.
    Only pairs entering the current small wave pay the deeper geometry cost.
 3. For a flat support, derive the exact release EEF pose as
    `object_goal * inverse(measured_attachment)`. For a collision-backed
-   container, AnyPlace still selects the destination and proves a settled pose,
-   while the host derives a geometry-backed gravity-drop terminal at that
-   destination that keeps the carried orientation. A flat support uses the
-   configured drop. A container may prefer its lowest geometry-proven full
-   exterior entry edge plus clearance; internal or suspended obstacles do not
-   qualify. If that batch exhausts IK/L5, the host retries configured height
-   under the same gates before expanding the frozen grasp frontier.
-   Its Z is host evidence, not an agent waypoint; gravity owns settling after detach.
-   Pair legality, Beam-2, state validity, and L5 plan-only must all pass in
-   either case. Stable wave barriers preserve deterministic order; use the
-   first complete pair.
+   container, AnyPlace selects the destination while the host derives a
+   collision-backed gravity-drop terminal from exterior entry geometry. Its Z
+   is host evidence, not an agent waypoint; gravity owns motion after detach.
+   If a wave exhausts IK/L5, retry the configured height before expanding the
+   frozen grasp frontier. Pair legality, Beam-2, state validity, and L5
+   plan-only still gate every pair; use the first complete pair.
 4. After native attach PASS, recompile the frozen AnyPlace pool from the
    measured attachment and current PlanningScene. Do not rerun AnyPlace or the
    grasp model because one pair fails; continue the frozen pair/grasp frontiers.
@@ -53,16 +48,17 @@ and MoveIt owns complete robot paths.
    There is no carry lift, hover, descent waypoint, agent-authored offset,
    near-target shortcut, or retreat. Every receipt must retain attachment and
    satisfy the native drift bound.
-6. At the release terminal, call `gripper_control position=1` once. PASS requires
-   detach ACK and stable placement. Once Gazebo proves detach, opening may
-   overlap PlanningScene sync; the receipt must prove both. Visual proximity
-   alone is not proof.
-7. On retained placement PASS, close the environment once. If planning rejects
-   before execution, consume only that pair. If execution leaves a known safe
-   state, follow the typed frozen-frontier recovery. Unknown transport state
-   requires observation on the same handle. Infrastructure errors are never
-   candidate failures.
+6. At the release terminal, call `gripper_control position=1` once. Release
+   completion requires native detach ACK and gripper-open ACK. Opening overlaps
+   PlanningScene detach synchronization; repeated simulator pose polling and a
+   fixed stability dwell are not part of this action.
+7. Review the causal post-release RGB-D observation with the VLM. Continue the
+   next assignment or close the environment when the part is visibly acceptable
+   in its container; observe again if ambiguous. A pre-execution planning
+   rejection consumes only that pair. Resume a known safe state from the frozen
+   frontier; observe unknown transport state on the same handle. Infrastructure
+   errors are never candidate failures.
 
 Never hand-edit model goals, add agent-authored offsets, retry an unchanged failed fingerprint, or
-claim success without native state validity, complete MoveIt plan proof, and
-stable in-zone release evidence.
+claim success without native state validity, complete MoveIt plan proof, the
+ordered native release receipt, and VLM review of a causal post-release image.

@@ -108,6 +108,10 @@ CONTROL_RECEIPT_FIELDS = (
     "attachment_transform",
     "physical_verification",
     "child_link_proof",
+    "release_evidence",
+    # Historical release receipts carried a blocking simulator stability
+    # verdict. Retain the field only for replay compatibility; live releases
+    # use release_evidence plus a causal VLM-visible observation.
     "placement_verification",
     # Multi-object sorting changes the authoritative target binding and
     # assignment in-place.  Preserve the bounded transition proof so memory

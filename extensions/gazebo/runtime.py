@@ -670,18 +670,26 @@ class GazeboRuntime:
     def complete_active_work_order_item(
         self,
         *,
-        placement_verification: Mapping[str, Any],
+        release_evidence: Mapping[str, Any],
         post_release_observation: EnvObservation | None = None,
     ) -> dict[str, Any] | None:
-        """Advance a proven VLM-authored work order without recreating the world."""
+        """Advance a released VLM-authored work order without recreating the world.
+
+        The native detach and gripper-open acknowledgements close the physical
+        release transaction. Placement quality is intentionally reviewed by
+        the VLM from the causal post-release observation rather than by a
+        blocking simulator stability poll.
+        """
 
         if not self._work_order_configs:
             raise GazeboProcessError("WORK_ORDER_NOT_CONFIGURED")
         if not (
-            placement_verification.get("placement_confirmed") is True
-            and str(placement_verification.get("verdict") or "").upper() == "PASS"
+            release_evidence.get("schema_version")
+            == "openeta.native_release_evidence.v1"
+            and release_evidence.get("detached_confirmed") is True
+            and release_evidence.get("gripper_open_confirmed") is True
         ):
-            raise GazeboProcessError("MULTI_SORT_PLACEMENT_NOT_PROVEN")
+            raise GazeboProcessError("MULTI_SORT_RELEASE_NOT_PROVEN")
         current = self.active_pick_place_config
         assignment = getattr(current, "work_order_item", None)
         assignment_id = (

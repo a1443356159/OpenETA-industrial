@@ -145,7 +145,7 @@ jq '{mcp_group_exited,port_free,
 - `planner_mode` 为 `agentic_closed_loop`；
 - `host_dispatch_count` 为 `0`；
 - 两个物品各有一次 SAM3、AnyPlace 和 GraspGenX 模型链证据；
-- 最终放置具有 MoveIt 状态有效性、L5 plan-only、原生 attach/detach 和稳定入箱证明；
+- 最终放置具有 MoveIt 状态有效性、L5 plan-only、原生 attach/detach，以及供 VLM 审阅的因果 post-release RGB-D；释放工具不再阻塞等待固定时长的仿真落稳采样；
 - `cleanup.json` 中 `mcp_group_exited`、`port_free`、GUI lifecycle 和 protected ROS graph 检查均通过，且 owned residual 列表为空。
 
 运行失败时保留整个 `RUN_ROOT`，不要覆盖或删除。可用相同参数加 `--verify-only` 重新读取证据；新的物理复测必须换一个新目录。
@@ -210,4 +210,4 @@ scripts/run_random_multi_normal_gazebo_acceptance.sh \
 .cache/reports/final-vlm-repro-20260831-physical-rebase/run3/acceptance-report.json
 ```
 
-三次均为 `agentic_closed_loop`、`host_dispatch_count=0`、22 次工具调用，并完成两个物品的稳定入箱。每轮 `cleanup.json` 都证明 MCP 进程组退出、端口释放、Gazebo GUI 从本轮 partition 启动并随本轮退出、owned residual 为空且受保护 ROS graph 未变化。复测期间服务器存在显著共享 GPU/CPU 负载，因此这些时间用于稳定性记录，不作为独占算力下的性能基线。当前状态恢复、动作后稳定判定和物体重基另由完整测试集 `1903 passed, 16 skipped` 覆盖；物理恢复不要求为了“制造失败”而污染三次发行 PASS。
+三次均为 `agentic_closed_loop`、`host_dispatch_count=0`、22 次工具调用，并完成两个物品的连续入箱。每轮 `cleanup.json` 都证明 MCP 进程组退出、端口释放、Gazebo GUI 从本轮 partition 启动并随本轮退出、owned residual 为空且受保护 ROS graph 未变化。复测期间服务器存在显著共享 GPU/CPU 负载，因此这些时间用于稳定性记录，不作为独占算力下的性能基线。当前状态恢复、动作终态判定和物体重基另由完整测试集覆盖；物理恢复不要求为了“制造失败”而污染三次发行 PASS。
