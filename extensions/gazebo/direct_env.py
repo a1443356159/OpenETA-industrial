@@ -227,6 +227,10 @@ class GazeboDirectEnv(Env):
         self._native_grasp_verifier = NativeGraspVerifier(self._native_grasp_config) if self._native_grasp_config is not None else None
         self._native_grasp_transport_locked = False
         self._attachment_transform: dict[str, Any] | None = None
+        # Captured while the target is still a world body immediately before a
+        # successful attach.  A later frozen-frontier recovery uses this exact
+        # world pose as the source of its measured detached-object rebind.
+        self._attachment_source_pose_sync: dict[str, Any] | None = None
 
     @property
     def controller(self) -> Any | None:
@@ -341,6 +345,7 @@ class GazeboDirectEnv(Env):
             self._native_grasp_verifier.reset()
             self._native_grasp_transport_locked = False
             self._attachment_transform = None
+            self._attachment_source_pose_sync = None
         observation = self.runtime.reset(seed=self._seed)
         active_config = getattr(self.runtime, "active_pick_place_config", None)
         if isinstance(active_config, NativePickPlaceConfig):
@@ -367,6 +372,10 @@ class GazeboDirectEnv(Env):
     def step(self, action: Any):
         raw_action = action if isinstance(action, Mapping) else {}
         action_type = str(raw_action.get("action_type") or "")
+        frozen_frontier_recovery = (
+            action_type == "gripper_open"
+            and raw_action.get("recovery_intent") == "frozen_grasp_frontier"
+        )
         contact_window: GazeboNativeContactWindow | None = None
         release_before_open: dict[str, Any] | None = None
         coordinated_open_result: tuple[EnvObservation, dict[str, Any]] | None = None
@@ -475,6 +484,10 @@ class GazeboDirectEnv(Env):
                 "_openeta_receipt": receipt
             } if STRUCTURED_RECEIPT in self.profile.capabilities else {}
         if self._native_grasp_config is not None and action_type == "gripper_close":
+            # Any new physical close supersedes a prior detached-world source
+            # packet.  A recovery may only use the source captured for the
+            # currently attached object.
+            self._attachment_source_pose_sync = None
             contact_window = GazeboNativeContactWindow(
                 gz_executable=self.deployment.gz_executable,
                 environment=dict(self.deployment.process_environment),
@@ -526,6 +539,26 @@ class GazeboDirectEnv(Env):
                 release_sequence: list[dict[str, Any]] = []
                 detached_acked = False
                 open_future: Future[tuple[EnvObservation, dict[str, Any]]] | None = None
+                frontier_source = (
+                    getattr(self, "_attachment_source_pose_sync", None)
+                    if frozen_frontier_recovery
+                    else None
+                )
+                if frozen_frontier_recovery and not isinstance(frontier_source, Mapping):
+                    observation = self.runtime.observe()
+                    raw = self._decorate_robot(self._as_unified(observation))
+                    receipt = {
+                        "ok": False,
+                        "error_code": "FROZEN_GRASP_FRONTIER_SOURCE_POSE_UNAVAILABLE",
+                        "infrastructure_error": True,
+                        "motion_outcome": "unknown",
+                        "execution_started": False,
+                        "observation": raw,
+                    }
+                    self._latest = raw
+                    return raw, 0.0, False, False, {
+                        "_openeta_receipt": receipt
+                    } if STRUCTURED_RECEIPT in self.profile.capabilities else {}
 
                 with ThreadPoolExecutor(
                     max_workers=1,
@@ -597,6 +630,12 @@ class GazeboDirectEnv(Env):
                             "target_pose": target_pose,
                             "planning_scene_revision": int(scene_revision),
                             "record": record,
+                            "frozen_grasp_frontier_recovery": frozen_frontier_recovery,
+                            **(
+                                {"frontier_source": dict(frontier_source)}
+                                if isinstance(frontier_source, Mapping)
+                                else {}
+                            ),
                             "attached_collision_filter": collision_filter,
                             "release_coordination": {
                                 "schema_version": (
@@ -943,6 +982,11 @@ class GazeboDirectEnv(Env):
                             mount_xyz=mount_pose.xyz,
                             mount_quat_xyzw=mount_pose.quat_xyzw,
                         )
+                        self._attachment_source_pose_sync = (
+                            dict(rollback_pose_sync_source)
+                            if isinstance(rollback_pose_sync_source, Mapping)
+                            else None
+                        )
                         record = self._native_grasp_verifier.close_result(gate, attach_acked=True)
                         baseline_attempts = attachment.capture_baseline()
                         if isinstance(baseline_attempts, int) and not isinstance(
@@ -1126,6 +1170,7 @@ class GazeboDirectEnv(Env):
                     })
                     self._native_grasp_transport_locked = True
                     self._attachment_transform = None
+                    self._attachment_source_pose_sync = None
                 finally:
                     if contact_window is not None:
                         contact_window.close()
@@ -1223,7 +1268,9 @@ class GazeboDirectEnv(Env):
                         )
                         current_progress = getattr(
                             self.runtime, "multi_sort_progress", lambda: None
-                        )()
+                        )() if not release_before_open.get(
+                            "frozen_grasp_frontier_recovery"
+                        ) else None
                         progress = None
                         transition: Mapping[str, Any] = {}
                         if isinstance(current_progress, Mapping):
@@ -1321,10 +1368,46 @@ class GazeboDirectEnv(Env):
                                 # touch during this state check.
                                 allow_target_touch=True,
                             )
+                        frozen_frontier_recovery_evidence: dict[str, Any] | None = None
+                        if release_before_open.get("frozen_grasp_frontier_recovery") is True:
+                            frontier_source = release_before_open.get("frontier_source")
+                            if not isinstance(frontier_source, Mapping):
+                                raise GazeboProcessError(
+                                    "FROZEN_GRASP_FRONTIER_SOURCE_POSE_UNAVAILABLE"
+                                )
+                            frozen_frontier_recovery_evidence = {
+                                "schema_version": "openeta.frozen_grasp_frontier_recovery.v1",
+                                "status": "ready",
+                                "model_inference_invoked": False,
+                                "source_planning_scene_revision": (
+                                    frontier_source.get("source_revision")
+                                ),
+                                "planning_scene_revision": int(scene_revision),
+                            }
+                            receipt["planning_scene_target_pose_sync"] = (
+                                self._planning_scene_target_pose_sync_evidence(
+                                    frontier_source,
+                                    target_xyz=target_pose.xyz,
+                                    target_quat_xyzw=target_pose.quat_xyzw,
+                                    revision=int(scene_revision),
+                                    execution_started=True,
+                                )
+                            )
+                            receipt["frozen_grasp_frontier_recovery"] = (
+                                frozen_frontier_recovery_evidence
+                            )
+                            # This open restores the frozen grasp search, not
+                            # the work order.  Do not leak a completed-place
+                            # proof into the next agent turn.
+                            receipt.pop("release_evidence", None)
                         release_sequence.append(
                             {
                                 "sequence": len(release_sequence) + 1,
-                                "event": "released_target_pose_sync_ack",
+                                "event": (
+                                    "frozen_frontier_target_pose_sync_ack"
+                                    if frozen_frontier_recovery_evidence is not None
+                                    else "released_target_pose_sync_ack"
+                                ),
                                 "revision": int(scene_revision),
                                 **(
                                     {
@@ -1395,6 +1478,7 @@ class GazeboDirectEnv(Env):
                                 raw["metadata"]["control_spec"] = dict(
                                     self.openeta_control_spec
                                 )
+                        self._attachment_source_pose_sync = None
                         post_release_stage = "complete"
                     except Exception as exc:
                         record = release_before_open["record"]

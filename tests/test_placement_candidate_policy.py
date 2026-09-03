@@ -141,6 +141,133 @@ def test_all_placement_candidates_failed_stops_without_new_inference() -> None:
     }
 
 
+def test_pristine_attached_place_zero_pass_reopens_and_resumes_frozen_grasp_frontier() -> None:
+    """A measured attachment miss resumes frozen model grasps, not inference."""
+
+    memory = AgentMemory()
+    memory.save_fact(
+        "frozen_placement_goal_pool",
+        {
+            "schema_version": "openeta.frozen_placement_goal_pool.v1",
+            "status": "ready",
+            "goal_count": 96,
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "grasp_candidate_policy",
+        {
+            "status": "accepted",
+            "active_candidate": {"id": "grasp_000"},
+            "accepted_candidate": {"id": "grasp_000"},
+            "frozen_grasp_frontier_remaining_count": 504,
+            "frozen_grasp_frontier_generation": 1,
+            "planning_scene_revision": 5,
+            "rejected_candidates": [],
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "grasp_execution",
+        {
+            "status": "completed",
+            "stage": "attached",
+            "candidate_id": "grasp_000",
+        },
+        source="test",
+    )
+    memory.save_fact(
+        "attachment_gate",
+        {
+            "status": "resolved",
+            "verdict": "PASS",
+            "candidate_id": "grasp_000",
+            "planning_scene_revision": 6,
+        },
+        source="test",
+    )
+    zero_pass = EnvAction(
+        action_type="tool_call",
+        command={
+            "request": {
+                "name": "anyplace",
+                "parameters": {"reuse_frozen_goal_pool": True, "scene_revision": 6},
+            },
+            "tool_calls": [
+                {
+                    "name": "anyplace",
+                    "result": {
+                        "success": True,
+                        "details": {
+                            "outputs": {
+                                "placement_candidates": [],
+                                "qualification_evidence": {
+                                    "results": [{"candidate_id": "p0"}] * 96
+                                },
+                                "frozen_goal_requalification": True,
+                                "scene_revision": 6,
+                            }
+                        },
+                    },
+                }
+            ],
+        },
+    )
+
+    memory.add_action(zero_pass)
+
+    placement = memory.placement_candidate_policy()
+    recovery = memory.grasp_recovery()
+    policy = memory.grasp_candidate_policy()
+    assert placement["status"] == "frozen_grasp_frontier_recovery_required"
+    assert recovery["status"] == "required"
+    assert recovery["required_action"] == {
+        "name": "gripper_control",
+        "parameters": {"position": 1, "recovery_intent": "frozen_grasp_frontier"},
+    }
+    assert policy["status"] == "frozen_frontier_required"
+    assert policy["frozen_grasp_frontier_rebase_pending"]["physically_rejected_candidate_id"] == (
+        "grasp_000"
+    )
+
+    rebound_sync = {
+        "schema_version": "openeta.planning_scene_target_pose_sync.v1",
+        "operation": "update_world_target",
+        "source_revision": 5,
+        "revision": 8,
+        "topology_unchanged": True,
+        "static_world_unchanged": True,
+        "attached_ids_before": [],
+        "attached_ids_after": [],
+    }
+    memory.add_action(
+        _successful_call(
+            "gripper_control",
+            {"position": 1, "recovery_intent": "frozen_grasp_frontier"},
+            {
+                "planning_scene_revision": 8,
+                "detachable_joint": {"state": "detached"},
+                "planning_scene_target_pose_sync": rebound_sync,
+                "frozen_grasp_frontier_recovery": {
+                    "schema_version": "openeta.frozen_grasp_frontier_recovery.v1",
+                    "status": "ready",
+                    "model_inference_invoked": False,
+                },
+            },
+        )
+    )
+
+    policy = memory.grasp_candidate_policy()
+    assert policy["status"] == "frozen_frontier_required"
+    assert policy["planning_scene_revision"] == 8
+    assert policy["frozen_grasp_frontier_recovery"]["model_inference_invoked"] is False
+    assert memory.grasp_recovery()["status"] == "completed"
+    assert memory.grasp_execution() is None
+    assert memory.attachment_gate() is None
+    assert memory.placement_candidate_policy() is None
+    assert memory.frozen_placement_goal_pool()["goal_count"] == 96
+
+
 def test_failed_first_candidate_allows_only_the_second_candidate() -> None:
     memory = AgentMemory()
     memory.save_fact("placement_candidate_policy", _policy(["placement_000", "placement_001"]), source="test")

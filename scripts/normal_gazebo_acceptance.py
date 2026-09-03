@@ -1122,6 +1122,11 @@ def _assignment_execution_token(
     if name == "move_to" and pose.get("purpose") == "placement" and assignment_id:
         return f"placement_move:{assignment_id}"
     if name == "gripper_control" and assignment_id:
+        if parameters.get("recovery_intent") == "frozen_grasp_frontier":
+            # A failed measured-attachment placement frontier can safely
+            # reopen at the original grasp terminal and continue an already
+            # frozen model queue.  It is not an assignment release.
+            return ""
         if parameters.get("position") == 0:
             return f"attach:{assignment_id}"
         if parameters.get("position") == 1:

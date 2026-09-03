@@ -996,6 +996,75 @@ def test_multi_sort_release_uses_one_runtime_owned_scene_transition() -> None:
     assert raw["metadata"]["planning_scene_revision"] == 9
 
 
+def test_attached_place_frontier_recovery_reopens_without_completing_work_order() -> None:
+    env, events = _attached_release_env()
+    planning_scene = env.runtime.controller.planning_scene
+    target_id = env._native_grasp_config.target_id
+    released_xyz = (
+        env._native_grasp_config.destination_center_xy[0],
+        env._native_grasp_config.destination_center_xy[1],
+        env._native_grasp_config.destination_support_z_m
+        + env._native_grasp_config.target_size_m[2] / 2.0,
+    )
+    planning_scene.world_specs = {
+        target_id: {
+            "pose_xyz": list(released_xyz),
+            "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+    planning_scene.world_ids = {target_id}
+    planning_scene.attached_ids = set()
+    env._attachment_source_pose_sync = env._planning_scene_target_pose_sync_source()
+    env.runtime.multi_sort_progress = lambda: {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "all_completed": False,
+        "active_assignment_index": 0,
+    }
+
+    def fail_if_completed(**_kwargs):
+        pytest.fail("frontier recovery must not advance the work order")
+
+    env.runtime.complete_active_work_order_item = fail_if_completed
+
+    def execute(action):
+        assert action == {
+            "action_type": "gripper_open",
+            "recovery_intent": "frozen_grasp_frontier",
+        }
+        events.append("gripper_open")
+        return EnvObservation(task="pick and place", cameras=[], robot=RobotState()), {"ok": True}
+
+    env.runtime.execute = execute
+
+    _raw, _, _, _, result = env.step(
+        {
+            "action_type": "gripper_open",
+            "recovery_intent": "frozen_grasp_frontier",
+        }
+    )
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is True
+    assert "release_evidence" not in receipt
+    assert receipt["frozen_grasp_frontier_recovery"] == {
+        "schema_version": "openeta.frozen_grasp_frontier_recovery.v1",
+        "status": "ready",
+        "model_inference_invoked": False,
+        "source_planning_scene_revision": 7,
+        "planning_scene_revision": 9,
+    }
+    sync = receipt["planning_scene_target_pose_sync"]
+    assert sync["source_revision"] == 7
+    assert sync["revision"] == 9
+    assert sync["attached_ids_before"] == sync["attached_ids_after"] == []
+    assert sync["topology_unchanged"] is True
+    assert sync["static_world_unchanged"] is True
+    assert receipt["release_sequence"][-1]["event"] == (
+        "frozen_frontier_target_pose_sync_ack"
+    )
+    assert env._attachment_source_pose_sync is None
+
+
 def test_irreversible_release_proof_survives_later_scene_sync_failure() -> None:
     env, events = _attached_release_env()
 

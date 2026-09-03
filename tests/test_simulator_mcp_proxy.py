@@ -1971,6 +1971,49 @@ def test_gripper_control_selects_open_or_close_mcp_tool(tmp_path: Path) -> None:
     assert transport.calls[1]["name"] == "gripper_close"
 
 
+def test_gripper_control_forwards_only_host_authorized_frontier_recovery(
+    tmp_path: Path,
+) -> None:
+    transport = FakeSimulatorMcpTransport({"cameras": [], "robot": {}})
+    tools = bind_simulator_mcp_tool_handlers(
+        build_default_tool_registry(),
+        transport=transport,
+        config=SimulatorMcpToolProxyConfig(
+            session_id="session-frontier-recovery",
+            handle="env-frontier-recovery",
+            image_output_root=tmp_path,
+        ),
+        tool_names=("gripper_control",),
+    )
+    parameters = {"position": 1, "recovery_intent": "frozen_grasp_frontier"}
+    result = tools.call(
+        "gripper_control",
+        parameters,
+        metadata={
+            "supervision_context": {
+                "memory": {
+                    "grasp_recovery": {
+                        "status": "required",
+                        "purpose": "attached_place_frontier_recovery",
+                        "required_action": {
+                            "name": "gripper_control",
+                            "parameters": parameters,
+                        },
+                    }
+                }
+            }
+        },
+    )
+
+    assert result.success is True
+    assert transport.calls[0]["name"] == "gripper_open"
+    assert transport.calls[0]["arguments"] == {
+        "handle": "env-frontier-recovery",
+        "session_id": "session-frontier-recovery",
+        "recovery_intent": "frozen_grasp_frontier",
+    }
+
+
 def test_gripper_control_rejects_fractional_command(tmp_path: Path) -> None:
     transport = FakeSimulatorMcpTransport({"cameras": [], "robot": {}})
     tools = bind_simulator_mcp_tool_handlers(

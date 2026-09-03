@@ -4066,6 +4066,23 @@ class AgentMemory:
                 )
                 self.record(f"grasp_recovery_{stage}_stopped", dict(recovery))
                 return True
+            if (
+                stage == "reopen"
+                and recovery.get("purpose") == "attached_place_frontier_recovery"
+            ):
+                self._complete_attached_place_frontier_recovery(recovery, call=call)
+                self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+                    recovery, source="attached_place_frontier_recovery_completed"
+                )
+                self.record(
+                    (
+                        "attached_place_frontier_recovery_completed"
+                        if recovery.get("status") == "completed"
+                        else "attached_place_frontier_recovery_stopped"
+                    ),
+                    dict(recovery),
+                )
+                return True
             self._complete_grasp_recovery_physical_stage(
                 recovery,
                 stage=stage,
@@ -4113,6 +4130,134 @@ class AgentMemory:
                 )
                 self.record("grasp_reestimate_observation_required", dict(reestimate))
         return True
+
+    def _complete_attached_place_frontier_recovery(
+        self,
+        recovery: JsonDict,
+        *,
+        call: JsonDict,
+    ) -> None:
+        """Close an attached-place recovery only after its native rebind proof.
+
+        The simulator has already detached/opened the gripper.  Do not expose
+        another frozen model grasp until its source world pose, current world
+        pose, and unchanged static-scene proof are all present.  The runtime
+        assembly verifies this evidence again while rebasing the coordinator;
+        this early check prevents stale attachment facts from leaking into the
+        next planner turn.
+        """
+
+        receipt = _environment_receipt(call)
+        evidence = receipt.get("frozen_grasp_frontier_recovery")
+        evidence = evidence if isinstance(evidence, dict) else {}
+        sync_entry = self.planning_scene_target_pose_sync()
+        sync = (
+            sync_entry.get("planning_scene_target_pose_sync")
+            if isinstance(sync_entry, dict)
+            else None
+        )
+        sync = sync if isinstance(sync, dict) else {}
+        policy = self.grasp_candidate_policy()
+        pending = (
+            policy.get("frozen_grasp_frontier_rebase_pending")
+            if isinstance(policy, dict)
+            else None
+        )
+        candidate_id = str(recovery.get("candidate_id") or "")
+        expected_source_revision = _optional_int(
+            pending.get("source_planning_scene_revision")
+            if isinstance(pending, dict)
+            else None,
+            default=-1,
+        )
+        revision = _optional_int(receipt.get("planning_scene_revision"), default=-1)
+        detached = receipt.get("detachable_joint")
+        valid = (
+            isinstance(policy, dict)
+            and policy.get("status") == "frozen_frontier_required"
+            and isinstance(pending, dict)
+            and str(pending.get("physically_rejected_candidate_id") or "") == candidate_id
+            and evidence.get("schema_version") == "openeta.frozen_grasp_frontier_recovery.v1"
+            and evidence.get("status") == "ready"
+            and evidence.get("model_inference_invoked") is False
+            and isinstance(detached, dict)
+            and detached.get("state") == "detached"
+            and sync.get("schema_version") == "openeta.planning_scene_target_pose_sync.v1"
+            and sync.get("operation") == "update_world_target"
+            and sync.get("topology_unchanged") is True
+            and sync.get("static_world_unchanged") is True
+            and sync.get("attached_ids_before") == []
+            and sync.get("attached_ids_after") == []
+            and _optional_int(sync.get("source_revision"), default=-1)
+            == expected_source_revision
+            and _optional_int(sync.get("revision"), default=-1) == revision
+            and revision >= 0
+        )
+        if not valid:
+            recovery.update(
+                {
+                    "status": "stopped_requires_human",
+                    "stage": "frontier_rebind",
+                    "required_action": None,
+                    "stop_reason": "attached_place_frontier_rebind_proof_missing",
+                    "completed_at_s": time.time(),
+                }
+            )
+            # The physical open is irreversible even if its proof was
+            # incomplete.  Never leave stale attached-state facts available
+            # to a later planner decision.
+            for key in (
+                GRASP_EXECUTION_KEY,
+                ATTACHMENT_GATE_KEY,
+                PLACEMENT_CANDIDATE_POLICY_KEY,
+                PLACEMENT_RELEASE_KEY,
+            ):
+                self.facts.pop(key, None)
+            return
+
+        assert isinstance(policy, dict)
+        policy.update(
+            {
+                "status": "frozen_frontier_required",
+                "scene_epoch": self.scene_epoch(),
+                "planning_scene_revision": revision,
+                "active_rank": None,
+                "active_candidate": None,
+                "remaining_candidate_ids": [],
+                "frozen_grasp_frontier_recovery": {
+                    "schema_version": "openeta.frozen_grasp_frontier_recovery.v1",
+                    "source_planning_scene_revision": expected_source_revision,
+                    "planning_scene_revision": revision,
+                    "candidate_id": candidate_id,
+                    "model_inference_invoked": False,
+                },
+            }
+        )
+        self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy, source="attached_place_frontier_rebound"
+        )
+        for key in (
+            GRASP_EXECUTION_KEY,
+            ATTACHMENT_GATE_KEY,
+            PLACEMENT_CANDIDATE_POLICY_KEY,
+            PLACEMENT_RELEASE_KEY,
+        ):
+            self.facts.pop(key, None)
+        recovery.update(
+            {
+                "status": "completed",
+                "stage": "completed",
+                "required_action": None,
+                "completed_at_s": time.time(),
+                "scene_epoch": self.scene_epoch(),
+                "result": {
+                    "tool": "gripper_control",
+                    "reached_target": True,
+                    "model_inference_invoked": False,
+                    "planning_scene_revision": revision,
+                },
+            }
+        )
 
     def _resolve_reconciled_grasp_recovery(
         self,
@@ -5303,6 +5448,12 @@ class AgentMemory:
         candidates = outputs.get("placement_candidates")
         if not isinstance(candidates, list) or not candidates:
             if isinstance(outputs.get("qualification_evidence"), dict):
+                if self._schedule_attached_place_frontier_recovery(
+                    outputs=outputs,
+                    previous_policy=previous_policy,
+                    private_qualification=private_qualification,
+                ):
+                    return True
                 zero_pass_resume = (
                     isinstance(previous_policy, dict)
                     and previous_policy.get("status") == "frozen_frontier_required"
@@ -5460,6 +5611,190 @@ class AgentMemory:
             }
         self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(policy, source="anyplace")
         self.record("placement_candidates_retained", dict(policy))
+        return True
+
+    def _schedule_attached_place_frontier_recovery(
+        self,
+        *,
+        outputs: Mapping[str, Any],
+        previous_policy: JsonDict | None,
+        private_qualification: Mapping[str, Any],
+    ) -> bool:
+        """Continue a frozen grasp frontier after a pristine attached-place miss.
+
+        A measured attachment can differ enough from its pre-bind prediction
+        that every frozen AnyPlace target becomes infeasible.  When no
+        placement motion has started, the arm is still at the original grasp
+        terminal.  It is then safe to reopen, prove the detached object's
+        current world pose, and requalify the next *already frozen* model
+        grasp branch.  This is deliberately narrower than generic placement
+        recovery: after a placement motion attempt the object may be anywhere
+        along a transport path, so this automatic reopen is no longer safe.
+        """
+
+        if (
+            outputs.get("frozen_goal_requalification") is not True
+            or isinstance(previous_policy, dict)
+        ):
+            return False
+        frozen_pool = self.frozen_placement_goal_pool()
+        policy = self.grasp_candidate_policy()
+        execution = self.grasp_execution()
+        attachment = self.attachment_gate()
+        if not (
+            isinstance(frozen_pool, dict)
+            and frozen_pool.get("status") == "ready"
+            and isinstance(policy, dict)
+            and str(policy.get("status") or "") in {"active", "accepted"}
+            and isinstance(execution, dict)
+            and execution.get("status") == "completed"
+            and execution.get("stage") == "attached"
+            and execution.get("attachment_mode") != "articulated_handle"
+            and isinstance(attachment, dict)
+            and attachment.get("status") == "resolved"
+            and str(attachment.get("verdict") or "").upper() == "PASS"
+        ):
+            return False
+        candidate_id = str(execution.get("candidate_id") or "")
+        if not candidate_id:
+            return False
+        active = policy.get("active_candidate")
+        accepted = policy.get("accepted_candidate")
+        policy_candidate_id = str(
+            (active if isinstance(active, dict) else accepted).get("id") or ""
+        ) if isinstance(active, dict) or isinstance(accepted, dict) else ""
+        if policy_candidate_id and policy_candidate_id != candidate_id:
+            return False
+        if str(attachment.get("candidate_id") or "") not in {"", candidate_id}:
+            return False
+        remaining = _optional_int(
+            policy.get("frozen_grasp_frontier_remaining_count"), default=0
+        )
+        source_revision = _optional_int(
+            policy.get("planning_scene_revision"), default=-1
+        )
+        attachment_revision = _optional_int(
+            attachment.get("planning_scene_revision"), default=-1
+        )
+        output_revision = _optional_int(outputs.get("scene_revision"), default=-1)
+        if (
+            remaining <= 0
+            or source_revision < 0
+            or attachment_revision < 0
+            or output_revision != attachment_revision
+        ):
+            return False
+
+        rejection = {
+            "candidate_id": candidate_id,
+            "reason": (
+                "all frozen placement goals are infeasible for the measured "
+                "attachment before any placement motion began"
+            ),
+            "source": "attached_place_frontier_exhausted",
+            "frozen_goal_requalification": True,
+            "rejected_goal_count": len(private_qualification.get("results", [])),
+            "attachment_planning_scene_revision": attachment_revision,
+            "source_planning_scene_revision": source_revision,
+        }
+        rejected = [
+            dict(item)
+            for item in policy.get("rejected_candidates", [])
+            if isinstance(item, dict)
+        ]
+        if candidate_id not in {
+            str(item.get("candidate_id") or "") for item in rejected
+        }:
+            rejected.append(rejection)
+        policy.update(
+            {
+                "status": "frozen_frontier_required",
+                "active_rank": None,
+                "active_candidate": None,
+                "remaining_candidate_ids": [],
+                "rejected_candidates": rejected,
+                "stop_reason": "frozen_grasp_frontier_recovery_required",
+                "frozen_grasp_frontier_rebase_pending": {
+                    "schema_version": "openeta.frozen_grasp_frontier_rebase_pending.v1",
+                    "reason_code": "ATTACHED_PLACE_FRONTIER_EXHAUSTED",
+                    "source_planning_scene_revision": source_revision,
+                    "physically_rejected_candidate_id": candidate_id,
+                    "required_proof": (
+                        "detached_native_target_pose_sync_with_unchanged_static_scene"
+                    ),
+                    "model_inference_invoked": False,
+                },
+            }
+        )
+        placement_policy = {
+            "schema_version": "openeta.placement_candidate_policy.v2",
+            "status": "frozen_grasp_frontier_recovery_required",
+            "candidate_queue": [],
+            "active_candidate_id": None,
+            "rejected_candidates": [],
+            "rejected_candidate_count": len(private_qualification.get("results", [])),
+            "failed_request_fingerprints": [],
+            "scene_revision": attachment_revision,
+            "planning_scene_revision": attachment_revision,
+            "scene_epoch": self.scene_epoch(),
+            "selection_source": None,
+            "stop_reason": "CURRENT_GRASP_PLACE_INFEASIBLE",
+            "frozen_goal_requalification": True,
+            "frozen_goal_frontier_exhausted": True,
+            "recovery": {
+                "stage": "frozen_grasp_frontier_reopen",
+                "required_action": {
+                    "name": "gripper_control",
+                    "parameters": {
+                        "position": 1,
+                        "recovery_intent": "frozen_grasp_frontier",
+                    },
+                },
+            },
+        }
+        recovery = {
+            "schema_version": "openeta.grasp_recovery.v2",
+            "status": "required",
+            "recovery_id": f"attached-place-frontier-{uuid4()}",
+            "candidate_id": candidate_id,
+            "rejection_source": "attached_place_frontier_exhausted",
+            "rejection_reason": rejection["reason"],
+            "purpose": "attached_place_frontier_recovery",
+            "scene_epoch": self.scene_epoch(),
+            "stage": "reopen",
+            "reopen_required": True,
+            "restore_required": False,
+            "observe_after_reopen": False,
+            "required_action": {
+                "name": "gripper_control",
+                "parameters": {
+                    "position": 1,
+                    "recovery_intent": "frozen_grasp_frontier",
+                },
+            },
+            "frontier": {
+                "remaining_candidate_count": remaining,
+                "source_planning_scene_revision": source_revision,
+                "attachment_planning_scene_revision": attachment_revision,
+                "model_inference_invoked": False,
+            },
+            "created_at_s": time.time(),
+        }
+        self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            policy, source="attached_place_frontier_recovery"
+        )
+        self.facts[PLACEMENT_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
+            placement_policy, source="attached_place_frontier_recovery"
+        )
+        self.facts[GRASP_RECOVERY_KEY] = _memory_fact_entry(
+            recovery, source="attached_place_frontier_recovery"
+        )
+        self.record("attached_place_frontier_recovery_required", {
+            "candidate_id": candidate_id,
+            "remaining_candidate_count": remaining,
+            "rejected_goal_count": placement_policy["rejected_candidate_count"],
+            "model_inference_invoked": False,
+        })
         return True
 
     def _capture_compiled_placement(

@@ -896,11 +896,34 @@ class SimulatorMcpToolProxy:
     ) -> tuple[str, JsonDict]:
         if agent_tool == "gripper_control":
             binary_position = self._binary_gripper_position(context.parameters)
+            gripper_arguments: JsonDict = {"position": binary_position}
+            recovery_intent = context.parameters.get("recovery_intent")
+            if recovery_intent is not None:
+                if (
+                    binary_position != 1
+                    or recovery_intent != "frozen_grasp_frontier"
+                    or not self._host_authorized_frozen_grasp_frontier_reopen(context)
+                ):
+                    raise ValueError(
+                        "gripper recovery intent is reserved for the exact host-required "
+                        "frozen grasp-frontier reopen action."
+                    )
+                gripper_arguments["recovery_intent"] = recovery_intent
             if agent_tool in self.config.tool_name_map:
                 return self.config.tool_name_map[agent_tool], self._with_session(
-                    {"position": binary_position}
+                    gripper_arguments
                 )
-            return self._gripper_tool_name(binary_position), self._with_session({})
+            # The normal public gripper command has no arguments beyond the
+            # session.  Carry the host-private recovery intent only for the
+            # exact attached-place frontier boundary, where the simulator must
+            # not treat the open as a completed work-order release.
+            return self._gripper_tool_name(binary_position), self._with_session(
+                (
+                    {"recovery_intent": recovery_intent}
+                    if recovery_intent is not None
+                    else {}
+                )
+            )
         if agent_tool in self.config.tool_name_map:
             return self.config.tool_name_map[agent_tool], self._with_session(
                 dict(context.parameters)
@@ -1002,6 +1025,25 @@ class SimulatorMcpToolProxy:
         if type(position) is not int or position not in (0, 1):
             raise ValueError("gripper_control position must be exactly 0 or 1.")
         return position
+
+    @staticmethod
+    def _host_authorized_frozen_grasp_frontier_reopen(
+        context: ToolExecutionContext,
+    ) -> bool:
+        """Keep recovery-only simulator semantics out of model-authored calls."""
+
+        supervision = context.metadata.get("supervision_context")
+        memory = supervision.get("memory") if isinstance(supervision, Mapping) else None
+        recovery = memory.get("grasp_recovery") if isinstance(memory, Mapping) else None
+        required = recovery.get("required_action") if isinstance(recovery, Mapping) else None
+        return bool(
+            isinstance(recovery, Mapping)
+            and recovery.get("status") == "required"
+            and recovery.get("purpose") == "attached_place_frontier_recovery"
+            and isinstance(required, Mapping)
+            and required.get("name") == "gripper_control"
+            and required.get("parameters") == context.parameters
+        )
 
     def _gripper_tool_name(self, binary_position: int) -> str:
         return "gripper_open" if binary_position == 1 else "gripper_close"

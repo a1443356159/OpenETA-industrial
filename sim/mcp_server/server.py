@@ -1341,12 +1341,18 @@ _GRIPPER_STEPS = 10
 
 @_blocking_tool
 @_serialized_env_control
-def gripper_open(handle: str, *, session_id: str = "") -> dict:
+def gripper_open(
+    handle: str,
+    *,
+    session_id: str = "",
+    recovery_intent: str = "",
+) -> dict:
     """Open the gripper (10 steps).
 
     Args:
         handle: Environment handle from create_env.
         session_id: Optional session id to reuse an existing session.
+        recovery_intent: Host-authorized attached-place recovery mode.
 
     Returns:
         Same structure as ``step_env`` (observation, reward, terminated,
@@ -1357,9 +1363,14 @@ def gripper_open(handle: str, *, session_id: str = "") -> dict:
     meta = _session_envs.get(sid, {}).get(handle)
     if not meta:
         return {"error": f"Unknown: {handle}"}
+    if recovery_intent not in {"", "frozen_grasp_frontier"}:
+        return {"error": "Unsupported gripper recovery intent."}
     backend = meta.get("backend", "")
     if isinstance(meta.get("control_spec"), dict) and meta["control_spec"].get("motion_control"):
-        return _proxy_step(meta, {"action_type": "gripper_open"}, num_steps=1)
+        action = {"action_type": "gripper_open"}
+        if recovery_intent:
+            action["recovery_intent"] = recovery_intent
+        return _proxy_step(meta, action, num_steps=1)
     meta["_gripper_cmd"] = -1.0  # latch OPEN — held on every subsequent step
     try:
         act = make_gripper_action(meta, open_gripper=True, backend=backend)
