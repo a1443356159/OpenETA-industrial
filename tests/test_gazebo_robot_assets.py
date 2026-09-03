@@ -61,6 +61,25 @@ def test_ros_package_is_relocatable_and_has_required_control_contract(tmp_path: 
     assert "gripper_left_finger_joint" in xacro
 
 
+def test_pickplace_description_uses_explicit_four_bar_collision_state() -> None:
+    vendor_macro = (
+        ROBOTIQ_ASSETS / "urdf" / "robotiq_2f_85_macro.urdf.xacro"
+    ).read_text(encoding="utf-8")
+    mount_macro = (
+        ROBOTIQ_ASSETS / "urdf" / "rm75_robotiq2f85.urdf.xacro"
+    ).read_text(encoding="utf-8")
+    pickplace = (PACKAGE / "urdf" / "rm75_robotiq2f85_pickplace.urdf.xacro").read_text(
+        encoding="utf-8"
+    )
+
+    # The physical adapter solves the nonlinear four-bar and commands all six
+    # joints.  MoveIt must accept that same state for endpoint collision
+    # checking instead of silently applying the vendor's linear mimic model.
+    assert "kinematic_mimic:=true" in vendor_macro
+    assert 'kinematic_mimic="${not exact_four_bar}"' in mount_macro
+    assert 'exact_four_bar="true"' in pickplace
+
+
 def test_all_repository_robot_xml_is_well_formed() -> None:
     for package in (ROBOTIQ_PACKAGE,):
         for path in package.rglob("*"):

@@ -24,6 +24,7 @@ from .robot_control import (
     ARM_JOINTS,
     ARM_JOINT_BOUNDS,
     ARM_HOME_JOINT_POSITIONS,
+    GRIPPER_JOINTS,
     GazeboControlConfig,
     GazeboController,
     MOTION_FAILURE_SETTLE_INTERVAL_S,
@@ -36,6 +37,7 @@ from .robot_control import (
     robot_state_from_sources,
     start_state_recovery_record,
 )
+from .robotiq_kinematics import six_joint_positions
 from .planning_scene import (
     LEFT_FINGERTIP,
     RIGHT_FINGERTIP,
@@ -3093,12 +3095,20 @@ class _RosRuntime:
             request_names = list(names)
             request_positions = list(positions)
             if gripper_position is not None:
-                # MoveIt's mimic-joint model expands the remaining Robotiq
-                # linkage from this active joint.  A deterministic close sweep
-                # catches static collisions that an open-hand contact state
-                # cannot reveal before the physical gripper is actuated.
-                request_names.append(self.config.active_joint)
-                request_positions.append(gripper_position)
+                # The native Gazebo adapter drives all six joints from one
+                # common four-bar driver.  Its exact linkage is deliberately
+                # not the vendor URDF's constant-multiplier approximation:
+                # relying on MoveIt's implicit mimic expansion would therefore
+                # validate a different fingertip sweep from the one that is
+                # physically executed.  The pick-place robot description
+                # exposes those joints independently for collision checking;
+                # send the same deterministic six-joint configuration used by
+                # the simulator while retaining one public driver coordinate.
+                linkage = six_joint_positions(float(gripper_position))
+                request_names.extend(GRIPPER_JOINTS)
+                request_positions.extend(
+                    float(linkage[name]) for name in GRIPPER_JOINTS
+                )
             _populate_state_validity_request(
                 request,
                 request_positions,

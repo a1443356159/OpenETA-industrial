@@ -4,7 +4,11 @@
   <xacro:include filename="$(find openeta_rm75_v_description)/urdf/rm75_6fb_v.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/vendor/robotiq/rm75_robotiq2f85.urdf.xacro"/>
   <xacro:include filename="$(find openeta_rm75_robotiq2f85_sim)/urdf/ros2_control.xacro"/>
-  <xacro:rm75_robotiq2f85 parent="link_7" mount_z="0.0"/>
+  <!-- Collision qualification uses the same exact four-bar configuration
+       commanded by the native Gazebo adapter, not the vendor's linear mimic
+       approximation.  The arm group remains unchanged; only passive hand
+       joints become explicit RobotState inputs. -->
+  <xacro:rm75_robotiq2f85 parent="link_7" mount_z="0.0" exact_four_bar="true"/>
   <xacro:openeta_robotiq_ros2_control controller_config="$(arg controller_config)"/>
 
   <xacro:macro name="gz_gripper_position_controller" params="joint topic p_gain d_gain">

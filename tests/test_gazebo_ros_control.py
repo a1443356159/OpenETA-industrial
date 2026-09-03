@@ -13,11 +13,13 @@ import pytest
 
 from extensions.gazebo.robot_control import (
     ARM_JOINTS,
+    GRIPPER_JOINTS,
     JOINT_NAMES,
     GazeboControlConfig,
     make_move_group_goal,
     robot_state_from_sources,
 )
+from extensions.gazebo.robotiq_kinematics import six_joint_positions
 from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.ros_control import (
     L5_TRAJECTORY_START_TOLERANCE_RAD,
@@ -1302,7 +1304,7 @@ def test_recovery_ros_messages_preserve_all_seven_measured_joint_positions() -> 
     assert goal.trajectory.points[0].time_from_start is duration
 
 
-def test_qualification_open_state_adds_active_gripper_joint_to_moveit_diff() -> None:
+def test_qualification_open_state_adds_exact_four_bar_joint_state_to_moveit_diff() -> None:
     captured = []
     response_timeouts = []
 
@@ -1345,13 +1347,14 @@ def test_qualification_open_state_adds_active_gripper_joint_to_moveit_diff() -> 
         "collision_pairs": [],
         "contact_collision_override": False,
     }
+    expected_linkage = six_joint_positions(config.gripper_position(1))
     assert captured[0].robot_state.joint_state.name == [
         *[f"joint_{index}" for index in range(1, 8)],
-        config.active_joint,
+        *GRIPPER_JOINTS,
     ]
     assert captured[0].robot_state.joint_state.position == [
         *([0.0] * 7),
-        config.gripper_position(1),
+        *[expected_linkage[name] for name in GRIPPER_JOINTS],
     ]
     assert response_timeouts == pytest.approx([44.0])
 
@@ -1471,7 +1474,14 @@ def test_qualification_state_validity_stops_close_sweep_on_static_collision() ->
     class Client:
         def call_async(self, request):
             captured.append(request)
-            angle = request.robot_state.joint_state.position[-1]
+            requested = dict(
+                zip(
+                    request.robot_state.joint_state.name,
+                    request.robot_state.joint_state.position,
+                    strict=True,
+                )
+            )
+            angle = requested[config.active_joint]
             return SimpleNamespace(
                 valid=not math.isclose(angle, 0.05),
                 contacts=([Contact()] if math.isclose(angle, 0.05) else []),
@@ -1502,8 +1512,22 @@ def test_qualification_state_validity_stops_close_sweep_on_static_collision() ->
         ["robotiq_85_left_finger_tip_link", "work_table"]
     ]
     assert [
-        request.robot_state.joint_state.position[-1] for request in captured
+        dict(
+            zip(
+                request.robot_state.joint_state.name,
+                request.robot_state.joint_state.position,
+                strict=True,
+            )
+        )[config.active_joint]
+        for request in captured
     ] == [0.05]
+    expected_linkage = six_joint_positions(0.05)
+    assert captured[0].robot_state.joint_state.name[-len(GRIPPER_JOINTS) :] == list(
+        GRIPPER_JOINTS
+    )
+    assert captured[0].robot_state.joint_state.position[-len(GRIPPER_JOINTS) :] == [
+        expected_linkage[name] for name in GRIPPER_JOINTS
+    ]
     assert result["qualification_gripper_sweep_checks"][0]["sample"] == (
         "near_open"
     )
@@ -1582,7 +1606,14 @@ def test_close_sweep_accepts_simultaneous_bilateral_target_contact_geometry() ->
 
     class Client:
         def call_async(self, request):
-            angle = request.robot_state.joint_state.position[-1]
+            requested = dict(
+                zip(
+                    request.robot_state.joint_state.name,
+                    request.robot_state.joint_state.position,
+                    strict=True,
+                )
+            )
+            angle = requested[config.active_joint]
             links = ["robotiq_85_left_finger_tip_link"]
             if angle >= 0.4:
                 links.append("robotiq_85_right_finger_tip_link")
