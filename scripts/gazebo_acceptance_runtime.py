@@ -645,7 +645,7 @@ def _start_host_simulator_environment(
                 "agent_session_id": "host-launcher",
             },
         )
-    except Exception as exc:
+    except BaseException as exc:
         cleanup: Mapping[str, Any] = {"ok": True, "skipped": True}
         if episode_config.handle:
             cleanup = close_environment_mcp_env(
@@ -671,6 +671,8 @@ def _start_host_simulator_environment(
                 "cleanup": dict(cleanup),
             },
         )
+        if not isinstance(exc, Exception):
+            raise
         raise AcceptanceError(
             f"TUI_NOT_READY: launcher could not create/reset Gazebo: {exc}"
         ) from exc
@@ -1865,6 +1867,7 @@ def run_case(
         "closed": False,
         "skipped": True,
     }
+    run_error: BaseException | None = None
     tui_started_at_s: float | None = None
     tui_exited_at_s: float | None = None
     try:
@@ -1930,6 +1933,12 @@ def run_case(
             )
             tui_code = int(completed.returncode)
         tui_exited_at_s = time.time()
+    except BaseException as exc:
+        # Do not let an environment-start or TUI exception skip the worker,
+        # ROS graph, and Gazebo partition cleanup below.  Preserve the exact
+        # original exception and re-raise it after durable cleanup evidence is
+        # written.
+        run_error = exc
     finally:
         if host_lifecycle is not None:
             host_lifecycle.evidence.update(
@@ -2041,6 +2050,8 @@ def run_case(
         "protected_ros_graphs_unchanged": protected_graph_unchanged,
     }
     _json_dump(paths.root / "cleanup.json", cleanup)
+    if run_error is not None:
+        raise run_error
     if mcp_termination_error:
         raise AcceptanceError(f"MCP_CLEANUP_FAILED: {mcp_termination_error}")
     if not host_lifecycle_cleanup.get("closed"):

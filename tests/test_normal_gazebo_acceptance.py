@@ -137,6 +137,141 @@ def test_launcher_creates_before_tui_and_closes_exact_environment_after_exit(
     assert lifecycle_errors == []
 
 
+def test_launcher_closes_partial_environment_when_start_is_interrupted(
+    tmp_path, monkeypatch
+) -> None:
+    closed = []
+
+    class InterruptedEnvironment:
+        def __init__(self, *, transport, config) -> None:
+            self.transport = transport
+            self.config = config
+
+        def reset(self, **_kwargs):
+            self.config.handle = "env-partial"
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        acceptance.base,
+        "SimulatorMcpEpisodeEnvironment",
+        InterruptedEnvironment,
+    )
+    monkeypatch.setattr(
+        acceptance.base,
+        "simulator_mcp_transport_for_url",
+        lambda _url: object(),
+    )
+
+    def close_partial(_transport, **kwargs):
+        closed.append(kwargs)
+        return {"success": True, "closed": True}
+
+    monkeypatch.setattr(acceptance.base, "close_environment_mcp_env", close_partial)
+    paths = acceptance.base.case_paths(tmp_path, "pick-place", "scripted_tui")
+    allocation = acceptance.base.Allocation(83, "host-lifecycle", 18767, "run-1")
+
+    with pytest.raises(KeyboardInterrupt):
+        acceptance.base._start_host_simulator_environment(
+            paths,
+            allocation,
+            environment_config={
+                "env_id": "openeta/gazebo_rm75_robotiq2f85_pickplace-v0",
+                "seed": 7,
+                "image_width": 512,
+                "image_height": 512,
+            },
+            timeout_s=30.0,
+        )
+
+    assert closed == [
+        {
+            "handle": "env-partial",
+            "session_id": "run-1",
+            "timeout_s": 30.0,
+        }
+    ]
+    evidence = json.loads(
+        (paths.root / "host-simulator-lifecycle.json").read_text(encoding="utf-8")
+    )
+    assert evidence["status"] == "start_failed"
+    assert evidence["error_type"] == "KeyboardInterrupt"
+    assert evidence["cleanup"]["closed"] is True
+
+
+def test_case_start_failure_still_writes_cleanup_and_stops_owned_group(
+    tmp_path, monkeypatch
+) -> None:
+    paths = acceptance.base.case_paths(tmp_path, "pick-place", "scripted_tui")
+    paths.root.mkdir(parents=True)
+    paths.receipt.write_text(
+        json.dumps({"preexisting_processes": [], "protected_ros_graphs": {}}),
+        encoding="utf-8",
+    )
+
+    class Process:
+        pid = 4321
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+    process = Process()
+    monkeypatch.setattr(acceptance.base.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(acceptance.base.os, "getpgid", lambda _pid: 4321)
+    monkeypatch.setattr(
+        acceptance.base,
+        "_wait_ready",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            acceptance.base.AcceptanceError("MCP_NOT_READY")
+        ),
+    )
+    monkeypatch.setattr(acceptance.base, "_root_provider_config", lambda _repo: {})
+    monkeypatch.setattr(
+        acceptance.base, "_tui_provider_environment", lambda *_args, **_kwargs: {}
+    )
+    monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])
+
+    def stop_group(target, _pgid, **_kwargs):
+        target.returncode = -15
+
+    monkeypatch.setattr(acceptance.base, "_terminate_owned_group", stop_group)
+    monkeypatch.setattr(
+        acceptance.base, "_terminate_owned_worker_groups", lambda **_kwargs: []
+    )
+    monkeypatch.setattr(
+        acceptance.base, "_terminate_owned_residual_groups", lambda **_kwargs: []
+    )
+    monkeypatch.setattr(acceptance.base, "_owned_process_residuals", lambda *_a, **_k: [])
+    monkeypatch.setattr(acceptance.base, "_wait_for_free_port", lambda _port: True)
+    monkeypatch.setattr(
+        acceptance.base,
+        "_ros_graph_cleanup",
+        lambda _domain: {"state": "PASSED"},
+    )
+    monkeypatch.setattr(
+        acceptance.base,
+        "_partition_cleanup",
+        lambda _partition: {"state": "PASSED"},
+    )
+    from extensions.gazebo.ros2_ws import acceptance_isolation
+
+    monkeypatch.setattr(acceptance_isolation, "probe_ros_graph", lambda _domain: {})
+    allocation = acceptance.base.Allocation(83, "case-start", 18767, "run-1")
+
+    with pytest.raises(acceptance.base.AcceptanceError, match="MCP_NOT_READY"):
+        acceptance.base.run_case(
+            Path(__file__).resolve().parents[1],
+            paths,
+            allocation,
+            environment_config={"env_id": "unused-after-readiness-failure"},
+        )
+
+    cleanup = json.loads((paths.root / "cleanup.json").read_text(encoding="utf-8"))
+    assert cleanup["mcp_group_exited"] is True
+    assert cleanup["port_free"] is True
+    assert cleanup["owned_process_residuals"] == []
+
+
 def test_operator_gui_launcher_waits_for_visible_ready_marker(tmp_path, monkeypatch) -> None:
     paths = acceptance.base.case_paths(tmp_path, "pick-place", "human_tui")
     paths.root.mkdir(parents=True)
