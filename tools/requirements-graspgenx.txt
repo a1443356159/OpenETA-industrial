@@ -8,6 +8,7 @@ mcp>=1.0,<1.29
 uvicorn
 starlette
 numpy
+scipy
 Pillow
 
 # Install torch for the target CUDA platform and install the official GraspGenX
