@@ -21,6 +21,7 @@ REFERENCE_POINT_LOCALIZATION_MAX_OUTPUT_TOKENS = 512
 REFERENCE_POINT_LOCALIZATION_MAX_ATTEMPTS = 3
 SEMANTIC_POINT_LOCALIZATION_SCHEMA_VERSION = "openeta.semantic_point_localization.v1"
 SEMANTIC_POINT_LOCALIZATION_MAX_OUTPUT_TOKENS = 512
+SEMANTIC_POINT_LOCALIZATION_MAX_ATTEMPTS = 2
 
 REFERENCE_POINT_LOCALIZATION_SYSTEM_PROMPT = """You are an isolated OpenETA visual localizer.
 Image #1 is an RGB observation from an embodied simulation scene. Images #2,
@@ -187,84 +188,96 @@ class BackendSemanticPointLocalizer:
     ) -> ReferencePointLocalization:
         width, height = image_size
         started = time.monotonic()
-        try:
-            result = self.backend.decide(
-                PlannerBackendRequest(
-                    system_prompt=SEMANTIC_POINT_LOCALIZATION_SYSTEM_PROMPT,
-                    tool_context={
-                        "schema_version": SEMANTIC_POINT_LOCALIZATION_SCHEMA_VERSION,
-                        "role": "semantic_point_localizer",
-                        "semantic_target": semantic_target,
-                        "scene_image_size": {"width": width, "height": height},
-                        "image_order": [{"image_number": 1, "role": "current_scene"}],
-                        "vision_image_paths": [str(scene_image)],
-                    },
-                    metadata={
-                        "schema_version": SEMANTIC_POINT_LOCALIZATION_SCHEMA_VERSION,
-                        "isolated_context": True,
-                    },
+        result = None
+        payload: JsonDict = {}
+        validation_error = ""
+        for attempt in range(1, SEMANTIC_POINT_LOCALIZATION_MAX_ATTEMPTS + 1):
+            try:
+                result = self.backend.decide(
+                    PlannerBackendRequest(
+                        system_prompt=SEMANTIC_POINT_LOCALIZATION_SYSTEM_PROMPT,
+                        tool_context={
+                            "schema_version": SEMANTIC_POINT_LOCALIZATION_SCHEMA_VERSION,
+                            "role": "semantic_point_localizer",
+                            "semantic_target": semantic_target,
+                            "scene_image_size": {"width": width, "height": height},
+                            "image_order": [{"image_number": 1, "role": "current_scene"}],
+                            "vision_image_paths": [str(scene_image)],
+                        },
+                        attempt=attempt,
+                        validation_errors=([validation_error] if validation_error else []),
+                        metadata={
+                            "schema_version": SEMANTIC_POINT_LOCALIZATION_SCHEMA_VERSION,
+                            "isolated_context": True,
+                        },
+                    )
                 )
-            )
-        except Exception as exc:  # noqa: BLE001 - provider boundary is fail-closed.
-            raise SemanticPointLocalizationError(
-                "semantic_point_localization_provider_error",
-                f"isolated visual localizer failed: {exc}",
-                infrastructure=True,
-            ) from exc
-        latency_s = time.monotonic() - started
-        try:
-            payload = _json_object(result.payload)
-            decision = str(payload.get("decision") or "").strip().lower()
-            reason = str(payload.get("reason") or "").strip()
-            if decision == "abstain":
+            except Exception as exc:  # noqa: BLE001 - provider boundary is fail-closed.
                 raise SemanticPointLocalizationError(
-                    "semantic_point_localization_abstained",
-                    reason or "isolated visual localizer could not identify the target",
+                    "semantic_point_localization_provider_error",
+                    f"isolated visual localizer failed: {exc}",
+                    infrastructure=True,
+                ) from exc
+            try:
+                payload = _json_object(result.payload)
+                decision = str(payload.get("decision") or "").strip().lower()
+                reason = str(payload.get("reason") or "").strip()
+                if decision == "abstain":
+                    raise SemanticPointLocalizationError(
+                        "semantic_point_localization_abstained",
+                        reason or "isolated visual localizer could not identify the target",
+                    )
+                if decision != "locate":
+                    raise ValueError("decision must be locate or abstain")
+                coordinate_space = str(payload.get("coordinate_space") or "").strip()
+                if coordinate_space and coordinate_space != "original_pixels":
+                    raise ValueError("coordinate_space must be original_pixels")
+                declared_size = payload.get("image_size")
+                if declared_size is not None and not (
+                    isinstance(declared_size, (list, tuple))
+                    and len(declared_size) == 2
+                    and all(
+                        isinstance(item, int | float) and not isinstance(item, bool)
+                        for item in declared_size
+                    )
+                    and int(declared_size[0]) == width
+                    and int(declared_size[1]) == height
+                ):
+                    raise ValueError("image_size does not match the original image")
+                point = payload.get("point")
+                if not isinstance(point, dict):
+                    raise ValueError("locate decision must include point")
+                x = _finite_number(point.get("x"), field="point.x")
+                y = _finite_number(point.get("y"), field="point.y")
+                if not (0 <= x < width and 0 <= y < height):
+                    raise ValueError("point lies outside the original image")
+                bbox = (
+                    None
+                    if payload.get("bbox_xyxy") is None
+                    else _bbox_xyxy(
+                        payload.get("bbox_xyxy"),
+                        image_size=image_size,
+                        point=(x, y),
+                    )
                 )
-            if decision != "locate":
-                raise ValueError("decision must be locate or abstain")
-            coordinate_space = str(payload.get("coordinate_space") or "").strip()
-            if coordinate_space and coordinate_space != "original_pixels":
-                raise ValueError("coordinate_space must be original_pixels")
-            declared_size = payload.get("image_size")
-            if declared_size is not None and not (
-                isinstance(declared_size, (list, tuple))
-                and len(declared_size) == 2
-                and all(
-                    isinstance(item, int | float) and not isinstance(item, bool)
-                    for item in declared_size
+                confidence = _finite_number(
+                    payload.get("confidence", 0.0), field="confidence"
                 )
-                and int(declared_size[0]) == width
-                and int(declared_size[1]) == height
-            ):
-                raise ValueError("image_size does not match the original image")
-            point = payload.get("point")
-            if not isinstance(point, dict):
-                raise ValueError("locate decision must include point")
-            x = _finite_number(point.get("x"), field="point.x")
-            y = _finite_number(point.get("y"), field="point.y")
-            if not (0 <= x < width and 0 <= y < height):
-                raise ValueError("point lies outside the original image")
-            bbox = (
-                None
-                if payload.get("bbox_xyxy") is None
-                else _bbox_xyxy(
-                    payload.get("bbox_xyxy"),
-                    image_size=image_size,
-                    point=(x, y),
-                )
-            )
-            confidence = _finite_number(payload.get("confidence", 0.0), field="confidence")
-            if not 0 <= confidence <= 1:
-                raise ValueError("confidence must be between 0 and 1")
-        except SemanticPointLocalizationError:
-            raise
-        except (TypeError, ValueError) as exc:
-            raise SemanticPointLocalizationError(
-                "semantic_point_localization_contract_error",
-                f"isolated visual localizer returned invalid evidence: {exc}",
-                infrastructure=True,
-            ) from exc
+                if not 0 <= confidence <= 1:
+                    raise ValueError("confidence must be between 0 and 1")
+                break
+            except SemanticPointLocalizationError:
+                raise
+            except (TypeError, ValueError) as exc:
+                validation_error = str(exc)
+                if attempt == SEMANTIC_POINT_LOCALIZATION_MAX_ATTEMPTS:
+                    raise SemanticPointLocalizationError(
+                        "semantic_point_localization_contract_error",
+                        f"isolated visual localizer returned invalid evidence: {exc}",
+                        infrastructure=True,
+                    ) from exc
+        assert result is not None
+        latency_s = time.monotonic() - started
         return ReferencePointLocalization(
             x=x,
             y=y,
@@ -279,6 +292,7 @@ class BackendSemanticPointLocalizer:
                 "coordinate_space": "original_pixels",
                 "image_size": [width, height],
                 "latency_s": round(latency_s, 6),
+                "attempt_count": attempt,
                 "provider_details": _compact_provider_details(result.details),
             },
         )
@@ -716,7 +730,7 @@ def _repeats_excluded_candidate(
     return math.hypot(point[0] - old_x, point[1] - old_y) <= tolerance
 
 
-def _json_object(value: JsonDict | str) -> JsonDict:
+def _json_object(value: object) -> JsonDict:
     if isinstance(value, dict):
         return dict(value)
     if isinstance(value, str):
@@ -731,6 +745,14 @@ def _json_object(value: JsonDict | str) -> JsonDict:
             raise ValueError("reference point localizer returned invalid JSON") from exc
         if isinstance(payload, dict):
             return payload
+        if (
+            isinstance(payload, list)
+            and len(payload) == 1
+            and isinstance(payload[0], dict)
+        ):
+            return dict(payload[0])
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        return dict(value[0])
     raise ValueError("reference point localizer must return one JSON object")
 
 

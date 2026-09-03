@@ -22,6 +22,7 @@ from agent.runtime.planner import (
     _operator_semantic_prompts,
     _sam3_request_identity,
     _semantic_camera_view_identity,
+    _semantic_detections_share_bundle,
     _semantic_perception_obligation,
     _validate_sam3_parameters,
 )
@@ -2506,6 +2507,52 @@ def test_active_observe_rebinds_nested_environment_epoch_to_current_session() ->
     assert selected["scene_epoch"] == 4
     assert placement_object["scene_epoch"] == 4
     assert memory.pending_sam3_selection() is None
+
+
+def test_same_image_keeps_target_and_region_when_bundle_ids_differ() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="sort a wrench into a bin")
+    source_image = "/tmp/current-top.png"
+    memory.save_fact(
+        "pending_sam3_selection",
+        {
+            "result_id": "active-target",
+            "target_prompt": "silver wrench",
+            "source_image": source_image,
+            "scene_epoch": 0,
+            "semantic_role": "grasp_target",
+            "perception_bundle_id": "perception-active-internal",
+            "candidates": [{"id": "target", "mask_ref": "/tmp/target-mask.png"}],
+        },
+        source="test",
+    )
+    target = memory.resolve_sam3_selection(
+        result_id="active-target",
+        detection_id="target",
+        selection_source="active_vision_point_depth_geometry",
+    )
+    memory.save_fact(
+        "pending_sam3_selection",
+        {
+            "result_id": "outer-region",
+            "target_prompt": "blue bin interior",
+            "source_image": source_image,
+            "scene_epoch": 0,
+            "semantic_role": "placement_region",
+            "perception_bundle_id": "perception-outer-materialization",
+            "candidates": [{"id": "region", "mask_ref": "/tmp/region-mask.png"}],
+        },
+        source="test",
+    )
+    region = memory.resolve_sam3_selection(
+        result_id="outer-region",
+        detection_id="region",
+        selection_source="isolated_main_vlm",
+    )
+
+    assert memory.placement_object_detection() is not None
+    assert memory.placement_region_detection() is not None
+    assert _semantic_detections_share_bundle(target, region) is True
 
 
 def test_active_observe_placement_detection_enters_anyplace_memory() -> None:

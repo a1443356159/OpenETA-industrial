@@ -612,6 +612,65 @@ def test_active_observe_searches_from_calibrated_visual_point_without_mask(
     assert sam_calls[0]["semantic_target"] == "red hex bolt"
 
 
+def test_active_observe_uses_current_localizer_roi_before_motion(
+    tmp_path: Path,
+) -> None:
+    top_rgb, top_depth = tmp_path / "top.png", tmp_path / "top-depth.png"
+    wrist_rgb, wrist_depth = tmp_path / "wrist.png", tmp_path / "wrist-depth.png"
+    mask_path = tmp_path / "roi-mask.png"
+    _save_rgb(top_rgb)
+    _save_rgb(wrist_rgb)
+    mask = np.zeros((120, 160), dtype=bool)
+    mask[35:85, 55:105] = True
+    _save_depth(top_depth, millimetres=980, mask=mask)
+    _save_depth(wrist_depth)
+    Image.fromarray((mask * 255).astype(np.uint8)).save(mask_path)
+    observation = _observation(
+        top_rgb=top_rgb,
+        top_depth=top_depth,
+        wrist_rgb=wrist_rgb,
+        wrist_depth=wrist_depth,
+    )
+    sam_contexts: list[ToolExecutionContext] = []
+
+    def sam3_handler(context: ToolExecutionContext) -> ToolResult:
+        sam_contexts.append(context)
+        detection = {
+            "id": "detection_target",
+            "label": "red hex bolt",
+            "mask_ref": str(mask_path),
+            "bbox_xyxy": [55, 35, 105, 85],
+        }
+        return ToolResult(
+            True,
+            details={
+                "result_id": "current-roi-result",
+                "source_image": str(top_rgb),
+                "source_frame_id": "top_camera_optical_frame",
+                "semantic_role": "grasp_target",
+                "semantic_target": "red hex bolt",
+                "perception_bundle_id": "perception-current-roi",
+                "observation_id": "observation-current-roi",
+                "detections": [detection],
+                "selected_detection": detection,
+            },
+        )
+
+    controller = _controller(tmp_path, sam3_handler=sam3_handler)
+    context = _search_context(controller, observation, source_image=top_rgb)
+    context.parameters["target_hint"]["bbox_xyxy"] = [55.0, 35.0, 105.0, 85.0]
+
+    result = controller.handler(context)
+
+    assert result.success is True
+    assert result.details["outputs"]["status"] == "reused"
+    assert result.details["outputs"]["motion_count"] == 0
+    assert result.details["outputs"]["selected_detection"]["id"] == "detection_target"
+    assert len(sam_contexts) == 1
+    assert sam_contexts[0].parameters["mode"] == "text"
+    assert sam_contexts[0].parameters["roi_bbox_xyxy"] == [55.0, 35.0, 105.0, 85.0]
+
+
 def test_grasp_rgbd_quality_requires_resolution_scaled_border_margin(
     tmp_path: Path,
 ) -> None:

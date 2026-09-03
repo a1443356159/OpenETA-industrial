@@ -8014,6 +8014,12 @@ def _semantic_detection_is_current(
 def _semantic_detections_share_bundle(first: object, second: object) -> bool:
     if not isinstance(first, dict) or not isinstance(second, dict):
         return False
+    # Composite tools can derive an internal bundle id before the outer
+    # planner materializes the same camera packet.  The immutable RGB artifact
+    # is the authoritative packet identity in that case; differing derived ids
+    # must not make two masks from the exact same image mutually stale.
+    if _same_local_artifact(first.get("source_image"), second.get("source_image")):
+        return True
     first_bundle = str(first.get("perception_bundle_id") or "")
     second_bundle = str(second.get("perception_bundle_id") or "")
     if first_bundle or second_bundle:

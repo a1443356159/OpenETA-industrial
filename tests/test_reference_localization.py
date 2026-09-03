@@ -10,6 +10,7 @@ from agent.runtime.reference_localization import (
     REFERENCE_POINT_LOCALIZATION_SYSTEM_PROMPT,
     REFERENCE_POINT_VERIFICATION_SYSTEM_PROMPT,
     BackendReferencePointLocalizer,
+    BackendSemanticPointLocalizer,
 )
 
 
@@ -122,6 +123,38 @@ def test_reference_point_localizer_requires_exact_instance_attributes() -> None:
     )
     assert "grasp_geometry_family" in REFERENCE_POINT_VERIFICATION_SYSTEM_PROMPT
     assert "never relabel an object" in REFERENCE_POINT_VERIFICATION_SYSTEM_PROMPT
+
+
+def test_semantic_point_localizer_retries_one_malformed_payload(tmp_path: Path) -> None:
+    scene, _ = _images(tmp_path)
+    attempts = []
+
+    def decide(request):
+        attempts.append(request)
+        if len(attempts) == 1:
+            # Some OpenAI-compatible providers occasionally wrap a valid JSON
+            # object in an array despite json_object response mode.
+            return "[]"
+        return (
+            '[{"decision":"locate","coordinate_space":"original_pixels",'
+            '"image_size":[64,48],"point":{"x":21,"y":30},'
+            '"bbox_xyxy":[16,20,28,40],"confidence":0.84,'
+            '"reason":"unique visible target"}]'
+        )
+
+    result = BackendSemanticPointLocalizer(CallablePlannerBackend(decide)).localize(
+        semantic_target="silver wrench",
+        scene_image=scene,
+        image_size=(64, 48),
+    )
+
+    assert result.as_prompt_point() == {"x": 21.0, "y": 30.0, "label": 1}
+    assert len(attempts) == 2
+    assert attempts[1].attempt == 2
+    assert attempts[1].validation_errors == [
+        "reference point localizer must return one JSON object"
+    ]
+    assert result.details["attempt_count"] == 2
 
 
 def test_reference_point_localizer_excludes_rejected_candidate_and_retries(

@@ -252,6 +252,8 @@ class ActiveVisionController:
             )
 
         search_mode = not evidence_id
+        semantic_roi_bbox: list[float] | None = None
+        semantic_roi_source_frame_id = ""
         if search_mode:
             target_hint = params.get("target_hint")
             if target_hint is None:
@@ -322,6 +324,19 @@ class ActiveVisionController:
                     source_rgb=Path(str(hint_receipt["source_image"])),
                     point_xy=(float(requested_point[0]), float(requested_point[1])),
                 )
+            raw_roi_bbox = hint_receipt.get("bbox_xyxy")
+            if (
+                isinstance(raw_roi_bbox, list)
+                and len(raw_roi_bbox) == 4
+                and all(
+                    isinstance(value, int | float) and not isinstance(value, bool)
+                    for value in raw_roi_bbox
+                )
+            ):
+                semantic_roi_bbox = [float(value) for value in raw_roi_bbox]
+                semantic_roi_source_frame_id = str(
+                    hint_receipt.get("source_frame_id") or ""
+                )
             target_point_count = 1
         else:
             evidence = _resolve_target_evidence(
@@ -373,6 +388,113 @@ class ActiveVisionController:
                 target_points_world, 0.02, axis=0
             )
             target_point_count = int(len(target_points_world))
+        # A semantic localizer has already grounded a point and, when available,
+        # a tight visual box in a calibrated current view.  Try that inexpensive
+        # ROI-constrained text mask before moving the arm.  This prevents a
+        # full-frame point mask from absorbing a support surface around a thin
+        # industrial tool, while retaining the same RGB-D and geometry gates as
+        # an actively acquired view.
+        if search_mode and self.sam3_handler is not None and semantic_roi_bbox is not None:
+            source_rgb = Path(str(hint_receipt["source_image"]))
+            try:
+                current_packet = _camera_packet_for_source(
+                    observation,
+                    source_rgb=source_rgb,
+                    frame_id=semantic_roi_source_frame_id,
+                )
+            except ActiveVisionError as exc:
+                record["current_view_semantic_probe"] = {
+                    "accepted": False,
+                    "rejection": exc.args[0],
+                }
+            else:
+                phase_started = time.monotonic()
+                semantic_result, semantic_cache_hit = self._segment_semantic_view(
+                    context,
+                    observation=observation,
+                    packet=current_packet,
+                    semantic_target=semantic_target,
+                    scene_epoch=_scene_epoch(observation),
+                    roi_bbox_xyxy=semantic_roi_bbox,
+                )
+                probe: JsonDict = {
+                    "frame_id": current_packet["camera"].frame_id,
+                    "roi_bbox_xyxy": list(semantic_roi_bbox),
+                    "sam3_elapsed_s": round(time.monotonic() - phase_started, 6),
+                    "sam3_cache_hit": semantic_cache_hit,
+                    "sam3_success": semantic_result.success,
+                    "accepted": False,
+                }
+                record["current_view_semantic_probe"] = probe
+                if semantic_result.success:
+                    current_evidence = _evidence_from_sam_result(
+                        semantic_result,
+                        observation=observation,
+                        artifact_root=self.artifact_root,
+                    )
+                    if current_evidence is not None:
+                        current_quality, current_points = _target_quality(
+                            current_evidence,
+                            profile=self.quality_profile,
+                        )
+                        requested_point = hint_receipt["requested_point_xy"]
+                        current_geometry = _point_depth_geometry_audit(
+                            current_evidence,
+                            target_center_world=target_center,
+                            target_extent_world=target_extent,
+                            point_xy=(
+                                float(requested_point[0]),
+                                float(requested_point[1]),
+                            ),
+                            world_points=current_points,
+                        )
+                        probe["quality"] = current_quality
+                        probe["point_depth_geometry"] = current_geometry
+                        if (
+                            current_quality.get("passed") is True
+                            and current_geometry.get("passed") is True
+                        ):
+                            probe["accepted"] = True
+                            record.update(
+                                {
+                                    "status": "reused",
+                                    "stop_reason": "current_roi_semantic_quality_pass",
+                                    "viewpoint_id": (
+                                        f"existing:{current_evidence.frame_id}"
+                                    ),
+                                    "motion_count": 0,
+                                    "final_quality": {
+                                        **current_quality,
+                                        "point_depth_geometry": current_geometry,
+                                    },
+                                }
+                            )
+                            return (
+                                self._result(
+                                    context,
+                                    success=True,
+                                    status="reused",
+                                    content=(
+                                        "Current ROI-grounded RGB-D observation already "
+                                        "passes target quality."
+                                    ),
+                                    record=record,
+                                    quality=record["final_quality"],
+                                    observation_bundle_id=(
+                                        current_evidence.perception_bundle_id
+                                    ),
+                                    viewpoint_id=(
+                                        f"existing:{current_evidence.frame_id}"
+                                    ),
+                                    motion_count=0,
+                                    segmentation=semantic_result.details,
+                                ),
+                                None,
+                            )
+                        probe["rejection"] = "roi_semantic_quality_rejected"
+                    else:
+                        probe["rejection"] = "roi_semantic_selection_missing"
+
         if motion_budget == 0:
             raise ActiveVisionError(
                 "current_view_insufficient_motion_disabled",
@@ -531,6 +653,12 @@ class ActiveVisionController:
                     packet=packet,
                     semantic_target=semantic_target,
                     scene_epoch=_scene_epoch(current_observation),
+                    roi_bbox_xyxy=(
+                        semantic_roi_bbox
+                        if semantic_roi_bbox is not None
+                        and camera.frame_id == semantic_roi_source_frame_id
+                        else None
+                    ),
                 )
                 evaluation["semantic_sam3_elapsed_s"] = round(
                     time.monotonic() - phase_started,
@@ -914,6 +1042,7 @@ class ActiveVisionController:
         packet: JsonDict,
         semantic_target: str,
         scene_epoch: int,
+        roi_bbox_xyxy: list[float] | None = None,
     ) -> tuple[ToolResult, bool]:
         assert self.sam3_handler is not None
         rgb_path = str(packet["rgb"]["path"])
@@ -924,6 +1053,7 @@ class ActiveVisionController:
                 "semantic_target": semantic_target,
                 "semantic_role": SUPPORTED_SEMANTIC_ROLE,
                 "scene_epoch": scene_epoch,
+                "roi_bbox_xyxy": roi_bbox_xyxy,
             }
         )
         with self._sam_cache_lock:
@@ -944,6 +1074,11 @@ class ActiveVisionController:
                     "observation_id": f"observation-{fingerprint[:16]}",
                     "perception_bundle_id": f"perception-{fingerprint[16:32]}",
                     "attempt_id": f"active-sam3-text-{fingerprint[:16]}",
+                    **(
+                        {"roi_bbox_xyxy": list(roi_bbox_xyxy)}
+                        if roi_bbox_xyxy is not None
+                        else {}
+                    ),
                 },
                 observation=observation,
                 metadata=dict(outer_context.metadata),

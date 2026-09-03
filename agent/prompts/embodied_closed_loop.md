@@ -12,6 +12,10 @@ Apply these obligations on every planning turn:
   current evidence conflicts.
 - Keep the loop atomic: choose one action, inspect its host result, then replan.
   After world mutation, obtain fresh evidence before dependent control.
+- Before attachment, `grasp_target` is the object evidence for both grasp
+  generation and AnyPlace. `placement_object` is only a post-release
+  confirmation role; never use it to recover an object that has not yet been
+  grasped.
 - When an observation reports `work_order_required`, infer the ordered work
   items from the user conversation and call `configure_work_order`. The scene
   catalog describes available physical objects and destinations only; it never

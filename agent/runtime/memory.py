@@ -1465,7 +1465,14 @@ class AgentMemory:
         other_bundle_id = (
             str(other.get("perception_bundle_id") or "") if isinstance(other, dict) else ""
         )
-        if isinstance(other, dict) and (
+        same_source_image = (
+            isinstance(source_image, str)
+            and bool(source_image)
+            and source_image == other.get("source_image")
+            if isinstance(other, dict)
+            else False
+        )
+        if isinstance(other, dict) and not same_source_image and (
             (bundle_id and other_bundle_id and bundle_id != other_bundle_id)
             or (
                 not bundle_id

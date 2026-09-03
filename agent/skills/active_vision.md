@@ -61,7 +61,9 @@ A `reused` result means the existing calibrated RGB-D packet already passes the
 quality gate and no motion/model call occurred. An `acquired` grasp result supplies a
 new observation bundle after bounded motion; an acquired placement-region result
 supplies a point-grounded mask from the unchanged scene view. Continue the normal
-grasp or AnyPlace flow from that evidence. On `exhausted`, inspect the compact stop reason; do not repeat the
+grasp or AnyPlace flow from that evidence. A selected `grasp_target` remains the
+pre-attachment object mask for both grasp and placement inference; do not ask for
+`placement_object` until after a release needs confirmation. On `exhausted`, inspect the compact stop reason; do not repeat the
 same fingerprint. In particular, `camera_self_occlusion_unusable` is a
 mechanical/calibration defect that arm motion cannot repair. On
 `infrastructure_error`, stop rather than recording the target as unreachable.
