@@ -1422,18 +1422,26 @@ def test_post_detach_open_state_keeps_released_object_as_collision_probe() -> No
                         "id": "target_object",
                         "frame": config.base_link,
                         "link_name": config.mount_child,
-                    }
+                    },
+                    {
+                        "id": "target_object",
+                        "frame": config.base_link,
+                        "link_name": config.mount_child,
+                    },
                 ],
             },
         }
     )
 
     attached = captured[0].robot_state.attached_collision_objects
-    assert len(attached) == 2
+    assert len(attached) == 3
     assert attached[0].object.operation == "REMOVE"
     assert attached[1].object.id == "target_object__openeta_detached_probe"
     assert attached[1].link_name == config.mount_child
     assert attached[1].touch_links == []
+    assert attached[2].object.id == "target_object__openeta_detached_probe_1"
+    assert attached[2].link_name == config.mount_child
+    assert attached[2].touch_links == []
     assert result["valid"] is False
     assert result["collision_pairs"] == [
         [
@@ -1441,7 +1449,7 @@ def test_post_detach_open_state_keeps_released_object_as_collision_probe() -> No
             "target_object__openeta_detached_probe",
         ]
     ]
-    assert result["qualification_detached_collision_probe_count"] == 1
+    assert result["qualification_detached_collision_probe_count"] == 2
 
 
 def test_qualification_state_validity_stops_close_sweep_on_static_collision() -> None:

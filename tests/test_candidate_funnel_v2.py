@@ -557,9 +557,15 @@ def test_ros_virtual_scene_diff_is_clone_only_and_payload_aware():
     )
     assert detached["planning_scene_diff"]["remove_attached_ids"] == ["target"]
     assert detached["planning_scene_diff"]["world_objects"][0]["pose_xyz"][0] == pytest.approx(0.4)
-    settled_probe = detached["planning_scene_diff"][
+    detached_probes = detached["planning_scene_diff"][
         "detached_collision_probe_objects"
-    ][0]
+    ]
+    assert len(detached_probes) == 2
+    release_probe, settled_probe = detached_probes
+    assert release_probe["pose_xyz"] == pytest.approx([0.4, 0.0, 0.3])
+    assert release_probe["qualification_pose_role"] == (
+        "release_endpoint_collision_body"
+    )
     assert settled_probe["pose_xyz"] == pytest.approx([0.6, -0.1, 0.12])
     assert settled_probe["pose_quat_xyzw"] == pytest.approx([0.0, 0.0, 1.0, 0.0])
     assert settled_probe["qualification_pose_role"] == (

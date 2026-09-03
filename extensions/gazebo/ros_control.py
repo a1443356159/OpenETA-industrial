@@ -3119,7 +3119,9 @@ class _RosRuntime:
                 # collision probe with no touch links.  At this single robot
                 # state its geometry is identical to the detached world body,
                 # while MoveIt can now prove every robot/object collision.
-                for spec in scene_diff.get("detached_collision_probe_objects", []):
+                for probe_index, spec in enumerate(
+                    scene_diff.get("detached_collision_probe_objects", [])
+                ):
                     if not isinstance(spec, Mapping):
                         continue
                     probe = self.attached_collision_object_type()
@@ -3135,7 +3137,10 @@ class _RosRuntime:
                     # qualification-only id makes both operations unambiguous
                     # and deliberately inherits no target/touch-link ACM
                     # exemptions.
-                    probe.object.id = f"{probe.object.id}__openeta_detached_probe"
+                    probe.object.id = (
+                        f"{probe.object.id}__openeta_detached_probe"
+                        f"{'' if probe_index == 0 else f'_{probe_index}'}"
+                    )
                     request.robot_state.attached_collision_objects.append(probe)
                     detached_collision_probe_count += 1
             response = self._await(
@@ -3514,7 +3519,19 @@ class _RosRuntime:
                 "pose_xyz": list(world_xyz),
                 "pose_quat_xyzw": list(world_quat),
             }
-            detached_probe = world
+            # The release endpoint and the predicted settled pose represent
+            # different safety moments. A long or asymmetric part can clear
+            # the bin after settling while still intersecting the wrist/camera
+            # immediately after the gripper opens. Keep the exact endpoint
+            # probe first, then add the settled-body probe below when it is a
+            # distinct pose. GetStateValidity cannot carry world-object diffs,
+            # so both are request-local attached-body probes.
+            detached_probes = [
+                {
+                    **world,
+                    "qualification_pose_role": "release_endpoint_collision_body",
+                }
+            ]
             settled_pose = target.get("qualification_settled_object_pose")
             if isinstance(settled_pose, Mapping):
                 settled_xyz = settled_pose.get("xyz")
@@ -3529,12 +3546,17 @@ class _RosRuntime:
                         "ok": False,
                         "reason": "virtual_detach_settled_pose_invalid",
                     }
-                detached_probe = {
+                settled_probe = {
                     **world,
                     "pose_xyz": [float(value) for value in settled_xyz],
                     "pose_quat_xyzw": [float(value) for value in settled_quat],
                     "qualification_pose_role": "predicted_settled_collision_body",
                 }
+                if (
+                    settled_probe["pose_xyz"] != world["pose_xyz"]
+                    or settled_probe["pose_quat_xyzw"] != world["pose_quat_xyzw"]
+                ):
+                    detached_probes.append(settled_probe)
             scene["attached_specs"] = {}
             scene.setdefault("world_specs", {})[target_id] = world
             planning_diff = {
@@ -3542,11 +3564,11 @@ class _RosRuntime:
                 "world_objects": [world],
                 # See qualification_state_validity: the public
                 # GetStateValidity service cannot carry world-object diffs.
-                # Preserve the exact model/geometry-derived settled body for
-                # its request-local post-open collision probe.  When an older
-                # candidate has no settled goal, retain the historical exact
-                # release-pose probe for artifact compatibility.
-                "detached_collision_probe_objects": [detached_probe],
+                # Prove both the exact release endpoint and, where distinct,
+                # the model/geometry-derived settled body. Omitting either
+                # permits a candidate that is safe only after it falls (or
+                # only while it is still held) to reach an irreversible open.
+                "detached_collision_probe_objects": detached_probes,
             }
         scene.setdefault("transitions", []).append(transition)
         scene_hash = hashlib.sha256(
