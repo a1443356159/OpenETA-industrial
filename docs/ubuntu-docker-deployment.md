@@ -155,7 +155,9 @@ candidate rejection.
 The final Docker profile freezes 512 GraspGenX candidates once and consumes
 them in the `fast_v3` small-wave funnel. It does not issue 512 eager IK or L5
 requests. Set `OPENETA_GRASPGENX_RAW_POOL_SIZE=1024` only for a measured
-coverage experiment after a 512-pool miss; it is not the release default.
+coverage experiment after a 512-pool miss; it is not the release default. The
+default ladder then extends through 512 before the final 1024 tail, so the
+larger reserve remains lazy at the IK/L5 layers.
 
 ## GPU GUI / VNC 转发
 

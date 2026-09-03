@@ -35,6 +35,10 @@ the replay and shadow gates below pass.
   slices with cumulative limits `4 → 8 → 16 → 32 → 64 → 128 → 256`; only if
   those waves cannot produce a complete grasp/place branch does the
   deterministic implicit exhaustion wave visit the remaining frozen pool.
+  A deliberate 1024-reserve experiment automatically extends that same ladder
+  through `512` before its terminal `1024` tail; it never converts the extra
+  reserve into an eager 768-candidate qualification wave. The release default
+  remains 512 until coverage data proves a wider pool is worthwhile.
   Placement waves use cumulative limits
   `4 → 8 → 16 → 32 → 96` per grasp branch. Candidate IDs, branch IDs,
   and 10 mm / 10 degree SE(3) cluster IDs determine a stable round-robin order.

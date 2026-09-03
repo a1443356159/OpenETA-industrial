@@ -385,6 +385,51 @@ def test_default_grasp_ladder_reaches_256_before_implicit_pool_exhaustion() -> N
     ]
 
 
+def test_wider_default_reserve_keeps_the_incremental_wave_contract() -> None:
+    """1024 remains best-first instead of exposing 768 candidates at once."""
+
+    descriptors = []
+    for index in range(1024):
+        candidate = _candidate(index, score=1024.0 - index)
+        candidate["qualification_stages"][0]["xyz"] = [0.4, 0.0, 0.5]
+        descriptors.append(
+            {
+                "candidate_id": candidate["id"],
+                "candidate": candidate,
+                "candidate_pose_sha256": _hash(candidate),
+            }
+        )
+
+    waves = schedule_candidate_waves(
+        descriptors,
+        purpose="grasp",
+        grasp_waves=(4, 8, 16, 32, 64, 128, 256, 512),
+    )
+
+    assert [wave.cumulative_per_branch for wave in waves] == [
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+    ]
+    assert [len(wave.candidates) for wave in waves] == [
+        4,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+    ]
+
+
 def _request(candidates, *, purpose="placement", overrides=None):
     funnel = {
         "qualification_profile": "fast_v3",

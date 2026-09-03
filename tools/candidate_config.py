@@ -120,6 +120,38 @@ def cumulative_waves(
     return parsed
 
 
+def default_grasp_waves_for_pool(raw_pool: int) -> tuple[int, ...]:
+    """Return the default cumulative ladder before an exhaustive tail.
+
+    The frozen reserve is deliberately wider than the deep qualification
+    frontier.  When an operator raises the reserve from 512 to 1024, retaining
+    the literal 512 ladder would make the implicit final wave contain 768
+    candidates.  Extend the same deterministic doubling schedule instead, so
+    a wider reserve remains a sequence of small best-first waves followed by
+    only its final exhaustive tail.  This function does *not* include
+    ``raw_pool`` itself: :func:`schedule_candidate_waves` always appends the
+    exhaustive terminal limit.
+    """
+
+    maximum = raw_pool_size(raw_pool)
+    wave = DEFAULT_GRASP_WAVES[0]
+    waves: list[int] = []
+    while wave < maximum:
+        waves.append(wave)
+        wave *= 2
+    return tuple(waves)
+
+
+def _uses_default_waves(value: Any, default: tuple[int, ...]) -> bool:
+    """Recognize the default whether it arrived from Python or the environment."""
+
+    if value == default:
+        return True
+    return isinstance(value, str) and value.replace(" ", "") == ",".join(
+        str(item) for item in default
+    )
+
+
 def argparse_raw_pool_size(*, placement: bool = False):
     def parse(value: str) -> int:
         try:
@@ -202,10 +234,17 @@ class CandidateFunnelConfig:
         )
         grasp_waves_value = self.grasp_waves
         placement_waves_value = self.placement_waves
-        placement_uses_default = placement_waves_value == DEFAULT_PLACEMENT_WAVES or (
-            isinstance(placement_waves_value, str)
-            and placement_waves_value.replace(" ", "") == "4,8,16,32,96"
+        grasp_uses_default = _uses_default_waves(
+            grasp_waves_value, DEFAULT_GRASP_WAVES
         )
+        placement_uses_default = _uses_default_waves(
+            placement_waves_value, DEFAULT_PLACEMENT_WAVES
+        )
+        largest_grasp_pool = max(
+            self.graspgenx_raw_pool_size, self.anygrasp_raw_pool_size
+        )
+        if grasp_uses_default:
+            grasp_waves_value = default_grasp_waves_for_pool(largest_grasp_pool)
         if placement_uses_default and self.anyplace_raw_pool_size != DEFAULT_ANYPLACE_RAW_POOL_SIZE:
             placement_waves_value = tuple(
                 [
@@ -221,7 +260,7 @@ class CandidateFunnelConfig:
             cumulative_waves(
                 grasp_waves_value,
                 name="grasp_waves",
-                maximum=max(self.graspgenx_raw_pool_size, self.anygrasp_raw_pool_size),
+                maximum=largest_grasp_pool,
             ),
         )
         object.__setattr__(

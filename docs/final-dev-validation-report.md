@@ -15,7 +15,9 @@ it is never part of candidate selection.
 The 512 reserve is deliberately the release default. Qualification uses small
 deterministic waves and stops on the first complete proof. A 1024 reserve is
 available only as an explicit coverage experiment after a 512-pool miss; it
-does not make the initial model generation free.
+does not make the initial model generation free. Its default ladder adds a
+512-candidate wave before the terminal 1024 tail, retaining lazy deep
+qualification rather than issuing one oversized final wave.
 
 ## Verified recent evidence
 

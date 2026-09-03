@@ -67,6 +67,9 @@ as the implicit exhaustive tail when the configured waves cannot produce a
 complete pair. Each grasp branch covers AnyPlace waves at cumulative limits
 `4 → 8 → 16 → 32 → 96`; a physical failure resumes the next frozen grasp
 branch rather than rerunning a model.
+An opt-in 1024 reserve extends the default grasp ladder with `512` before its
+final exhaustion tail, preserving small-wave best-first behavior rather than
+launching a single 768-candidate deep wave.
 Different candidates run concurrently, but each candidate's dependent stages
 remain ordered and wave results merge by fixed candidate ID.
 

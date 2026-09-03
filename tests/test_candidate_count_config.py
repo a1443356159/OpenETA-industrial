@@ -16,6 +16,7 @@ from tools.candidate_config import (
     DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT,
     MAX_GRASP_RAW_POOL_SIZE,
     CandidateFunnelConfig,
+    default_grasp_waves_for_pool,
 )
 from tools.graspgenx_core import GraspGenXBackend
 
@@ -134,6 +135,46 @@ def test_graspgenx_maximum_reserve_pool_is_opt_in(monkeypatch, tmp_path):
     command = services._build_configs(args)[0].command
 
     assert command[command.index("--raw-pool-size") + 1] == str(MAX_GRASP_RAW_POOL_SIZE)
+
+
+def test_default_grasp_ladder_extends_when_opt_in_reserve_is_wider() -> None:
+    """A wider frozen pool must not turn into one giant final deep wave."""
+
+    assert default_grasp_waves_for_pool(512) == DEFAULT_GRASP_WAVES
+    assert default_grasp_waves_for_pool(1024) == (
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+    )
+    assert CandidateFunnelConfig(graspgenx_raw_pool_size=1024).grasp_waves == (
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+    )
+
+
+def test_environment_opt_in_uses_the_extended_default_grasp_ladder(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", "1024")
+    monkeypatch.delenv("OPENETA_QUALIFICATION_GRASP_WAVES", raising=False)
+    args = services.build_parser().parse_args(
+        ["status", "graspgenx", "--state-dir", str(tmp_path)]
+    )
+
+    config = services._startup_funnel_config(args)
+
+    assert config.grasp_waves == (4, 8, 16, 32, 64, 128, 256, 512)
 
 
 def test_frozen_pair_cli_precedes_environment(monkeypatch, tmp_path):
