@@ -417,6 +417,10 @@ def test_active_observe_semantically_regrounds_fresh_view_and_caches_sam3(
     assert second.success is True
     assert first.details["outputs"]["status"] == "acquired"
     assert first.details["outputs"]["motion_count"] == 1
+    # The inner move-and-observe transaction already returned the fresh
+    # simulator snapshot.  A caller must use that exact packet rather than
+    # requesting another passive observation from the same settled view.
+    assert first.details["requires_observation_after_call"] is False
     assert first.details["outputs"]["observation_bundle_id"] == "perception-active"
     assert proxy.calls == ["move_to", "observe", "move_to", "observe"]
     assert len(sam_calls) == 1
