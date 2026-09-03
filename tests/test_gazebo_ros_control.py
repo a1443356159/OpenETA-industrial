@@ -1153,6 +1153,35 @@ class _Tf:
         )
 
 
+class _LaggingTf:
+    """A tf2-like buffer whose latest sample trails the JointState stream."""
+
+    def __init__(self, latest_stamp_s: float):
+        self.latest_stamp_s = float(latest_stamp_s)
+        self.lookup_times = []
+
+    def lookup_transform(self, base, child, stamp):
+        assert (base, child) == ("base_link", "gripper_mount_link")
+        self.lookup_times.append(stamp)
+        requested_ns = int(getattr(stamp, "nanoseconds", 0))
+        latest_ns = int(round(self.latest_stamp_s * 1_000_000_000))
+        if requested_ns > latest_ns:
+            raise LookupError("requested transform is newer than TF queue")
+        stamp_s = requested_ns * 1e-9 if requested_ns else self.latest_stamp_s
+        sec = int(stamp_s)
+        header_stamp = SimpleNamespace(
+            sec=sec,
+            nanosec=int(round((stamp_s - sec) * 1e9)),
+        )
+        return SimpleNamespace(
+            header=SimpleNamespace(stamp=header_stamp),
+            transform=SimpleNamespace(
+                translation=SimpleNamespace(x=0.1, y=0.2, z=0.3),
+                rotation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            ),
+        )
+
+
 def _joint_message(
     stamp_s: float | None = None,
     *,
@@ -1290,6 +1319,51 @@ def test_ros_state_source_queries_tf_at_the_joint_state_timestamp() -> None:
     assert state.metadata["tf_lookup_policy"] == "joint_state_timestamp"
     assert state.metadata["joint_tf_synchronized"] is True
     assert getattr(tf.lookup_times[-1], "nanoseconds", None) == 10_100_000_000
+
+
+def test_ros_state_source_pairs_lagging_tf_with_stationary_joint_history() -> None:
+    pytest.importorskip("rclpy.time")
+    tf = _LaggingTf(10.0)
+    source = RosGazeboStateSource(
+        _Node(),
+        tf,
+        config=GazeboControlConfig(),
+        freshness_s=0.2,
+    )
+    stationary = [0.0] * len(JOINT_NAMES)
+    source.joint_state_callback(_joint_message(10.0, velocities=stationary))
+    source.joint_state_callback(_joint_message(10.1, velocities=stationary))
+
+    state = source.state()
+
+    assert state.metadata["joint_state_timestamp_s"] == pytest.approx(10.0)
+    assert state.metadata["tf_timestamp_s"] == pytest.approx(10.0)
+    assert state.metadata["joint_tf_synchronized"] is True
+    assert state.metadata["joint_tf_history_backfill"] is True
+    assert state.metadata["joint_state_freshness_policy"] == (
+        "stationary_tail_tf_history_backfill"
+    )
+    assert getattr(tf.lookup_times[0], "nanoseconds", None) == 10_100_000_000
+    assert getattr(tf.lookup_times[1], "nanoseconds", None) == 0
+
+
+def test_ros_state_source_rejects_lagging_tf_when_joint_history_moved() -> None:
+    pytest.importorskip("rclpy.time")
+    tf = _LaggingTf(10.0)
+    source = RosGazeboStateSource(
+        _Node(),
+        tf,
+        config=GazeboControlConfig(),
+        freshness_s=0.2,
+    )
+    stationary = [0.0] * len(JOINT_NAMES)
+    source.joint_state_callback(_joint_message(10.0, velocities=stationary))
+    moving = _joint_message(10.1, velocities=stationary)
+    moving.position[0] = 0.02
+    source.joint_state_callback(moving)
+
+    with pytest.raises(RuntimeError, match="JOINT_TF_STATE_DESYNCHRONIZED"):
+        source.state()
 
 
 def test_recovery_ros_messages_preserve_all_seven_measured_joint_positions() -> None:

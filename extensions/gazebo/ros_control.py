@@ -6,6 +6,7 @@ OpenETA on a non-ROS test machine remains supported.
 
 from __future__ import annotations
 
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import copy
 from dataclasses import dataclass
@@ -68,6 +69,18 @@ L5_TRAJECTORY_CACHE_LIMIT = 64
 # to 10 micrometres and orientation far more tightly than the execution goal,
 # while making this representation-only noise deterministic.
 L5_TRAJECTORY_POSE_DECIMALS = 5
+
+# ``robot_state_publisher`` and the controller can be serviced by different
+# executor callbacks.  Keep enough JointState history to pair a delayed TF
+# sample with the *same* joint observation, never with whichever state happened
+# to arrive most recently.  This is a bounded transport buffer, not a planner
+# cache or a candidate-selection heuristic.
+JOINT_TF_SYNC_HISTORY_LIMIT = 2048
+# The normal freshness budget is intentionally short.  A terminal action,
+# however, may be acknowledged while a loaded simulator is still draining its
+# TF callback queue.  Use the same bounded readiness window used by
+# ``wait_fresh`` so that a causally later, exactly paired sample can arrive.
+JOINT_TF_ACTION_SYNC_TIMEOUT_S = 15.0
 
 _QUALIFICATION_POSE_FIELDS = (
     "xyz",
@@ -1628,30 +1641,144 @@ class RosGazeboStateSource:
         self._joint_state: dict[str, list] | None = None
         self._joint_received = 0.0
         self._joint_stamp: float | None = None
+        self._joint_history: deque[dict[str, Any]] = deque(
+            maxlen=JOINT_TF_SYNC_HISTORY_LIMIT
+        )
         self._minimum_ros_timestamp_s: float | None = None
 
     def joint_state_callback(self, message: Any) -> None:
+        joint = {
+            "name": list(message.name),
+            "position": list(message.position),
+            "velocity": list(message.velocity),
+        }
+        received = time.monotonic()
+        stamp = getattr(getattr(message, "header", None), "stamp", None)
+        joint_stamp = (
+            float(int(getattr(stamp, "sec", 0)))
+            + float(int(getattr(stamp, "nanosec", 0))) * 1e-9
+            if stamp is not None
+            else None
+        )
         with self._lock:
-            self._joint_state = {
-                "name": list(message.name),
-                "position": list(message.position),
-                "velocity": list(message.velocity),
-            }
-            self._joint_received = time.monotonic()
-            stamp = getattr(getattr(message, "header", None), "stamp", None)
-            self._joint_stamp = (
-                float(int(getattr(stamp, "sec", 0)))
-                + float(int(getattr(stamp, "nanosec", 0))) * 1e-9
-                if stamp is not None
-                else None
+            self._joint_state = joint
+            self._joint_received = received
+            self._joint_stamp = joint_stamp
+            self._joint_history.append(
+                {
+                    "joint": joint,
+                    "received": received,
+                    "stamp": joint_stamp,
+                }
             )
 
     def clear(self, *, min_ros_timestamp_s: float | None = None) -> None:
         with self._lock:
             self._joint_state, self._joint_received, self._joint_stamp = None, 0.0, None
+            self._joint_history.clear()
             self._minimum_ros_timestamp_s = (
                 float(min_ros_timestamp_s) if min_ros_timestamp_s is not None else None
             )
+
+    @staticmethod
+    def _arm_joint_positions_and_velocities(
+        joint: Mapping[str, Sequence[object]],
+    ) -> tuple[dict[str, float], dict[str, float]] | None:
+        names = joint.get("name")
+        positions = joint.get("position")
+        velocities = joint.get("velocity")
+        if not isinstance(names, Sequence) or isinstance(names, (str, bytes)):
+            return None
+        if not isinstance(positions, Sequence) or isinstance(positions, (str, bytes)):
+            return None
+        if not isinstance(velocities, Sequence) or isinstance(velocities, (str, bytes)):
+            return None
+        index = {str(name): offset for offset, name in enumerate(names)}
+        if any(
+            name not in index
+            or index[name] >= len(positions)
+            or index[name] >= len(velocities)
+            for name in ARM_JOINTS
+        ):
+            return None
+        try:
+            joint_positions = {
+                name: float(positions[index[name]]) for name in ARM_JOINTS
+            }
+            joint_velocities = {
+                name: float(velocities[index[name]]) for name in ARM_JOINTS
+            }
+        except (TypeError, ValueError):
+            return None
+        if not all(
+            math.isfinite(value)
+            for value in (*joint_positions.values(), *joint_velocities.values())
+        ):
+            return None
+        return joint_positions, joint_velocities
+
+    @classmethod
+    def _stationary_arm_tail(
+        cls,
+        history: Sequence[Mapping[str, Any]],
+        *,
+        selected_index: int,
+    ) -> bool:
+        """Prove that delayed TF still describes the current stationary arm.
+
+        A matching transform from an older sample is usable for a fresh
+        planning read only when all later measured arm states show that the
+        arm stayed at that configuration.  This keeps temporal alignment
+        exact while allowing an overloaded TF consumer to catch up.
+        """
+
+        if selected_index >= len(history) - 1:
+            return False
+        selected = history[selected_index].get("joint")
+        if not isinstance(selected, Mapping):
+            return False
+        values = cls._arm_joint_positions_and_velocities(selected)
+        if values is None:
+            return False
+        reference_positions, reference_velocities = values
+        if any(
+            abs(reference_velocities[name]) > MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+            for name in ARM_JOINTS
+        ):
+            return False
+        for sample in history[selected_index + 1 :]:
+            joint = sample.get("joint")
+            if not isinstance(joint, Mapping):
+                return False
+            values = cls._arm_joint_positions_and_velocities(joint)
+            if values is None:
+                return False
+            positions, velocities = values
+            if any(
+                abs(positions[name] - reference_positions[name])
+                > L5_TRAJECTORY_START_TOLERANCE_RAD
+                for name in ARM_JOINTS
+            ) or any(
+                abs(velocities[name]) > MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S
+                for name in ARM_JOINTS
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _history_index_at_stamp(
+        history: Sequence[Mapping[str, Any]], tf_stamp: float | None
+    ) -> int | None:
+        if tf_stamp is None or not math.isfinite(tf_stamp):
+            return None
+        for index in range(len(history) - 1, -1, -1):
+            sample_stamp = history[index].get("stamp")
+            if isinstance(sample_stamp, (int, float)) and not isinstance(
+                sample_stamp, bool
+            ) and math.isfinite(float(sample_stamp)):
+                if abs(float(sample_stamp) - tf_stamp) <= 1e-6:
+                    return index
+        return None
 
     def state(
         self,
@@ -1660,9 +1787,14 @@ class RosGazeboStateSource:
         minimum_ros_timestamp_s: float | None = None,
     ):
         with self._lock:
-            joint = dict(self._joint_state) if self._joint_state is not None else None
-            received = self._joint_received
-            joint_stamp = self._joint_stamp
+            history = tuple(
+                {
+                    "joint": dict(sample["joint"]),
+                    "received": float(sample["received"]),
+                    "stamp": sample["stamp"],
+                }
+                for sample in self._joint_history
+            )
             stored_minimum_stamp = self._minimum_ros_timestamp_s
         minimum_candidates = [
             float(value)
@@ -1672,12 +1804,23 @@ class RosGazeboStateSource:
             and math.isfinite(float(value))
         ]
         minimum_stamp = max(minimum_candidates) if minimum_candidates else None
-        joint_wall_age_s = time.monotonic() - received
-        if joint is None or (
+        if not history:
+            raise RuntimeError("JOINT_STATE_TIMEOUT")
+        latest_index = len(history) - 1
+        latest = history[latest_index]
+        latest_received = float(latest["received"])
+        latest_joint_wall_age_s = time.monotonic() - latest_received
+        if (
             not allow_barrier_ordered_stale
-            and joint_wall_age_s > self.freshness_s
+            and latest_joint_wall_age_s > self.freshness_s
         ):
             raise RuntimeError("JOINT_STATE_TIMEOUT")
+        selected_index = latest_index
+        joint = latest["joint"]
+        received = latest_received
+        joint_stamp = latest["stamp"]
+        tf_lookup_policy = "joint_state_timestamp"
+        history_backfill = False
         try:
             # Pair the geometric transform with the exact JointState sample
             # that supplies the arm positions.  Asking tf2 for its latest
@@ -1685,13 +1828,6 @@ class RosGazeboStateSource:
             # sample with an older transform while Gazebo is catching up.  The
             # resulting hybrid state is neither a real robot configuration nor
             # valid evidence for a Cartesian target check.
-            #
-            # A stamped lookup also naturally waits (via the callers' bounded
-            # retry loops) until robot_state_publisher has caught up with that
-            # JointState.  Header-less state streams retain the prior latest-TF
-            # behavior; they cannot be used across an action timestamp barrier
-            # below in any case.
-            tf_lookup_policy = "joint_state_timestamp"
             try:
                 from rclpy.clock import ClockType
                 from rclpy.time import Time
@@ -1703,21 +1839,71 @@ class RosGazeboStateSource:
                     )
                 else:
                     tf_lookup_policy = "latest_tf_for_unstamped_joint_state"
-                    lookup_time = Time()
+                    lookup_time = Time(
+                        nanoseconds=0,
+                        clock_type=ClockType.ROS_TIME,
+                    )
             except ImportError:
                 # The ROS-free test fallback has no timestamp-aware tf2 time
                 # representation.  Production uses the branch above.
                 tf_lookup_policy = "node_clock_fallback"
                 lookup_time = self.node.get_clock().now()
-            stamped_transform = self.tf_buffer.lookup_transform(
-                self.config.base_link, self.config.mount_child, lookup_time
-            )
+            try:
+                stamped_transform = self.tf_buffer.lookup_transform(
+                    self.config.base_link, self.config.mount_child, lookup_time
+                )
+                tf_stamp = _stamp_seconds(
+                    getattr(getattr(stamped_transform, "header", None), "stamp", None)
+                )
+                direct_match = (
+                    tf_lookup_policy != "joint_state_timestamp"
+                    or joint_stamp is None
+                    or tf_stamp is None
+                    or abs(tf_stamp - joint_stamp) <= 1e-6
+                )
+                if not direct_match:
+                    raise RuntimeError("JOINT_TF_STATE_DESYNCHRONIZED")
+            except Exception as direct_error:
+                # Under load the latest JointState can be newer than the TF
+                # listener's callback queue.  Ask for the latest transform,
+                # then pair it only with the exact historical JointState that
+                # produced it.  The fallback therefore preserves a real robot
+                # configuration rather than combining observations from two
+                # different instants.
+                if tf_lookup_policy != "joint_state_timestamp":
+                    raise RuntimeError("TF_TIMEOUT") from direct_error
+                try:
+                    latest_tf_time = Time(
+                        nanoseconds=0,
+                        clock_type=ClockType.ROS_TIME,
+                    )
+                    stamped_transform = self.tf_buffer.lookup_transform(
+                        self.config.base_link,
+                        self.config.mount_child,
+                        latest_tf_time,
+                    )
+                except Exception as latest_error:
+                    raise RuntimeError("TF_TIMEOUT") from latest_error
+                tf_stamp = _stamp_seconds(
+                    getattr(getattr(stamped_transform, "header", None), "stamp", None)
+                )
+                selected_index = self._history_index_at_stamp(history, tf_stamp)
+                if selected_index is None:
+                    raise RuntimeError("JOINT_TF_STATE_DESYNCHRONIZED") from direct_error
+                selected = history[selected_index]
+                joint = selected["joint"]
+                received = float(selected["received"])
+                joint_stamp = selected["stamp"]
+                tf_lookup_policy = "latest_tf_matched_joint_history"
+                history_backfill = True
             transform = stamped_transform.transform
         except Exception as exc:
+            if isinstance(exc, RuntimeError) and str(exc) in {
+                "TF_TIMEOUT",
+                "JOINT_TF_STATE_DESYNCHRONIZED",
+            }:
+                raise
             raise RuntimeError("TF_TIMEOUT") from exc
-        tf_stamp = _stamp_seconds(
-            getattr(getattr(stamped_transform, "header", None), "stamp", None)
-        )
         # An explicitly stamped lookup must return the transform for that same
         # observation.  A microsecond tolerance only absorbs float conversion
         # of ROS nanosecond stamps; it is not a geometric acceptance margin.
@@ -1729,6 +1915,21 @@ class RosGazeboStateSource:
         )
         if not synchronized:
             raise RuntimeError("JOINT_TF_STATE_DESYNCHRONIZED")
+        joint_wall_age_s = time.monotonic() - received
+        stationary_tail_backfill = False
+        if not allow_barrier_ordered_stale and selected_index != latest_index:
+            stationary_tail_backfill = self._stationary_arm_tail(
+                history,
+                selected_index=selected_index,
+            )
+            if not stationary_tail_backfill:
+                raise RuntimeError("JOINT_TF_STATE_DESYNCHRONIZED")
+        if (
+            not allow_barrier_ordered_stale
+            and joint_wall_age_s > self.freshness_s
+            and not stationary_tail_backfill
+        ):
+            raise RuntimeError("JOINT_STATE_TIMEOUT")
         if minimum_stamp is not None and (
             joint_stamp is None
             or tf_stamp is None
@@ -1760,14 +1961,22 @@ class RosGazeboStateSource:
                 "joint_state_timestamp_s": joint_stamp,
                 "joint_state_received_monotonic_s": received,
                 "joint_state_wall_age_s": joint_wall_age_s,
+                "latest_joint_state_timestamp_s": latest.get("stamp"),
+                "latest_joint_state_wall_age_s": latest_joint_wall_age_s,
                 "joint_state_freshness_policy": (
                     "barrier_ordered_action_terminal"
                     if allow_barrier_ordered_stale
-                    else "wall_fresh"
+                    else (
+                        "stationary_tail_tf_history_backfill"
+                        if stationary_tail_backfill
+                        else "wall_fresh"
+                    )
                 ),
                 "tf_timestamp_s": tf_stamp,
                 "tf_lookup_policy": tf_lookup_policy,
                 "joint_tf_synchronized": synchronized,
+                "joint_tf_history_backfill": history_backfill,
+                "joint_tf_history_sample_count": len(history),
             }
         )
         return state
@@ -1778,8 +1987,8 @@ class RosGazeboStateSource:
         A successful trajectory action is the completion ACK.  If rendering or
         physics makes JointState wall-time cadence slower than the ordinary
         freshness window, retain the latest sample only when both its ROS stamp
-        and the latest TF are newer than the action-completion barrier.  Wait up
-        to the source freshness budget for that causally later sample; the
+        and the latest TF are newer than the action-completion barrier.  Wait
+        through a bounded TF-drain window for that causally later sample; the
         caller still has to prove the exact Cartesian terminal and a stationary
         arm.
         """
@@ -1787,7 +1996,10 @@ class RosGazeboStateSource:
         minimum = float(minimum_ros_timestamp_s)
         if not math.isfinite(minimum):
             raise RuntimeError("POST_ACTION_STATE_NOT_FRESH")
-        deadline = time.monotonic() + self.freshness_s
+        deadline = time.monotonic() + max(
+            self.freshness_s,
+            JOINT_TF_ACTION_SYNC_TIMEOUT_S,
+        )
         last_error: RuntimeError | None = None
         while True:
             try:
@@ -1813,7 +2025,10 @@ class RosGazeboStateSource:
         minimum = float(minimum_ros_timestamp_s)
         if not math.isfinite(minimum):
             raise RuntimeError("POST_ACTION_STATE_NOT_FRESH")
-        deadline = time.monotonic() + MOTION_FAILURE_SETTLE_TIMEOUT_S
+        deadline = time.monotonic() + max(
+            MOTION_FAILURE_SETTLE_TIMEOUT_S,
+            JOINT_TF_ACTION_SYNC_TIMEOUT_S,
+        )
         last_error: RuntimeError | None = None
         while True:
             try:
