@@ -245,6 +245,44 @@ def test_zero_moveit_pass_reestimates_same_grasp_backend_with_fresh_observation(
     assert reestimate["attempt_count"] == 1
 
 
+def test_zero_moveit_pass_does_not_impose_a_host_retry_cap() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the block")
+    memory.add_observation(EnvObservation(task="pick the block", cameras=[], robot=RobotState()))
+    memory.save_fact(
+        "selected_sam3_detection",
+        {"target_prompt": "red block"},
+        source="test",
+    )
+    memory.save_fact(
+        "grasp_reestimation",
+        {"status": "ready", "attempt_count": 3},
+        source="test",
+    )
+
+    memory.add_action(
+        _tool_action(
+            "grasp_pose_estimate",
+            {},
+            outputs={
+                "result_id": "g0",
+                "selected_backend": "graspgenx",
+                "source_rgb": "fresh-grasp.png",
+                "camera_frame_id": "top",
+                "source": {"rgb": "fresh-grasp.png", "camera_frame_id": "top"},
+                "grasp_candidates": [],
+                "generated_candidate_count": 10,
+                "qualification_evidence": {"results": []},
+            },
+        )
+    )
+
+    assert memory.grasp_reestimation()["status"] == "pending_observation"
+    assert memory.grasp_reestimation()["attempt_count"] == 4
+    assert "max_attempts" not in memory.grasp_reestimation()
+    assert memory.grasp_candidate_policy()["status"] == "exhausted"
+
+
 def test_zero_pass_frozen_model_pool_requests_fresh_agentic_cycle(tmp_path: Path) -> None:
     memory = AgentMemory()
     memory.start_session(task="pick the red block and place it in the green zone")

@@ -65,7 +65,6 @@ ACTIVE_ENVIRONMENT_TASK_KEY = "active_environment_task"
 NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
 NATIVE_GRASP_MAXIMUM_DRIFT_M = 0.01
 GRASP_CANDIDATE_MAX_ATTEMPTS = 3
-GRASP_ZERO_PASS_REESTIMATION_LIMIT = 3
 ARTICULATED_HANDLE_APPROACH_MODES = ("top_down", "front", "side")
 TRANSITION_LEDGER_LIMIT = 32
 GRASP_GEOMETRY_FAMILIES = {
@@ -3292,46 +3291,31 @@ class AgentMemory:
                             else 0
                         )
                         attempt_count = previous_attempts + 1
-                        if attempt_count >= GRASP_ZERO_PASS_REESTIMATION_LIMIT:
-                            policy.update(
-                                {
-                                    "status": "stopped_requires_human",
-                                    "stop_reason": "grasp_moveit_zero_pass_retry_limit",
-                                    "zero_pass_reestimate_attempt_count": attempt_count,
-                                }
-                            )
-                            self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                                policy, source="moveit_qualification_zero_pass_retry_limit"
-                            )
-                            self.facts.pop(GRASP_REESTIMATION_KEY, None)
-                            self.record("grasp_moveit_zero_pass_stopped", dict(policy))
-                        else:
-                            reestimate = {
-                                "schema_version": "openeta.grasp_reestimate.v1",
-                                "status": "pending_observation",
-                                "reason": "moveit_qualification_zero_pass",
-                                "attempt_count": attempt_count,
-                                "max_attempts": GRASP_ZERO_PASS_REESTIMATION_LIMIT,
-                                "scene_epoch": self.scene_epoch(),
-                                "target_prompt": target_prompt,
-                                "source_image": source_rgb,
-                                "source_observation_rgb_paths": self._latest_current_observation_rgb_paths(),
-                                "previous_view": str(
-                                    outputs.get("camera_frame_id")
-                                    or source.get("camera_frame_id")
-                                    or ""
-                                ),
-                                "source_tool": source_tool,
-                                "source_backend": source_backend,
-                                "invalidate_frozen_placement_pool": False,
-                                "preserve_frozen_placement_pool": frozen_pool_active,
-                                **_zero_pass_grasp_recovery_route(outputs),
-                                "created_at_s": time.time(),
-                            }
-                            self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
-                                reestimate, source="moveit_qualification_zero_pass_reestimate"
-                            )
-                            self.record("grasp_moveit_zero_pass_reestimate_required", reestimate)
+                        reestimate = {
+                            "schema_version": "openeta.grasp_reestimate.v1",
+                            "status": "pending_observation",
+                            "reason": "moveit_qualification_zero_pass",
+                            "attempt_count": attempt_count,
+                            "scene_epoch": self.scene_epoch(),
+                            "target_prompt": target_prompt,
+                            "source_image": source_rgb,
+                            "source_observation_rgb_paths": self._latest_current_observation_rgb_paths(),
+                            "previous_view": str(
+                                outputs.get("camera_frame_id")
+                                or source.get("camera_frame_id")
+                                or ""
+                            ),
+                            "source_tool": source_tool,
+                            "source_backend": source_backend,
+                            "invalidate_frozen_placement_pool": False,
+                            "preserve_frozen_placement_pool": frozen_pool_active,
+                            **_zero_pass_grasp_recovery_route(outputs),
+                            "created_at_s": time.time(),
+                        }
+                        self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                            reestimate, source="moveit_qualification_zero_pass_reestimate"
+                        )
+                        self.record("grasp_moveit_zero_pass_reestimate_required", reestimate)
                     else:
                         self._schedule_grasp_recovery(
                             rejection={
@@ -3633,44 +3617,29 @@ class AgentMemory:
                     else 0
                 )
                 attempt_count = previous_attempts + 1
-                if attempt_count >= GRASP_ZERO_PASS_REESTIMATION_LIMIT:
-                    policy.update(
-                        {
-                            "status": "stopped_requires_human",
-                            "stop_reason": "grasp_moveit_zero_pass_retry_limit",
-                            "zero_pass_reestimate_attempt_count": attempt_count,
-                        }
-                    )
-                    self.facts[GRASP_CANDIDATE_POLICY_KEY] = _memory_fact_entry(
-                        policy, source=f"{source_tool}_zero_pass_retry_limit"
-                    )
-                    self.facts.pop(GRASP_REESTIMATION_KEY, None)
-                    self.record("grasp_moveit_zero_pass_stopped", dict(policy))
-                else:
-                    reestimate = {
-                        "schema_version": "openeta.grasp_reestimate.v1",
-                        "status": "pending_observation",
-                        "reason": "moveit_qualification_zero_pass",
-                        "attempt_count": attempt_count,
-                        "max_attempts": GRASP_ZERO_PASS_REESTIMATION_LIMIT,
-                        "scene_epoch": self.scene_epoch(),
-                        "target_prompt": target_prompt,
-                        "source_image": source_rgb,
-                        "source_observation_rgb_paths": self._latest_current_observation_rgb_paths(),
-                        "previous_view": camera_frame_id,
-                        "source_tool": source_tool,
-                        "source_backend": source_backend,
-                        "invalidate_frozen_placement_pool": False,
-                        "preserve_frozen_placement_pool": isinstance(
-                            self.frozen_placement_goal_pool(), dict
-                        ),
-                        **_zero_pass_grasp_recovery_route(outputs),
-                        "created_at_s": time.time(),
-                    }
-                    self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
-                        reestimate, source=f"{source_tool}_zero_pass_reestimate"
-                    )
-                    self.record("grasp_moveit_zero_pass_reestimate_required", reestimate)
+                reestimate = {
+                    "schema_version": "openeta.grasp_reestimate.v1",
+                    "status": "pending_observation",
+                    "reason": "moveit_qualification_zero_pass",
+                    "attempt_count": attempt_count,
+                    "scene_epoch": self.scene_epoch(),
+                    "target_prompt": target_prompt,
+                    "source_image": source_rgb,
+                    "source_observation_rgb_paths": self._latest_current_observation_rgb_paths(),
+                    "previous_view": camera_frame_id,
+                    "source_tool": source_tool,
+                    "source_backend": source_backend,
+                    "invalidate_frozen_placement_pool": False,
+                    "preserve_frozen_placement_pool": isinstance(
+                        self.frozen_placement_goal_pool(), dict
+                    ),
+                    **_zero_pass_grasp_recovery_route(outputs),
+                    "created_at_s": time.time(),
+                }
+                self.facts[GRASP_REESTIMATION_KEY] = _memory_fact_entry(
+                    reestimate, source=f"{source_tool}_zero_pass_reestimate"
+                )
+                self.record("grasp_moveit_zero_pass_reestimate_required", reestimate)
             elif all_candidates_over_width:
                 self._schedule_grasp_estimation_recovery(
                     policy=policy,
