@@ -269,6 +269,7 @@ def test_active_observe_reuses_quality_current_rgbd_without_motion(tmp_path: Pat
     assert result.details["outputs"]["status"] == "reused"
     assert result.details["outputs"]["motion_count"] == 0
     assert result.details["outputs"]["quality"]["passed"] is True
+    assert result.details["requires_observation_after_call"] is False
     assert Path(result.details["outputs"]["artifact_ref"]).is_file()
 
 

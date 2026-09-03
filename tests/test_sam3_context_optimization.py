@@ -1212,6 +1212,85 @@ def test_model_projection_hides_anyplace_paths_and_release_geometry() -> None:
     assert "required_parameters" not in motion
 
 
+def test_precontact_target_mask_never_triggers_duplicate_placement_object() -> None:
+    """A fresh grasp mask is sufficient object evidence before attachment."""
+
+    observation = EnvObservation(
+        task="sort the silver wrench into the blue bin",
+        cameras=[],
+        robot=RobotState(),
+        metadata={"step_idx": 11},
+    )
+    current_image = "/tmp/current-top.png"
+    obligation = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=[
+            {"kind": "rgb", "frame_id": "agentview", "path": current_image},
+            {"kind": "rgb", "frame_id": "wrist", "path": "/tmp/current-wrist.png"},
+        ],
+        memory_context={
+            "scene_epoch": 5,
+            "selected_sam3_detection": {
+                "id": "grasp-mask",
+                "target_prompt": "silver wrench",
+                "source_image": current_image,
+                "scene_epoch": 5,
+                "perception_bundle_id": "active-view-bundle",
+            },
+            # This is the stale duplicate written by an earlier route.  It
+            # must not override the current grasp-target evidence or cause a
+            # second semantic pass for the same physical item.
+            "placement_object_detection": {
+                "id": "stale-object-mask",
+                "target_prompt": "silver wrench",
+                "source_image": "/tmp/previous-top.png",
+                "scene_epoch": 5,
+                "perception_bundle_id": "previous-bundle",
+            },
+            "sam3_semantic_state": {"roles": {}, "attempts": []},
+        },
+    )
+
+    assert obligation is not None
+    assert obligation["semantic_role"] == "placement_region"
+    assert obligation["preferred_image"] == current_image
+
+
+def test_precontact_stale_target_restarts_grasp_target_not_placement_object() -> None:
+    observation = EnvObservation(
+        task="sort the silver wrench into the blue bin",
+        cameras=[],
+        robot=RobotState(),
+        metadata={"step_idx": 12},
+    )
+    obligation = _semantic_perception_obligation(
+        observation=observation,
+        camera_artifacts=[
+            {"kind": "rgb", "frame_id": "agentview", "path": "/tmp/new-top.png"}
+        ],
+        memory_context={
+            "scene_epoch": 5,
+            "selected_sam3_detection": {
+                "id": "old-grasp-mask",
+                "target_prompt": "silver wrench",
+                "source_image": "/tmp/previous-top.png",
+                "scene_epoch": 5,
+            },
+            "placement_object_detection": {
+                "id": "old-object-mask",
+                "target_prompt": "silver wrench",
+                "source_image": "/tmp/previous-top.png",
+                "scene_epoch": 5,
+            },
+            "sam3_semantic_state": {"roles": {}, "attempts": []},
+        },
+    )
+
+    assert obligation is not None
+    assert obligation["semantic_role"] == "grasp_target"
+    assert obligation["preferred_image"] == "/tmp/new-top.png"
+
+
 def test_attached_object_never_triggers_postattach_semantic_retry() -> None:
     observation = EnvObservation(
         task="pick and place",

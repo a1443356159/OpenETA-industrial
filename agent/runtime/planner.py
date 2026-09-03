@@ -7232,8 +7232,19 @@ def _semantic_perception_obligation(
             current_rgb[0],
         ),
     )
+    # ``placement_object_detection`` is retained as a compatibility cache for
+    # older sessions that stored the selected grasp mask only under that key.
+    # It is never a reason to issue a new pre-contact placement-object SAM3
+    # request: the current grasp mask remains the canonical source whenever it
+    # is available.
     object_detection = memory_context.get("placement_object_detection")
     region_detection = memory_context.get("placement_region_detection")
+    selected = memory_context.get("selected_sam3_detection")
+    current_selected = _semantic_detection_is_current(
+        selected,
+        camera_artifacts=current_rgb,
+        scene_epoch=scene_epoch,
+    )
     current_object = _semantic_detection_is_current(
         object_detection,
         camera_artifacts=current_rgb,
@@ -7244,7 +7255,6 @@ def _semantic_perception_obligation(
         camera_artifacts=current_rgb,
         scene_epoch=scene_epoch,
     )
-    selected = memory_context.get("selected_sam3_detection")
     execution = memory_context.get("grasp_execution")
     attachment = memory_context.get("attachment_gate")
     attached = (
@@ -7259,25 +7269,34 @@ def _semantic_perception_obligation(
     frozen_pool = memory_context.get("frozen_placement_goal_pool")
     grasp_policy = memory_context.get("grasp_candidate_policy")
 
-    # The object and destination are segmented once before grasp generation.
-    # After native attachment succeeds, AnyPlace goals are rebound to the
-    # measured attachment transform without another SAM3 or model call.
+    # Before attachment, the selected grasp mask is also the object evidence
+    # for AnyPlace.  A separate ``placement_object`` semantic pass would
+    # duplicate the same target and, after an active view, can accidentally
+    # replace a valid grasp mask solely because an outer receipt materialized
+    # a new image path.  The destination is the only independent pre-contact
+    # segmentation.  After native attachment succeeds, AnyPlace goals are
+    # rebound to the measured transform without another SAM3 or model call.
     if attached:
         return None
 
     semantic_role = ""
     source_image = str(preferred_rgb.get("path") or "")
     if not isinstance(execution, dict) and not isinstance(frozen_pool, dict):
-        if not isinstance(selected, dict):
+        precontact_target = (
+            selected
+            if current_selected
+            else object_detection
+            if current_object
+            else None
+        )
+        if not isinstance(precontact_target, dict):
             semantic_role = "grasp_target"
-        elif not current_object:
-            semantic_role = "placement_object"
         elif not current_region or not _semantic_detections_share_bundle(
-            object_detection,
+            precontact_target,
             region_detection,
         ):
             semantic_role = "placement_region"
-            source_image = str(object_detection.get("source_image") or source_image)
+            source_image = str(precontact_target.get("source_image") or source_image)
         elif not isinstance(grasp_policy, dict):
             return None
     else:

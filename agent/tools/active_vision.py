@@ -191,6 +191,19 @@ class ActiveVisionController:
         result.details.setdefault("artifacts", []).append(artifact)
         outputs = result.details.setdefault("outputs", {})
         outputs["artifact_ref"] = artifact["path"]
+        # ``active_observe`` has one world-mutating capability (a qualified
+        # camera motion), but its common current-view path performs no motion
+        # at all.  Do not invalidate the exact RGB-D packet and freshly
+        # selected SAM3 mask in that case: a forced outer ``observe`` would
+        # only change artifact paths, trigger a duplicate target segmentation,
+        # and provide no new physical information.  Paths with real motion
+        # retain the normal fresh-observation gate and simulator receipt.
+        if (
+            result.success
+            and str(outputs.get("status") or "") in {"reused", "acquired"}
+            and int(outputs.get("motion_count") or 0) == 0
+        ):
+            result.details["requires_observation_after_call"] = False
         if receipt is not None:
             result.details["environment_receipt"] = receipt
         return result
