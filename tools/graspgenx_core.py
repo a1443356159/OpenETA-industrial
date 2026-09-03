@@ -840,7 +840,7 @@ def _iter_se3_mmr_order(
     """Yield the exact MMR order only as far as its consumer needs.
 
     Candidate generation previously materialised nearly the complete 7k-pose
-    MMR permutation before collision screening could stop at the 512-pose
+    MMR permutation before collision screening could stop at the configured
     provider pool.  The greedy state is prefix-stable, so yielding it lazily
     preserves the byte-for-byte ordering while avoiding work on the frozen
     tail that downstream qualification may never inspect.

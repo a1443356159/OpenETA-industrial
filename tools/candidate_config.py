@@ -13,6 +13,12 @@ DEFAULT_GRASP_RAW_POOL_SIZE = 200
 # candidates, never host-generated pose variants.  AnyGrasp retains its
 # independent existing 200-candidate contract.
 DEFAULT_GRASPGENX_RAW_POOL_SIZE = 512
+# This is deliberately a startup-only reserve-pool ceiling, not a promise to
+# run 1,024 IK requests.  The scheduler consumes the frozen pool cumulatively
+# and stops as soon as the configured L5 target is proved.  Keeping the
+# larger value opt-in lets acceptance compare recall after a frozen-frontier
+# miss without changing the established 512-candidate default.
+MAX_GRASP_RAW_POOL_SIZE = 1024
 DEFAULT_ANYPLACE_RAW_POOL_SIZE = 96
 DEFAULT_GRASP_DIVERSITY_POOL_SIZE = 64
 DEFAULT_ANYPLACE_DIVERSITY_POOL_SIZE = 96
@@ -66,7 +72,7 @@ def raw_pool_size(value: Any, *, placement: bool = False) -> int:
         value,
         name="raw pool size",
         minimum=10,
-        maximum=256 if placement else 512,
+        maximum=256 if placement else MAX_GRASP_RAW_POOL_SIZE,
     )
 
 

@@ -14,6 +14,7 @@ from tools.candidate_config import (
     DEFAULT_GRASP_WAVES,
     DEFAULT_FROZEN_PAIR_FULL_PLAN_LIMIT,
     DEFAULT_FROZEN_PAIR_GRASP_BRANCH_LIMIT,
+    MAX_GRASP_RAW_POOL_SIZE,
     CandidateFunnelConfig,
 )
 from tools.graspgenx_core import GraspGenXBackend
@@ -116,12 +117,23 @@ def test_anyplace_inference_seed_cli_precedes_environment(monkeypatch, tmp_path)
 
 
 def test_invalid_raw_pool_environment_fails_startup(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", "513")
+    monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", str(MAX_GRASP_RAW_POOL_SIZE + 1))
     args = services.build_parser().parse_args(
         ["status", "graspgenx", "--state-dir", str(tmp_path)]
     )
     with pytest.raises(services.ConfigError):
         services._build_configs(args)
+
+
+def test_graspgenx_maximum_reserve_pool_is_opt_in(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENETA_GRASPGENX_RAW_POOL_SIZE", str(MAX_GRASP_RAW_POOL_SIZE))
+    args = services.build_parser().parse_args(
+        ["status", "graspgenx", "--state-dir", str(tmp_path)]
+    )
+
+    command = services._build_configs(args)[0].command
+
+    assert command[command.index("--raw-pool-size") + 1] == str(MAX_GRASP_RAW_POOL_SIZE)
 
 
 def test_frozen_pair_cli_precedes_environment(monkeypatch, tmp_path):

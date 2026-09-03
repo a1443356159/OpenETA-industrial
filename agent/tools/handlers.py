@@ -5040,7 +5040,7 @@ def _normalise_graspgenx_response(
         or generated_candidate_count != candidate_count
         or raw_candidate_count < generated_candidate_count
         or model_raw_candidate_count < raw_candidate_count
-        or not 1 <= candidate_count <= 512
+        or not 1 <= candidate_count <= expected_raw_pool_size
     ):
         return _graspgenx_failure("inconsistent_grasp_outputs")
 
