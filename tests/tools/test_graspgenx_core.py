@@ -789,6 +789,44 @@ def test_collision_selection_checks_source_balanced_ranked_batches(
     assert metadata["collision_rejected_count"] == 2
 
 
+def test_collision_selection_amortizes_gpu_uploads_without_growing_cdist_chunks(
+    tmp_path: Path,
+) -> None:
+    source, checkpoints, grippers = _backend_layout(tmp_path)
+    backend = GraspGenXBackend(
+        graspgenx_root=source,
+        checkpoint_root=checkpoints,
+        gripper_descriptions_root=grippers,
+        raw_pool_size=512,
+    )
+    poses = np.tile(np.eye(4), (520, 1, 1))
+    poses[:, 0, 3] = np.arange(520) * 0.02
+    scores = np.linspace(1.0, 0.0, 520)
+    request_sizes: list[int] = []
+    inner_sizes: list[int] = []
+
+    def filter_collisions(**kwargs: Any) -> np.ndarray:
+        request_sizes.append(len(kwargs["grasp_poses"]))
+        inner_sizes.append(int(kwargs["batch_size"]))
+        return np.ones(len(kwargs["grasp_poses"]), dtype=bool)
+
+    selected, metadata = backend._select_collision_free(
+        loaded={"filter_collisions": filter_collisions},
+        sampler_entry={"collision_surface_points": np.zeros((2000, 3), dtype=np.float32)},
+        scene_points=np.ones((10, 3), dtype=np.float32),
+        camera_native_grasps=poses,
+        scores=scores,
+        branch_tags=["diff" if index % 2 else "obb" for index in range(520)],
+    )
+
+    assert len(selected) == 512
+    assert request_sizes == [256, 256]
+    # Peak cdist memory remains governed by the upstream 16-pose chunk.
+    assert inner_sizes == [16, 16]
+    assert metadata["collision_filter_call_count"] == 2
+    assert metadata["collision_checked_count"] == 512
+
+
 def test_collision_selection_reports_all_grasps_colliding(tmp_path: Path) -> None:
     source, checkpoints, grippers = _backend_layout(tmp_path)
     backend = GraspGenXBackend(

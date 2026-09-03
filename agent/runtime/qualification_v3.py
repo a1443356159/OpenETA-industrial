@@ -507,6 +507,222 @@ def _descriptor_diversity_distance(left: Mapping[str, Any], right: Mapping[str, 
     return translation_m * 10.0 + rotation_rad + source_bonus
 
 
+def _rotation_matrix3(value: object) -> tuple[tuple[float, float, float], ...] | None:
+    if not (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes, bytearray))
+        and len(value) == 3
+        and all(
+            isinstance(row, Sequence)
+            and not isinstance(row, (str, bytes, bytearray))
+            and len(row) == 3
+            for row in value
+        )
+    ):
+        return None
+    try:
+        matrix = tuple(tuple(float(item) for item in row) for row in value)
+    except (TypeError, ValueError):
+        return None
+    return matrix if all(math.isfinite(item) for row in matrix for item in row) else None
+
+
+def _parallel_jaw_source_rotation(
+    descriptor: Mapping[str, Any],
+) -> tuple[tuple[tuple[float, float, float], ...], int] | None:
+    """Return a provider rotation and its approach-axis index when explicit.
+
+    GraspGenX publishes the jaw closing and binormal axes with each measured
+    centering record.  Their remaining local axis is the approach axis around
+    which a 180-degree roll is physically equivalent for a parallel gripper.
+    This avoids inferring symmetry from a model name or robot-specific frame.
+    """
+
+    candidate = descriptor.get("candidate")
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    sources: list[Mapping[str, Any]] = [candidate]
+    camera_pose = candidate.get("camera_pose")
+    if isinstance(camera_pose, Mapping):
+        sources.append(camera_pose)
+    compile_parameters = candidate.get("compile_parameters")
+    if isinstance(compile_parameters, Mapping):
+        compiled_camera_pose = compile_parameters.get("camera_pose")
+        if isinstance(compiled_camera_pose, Mapping):
+            sources.append(compiled_camera_pose)
+    for source in sources:
+        alignment = source.get("target_closing_alignment")
+        rotation = _rotation_matrix3(source.get("rotation_matrix"))
+        if not isinstance(alignment, Mapping) or rotation is None:
+            continue
+        closing = str(alignment.get("closing_axis") or "")
+        binormal = str(alignment.get("binormal_axis") or "")
+        occupied = {
+            index
+            for index, suffix in enumerate(("_x", "_y", "_z"))
+            if closing.endswith(suffix) or binormal.endswith(suffix)
+        }
+        if len(occupied) == 2:
+            approach_axis = next(index for index in range(3) if index not in occupied)
+            return rotation, approach_axis
+    return None
+
+
+def _rotation_angle_rad(
+    left: tuple[tuple[float, float, float], ...],
+    right: tuple[tuple[float, float, float], ...],
+    *,
+    right_column_signs: tuple[int, int, int] = (1, 1, 1),
+) -> float:
+    # trace(left.T @ right) can be computed as a signed column-wise dot sum.
+    trace = sum(
+        right_column_signs[column]
+        * sum(left[row][column] * right[row][column] for row in range(3))
+        for column in range(3)
+    )
+    return math.acos(min(1.0, max(-1.0, (trace - 1.0) * 0.5)))
+
+
+def _frozen_frontier_distance(
+    descriptor: Mapping[str, Any],
+    anchor: Mapping[str, Any],
+) -> tuple[float, float, float]:
+    """Return deterministic geometry distance for post-L5 frontier search.
+
+    Translation and rotation remain separate ordering dimensions so no tuned
+    scene-specific scalar decides the frontier.  When both candidates carry
+    explicit parallel-jaw axes, a 180-degree roll around the approach axis is
+    treated as the same physical orientation for ordering only.  Each pose
+    still receives independent IK, validity, and L5 evidence.
+    """
+
+    distance = _pose_distance(final_target(descriptor), final_target(anchor))
+    if distance is None:
+        return (math.inf, math.inf, math.inf)
+    translation_m, rotation_rad = distance
+    left_source = _parallel_jaw_source_rotation(descriptor)
+    right_source = _parallel_jaw_source_rotation(anchor)
+    if left_source is not None and right_source is not None:
+        left_rotation, left_approach_axis = left_source
+        right_rotation, right_approach_axis = right_source
+        if left_approach_axis == right_approach_axis:
+            signs = [-1, -1, -1]
+            signs[left_approach_axis] = 1
+            rotation_rad = min(
+                _rotation_angle_rad(left_rotation, right_rotation),
+                _rotation_angle_rad(
+                    left_rotation,
+                    right_rotation,
+                    right_column_signs=tuple(signs),
+                ),
+            )
+    normalized_distance = (
+        translation_m / POSITION_CLUSTER_M
+        + rotation_rad / math.radians(ORIENTATION_CLUSTER_DEG)
+    )
+    return (normalized_distance, translation_m, rotation_rad)
+
+
+def reprioritize_grasp_frontier(
+    waves: Sequence[CandidateWave],
+    *,
+    completed_wave_position: int,
+    anchors: Sequence[Mapping[str, Any]],
+) -> tuple[list[CandidateWave], JsonDict]:
+    """Reorder only the untouched grasp frontier after an L5 planning miss.
+
+    The first slot exploits the closest model-native sibling of a state-valid
+    endpoint; the next slot preserves the precomputed global exploration
+    order.  Alternating those queues retains broad coverage, every candidate,
+    every wave size, and every deterministic barrier while making a nearby IK
+    cache hit available much sooner.
+    """
+
+    copied = list(waves)
+    if (
+        completed_wave_position < 0
+        or completed_wave_position >= len(copied) - 1
+        or not anchors
+    ):
+        return copied, {
+            "applied": False,
+            "policy": "nearest_sibling_interleaved_with_frozen_order",
+            "anchor_candidate_ids": [],
+            "candidate_count": 0,
+        }
+    future = [
+        dict(descriptor)
+        for wave in copied[completed_wave_position + 1 :]
+        for descriptor in wave.candidates
+    ]
+    usable_anchors = [dict(anchor) for anchor in anchors if final_target(anchor)]
+    if not future or not usable_anchors:
+        return copied, {
+            "applied": False,
+            "policy": "nearest_sibling_interleaved_with_frozen_order",
+            "anchor_candidate_ids": [],
+            "candidate_count": len(future),
+        }
+
+    nearest = deque(
+        sorted(
+            future,
+            key=lambda descriptor: (
+                min(
+                    _frozen_frontier_distance(descriptor, anchor)
+                    for anchor in usable_anchors
+                ),
+                _descriptor_priority(descriptor),
+                int(descriptor.get("fixed_candidate_index", 0)),
+            ),
+        )
+    )
+    frozen = deque(future)
+    ordered: list[JsonDict] = []
+    selected_keys: set[tuple[str, int]] = set()
+
+    def take(queue: deque[JsonDict]) -> None:
+        while queue:
+            descriptor = queue.popleft()
+            candidate_key = (
+                str(descriptor.get("candidate_id") or ""),
+                int(descriptor.get("fixed_candidate_index", 0)),
+            )
+            if candidate_key in selected_keys:
+                continue
+            selected_keys.add(candidate_key)
+            ordered.append(descriptor)
+            return
+
+    while len(ordered) < len(future):
+        take(nearest)
+        take(frozen)
+
+    cursor = 0
+    for position in range(completed_wave_position + 1, len(copied)):
+        original = copied[position]
+        size = len(original.candidates)
+        copied[position] = CandidateWave(
+            wave_index=original.wave_index,
+            cumulative_per_branch=original.cumulative_per_branch,
+            candidates=tuple(ordered[cursor : cursor + size]),
+            recovery=original.recovery,
+            frozen_pair_batch_index=original.frozen_pair_batch_index,
+        )
+        cursor += size
+    return copied, {
+        "applied": True,
+        "policy": "nearest_sibling_interleaved_with_frozen_order",
+        "anchor_candidate_ids": [
+            str(anchor.get("candidate_id") or "") for anchor in usable_anchors
+        ],
+        "candidate_count": len(future),
+        "next_candidate_ids": [
+            str(descriptor.get("candidate_id") or "")
+            for descriptor in ordered[: min(8, len(ordered))]
+        ],
+    }
+
+
 def _quality_seeded_farthest_first(
     descriptors: Sequence[Mapping[str, Any]],
 ) -> list[JsonDict]:

@@ -96,7 +96,14 @@ MOE_OBB_POSITION_SPACING_CM = 1.0
 COLLISION_THRESHOLD = 0.001
 MAX_COLLISION_SCENE_POINTS = 8192
 NUM_COLLISION_SAMPLES = 2000
+# The upstream collision helper already chunks ``torch.cdist`` by
+# ``COLLISION_BATCH_SIZE`` to bound its peak allocation.  Passing only one
+# such chunk per helper call needlessly retransfers the unchanged scene and
+# gripper surface tensors for every 16 poses.  Keep the memory-bound inner
+# chunk unchanged while amortising those host-to-device conversions over a
+# larger request.
 COLLISION_BATCH_SIZE = 16
+COLLISION_REQUEST_BATCH_SIZE = 256
 MMR_TRANSLATION_SCALE_M = 0.03
 MMR_ROTATION_SCALE_RAD = math.radians(30.0)
 MMR_ROTATION_WEIGHT = 1.0
@@ -1156,6 +1163,7 @@ class GraspGenXBackend:
         up_direction_camera: Any,
     ) -> dict[str, Any]:
         start = time.perf_counter()
+        phase_start = start
         metadata = self._metadata_base(gripper_name=gripper_name)
 
         try:
@@ -1202,6 +1210,10 @@ class GraspGenXBackend:
                 gripper=gripper,
             )
             metadata["geometry_driven_anchors"] = geometry_anchor_metadata
+            metadata["preprocessing_duration_ms"] = round(
+                (time.perf_counter() - phase_start) * 1000.0,
+                3,
+            )
         except GraspGenXInputError as exc:
             metadata.update(exc.metadata)
             return failure_result(
@@ -1210,9 +1222,14 @@ class GraspGenXBackend:
             )
 
         try:
+            phase_start = time.perf_counter()
             loaded = self._get_loaded_backend()
             sampler_entry = self._get_sampler_entry(loaded, gripper.name)
             metadata.update(self._model_metadata(loaded))
+            metadata["backend_prepare_duration_ms"] = round(
+                (time.perf_counter() - phase_start) * 1000.0,
+                3,
+            )
         except GraspGenXInputError as exc:
             metadata.update(exc.metadata)
             return failure_result(
@@ -1226,6 +1243,7 @@ class GraspGenXBackend:
             )
 
         try:
+            phase_start = time.perf_counter()
             planner_outputs = []
             # Test/lightweight backends do not expose the real torch runtime
             # and retain their single-call contract.  A loaded production
@@ -1290,6 +1308,10 @@ class GraspGenXBackend:
             )
             metadata["discarded_expansion_obb_candidate_count"] = discarded_expansion_obb_count
             metadata["deterministic_obb_reuse_policy"] = "retain_first_full_draw_only"
+            metadata["model_inference_duration_ms"] = round(
+                (time.perf_counter() - phase_start) * 1000.0,
+                3,
+            )
         except Exception as exc:  # noqa: BLE001 - third-party inference boundary.
             return failure_result(
                 reason="model_inference_failed",
@@ -1297,6 +1319,7 @@ class GraspGenXBackend:
             )
 
         try:
+            phase_start = time.perf_counter()
             grasps_aligned, scores, tags = validate_raw_grasp_outputs(
                 raw_grasps, raw_scores, raw_tags
             )
@@ -1371,6 +1394,10 @@ class GraspGenXBackend:
                 raise GraspGenXInputError("inconsistent_grasp_outputs")
             metadata["returned_candidate_count"] = len(candidates)
             metadata["generated_candidate_count"] = len(candidates)
+            metadata["candidate_selection_duration_ms"] = round(
+                (time.perf_counter() - phase_start) * 1000.0,
+                3,
+            )
         except GraspGenXInputError as exc:
             metadata.update(exc.metadata)
             return failure_result(
@@ -1698,9 +1725,14 @@ class GraspGenXBackend:
         checked = 0
         rejected = 0
         diversity_rejected = 0
+        collision_filter_call_count = 0
         filter_fn = loaded["filter_collisions"]
-        for offset in range(0, len(inspection_order), COLLISION_BATCH_SIZE):
-            batch_indices = inspection_order[offset : offset + COLLISION_BATCH_SIZE]
+        recall_request_size = min(
+            COLLISION_REQUEST_BATCH_SIZE,
+            max(COLLISION_BATCH_SIZE, recall_base_limit),
+        )
+        for offset in range(0, len(inspection_order), recall_request_size):
+            batch_indices = inspection_order[offset : offset + recall_request_size]
             batch_poses = camera_native_grasps[batch_indices]
             free_mask = np.asarray(
                 filter_fn(
@@ -1712,6 +1744,7 @@ class GraspGenXBackend:
                     device=self.device,
                 )
             )
+            collision_filter_call_count += 1
             if free_mask.shape != (len(batch_indices),) or free_mask.dtype.kind != "b":
                 raise GraspGenXInputError("inconsistent_grasp_outputs")
             checked += len(batch_indices)
@@ -1754,8 +1787,12 @@ class GraspGenXBackend:
         recall_base = recall_base[:recall_base_limit]
         reserve: list[int] = []
         ordered_variants = variant_order(recall_base)
-        for offset in range(0, len(ordered_variants), COLLISION_BATCH_SIZE):
-            batch_indices = ordered_variants[offset : offset + COLLISION_BATCH_SIZE]
+        reserve_request_size = min(
+            COLLISION_REQUEST_BATCH_SIZE,
+            max(COLLISION_BATCH_SIZE, reserve_capacity),
+        )
+        for offset in range(0, len(ordered_variants), reserve_request_size):
+            batch_indices = ordered_variants[offset : offset + reserve_request_size]
             batch_poses = camera_native_grasps[batch_indices]
             free_mask = np.asarray(
                 filter_fn(
@@ -1767,6 +1804,7 @@ class GraspGenXBackend:
                     device=self.device,
                 )
             )
+            collision_filter_call_count += 1
             if free_mask.shape != (len(batch_indices),) or free_mask.dtype.kind != "b":
                 raise GraspGenXInputError("inconsistent_grasp_outputs")
             checked += len(batch_indices)
@@ -1793,6 +1831,9 @@ class GraspGenXBackend:
             "collision_scene_point_count": int(len(collision_scene)),
             "collision_checked_count": checked,
             "collision_rejected_count": rejected,
+            "collision_filter_call_count": collision_filter_call_count,
+            "collision_filter_request_batch_size": COLLISION_REQUEST_BATCH_SIZE,
+            "collision_filter_internal_batch_size": COLLISION_BATCH_SIZE,
             "candidate_selection": selection_name,
             "mmr_diversity_order_count": diversity_order_count,
             "formal_min_translation_m": FORMAL_MIN_TRANSLATION_M,

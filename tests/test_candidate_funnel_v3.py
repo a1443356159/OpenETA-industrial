@@ -26,10 +26,12 @@ from agent.runtime.qualification_legality import (
     evaluate_placement_goal_legality,
 )
 from agent.runtime.qualification_v3 import (
+    CandidateWave,
     candidate_physical_quality_key,
     frozen_frontier_parent_priority,
     parallel_gripper_centering_quality,
     parallel_gripper_centering_variant_priority,
+    reprioritize_grasp_frontier,
     schedule_candidate_waves,
     select_grasp_branches,
 )
@@ -286,6 +288,63 @@ def test_pose_diversity_scheduler_caches_pairwise_distances(monkeypatch) -> None
 
     assert sum(len(wave.candidates) for wave in waves) == 32
     assert calls <= 32 * 31 // 2
+
+
+def test_l5_miss_reorders_untouched_frontier_without_losing_candidates() -> None:
+    def descriptor(
+        index: int,
+        *,
+        x: float,
+        rotation: list[list[float]],
+    ) -> dict[str, object]:
+        candidate = _candidate(index, score=10.0 - index)
+        candidate["qualification_stages"][0]["xyz"] = [x, 0.0, 0.5]
+        candidate["compile_parameters"] = {
+            "camera_pose": {
+                "rotation_matrix": rotation,
+                "target_closing_alignment": {
+                    "closing_axis": "graspnet_local_y",
+                    "binormal_axis": "graspnet_local_z",
+                },
+            }
+        }
+        return {
+            "candidate_id": candidate["id"],
+            "candidate": candidate,
+            "fixed_candidate_index": index,
+            "se3_cluster_id": f"se3_{index:04d}",
+            "capability_score": {},
+        }
+
+    identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    # A 180-degree roll around GraspNet's explicit approach axis (local X)
+    # is a parallel-jaw equivalent orientation, not a different approach.
+    symmetric_roll = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
+    anchor = descriptor(0, x=0.40, rotation=identity)
+    frozen_head = descriptor(1, x=0.80, rotation=identity)
+    sibling = descriptor(2, x=0.41, rotation=symmetric_roll)
+    nearby = descriptor(3, x=0.42, rotation=identity)
+    tail = descriptor(4, x=0.90, rotation=identity)
+    waves = [
+        CandidateWave(0, 1, (anchor,)),
+        CandidateWave(1, 3, (frozen_head, sibling)),
+        CandidateWave(2, 5, (nearby, tail)),
+    ]
+
+    reordered, evidence = reprioritize_grasp_frontier(
+        waves,
+        completed_wave_position=0,
+        anchors=[anchor],
+    )
+
+    assert evidence["applied"] is True
+    assert evidence["anchor_candidate_ids"] == ["c0"]
+    # Exploit the model sibling, then keep the original exploration head.
+    assert [item["candidate_id"] for item in reordered[1].candidates] == ["c2", "c1"]
+    assert [len(wave.candidates) for wave in reordered] == [1, 2, 2]
+    assert {
+        item["candidate_id"] for wave in reordered for item in wave.candidates
+    } == {"c0", "c1", "c2", "c3", "c4"}
 
 
 def test_default_grasp_ladder_reaches_256_before_implicit_pool_exhaustion() -> None:

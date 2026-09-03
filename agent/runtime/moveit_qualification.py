@@ -47,6 +47,7 @@ from agent.runtime.qualification_v3 import (
     normalized_joint_distance,
     parallel_gripper_centering_evidence,
     frozen_pair_l5_submission_order,
+    reprioritize_grasp_frontier,
     schedule_candidate_waves,
     select_grasp_branches,
 )
@@ -2161,6 +2162,8 @@ class MoveItQualificationEngine:
         l5_attempts: list[JsonDict] = []
         wave_evidence: list[JsonDict] = []
         recovery_waves: list[CandidateWave] = []
+        frontier_anchor_descriptors: list[JsonDict] = []
+        frontier_reprioritization_count = 0
         pair_legality_cache: dict[tuple[str, str], tuple[str, JsonDict]] = {}
         infrastructure_error = next(
             (
@@ -2300,6 +2303,7 @@ class MoveItQualificationEngine:
                             batch_cache.append(cached)
             submitted_this_wave = 0
             passed_this_wave = 0
+            frontier_anchor_ids: list[str] = []
             if not infrastructure_error:
                 ranked = sorted(
                     (
@@ -2364,6 +2368,17 @@ class MoveItQualificationEngine:
                             planned.get("reason") or "plan_only_service_error"
                         )
                         break
+                    if (
+                        purpose == "grasp"
+                        and not recovery
+                        and planned.get("verdict") == "FAIL"
+                        and planned.get("reason") == "plan_only_failed"
+                    ):
+                        # A state-valid endpoint that only missed motion
+                        # planning is useful local evidence.  Its untouched
+                        # model siblings remain independently proven, but may
+                        # now use the wave cache before distant exploration.
+                        frontier_anchor_ids.append(candidate_id)
                     terminal_evidence = (
                         planned.get("stages", [{}])[-1].get("terminal_gripper_state_validity")
                         if isinstance(planned.get("stages"), list)
@@ -2401,6 +2416,8 @@ class MoveItQualificationEngine:
                 "l5_pass_count": passed_this_wave,
                 "elapsed_s": time.monotonic() - wave_started,
             }
+            if frontier_anchor_ids:
+                wave_record["frontier_anchor_candidate_ids"] = frontier_anchor_ids
             if qualification_mode == "frozen_pair":
                 wave_record.update(
                     {
@@ -2414,9 +2431,33 @@ class MoveItQualificationEngine:
             return bool(infrastructure_error or acceptable_target_reached())
 
         if not infrastructure_error:
-            for wave in waves:
+            for wave_position in range(len(waves)):
+                wave = waves[wave_position]
                 if run_wave(wave, recovery=False):
                     break
+                if purpose != "grasp":
+                    continue
+                anchor_ids = wave_evidence[-1].get("frontier_anchor_candidate_ids")
+                if not isinstance(anchor_ids, list) or not anchor_ids:
+                    continue
+                known_anchor_ids = {
+                    str(anchor.get("candidate_id") or "")
+                    for anchor in frontier_anchor_descriptors
+                }
+                frontier_anchor_descriptors.extend(
+                    descriptor_by_id[str(candidate_id)]
+                    for candidate_id in anchor_ids
+                    if str(candidate_id) in descriptor_by_id
+                    and str(candidate_id) not in known_anchor_ids
+                )
+                waves, reprioritization = reprioritize_grasp_frontier(
+                    waves,
+                    completed_wave_position=wave_position,
+                    anchors=frontier_anchor_descriptors,
+                )
+                wave_evidence[-1]["frontier_reprioritization"] = reprioritization
+                if reprioritization.get("applied") is True:
+                    frontier_reprioritization_count += 1
 
         if (
             not infrastructure_error
@@ -2753,6 +2794,8 @@ class MoveItQualificationEngine:
             "first_l5_pass_s": first_l5_pass_elapsed_s,
             "total_elapsed_s": time.monotonic() - start_time,
             "capability_map_status": capability_map_status,
+            "frontier_reprioritization_count": frontier_reprioritization_count,
+            "frontier_anchor_count": len(frontier_anchor_descriptors),
             "l5_pass_target": target,
             "l5_min_pass_target": minimum_target,
             **legality_metrics,
