@@ -68,6 +68,30 @@
           "target_prompt": "red hex bolt",
           "semantic_aliases": ["red M24 hex bolt", "红色六角螺栓"],
           "source_support_object_id": "work_table"
+        },
+        {
+          "id": "silver_box_wrench",
+          "target_object_id": "silver_box_wrench",
+          "target_link": "silver_box_wrench_link",
+          "target_prompt": "silver box-end wrench",
+          "semantic_aliases": ["silver wrench", "box wrench", "银色扳手", "银色梅花扳手"],
+          "source_support_object_id": "work_table"
+        },
+        {
+          "id": "blue_handled_pliers",
+          "target_object_id": "distractor_object",
+          "target_link": "distractor_link",
+          "target_prompt": "blue-handled pliers",
+          "semantic_aliases": ["wire pliers", "blue handled pliers", "钢丝钳", "蓝柄钢丝钳"],
+          "source_support_object_id": "work_table"
+        },
+        {
+          "id": "blue_black_screwdriver",
+          "target_object_id": "blue_black_screwdriver",
+          "target_link": "blue_black_screwdriver_link",
+          "target_prompt": "blue and black screwdriver",
+          "semantic_aliases": ["blue-black screwdriver", "screwdriver", "蓝黑色螺丝刀", "螺丝刀"],
+          "source_support_object_id": "work_table"
         }
       ],
       "placement_regions": [
@@ -115,6 +139,30 @@
           "target_link": "red_m24_hex_bolt_link",
           "target_prompt": "red hex bolt",
           "semantic_aliases": ["red M24 hex bolt", "红色六角螺栓"],
+          "source_support_object_id": "work_table"
+        },
+        {
+          "id": "silver_box_wrench",
+          "target_object_id": "silver_box_wrench",
+          "target_link": "silver_box_wrench_link",
+          "target_prompt": "silver box-end wrench",
+          "semantic_aliases": ["silver wrench", "box wrench", "银色扳手", "银色梅花扳手"],
+          "source_support_object_id": "work_table"
+        },
+        {
+          "id": "blue_handled_pliers",
+          "target_object_id": "distractor_object",
+          "target_link": "distractor_link",
+          "target_prompt": "blue-handled pliers",
+          "semantic_aliases": ["wire pliers", "blue handled pliers", "钢丝钳", "蓝柄钢丝钳"],
+          "source_support_object_id": "work_table"
+        },
+        {
+          "id": "blue_black_screwdriver",
+          "target_object_id": "blue_black_screwdriver",
+          "target_link": "blue_black_screwdriver_link",
+          "target_prompt": "blue and black screwdriver",
+          "semantic_aliases": ["blue-black screwdriver", "screwdriver", "蓝黑色螺丝刀", "螺丝刀"],
           "source_support_object_id": "work_table"
         }
       ],

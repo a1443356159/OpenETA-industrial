@@ -1436,13 +1436,17 @@ class ContactGateResult:
 
 
 def _identity_kind(
-    names: Sequence[str], config: NativePickPlaceConfig, side: str
+    names: Sequence[str],
+    config: NativePickPlaceConfig,
+    side: str,
+    *,
+    non_target_ids: Sequence[str],
 ) -> ReasonCode | None:
     """Classify a raw contact message without accepting partial identities."""
 
     joined = "\n".join(str(name) for name in names)
     has_target = config.target_id in joined
-    has_distractor = config.distractor_id in joined
+    has_distractor = any(object_id in joined for object_id in non_target_ids)
     # The pad stream may only identify its own fingertip and the target.  A
     # message carrying both objects or an unrelated collision is a mixed
     # contact, which cannot be promoted by a later good sample.
@@ -1483,6 +1487,14 @@ def confirm_native_bilateral_contact(
     """
 
     cfg = config or NativePickPlaceConfig()
+    catalog_target_ids = tuple(
+        str(item["target_object_id"])
+        for item in cfg.manipulation_targets
+        if str(item["target_object_id"]) != cfg.target_id
+    )
+    non_target_ids = catalog_target_ids
+    if cfg.distractor_id != cfg.target_id and cfg.distractor_id not in non_target_ids:
+        non_target_ids = (*non_target_ids, cfg.distractor_id)
     ordered = sorted(samples, key=lambda item: (item.timestamp_s, item.side))
     by_side: dict[str, list[NativeContactSample]] = {"left": [], "right": []}
     if verification_window_started_sim_time_s is None or not math.isfinite(
@@ -1519,7 +1531,12 @@ def confirm_native_bilateral_contact(
                 len(by_side["left"]),
                 len(by_side["right"]),
             )
-        rejected = _identity_kind(sample.collision_names, cfg, sample.side)
+        rejected = _identity_kind(
+            sample.collision_names,
+            cfg,
+            sample.side,
+            non_target_ids=non_target_ids,
+        )
         if rejected is not None:
             return ContactGateResult(
                 False,

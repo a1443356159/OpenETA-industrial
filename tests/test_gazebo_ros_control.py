@@ -78,7 +78,7 @@ def test_target_activation_rolls_back_after_post_commit_validity_failure() -> No
         ),
     )
     base_config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
-    previous_config, next_config = base_config.manipulation_target_configs
+    previous_config, next_config = base_config.manipulation_target_configs[:2]
     runtime = SimpleNamespace(
         planning_scene=scene,
         config=previous_config,

@@ -97,6 +97,48 @@ MULTI_NORMAL_TASK_VARIANTS = {
             ("target_object", "target_link", "yellow wrench", "blue_parts_bin", "blue parts bin"),
         ],
     },
+    "screwdriver-green": {
+        "operator_instruction": (
+            "请把工作台上的蓝黑色螺丝刀放进绿色零件箱，其他物件不要动。"
+        ),
+        "items": [
+            (
+                "blue_black_screwdriver",
+                "blue_black_screwdriver_link",
+                "blue and black screwdriver",
+                "green_parts_bin",
+                "green parts bin",
+            ),
+        ],
+    },
+    "silver-wrench-blue": {
+        "operator_instruction": (
+            "请把工作台上的银色梅花扳手放进蓝色零件箱，其他物件不要动。"
+        ),
+        "items": [
+            (
+                "silver_box_wrench",
+                "silver_box_wrench_link",
+                "silver box-end wrench",
+                "blue_parts_bin",
+                "blue parts bin",
+            ),
+        ],
+    },
+    "pliers-green": {
+        "operator_instruction": (
+            "请把工作台上的蓝柄钢丝钳放进绿色零件箱，其他物件不要动。"
+        ),
+        "items": [
+            (
+                "distractor_object",
+                "distractor_link",
+                "blue-handled pliers",
+                "green_parts_bin",
+                "green parts bin",
+            ),
+        ],
+    },
 }
 LEGACY_MULTI_NORMAL_REQUEST_IDS = {
     DEFAULT_MULTI_NORMAL_TASK_VARIANT: "multi_normal",
@@ -214,6 +256,12 @@ SCENARIO_INSTRUCTIONS = {
 }
 
 
+def _scenario_instruction(scenario: str, assignment_count: int) -> str:
+    if scenario not in MULTI_SORT_SCENARIOS or assignment_count > 1:
+        return SCENARIO_INSTRUCTIONS[scenario]
+    return "这是一次单件分拣；请只处理指定物件，确认已放入目标箱后再结束。"
+
+
 def _scene_contract(scenario: str) -> dict[str, Any]:
     if scenario not in SCENARIOS:
         raise ValueError(f"unsupported pick-place acceptance scenario: {scenario}")
@@ -300,10 +348,7 @@ def _expected_work_order(
             region = region_catalog[str(region_id)]
             expected.append(
                 {
-                    "id": (
-                        f"{('yellow_wrench' if target_id == 'target_object' else 'red_bolt')}"
-                        f"_to_{region_id}"
-                    ),
+                    "id": f"{target['id']}_to_{region_id}",
                     "target_object_id": str(target_id),
                     "target_link": str(target_link),
                     "target_prompt": str(target_prompt),
@@ -506,12 +551,19 @@ def _instructions_for_backend(
     _validated_qualification_profile(qualification_profile)
     scene = _scene_contract(scenario)
     task = _scene_task(scene, scenario=scenario, task_variant=task_variant)
+    assignment_count = len(
+        _expected_work_order(
+            scene,
+            scenario=scenario,
+            task_variant=task_variant,
+        )
+    )
     control = AGENTIC_CONTROL if profile == "agentic_normal" else SMOKE_CONTROL
     recovery = f"\n{TASK_INSTRUCTIONS}" if profile == "agentic_normal" else ""
     return (
         f"{control}\n"
         f"{task['operator_instruction']}\n"
-        f"{SCENARIO_INSTRUCTIONS[scenario]}"
+        f"{_scenario_instruction(scenario, assignment_count)}"
         f"{recovery}\n"
     )
 
@@ -1636,7 +1688,7 @@ def verify_case(
             task_variant=variant,
         )
         compatible_scene_receipts = [expected_scene_receipt]
-        if scenario == "multi_normal":
+        if scenario == "multi_normal" and variant in LEGACY_MULTI_NORMAL_REQUEST_IDS:
             legacy_scene_receipt = dict(expected_scene_receipt)
             legacy_scene_receipt["acceptance_request_id"] = (
                 LEGACY_MULTI_NORMAL_REQUEST_IDS[variant]

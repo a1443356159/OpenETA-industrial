@@ -304,6 +304,45 @@ def test_native_contact_rejects_distractor_and_preclose_samples() -> None:
     assert preclose.reason_code is ReasonCode.CONTACT_SAMPLE_BEFORE_WINDOW
 
 
+def test_catalog_object_is_target_not_distractor_when_selected() -> None:
+    config = NativePickPlaceConfig(
+        acceptance_scene_id="multi_normal"
+    ).work_order_configs(
+        [
+            {
+                "target_prompt": "钢丝钳",
+                "placement_region_prompt": "绿色零件箱",
+            }
+        ]
+    )[0]
+    samples = [
+        NativeContactSample(
+            side,
+            stamp,
+            20.0,
+            (
+                f"rm75::robotiq_85_{side}_finger_tip_link",
+                "distractor_object::distractor_link::handles",
+            ),
+        )
+        for side, stamps in (
+            ("left", (10.01, 10.07, 10.12)),
+            ("right", (10.02, 10.08, 10.13)),
+        )
+        for stamp in stamps
+    ]
+
+    result = confirm_native_bilateral_contact(
+        samples,
+        verification_window_started_sim_time_s=10.0,
+        now_monotonic_s=20.1,
+        config=config,
+    )
+
+    assert result.accepted is True
+    assert result.reason_code is ReasonCode.CONTACT_TARGET_CONFIRMED
+
+
 def test_transport_retention_has_no_direction_or_distance_threshold() -> None:
     verifier = NativeGraspVerifier()
     verifier.close_result(_accepted_gate(), attach_acked=True)

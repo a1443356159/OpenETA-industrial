@@ -354,7 +354,7 @@ def test_native_grasp_sdf_renderer_allows_only_the_stock_fixed_joint_topology() 
     ) == "1"
 
 
-def test_multi_normal_materializes_two_independent_stock_detachable_joints() -> None:
+def test_multi_normal_materializes_independent_stock_detachable_joints() -> None:
     root = ET.fromstring(
         """<sdf><model name="robot"><link name="base_link"/>
         <plugin filename="gz-sim-detachable-joint-system" name="gz::sim::systems::DetachableJoint">
@@ -377,10 +377,16 @@ def test_multi_normal_materializes_two_independent_stock_detachable_joints() -> 
     assert [plugin.findtext("child_model") for plugin in plugins] == [
         "target_object",
         "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
     ]
     assert [plugin.findtext("output_topic") for plugin in plugins] == [
         "/openeta/native_grasp/detachable_joint/target/state",
         "/openeta/native_grasp/detachable_joint/red_m24_hex_bolt/state",
+        "/openeta/native_grasp/detachable_joint/silver_box_wrench/state",
+        "/openeta/native_grasp/detachable_joint/distractor_object/state",
+        "/openeta/native_grasp/detachable_joint/blue_black_screwdriver/state",
     ]
 
 
@@ -394,6 +400,9 @@ def test_multi_normal_physical_catalog_does_not_preselect_a_task() -> None:
     assert [item.target_id for item in config.manipulation_target_configs] == [
         "target_object",
         "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
     ]
     assert evidence["manipulation_catalog"]["targets"][0]["target_prompt"] == (
         "yellow wrench"
@@ -447,6 +456,24 @@ def test_multi_normal_physical_catalog_does_not_preselect_a_task() -> None:
             ],
             ["red_m24_hex_bolt", "target_object"],
             ["green_parts_bin", "blue_parts_bin"],
+        ),
+        (
+            [
+                {
+                    "target_prompt": "蓝黑色螺丝刀",
+                    "placement_region_prompt": "绿色零件箱",
+                },
+                {
+                    "target_prompt": "银色扳手",
+                    "placement_region_prompt": "蓝色零件箱",
+                },
+                {
+                    "target_prompt": "钢丝钳",
+                    "placement_region_prompt": "green bin",
+                },
+            ],
+            ["blue_black_screwdriver", "silver_box_wrench", "distractor_object"],
+            ["green_parts_bin", "blue_parts_bin", "green_parts_bin"],
         ),
     ],
 )

@@ -143,7 +143,7 @@ def test_authoritative_scene_materializes_attachment_collision_masks_and_plugin(
     assert evidence["attached_target_environment_collision_enabled"] is True
 
 
-def test_authoritative_multi_normal_owns_two_filtered_dynamic_targets() -> None:
+def test_authoritative_multi_normal_owns_filtered_dynamic_target_catalog() -> None:
     compiled = _compile("multi_normal")
     world = ET.fromstring(compiled.sdf_bytes).find("world")
 
@@ -151,6 +151,9 @@ def test_authoritative_multi_normal_owns_two_filtered_dynamic_targets() -> None:
     assert [binding.target_model for binding in compiled.target_bindings] == [
         "target_object",
         "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
     ]
     plugins = world.findall(
         "plugin[@name='openeta::gazebo::AttachedCollisionFilter']"
@@ -158,8 +161,17 @@ def test_authoritative_multi_normal_owns_two_filtered_dynamic_targets() -> None:
     assert [plugin.findtext("target_model") for plugin in plugins] == [
         "target_object",
         "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
     ]
-    for target_id in ("target_object", "red_m24_hex_bolt"):
+    for target_id in (
+        "target_object",
+        "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
+    ):
         assert {
             collision.findtext("surface/contact/collide_bitmask")
             for collision in world.findall(
@@ -178,6 +190,9 @@ def test_multi_normal_is_one_task_neutral_physical_world() -> None:
     assert {binding.target_model for binding in compiled.target_bindings} == {
         "target_object",
         "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
     }
     with pytest.raises(ValueError, match="unsupported acceptance scene"):
         load_acceptance_scene_contract("multi_normal_prompt_variant")
@@ -201,6 +216,9 @@ def test_seeded_multi_normal_layout_is_task_neutral_and_authoritative() -> None:
     assert [binding.target_model for binding in randomized.target_bindings] == [
         "target_object",
         "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
     ]
     assert {item.object_id for item in randomized.objects} == {
         item.object_id for item in canonical.objects

@@ -671,6 +671,21 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
             ],
             "green_parts_bin",
         ),
+        (
+            "screwdriver-green",
+            ["blue_black_screwdriver_to_green_parts_bin"],
+            "green_parts_bin",
+        ),
+        (
+            "silver-wrench-blue",
+            ["silver_box_wrench_to_blue_parts_bin"],
+            "blue_parts_bin",
+        ),
+        (
+            "pliers-green",
+            ["blue_handled_pliers_to_green_parts_bin"],
+            "green_parts_bin",
+        ),
     ],
 )
 def test_multi_normal_task_variants_change_only_user_words_and_verification_contract(
@@ -719,9 +734,11 @@ def test_multi_normal_task_variants_change_only_user_words_and_verification_cont
     assert acceptance._scenario_environment("multi_normal") == {
         "OPENETA_ACCEPTANCE_SCENE": "multi_normal"
     }
-    assert "放好第一件后不要关闭环境" in paths.instructions.read_text(
-        encoding="utf-8"
-    )
+    instructions = paths.instructions.read_text(encoding="utf-8")
+    if len(ordered_assignment_ids) > 1:
+        assert "放好第一件后不要关闭环境" in instructions
+    else:
+        assert "请只处理指定物件" in instructions
 
 
 def test_randomized_release_scene_environment_is_not_a_qualification_fault() -> None:
