@@ -879,6 +879,181 @@ def test_frozen_pair_tries_geometry_release_heights_before_expanding_grasps(
     }[passing_variant]
 
 
+def test_frozen_pair_retries_full_barrier_prebind_after_primary_static_collision() -> None:
+    """A tall payload must not exhaust an otherwise valid AnyPlace pool."""
+
+    calls: list[tuple[str, str]] = []
+
+    def rpc(_name: str, request: dict[str, Any], _timeout: float) -> dict[str, Any]:
+        if _is_goal_prebind(request):
+            variant = request["funnel"]["release_height_variant"]
+            calls.append(("prebind", variant))
+            if variant == "geometry_primary":
+                return _goal_prebind_response(
+                    request,
+                    verdict="FAIL",
+                    reason="goal_static_obstacle_penetration",
+                )
+            assert variant == "full_barrier_clearance"
+            response = _goal_prebind_response(request)
+            for row in response["results"]:
+                candidate = row["prebound_candidate"]
+                candidate["placement_release_offset_selection"] = {
+                    "configured_drop_height_m": 0.05,
+                    "effective_offset_m": 0.165,
+                    "full_barrier_clearance_offset_m": 0.165,
+                    "source": "container_full_barrier_clearance",
+                }
+            return response
+
+        variant = request["candidates"][0]["candidate"].get(
+            "frozen_pair_release_height_variant",
+            "geometry_primary",
+        )
+        calls.append(("pair", variant))
+        rows = [
+            {
+                "candidate_id": item["candidate_id"],
+                "candidate_pose_sha256": item["candidate_pose_sha256"],
+                "qualification_binding_sha256": request[
+                    "qualification_binding_sha256"
+                ],
+                "execution_started": False,
+                "verdict": "PASS",
+                "reason": "qualified",
+                "stages": [_pass_stage()],
+                "full_plan_submitted": True,
+                "goal_legality": {
+                    "verdict": "PASS",
+                    "checks": {
+                        "object_frame_binding": {
+                            "collision_goal_pose": {
+                                "convention": "T_world_collision_object_goal",
+                                "frame": "world",
+                                "translation_xyz": [0.48, 0.0, 0.43],
+                                "rotation_matrix": [
+                                    [1.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0],
+                                    [0.0, 0.0, 1.0],
+                                ],
+                            }
+                        }
+                    },
+                },
+            }
+            for item in request["candidates"]
+        ]
+        return {
+            "schema_version": request["schema_version"],
+            "planning_scene_revision": request["planning_scene_revision"],
+            "execution_started": False,
+            "selected_candidate_ids": [request["candidates"][0]["candidate_id"]],
+            "results": rows,
+        }
+
+    cache = QualificationCache()
+    qualifier = MoveItCandidateQualifier(
+        rpc,
+        cache=cache,
+        compile_candidate=lambda *_args: {
+            "qualification_stages": [
+                {
+                    "name": "release",
+                    "xyz": [0.4, 0.0, 0.5],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                }
+            ]
+        },
+        qualification_profile="fast_v3",
+        solver_profile="kdl_fast",
+    )
+    grasp = {"id": "g0", "score": 0.9}
+    cache.replace(
+        purpose="grasp",
+        candidates=[grasp],
+        proofs={
+            "g0": {
+                "verdict": "PASS",
+                "stages": [
+                    {
+                        "name": "contact",
+                        "target_pose": {
+                            "xyz": [0.3, 0.0, 0.45],
+                            "rotation_matrix": [
+                                [1.0, 0.0, 0.0],
+                                [0.0, 1.0, 0.0],
+                                [0.0, 0.0, 1.0],
+                            ],
+                        },
+                        "end_joint_state": {
+                            "joint_names": ["j1"],
+                            "positions": [0.0],
+                        },
+                    }
+                ],
+            }
+        },
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+    coordinator = _FrozenGoalPairCoordinator(
+        qualifier,
+        object_goals=[
+            {
+                "id": "p0",
+                "object_goal_pose": {
+                    "frame": "world",
+                    "translation_xyz": [0.48, 0.0, 0.43],
+                    "rotation_matrix": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                },
+            }
+        ],
+        object_current_pose={
+            "frame": "world",
+            "translation_xyz": [0.3, 0.0, 0.43],
+            "rotation_matrix": [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        },
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+
+    result = coordinator.filter_grasps(
+        ToolResult(True, "qualified", {"grasp_candidates": [grasp]}),
+        scene_epoch=3,
+        planning_scene_revision=7,
+        source={},
+    )
+
+    assert result.success is True
+    assert [item["id"] for item in result.details["grasp_candidates"]] == ["g0"]
+    assert result.details["frozen_goal_release_height_full_barrier_attempted"] is True
+    assert result.details["frozen_goal_release_height_full_barrier_activated"] is True
+    assert result.details["frozen_goal_primary_legality_summary"][
+        "frozen_goal_legality_reason_counts"
+    ] == {"goal_static_obstacle_penetration": 1}
+    assert calls == [
+        ("prebind", "geometry_primary"),
+        ("prebind", "full_barrier_clearance"),
+        ("pair", "full_barrier_clearance"),
+    ]
+    selected = coordinator.qualified_goals_by_grasp["g0"][0]
+    assert selected["placement_release_offset_selection"]["source"] == (
+        "container_full_barrier_clearance"
+    )
+
+
 def test_fast_pair_search_returns_first_complete_and_retains_frozen_tail(
     tmp_path: Path,
 ) -> None:

@@ -2534,9 +2534,14 @@ class _FrozenGoalPairCoordinator:
                 if isinstance(goal, Mapping)
             )
         ):
+            unbound_goals = [
+                json.loads(json.dumps(goal))
+                for goal in self.object_goals
+                if isinstance(goal, Mapping)
+            ]
             try:
                 prebound_goals, goal_prebind_summary = prebind(
-                    self.object_goals,
+                    unbound_goals,
                     scene_epoch=scene_epoch,
                     planning_scene_revision=planning_scene_revision,
                     source=source,
@@ -2558,6 +2563,62 @@ class _FrozenGoalPairCoordinator:
             self.object_goals = [
                 json.loads(json.dumps(goal)) for goal in prebound_goals
             ]
+            # The primary release height clears the lowest proven container
+            # entry.  A long object can still intersect a higher exterior
+            # wall even when every immutable AnyPlace goal has an otherwise
+            # valid destination.  Before declaring the frozen pool empty,
+            # retry the same goals at the existing geometry-derived full
+            # barrier clearance.  This retains the model-owned SE(3) target
+            # and changes only the host-owned release height.  It is
+            # deliberately limited to a complete static-collision barrier:
+            # arbitrary rejected goals must not gain a speculative retry.
+            primary_reason_counts = goal_prebind_summary.get(
+                "frozen_goal_legality_reason_counts"
+            )
+            primary_static_collision_only = (
+                not self.object_goals
+                and isinstance(primary_reason_counts, Mapping)
+                and bool(primary_reason_counts)
+                and set(str(reason) for reason in primary_reason_counts)
+                == {"goal_static_obstacle_penetration"}
+            )
+            if primary_static_collision_only:
+                primary_summary = json.loads(json.dumps(goal_prebind_summary))
+                try:
+                    elevated_goals, elevated_summary = prebind(
+                        unbound_goals,
+                        scene_epoch=scene_epoch,
+                        planning_scene_revision=planning_scene_revision,
+                        source=source,
+                        release_height_variant=FULL_BARRIER_RELEASE_HEIGHT,
+                    )
+                except Exception as exc:  # noqa: BLE001 - private scene boundary.
+                    return ToolResult(
+                        False,
+                        "Placement full-barrier release-height prebind failed: "
+                        f"{exc}",
+                        {
+                            "reason": "qualification_infrastructure_error",
+                            "infrastructure_error": True,
+                            "qualification_infrastructure_reason": (
+                                "placement_full_barrier_release_height_prebind_failed"
+                            ),
+                            "release_height_variant": FULL_BARRIER_RELEASE_HEIGHT,
+                            "error_type": type(exc).__name__,
+                            "execution_started": False,
+                        },
+                    )
+                self.object_goals = [
+                    json.loads(json.dumps(goal)) for goal in elevated_goals
+                ]
+                goal_prebind_summary = {
+                    **elevated_summary,
+                    "frozen_goal_primary_legality_summary": primary_summary,
+                    "frozen_goal_release_height_full_barrier_attempted": True,
+                    "frozen_goal_release_height_full_barrier_activated": bool(
+                        self.object_goals
+                    ),
+                }
             if not self.object_goals:
                 result.details.update(goal_prebind_summary)
                 result.details["frozen_pair_stop_reason"] = (
@@ -2705,7 +2766,14 @@ class _FrozenGoalPairCoordinator:
                 if index < len(group)
             ]
 
-        pairs = build_pairs(current_goals)
+        active_release_height_variant = str(
+            goal_prebind_summary.get("frozen_goal_release_height_variant")
+            or "geometry_primary"
+        )
+        pairs = build_pairs(
+            current_goals,
+            release_height_variant=active_release_height_variant,
+        )
         if not pairs:
             return self._replace_grasps(result, [], {}, scene_epoch, planning_scene_revision)
         if goal_prebind_summary:
