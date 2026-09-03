@@ -19,10 +19,14 @@ from tools.graspgenx_core import (
     GraspGenXInputError,
     GripperDescription,
     DIVERSITY_EXPANSION_DRAW_SPECS,
+    FORMAL_MIN_APPROACH_SEPARATION_RAD,
+    FORMAL_MIN_TRANSLATION_M,
+    FORMAL_MIN_WRIST_ROTATION_RAD,
     MODEL_INFERENCE_DRAWS,
     MODEL_INFERENCE_DRAW_SPECS,
     RECALL_BASE_DRAW_SPECS,
     _centering_variant_order,
+    _is_formally_novel_grasp,
     _parallel_gripper_centering_metrics,
     _se3_mmr_order,
     build_targeted_point_clouds,
@@ -386,6 +390,45 @@ def test_se3_mmr_prefers_centered_candidate_without_changing_source_coverage() -
     )
 
     assert order == [0, 2, 1]
+
+
+def test_vectorized_formal_novelty_matches_pairwise_definition() -> None:
+    rng = np.random.default_rng(17)
+    poses = np.tile(np.eye(4), (24, 1, 1))
+    poses[:, :3, 3] = rng.uniform(-0.01, 0.01, size=(24, 3))
+    angles = rng.uniform(-0.2, 0.2, size=24)
+    poses[:, 0, 0] = np.cos(angles)
+    poses[:, 0, 1] = -np.sin(angles)
+    poses[:, 1, 0] = np.sin(angles)
+    poses[:, 1, 1] = np.cos(angles)
+
+    def pairwise(candidate_index: int, selected_indices: list[int]) -> bool:
+        candidate = poses[candidate_index]
+        for selected_index in selected_indices:
+            selected = poses[selected_index]
+            translation = np.linalg.norm(candidate[:3, 3] - selected[:3, 3])
+            approach = np.arccos(
+                np.clip(np.dot(candidate[:3, 2], selected[:3, 2]), -1.0, 1.0)
+            )
+            trace = np.trace(candidate[:3, :3].T @ selected[:3, :3])
+            wrist = np.arccos(np.clip((trace - 1.0) * 0.5, -1.0, 1.0))
+            if (
+                translation < FORMAL_MIN_TRANSLATION_M
+                and approach < FORMAL_MIN_APPROACH_SEPARATION_RAD
+                and wrist < FORMAL_MIN_WRIST_ROTATION_RAD
+            ):
+                return False
+        return True
+
+    selected = [0, 3, 7, 12, 18]
+    assert [
+        _is_formally_novel_grasp(
+            poses=poses,
+            candidate_index=index,
+            selected_indices=selected,
+        )
+        for index in range(len(poses))
+    ] == [pairwise(index, selected) for index in range(len(poses))]
 
 
 def test_centering_variant_order_requires_same_mode_and_material_improvement() -> None:

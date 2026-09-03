@@ -983,23 +983,32 @@ def _is_formally_novel_grasp(
     """Whether a pose is sufficiently distinct for the formal candidate pool."""
 
     np, _Image = _load_image_dependencies()
-    candidate = np.asarray(poses[candidate_index], dtype=np.float64)
-    for selected_index in selected_indices:
-        selected = np.asarray(poses[selected_index], dtype=np.float64)
-        translation = float(np.linalg.norm(candidate[:3, 3] - selected[:3, 3]))
-        cosine = float(np.clip(np.dot(candidate[:3, 2], selected[:3, 2]), -1.0, 1.0))
-        approach_separation = math.acos(cosine)
-        relative_trace = float(np.trace(candidate[:3, :3].T @ selected[:3, :3]))
-        wrist_rotation_separation = math.acos(
-            float(np.clip((relative_trace - 1.0) * 0.5, -1.0, 1.0))
-        )
-        if (
-            translation < FORMAL_MIN_TRANSLATION_M
-            and approach_separation < FORMAL_MIN_APPROACH_SEPARATION_RAD
-            and wrist_rotation_separation < FORMAL_MIN_WRIST_ROTATION_RAD
-        ):
-            return False
-    return True
+    if not selected_indices:
+        return True
+    pose_array = np.asarray(poses, dtype=np.float64)
+    candidate = pose_array[candidate_index]
+    selected = pose_array[np.asarray(selected_indices, dtype=np.int64)]
+    translations = np.linalg.norm(
+        selected[:, :3, 3] - candidate[:3, 3],
+        axis=1,
+    )
+    approach_separations = np.arccos(
+        np.clip(selected[:, :3, 2] @ candidate[:3, 2], -1.0, 1.0)
+    )
+    relative_traces = np.einsum(
+        "nij,ij->n",
+        selected[:, :3, :3],
+        candidate[:3, :3],
+    )
+    wrist_rotation_separations = np.arccos(
+        np.clip((relative_traces - 1.0) * 0.5, -1.0, 1.0)
+    )
+    duplicates = (
+        (translations < FORMAL_MIN_TRANSLATION_M)
+        & (approach_separations < FORMAL_MIN_APPROACH_SEPARATION_RAD)
+        & (wrist_rotation_separations < FORMAL_MIN_WRIST_ROTATION_RAD)
+    )
+    return not bool(duplicates.any())
 
 
 def _centering_variant_order(
