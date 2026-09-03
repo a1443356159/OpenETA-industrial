@@ -2520,11 +2520,19 @@ class MoveItQualificationEngine:
                 except _QualificationInfrastructureError as exc:
                     infrastructure_error = str(exc)
 
-        # Prefer two distinct model poses.  If exhaustive fast and recovery
-        # coverage leaves exactly one L5-qualified grasp pose, independently
-        # prove the second Beam-2 joint branch before exposing a fallback.  The
+        # Multi-branch requests prefer two distinct model poses.  If their
+        # search leaves exactly one L5-qualified pose, independently prove the
+        # second Beam-2 joint branch before exposing a fallback.  A one-plan
+        # request keeps that branch frozen for later recovery instead.  The
         # Cartesian contact remains byte-for-byte the provider pose.
-        if not infrastructure_error and purpose == "grasp" and len(l5_passes) == 1:
+        if (
+            not infrastructure_error
+            and purpose == "grasp"
+            and len(l5_passes) == 1
+            and target > 1
+        ):
+            # This request still owes a backup, so reuse the already-screened
+            # alternate joint state before degrading its requested redundancy.
             primary = l5_passes[0]
             alternate = self._alternate_grasp_joint_branch_screen(
                 primary,

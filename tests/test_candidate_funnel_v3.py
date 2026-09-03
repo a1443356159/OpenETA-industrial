@@ -477,6 +477,45 @@ def test_fast_wire_response_omits_rehydratable_compile_parameters():
     assert response["results"][0]["screening_attempts"] == []
 
 
+def test_single_pass_grasp_target_keeps_alternate_beam_branch_for_recovery():
+    planned_states = []
+
+    def compute_ik(target, seed, collision):
+        del target, collision
+        position = -0.2 if seed.get("seed_source") == "named_home" else 0.2
+        return {
+            "ok": True,
+            "joint_state": {"names": ["j1"], "positions": [position]},
+            "min_singular_value": 0.3,
+        }
+
+    def plan_only(target, start, timeout, attempts):
+        del start, timeout, attempts
+        state = target["qualification_goal_joint_state"]
+        planned_states.append(state["positions"][0])
+        return {
+            "ok": True,
+            "execution_started": False,
+            "trajectory_points": [{"positions": list(state["positions"])}],
+            "end_joint_state": dict(state),
+        }
+
+    response = _engine(compute_ik=compute_ik, plan_only=plan_only).qualify(
+        _request(
+            [_candidate(0)],
+            purpose="grasp",
+            overrides={"l5_pass_target": 1, "l5_min_pass_target": 1},
+        )
+    )
+
+    assert response["selected_candidate_ids"] == ["c0"]
+    assert response["stop_reason"] == "complete_l5_pass_found"
+    assert response["metrics"]["l5_pass_count"] == 1
+    assert response["metrics"]["l5_joint_branch_pass_count"] == 1
+    assert planned_states == [0.2]
+    assert [attempt["joint_branch_index"] for attempt in response["l5_attempts"]] == [0]
+
+
 def test_fast_ik_request_carries_the_wave_queue_depth_separately_from_solver_budget():
     seen: list[tuple[float, int]] = []
     validity_depths: list[int] = []
