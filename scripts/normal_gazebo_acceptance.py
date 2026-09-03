@@ -139,6 +139,64 @@ MULTI_NORMAL_TASK_VARIANTS = {
             ),
         ],
     },
+    "three-tools-a": {
+        "operator_instruction": (
+            "请依次把蓝黑色螺丝刀放进绿色零件箱，把银色梅花扳手放进蓝色零件箱，"
+            "再把蓝柄钢丝钳放进绿色零件箱。其他物件不要动，全部完成后再结束。"
+        ),
+        "items": [
+            (
+                "blue_black_screwdriver",
+                "blue_black_screwdriver_link",
+                "blue and black screwdriver",
+                "green_parts_bin",
+                "green parts bin",
+            ),
+            (
+                "silver_box_wrench",
+                "silver_box_wrench_link",
+                "silver box-end wrench",
+                "blue_parts_bin",
+                "blue parts bin",
+            ),
+            (
+                "distractor_object",
+                "distractor_link",
+                "blue-handled pliers",
+                "green_parts_bin",
+                "green parts bin",
+            ),
+        ],
+    },
+    "mixed-tools-b": {
+        "operator_instruction": (
+            "请依次把红色六角螺栓放进绿色零件箱，把黄色活动扳手放进蓝色零件箱，"
+            "再把蓝黑色螺丝刀放进绿色零件箱。其他物件不要动，全部完成后再结束。"
+        ),
+        "items": [
+            (
+                "red_m24_hex_bolt",
+                "red_m24_hex_bolt_link",
+                "red hex bolt",
+                "green_parts_bin",
+                "green parts bin",
+            ),
+            (
+                "target_object",
+                "target_link",
+                "yellow wrench",
+                "blue_parts_bin",
+                "blue parts bin",
+            ),
+            (
+                "blue_black_screwdriver",
+                "blue_black_screwdriver_link",
+                "blue and black screwdriver",
+                "green_parts_bin",
+                "green parts bin",
+            ),
+        ],
+    },
 }
 LEGACY_MULTI_NORMAL_REQUEST_IDS = {
     DEFAULT_MULTI_NORMAL_TASK_VARIANT: "multi_normal",
@@ -246,12 +304,13 @@ TASK_INSTRUCTIONS = """
 SCENARIO_INSTRUCTIONS = {
     "normal": "桌上还有几件外观相近的工具，拿之前请确认没有拿错。",
     "multi_normal": (
-        "这是同一工作单元内的连续分拣；放好第一件后不要关闭环境，"
-        "重新看清当前场景并继续第二件。"
+        "这是同一工作单元内的连续分拣；每放好一件都不要关闭环境，"
+        "请重新看清当前场景，如还有指定物件就继续下一件。"
     ),
     "multi_normal_random_12345": (
         "工作台物件的位置和朝向已经变化。这是同一工作单元内的连续分拣；"
-        "放好第一件后不要关闭环境，重新看清当前场景并继续第二件。"
+        "每放好一件都不要关闭环境，请重新看清当前场景，"
+        "如还有指定物件就继续下一件。"
     ),
 }
 

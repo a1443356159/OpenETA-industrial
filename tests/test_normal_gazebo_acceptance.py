@@ -540,7 +540,7 @@ def test_multi_normal_prepares_one_human_request_with_private_verification_contr
 
     assert "黄色活动扳手" in prompt and "绿色零件箱" in prompt
     assert "红色六角螺栓" in prompt and "蓝色零件箱" in prompt
-    assert "放好第一件后不要关闭环境" in prompt
+    assert "每放好一件都不要关闭环境" in prompt
     assert [item["id"] for item in assignments] == [
         "yellow_wrench_to_green_parts_bin",
         "red_bolt_to_blue_parts_bin",
@@ -686,6 +686,24 @@ def test_multi_normal_counts_legacy_anyplace_model_calls_per_assignment() -> Non
             ["blue_handled_pliers_to_green_parts_bin"],
             "green_parts_bin",
         ),
+        (
+            "three-tools-a",
+            [
+                "blue_black_screwdriver_to_green_parts_bin",
+                "silver_box_wrench_to_blue_parts_bin",
+                "blue_handled_pliers_to_green_parts_bin",
+            ],
+            "green_parts_bin",
+        ),
+        (
+            "mixed-tools-b",
+            [
+                "red_bolt_to_green_parts_bin",
+                "yellow_wrench_to_blue_parts_bin",
+                "blue_black_screwdriver_to_green_parts_bin",
+            ],
+            "green_parts_bin",
+        ),
     ],
 )
 def test_multi_normal_task_variants_change_only_user_words_and_verification_contract(
@@ -736,7 +754,7 @@ def test_multi_normal_task_variants_change_only_user_words_and_verification_cont
     }
     instructions = paths.instructions.read_text(encoding="utf-8")
     if len(ordered_assignment_ids) > 1:
-        assert "放好第一件后不要关闭环境" in instructions
+        assert "每放好一件都不要关闭环境" in instructions
     else:
         assert "请只处理指定物件" in instructions
 
