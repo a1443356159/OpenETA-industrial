@@ -518,10 +518,12 @@ class MoveItCandidateQualifier:
         if received != expected:
             raise RuntimeError("placement goal prebind candidate identity mismatch")
         bound: list[JsonDict] = []
+        reason_counts: Counter[str] = Counter()
         for row in rows:
             if not isinstance(row, Mapping):
                 continue
             verdict = str(row.get("verdict") or "UNKNOWN").upper()
+            reason_counts[str(row.get("reason") or "goal_legality_unknown")] += 1
             if verdict == "PASS" and isinstance(row.get("prebound_candidate"), Mapping):
                 bound.append(json.loads(json.dumps(row["prebound_candidate"])))
             elif verdict not in {"PASS", "FAIL"}:
@@ -538,6 +540,9 @@ class MoveItCandidateQualifier:
             "frozen_goal_legality_pass_count": len(bound),
             "frozen_goal_legality_reject_count": len(rows) - len(bound),
             "frozen_goal_legality_frontier_count": len(bound),
+            "frozen_goal_legality_reason_counts": {
+                reason: reason_counts[reason] for reason in sorted(reason_counts)
+            },
             "frozen_goal_legality_elapsed_s": response_metrics.get(
                 "goal_legality_elapsed_s"
             ),

@@ -1070,7 +1070,14 @@ def _candidate_qualification_compiler(
             settled_goal = candidate.get(
                 "qualified_world_collision_object_goal_pose"
             )
-            if isinstance(settled_goal, Mapping):
+            dynamic_settling_overlaps = candidate.get(
+                "qualified_settled_dynamic_overlap_ids"
+            )
+            has_dynamic_settling_overlap = bool(
+                isinstance(dynamic_settling_overlaps, list)
+                and dynamic_settling_overlaps
+            )
+            if isinstance(settled_goal, Mapping) and not has_dynamic_settling_overlap:
                 # The EEF remains at the release endpoint while the object
                 # settles under physics.  The prior virtual-detach proof used
                 # only the elevated release pose, so a long part could settle
@@ -1090,6 +1097,19 @@ def _candidate_qualification_compiler(
                         separators=(",", ":"),
                     ).encode("utf-8")
                 ).hexdigest()
+            elif has_dynamic_settling_overlap:
+                # A model settled pose that intersects another loose payload
+                # is not a deterministic post-release state: native dynamics
+                # may move either body. Prove the exact elevated release
+                # endpoint here and leave final membership to the causal
+                # post-release observation. Static structures remain hard
+                # collision gates throughout the path.
+                release_stage["qualification_settled_probe_policy"] = (
+                    "release_endpoint_only_due_dynamic_settling"
+                )
+                parameters["qualification_settled_dynamic_overlap_ids"] = sorted(
+                    {str(value) for value in dynamic_settling_overlaps if str(value)}
+                )
             stages = [release_stage]
         else:
             extrinsics = source.get("camera_extrinsics")

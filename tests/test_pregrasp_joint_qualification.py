@@ -329,6 +329,20 @@ def test_predicted_attachment_recompiles_frozen_goal_in_model_object_frame() -> 
         "qualification_object_goal_source"
     ] == "physical_goal_with_measured_attachment"
 
+    dynamic_overlap_candidate = {
+        **candidate,
+        "qualified_settled_dynamic_overlap_ids": ["previous_payload"],
+    }
+    dynamic_overlap = compiler(dynamic_overlap_candidate, "placement", {}, 2, 7)
+    dynamic_stage = dynamic_overlap["qualification_stages"][0]
+    assert "qualification_settled_object_pose" not in dynamic_stage
+    assert dynamic_stage["qualification_settled_probe_policy"] == (
+        "release_endpoint_only_due_dynamic_settling"
+    )
+    assert dynamic_overlap["compile_parameters"][
+        "qualification_settled_dynamic_overlap_ids"
+    ] == ["previous_payload"]
+
     rebased_candidate = dict(candidate)
     rebased_candidate["frozen_object_motion_rebase"] = {
         "schema_version": "openeta.frozen_object_motion_rebase.v1",

@@ -2111,6 +2111,9 @@ def test_goal_prebind_rpc_freezes_container_release_before_pair_compilation():
 
     assert summary["frozen_goal_legality_screen_complete"] is True
     assert summary["frozen_goal_legality_pass_count"] == 1
+    assert summary["frozen_goal_legality_reason_counts"] == {
+        "goal_legality_qualified": 1
+    }
     assert summary["frozen_goal_legality_elapsed_s"] >= 0.0
     assert summary["frozen_goal_legality_rpc_timeout_s"] == rpc_timeouts[0]
     assert rpc_timeouts[0] > 30.0
@@ -2611,6 +2614,7 @@ def test_object_goal_static_collision_is_rejected_by_target_gate():
         "size_xyz": [0.05, 0.05, 0.08],
         "pose_xyz": [0.28, 0.12, 0.44],
         "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "gazebo_static": True,
     }
     scene["placement_region"]["center_xy"] = [0.28, 0.12]
     scene["placement_region"]["size_xy_m"] = [0.12, 0.12]
@@ -2652,6 +2656,53 @@ def test_object_goal_static_collision_is_rejected_by_target_gate():
         ]
     )
     assert response["metrics"]["screening_attempt_count"] == 0
+
+
+def test_object_goal_dynamic_overlap_is_evidence_not_a_hard_reject():
+    scene = _placement_scene()
+    scene["world_specs"]["settled_payload"] = {
+        "id": "settled_payload",
+        "shape": "box",
+        "size_xyz": [0.05, 0.05, 0.08],
+        "pose_xyz": [0.28, 0.12, 0.44],
+        "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "gazebo_static": False,
+    }
+    scene["placement_region"].update(
+        {
+            "center_xy": [0.28, 0.12],
+            "size_xy_m": [0.12, 0.12],
+            "acceptance_semantics": "stable_geometry_centroid_inside",
+        }
+    )
+    candidate = _candidate(0)
+    candidate.update(
+        {
+            "source_grasp_id": "g0",
+            "source_object_goal_id": "p0",
+            "object_goal_pose": {
+                "frame": "world",
+                "translation_xyz": [0.28, 0.12, 0.44],
+                "rotation_matrix": [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+        }
+    )
+    descriptor = {"candidate_id": "p0", "candidate": candidate}
+
+    evidence = evaluate_placement_goal_legality(descriptor, scene=scene)
+    bind_qualified_placement_goal(descriptor, evidence)
+
+    assert evidence["verdict"] == "PASS"
+    collision = evidence["checks"]["static_scene_collision"]
+    assert collision["collision_ids"] == []
+    assert collision["dynamic_overlap_ids"] == ["settled_payload"]
+    assert descriptor["candidate"]["qualified_settled_dynamic_overlap_ids"] == [
+        "settled_payload"
+    ]
 
 
 def test_compound_bin_exempts_only_support_floor_not_collision_wall() -> None:

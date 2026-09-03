@@ -1488,8 +1488,11 @@ def evaluate_placement_goal_legality(
         result["checks"]["placement_region"] = {"available": False}
 
     collisions: list[str] = []
+    dynamic_overlaps: list[str] = []
     uncheckable: list[str] = []
     evaluated_obstacles: list[str] = []
+    evaluated_static_obstacles: list[str] = []
+    evaluated_dynamic_objects: list[str] = []
     support_contact_primitive_count = 0
     support_barrier_primitive_count = 0
     for object_id, spec in sorted(world_specs.items(), key=lambda item: str(item[0])):
@@ -1509,7 +1512,15 @@ def evaluate_placement_goal_legality(
                 uncheckable.append(object_id)
             continue
         evaluated_obstacles.append(object_id)
-        if any(
+        dynamic_object = spec.get("gazebo_static") is False
+        if dynamic_object:
+            evaluated_dynamic_objects.append(object_id)
+        else:
+            # Legacy/non-Gazebo scenes do not carry a mobility annotation.
+            # Preserve their conservative behavior by treating an unmarked
+            # world body as static.
+            evaluated_static_obstacles.append(object_id)
+        penetrates = any(
             _obb_penetrates(
                 _projected_obb(body),
                 obstacle,
@@ -1517,12 +1528,26 @@ def evaluate_placement_goal_legality(
             )
             for body in goal_geometry
             for obstacle in obstacle_boxes
-        ):
-            collisions.append(object_id)
+        )
+        if penetrates:
+            if dynamic_object:
+                # This layer evaluates the model's predicted *settled* pose.
+                # A loose object already in a bin can translate or rotate as
+                # the new payload falls, so overlap with it is not proof that
+                # the elevated release is unsafe or the sort will fail.  Keep
+                # the overlap as immutable evidence; pair legality and MoveIt
+                # still check the attached path and exact release endpoint.
+                dynamic_overlaps.append(object_id)
+            else:
+                collisions.append(object_id)
     result["checks"]["static_scene_collision"] = {
         "available": bool(world_specs),
         "evaluated_obstacle_ids": evaluated_obstacles,
+        "evaluated_static_obstacle_ids": evaluated_static_obstacles,
+        "evaluated_dynamic_object_ids": evaluated_dynamic_objects,
         "collision_ids": collisions,
+        "dynamic_overlap_ids": dynamic_overlaps,
+        "dynamic_overlap_role": "settled_goal_evidence_only",
         "uncheckable_ids": uncheckable,
         "support_contact_primitive_count": support_contact_primitive_count,
         "support_barrier_primitive_count": support_barrier_primitive_count,
@@ -1639,6 +1664,22 @@ def bind_qualified_placement_goal(
     container_drop = binding.get("container_drop")
     if isinstance(container_drop, Mapping) and container_drop.get("enabled") is True:
         candidate["container_drop_release_prebound"] = True
+    collision_check = checks.get("static_scene_collision")
+    dynamic_overlap_ids = (
+        collision_check.get("dynamic_overlap_ids")
+        if isinstance(collision_check, Mapping)
+        else None
+    )
+    if isinstance(dynamic_overlap_ids, list) and dynamic_overlap_ids:
+        candidate["qualified_settled_dynamic_overlap_ids"] = sorted(
+            {str(value) for value in dynamic_overlap_ids if str(value)}
+        )
+        candidate["qualified_settled_probe_policy"] = (
+            "release_endpoint_only_due_dynamic_settling"
+        )
+    else:
+        candidate.pop("qualified_settled_dynamic_overlap_ids", None)
+        candidate.pop("qualified_settled_probe_policy", None)
     if isinstance(qualified_motion, Mapping):
         if _transform_matrix(qualified_motion.get("transform_matrix")) is None:
             return
