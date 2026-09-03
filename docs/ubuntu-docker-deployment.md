@@ -69,18 +69,40 @@ deploy/ubuntu/openeta.sh tui
 # 无 Planner/VLM 的 normal 控制链，默认连续两轮
 deploy/ubuntu/openeta.sh smoke-normal
 
-# 带 Planner/VLM 的 agentic normal，默认连续两轮
+# 带 Planner/VLM 的最终双物件 `multi_normal`，默认连续两轮
 deploy/ubuntu/openeta.sh agentic-normal
 
 # 容器内测试
 deploy/ubuntu/openeta.sh test tests/test_hpc_deployment.py -q
 ```
 
-每组 normal 证据位于 `.cache/docker/state/runs/<profile>-<timestamp>/`。第一轮失败会
+每组验收证据位于 `.cache/docker/state/runs/<profile>-<timestamp>/`。第一轮失败会
 立即返回非零，不用第二轮重试掩盖故障。可显式修改轮数和场景：
 
 ```bash
 deploy/ubuntu/openeta.sh smoke-normal --runs 1 --scenario normal
+```
+
+`agentic-normal` 的默认场景是最终的任务中立 `multi_normal` 双物件分拣；
+`smoke-normal` 仍只支持单物件 `normal`，不能替代带 VLM 的验收。Docker 入口也支持
+同一物理场景内的单、双和三物件自然语言工单。`--task-variant` 仅给验收器选择私有
+核对契约，实际任务语义仍来自 Planner 在 TUI 中读取的工单：
+
+```bash
+# 单物件：蓝黑色螺丝刀 → 绿色料箱
+deploy/ubuntu/openeta.sh agentic-normal --runs 2 \
+  --scenario multi_normal --task-variant screwdriver-green
+
+# 默认双物件：黄色活动扳手 → 绿色料箱；红色六角螺栓 → 蓝色料箱
+deploy/ubuntu/openeta.sh agentic-normal --runs 2
+
+# 三物件：螺丝刀、银色梅花扳手、蓝柄钢丝钳依次分拣
+deploy/ubuntu/openeta.sh agentic-normal --runs 2 \
+  --scenario multi_normal --task-variant three-tools-a
+
+# 固定 seed 的随机布局；仍使用同一权威场景编译器和碰撞模型
+deploy/ubuntu/openeta.sh agentic-normal --runs 2 \
+  --scenario multi_normal_random_12345 --task-variant mixed-tools-b
 ```
 
 Planner/VLM 配置默认从仓库内已忽略的 `.env` 以 Docker secret 只读挂载；它不会作为
@@ -95,6 +117,45 @@ deploy/ubuntu/openeta.sh agentic-normal
 `.env`、`apikey.md`、本机 MCP registry、checkpoint、license 和运行证据均被
 `.dockerignore` 排除，不会进入 build context 或镜像层。不要把 API key 写入
 `compose.yaml` 或 Dockerfile。
+
+### 百炼 Qwen Planner/VLM
+
+最终部署使用百炼 OpenAI-compatible Vision 接口时，创建一个仅由部署用户可读的
+provider secret。以下示例使用北京业务空间端点；将 `WORKSPACE_ID` 和密钥替换为
+控制台实际值，**不要**把密钥提交到 Git：
+
+```bash
+umask 077
+cat > /secure/openeta-bailian-qwen.env <<'EOF'
+OPENETA_LLM_PROVIDER=openai-compatible
+OPENETA_LLM_MODEL=qwen3-vl-flash
+OPENETA_LLM_API_BASE=https://WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+OPENETA_LLM_API_KEY=replace-with-bailian-api-key
+OPENETA_LLM_ENABLE_VISION=true
+OPENETA_LLM_THINKING_MODE=disabled
+OPENETA_LLM_TIMEOUT_S=60
+OPENETA_LLM_MAX_ATTEMPTS=3
+OPENETA_LLM_RETRY_BACKOFF_S=0.5
+OPENETA_LLM_MAX_TOKENS=512
+EOF
+chmod 600 /secure/openeta-bailian-qwen.env
+export OPENETA_PROVIDER_ENV_FILE=/secure/openeta-bailian-qwen.env
+deploy/ubuntu/openeta.sh config
+```
+
+`qwen3-vl-flash` is the recommended low-latency visual Planner profile here:
+it supports image input, function calling and structured output through the
+OpenAI-compatible Vision API. The official endpoint form and model capability
+are documented by [Alibaba Cloud Model Studio](https://help.aliyun.com/zh/model-studio/qwen-vl-compatible-with-openai)
+and [the qwen3-vl-flash model page](https://help.aliyun.com/zh/model-studio/qwen3-vl-flash).
+The OpenETA provider preflight records the endpoint and model with the key
+redacted; a provider or service failure is an infrastructure failure, never a
+candidate rejection.
+
+The final Docker profile freezes 512 GraspGenX candidates once and consumes
+them in the `fast_v3` small-wave funnel. It does not issue 512 eager IK or L5
+requests. Set `OPENETA_GRASPGENX_RAW_POOL_SIZE=1024` only for a measured
+coverage experiment after a 512-pool miss; it is not the release default.
 
 ## GPU GUI / VNC 转发
 

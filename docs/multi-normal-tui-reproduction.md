@@ -54,6 +54,10 @@ DISPLAY=:3 vglrun -d egl -c proxy glxinfo -B \
 
 三项健康检查都应返回 `"ok": true`，VirtualGL 检查应显示 `NVIDIA Corporation` 和 NVIDIA GPU。裸 `DISPLAY=:3 glxinfo` 可能显示 llvmpipe，因为 TigerVNC 只提供 2D framebuffer；Gazebo GUI 由 `vglrun` 重定向到 GPU，判断时以带 `vglrun` 的结果为准。用 RealVNC 连接上述 SSH 隧道，确认桌面可见；验收启动后 Gazebo GUI 会自动打开。Provider 凭据由部署目录中的受控配置加载，不要把密钥写入命令、Prompt 或报告。
 
+最终百炼配置使用 OpenAI-compatible Vision 端点和 `qwen3-vl-flash`；Docker 部署中的
+无密钥模板、权限设置和预检步骤见
+[Ubuntu Docker 部署](ubuntu-docker-deployment.md#百炼-qwen-plannervlm)。
+
 发行行为实现基线为 `3a70294`；实际复现提交可以是该提交或其在 `final-dev` 上的后继。工作树必须干净，且代码、ROS overlay 与受控服务来自同一发行谱系。
 
 ## 2. 启动人工 TUI

@@ -40,7 +40,9 @@ export OPENETA_PYTHON_EXECUTABLE="${APP_PYTHON}"
 export OPENETA_GAZEBO_SYSTEM_ROS_PREFIX=/opt/ros/jazzy
 export OPENETA_GAZEBO_OVERLAY=/opt/openeta/src/extensions/gazebo/ros2_ws/install
 export OPENETA_QUALIFICATION_PROFILE=fast_v3
-export OPENETA_GRASPGENX_RAW_POOL_SIZE=200
+# The final GraspGenX release path freezes its 512-candidate reserve once and
+# searches it incrementally.  This is a pool size, not 512 eager IK calls.
+export OPENETA_GRASPGENX_RAW_POOL_SIZE=512
 export OPENETA_ANYPLACE_RAW_POOL_SIZE=96
 export OPENETA_ANYPLACE_DIVERSITY_POOL_SIZE=96
 export OPENETA_SAM3_PYTHON=/opt/openeta/venvs/sam3/bin/python
@@ -100,7 +102,7 @@ for run_index in 1 2; do
   /usr/bin/time \
     --format='wall_s=%e\nuser_s=%U\nsystem_s=%S\nmax_rss_kb=%M' \
     --output="${RUN_ROOT}/run-${run_index}-time.txt" \
-    "${REPO_ROOT}/scripts/run_m6_gazebo_acceptance.sh" \
+    "${REPO_ROOT}/scripts/run_pick_place_acceptance.sh" \
       --run-root "${run_path}" \
       --scenario normal \
       --execution-profile smoke_normal \

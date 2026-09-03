@@ -59,9 +59,21 @@ def test_container_entrypoints_use_graspgenx_and_two_run_default() -> None:
     services = (UBUNTU_DEPLOY / "model_services.sh").read_text(encoding="utf-8")
 
     assert "OPENETA_ACCEPTANCE_RUNS: ${OPENETA_ACCEPTANCE_RUNS:-2}" in compose
+    assert "OPENETA_GRASPGENX_RAW_POOL_SIZE: ${OPENETA_GRASPGENX_RAW_POOL_SIZE:-512}" in compose
     assert "--grasp-backend graspgenx" in normal
+    assert 'scenario="multi_normal"' in normal
+    assert "multi_normal_random_12345" in normal
+    assert "--task-variant" in normal
+    assert 'scripts/run_pick_place_acceptance.sh' in normal
+    assert "run_m6_gazebo_acceptance.sh" not in normal
     assert "for target in sam3 anyplace graspgenx" in services
     assert "start anygrasp" not in services
+
+
+def test_docker_example_matches_final_graspgenx_reserve_default() -> None:
+    example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "OPENETA_GRASPGENX_RAW_POOL_SIZE=512" in example
 
 
 def test_tui_registry_contains_only_container_started_services() -> None:

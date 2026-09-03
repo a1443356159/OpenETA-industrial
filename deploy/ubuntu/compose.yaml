@@ -55,6 +55,10 @@ services:
       OPENETA_GRASPGENX_GRIPPER_DESCRIPTIONS_ROOT: /srv/openeta/models/graspgenx/gripper_descriptions
       OPENETA_GRASP_BACKEND: ${OPENETA_GRASP_BACKEND:-graspgenx}
       OPENETA_QUALIFICATION_PROFILE: ${OPENETA_QUALIFICATION_PROFILE:-fast_v3}
+      # GraspGenX generates this frozen reserve once; fast_v3 consumes it in
+      # small cumulative waves and stops on the first complete proof.
+      OPENETA_GRASPGENX_RAW_POOL_SIZE: ${OPENETA_GRASPGENX_RAW_POOL_SIZE:-512}
+      OPENETA_ACCEPTANCE_TASK_VARIANT: ${OPENETA_ACCEPTANCE_TASK_VARIANT:-}
       OPENETA_ACCEPTANCE_RUNS: ${OPENETA_ACCEPTANCE_RUNS:-2}
     volumes:
       - type: bind

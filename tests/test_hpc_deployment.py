@@ -111,6 +111,16 @@ def test_slurm_runtime_scripts_do_not_embed_site_identity() -> None:
         assert "gpu:L40" not in content
 
 
+def test_hpc_smoke_uses_current_pick_place_runner_and_final_grasp_reserve() -> None:
+    runtime = (REPO_ROOT / "deploy/HPC/container_smoke_normal.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "OPENETA_GRASPGENX_RAW_POOL_SIZE=512" in runtime
+    assert "scripts/run_pick_place_acceptance.sh" in runtime
+    assert "run_m6_gazebo_acceptance.sh" not in runtime
+
+
 def test_docker_context_excludes_local_protected_assets() -> None:
     dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
 

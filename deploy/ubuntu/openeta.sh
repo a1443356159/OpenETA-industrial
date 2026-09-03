@@ -15,8 +15,8 @@ Commands:
   config                Render and validate the Compose configuration
   shell                 Open a shell in the immutable image
   tui [ARGS...]         Start the interactive OpenETA TUI
-  smoke-normal [ARGS]   Run normal without a Planner/VLM (two runs by default)
-  agentic-normal [ARGS] Run normal with the configured Planner/VLM
+  smoke-normal [ARGS]   Run single-item normal without a Planner/VLM (two runs by default)
+  agentic-normal [ARGS] Run final multi_normal sorting with the configured Planner/VLM
   validate-assets       Validate mounted model assets and prepare writable cache
   test [PYTEST_ARGS...] Run repository tests inside the image
   exec COMMAND [...]    Run an arbitrary command after container initialization

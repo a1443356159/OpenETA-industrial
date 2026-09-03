@@ -9,6 +9,7 @@ the first table instead of reading the `docs/` directory alphabetically.
 | Document | Status | Purpose |
 | --- | --- | --- |
 | [`multi-normal-tui-reproduction.md`](multi-normal-tui-reproduction.md) | Operator runbook | Canonical human TUI procedure, representative prompt, evidence checks, and task variants. |
+| [`final-dev-validation-report.md`](final-dev-validation-report.md) | Release evidence | Current `final-dev` Qwen validation matrix, evidence roots, and remaining promotion gates. |
 | [`gazebo-normal-acceptance.md`](gazebo-normal-acceptance.md) | Normative contract | Final task-neutral scene, model/geometry boundaries, physical proofs, recovery, and release gates. |
 | [`openeta-qualification-funnel-v3.md`](openeta-qualification-funnel-v3.md) | Normative contract | `fast_v3` scheduling, Beam-2 IK, deterministic recovery, evidence, and promotion criteria. |
 | [`gazebo-rm75-robotiq2f85.md`](gazebo-rm75-robotiq2f85.md) | Runtime profile | Robot, gripper, cameras, controllers, PlanningScene, and Gazebo launch behavior. |
@@ -24,10 +25,12 @@ SAM3, MoveIt, and the `fast_v3` qualification profile. AnyGrasp remains availabl
 backend evaluation. The repository-wide rollback default may remain `legacy`; the release runner
 selects `fast_v3` explicitly.
 
-The validated implementation baseline is `3a70294` (2026-08-31). Three consecutive GPU-GUI
+The historical validated implementation baseline is `3a70294` (2026-08-31). Three consecutive GPU-GUI
 `human_tui` runs of the representative wrench/bolt work order passed with 22 agent-selected tools
-and zero host dispatches each. The operator runbook records the exact server path, SSH/VNC tunnel,
-health and VirtualGL checks, prompt, approvals, report queries, timings, tokens, and evidence roots.
+and zero host dispatches each. Current `final-dev` evidence and the explicit remaining provider
+promotion gates are recorded separately in the validation report. The operator runbook records the
+exact server path, SSH/VNC tunnel, health and VirtualGL checks, prompt, approvals, report queries,
+timings, tokens, and evidence roots.
 
 ## Framework and interfaces
 
