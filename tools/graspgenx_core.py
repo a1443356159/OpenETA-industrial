@@ -15,7 +15,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -816,6 +818,34 @@ def _se3_mmr_order(
 ) -> list[int]:
     """Return a deterministic, source-aware quality/diversity ordering."""
 
+    return list(
+        _iter_se3_mmr_order(
+            poses=poses,
+            scores=scores,
+            branch_tags=branch_tags,
+            selection_limit=selection_limit,
+            centering_ratios=centering_ratios,
+        )
+    )
+
+
+def _iter_se3_mmr_order(
+    *,
+    poses: Any,
+    scores: Any,
+    branch_tags: list[str],
+    selection_limit: int,
+    centering_ratios: Any | None = None,
+) -> Iterator[int]:
+    """Yield the exact MMR order only as far as its consumer needs.
+
+    Candidate generation previously materialised nearly the complete 7k-pose
+    MMR permutation before collision screening could stop at the 512-pose
+    provider pool.  The greedy state is prefix-stable, so yielding it lazily
+    preserves the byte-for-byte ordering while avoiding work on the frozen
+    tail that downstream qualification may never inspect.
+    """
+
     np, _Image = _load_image_dependencies()
     pose_array = np.asarray(poses, dtype=np.float64)
     score_array = np.asarray(scores, dtype=np.float64)
@@ -824,7 +854,7 @@ def _se3_mmr_order(
         raise GraspGenXInputError("inconsistent_grasp_outputs")
     ranked = sorted(range(count), key=lambda index: (-score_array[index], index))
     if not ranked:
-        return []
+        return
     selection_limit = max(1, min(int(selection_limit), count))
     score_span = float(score_array.max() - score_array.min())
     quality = (
@@ -934,15 +964,17 @@ def _se3_mmr_order(
     max_similarity = np.zeros(count, dtype=np.float64)
     for chosen in selected:
         max_similarity = np.maximum(max_similarity, similarity_to(chosen))
+    yield from selected
     while bool(remaining.any()) and len(selected) < selection_limit:
         available = np.flatnonzero(remaining)
         objective = quality - MMR_SIMILARITY_PENALTY * max_similarity
         best = deterministic_best(available, objective)
         selected.append(best)
         remaining[best] = False
+        yield best
         if bool(remaining.any()):
             max_similarity = np.maximum(max_similarity, similarity_to(best))
-    return [*selected, *(index for index in ranked if remaining[index])]
+    yield from (index for index in ranked if remaining[index])
 
 
 def _is_formally_novel_grasp(
@@ -1622,7 +1654,7 @@ class GraspGenXBackend:
         )
         # The recall base deliberately uses the pre-centering MMR objective.
         # Ordering evidence must never erase a legacy model representative.
-        inspection_order = _se3_mmr_order(
+        inspection_order = _iter_se3_mmr_order(
             poses=poses[:base_raw_count],
             scores=score_array[:base_raw_count],
             branch_tags=branch_tags[:base_raw_count],
@@ -1731,8 +1763,10 @@ class GraspGenXBackend:
             COLLISION_REQUEST_BATCH_SIZE,
             max(COLLISION_BATCH_SIZE, recall_base_limit),
         )
-        for offset in range(0, len(inspection_order), recall_request_size):
-            batch_indices = inspection_order[offset : offset + recall_request_size]
+        while True:
+            batch_indices = list(islice(inspection_order, recall_request_size))
+            if not batch_indices:
+                break
             batch_poses = camera_native_grasps[batch_indices]
             free_mask = np.asarray(
                 filter_fn(
