@@ -7859,10 +7859,18 @@ class AgentMemory:
             }
         self.compact_summary = str(memory.get("compact_summary", ""))
 
-    def model_conversation_messages(self) -> list[JsonDict]:
-        """Return canonical chat messages in provider-compatible form."""
+    def model_conversation_messages(
+        self,
+        *,
+        omit_known_successful_execution_feedback: bool = False,
+    ) -> list[JsonDict]:
+        """Return provider chat messages with optional success-feedback elision."""
 
-        return self.conversation.model_messages()
+        return self.conversation.model_messages(
+            omit_known_successful_execution_feedback=(
+                omit_known_successful_execution_feedback
+            )
+        )
 
     def conversation_checkpoint_summary(self) -> str:
         summary = self.conversation.checkpoint.get("summary")

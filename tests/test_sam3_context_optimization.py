@@ -17,8 +17,6 @@ from agent.runtime.planner import (
     _default_tool_planner_system_prompt,
     _model_request_context,
     _model_phase_and_legal_tools,
-    _operator_control_metadata,
-    _operator_planner_mode,
     _operator_semantic_prompts,
     _sam3_request_identity,
     _semantic_camera_view_identity,
@@ -979,6 +977,92 @@ def test_model_projection_compacts_unique_host_bound_atomic_action() -> None:
     assert required_action["parameter_binding_sha256"] == binding[
         "parameter_binding_sha256"
     ]
+
+
+def test_model_projection_uses_structured_state_not_known_success_feedback() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick the red block")
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "status": "executed",
+                "request": {
+                    "kind": "tool_call",
+                    "name": "move_to",
+                    "parameters": {},
+                },
+                "tool_calls": [
+                    {
+                        "name": "move_to",
+                        "status": "executed",
+                        "result": {"success": True, "content": "motion complete"},
+                    }
+                ],
+            },
+        )
+    )
+    full_context = {
+        "task": "pick the red block",
+        "planner_mode": "agentic_closed_loop",
+        "observation": {"camera_ids": ["top"]},
+        "active_environment_task": {"status": "running"},
+        "grasp_execution": {
+            "status": "required",
+            "stage": "close",
+            "required_action": {
+                "name": "gripper_control",
+                "parameters": {"command": "close"},
+            },
+        },
+        "tool_references": [
+            {
+                "name": "gripper_control",
+                "description": "close the gripper",
+                "parameters": {"command": "string"},
+            }
+        ],
+        "memory": {"metadata": {}},
+        "selected_skill_guidance": [],
+        "skill_usage": {},
+    }
+
+    projected, messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    assert messages == []
+    assert projected["controller"]["legal_tool_names"] == ["gripper_control"]
+    assert projected["state"]["grasp_execution"]["stage"] == "close"
+
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "status": "failed",
+                "request": {
+                    "kind": "tool_call",
+                    "name": "gripper_control",
+                    "parameters": {"command": "close"},
+                },
+                "tool_calls": [
+                    {
+                        "name": "gripper_control",
+                        "status": "failed",
+                        "result": {"success": False, "content": "gripper stalled"},
+                    }
+                ],
+            },
+        )
+    )
+    _recovery_context, recovery_messages = _model_request_context(
+        full_context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+    assert "OpenETA host execution evidence" in recovery_messages[-1]["content"]
 
 
 def test_model_projection_keeps_skill_for_unbound_semantic_decision() -> None:

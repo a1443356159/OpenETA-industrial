@@ -89,6 +89,32 @@ def test_user_constraint_survives_many_operational_events() -> None:
     assert all(event["type"] != "user_message" for event in context["recent_events"])
 
 
+def test_next_model_turn_omits_only_known_successful_host_feedback() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick milk")
+    memory.begin_user_turn("Keep the gripper closed until after the lift.", source="user")
+    memory.add_action(_action("move_to"))
+
+    compact = memory.model_conversation_messages(
+        omit_known_successful_execution_feedback=True
+    )
+    assert [message["content"] for message in compact] == [
+        "pick milk",
+        "Keep the gripper closed until after the lift.",
+    ]
+
+    failed = _action("move_to", index=1)
+    failed.command["status"] = "failed"
+    failed.command["tool_calls"][0]["status"] = "failed"
+    failed.command["tool_calls"][0]["result"]["success"] = False
+    memory.add_action(failed)
+
+    recovery_messages = memory.model_conversation_messages(
+        omit_known_successful_execution_feedback=True
+    )
+    assert "OpenETA host execution evidence" in recovery_messages[-1]["content"]
+
+
 def test_launcher_environment_identity_survives_many_tool_calls() -> None:
     memory = AgentMemory()
     memory.start_session(task="Sort the requested parts.")

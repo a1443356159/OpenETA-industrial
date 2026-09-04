@@ -4397,14 +4397,20 @@ def build_tool_context(
         # provider. Serializing large qualification artifacts is pure overhead.
         context["context_budget"] = _skipped_host_macro_context_budget(
             config=context_config,
-            conversation_message_count=len(memory.model_conversation_messages()),
+            conversation_message_count=len(
+                memory.model_conversation_messages(
+                    omit_known_successful_execution_feedback=True
+                )
+            ),
         )
         return context
     budget = _context_budget_status(
         context,
         config=context_config,
         auto_compact_triggered=False,
-        conversation_messages=memory.model_conversation_messages(),
+        conversation_messages=memory.model_conversation_messages(
+            omit_known_successful_execution_feedback=True
+        ),
     )
     if budget["should_auto_compact"]:
         memory.compact(max_events=context_config.auto_compact_max_events)
@@ -4419,7 +4425,9 @@ def build_tool_context(
             context,
             config=context_config,
             auto_compact_triggered=True,
-            conversation_messages=memory.model_conversation_messages(),
+            conversation_messages=memory.model_conversation_messages(
+                omit_known_successful_execution_feedback=True
+            ),
         )
     context["context_budget"] = budget
     return context
@@ -4436,7 +4444,9 @@ def _model_request_context(
     """Project private runtime state into one bounded coding-agent style turn."""
 
     messages = _deduplicated_model_messages(
-        memory.model_conversation_messages(),
+        memory.model_conversation_messages(
+            omit_known_successful_execution_feedback=True
+        ),
         task=str(full_context.get("task") or ""),
         max_messages=config.max_model_conversation_messages,
     )

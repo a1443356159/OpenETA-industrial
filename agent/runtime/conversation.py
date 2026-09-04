@@ -175,11 +175,40 @@ class ConversationHistory:
         self.items.extend((action_item, result_item))
         return [action_item, result_item]
 
-    def model_messages(self) -> list[JsonDict]:
+    def model_messages(
+        self,
+        *,
+        omit_known_successful_execution_feedback: bool = False,
+    ) -> list[JsonDict]:
+        """Return provider-compatible dialogue without duplicating known success.
+
+        The append-only conversation keeps every action and tool result for
+        operator audit/replay.  The next planner turn already receives the
+        authoritative structured state and latest receipt, however, so replaying
+        a known-successful tool result as an extra user message is redundant
+        prompt context.  Failure or uncertain feedback remains model-visible:
+        it may contain the only actionable recovery diagnostic.
+        """
+
+        successful_action_ids = (
+            {
+                str(item.data.get("action_id") or "")
+                for item in self.items
+                if _is_known_successful_tool_result(item)
+                and str(item.data.get("action_id") or "")
+            }
+            if omit_known_successful_execution_feedback
+            else set()
+        )
         return [
             {"role": item.role, "content": item.content}
             for item in self.items
             if item.content.strip()
+            and not (
+                omit_known_successful_execution_feedback
+                and item.kind in {"action", "tool_result"}
+                and str(item.data.get("action_id") or "") in successful_action_ids
+            )
         ]
 
     def planning_context(self, *, max_items: int = 20) -> JsonDict:
@@ -376,6 +405,26 @@ def _summarize_tool_calls(value: Any) -> list[JsonDict]:
             }
         )
     return calls
+
+
+def _is_known_successful_tool_result(item: ConversationItem) -> bool:
+    """Whether a persisted tool result adds no recovery information."""
+
+    if item.kind != "tool_result":
+        return False
+    data = item.data
+    if str(data.get("status") or "") != "executed":
+        return False
+    calls = data.get("tool_calls")
+    if not isinstance(calls, list) or not calls:
+        return False
+    for call in calls:
+        if not isinstance(call, dict) or str(call.get("status") or "") != "executed":
+            return False
+        result = call.get("result")
+        if not isinstance(result, dict) or result.get("success") is not True:
+            return False
+    return True
 
 
 def _summarize_skill_call(value: Any) -> JsonDict | None:
