@@ -9,7 +9,7 @@ the first table instead of reading the `docs/` directory alphabetically.
 | Document | Status | Purpose |
 | --- | --- | --- |
 | [`multi-normal-tui-reproduction.md`](multi-normal-tui-reproduction.md) | Operator runbook | Canonical human TUI procedure, representative prompt, evidence checks, and task variants. |
-| [`final-dev-validation-report.md`](final-dev-validation-report.md) | Release evidence | Current `final-dev` Qwen validation matrix, evidence roots, and remaining promotion gates. |
+| [`final-dev-validation-report.md`](final-dev-validation-report.md) | Release evidence | Current `final-dev` BaiLian Qwen `multi_normal` evidence, timing, and exact evidence roots. |
 | [`gazebo-normal-acceptance.md`](gazebo-normal-acceptance.md) | Normative contract | Final task-neutral scene, model/geometry boundaries, physical proofs, recovery, and release gates. |
 | [`openeta-qualification-funnel-v3.md`](openeta-qualification-funnel-v3.md) | Normative contract | `fast_v3` scheduling, Beam-2 IK, deterministic recovery, evidence, and promotion criteria. |
 | [`gazebo-rm75-robotiq2f85.md`](gazebo-rm75-robotiq2f85.md) | Runtime profile | Robot, gripper, cameras, controllers, PlanningScene, and Gazebo launch behavior. |
@@ -26,11 +26,11 @@ backend evaluation. The repository-wide rollback default may remain `legacy`; th
 selects `fast_v3` explicitly.
 
 `3a70294` (2026-08-31) is a historical GPU-GUI validation baseline, not a
-claim about the current release candidate. Current `final-dev` evidence,
-source revisions, and the still-unclaimed official BaiLian promotion gates are
-recorded separately in the validation report. The operator runbook records
-the SSH/VNC tunnel, health and VirtualGL checks, prompt, approvals, report
-queries, timings, tokens, and evidence roots.
+claim about the current release candidate. Current `final-dev` evidence and
+source revisions for the shipped `multi_normal` flow are recorded separately
+in the validation report. The operator runbook records the SSH/VNC tunnel,
+health and VirtualGL checks, prompt, approvals, report queries, timings,
+tokens, and evidence roots.
 
 ## Framework and interfaces
 

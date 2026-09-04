@@ -69,7 +69,7 @@ deploy/ubuntu/openeta.sh tui
 # 无 Planner/VLM 的 normal 控制链，默认连续两轮
 deploy/ubuntu/openeta.sh smoke-normal
 
-# 带 Planner/VLM 的最终双物件 `multi_normal`，默认连续两轮
+# 带百炼 Qwen Planner/VLM 的最终双物件 `multi_normal`，默认连续两轮
 deploy/ubuntu/openeta.sh agentic-normal
 
 # 容器内测试
@@ -84,38 +84,23 @@ deploy/ubuntu/openeta.sh smoke-normal --runs 1 --scenario normal
 ```
 
 `agentic-normal` 的默认场景是最终的任务中立 `multi_normal` 双物件分拣；
-`smoke-normal` 仍只支持单物件 `normal`，不能替代带 VLM 的验收。Docker 入口也支持
-同一物理场景内的单、双和三物件自然语言工单。`--task-variant` 仅给验收器选择私有
-核对契约，实际任务语义仍来自 Planner 在 TUI 中读取的工单：
+`smoke-normal` 仍只支持单物件 `normal`，不能替代带 VLM 的验收。当前交付只要求默认
+`multi_normal` 工单，不把其他物件数量、随机布局或候选池对比作为启动前置条件：
 
 ```bash
-# 单物件：蓝黑色螺丝刀 → 绿色料箱
-deploy/ubuntu/openeta.sh agentic-normal --runs 2 \
-  --scenario multi_normal --task-variant screwdriver-green
-
 # 默认双物件：黄色活动扳手 → 绿色料箱；红色六角螺栓 → 蓝色料箱
 deploy/ubuntu/openeta.sh agentic-normal --runs 2
-
-# 三物件：螺丝刀、银色梅花扳手、蓝柄钢丝钳依次分拣
-deploy/ubuntu/openeta.sh agentic-normal --runs 2 \
-  --scenario multi_normal --task-variant three-tools-a
-
-# 固定 seed 的随机布局；仍使用同一权威场景编译器和碰撞模型
-deploy/ubuntu/openeta.sh agentic-normal --runs 2 \
-  --scenario multi_normal_random_12345 --task-variant mixed-tools-b
 ```
 
-默认两轮用于日常稳定性检查。准备将某一类任务写入正式发布报告时，使用三轮、全新
-run root 的连续验收；任一轮失败时启动器会立即返回非零，不会继续用后续成功掩盖它：
+默认两轮用于稳定性复现；任一轮失败时启动器会立即返回非零，不会继续用后续成功掩盖
+它。用于现场演示时可显式运行一轮：
 
 ```bash
-# 例：正式的三件任务推广检查
-deploy/ubuntu/openeta.sh agentic-normal --runs 3 \
-  --scenario multi_normal --task-variant three-tools-a
+deploy/ubuntu/openeta.sh agentic-normal --runs 1
 ```
 
-单件、双件和随机布局也应各自执行同样的三轮命令；所需矩阵和报告字段以
-[`final-dev-validation-report.md`](final-dev-validation-report.md) 为准。
+`--scenario` 和 `--task-variant` 仍保留为研发接口，但不属于当前交付验收。物理场景
+不会从这些参数获取任务语义，实际指令仍由 Planner 从 TUI 工作单读取。
 
 Planner/VLM 配置默认从仓库内已忽略的 `.env` 以 Docker secret 只读挂载；它不会作为
 Compose `env_file` 或 Compose 自身的插值配置读取，也不会出现在容器 inspect 配置中。
@@ -168,32 +153,10 @@ is an infrastructure failure, never a candidate rejection.
 
 The final Docker profile freezes 512 GraspGenX candidates once and consumes
 them in the `fast_v3` small-wave funnel. It does not issue 512 eager IK or L5
-requests. GraspGenX uses one fixed, model-native draw set per inference call,
-so raising `OPENETA_GRASPGENX_RAW_POOL_SIZE=1024` does not rerun or enlarge
-that native inference. It does increase host-side candidate selection,
-collision filtering and frozen-result serialization, so retain it as a
-measured coverage experiment until physical results justify a default change.
-The default ladder then extends through 512 before the final 1024 tail, so the
-larger reserve remains lazy at the IK/L5 layers.
-
-For a reproducible reserve comparison, keep the image, provider profile,
-scenario and task variant fixed, create a fresh run root for each condition,
-and override only the reserve size. For example:
-
-```bash
-export OPENETA_GRASPGENX_RAW_POOL_SIZE=1024
-deploy/ubuntu/openeta.sh agentic-normal \
-  --runs 3 \
-  --scenario multi_normal \
-  --task-variant wrench-green-bolt-blue \
-  --run-root /srv/openeta/state/runs/grasp-pool-1024
-```
-
-Compare that batch with the same command using
-`OPENETA_GRASPGENX_RAW_POOL_SIZE=512`. Inspect each fresh run's
-`service-preflight.json` for the registered pool size and its
-`acceptance-report.json` for complete PASS/lifecycle evidence. Do not run the
-two batches concurrently: GraspGenX, AnyPlace and the visual Planner share the
+requests. `OPENETA_GRASPGENX_RAW_POOL_SIZE=1024` remains an explicit
+development-only coverage experiment: it increases host-side selection and
+frozen-result serialization, and is not part of the stable `multi_normal`
+delivery command. Do not run independent model services concurrently on the
 same GPU.
 
 ## GPU GUI / VNC 转发

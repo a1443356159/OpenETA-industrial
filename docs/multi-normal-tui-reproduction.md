@@ -1,8 +1,7 @@
 # `multi_normal` 人工 TUI 复现指南
 
-> **文档状态：** `final-dev` 发布候选的人工操作手册。只有
-> [`final-dev-validation-report.md`](final-dev-validation-report.md) 中的百炼
-> promotion matrix 全部满足后，才可将其称为最终发行手册。验收语义以
+> **文档状态：** `final-dev` 的 `multi_normal` 交付操作手册。当前发行范围只要求本文的
+> 代表性双物件工单稳定通过；验收语义以
 > [`gazebo-normal-acceptance.md`](gazebo-normal-acceptance.md) 为准，资格漏斗细节见
 > [`openeta-qualification-funnel-v3.md`](openeta-qualification-funnel-v3.md)。
 
@@ -74,7 +73,8 @@ DISPLAY=:3 vglrun -d egl -c proxy glxinfo -B \
 [Ubuntu Docker 部署](ubuntu-docker-deployment.md#百炼-qwen-plannervlm)。
 
 历史实现基线 `3a70294` 只用于追溯，不是当前发布证明。实际复现必须记录
-`git rev-parse HEAD`，并使用验证报告中列出的 `final-dev` 发行谱系；工作树必须干净，且代码、ROS overlay 与受控服务来自同一谱系。只有在报告的百炼 promotion matrix 满足后，相关提交才可被标记为最终发行。
+`git rev-parse HEAD`，并使用验证报告中列出的 `final-dev` 发行谱系；工作树必须干净，且代码、ROS overlay 与受控服务来自同一谱系。当前稳定性证据和准确的运行提交见
+[final-dev-validation-report.md](final-dev-validation-report.md)。
 
 ## 2. 启动人工 TUI
 
@@ -180,57 +180,13 @@ scripts/run_multi_normal_gazebo_acceptance.sh \
   --verify-only
 ```
 
-## 可接受的 Prompt 变化
+## 本交付的范围边界
 
-`multi_normal` 并不绑定固定任务文本。保持同一物品顺序和料箱对应关系时，操作员可以自由改变措辞，不需要修改启动命令。若要正式验证另外三种顺序/料箱组合，在启动命令中选择相应的私有核对契约，并输入语义一致的自然语言 Prompt：
+`multi_normal` 本身不绑定固定措辞；操作员可用自然语言改写第 3 节 Prompt，但应保持
+同一物件、目标料箱、顺序和“不移动其他物件”的语义。验收器的 `--task-variant`、随机
+布局和更多物件组合仍是仓库的研发能力，不是本手册要求操作员运行的附加验证，也不会在
+默认复现命令中启动。
 
-| `--task-variant` | 连续任务 |
-| --- | --- |
-| `wrench-blue-bolt-green` | 扳手 → 蓝箱，然后螺栓 → 绿箱 |
-| `bolt-blue-wrench-green` | 螺栓 → 蓝箱，然后扳手 → 绿箱 |
-| `bolt-green-wrench-blue` | 螺栓 → 绿箱，然后扳手 → 蓝箱 |
-
-例如：
-
-```bash
-scripts/run_multi_normal_gazebo_acceptance.sh \
-  --operator-mode human_tui \
-  --task-variant bolt-green-wrench-blue \
-  --run-root "$RUN_ROOT"
-```
-
-`--task-variant` 只告诉验收器如何核对人类请求，不会把任务写入物理场景或 Planner 上下文。实际智能体仍可接受场景内更多自然语言任务；若要把新的物品/料箱组合纳入正式自动核验，应新增任务契约，而不是复制或特化物理场景。
-
-## 随机布局复测
-
-发行树还包含 seed `12345` 的任务中立随机布局。它保留与 `multi_normal` 相同的七个工业物件、两个可抓目标、两个物理料箱和自然语言工单，只改变桌面动态物件的位置与朝向：
-
-```bash
-RUN_ROOT="$REPO/.cache/reports/random-multi-normal-human-$(date -u +%Y%m%dT%H%M%SZ)"
-
-scripts/run_random_multi_normal_gazebo_acceptance.sh \
-  --operator-mode human_tui \
-  --run-root "$RUN_ROOT"
-```
-
-使用第 3 节的同一条操作员 Prompt。正式报告中的 `scenario` 应为 `multi_normal_random_12345`，`acceptance_scene.seed` 应为 `12345`。随机布局不是外部 SDF 旁路：目录中的 `model_pose_overrides` 只允许移动当前权威世界里已有的动态模型；最终 SDF 仍由同一个场景编译器生成并同步为 MoveIt CollisionObject。启动前会按真实碰撞包围盒检查桌面边界、初始支撑高度、物体间间隙、两个料箱和机器人基座保留区。物件颜色和语义身份保持不变，避免把“随机颜色导致任务含义变化”误当成几何泛化测试。
-
-## 历史复测记录
-
-2026-08-31 在 `final-dev` 的实现基线 `3a70294` 上，使用同一个任务中立的 `multi_normal` 场景、RealVNC `:3` 桌面和 VirtualGL/NVIDIA Gazebo GUI，连续完成三次独立人工 TUI 验收：
-
-| 运行 | 人类请求 | 结果 | TUI 工作时间 | 工具调用 | Provider tokens | 关键覆盖 |
-| --- | --- | --- | ---: | ---: | ---: | --- |
-| `run1` | 扳手 → 绿箱；螺栓 → 蓝箱 | PASS | 14 分 35 秒 | 22 | 129,985 | 两件均首个物理方案贯通；仅主模型 |
-| `run2` | 扳手 → 绿箱；螺栓 → 蓝箱 | PASS | 19 分 40 秒 | 22 | 130,236 | 不同螺栓抓取/放置候选；一次 provider fallback |
-| `run3` | 扳手 → 绿箱；螺栓 → 蓝箱 | PASS | 17 分 27 秒 | 22 | 128,361 | 第三组抓取方向与关节分支；一次 provider fallback |
-
-对应发行证据位于服务器工作树的：
-
-```text
-.cache/reports/final-vlm-repro-20260831-physical-rebase/run1/acceptance-report.json
-.cache/reports/final-vlm-repro-20260831-physical-rebase/run2/acceptance-report.json
-.cache/reports/final-vlm-repro-20260831-physical-rebase/run3/acceptance-report.json
-```
-
-三次均为 `agentic_closed_loop`、`host_dispatch_count=0`、22 次工具调用，并完成两个物品的连续入箱。这是迁移前的历史发行证据：当时环境创建/关闭仍各占一个 agent 工具回合，SAM3 的目标与料箱也分别占一个顶层工具回合。当前版本已把环境生命周期移到启动器，并把同一 assignment 的两次 SAM3 请求合并为一个有序宿主批次，因此不再以 22 作为固定门槛；仍要求子请求证据完整且 VLM 对任务动作作出决定。每轮 `cleanup.json` 都证明 MCP 进程组退出、端口释放、Gazebo GUI 从本轮 partition 启动并随本轮退出、owned residual 为空且受保护 ROS graph 未变化。复测期间服务器存在显著共享 GPU/CPU 负载，因此这些时间用于稳定性记录，不作为独占算力下的性能基线。当前状态恢复、动作终态判定和物体重基另由完整测试集覆盖；物理恢复不要求为了“制造失败”而污染三次发行 PASS。它们不替代当前验证报告规定的官方百炼 promotion matrix。
+不要为了证明额外场景而覆盖本轮 `RUN_ROOT` 或修改当前物理场景。若以后正式扩展交付
+范围，应为新的自然语言任务和世界状态单独建立证据，而不是把它伪装成这份
+`multi_normal` 复现记录的一部分。

@@ -1,187 +1,78 @@
-# `final-dev` Qwen validation report
+# `final-dev` `multi_normal` 交付记录
 
-> **Status:** Release-candidate evidence ledger. This document records only
-> artifacts that have been read and verified. It is not a substitute for the
-> final three-by-three BaiLian promotion gate below.
+> **交付范围：** 百炼 Qwen 驱动的双物件 `multi_normal` 连续分拣。本文是该范围的
+> 发行证据，不把随机布局、额外物件类别或历史 benchmark 误写为本次交付的前置条件。
 
-## Scope
+## 运行配置
 
-The current source baseline is `7cbe9ef` (`final-dev`). It uses the task-neutral
-RM75/Robotiq `multi_normal` world, `fast_v3`, GraspGenX with a frozen reserve
-of 512 model candidates, AnyPlace with 96 object goals, MoveIt L5 plan-only
-proofs, and the real PTY-based agentic TUI. The GUI is a case-owned observer;
-it is never part of candidate selection.
+- 场景：任务中立的 RM75 / Robotiq `multi_normal`；操作员在 TUI 中用自然语言给出
+  物品顺序和目标料箱。
+- Planner/VLM：百炼 OpenAI-compatible Vision API，`qwen3-vl-flash`。
+- 感知与动作：SAM3、GraspGenX、AnyPlace、MoveIt 和 GPU Gazebo GUI。
+- 资格化：`fast_v3`，GraspGenX 每件物品冻结一个 512 候选的模型结果池，按小波次
+  深度贯通；512 是候选储备，不代表 512 次同步 IK 或 L5。
+- 回退边界：AnyGrasp 不进入此交付链；GUI 和 Dashboard 只供操作员观察，不参与候选
+  选择或验收决策。
 
-The 512 reserve is deliberately the release default. Qualification uses small
-deterministic waves and stops on the first complete proof. A 1024 reserve is
-available as an explicit coverage experiment. It reuses GraspGenX's fixed
-model-native inference draws, but increases host-side selection, collision
-filtering and frozen-result serialization; physical evidence must therefore
-establish its recall/latency trade-off before it becomes the default. Its
-default ladder adds a 512-candidate wave before the terminal 1024 tail,
-retaining lazy deep qualification rather than issuing one oversized final
-wave.
+实际物理执行代码的提交为
+`7cbe9ef9e751322771a2d6aeaa80ac13722277b1`。后续本报告和操作手册的文档提交不改变
+运行代码。
 
-## Current exact-revision `multi_normal` evidence
+## 稳定性证据
 
-On 2026-09-04, the representative two-item work order completed twice in
-fresh, isolated run roots at exact Git head
-`7cbe9ef9e751322771a2d6aeaa80ac13722277b1`. Each run used the configured
-official BaiLian-compatible Qwen Vision deployment, `qwen3-vl-flash`, the real
-agentic PTY, GPU Gazebo GUI, GraspGenX, AnyPlace and `fast_v3`; neither used a
-host macro nor an `ask_human` recovery.
+2026-09-04，在相同的代表性工单、全新隔离 run root 和真实 PTY 中完成两次连续运行：
 
-| Work order | Evidence root | Result | Tool calls | Planner tokens |
-| --- | --- | --- | ---: | ---: |
-| yellow adjustable wrench → green parts bin; red hex bolt → blue parts bin | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-a/` | PASS | 17 | 115,366 |
-| same work order, fresh scene/run root | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-b/` | PASS | 17 | 113,701 |
+> 先把黄色活动扳手放进绿色零件箱，再把红色六角螺栓放进蓝色零件箱；其他物件不要动。
 
-Both `environment-receipt.json` files record the exact Git head above. Their
-`acceptance-report.json` files record `agentic_closed_loop`,
-`host_dispatch_count=0`, `fast_v3`, GraspGenX, `status=passed` and no verifier
-errors. Per assignment, SAM3, AnyPlace and GraspGenX each ran once; placement
-reused the frozen AnyPlace pool rather than invoking another model inference.
+| 运行 | 证据根目录 | 结果 | 工具调用 | Planner tokens |
+| --- | --- | ---: | ---: | ---: |
+| A | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-a/` | PASS | 17 | 115,366 |
+| B | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-b/` | PASS | 17 | 113,701 |
 
-This is the current stable representative release path. It is intentionally
-not misrepresented as completion of the broader three-by-three promotion
-matrix below: the remaining task classes and random-layout rows need their own
-fresh evidence before a wider release claim.
+两份 `environment-receipt.json` 都记录了上述运行代码提交；两份
+`acceptance-report.json` 都记录：
 
-### Observed wall-clock profile
+- `status=passed`、`scenario=multi_normal`、`agentic_closed_loop`；
+- `host_dispatch_count=0`、`fast_v3`、GraspGenX，且 verifier errors 为空；
+- 每个任务物件各运行一次 SAM3 assignment、一次 GraspGenX 和一次 AnyPlace 模型链；
+  后续资格化复用冻结候选池，不重新推理；
+- 没有 `ask_human` 恢复。
 
-The server was shared during both runs, so these values are diagnostic evidence
-rather than an exclusive-machine benchmark. They are taken from the real PTY
-transcripts and include each tool's visible wall time.
+这两次独立 PASS 是本交付范围的稳定性依据。更广的任务组合和随机世界仍可作为后续研发
+评估，但不是当前版本的验收门槛，也不会由默认复现流程触发。
 
-| Metric | Run A | Run B |
+## 已纳入的可靠性修复
+
+| 提交 | 修复 | 对 `multi_normal` 的作用 |
+| --- | --- | --- |
+| `35e67ec` | 原生 detach 已完成时，已知夹爪控制器终态失败只保留为 telemetry；拒绝和未知结果仍严格失败。 | 避免 Gazebo 控制器已知终态造成无意义的人工恢复。 |
+| `7cbe9ef` | 恢复层先保留候选的固定快速基础种子，再补六个固定恢复种子；批次缓存不能替换基础分支。 | 相同模型候选不会因进入恢复波次而丢掉此前可行的确定性 IK 分支。 |
+
+本次没有为当前样本加入坐标、物体名称或候选编号特判；冻结模型输出、确定性种子和
+MoveIt 状态/L5 证明仍是通用机制。
+
+## 观察到的时延
+
+服务器在两轮期间有共享负载，以下数值用于定位优化方向，而非独占性能承诺：
+
+| 指标 | 运行 A | 运行 B |
 | --- | ---: | ---: |
-| TUI episode wall time | 436 s | 349 s |
-| two `grasp_pose_estimate` calls (GraspGenX plus host qualification) | 103 s | 74 s |
-| four MoveIt/Gazebo `move_to` executions | 145 s | 111 s |
-| four native `gripper_control` executions | 86 s | 79 s |
-| AnyPlace model/frozen-pool calls | 14.5 s | 14.6 s |
+| TUI episode 墙钟 | 436 s | 349 s |
+| 两次 `grasp_pose_estimate`（GraspGenX 与资格化） | 103 s | 74 s |
+| 四段 MoveIt/Gazebo `move_to` | 145 s | 111 s |
+| 四次原生 `gripper_control` | 86 s | 79 s |
+| AnyPlace 模型/冻结池调用 | 14.5 s | 14.6 s |
 
-The largest current controllable cost is physical simulation execution, not
-the inexpensive AnyPlace frozen-pool path. The motion profiles remain at the
-conservative tracking-proven settings in this release: a speed increase must
-first pass a separate GUI-on controller bake-off, rather than being folded into
-a stability-focused release from two shared-host runs.
+主要时延来自物理仿真轨迹和夹爪执行，不是 AnyPlace 的冻结池。当前使用已通过跟踪误差
+检验的保守控制器配置；不为追求一次测试的更短时间而改变速度/加速度或牺牲终态证明。
 
-## Verified recent evidence
+## 复现与 Docker 交付
 
-All paths below are remote evidence roots, not repository fixtures. Their
-reports show `status: passed`, `fast_v3`, a real planner provider, and no
-residual case-owned Gazebo/MCP processes after lifecycle close.
+- 服务器人工 TUI、VNC 和 GPU GUI 的逐步操作见
+  [multi-normal-tui-reproduction.md](multi-normal-tui-reproduction.md)。
+- 可移植 Docker 镜像、百炼 provider secret、模型准备和默认双轮命令见
+  [ubuntu-docker-deployment.md](ubuntu-docker-deployment.md)。
 
-| World / work order | Evidence root | Result | Tool calls |
-| --- | --- | --- | ---: |
-| `multi_normal`; bolt → blue bin, wrench → green bin | `/root/autodl-tmp/openeta-final-dev-fourbar-validation/multi-512-2-reversed-tfhistory-unique/` | PASS | 17 |
-| `multi_normal`; wrench → blue bin, bolt → green bin | `/root/autodl-tmp/openeta-final-dev-fourbar-validation/multi-512-3-wrench-blue-bolt-green-packetfix/` | PASS | 17 |
-| `multi_normal_random_12345`; bolt → green bin, wrench → blue bin | `/root/autodl-tmp/openeta-final-dev-fourbar-validation/multi-random-512-1-packetfix/` | PASS | 17 |
-
-The last two runs also record clean case lifecycle close: the GUI, Gazebo
-partition and MCP server were all retired without touching unrelated services.
-The packet-fix run verifies that a successful `active_observe` keeps its own
-fresh observation packet instead of forcing an immediately redundant passive
-observation.
-
-## Delivery hardening lineage
-
-The historical artifacts above deliberately retain their source revision
-(`187b4df`) rather than being relabelled as evidence for later code. The
-current exact-revision runs in the preceding section cover the accumulated
-delivery candidate, including the following hardening changes:
-
-| Revision | Change | Local evidence |
-| --- | --- | --- |
-| `b78164c` | An opt-in 1024 GraspGenX reserve extends the small-wave ladder through 512 instead of creating one 768-candidate deep wave. | candidate scheduling/configuration tests and full repository suite |
-| `b061c80`, `afaff5a` | The 1024 reserve is documented as a host-side coverage expansion, and a regression test proves it cannot add model-native GraspGenX draws. | targeted 512/1024 draw-contract test |
-| `41dd0b9` | Provider `/models` discovery is advisory; the configured model's direct structured chat smoke remains the BaiLian compatibility gate. | provider-preflight tests and full repository suite |
-| `35e67ec` | A returned, known gripper controller terminal result after native detach is retained as telemetry instead of forcing a false human recovery; rejections and unknown outcomes remain strict. | Gazebo controller/release tests; included in current physical runs |
-| `7cbe9ef` | A recovery screen preserves the candidate's deterministic fast base seeds before adding six unique fixed supplements; mutable batch cache cannot displace the base branch. | funnel regression tests; included in current physical runs |
-
-These revisions do not substitute for the remaining physical promotion matrix
-below. Every new row must still retain its exact `HEAD` in the case receipt.
-
-## Provider-only compatibility check
-
-On 2026-09-04, the current repository's native provider-preflight was run
-against the configured official BaiLian `qwen3-vl-flash` workspace endpoint
-without starting Gazebo, MCP services, or a TUI. The endpoint advertised the
-selected model; model discovery completed in about 157 ms and the direct
-structured chat smoke completed in about 432 ms (about 589 ms total). A
-separate one-image structured request also completed successfully through the
-same OpenETA client path.
-
-The same client then received the representative Chinese two-item work order
-with the task-neutral manipulation catalog. It selected
-`configure_work_order` and returned the exact ordered catalog assignments
-`yellow wrench → green parts bin`, then `red hex bolt → blue parts bin`, with
-no schema retry (about 2.2 s; 1,191 provider tokens). This is a narrow
-agentic semantic check, not a substitution for perception, qualification, or
-physical execution.
-
-A host-bound `grasp_contact` decision was also checked: the model chose
-`move_to` and returned `parameters={}`, correctly leaving the qualified pose
-and trajectory to the immutable host binding (about 1.6 s; 1,183 provider
-tokens). This guards against an otherwise costly failure mode in which a
-planner tries to reconstruct geometry that it was never given.
-
-For a broader non-physical work-order check, the same client parsed one real
-single-item, one double-item, and one three-item `multi_normal` Chinese work
-order against the full task-neutral catalog. All three returned the exact
-ordered catalog assignments in one valid `configure_work_order` call:
-
-| Class | Fixture | Result | Provider latency | Provider tokens |
-| --- | --- | --- | ---: | ---: |
-| Single | `screwdriver-green` | exact ordered assignment | 1.93 s | 1,069 |
-| Double | `wrench-green-bolt-blue` | exact ordered assignments | 2.06 s | 1,142 |
-| Multi | `three-tools-a` | exact ordered assignments | 2.64 s | 1,195 |
-
-These are semantic-control checks only. They show that expanding a work order
-does not require a second model repair turn in this client path; they do not
-prove grasp, placement, collision, or physical-release success.
-
-For deterministic-control evidence, the representative double-item Chinese
-work order was submitted to the same endpoint ten independent times. All ten
-responses selected `configure_work_order` with the same valid ordered catalog
-assignments and required no schema repair. Provider latency was 1.92–3.01 s
-(P50 2.31 s). This is deliberately scoped to the bounded semantic decision;
-the physical promotion matrix still requires fresh full episodes.
-
-This proves that the selected endpoint accepts the release client's current
-OpenAI-compatible structured and visual request shapes. It is deliberately
-**not** a physical-sort result, a throughput claim for full agent contexts, or
-promotion evidence. Every physical case must still retain its own redacted
-`provider-preflight.json` under its run root.
-
-## Promotion matrix
-
-The final delivery must be run with the official BaiLian Qwen Vision endpoint
-and a clean Docker image. A row is promoted only after **three independent
-PASS** runs, each with a fresh run root and a clean lifecycle receipt:
-
-| Work order class | Contract fixture | Required proof |
-| --- | --- | --- |
-| Single physical sort | `screwdriver-green` (and at least one geometrically different single object) | 3 × PASS |
-| Double physical sort | default `wrench-green-bolt-blue` plus order/bin variation | 3 × PASS |
-| Multi physical sort | `three-tools-a` or `mixed-tools-b` | 3 × PASS |
-| Generalization | `multi_normal_random_12345` with a non-duplicate work order | 3 × PASS |
-
-Every promoted report must show the configured BaiLian model and redacted
-endpoint provenance, `agentic_closed_loop`, `fast_v3`, one frozen model pool
-per item, MoveIt state-validity/L5 evidence, native attach/detach evidence,
-and clean lifecycle shutdown. A provider or transport outage remains an
-infrastructure event and cannot be counted as a geometric failure.
-
-## Reproduction
-
-Use the Docker commands in
-[Ubuntu Docker deployment](ubuntu-docker-deployment.md#百炼-qwen-plannervlm).
-The default `agentic-normal` command runs a two-item `multi_normal` task;
-select the single-, multi-item, or random variants explicitly as needed. For
-interactive VNC/TUI reproduction, use
-[the operator runbook](multi-normal-tui-reproduction.md).
-
-The report is intentionally evidence-first: it leaves the BaiLian promotion
-matrix unclaimed until the matching artifacts have been produced and checked.
+复现时应使用新 run root。默认 Docker `agentic-normal` 连续跑两轮：首轮失败即退出，
+不会以第二轮成功掩盖故障。若仅需操作员演示一轮，可显式传入 `--runs 1`；这不改变
+上述已记录的双轮稳定性证据。
