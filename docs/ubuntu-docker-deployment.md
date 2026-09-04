@@ -176,6 +176,26 @@ measured coverage experiment until physical results justify a default change.
 The default ladder then extends through 512 before the final 1024 tail, so the
 larger reserve remains lazy at the IK/L5 layers.
 
+For a reproducible reserve comparison, keep the image, provider profile,
+scenario and task variant fixed, create a fresh run root for each condition,
+and override only the reserve size. For example:
+
+```bash
+export OPENETA_GRASPGENX_RAW_POOL_SIZE=1024
+deploy/ubuntu/openeta.sh agentic-normal \
+  --runs 3 \
+  --scenario multi_normal \
+  --task-variant wrench-green-bolt-blue \
+  --run-root /srv/openeta/state/runs/grasp-pool-1024
+```
+
+Compare that batch with the same command using
+`OPENETA_GRASPGENX_RAW_POOL_SIZE=512`. Inspect each fresh run's
+`service-preflight.json` for the registered pool size and its
+`acceptance-report.json` for complete PASS/lifecycle evidence. Do not run the
+two batches concurrently: GraspGenX, AnyPlace and the visual Planner share the
+same GPU.
+
 ## GPU GUI / VNC 转发
 
 默认采用 headless EGL/OGRE2。需要把独立 Gazebo client 或其他 Qt 窗口显示到主机已有的

@@ -50,6 +50,7 @@ unit-tested, but **not yet physically re-run**, hardening changes:
 | Revision | Change | Local evidence |
 | --- | --- | --- |
 | `b78164c` | An opt-in 1024 GraspGenX reserve extends the small-wave ladder through 512 instead of creating one 768-candidate deep wave. | candidate scheduling/configuration tests and full repository suite |
+| `b061c80`, `afaff5a` | The 1024 reserve is documented as a host-side coverage expansion, and a regression test proves it cannot add model-native GraspGenX draws. | targeted 512/1024 draw-contract test |
 | `41dd0b9` | Provider `/models` discovery is advisory; the configured model's direct structured chat smoke remains the BaiLian compatibility gate. | provider-preflight tests and full repository suite |
 
 These revisions are delivery preparation, not a substitute for the physical
