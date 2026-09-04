@@ -1685,13 +1685,18 @@ class OpenEtaCli:
         config = self.state.config.redacted()
         model = config.get("model") or "(not set)"
         status = "ready" if not self.state.config.missing_fields() else "needs config"
+        # A terminal transcript is an audit artifact, not a credential
+        # inspector.  Even a partially redacted key exposes a stable suffix
+        # that can be correlated across runs, so report only whether a key is
+        # configured.
+        credential_status = "configured" if self.state.config.api_key else "not set"
         width = 72
         print(Theme.accent("╭" + "─" * (width - 2) + "╮"))
         print_box_line("OpenETA Agent Console", width=width, strong=True)
         print_box_line(f"provider  {config.get('provider')}    model  {model}", width=width)
         print_box_line(f"base      {config.get('api_base') or '(not set)'}", width=width)
         print_box_line(
-            f"key       {config.get('api_key') or '(not set)'}    status  {status}",
+            f"credential {credential_status}    status  {status}",
             width=width,
         )
         context_window = config.get("context_window_tokens") or "(not set)"
@@ -1729,7 +1734,10 @@ class OpenEtaCli:
             ("provider", config["provider"]),
             ("model", config["model"] or "(not set)"),
             ("api_base", config["api_base"] or "(not set)"),
-            ("api_key", config["api_key"] or "(not set)"),
+            (
+                "credential",
+                "configured" if self.state.config.api_key else "(not set)",
+            ),
             ("timeout_s", config["timeout_s"]),
             ("max_attempts", config["max_attempts"]),
             ("retry_backoff_s", config["retry_backoff_s"]),
@@ -1742,10 +1750,16 @@ class OpenEtaCli:
         ]
         for key, value in rows:
             print(f"  {key:22} {value}")
-        fallback = config.get("fallback")
-        if isinstance(fallback, dict):
-            for key in ("provider", "model", "api_base", "api_key", "timeout_s"):
-                print(f"  {'fallback.' + key:22} {fallback.get(key) or '(not set)'}")
+        fallback = self.state.config.fallback
+        if fallback is not None:
+            for key, value in (
+                ("provider", fallback.provider),
+                ("model", fallback.model),
+                ("api_base", fallback.api_base),
+                ("credential", "configured" if fallback.api_key else "(not set)"),
+                ("timeout_s", fallback.timeout_s),
+            ):
+                print(f"  {'fallback.' + key:22} {value or '(not set)'}")
 
 
 def _print_skill_review_proposal(proposal: JsonDict) -> None:

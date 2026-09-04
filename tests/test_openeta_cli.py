@@ -13,6 +13,7 @@ import agent.cli.openeta_cli as cli_module
 import agent.cli.experiment as experiment_cli
 import agent.runtime.runtime_assembly as runtime_assembly
 from adapter.protocol import CameraFrame, EnvAction, EnvObservation, RobotState, StepResult
+from agent.backends.provider_config import PlannerProviderConfig, ProviderEndpointConfig
 from agent.cli.openeta_cli import (
     HOST_SIMULATOR_BOOTSTRAP_ENV,
     OpenEtaCli,
@@ -170,6 +171,36 @@ def test_cli_checker_config_accepts_explicit_safety_mapping(monkeypatch) -> None
     config = _build_cli_checker_config(tools)
 
     assert config.pre_safety_checks == {"move_to": "obstacle_avoidance"}
+
+
+def test_cli_status_views_never_print_credential_fingerprints(capsys) -> None:
+    cli = OpenEtaCli()
+    primary_secret = "sk-primary-secret-suffix"
+    fallback_secret = "sk-fallback-secret-suffix"
+    cli.state.config = PlannerProviderConfig(
+        provider="openai-compatible",
+        model="vision-model",
+        api_base="https://models.example.test/v1",
+        api_key=primary_secret,
+        fallback=ProviderEndpointConfig(
+            provider="openai-compatible",
+            model="fallback-model",
+            api_base="https://fallback.example.test/v1",
+            api_key=fallback_secret,
+        ),
+    )
+
+    cli._print_header()
+    cli._print_config()
+
+    rendered = capsys.readouterr().out
+    assert primary_secret not in rendered
+    assert fallback_secret not in rendered
+    assert primary_secret[-6:] not in rendered
+    assert fallback_secret[-6:] not in rendered
+    assert "credential configured" in rendered
+    assert "fallback.credential" in rendered
+    assert "api_key" not in rendered
 
 
 def test_cli_runtime_binds_only_explicitly_enabled_web_capabilities(
