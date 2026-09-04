@@ -479,7 +479,15 @@ class GazeboRuntime:
             self.closed = False
         self._start()
         self._reset_target_pose_evidence = None
-        if self.controller is not None:
+        if self.controller is not None and PHYSICS not in self.profile.capabilities:
+            # A native pick/place reset always recreates the isolated world and
+            # its controller above.  ``_start`` has therefore already waited
+            # for a fresh, time-synchronised joint/TF sample.  Clearing that
+            # sample here would turn a healthy static robot into a dependency
+            # on an unnecessary later /tf publication, which is especially
+            # fragile while Gazebo is under load.  Non-physics profiles keep
+            # their controller across a model reset, so they still need the
+            # post-reset source boundary.
             reset_sources = getattr(self.controller, "reset_sources", None)
             if callable(reset_sources):
                 reset_sources()

@@ -953,6 +953,9 @@ def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_
         def wait_ready(self, _timeout):
             events.append(("controller_ready",))
 
+        def reset_sources(self):
+            events.append(("reset_sources",))
+
         def close(self):
             events.append(("controller_close",))
 
@@ -983,6 +986,10 @@ def test_native_grasp_runtime_detaches_while_paused_before_controller_ready_and_
     assert events[:first_detach] == [("launch",), ("attachment_ready",), ("paused", True)]
     assert events[first_detach + 1] == ("paused", False)
     assert events.index(("controller_ready",)) > events.index(("paused", False))
+    # The fresh controller readiness gate has already established the
+    # joint/TF pair. Native reset must retain it rather than requiring an
+    # unrelated later TF publication from an otherwise stationary robot.
+    assert ("reset_sources",) not in events
     # The fresh paused launch, rather than model_only reset, restores the SDF
     # object poses and gives the stock plugin a real detached transition.
     assert world.resets == []
