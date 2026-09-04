@@ -47,6 +47,26 @@ not misrepresented as completion of the broader three-by-three promotion
 matrix below: the remaining task classes and random-layout rows need their own
 fresh evidence before a wider release claim.
 
+### Observed wall-clock profile
+
+The server was shared during both runs, so these values are diagnostic evidence
+rather than an exclusive-machine benchmark. They are taken from the real PTY
+transcripts and include each tool's visible wall time.
+
+| Metric | Run A | Run B |
+| --- | ---: | ---: |
+| TUI episode wall time | 436 s | 349 s |
+| two `grasp_pose_estimate` calls (GraspGenX plus host qualification) | 103 s | 74 s |
+| four MoveIt/Gazebo `move_to` executions | 145 s | 111 s |
+| four native `gripper_control` executions | 86 s | 79 s |
+| AnyPlace model/frozen-pool calls | 14.5 s | 14.6 s |
+
+The largest current controllable cost is physical simulation execution, not
+the inexpensive AnyPlace frozen-pool path. The motion profiles remain at the
+conservative tracking-proven settings in this release: a speed increase must
+first pass a separate GUI-on controller bake-off, rather than being folded into
+a stability-focused release from two shared-host runs.
+
 ## Verified recent evidence
 
 All paths below are remote evidence roots, not repository fixtures. Their
