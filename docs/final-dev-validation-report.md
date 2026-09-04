@@ -77,6 +77,21 @@ and trajectory to the immutable host binding (about 1.6 s; 1,183 provider
 tokens). This guards against an otherwise costly failure mode in which a
 planner tries to reconstruct geometry that it was never given.
 
+For a broader non-physical work-order check, the same client parsed one real
+single-item, one double-item, and one three-item `multi_normal` Chinese work
+order against the full task-neutral catalog. All three returned the exact
+ordered catalog assignments in one valid `configure_work_order` call:
+
+| Class | Fixture | Result | Provider latency | Provider tokens |
+| --- | --- | --- | ---: | ---: |
+| Single | `screwdriver-green` | exact ordered assignment | 1.93 s | 1,069 |
+| Double | `wrench-green-bolt-blue` | exact ordered assignments | 2.06 s | 1,142 |
+| Multi | `three-tools-a` | exact ordered assignments | 2.64 s | 1,195 |
+
+These are semantic-control checks only. They show that expanding a work order
+does not require a second model repair turn in this client path; they do not
+prove grasp, placement, collision, or physical-release success.
+
 This proves that the selected endpoint accepts the release client's current
 OpenAI-compatible structured and visual request shapes. It is deliberately
 **not** a physical-sort result, a throughput claim for full agent contexts, or
