@@ -87,37 +87,83 @@ MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S = 0.001
 MOTION_RESTART_MAX_ARM_VELOCITY_RAD_S = 0.01
 
 
-def _is_l5_release_dispatch_control_failure(
-    goal: Mapping[str, Any],
-    result: Mapping[str, Any],
-) -> bool:
-    """Return whether a proven release trajectory only lost controller closure.
+def _l5_terminal_action(goal: Mapping[str, Any]) -> dict[str, str] | None:
+    """Return the physical terminal action represented by a cached L5 goal.
 
-    The cached L5 trajectory is the pre-execution proof for a placement
-    release. A FollowJointTrajectory ``CONTROL_FAILED`` result is useful
-    telemetry, but it must not turn that already-dispatched physical release
-    into a new Cartesian qualification problem. This deliberately applies
-    only to an exact cached L5 replay at the host-compiled release boundary;
-    planning failures, missing action receipts, ordinary motions, and unknown
-    outcomes retain their existing fail-closed behavior.
+    A cached trajectory is eligible for execution-side terminal reconciliation
+    only at one of the two host-compiled physical boundaries. The grasp
+    compiler intentionally does not add a generic ``purpose=grasp`` field, so
+    identify that boundary from its immutable compiled grasp identifier and
+    contact stage rather than accepting an arbitrary caller-provided purpose.
     """
 
+    if (
+        str(goal.get("grasp_stage") or "") == "contact"
+        and str(goal.get("compiled_grasp_id") or "")
+    ):
+        return {
+            "purpose": "grasp",
+            "stage": "contact",
+            "physical_outcome_authority": "native_contact_attach_ack",
+        }
+    if (
+        str(goal.get("purpose") or "") == "placement"
+        and str(goal.get("placement_stage") or "") == "release"
+        and str(goal.get("compiled_placement_id") or "")
+    ):
+        return {
+            "purpose": "placement",
+            "stage": "release",
+            "physical_outcome_authority": "detach_open_and_causal_visual_observation",
+        }
+    return None
+
+
+def _l5_terminal_dispatch_outcome(
+    goal: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> dict[str, str] | None:
+    """Return a known result for a cached, host-compiled terminal dispatch.
+
+    L5 proves the collision-free trajectory against the current scene and the
+    cache hit additionally proves that its start state has not changed. At a
+    physical terminal action, FollowJointTrajectory's final endpoint telemetry
+    is therefore not a second source of truth: grasp contact is confirmed by
+    native contact/attachment, while placement release is confirmed by
+    detach/open and causal observation. We accept only a controller success
+    or its known ``CONTROL_FAILED`` completion after dispatch. Planning
+    failures, timeouts, missing action receipts, transport/recovery motions,
+    and unknown outcomes remain fail-closed.
+    """
+
+    terminal_action = _l5_terminal_action(goal)
+    if terminal_action is None:
+        return None
     try:
         planned_point_count = int(result.get("planned_point_count") or 0)
     except (TypeError, ValueError):
-        return False
-    return bool(
-        result.get("ok") is False
-        and result.get("execution_started") is True
+        return None
+    common_dispatch = (
+        result.get("execution_started") is True
         and planned_point_count > 0
-        and result.get("moveit_error_code") == MOVEIT_CONTROL_FAILED
         and result.get("l5_trajectory_reused") is True
         and result.get("l5_trajectory_cache_status") == "hit"
         and isinstance(result.get("l5_trajectory_cache_key"), str)
         and bool(result.get("l5_trajectory_cache_key"))
-        and str(goal.get("purpose") or "") == "placement"
-        and str(goal.get("placement_stage") or "") == "release"
+        and result.get("reconciliation_required") is not True
     )
+    if not common_dispatch:
+        return None
+    if result.get("ok") is True:
+        return {**terminal_action, "controller_outcome": "success"}
+    if (
+        result.get("ok") is False
+        and result.get("moveit_error_code") == MOVEIT_CONTROL_FAILED
+    ):
+        return {**terminal_action, "controller_outcome": "control_failed"}
+    return None
+
+
 # These targets are relative to the first fresh mount pose after a reset, not
 # absolute world coordinates.  They are the small, validated neutral motions
 # available in the empty motion-control profile.  Publishing the relation in the existing
@@ -1291,9 +1337,7 @@ class GazeboController:
                             **recovery_timing,
                         },
                     )
-                l5_release_dispatch_control_failure = (
-                    _is_l5_release_dispatch_control_failure(goal, result)
-                )
+                l5_terminal_dispatch = _l5_terminal_dispatch_outcome(goal, result)
                 barrier_ordered_terminal_state = False
                 action_started_value = result.get("action_started_ros_time_s")
                 action_completed_value = result.get("action_completed_ros_time_s")
@@ -1323,16 +1367,14 @@ class GazeboController:
                 else:
                     action_barrier_value = action_started_value
                     action_barrier_source = "action_started_ros_time_s"
-                # The L5 release replay already has an exact plan-only proof
-                # and an accepted attached-object boundary. If the controller
-                # reports CONTROL_FAILED after accepting that replay, do not
-                # wait for a second terminal-pose/stationarity proof before
-                # the required detach/open. The post-release causal visual
-                # observation remains the placement authority; this branch
-                # merely avoids turning controller telemetry into a veto.
+                # A cached L5 terminal replay has an exact plan-only proof and
+                # an unchanged proven start state. Do not turn the position
+                # controller's final sample into a duplicate physical-outcome
+                # gate: native contact/attachment proves grasp contact, and
+                # detach/open plus causal observation proves release.
                 terminal_state_provider = (
                     None
-                    if l5_release_dispatch_control_failure
+                    if l5_terminal_dispatch is not None
                     else self.barrier_ordered_terminal_state_provider
                     if result.get("ok") is True
                     else (
@@ -1344,7 +1386,7 @@ class GazeboController:
                 )
                 failed_motion_terminal_sample = (
                     result.get("ok") is False
-                    and not l5_release_dispatch_control_failure
+                    and l5_terminal_dispatch is None
                 )
                 if (
                     result.get("execution_started") is True
@@ -1567,6 +1609,7 @@ class GazeboController:
                 if (
                     ok
                     and not bool(result.get("plan_only", False))
+                    and l5_terminal_dispatch is None
                     and (
                         not target_verified
                         or (
@@ -1702,8 +1745,51 @@ class GazeboController:
                     and max_arm_velocity_rad_s is not None
                     and max_arm_velocity_rad_s <= MOTION_TERMINAL_MAX_ARM_VELOCITY_RAD_S
                 )
-                release_dispatch_reconciled = False
-                if control_failed_at_verified_terminal:
+                l5_terminal_dispatch_reconciled = False
+                if l5_terminal_dispatch is not None:
+                    original_error = str(error or "MOTION_EXECUTION_FAILED")
+                    ok = True
+                    error = None
+                    l5_terminal_dispatch_reconciled = True
+                    terminal_reconciliation = {
+                        "schema_version": "openeta.gazebo.motion_terminal_reconciliation.v1",
+                        "status": "PASS",
+                        "reason_code": (
+                            "CONTROL_FAILED_AFTER_L5_TERMINAL_DISPATCH"
+                            if l5_terminal_dispatch["controller_outcome"]
+                            == "control_failed"
+                            else "L5_TERMINAL_DISPATCH_ACCEPTED"
+                        ),
+                        "proof_boundary": (
+                            "cached_l5_plan_only_proof_and_host_compiled_terminal_action"
+                        ),
+                        "controller_terminal_verification": "telemetry_only",
+                        "terminal_action": {
+                            "purpose": l5_terminal_dispatch["purpose"],
+                            "stage": l5_terminal_dispatch["stage"],
+                        },
+                        "post_terminal_authority": l5_terminal_dispatch[
+                            "physical_outcome_authority"
+                        ],
+                        "controller_outcome": l5_terminal_dispatch[
+                            "controller_outcome"
+                        ],
+                        **(
+                            {"original_error_code": original_error}
+                            if l5_terminal_dispatch["controller_outcome"]
+                            == "control_failed"
+                            else {}
+                        ),
+                        "moveit_error_code": result.get("moveit_error_code"),
+                        "execution_started": True,
+                        "planned_point_count": int(result.get("planned_point_count") or 0),
+                        "l5_trajectory_cache_key": result.get("l5_trajectory_cache_key"),
+                        "l5_trajectory_cache_status": "hit",
+                        "exact_target_verified": bool(target_verified),
+                        "position_error_m": position_error_m,
+                        "orientation_error_rad": orientation_error_rad,
+                    }
+                elif control_failed_at_verified_terminal:
                     original_error = str(error or "MOTION_EXECUTION_FAILED")
                     ok = True
                     error = None
@@ -1724,35 +1810,11 @@ class GazeboController:
                         "position_error_m": position_error_m,
                         "orientation_error_rad": orientation_error_rad,
                     }
-                elif l5_release_dispatch_control_failure:
-                    original_error = str(error or "MOTION_EXECUTION_FAILED")
-                    ok = True
-                    error = None
-                    release_dispatch_reconciled = True
-                    terminal_reconciliation = {
-                        "schema_version": "openeta.gazebo.motion_terminal_reconciliation.v1",
-                        "status": "PASS",
-                        "reason_code": "CONTROL_FAILED_AFTER_L5_RELEASE_DISPATCH",
-                        "proof_boundary": (
-                            "cached_l5_plan_only_proof_and_host_compiled_release"
-                        ),
-                        "controller_terminal_verification": "telemetry_only",
-                        "post_release_authority": "causal_visual_observation",
-                        "original_error_code": original_error,
-                        "moveit_error_code": MOVEIT_CONTROL_FAILED,
-                        "execution_started": True,
-                        "planned_point_count": int(result.get("planned_point_count") or 0),
-                        "l5_trajectory_cache_key": result.get("l5_trajectory_cache_key"),
-                        "l5_trajectory_cache_status": "hit",
-                        "exact_target_verified": bool(target_verified),
-                        "position_error_m": position_error_m,
-                        "orientation_error_rad": orientation_error_rad,
-                    }
                 if (
                     ok
                     and not bool(result.get("plan_only", False))
                     and not target_verified
-                    and not release_dispatch_reconciled
+                    and not l5_terminal_dispatch_reconciled
                 ):
                     ok = False
                     error = "MOTION_TARGET_NOT_REACHED"
@@ -1832,7 +1894,7 @@ class GazeboController:
                         "end_state": end.to_dict(),
                         "steps_executed": 1,
                         "reached_target": bool(
-                            release_dispatch_reconciled
+                            l5_terminal_dispatch_reconciled
                             or (result.get("reached_goal", ok) and target_verified)
                         ),
                         "stalled": False,

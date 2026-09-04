@@ -581,41 +581,115 @@ def test_controller_reconciles_control_failed_only_at_exact_stationary_terminal(
     assert proof["max_arm_velocity_rad_s"] == 0.0
 
 
-def test_controller_allows_l5_release_dispatch_after_control_failure_without_terminal_gate() -> None:
+@pytest.mark.parametrize(
+    (
+        "target_pose",
+        "controller_result",
+        "expected_terminal_action",
+        "expected_authority",
+        "expected_reason_code",
+    ),
+    [
+        (
+            {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "compiled_grasp_id": "cached-l5-grasp-proof",
+                "grasp_stage": "contact",
+            },
+            {
+                "ok": False,
+                "error_code": "MOTION_EXECUTION_FAILED",
+                "motion_outcome": "failed",
+                "moveit_error_code": -4,
+            },
+            {"purpose": "grasp", "stage": "contact"},
+            "native_contact_attach_ack",
+            "CONTROL_FAILED_AFTER_L5_TERMINAL_DISPATCH",
+        ),
+        (
+            {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "purpose": "placement",
+                "compiled_placement_id": "cached-l5-release-proof",
+                "placement_stage": "release",
+            },
+            {
+                "ok": False,
+                "error_code": "MOTION_EXECUTION_FAILED",
+                "motion_outcome": "failed",
+                "moveit_error_code": -4,
+            },
+            {"purpose": "placement", "stage": "release"},
+            "detach_open_and_causal_visual_observation",
+            "CONTROL_FAILED_AFTER_L5_TERMINAL_DISPATCH",
+        ),
+        (
+            {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "compiled_grasp_id": "cached-l5-grasp-proof",
+                "grasp_stage": "contact",
+            },
+            {"ok": True, "reached_goal": True, "motion_outcome": "completed"},
+            {"purpose": "grasp", "stage": "contact"},
+            "native_contact_attach_ack",
+            "L5_TERMINAL_DISPATCH_ACCEPTED",
+        ),
+        (
+            {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "purpose": "placement",
+                "compiled_placement_id": "cached-l5-release-proof",
+                "placement_stage": "release",
+            },
+            {"ok": True, "reached_goal": True, "motion_outcome": "completed"},
+            {"purpose": "placement", "stage": "release"},
+            "detach_open_and_causal_visual_observation",
+            "L5_TERMINAL_DISPATCH_ACCEPTED",
+        ),
+    ],
+)
+def test_controller_treats_cached_l5_terminal_dispatch_as_telemetry_only(
+    target_pose,
+    controller_result,
+    expected_terminal_action,
+    expected_authority,
+    expected_reason_code,
+) -> None:
     start, end = _state(), _state()
-    # The controller can stop materially away from the requested EEF pose
-    # while the cached L5 release trajectory has already been dispatched. The
-    # release boundary is then completed by native detach/open plus causal
-    # visual evidence, not a second controller-pose proof.
+    # The controller can report a terminal result while the local EEF sample is
+    # materially away from the requested pose. L5 already proves the path;
+    # the physical terminal outcome is deliberately delegated to the native
+    # grasp or release verifier instead of a second Cartesian terminal gate.
     end.end_effector_pose["xyz"] = [0.06, -0.04, 0.57]
     states = iter((start, end))
     controller = GazeboController(
         state_provider=lambda: next(states),
+        barrier_ordered_terminal_state_provider=lambda _stamp: pytest.fail(
+            "cached L5 terminal dispatch must not wait for terminal supervision"
+        ),
         failed_motion_terminal_state_provider=lambda _stamp: pytest.fail(
-            "release dispatch must not wait for failed-motion terminal supervision"
+            "cached L5 terminal dispatch must not wait for failed-motion supervision"
         ),
         move_action=lambda _goal, _timeout: {
-            "ok": False,
-            "error_code": "MOTION_EXECUTION_FAILED",
-            "motion_outcome": "failed",
-            "moveit_error_code": -4,
+            **controller_result,
             "planned_point_count": 129,
             "execution_started": True,
             "l5_trajectory_reused": True,
             "l5_trajectory_cache_status": "hit",
-            "l5_trajectory_cache_key": "cached-l5-release-proof",
+            "l5_trajectory_cache_key": "cached-l5-terminal-proof",
+            "action_started_ros_time_s": 12.5,
+            "action_completed_ros_time_s": 14.0,
         },
     )
 
     receipt = controller.execute(
         {
             "action_type": "move_to",
-            "target_pose": {
-                "xyz": [0, 0, 0.5],
-                "quat_xyzw": [0, 0, 0, 1],
-                "purpose": "placement",
-                "placement_stage": "release",
-            },
+            "target_pose": target_pose,
             "tolerance": 0.002,
             "ori_tolerance": 0.05,
         }
@@ -626,9 +700,53 @@ def test_controller_allows_l5_release_dispatch_after_control_failure_without_ter
     assert receipt["motion_outcome"] == "completed"
     assert receipt["position_error_m"] > receipt["position_verification_tolerance_m"]
     proof = receipt["terminal_reconciliation"]
-    assert proof["reason_code"] == "CONTROL_FAILED_AFTER_L5_RELEASE_DISPATCH"
+    assert proof["reason_code"] == expected_reason_code
     assert proof["controller_terminal_verification"] == "telemetry_only"
+    assert proof["terminal_action"] == expected_terminal_action
+    assert proof["post_terminal_authority"] == expected_authority
     assert proof["exact_target_verified"] is False
+
+
+def test_controller_keeps_nonterminal_cached_l5_dispatch_strict() -> None:
+    start, end = _state(), _state()
+    end.end_effector_pose["xyz"] = [0.06, -0.04, 0.57]
+    states = iter((start, end))
+    controller = GazeboController(
+        state_provider=lambda: next(states),
+        failed_motion_terminal_state_provider=lambda _stamp: end,
+        move_action=lambda _goal, _timeout: {
+            "ok": False,
+            "error_code": "MOTION_EXECUTION_FAILED",
+            "motion_outcome": "failed",
+            "moveit_error_code": -4,
+            "planned_point_count": 129,
+            "execution_started": True,
+            "l5_trajectory_reused": True,
+            "l5_trajectory_cache_status": "hit",
+            "l5_trajectory_cache_key": "cached-l5-transport-proof",
+            "action_started_ros_time_s": 12.5,
+            "action_completed_ros_time_s": 14.0,
+        },
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "purpose": "placement",
+                "compiled_placement_id": "cached-l5-transport-proof",
+                "placement_stage": "transport",
+            },
+            "tolerance": 0.002,
+            "ori_tolerance": 0.05,
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is False
+    assert receipt["reached_target"] is False
+    assert "terminal_reconciliation" not in receipt
 
 
 @pytest.mark.parametrize("failure_mode", ["wrong_code", "moving", "off_target"])
