@@ -198,10 +198,13 @@ endpoints, and checkout consistency before starting an isolated run. Use
 `--verify-only` to re-verify an existing evidence directory without launching
 the environment.
 
-The validated 2026-08-31 release baseline is implementation commit `3a70294`.
-Three consecutive GPU-GUI `human_tui` runs of the representative two-item work
-order passed with 22 agent-selected tools each and zero host dispatches. Those
-records predate launcher-owned Gazebo lifecycle and assignment-batched SAM3, so
-22 is historical evidence rather than a current required count. Exact paths,
+The 2026-08-31 implementation baseline `3a70294` is historical validation
+evidence, not a claim about the current release candidate. Three GPU-GUI
+`human_tui` runs of the representative two-item work order passed with 22
+agent-selected tools each and zero host dispatches. Those records predate
+launcher-owned Gazebo lifecycle and assignment-batched SAM3, so 22 is
+historical evidence rather than a current required count. Exact paths,
 timings, token counts, approval procedure, and cleanup checks are recorded in
-the [operator reproduction guide](multi-normal-tui-reproduction.md).
+the [operator reproduction guide](multi-normal-tui-reproduction.md); current
+official BaiLian promotion status is recorded in the
+[validation report](final-dev-validation-report.md).

@@ -25,12 +25,12 @@ SAM3, MoveIt, and the `fast_v3` qualification profile. AnyGrasp remains availabl
 backend evaluation. The repository-wide rollback default may remain `legacy`; the release runner
 selects `fast_v3` explicitly.
 
-The historical validated implementation baseline is `3a70294` (2026-08-31). Three consecutive GPU-GUI
-`human_tui` runs of the representative wrench/bolt work order passed with 22 agent-selected tools
-and zero host dispatches each. Current `final-dev` evidence and the explicit remaining provider
-promotion gates are recorded separately in the validation report. The operator runbook records the
-exact server path, SSH/VNC tunnel, health and VirtualGL checks, prompt, approvals, report queries,
-timings, tokens, and evidence roots.
+`3a70294` (2026-08-31) is a historical GPU-GUI validation baseline, not a
+claim about the current release candidate. Current `final-dev` evidence,
+source revisions, and the still-unclaimed official BaiLian promotion gates are
+recorded separately in the validation report. The operator runbook records
+the SSH/VNC tunnel, health and VirtualGL checks, prompt, approvals, report
+queries, timings, tokens, and evidence roots.
 
 ## Framework and interfaces
 

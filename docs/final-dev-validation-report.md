@@ -37,6 +37,22 @@ The packet-fix run verifies that a successful `active_observe` keeps its own
 fresh observation packet instead of forcing an immediately redundant passive
 observation.
 
+## Local delivery hardening after those artifacts
+
+The verified artifacts above deliberately retain their source revision
+(`187b4df`) rather than being relabelled as evidence for later code. The
+current `final-dev` delivery candidate also contains the following
+unit-tested, but **not yet physically re-run**, hardening changes:
+
+| Revision | Change | Local evidence |
+| --- | --- | --- |
+| `b78164c` | An opt-in 1024 GraspGenX reserve extends the small-wave ladder through 512 instead of creating one 768-candidate deep wave. | candidate scheduling/configuration tests and full repository suite |
+| `41dd0b9` | Provider `/models` discovery is advisory; the configured model's direct structured chat smoke remains the BaiLian compatibility gate. | provider-preflight tests and full repository suite |
+
+These revisions are delivery preparation, not a substitute for the physical
+promotion matrix below. A new remote run must record its exact `HEAD` in its
+case receipt before it can be added to the verified table.
+
 ## Promotion matrix
 
 The final delivery must be run with the official BaiLian Qwen Vision endpoint
