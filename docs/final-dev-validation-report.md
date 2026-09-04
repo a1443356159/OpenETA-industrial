@@ -80,6 +80,13 @@ Planner 投影单元测试已通过；由于不需要启动新场景来验证文
 - 可移植 Docker 镜像、百炼 provider secret、模型准备和默认双轮命令见
   [ubuntu-docker-deployment.md](ubuntu-docker-deployment.md)。
 
+在当前 `final-dev` 上，`tests/test_ubuntu_docker_deployment.py` 与
+`tests/test_hpc_deployment.py` 共 17 项静态部署契约测试通过：它们覆盖唯一的
+CUDA/ROS 镜像定义、只读模型卷/可写状态卷、窄范围 provider secret、Qwen/GraspGenX
+默认入口、HPC 复用同一 Dockerfile，以及本地凭据不会进入 build context。该检查不等同于
+实际镜像构建；首次部署仍应在具备 Docker Engine、NVIDIA Container Toolkit、模型权重和
+GPU 的目标主机上执行文档中的 `build`、`fetch-models` 与 `validate-assets`。
+
 复现时应使用新 run root。默认 Docker `agentic-normal` 连续跑两轮：首轮失败即退出，
 不会以第二轮成功掩盖故障。若仅需操作员演示一轮，可显式传入 `--runs 1`；这不改变
 上述已记录的双轮稳定性证据。
