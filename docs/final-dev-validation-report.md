@@ -92,6 +92,13 @@ These are semantic-control checks only. They show that expanding a work order
 does not require a second model repair turn in this client path; they do not
 prove grasp, placement, collision, or physical-release success.
 
+For deterministic-control evidence, the representative double-item Chinese
+work order was submitted to the same endpoint ten independent times. All ten
+responses selected `configure_work_order` with the same valid ordered catalog
+assignments and required no schema repair. Provider latency was 1.92–3.01 s
+(P50 2.31 s). This is deliberately scoped to the bounded semantic decision;
+the physical promotion matrix still requires fresh full episodes.
+
 This proves that the selected endpoint accepts the release client's current
 OpenAI-compatible structured and visual request shapes. It is deliberately
 **not** a physical-sort result, a throughput claim for full agent contexts, or
