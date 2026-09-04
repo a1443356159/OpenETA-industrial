@@ -71,6 +71,12 @@ no schema retry (about 2.2 s; 1,191 provider tokens). This is a narrow
 agentic semantic check, not a substitution for perception, qualification, or
 physical execution.
 
+A host-bound `grasp_contact` decision was also checked: the model chose
+`move_to` and returned `parameters={}`, correctly leaving the qualified pose
+and trajectory to the immutable host binding (about 1.6 s; 1,183 provider
+tokens). This guards against an otherwise costly failure mode in which a
+planner tries to reconstruct geometry that it was never given.
+
 This proves that the selected endpoint accepts the release client's current
 OpenAI-compatible structured and visual request shapes. It is deliberately
 **not** a physical-sort result, a throughput claim for full agent contexts, or
