@@ -75,6 +75,39 @@ def test_provider_config_roundtrips_fallback_endpoint(tmp_path: Path) -> None:
     assert redacted_fallback["api_key"] != "fallback-key"
 
 
+def test_redacted_provider_metadata_keeps_no_credential_fingerprint() -> None:
+    primary_secret = "sk-primary-secret-identifier"
+    fallback_secret = "sk-fallback-secret-identifier"
+    provider = PlannerProviderConfig(
+        provider="primary-compatible",
+        model="primary-model",
+        api_base="https://primary.example.test",
+        api_key=primary_secret,
+        fallback=ProviderEndpointConfig(
+            provider="fallback-compatible",
+            model="fallback-model",
+            api_base="https://fallback.example.test",
+            api_key=fallback_secret,
+        ),
+    )
+    backend = OpenAICompatiblePlannerBackendConfig(
+        provider="primary-compatible",
+        model="primary-model",
+        api_base="https://primary.example.test",
+        api_key=primary_secret,
+        fallback=provider.fallback,
+    )
+
+    for redacted in (provider.redacted(), backend.redacted()):
+        rendered = repr(redacted)
+        assert primary_secret not in rendered
+        assert fallback_secret not in rendered
+        assert primary_secret[-10:] not in rendered
+        assert fallback_secret[-10:] not in rendered
+        assert redacted["api_key"] == "<configured>"
+        assert redacted["fallback"]["api_key"] == "<configured>"
+
+
 def test_backend_alternates_providers_after_consecutive_timeouts() -> None:
     calls: list[dict[str, object]] = []
 

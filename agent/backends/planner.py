@@ -1237,6 +1237,7 @@ def _coerce_non_negative_int(value: object) -> int | None:
 def _redact_secret(value: str) -> str:
     if not value:
         return ""
-    if len(value) <= 8:
-        return "***"
-    return f"{value[:3]}...{value[-4:]}"
+    # This representation is persisted in planner/rollout metadata. Do not
+    # retain any portion of a credential: a stable prefix or suffix is still
+    # sensitive correlation data in long-lived acceptance artifacts.
+    return "<configured>"

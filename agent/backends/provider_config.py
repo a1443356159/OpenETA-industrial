@@ -388,6 +388,8 @@ def _first_optional_bool(*values: str | None) -> bool | None:
 def _redact_secret(value: str) -> str:
     if not value:
         return ""
-    if len(value) <= 8:
-        return "***"
-    return f"{value[:3]}...{value[-4:]}"
+    # Provider configuration is copied into CLI, GUI, and rollout metadata.
+    # Keeping even a prefix or suffix makes a credential a stable identifier
+    # across artifacts, so this is intentionally a presence marker rather
+    # than a partially masked secret.
+    return "<configured>"
