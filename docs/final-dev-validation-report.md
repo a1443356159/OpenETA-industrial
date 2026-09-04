@@ -63,6 +63,14 @@ structured chat smoke completed in about 432 ms (about 589 ms total). A
 separate one-image structured request also completed successfully through the
 same OpenETA client path.
 
+The same client then received the representative Chinese two-item work order
+with the task-neutral manipulation catalog. It selected
+`configure_work_order` and returned the exact ordered catalog assignments
+`yellow wrench → green parts bin`, then `red hex bolt → blue parts bin`, with
+no schema retry (about 2.2 s; 1,191 provider tokens). This is a narrow
+agentic semantic check, not a substitution for perception, qualification, or
+physical execution.
+
 This proves that the selected endpoint accepts the release client's current
 OpenAI-compatible structured and visual request shapes. It is deliberately
 **not** a physical-sort result, a throughput claim for full agent contexts, or
