@@ -14,10 +14,13 @@ DEFAULT_GRASP_RAW_POOL_SIZE = 200
 # independent existing 200-candidate contract.
 DEFAULT_GRASPGENX_RAW_POOL_SIZE = 512
 # This is deliberately a startup-only reserve-pool ceiling, not a promise to
-# run 1,024 IK requests.  The scheduler consumes the frozen pool cumulatively
-# and stops as soon as the configured L5 target is proved.  Keeping the
-# larger value opt-in lets acceptance compare recall after a frozen-frontier
-# miss without changing the established 512-candidate default.
+# run 1,024 IK requests.  GraspGenX's model-native draw set is frozen per
+# inference call and does not grow just because this selection limit grows;
+# the extra work is host-side filtering/serialization of the wider reserve.
+# The scheduler then consumes it cumulatively and stops as soon as the
+# configured L5 target is proved.  Keeping the larger value opt-in lets
+# acceptance measure that recall/latency trade-off before changing the
+# established 512-candidate default.
 MAX_GRASP_RAW_POOL_SIZE = 1024
 DEFAULT_ANYPLACE_RAW_POOL_SIZE = 96
 DEFAULT_GRASP_DIVERSITY_POOL_SIZE = 64

@@ -168,9 +168,12 @@ is an infrastructure failure, never a candidate rejection.
 
 The final Docker profile freezes 512 GraspGenX candidates once and consumes
 them in the `fast_v3` small-wave funnel. It does not issue 512 eager IK or L5
-requests. Set `OPENETA_GRASPGENX_RAW_POOL_SIZE=1024` only for a measured
-coverage experiment after a 512-pool miss; it is not the release default. The
-default ladder then extends through 512 before the final 1024 tail, so the
+requests. GraspGenX uses one fixed, model-native draw set per inference call,
+so raising `OPENETA_GRASPGENX_RAW_POOL_SIZE=1024` does not rerun or enlarge
+that native inference. It does increase host-side candidate selection,
+collision filtering and frozen-result serialization, so retain it as a
+measured coverage experiment until physical results justify a default change.
+The default ladder then extends through 512 before the final 1024 tail, so the
 larger reserve remains lazy at the IK/L5 layers.
 
 ## GPU GUI / VNC 转发

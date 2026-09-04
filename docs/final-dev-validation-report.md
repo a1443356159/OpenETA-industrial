@@ -14,10 +14,13 @@ it is never part of candidate selection.
 
 The 512 reserve is deliberately the release default. Qualification uses small
 deterministic waves and stops on the first complete proof. A 1024 reserve is
-available only as an explicit coverage experiment after a 512-pool miss; it
-does not make the initial model generation free. Its default ladder adds a
-512-candidate wave before the terminal 1024 tail, retaining lazy deep
-qualification rather than issuing one oversized final wave.
+available as an explicit coverage experiment. It reuses GraspGenX's fixed
+model-native inference draws, but increases host-side selection, collision
+filtering and frozen-result serialization; physical evidence must therefore
+establish its recall/latency trade-off before it becomes the default. Its
+default ladder adds a 512-candidate wave before the terminal 1024 tail,
+retaining lazy deep qualification rather than issuing one oversized final
+wave.
 
 ## Verified recent evidence
 
