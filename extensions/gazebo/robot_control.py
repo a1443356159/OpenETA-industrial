@@ -164,6 +164,43 @@ def _l5_terminal_dispatch_outcome(
     return None
 
 
+def _known_gripper_terminal_dispatch(
+    result: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Describe a completed gripper action without treating it as success.
+
+    The gripper adapter distinguishes an accepted command with a returned
+    terminal result from an unstarted/rejected command and from a timeout or
+    transport failure whose final physical state is unknown.  Direct physical
+    boundaries can use that distinction to keep the controller's endpoint
+    status as telemetry; ordinary opens, recovery and transport relief remain
+    strict at this layer.
+    """
+
+    if (
+        result.get("execution_started") is not True
+        or result.get("completion_known") is not True
+        or result.get("reconciliation_required") is True
+    ):
+        return None
+    status = str(result.get("terminal_status") or "")
+    if status not in {"succeeded", "not_succeeded"}:
+        return None
+    if result.get("ok") is True:
+        outcome = "success"
+    elif result.get("ok") is False:
+        outcome = "control_failed"
+    else:
+        return None
+    return {
+        "schema_version": "openeta.gazebo.gripper_terminal_dispatch.v1",
+        "execution_started": True,
+        "completion_known": True,
+        "controller_outcome": outcome,
+        "terminal_status": status,
+    }
+
+
 # These targets are relative to the first fresh mount pose after a reset, not
 # absolute world coordinates.  They are the small, validated neutral motions
 # available in the empty motion-control profile.  Publishing the relation in the existing
@@ -1975,6 +2012,7 @@ class GazeboController:
                         "MOTION_OUTCOME_UNKNOWN",
                         {"motion_outcome": "unknown", "reconciliation_required": True},
                     )
+                terminal_dispatch = _known_gripper_terminal_dispatch(result)
                 reached_goal = bool(result.get("reached_goal", result["ok"]))
                 stalled = bool(result.get("stalled", False))
                 # The native-grasp profile explicitly allows a successful stalled close
@@ -1990,7 +2028,9 @@ class GazeboController:
                     # are known.  In the native-grasp profile this admits only
                     # the subsequent independent Gazebo contact gate; it never
                     # constitutes grasp or attachment evidence by itself.
-                    ok = result["ok"] or stalled
+                    ok = result["ok"] or (
+                        stalled and terminal_dispatch is not None
+                    )
                 else:
                     ok = result["ok"] and reached_goal and not stalled
                 state.gripper_state.update(
@@ -2019,6 +2059,9 @@ class GazeboController:
                         **{
                             key: result[key]
                             for key in (
+                                "execution_started",
+                                "completion_known",
+                                "reconciliation_required",
                                 "terminal_status",
                                 "terminal_status_code",
                                 "terminal_gripper_joint_state",
@@ -2029,6 +2072,11 @@ class GazeboController:
                             )
                             if key in result
                         },
+                        **(
+                            {"gripper_terminal_dispatch": terminal_dispatch}
+                            if terminal_dispatch is not None
+                            else {}
+                        ),
                     },
                 )
             return GazeboControlResult(False, "INVALID_CONTROL_ACTION")

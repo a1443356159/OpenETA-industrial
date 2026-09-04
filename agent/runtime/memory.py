@@ -24,7 +24,10 @@ from agent.runtime.calibration_registry import (
     DEFAULT_GRASP_CALIBRATION_PROFILE,
     load_grasp_calibration_capabilities,
 )
-from agent.runtime.release_evidence import ordered_native_release_proof
+from agent.runtime.release_evidence import (
+    known_gripper_open_terminal_dispatch,
+    ordered_native_release_proof,
+)
 
 
 PENDING_SAM3_SELECTION_KEY = "pending_sam3_selection"
@@ -6465,12 +6468,21 @@ class AgentMemory:
             ):
                 return False
         release_evidence = receipt.get("release_evidence")
+        gripper_open_terminal_dispatch_accepted = bool(
+            isinstance(release_evidence, dict)
+            and known_gripper_open_terminal_dispatch(
+                release_evidence.get("gripper_open_terminal_dispatch")
+            )
+        )
         release_proven = bool(
             isinstance(release_evidence, dict)
             and release_evidence.get("schema_version")
             == "openeta.native_release_evidence.v1"
             and release_evidence.get("detached_confirmed") is True
-            and release_evidence.get("gripper_open_confirmed") is True
+            and (
+                release_evidence.get("gripper_open_confirmed") is True
+                or gripper_open_terminal_dispatch_accepted
+            )
             and isinstance(
                 release_evidence.get("post_release_visual_observation"), dict
             )
@@ -6519,8 +6531,9 @@ class AgentMemory:
                     "verdict. A fresh observation is required."
                     if legacy_verification_failed
                     else (
-                        "The object release did not contain both native detach and "
-                        "gripper-open acknowledgements. A fresh observation is required."
+                        "The object release did not contain native detach plus a "
+                        "confirmed or known-dispatched gripper-open boundary. A fresh "
+                        "observation is required."
                     )
                 ),
                 evidence={

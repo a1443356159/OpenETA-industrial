@@ -1988,6 +1988,71 @@ def test_release_uses_ordered_detach_revision_then_stops_reopening() -> None:
     assert memory.placement_release() == release
 
 
+def test_release_accepts_known_open_terminal_dispatch_after_native_detach() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="pick and place")
+    memory.save_fact(
+        "placement_release",
+        {
+            "schema_version": "openeta.placement_release.v1",
+            "status": "ready",
+            "candidate_id": "grasp-1",
+            "placement_pose_id": "place-1",
+        },
+        source="test",
+    )
+    receipt = {
+        "ok": True,
+        "planning_scene_revision": 3,
+        "gripper_open_executed": True,
+        "detachable_joint": {"state": "detached"},
+        "release_sequence": [
+            {"sequence": 1, "event": "native_detach_ack", "state": "detached"},
+            {"sequence": 2, "event": "planning_scene_detach_ack", "revision": 3},
+            {
+                "sequence": 3,
+                "event": "gripper_open_completed",
+                "ok": True,
+                "controller_terminal_verification": "telemetry_only",
+            },
+        ],
+        "release_evidence": {
+            "schema_version": "openeta.native_release_evidence.v1",
+            "detached_confirmed": True,
+            "gripper_open_confirmed": False,
+            "gripper_open_terminal_dispatch": {
+                "schema_version": "openeta.gazebo.gripper_terminal_dispatch.v1",
+                "execution_started": True,
+                "completion_known": True,
+                "controller_outcome": "control_failed",
+                "terminal_status": "not_succeeded",
+            },
+            "post_release_visual_observation": {
+                "schema_version": "openeta.post_release_visual_observation.v1",
+                "required": True,
+                "available": True,
+                "source": "causal_post_release_rgbd",
+                "review_authority": "vlm",
+            },
+        },
+    }
+
+    memory.add_action(
+        _tool_action(
+            "gripper_control",
+            {"position": 1},
+            environment_receipt=receipt,
+        )
+    )
+
+    release = memory.placement_release()
+    assert release["status"] == "released"
+    assert release["release_evidence"]["gripper_open_confirmed"] is False
+    assert release["release_evidence"]["gripper_open_terminal_dispatch"][
+        "controller_outcome"
+    ] == "control_failed"
+
+
 def test_failed_release_after_detach_requires_fresh_agentic_cycle() -> None:
     memory = AgentMemory()
     memory.start_session(task="pick and place")

@@ -4879,6 +4879,8 @@ class _RosRuntime:
             return finish(
                 {
                     "ok": False,
+                    "execution_started": False,
+                    "completion_known": True,
                     "error_code": "GRIPPER_FAILED",
                     "terminal_status": "rejected",
                 }
@@ -4893,20 +4895,26 @@ class _RosRuntime:
             return finish(
                 {
                     "ok": False,
+                    "execution_started": True,
+                    "completion_known": False,
                     "reached_goal": False,
                     "stalled": False,
                     "error_code": "GRIPPER_TIMEOUT",
                     "terminal_status": "timed_out",
+                    "reconciliation_required": True,
                 }
             )
         except Exception:
             return finish(
                 {
                     "ok": False,
+                    "execution_started": True,
+                    "completion_known": False,
                     "reached_goal": False,
                     "stalled": False,
                     "error_code": "GRIPPER_FAILED",
                     "terminal_status": "result_error",
+                    "reconciliation_required": True,
                 }
             )
         result = wrapped.result
@@ -4950,6 +4958,8 @@ class _RosRuntime:
         return finish(
             {
                 "ok": ok,
+                "execution_started": True,
+                "completion_known": True,
                 "reached_goal": reached_goal,
                 "stalled": stalled,
                 "stall_accepted_for_command": stall_is_valid_for_command,

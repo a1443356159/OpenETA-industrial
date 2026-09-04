@@ -66,6 +66,34 @@ def _native_close_failure_classification(
     return candidate_rejection, infrastructure_error, failure_class
 
 
+def _known_gripper_terminal_dispatch(
+    receipt: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return a controller-authored, known gripper completion record.
+
+    This is deliberately narrower than a successful gripper command.  A
+    placement release has already crossed Gazebo's irreversible detach
+    boundary, so a returned controller endpoint failure is telemetry when the
+    command was actually dispatched and its result is known.  Rejections,
+    timeouts and transport failures do not satisfy this predicate.
+    """
+
+    value = receipt.get("gripper_terminal_dispatch")
+    if not isinstance(value, Mapping):
+        return None
+    dispatch = dict(value)
+    if (
+        dispatch.get("schema_version")
+        != "openeta.gazebo.gripper_terminal_dispatch.v1"
+        or dispatch.get("execution_started") is not True
+        or dispatch.get("completion_known") is not True
+        or dispatch.get("controller_outcome") not in {"success", "control_failed"}
+        or dispatch.get("terminal_status") not in {"succeeded", "not_succeeded"}
+    ):
+        return None
+    return dispatch
+
+
 def _detached_target_motion_audit(
     *,
     source_spec: Mapping[str, Any],
@@ -1181,18 +1209,62 @@ class GazeboDirectEnv(Env):
                     release_sequence = list(
                         release_before_open["release_sequence"]
                     )
-                    open_executed = receipt.get("ok") is True
+                    terminal_dispatch = _known_gripper_terminal_dispatch(receipt)
+                    controller_telemetry_only = bool(
+                        receipt.get("ok") is not True
+                        and terminal_dispatch is not None
+                    )
+                    open_executed = bool(
+                        receipt.get("ok") is True or controller_telemetry_only
+                    )
                     post_release_stage = "gripper_result"
                     try:
                         if not open_executed:
                             raise GazeboProcessError(
                                 str(receipt.get("error_code") or "GRIPPER_FAILED")
                             )
+                        if controller_telemetry_only:
+                            original_error = str(
+                                receipt.get("error_code") or "GRIPPER_FAILED"
+                            )
+                            receipt.update(
+                                {
+                                    "ok": True,
+                                    "error_code": None,
+                                    "gripper_terminal_reconciliation": {
+                                        "schema_version": (
+                                            "openeta.gazebo.gripper_terminal_reconciliation.v1"
+                                        ),
+                                        "status": "PASS",
+                                        "reason_code": (
+                                            "CONTROL_FAILED_AFTER_NATIVE_RELEASE_DISPATCH"
+                                        ),
+                                        "proof_boundary": (
+                                            "native_detach_ack_and_causal_visual_observation"
+                                        ),
+                                        "controller_terminal_verification": (
+                                            "telemetry_only"
+                                        ),
+                                        "original_error_code": original_error,
+                                        "controller_outcome": terminal_dispatch[
+                                            "controller_outcome"
+                                        ],
+                                        "terminal_status": terminal_dispatch[
+                                            "terminal_status"
+                                        ],
+                                    },
+                                }
+                            )
                         release_sequence.append(
                             {
                                 "sequence": len(release_sequence) + 1,
                                 "event": "gripper_open_completed",
                                 "ok": True,
+                                "controller_terminal_verification": (
+                                    "telemetry_only"
+                                    if controller_telemetry_only
+                                    else "strict_success"
+                                ),
                             }
                         )
                         # Detach and the physical open are already irreversible
@@ -1249,7 +1321,16 @@ class GazeboDirectEnv(Env):
                         release_evidence = {
                             "schema_version": "openeta.native_release_evidence.v1",
                             "detached_confirmed": True,
-                            "gripper_open_confirmed": True,
+                            "gripper_open_confirmed": not controller_telemetry_only,
+                            **(
+                                {
+                                    "gripper_open_terminal_dispatch": dict(
+                                        terminal_dispatch
+                                    )
+                                }
+                                if controller_telemetry_only
+                                else {}
+                            ),
                             "post_release_visual_observation": (
                                 post_release_visual_observation
                             ),

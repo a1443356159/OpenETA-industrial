@@ -952,6 +952,55 @@ def test_release_ack_triggers_open_while_planning_scene_detach_runs() -> None:
     assert raw["metadata"]["planning_scene_revision"] == 9
 
 
+def test_release_uses_known_open_controller_failure_as_terminal_telemetry() -> None:
+    env, events = _attached_release_env()
+
+    def execute(action):
+        assert action == {"action_type": "gripper_open"}
+        events.append("gripper_open")
+        return env.runtime.observe(), {
+            "ok": False,
+            "error_code": "GRIPPER_FAILED",
+            "gripper_terminal_dispatch": {
+                "schema_version": "openeta.gazebo.gripper_terminal_dispatch.v1",
+                "execution_started": True,
+                "completion_known": True,
+                "controller_outcome": "control_failed",
+                "terminal_status": "not_succeeded",
+            },
+        }
+
+    env.runtime.execute = execute
+
+    _, _, _, _, result = env.step({"action_type": "gripper_open"})
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is True
+    assert receipt["error_code"] is None
+    assert receipt["gripper_open_executed"] is True
+    assert receipt["gripper_terminal_reconciliation"] == {
+        "schema_version": "openeta.gazebo.gripper_terminal_reconciliation.v1",
+        "status": "PASS",
+        "reason_code": "CONTROL_FAILED_AFTER_NATIVE_RELEASE_DISPATCH",
+        "proof_boundary": "native_detach_ack_and_causal_visual_observation",
+        "controller_terminal_verification": "telemetry_only",
+        "original_error_code": "GRIPPER_FAILED",
+        "controller_outcome": "control_failed",
+        "terminal_status": "not_succeeded",
+    }
+    assert receipt["release_evidence"]["detached_confirmed"] is True
+    assert receipt["release_evidence"]["gripper_open_confirmed"] is False
+    assert receipt["release_evidence"]["gripper_open_terminal_dispatch"][
+        "controller_outcome"
+    ] == "control_failed"
+    assert receipt["release_sequence"][2] == {
+        "sequence": 3,
+        "event": "gripper_open_completed",
+        "ok": True,
+        "controller_terminal_verification": "telemetry_only",
+    }
+
+
 def test_multi_sort_release_uses_one_runtime_owned_scene_transition() -> None:
     env, events = _attached_release_env()
     pending = {

@@ -6,6 +6,28 @@ from collections.abc import Mapping
 from typing import Any
 
 
+def known_gripper_open_terminal_dispatch(value: object) -> bool:
+    """Validate controller telemetry that may accompany a native release.
+
+    A physical placement becomes irreversible when Gazebo confirms detach.
+    The subsequent open command must have been dispatched and must return a
+    known terminal result, but its position-controller status is not an
+    independent placement proof.  Timeouts, rejections and unknown outcomes
+    remain ineligible.
+    """
+
+    if not isinstance(value, Mapping):
+        return False
+    return bool(
+        value.get("schema_version")
+        == "openeta.gazebo.gripper_terminal_dispatch.v1"
+        and value.get("execution_started") is True
+        and value.get("completion_known") is True
+        and value.get("controller_outcome") in {"success", "control_failed"}
+        and value.get("terminal_status") in {"succeeded", "not_succeeded"}
+    )
+
+
 def ordered_native_release_proof(value: object) -> dict[str, Any] | None:
     """Parse release evidence without relying on fixed event indexes.
 

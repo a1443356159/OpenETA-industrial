@@ -883,6 +883,8 @@ def test_native_grasp_profile_admits_known_stalled_close_to_contact_gate() -> No
         state_provider=_state,
         gripper_action=lambda _position, _timeout: {
             "ok": False,
+            "execution_started": True,
+            "completion_known": True,
             "reached_goal": False,
             "stalled": True,
             "terminal_status": "not_succeeded",
@@ -917,6 +919,35 @@ def test_native_grasp_profile_never_admits_stalled_open() -> None:
     assert receipt["reached_goal"] is False
     assert receipt["stalled"] is True
     assert receipt["error_code"] == "GRIPPER_FAILED"
+
+
+def test_robot_gripper_records_known_failed_terminal_dispatch_without_crediting_open() -> None:
+    controller = GazeboController(
+        config=NativePickPlaceConfig(),
+        state_provider=_state,
+        gripper_action=lambda _position, _timeout: {
+            "ok": False,
+            "execution_started": True,
+            "completion_known": True,
+            "reached_goal": False,
+            "stalled": False,
+            "error_code": "GRIPPER_FAILED",
+            "terminal_status": "not_succeeded",
+            "terminal_status_code": 6,
+        },
+    )
+
+    receipt = controller.execute({"action_type": "gripper_open"}).to_dict()
+
+    assert receipt["ok"] is False
+    assert receipt["error_code"] == "GRIPPER_FAILED"
+    assert receipt["gripper_terminal_dispatch"] == {
+        "schema_version": "openeta.gazebo.gripper_terminal_dispatch.v1",
+        "execution_started": True,
+        "completion_known": True,
+        "controller_outcome": "control_failed",
+        "terminal_status": "not_succeeded",
+    }
 
 
 def test_robot_gripper_receipt_keeps_terminal_and_wall_clock_diagnostics() -> None:
