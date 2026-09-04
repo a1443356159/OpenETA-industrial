@@ -53,6 +53,22 @@ These revisions are delivery preparation, not a substitute for the physical
 promotion matrix below. A new remote run must record its exact `HEAD` in its
 case receipt before it can be added to the verified table.
 
+## Provider-only compatibility check
+
+On 2026-09-04, the current repository's native provider-preflight was run
+against the configured official BaiLian `qwen3-vl-flash` workspace endpoint
+without starting Gazebo, MCP services, or a TUI. The endpoint advertised the
+selected model; model discovery completed in about 157 ms and the direct
+structured chat smoke completed in about 432 ms (about 589 ms total). A
+separate one-image structured request also completed successfully through the
+same OpenETA client path.
+
+This proves that the selected endpoint accepts the release client's current
+OpenAI-compatible structured and visual request shapes. It is deliberately
+**not** a physical-sort result, a throughput claim for full agent contexts, or
+promotion evidence. Every physical case must still retain its own redacted
+`provider-preflight.json` under its run root.
+
 ## Promotion matrix
 
 The final delivery must be run with the official BaiLian Qwen Vision endpoint
