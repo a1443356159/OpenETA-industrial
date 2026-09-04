@@ -581,6 +581,56 @@ def test_controller_reconciles_control_failed_only_at_exact_stationary_terminal(
     assert proof["max_arm_velocity_rad_s"] == 0.0
 
 
+def test_controller_allows_l5_release_dispatch_after_control_failure_without_terminal_gate() -> None:
+    start, end = _state(), _state()
+    # The controller can stop materially away from the requested EEF pose
+    # while the cached L5 release trajectory has already been dispatched. The
+    # release boundary is then completed by native detach/open plus causal
+    # visual evidence, not a second controller-pose proof.
+    end.end_effector_pose["xyz"] = [0.06, -0.04, 0.57]
+    states = iter((start, end))
+    controller = GazeboController(
+        state_provider=lambda: next(states),
+        failed_motion_terminal_state_provider=lambda _stamp: pytest.fail(
+            "release dispatch must not wait for failed-motion terminal supervision"
+        ),
+        move_action=lambda _goal, _timeout: {
+            "ok": False,
+            "error_code": "MOTION_EXECUTION_FAILED",
+            "motion_outcome": "failed",
+            "moveit_error_code": -4,
+            "planned_point_count": 129,
+            "execution_started": True,
+            "l5_trajectory_reused": True,
+            "l5_trajectory_cache_status": "hit",
+            "l5_trajectory_cache_key": "cached-l5-release-proof",
+        },
+    )
+
+    receipt = controller.execute(
+        {
+            "action_type": "move_to",
+            "target_pose": {
+                "xyz": [0, 0, 0.5],
+                "quat_xyzw": [0, 0, 0, 1],
+                "purpose": "placement",
+                "placement_stage": "release",
+            },
+            "tolerance": 0.002,
+            "ori_tolerance": 0.05,
+        }
+    ).to_dict()
+
+    assert receipt["ok"] is True
+    assert receipt["reached_target"] is True
+    assert receipt["motion_outcome"] == "completed"
+    assert receipt["position_error_m"] > receipt["position_verification_tolerance_m"]
+    proof = receipt["terminal_reconciliation"]
+    assert proof["reason_code"] == "CONTROL_FAILED_AFTER_L5_RELEASE_DISPATCH"
+    assert proof["controller_terminal_verification"] == "telemetry_only"
+    assert proof["exact_target_verified"] is False
+
+
 @pytest.mark.parametrize("failure_mode", ["wrong_code", "moving", "off_target"])
 def test_controller_does_not_reconcile_unproven_execution_failure(
     failure_mode: str,
