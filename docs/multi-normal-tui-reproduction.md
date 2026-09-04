@@ -38,7 +38,18 @@ cd "$REPO"
 git status --short --branch
 git rev-parse --short HEAD
 
-export OPENETA_PYTHON_EXECUTABLE=/root/autodl-tmp/OpenETA-industrial/.venv/bin/python
+# Prefer the isolated runtime paired with this worktree.  A repository-local
+# .venv remains supported for a conventional checkout, but never borrow a
+# Python/ROS overlay from a different worktree.
+if [[ -x "$REPO/.openeta_runtime/venv/bin/python" ]]; then
+  export OPENETA_PYTHON_EXECUTABLE="$REPO/.openeta_runtime/venv/bin/python"
+  export OPENETA_GAZEBO_OVERLAY="$REPO/.openeta_runtime/ros-overlay"
+elif [[ -x "$REPO/.venv/bin/python" ]]; then
+  export OPENETA_PYTHON_EXECUTABLE="$REPO/.venv/bin/python"
+else
+  echo "no OpenETA Python runtime found beneath $REPO" >&2
+  exit 2
+fi
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 export DISPLAY=:3
 export OPENETA_GAZEBO_DISPLAY=:3

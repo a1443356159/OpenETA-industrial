@@ -6,7 +6,7 @@
 
 ## Scope
 
-The source baseline used by the verified remote runs was `187b4df` (`final-dev`). It uses the task-neutral
+The current source baseline is `7cbe9ef` (`final-dev`). It uses the task-neutral
 RM75/Robotiq `multi_normal` world, `fast_v3`, GraspGenX with a frozen reserve
 of 512 model candidates, AnyPlace with 96 object goals, MoveIt L5 plan-only
 proofs, and the real PTY-based agentic TUI. The GUI is a case-owned observer;
@@ -21,6 +21,31 @@ establish its recall/latency trade-off before it becomes the default. Its
 default ladder adds a 512-candidate wave before the terminal 1024 tail,
 retaining lazy deep qualification rather than issuing one oversized final
 wave.
+
+## Current exact-revision `multi_normal` evidence
+
+On 2026-09-04, the representative two-item work order completed twice in
+fresh, isolated run roots at exact Git head
+`7cbe9ef9e751322771a2d6aeaa80ac13722277b1`. Each run used the configured
+official BaiLian-compatible Qwen Vision deployment, `qwen3-vl-flash`, the real
+agentic PTY, GPU Gazebo GUI, GraspGenX, AnyPlace and `fast_v3`; neither used a
+host macro nor an `ask_human` recovery.
+
+| Work order | Evidence root | Result | Tool calls | Planner tokens |
+| --- | --- | --- | ---: | ---: |
+| yellow adjustable wrench → green parts bin; red hex bolt → blue parts bin | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-a/` | PASS | 17 | 115,366 |
+| same work order, fresh scene/run root | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-b/` | PASS | 17 | 113,701 |
+
+Both `environment-receipt.json` files record the exact Git head above. Their
+`acceptance-report.json` files record `agentic_closed_loop`,
+`host_dispatch_count=0`, `fast_v3`, GraspGenX, `status=passed` and no verifier
+errors. Per assignment, SAM3, AnyPlace and GraspGenX each ran once; placement
+reused the frozen AnyPlace pool rather than invoking another model inference.
+
+This is the current stable representative release path. It is intentionally
+not misrepresented as completion of the broader three-by-three promotion
+matrix below: the remaining task classes and random-layout rows need their own
+fresh evidence before a wider release claim.
 
 ## Verified recent evidence
 
@@ -40,22 +65,23 @@ The packet-fix run verifies that a successful `active_observe` keeps its own
 fresh observation packet instead of forcing an immediately redundant passive
 observation.
 
-## Local delivery hardening after those artifacts
+## Delivery hardening lineage
 
-The verified artifacts above deliberately retain their source revision
+The historical artifacts above deliberately retain their source revision
 (`187b4df`) rather than being relabelled as evidence for later code. The
-current `final-dev` delivery candidate also contains the following
-unit-tested, but **not yet physically re-run**, hardening changes:
+current exact-revision runs in the preceding section cover the accumulated
+delivery candidate, including the following hardening changes:
 
 | Revision | Change | Local evidence |
 | --- | --- | --- |
 | `b78164c` | An opt-in 1024 GraspGenX reserve extends the small-wave ladder through 512 instead of creating one 768-candidate deep wave. | candidate scheduling/configuration tests and full repository suite |
 | `b061c80`, `afaff5a` | The 1024 reserve is documented as a host-side coverage expansion, and a regression test proves it cannot add model-native GraspGenX draws. | targeted 512/1024 draw-contract test |
 | `41dd0b9` | Provider `/models` discovery is advisory; the configured model's direct structured chat smoke remains the BaiLian compatibility gate. | provider-preflight tests and full repository suite |
+| `35e67ec` | A returned, known gripper controller terminal result after native detach is retained as telemetry instead of forcing a false human recovery; rejections and unknown outcomes remain strict. | Gazebo controller/release tests; included in current physical runs |
+| `7cbe9ef` | A recovery screen preserves the candidate's deterministic fast base seeds before adding six unique fixed supplements; mutable batch cache cannot displace the base branch. | funnel regression tests; included in current physical runs |
 
-These revisions are delivery preparation, not a substitute for the physical
-promotion matrix below. A new remote run must record its exact `HEAD` in its
-case receipt before it can be added to the verified table.
+These revisions do not substitute for the remaining physical promotion matrix
+below. Every new row must still retain its exact `HEAD` in the case receipt.
 
 ## Provider-only compatibility check
 
