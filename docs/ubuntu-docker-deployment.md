@@ -105,6 +105,18 @@ deploy/ubuntu/openeta.sh agentic-normal --runs 2 \
   --scenario multi_normal_random_12345 --task-variant mixed-tools-b
 ```
 
+默认两轮用于日常稳定性检查。准备将某一类任务写入正式发布报告时，使用三轮、全新
+run root 的连续验收；任一轮失败时启动器会立即返回非零，不会继续用后续成功掩盖它：
+
+```bash
+# 例：正式的三件任务推广检查
+deploy/ubuntu/openeta.sh agentic-normal --runs 3 \
+  --scenario multi_normal --task-variant three-tools-a
+```
+
+单件、双件和随机布局也应各自执行同样的三轮命令；所需矩阵和报告字段以
+[`final-dev-validation-report.md`](final-dev-validation-report.md) 为准。
+
 Planner/VLM 配置默认从仓库内已忽略的 `.env` 以 Docker secret 只读挂载；它不会作为
 Compose `env_file` 或 Compose 自身的插值配置读取，也不会出现在容器 inspect 配置中。
 也可指定独立文件：
