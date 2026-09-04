@@ -711,8 +711,10 @@ def test_backend_returns_ranked_contract_without_transport_payloads(
     assert "point_cloud" not in serialized
 
 
+@pytest.mark.parametrize("raw_pool_size", (512, 1024))
 def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
     tmp_path: Path,
+    raw_pool_size: int,
 ) -> None:
     class SeedRecordingTorch:
         def __init__(self) -> None:
@@ -749,6 +751,7 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
         graspgenx_root=source,
         checkpoint_root=checkpoints,
         gripper_descriptions_root=grippers,
+        raw_pool_size=raw_pool_size,
     )
     result = backend.predict_grasps(
         depth=_image_payload(np.full((11, 11), 500, dtype=np.uint16)),
@@ -769,6 +772,9 @@ def test_real_backend_unions_multiple_stochastic_draws_before_diversity(
     ]
     assert result["details"]["model_raw_candidate_count"] == (1 + 2 * MODEL_INFERENCE_DRAWS)
     assert result["details"]["metadata"]["model_inference_draw_count"] == (MODEL_INFERENCE_DRAWS)
+    # A wider frozen reserve changes host-side candidate selection only.  It
+    # must not silently add another model-native diffusion/GraspMoE draw.
+    assert result["details"]["metadata"]["raw_pool_size"] == raw_pool_size
     assert result["details"]["metadata"]["model_inference_draw_seeds"] == [
         4 + offset for offset, _planner, _diffusion_only in MODEL_INFERENCE_DRAW_SPECS
     ]
