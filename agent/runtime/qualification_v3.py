@@ -967,6 +967,7 @@ def fixed_recovery_seeds(
     *,
     source: Mapping[str, Any],
     count: int = 6,
+    start_index: int = 0,
 ) -> list[JsonDict]:
     """Return the fixed remainder of the eight-seed budget (no runtime RNG)."""
 
@@ -986,10 +987,12 @@ def fixed_recovery_seeds(
         {
             "names": names,
             "positions": [
-                lo + radical_inverse(seed_index + 1, primes[joint_index]) * (hi - lo)
+                lo
+                + radical_inverse(seed_index + start_index + 1, primes[joint_index])
+                * (hi - lo)
                 for joint_index, (lo, hi) in enumerate(zip(lower, upper))
             ],
-            "seed_source": f"fixed_recovery_{seed_index}",
+            "seed_source": f"fixed_recovery_{seed_index + start_index}",
         }
         for seed_index in range(count)
     ]

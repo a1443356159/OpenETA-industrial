@@ -1354,11 +1354,12 @@ def _qualification_rpc_timeout_s(
     max_stage_count = max(stage_counts, default=1)
     if qualification_profile in {"fast_v3", "shadow"}:
         # Sixty seconds is a performance objective, never a transport cutoff.
-        # Cover pure IK + possible collision rescue + validity for both the
-        # fast and recovery seed budgets without assuming any concurrency.
+        # Cover pure IK + possible collision rescue + validity for the fast
+        # pass and for recovery's fast-base-plus-fixed-remainder pass without
+        # assuming any concurrency.
         per_stage_screening_s = 2.0 * (
             max(0, fast_seed_count) * (max(0.0, fast_ik_timeout_s) + STATE_VALIDITY_TIMEOUT_S)
-            + max(0, recovery_seed_count)
+            + max(0, fast_seed_count + recovery_seed_count)
             * (max(0.0, recovery_ik_timeout_s) + STATE_VALIDITY_TIMEOUT_S)
         )
         screening_budget_s = len(candidates) * max_stage_count * per_stage_screening_s
@@ -2253,7 +2254,17 @@ class MoveItQualificationEngine:
                             current_state=current_state,
                             batch_cache=tuple(batch_cache),
                             beam_width=beam_width,
-                            seed_count=(recovery_seed_count if recovery else fast_seed_count),
+                            # Recovery preserves the two deterministic fast
+                            # base seeds, then appends the fixed six-seed
+                            # remainder.  It must not replace the base with
+                            # a different seed regime merely because this
+                            # candidate reached a later wave.
+                            seed_count=(
+                                fast_seed_count + recovery_seed_count
+                                if recovery
+                                else fast_seed_count
+                            ),
+                            recovery_seed_count=recovery_seed_count if recovery else 0,
                             timeout_s=(recovery_timeout_s if recovery else fast_timeout_s),
                             recovery=recovery,
                             solver_profile=(
@@ -2959,6 +2970,7 @@ class MoveItQualificationEngine:
         batch_cache: Sequence[Mapping[str, Any]],
         beam_width: int,
         seed_count: int,
+        recovery_seed_count: int,
         timeout_s: float,
         recovery: bool,
         solver_profile: str,
@@ -3088,12 +3100,15 @@ class MoveItQualificationEngine:
                 batch_cache=batch_cache,
                 current_state=current_state,
                 source=source,
-                # Recovery expands only the first stage to its six fixed
-                # seeds. Every dependent stage propagates the surviving
-                # Beam-2 parents under the same bounded branching contract as
-                # the fast layer.
+                # Recovery appends its six fixed seeds after the same fast
+                # base at stage zero. Every dependent stage propagates the
+                # surviving Beam-2 parents under the same bounded branching
+                # contract as the fast layer.
                 count=seed_count if stage_index == 0 else beam_width,
                 recovery=recovery and stage_index == 0,
+                recovery_seed_count=(
+                    recovery_seed_count if recovery and stage_index == 0 else 0
+                ),
                 initial_seed_source=(
                     "candidate_start_state"
                     if isinstance(candidate_start, Mapping)
@@ -3448,16 +3463,20 @@ class MoveItQualificationEngine:
         count: int,
         recovery: bool,
         initial_seed_source: str,
+        recovery_seed_count: int = 0,
         candidate_seed_states: Sequence[Mapping[str, Any]] = (),
     ) -> list[JsonDict]:
-        if recovery:
-            seeds = fixed_recovery_seeds(start, source=source, count=count)
-            for seed in seeds:
-                seed["_chain_parent_state"] = dict(start)
-            return seeds
+        if recovery_seed_count < 0 or recovery_seed_count > count:
+            raise ValueError("invalid recovery seed budget")
+        # Do not let a mutable per-wave cache choose one of the initial
+        # seeds.  The exact same model pose must receive the same base seed
+        # pair whether it appears in wave one or after a long frontier.
+        # Batch cache remains a deterministic last-resort filler only when
+        # every immutable source is absent or duplicate.
+        base_count = count - recovery_seed_count if recovery else count
         seeds: list[JsonDict] = []
         if previous_beam:
-            for index, solution in enumerate(previous_beam[:count]):
+            for index, solution in enumerate(previous_beam[:base_count]):
                 state = solution.get("joint_state")
                 if not isinstance(state, Mapping):
                     continue
@@ -3474,7 +3493,7 @@ class MoveItQualificationEngine:
             seed["seed_source"] = initial_seed_source
             seed["_chain_parent_state"] = dict(start)
             seeds.append(seed)
-        if len(seeds) < count:
+        if len(seeds) < base_count:
             start_names = [str(name) for name in start.get("names") or []]
             trusted_candidate_seeds = [
                 value
@@ -3497,6 +3516,12 @@ class MoveItQualificationEngine:
                     ),
                 )
             ]
+            # Named home is an immutable model state. It precedes the
+            # batch cache so direct grasp qualification always uses the same
+            # base pair across waves and recovery layers.
+            home = source.get("home_joint_state") or current_state.get("home_joint_state")
+            if isinstance(home, Mapping):
+                ordered_supplements.append((home, "named_home"))
             ordered_supplements.extend(
                 [
                     (value, "batch_cache")
@@ -3514,9 +3539,6 @@ class MoveItQualificationEngine:
                     )
                 ]
             )
-            home = source.get("home_joint_state") or current_state.get("home_joint_state")
-            if isinstance(home, Mapping):
-                ordered_supplements.append((home, "named_home"))
             for supplement_state, supplement_source in ordered_supplements:
                 supplement = dict(supplement_state)
                 supplement["seed_source"] = supplement_source
@@ -3528,9 +3550,37 @@ class MoveItQualificationEngine:
                     supplement["_parent_rescues"] = int(
                         previous_beam[0].get("collision_rescues", 0)
                     )
-                expanded = _unique_joint_state_seeds([*seeds, supplement], limit=count)
+                expanded = _unique_joint_state_seeds(
+                    [*seeds, supplement], limit=base_count
+                )
                 if len(expanded) > len(seeds):
                     seeds = expanded
+                if len(seeds) >= base_count:
+                    break
+        if recovery:
+            # The recovery Sobol-like set is a fixed remainder, not a
+            # replacement.  Retaining the fast base makes recovery robust to
+            # a candidate moving between waves without introducing runtime
+            # randomness or another provider inference.
+            fixed_added = 0
+            fixed_index = 0
+            # A fixed point can coincide with a base seed (for example the
+            # center of a symmetric joint range).  Skip such duplicates and
+            # deterministically continue the same low-discrepancy sequence
+            # so recovery still receives six distinct supplementary seeds.
+            while fixed_added < recovery_seed_count and fixed_index < 64:
+                fixed = fixed_recovery_seeds(
+                    start,
+                    source=source,
+                    count=1,
+                    start_index=fixed_index,
+                )[0]
+                fixed_index += 1
+                fixed["_chain_parent_state"] = dict(start)
+                expanded = _unique_joint_state_seeds([*seeds, fixed], limit=count)
+                if len(expanded) > len(seeds):
+                    seeds = expanded
+                    fixed_added += 1
                 if len(seeds) >= count:
                     break
         return _unique_joint_state_seeds(seeds, limit=count)[:count]

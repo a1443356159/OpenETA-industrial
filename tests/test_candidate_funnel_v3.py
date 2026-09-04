@@ -3357,7 +3357,7 @@ def test_beam_two_propagates_parent_solutions_to_the_next_stage():
     assert response["results"][0]["stages"][0]["beam_width"] == 2
 
 
-def test_recovery_uses_six_fixed_seeds_only_at_first_chain_stage():
+def test_recovery_preserves_fast_base_then_uses_six_fixed_seeds_at_first_stage():
     by_stage = {"stage0": [], "stage1": []}
 
     def ik(target, seed, collision):
@@ -3387,11 +3387,44 @@ def test_recovery_uses_six_fixed_seeds_only_at_first_chain_stage():
     response = _engine(compute_ik=ik, plan_only=plan).qualify(_request([_candidate(0, stages=2)]))
 
     assert response["selected_candidate_ids"] == ["c0"]
-    assert sum(source.startswith("fixed_recovery") for source in by_stage["stage0"]) == 6
+    # Fast screening uses the immutable current/home pair.  The recovery
+    # screen repeats that exact pair and then appends the six fixed remainder;
+    # it never switches to a different seed regime.
+    assert by_stage["stage0"][:2] == ["current_robot_state", "named_home"]
+    assert by_stage["stage0"][2:4] == ["current_robot_state", "named_home"]
+    assert len(by_stage["stage0"][4:]) == 6
+    assert all(source.startswith("fixed_recovery_") for source in by_stage["stage0"][4:])
     assert all(not source.startswith("fixed_recovery") for source in by_stage["stage1"])
     # Two fast parents and two recovery parents: dependent stages never widen
-    # to the six-seed recovery budget.
+    # to the fixed recovery remainder.
     assert len(by_stage["stage1"]) == 4
+
+
+def test_recovery_base_is_not_displaced_by_the_batch_cache():
+    engine = _engine()
+    start = {"names": ["j1"], "positions": [0.0]}
+
+    seeds = engine._fast_stage_seeds(
+        start,
+        previous_beam=[],
+        batch_cache=[{"names": ["j1"], "positions": [0.4]}],
+        current_state={
+            **start,
+            "home_joint_state": {"names": ["j1"], "positions": [0.8]},
+        },
+        source={"joint_limits": {"lower": [-1.0], "upper": [1.0]}},
+        count=8,
+        recovery=True,
+        recovery_seed_count=6,
+        initial_seed_source="current_robot_state",
+    )
+
+    assert [seed["seed_source"] for seed in seeds[:2]] == [
+        "current_robot_state",
+        "named_home",
+    ]
+    assert len(seeds) == 8
+    assert all(seed["seed_source"].startswith("fixed_recovery_") for seed in seeds[2:])
 
 
 def test_initial_seed_uses_next_cache_state_when_nearest_is_duplicate():
@@ -3596,12 +3629,14 @@ def test_recovery_seeds_start_only_after_complete_fast_pool_failure():
 
     response = _engine(compute_ik=ik).qualify(_request([_candidate(0), _candidate(1)]))
 
-    first_recovery = next(
+    first_fixed_recovery = next(
         index for index, source in enumerate(sources) if source.startswith("fixed_recovery")
     )
-    assert first_recovery == 4
-    assert all(source.startswith("fixed_recovery") for source in sources[first_recovery:])
-    assert len(sources[first_recovery:]) == 12
+    # No recovery-only seed can run until every fast candidate has failed.
+    # Recovery then repeats its immutable base before its six fixed seeds.
+    assert first_fixed_recovery >= 4
+    assert sum(source.startswith("fixed_recovery") for source in sources) == 12
+    assert len(sources) == 20
     assert response["stop_reason"] == "candidate_and_recovery_exhausted"
 
 
