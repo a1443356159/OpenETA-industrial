@@ -147,20 +147,21 @@ def _work_order_progress_summary(trace_root: Path) -> dict[str, Any] | None:
         key=lambda path: path.stat().st_mtime_ns,
     ):
         try:
-            lines = trace_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            stream = trace_path.open(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            for value in _walk(event):
-                if not isinstance(value, Mapping):
+        with stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
                     continue
-                if value.get("schema_version") != "openeta.multi_sort_progress.v1":
-                    continue
-                latest = value
+                for value in _walk(event):
+                    if not isinstance(value, Mapping):
+                        continue
+                    if value.get("schema_version") != "openeta.multi_sort_progress.v1":
+                        continue
+                    latest = value
     if latest is None:
         return None
     try:
