@@ -11,6 +11,7 @@ from deploy.ubuntu.prepare_tui_workspace import mcp_registry
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UBUNTU_DEPLOY = REPO_ROOT / "deploy" / "ubuntu"
 HPC_DEPLOY = REPO_ROOT / "deploy" / "HPC"
+RELEASE_BUNDLE = REPO_ROOT / "scripts" / "package_final_dev_bundle.sh"
 
 
 def _compose_service() -> dict[str, object]:
@@ -60,6 +61,7 @@ def test_container_entrypoints_use_graspgenx_and_two_run_default() -> None:
 
     assert "OPENETA_ACCEPTANCE_RUNS: ${OPENETA_ACCEPTANCE_RUNS:-2}" in compose
     assert "OPENETA_GRASPGENX_RAW_POOL_SIZE: ${OPENETA_GRASPGENX_RAW_POOL_SIZE:-512}" in compose
+    assert "OPENETA_SCRIPTED_TUI_FOLLOW_UP_TASKS:" in compose
     assert "--grasp-backend graspgenx" in normal
     assert 'scenario="multi_normal"' in normal
     assert "multi_normal_random_12345" in normal
@@ -137,3 +139,13 @@ def test_platform_specific_launchers_are_separated() -> None:
     assert "--env-file /dev/null" in launcher
     assert "/srv/openeta/model-download:rw" in launcher
     assert "OPENETA_MODEL_ROOT=/srv/openeta/model-download" in launcher
+
+
+def test_release_bundle_script_archives_only_a_pinned_git_revision() -> None:
+    source = RELEASE_BUNDLE.read_text(encoding="utf-8")
+
+    assert RELEASE_BUNDLE.is_file()
+    assert "git -C \"${repo_root}\" archive" in source
+    assert "rev-parse --verify \"${revision}^{commit}\"" in source
+    assert "sha256sum" in source
+    assert "refusing to overwrite" in source

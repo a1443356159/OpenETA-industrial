@@ -39,6 +39,11 @@ deploy/ubuntu/openeta.sh fetch-models
 deploy/ubuntu/openeta.sh validate-assets
 ```
 
+如需向评委或另一台机器交付不含密钥和模型的固定源码包，先运行
+[`scripts/package_final_dev_bundle.sh`](../scripts/package_final_dev_bundle.sh)。完整的
+源码包、目标主机要求、Docker 与 TUI 复现顺序见
+[`final-dev` 迁移与复现交付包](final-dev-delivery.md)。
+
 默认目录为：
 
 ```text
@@ -98,6 +103,16 @@ deploy/ubuntu/openeta.sh agentic-normal --runs 2
 ```bash
 deploy/ubuntu/openeta.sh agentic-normal --runs 1
 ```
+
+脚本化连续工作单回归可选地设置一个 JSON 任务数组。它只会在同一真实 PTY 中依次提交
+自然语言输入；不会把工作单写入场景，也不会替 VLM 选择物件或目标：
+
+```bash
+export OPENETA_SCRIPTED_TUI_FOLLOW_UP_TASKS='["把银色扳手也放进绿色料箱"]'
+deploy/ubuntu/openeta.sh agentic-normal --runs 1
+```
+
+人工 TUI 不需要这个变量：上一张工作单完成后，直接输入下一条自然语言任务即可。
 
 `--scenario` 和 `--task-variant` 仍保留为研发接口，但不属于当前交付验收。物理场景
 不会从这些参数获取任务语义，实际指令仍由 Planner 从 TUI 工作单读取。
