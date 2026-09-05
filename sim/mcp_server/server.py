@@ -1743,8 +1743,17 @@ def main() -> None:
     p = argparse.ArgumentParser(description="OpenETA MCP + Web Dashboard")
     p.add_argument("--transport", default="sse", choices=["sse", "stdio"])
     p.add_argument("--port", type=int, default=0)
+    p.add_argument(
+        "--fd",
+        type=int,
+        default=None,
+        help="pre-bound TCP listener inherited from the acceptance launcher",
+    )
     args = p.parse_args()
+    if args.fd is not None and args.fd < 0:
+        p.error("--fd must be a non-negative file descriptor")
     port = args.port or int(os.environ.get("MCP_PORT", os.environ.get("PORT", "8765")))
+    host = "127.0.0.1" if args.fd is not None else "0.0.0.0"
     _init()
 
     if args.transport == "stdio":
@@ -1836,11 +1845,17 @@ def main() -> None:
             _sweeper_flag[0] = True
             _asyncio.create_task(_stale_session_sweeper())
 
-    print(f"\n  OpenETA Dashboard:      http://0.0.0.0:{port}/")
-    print(f"  MCP (Streamable HTTP):  http://0.0.0.0:{port}/mcp")
-    print(f"  MCP (legacy SSE):       http://0.0.0.0:{port}/sse\n")
+    print(f"\n  OpenETA Dashboard:      http://{host}:{port}/")
+    print(f"  MCP (Streamable HTTP):  http://{host}:{port}/mcp")
+    print(f"  MCP (legacy SSE):       http://{host}:{port}/sse\n")
     try:
-        uvicorn.run(combined, host="0.0.0.0", port=port, log_level="warning")
+        uvicorn.run(
+            combined,
+            host=host,
+            port=port,
+            fd=args.fd,
+            log_level="warning",
+        )
     finally:
         # Bench workers deliberately run in their own process groups.  A
         # server SIGTERM must therefore close live handles and explicitly stop

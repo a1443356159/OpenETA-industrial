@@ -2367,78 +2367,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{SUITE}-{args.operator_mode}",
         preflight=not args.prepare_only,
     )
-    paths = prepare_case(
-        repo,
-        run_root,
-        allocation,
-        services,
-        scenario=args.scenario,
-        grasp_backend=args.grasp_backend,
-        execution_profile=args.execution_profile,
-        qualification_profile=args.qualification_profile,
-        task_variant=task_variant,
-        operator_mode=args.operator_mode,
-    )
-    if args.prepare_only:
-        print(run_root)
-        return 0
-    code = base.run_case(
-        repo,
-        paths,
-        allocation,
-        environment_config={
-            "env_id": ENV_ID,
-            "seed": int(_scene_contract(args.scenario)["seed"]),
-            "render_mode": "rgb_array",
-            "image_width": 512,
-            "image_height": 512,
-        },
-        calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
-        extra_environment={
-            "OPENETA_GRASP_BACKEND": args.grasp_backend,
-            "OPENETA_QUALIFICATION_PROFILE": args.qualification_profile,
-            (
-                "OPENETA_SCRIPTED_TASK_METADATA"
-                if args.operator_mode == base.SCRIPTED_TUI
-                else "OPENETA_OPERATOR_TASK_METADATA"
-            ): _automation_metadata_for_backend(
-                args.grasp_backend,
-                execution_profile=args.execution_profile,
-                qualification_profile=args.qualification_profile,
-                scenario=args.scenario,
-                task_variant=task_variant,
-                operator_mode=args.operator_mode,
-            ),
-            # A cold or shared-GPU launch must still leave time to prove the
-            # stock DetachableJoint endpoints after world-control discovery.
-            # This affects startup only; motion, planning, execution, and
-            # verification deadlines stay unchanged.  Preserve an explicit
-            # operator/deployment override when one is supplied.
-            "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": os.environ.get(
-                "OPENETA_GAZEBO_STARTUP_TIMEOUT_S",
-                f"{DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S:g}",
-            ),
-            # Share the deployment runtime's bounded perception budget.  GPU
-            # contention may make a healthy cold inference much slower than
-            # its usual latency; qualification, IK, planning, and execution
-            # retain their own independent deadlines.
-            "OPENETA_PERCEPTION_RPC_TIMEOUT_S": f"{DEFAULT_PERCEPTION_RPC_TIMEOUT_S:g}",
-            **_scenario_environment(args.scenario),
-        },
-    )
-    report = verify_case(
-        paths,
-        scenario=args.scenario,
-        grasp_backend=args.grasp_backend,
-        execution_profile=args.execution_profile,
-        qualification_profile=args.qualification_profile,
-        task_variant=task_variant,
-        operator_mode=args.operator_mode,
-    )
-    report.update({"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())})
-    base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)
-    print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0 if code == 0 and report["status"] == "passed" else 1
+    try:
+        paths = prepare_case(
+            repo,
+            run_root,
+            allocation,
+            services,
+            scenario=args.scenario,
+            grasp_backend=args.grasp_backend,
+            execution_profile=args.execution_profile,
+            qualification_profile=args.qualification_profile,
+            task_variant=task_variant,
+            operator_mode=args.operator_mode,
+        )
+        if args.prepare_only:
+            print(run_root)
+            return 0
+        code = base.run_case(
+            repo,
+            paths,
+            allocation,
+            environment_config={
+                "env_id": ENV_ID,
+                "seed": int(_scene_contract(args.scenario)["seed"]),
+                "render_mode": "rgb_array",
+                "image_width": 512,
+                "image_height": 512,
+            },
+            calibration_profile=RM75_ROBOTIQ_GRASP_CALIBRATION_PROFILE,
+            extra_environment={
+                "OPENETA_GRASP_BACKEND": args.grasp_backend,
+                "OPENETA_QUALIFICATION_PROFILE": args.qualification_profile,
+                (
+                    "OPENETA_SCRIPTED_TASK_METADATA"
+                    if args.operator_mode == base.SCRIPTED_TUI
+                    else "OPENETA_OPERATOR_TASK_METADATA"
+                ): _automation_metadata_for_backend(
+                    args.grasp_backend,
+                    execution_profile=args.execution_profile,
+                    qualification_profile=args.qualification_profile,
+                    scenario=args.scenario,
+                    task_variant=task_variant,
+                    operator_mode=args.operator_mode,
+                ),
+                # A cold or shared-GPU launch must still leave time to prove the
+                # stock DetachableJoint endpoints after world-control discovery.
+                # This affects startup only; motion, planning, execution, and
+                # verification deadlines stay unchanged.  Preserve an explicit
+                # operator/deployment override when one is supplied.
+                "OPENETA_GAZEBO_STARTUP_TIMEOUT_S": os.environ.get(
+                    "OPENETA_GAZEBO_STARTUP_TIMEOUT_S",
+                    f"{DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S:g}",
+                ),
+                # Share the deployment runtime's bounded perception budget.  GPU
+                # contention may make a healthy cold inference much slower than
+                # its usual latency; qualification, IK, planning, and execution
+                # retain their own independent deadlines.
+                "OPENETA_PERCEPTION_RPC_TIMEOUT_S": f"{DEFAULT_PERCEPTION_RPC_TIMEOUT_S:g}",
+                **_scenario_environment(args.scenario),
+            },
+        )
+        report = verify_case(
+            paths,
+            scenario=args.scenario,
+            grasp_backend=args.grasp_backend,
+            execution_profile=args.execution_profile,
+            qualification_profile=args.qualification_profile,
+            task_variant=task_variant,
+            operator_mode=args.operator_mode,
+        )
+        report.update(
+            {"schema_version": SCHEMA_VERSION, "run_root": str(run_root.resolve())}
+        )
+        base._json_dump(run_root / "acceptance-report.json", report, exclusive=True)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if code == 0 and report["status"] == "passed" else 1
+    finally:
+        base._release_mcp_listener(allocation)
 
 
 if __name__ == "__main__":

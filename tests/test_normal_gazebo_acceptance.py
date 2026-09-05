@@ -283,6 +283,91 @@ def test_case_start_failure_still_writes_cleanup_and_stops_owned_group(
     assert cleanup["owned_process_residuals"] == []
 
 
+def test_mcp_readiness_failure_includes_owned_startup_log(tmp_path) -> None:
+    log_path = tmp_path / "mcp.log"
+    log_path.write_text(
+        "ERROR: [Errno 98] error while attempting to bind on address\n",
+        encoding="utf-8",
+    )
+
+    class ExitedProcess:
+        returncode = 3
+
+        def poll(self):
+            return self.returncode
+
+    with pytest.raises(acceptance.base.AcceptanceError) as raised:
+        acceptance.base._wait_ready(18767, ExitedProcess(), log_path=log_path)
+
+    message = str(raised.value)
+    assert "code 3" in message
+    assert str(log_path) in message
+    assert "error while attempting to bind" in message
+
+
+def test_allocate_retains_a_reserved_mcp_listener(monkeypatch) -> None:
+    class Listener:
+        closed = False
+
+        @staticmethod
+        def getsockname():
+            return ("127.0.0.1", 19321)
+
+        def close(self):
+            self.closed = True
+
+    listener = Listener()
+    monkeypatch.setattr(acceptance.base, "_reserve_mcp_listener", lambda: listener)
+
+    allocation = acceptance.base.allocate("reserved-listener")
+
+    assert allocation.port == 19321
+    assert allocation.mcp_listener is listener
+    acceptance.base._release_mcp_listener(allocation)
+    assert listener.closed is True
+
+
+def test_mcp_readiness_waits_for_an_http_application_response(monkeypatch) -> None:
+    calls = []
+
+    class Response:
+        status = 404
+
+        @staticmethod
+        def read():
+            return b""
+
+    class Connection:
+        def __init__(self, host, port, timeout):
+            calls.append((host, port, timeout))
+
+        @staticmethod
+        def request(method, path):
+            calls.append((method, path))
+
+        @staticmethod
+        def getresponse():
+            return Response()
+
+        @staticmethod
+        def close():
+            calls.append(("close",))
+
+    class LiveProcess:
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setattr(acceptance.base, "HTTPConnection", Connection)
+
+    acceptance.base._wait_ready(19321, LiveProcess(), timeout_s=0.1)
+
+    assert ("GET", "/__openeta_mcp_ready__") in calls
+    assert ("close",) in calls
+
+
 def test_operator_gui_launcher_waits_for_visible_ready_marker(tmp_path, monkeypatch) -> None:
     paths = acceptance.base.case_paths(tmp_path, "pick-place", "human_tui")
     paths.root.mkdir(parents=True)

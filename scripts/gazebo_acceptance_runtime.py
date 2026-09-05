@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 from datetime import datetime, UTC
+
+
+from http.client import HTTPConnection, HTTPException
 
 
 import hashlib
@@ -174,6 +177,13 @@ class Allocation:
     # Recorded only for live coordinator allocations.  Unit fixtures may use
     # the deterministic allocator without probing a ROS installation.
     candidate_domain_preflight: Mapping[str, Any] | None = None
+    # A bound listener is held across allocation and the MCP child exec, then
+    # handed to Uvicorn by file descriptor.  Keeping it here makes the chosen
+    # port part of the already-sealed case receipt without reopening the
+    # TOCTOU window between ``bind(port=0)`` and server startup.
+    mcp_listener: socket.socket | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,10 +221,41 @@ def _json_load(path: Path) -> Any:
         return json.load(stream)
 
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+def _reserve_mcp_listener() -> socket.socket:
+    """Bind and retain one loopback TCP listener for the MCP child.
+
+    Asking the kernel for a free port and immediately closing that probe is a
+    time-of-check/time-of-use race on a shared host: another process can bind
+    the number before Uvicorn starts.  The listener returned here remains
+    open until the child has inherited its descriptor, so its port is both
+    stable and locally scoped for the complete launch handoff.
+    """
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(128)
+        listener.set_inheritable(True)
+        return listener
+    except BaseException:
+        listener.close()
+        raise
+
+
+def _release_mcp_listener(allocation: Allocation) -> None:
+    """Close the launcher's copy of an optional reserved MCP listener."""
+
+    listener = allocation.mcp_listener
+    if listener is None:
+        return
+    try:
+        listener.close()
+    except OSError:
+        # ``close`` is deliberately idempotent at the ownership boundary:
+        # ``run_case`` closes after a successful descriptor handoff and the
+        # top-level runner closes again on every return path.
+        pass
 
 
 def _port_is_free(port: int) -> bool:
@@ -312,13 +353,15 @@ def allocate(
             "no isolated ROS_DOMAIN_ID is available"
             + (f" after preflight: {detail}" if preflight else "")
         )
+    listener = _reserve_mcp_listener()
     token = uuid.uuid4().hex[:12]
     return Allocation(
         ros_domain_id=domain,
         gz_partition=f"openeta-tui-{case_name}-{token}",
-        port=_free_port(),
+        port=int(listener.getsockname()[1]),
         run_id=token,
         candidate_domain_preflight=selected_preflight,
+        mcp_listener=listener,
     )
 
 
@@ -583,15 +626,61 @@ def case_paths(root: Path, milestone: str, mode: str) -> CasePaths:
     )
 
 
-def _wait_ready(port: int, process: subprocess.Popen[Any], timeout_s: float = 30.0) -> None:
+def _mcp_startup_log_excerpt(log_path: Path | None) -> str:
+    """Return a bounded, single-line diagnostic for an owned MCP startup log.
+
+    ``uvicorn`` reports several otherwise indistinguishable startup failures
+    through its process exit status (for example a bind collision and an ASGI
+    import failure).  The acceptance runner used to discard the only useful
+    detail by reporting merely ``code 3``.  The log is case-owned and has no
+    provider credentials, so a short tail is safe to include in the raised
+    diagnostic while the full log remains in the run directory.
+    """
+
+    if log_path is None:
+        return ""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return f"; MCP log: {log_path} (unreadable)"
+    tail = " ".join(text.splitlines()[-24:]).strip()
+    if len(tail) > 1_200:
+        tail = tail[-1_200:]
+    if not tail:
+        return f"; MCP log: {log_path} (empty)"
+    return f"; MCP log: {log_path}; tail: {tail}"
+
+
+def _wait_ready(
+    port: int,
+    process: subprocess.Popen[Any],
+    timeout_s: float = 30.0,
+    *,
+    log_path: Path | None = None,
+) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise AcceptanceError(f"MCP exited before readiness (code {process.returncode})")
+            raise AcceptanceError(
+                f"MCP exited before readiness (code {process.returncode})"
+                + _mcp_startup_log_excerpt(log_path)
+            )
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
-                return
-        except OSError:
+            # A reserved listener begins accepting TCP handshakes before the
+            # child has finished starting its ASGI application.  A raw socket
+            # connection would therefore report a false ready state.  An
+            # unknown GET route deterministically returns Starlette's 404 only
+            # after the combined MCP/dashboard application is serving.
+            connection = HTTPConnection("127.0.0.1", port, timeout=0.25)
+            try:
+                connection.request("GET", "/__openeta_mcp_ready__")
+                response = connection.getresponse()
+                response.read()
+                if response.status == 404:
+                    return
+            finally:
+                connection.close()
+        except (OSError, HTTPException):
             time.sleep(0.1)
     raise AcceptanceError("MCP_NOT_READY")
 
@@ -1958,24 +2047,42 @@ def run_case(
     if not python.is_file() or not os.access(python, os.X_OK):
         raise AcceptanceError("TUI_NOT_READY: selected Python executable is unavailable")
     log = paths.mcp_log.open("w", encoding="utf-8")
-    process = subprocess.Popen(
-        [
-            str(python),
-            "-u",
-            "-m",
-            "sim.mcp_server.server",
-            "--transport",
-            "sse",
-            "--port",
-            str(allocation.port),
-        ],
-        cwd=paths.root,
-        env=env,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        text=True,
-    )
+    command = [
+        str(python),
+        "-u",
+        "-m",
+        "sim.mcp_server.server",
+        "--transport",
+        "sse",
+        "--port",
+        str(allocation.port),
+    ]
+    popen_kwargs: dict[str, Any] = {
+        "cwd": paths.root,
+        "env": env,
+        "stdout": log,
+        "stderr": subprocess.STDOUT,
+        "start_new_session": True,
+        "text": True,
+    }
+    listener = allocation.mcp_listener
+    if listener is not None:
+        listener_fd = listener.fileno()
+        if listener_fd < 0:
+            log.close()
+            raise AcceptanceError("MCP_LISTENER_RESERVATION_INVALID")
+        command.extend(("--fd", str(listener_fd)))
+        # ``pass_fds`` is intentionally narrow: only the pre-bound local
+        # listener crosses the exec boundary, never another service socket or
+        # provider descriptor inherited by the launcher.
+        popen_kwargs["pass_fds"] = (listener_fd,)
+    try:
+        process = subprocess.Popen(command, **popen_kwargs)
+    finally:
+        # The child has inherited the descriptor once Popen returns.  Closing
+        # the parent copy immediately prevents the reservation from masking a
+        # failed child or surviving the case cleanup.
+        _release_mcp_listener(allocation)
     pgid = os.getpgid(process.pid)
     _json_dump(
         paths.pid_record,
@@ -2002,7 +2109,7 @@ def run_case(
     tui_started_at_s: float | None = None
     tui_exited_at_s: float | None = None
     try:
-        _wait_ready(allocation.port, process)
+        _wait_ready(allocation.port, process, log_path=paths.mcp_log)
         try:
             startup_timeout_s = float(
                 env.get("OPENETA_GAZEBO_STARTUP_TIMEOUT_S", "180")

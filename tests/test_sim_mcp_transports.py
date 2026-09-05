@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from http.client import HTTPConnection, HTTPException
 import json
 from pathlib import Path
 import socket
@@ -22,18 +23,28 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _wait_for_listener(port: int, process: subprocess.Popen[str]) -> None:
+def _wait_for_application(port: int, process: subprocess.Popen[str]) -> None:
+    """Wait for an ASGI response rather than a pre-bound TCP handshake."""
+
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         if process.poll() is not None:
             stderr = process.stderr.read() if process.stderr is not None else ""
             raise AssertionError(f"simulator MCP server exited early: {stderr}")
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
-                return
-        except OSError:
-            time.sleep(0.05)
-    raise AssertionError("simulator MCP server did not become ready")
+            connection = HTTPConnection("127.0.0.1", port, timeout=0.25)
+            try:
+                connection.request("GET", "/__openeta_mcp_ready__")
+                response = connection.getresponse()
+                response.read()
+                if response.status == 404:
+                    return
+            finally:
+                connection.close()
+        except (OSError, HTTPException):
+            pass
+        time.sleep(0.05)
+    raise AssertionError("simulator MCP application did not become ready")
 
 
 def _text_payload(result) -> dict:
@@ -93,7 +104,7 @@ def test_simulator_mcp_supports_standard_http_and_legacy_sse_read_only_lifecycle
         stderr=subprocess.PIPE,
     )
     try:
-        _wait_for_listener(port, process)
+        _wait_for_application(port, process)
         base_url = f"http://127.0.0.1:{port}"
         legacy_tools, legacy_payload = asyncio.run(
             _list_and_call_legacy_sse(f"{base_url}/sse")
@@ -114,6 +125,51 @@ def test_simulator_mcp_supports_standard_http_and_legacy_sse_read_only_lifecycle
         assert legacy_payload["count"] == 0
         assert modern_payload["count"] == 0
         assert transport_payload["count"] == 0
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+
+
+def test_simulator_mcp_accepts_a_prebound_loopback_listener() -> None:
+    """The acceptance launcher can hand a held port to Uvicorn without a race."""
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    listener.set_inheritable(True)
+    port = int(listener.getsockname()[1])
+    fd = listener.fileno()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "sim.mcp_server.server",
+            "--transport",
+            "sse",
+            "--port",
+            str(port),
+            "--fd",
+            str(fd),
+        ],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        pass_fds=(fd,),
+    )
+    listener.close()
+    try:
+        _wait_for_application(port, process)
+        transport = StreamableHttpSimulatorMcpTransport(
+            f"http://127.0.0.1:{port}/mcp"
+        )
+        tools = transport.list_tools(timeout_s=10.0)
+        assert any(item["name"] == "list_active_envs" for item in tools["tools"])
     finally:
         process.terminate()
         try:
