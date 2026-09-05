@@ -87,6 +87,12 @@ SCRIPTED_TUI = "scripted_tui"
 HUMAN_TUI = "human_tui"
 
 
+# Optional JSON list used only by the repeatable scripted-TUI driver.  It
+# exercises the same live TUI session that an operator would use for a second
+# work order, without making a fixture task part of the agent or simulator.
+_SCRIPTED_TUI_FOLLOW_UP_TASKS_ENV = "OPENETA_SCRIPTED_TUI_FOLLOW_UP_TASKS"
+
+
 PROTECTED_DOMAINS = frozenset({42, 100})
 
 
@@ -1198,6 +1204,46 @@ def scripted_tui_input(paths: CasePaths) -> str:
     return "\n".join(commands) + "\n"
 
 
+def scripted_tui_follow_up_tasks(env: Mapping[str, str]) -> tuple[str, ...]:
+    """Return normalized follow-up work orders for a scripted live TUI run.
+
+    The value is deliberately a JSON array rather than a delimiter-separated
+    shell string, so a natural-language task may itself contain punctuation.
+    It is an acceptance-driver input only: the planner still receives each
+    work order through its ordinary TUI prompt and decides how to fulfill it.
+    """
+
+    raw = str(env.get(_SCRIPTED_TUI_FOLLOW_UP_TASKS_ENV, "") or "").strip()
+    if not raw:
+        return ()
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError(
+            f"TUI_NOT_READY: {_SCRIPTED_TUI_FOLLOW_UP_TASKS_ENV} must be a JSON array"
+        ) from exc
+    if not isinstance(values, list):
+        raise AcceptanceError(
+            f"TUI_NOT_READY: {_SCRIPTED_TUI_FOLLOW_UP_TASKS_ENV} must be a JSON array"
+        )
+
+    tasks: list[str] = []
+    for index, value in enumerate(values, start=1):
+        if not isinstance(value, str):
+            raise AcceptanceError(
+                "TUI_NOT_READY: "
+                f"{_SCRIPTED_TUI_FOLLOW_UP_TASKS_ENV}[{index}] must be a string"
+            )
+        task = " ".join(value.split())
+        if not task:
+            raise AcceptanceError(
+                "TUI_NOT_READY: "
+                f"{_SCRIPTED_TUI_FOLLOW_UP_TASKS_ENV}[{index}] must not be empty"
+            )
+        tasks.append(task)
+    return tuple(tasks)
+
+
 def _scripted_tui_initial_input(paths: CasePaths) -> str:
     """Return console setup plus the task, withholding `/quit` until completion.
 
@@ -1213,16 +1259,19 @@ def _scripted_tui_initial_input(paths: CasePaths) -> str:
     return "\n".join(lines[:-1]) + "\n"
 
 
-def _scripted_tui_trace_state(paths: CasePaths) -> str:
-    """Return the newest durable scripted-TUI state from the trace tail.
+def _scripted_tui_trace_progress(paths: CasePaths) -> tuple[str, int]:
+    """Return the newest state and completed-episode count in the TUI trace.
 
     A scripted run has no human operator.  ``ask_human`` is therefore a
     terminal gate for the driver, rather than a prompt to which an automation
-    command could accidentally become an answer.  Read JSONL events in reverse
-    order so a later human answer or episode result overrides an older pause.
+    command could accidentally become an answer.  A count is required for a
+    persistent session: after the first work order succeeds, a later driver
+    submission must wait for *another* episode result instead of treating the
+    old result as completion of the follow-up order.
     """
 
     state = "running"
+    completed_episode_count = 0
     traces = sorted(
         paths.trace_root.glob("sessions/*/trace.jsonl"),
         key=lambda path: path.stat().st_mtime_ns,
@@ -1253,6 +1302,7 @@ def _scripted_tui_trace_state(paths: CasePaths) -> str:
                     ):
                         state = "human_input_required"
                     else:
+                        completed_episode_count += 1
                         state = "completed"
                     continue
                 if event_type in {"human_answer", "user_message"}:
@@ -1269,7 +1319,13 @@ def _scripted_tui_trace_state(paths: CasePaths) -> str:
                 info = step_result.get("info")
                 if isinstance(info, Mapping) and info.get("pause_reason") == "ask_human":
                     state = "human_input_required"
-    return state
+    return state, completed_episode_count
+
+
+def _scripted_tui_trace_state(paths: CasePaths) -> str:
+    """Return the newest durable scripted-TUI state from the trace tail."""
+
+    return _scripted_tui_trace_progress(paths)[0]
 
 
 def _wait_for_scripted_tui_episode(
@@ -1277,20 +1333,32 @@ def _wait_for_scripted_tui_episode(
     process: subprocess.Popen[Any],
     *,
     timeout_s: float,
+    minimum_completed_episodes: int = 1,
 ) -> str:
-    """Wait for completion or an unattended human-input gate.
+    """Wait for a requested completion count or an unattended human-input gate.
 
     The result deliberately does not label a completed episode as passed: the
     existing milestone verifier remains the sole authority for that decision.
     """
 
+    if minimum_completed_episodes < 1:
+        raise ValueError("minimum completed episodes must be positive")
+
+    def current_state() -> str:
+        state, completed_episode_count = _scripted_tui_trace_progress(paths)
+        if state == "human_input_required":
+            return state
+        if completed_episode_count >= minimum_completed_episodes:
+            return "completed"
+        return "running"
+
     deadline = time.monotonic() + timeout_s
     while process.poll() is None and time.monotonic() < deadline:
-        state = _scripted_tui_trace_state(paths)
+        state = current_state()
         if state != "running":
             return state
         time.sleep(0.1)
-    state = _scripted_tui_trace_state(paths)
+    state = current_state()
     if state != "running":
         return state
     return "exited" if process.poll() is not None else "timed_out"
@@ -1315,21 +1383,32 @@ def _terminate_scripted_tui_process(process: subprocess.Popen[Any]) -> None:
         process.wait(timeout=5)
 
 
-def _scripted_tui_driver_evidence(paths: CasePaths, *, status: str, reason_code: str) -> None:
+def _scripted_tui_driver_evidence(
+    paths: CasePaths,
+    *,
+    status: str,
+    reason_code: str,
+    completed_episode_count: int = 0,
+    follow_up_task_count: int = 0,
+    stage: str = "initial_task",
+) -> None:
     """Persist a bounded, secret-free reason when the PTY driver stops early."""
 
     _json_dump(
         paths.root / "scripted-tui-driver.json",
         {
-            "schema_version": "openeta.scripted_tui_driver.v1",
+            "schema_version": "openeta.scripted_tui_driver.v2",
             "status": status,
             "reason_code": reason_code,
+            "completed_episode_count": int(completed_episode_count),
+            "follow_up_task_count": int(follow_up_task_count),
+            "stage": stage,
         },
     )
 
 
 def _run_scripted_tui(command: str, paths: CasePaths, env: Mapping[str, str]) -> int:
-    """Drive the real PTY TUI, then submit `/quit` after episode completion."""
+    """Drive one live TUI session through an initial task and optional follow-ups."""
 
     timeout_raw = str(env.get("OPENETA_SCRIPTED_TUI_TIMEOUT_S", "3600"))
     try:
@@ -1338,6 +1417,7 @@ def _run_scripted_tui(command: str, paths: CasePaths, env: Mapping[str, str]) ->
         timeout_s = 3600.0
     if timeout_s <= 0:
         raise AcceptanceError("TUI_NOT_READY: scripted TUI timeout must be positive")
+    follow_up_tasks = scripted_tui_follow_up_tasks(env)
     process = subprocess.Popen(
         ["script", "--flush", "--return", "--command", command, str(paths.transcript)],
         cwd=paths.root,
@@ -1349,35 +1429,84 @@ def _run_scripted_tui(command: str, paths: CasePaths, env: Mapping[str, str]) ->
     if process.stdin is None:
         raise AcceptanceError("TUI_NOT_READY: scripted PTY stdin is unavailable")
     try:
-        process.stdin.write(_scripted_tui_initial_input(paths))
-        process.stdin.flush()
-        state = _wait_for_scripted_tui_episode(paths, process, timeout_s=timeout_s)
-        if state != "completed":
+        deadline = time.monotonic() + timeout_s
+
+        def wait_for_episode(*, target_count: int, stage: str) -> str:
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                return "timed_out"
+            state = _wait_for_scripted_tui_episode(
+                paths,
+                process,
+                timeout_s=remaining_s,
+                minimum_completed_episodes=target_count,
+            )
+            if state == "completed":
+                return state
             reason_code = {
                 "human_input_required": "TUI_HUMAN_INPUT_REQUIRED",
                 "timed_out": "TUI_SCRIPTED_TASK_TIMEOUT",
                 "exited": "TUI_EXITED_BEFORE_EPISODE_RESULT",
             }.get(state, "TUI_SCRIPTED_DRIVER_STATE_INVALID")
+            _, completed_episode_count = _scripted_tui_trace_progress(paths)
             _scripted_tui_driver_evidence(
                 paths,
                 status="blocked" if state == "human_input_required" else "failed",
                 reason_code=reason_code,
+                completed_episode_count=completed_episode_count,
+                follow_up_task_count=len(follow_up_tasks),
+                stage=stage,
             )
             _terminate_scripted_tui_process(process)
+            return state
+
+        process.stdin.write(_scripted_tui_initial_input(paths))
+        process.stdin.flush()
+        state = wait_for_episode(target_count=1, stage="initial_task")
+        if state != "completed":
             # The caller's normal finally block must still stop MCP/Gazebo and
             # materialize cleanup evidence, so return a failed TUI code rather
             # than bypassing it with an exception.
             return 1
+
+        for index, task in enumerate(follow_up_tasks, start=1):
+            process.stdin.write(task + "\n")
+            process.stdin.flush()
+            state = wait_for_episode(
+                target_count=index + 1,
+                stage=f"follow_up_task_{index}",
+            )
+            if state != "completed":
+                return 1
+
         if process.poll() is None:
             process.stdin.write("/quit\n")
             process.stdin.flush()
         try:
-            return int(process.wait(timeout=30))
+            code = int(process.wait(timeout=30))
+            _, completed_episode_count = _scripted_tui_trace_progress(paths)
+            _scripted_tui_driver_evidence(
+                paths,
+                status="passed" if code == 0 else "failed",
+                reason_code=(
+                    "TUI_SCRIPTED_SEQUENCE_COMPLETED"
+                    if code == 0
+                    else "TUI_EXITED_NONZERO_AFTER_SEQUENCE"
+                ),
+                completed_episode_count=completed_episode_count,
+                follow_up_task_count=len(follow_up_tasks),
+                stage="completed",
+            )
+            return code
         except subprocess.TimeoutExpired:
+            _, completed_episode_count = _scripted_tui_trace_progress(paths)
             _scripted_tui_driver_evidence(
                 paths,
                 status="failed",
                 reason_code="TUI_DID_NOT_EXIT_AFTER_QUIT",
+                completed_episode_count=completed_episode_count,
+                follow_up_task_count=len(follow_up_tasks),
+                stage="quit",
             )
             _terminate_scripted_tui_process(process)
             # Return through run_case's ordinary cleanup path. Raising here

@@ -2047,6 +2047,7 @@ def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkey
         root=tmp_path,
         transcript=tmp_path / "tui.transcript",
         instructions=instructions,
+        trace_root=tmp_path / "traces",
     )
 
     class Stdin:
@@ -2085,3 +2086,115 @@ def test_scripted_tui_quit_timeout_returns_through_cleanup_path(tmp_path, monkey
     assert terminated == [process]
     evidence = json.loads((tmp_path / "scripted-tui-driver.json").read_text())
     assert evidence["reason_code"] == "TUI_DID_NOT_EXIT_AFTER_QUIT"
+
+
+def test_scripted_tui_follow_up_tasks_require_a_json_string_array() -> None:
+    assert acceptance.base.scripted_tui_follow_up_tasks({}) == ()
+    assert acceptance.base.scripted_tui_follow_up_tasks(
+        {"OPENETA_SCRIPTED_TUI_FOLLOW_UP_TASKS": '["  next   task "]'}
+    ) == ("next task",)
+
+    with pytest.raises(acceptance.base.AcceptanceError, match="JSON array"):
+        acceptance.base.scripted_tui_follow_up_tasks(
+            {"OPENETA_SCRIPTED_TUI_FOLLOW_UP_TASKS": "next task"}
+        )
+    with pytest.raises(acceptance.base.AcceptanceError, match="must be a string"):
+        acceptance.base.scripted_tui_follow_up_tasks(
+            {"OPENETA_SCRIPTED_TUI_FOLLOW_UP_TASKS": "[3]"}
+        )
+
+
+def test_scripted_tui_trace_progress_counts_later_episodes_without_losing_human_gate(
+    tmp_path,
+) -> None:
+    trace = tmp_path / "traces" / "sessions" / "active" / "trace.jsonl"
+    trace.parent.mkdir(parents=True)
+    events = [
+        {"event_type": "episode_result", "payload": {"metadata": {}}},
+        {"event_type": "user_message", "payload": {}},
+        {"event_type": "episode_result", "payload": {"metadata": {}}},
+        {
+            "event_type": "episode_result",
+            "payload": {"metadata": {"waiting_for_human": True}},
+        },
+    ]
+    trace.write_text(
+        "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+    )
+    paths = SimpleNamespace(trace_root=tmp_path / "traces")
+
+    assert acceptance.base._scripted_tui_trace_progress(paths) == (
+        "human_input_required",
+        2,
+    )
+
+
+def test_scripted_tui_submits_follow_up_to_same_pty_after_new_episode_result(
+    tmp_path, monkeypatch
+) -> None:
+    instructions = tmp_path / "instructions.txt"
+    instructions.write_text("first task\n", encoding="utf-8")
+    paths = SimpleNamespace(
+        root=tmp_path,
+        transcript=tmp_path / "tui.transcript",
+        instructions=instructions,
+        trace_root=tmp_path / "traces",
+    )
+
+    class Stdin:
+        closed = False
+
+        def __init__(self) -> None:
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+            return len(value)
+
+        def flush(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    class Process:
+        pid = 12345
+
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            return 0
+
+    process = Process()
+    wait_targets = []
+    monkeypatch.setattr(acceptance.base.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    def wait_for_episode(*_args, **kwargs):
+        wait_targets.append(kwargs["minimum_completed_episodes"])
+        return "completed"
+
+    monkeypatch.setattr(acceptance.base, "_wait_for_scripted_tui_episode", wait_for_episode)
+    monkeypatch.setattr(
+        acceptance.base, "_scripted_tui_trace_progress", lambda _paths: ("completed", 2)
+    )
+
+    assert acceptance.base._run_scripted_tui(
+        "tui",
+        paths,
+        {"OPENETA_SCRIPTED_TUI_FOLLOW_UP_TASKS": '["second task"]'},
+    ) == 0
+    assert wait_targets == [1, 2]
+    assert process.stdin.writes == ["first task\n", "second task\n", "/quit\n"]
+    evidence = json.loads((tmp_path / "scripted-tui-driver.json").read_text())
+    assert evidence == {
+        "completed_episode_count": 2,
+        "follow_up_task_count": 1,
+        "reason_code": "TUI_SCRIPTED_SEQUENCE_COMPLETED",
+        "schema_version": "openeta.scripted_tui_driver.v2",
+        "stage": "completed",
+        "status": "passed",
+    }
