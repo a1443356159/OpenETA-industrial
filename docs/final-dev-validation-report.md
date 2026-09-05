@@ -21,19 +21,26 @@
 `46429fa` 的成功回执上下文去重也已随 C 得到一次新的真实物理 PASS。`0f678b4` 与本文档提交
 只改变交付材料，不改变运行代码。
 
+运行 D、E 使用相同运行时基线，并加入随后提交为 `2317881` 的共享主机 ROS domain 分配修复：
+先通过既有的双样本 ROS 图预检在 `102--232` 中寻找空闲 domain，旧 `80--101` 范围保留为
+回退。两次回执均选中 domain 102；因为提交是在两轮结束后创建，回执中的 Git HEAD 仍是
+`5b2ca98`，不应将它误读为缺少该运行时修改。
+
 ## 稳定性证据
 
-在相同的代表性工单、全新隔离 run root 和真实 PTY 中完成三次独立连续运行：
+在相同的代表性工单、全新隔离 run root 和真实 PTY 中完成五次独立连续运行：
 
 > 先把黄色活动扳手放进绿色零件箱，再把红色六角螺栓放进蓝色零件箱；其他物件不要动。
 
-| 运行 | 证据根目录 | 结果 | 工具调用 | Planner tokens |
-| --- | --- | ---: | ---: | ---: |
-| A | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-a/` | PASS | 17 | 115,366 |
-| B | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-b/` | PASS | 17 | 113,701 |
-| C | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-context-elision-d-20260905T0032Z/` | PASS | 17 | 100,951 |
+| 运行 | 证据根目录 | 结果 | TUI episode | 工具调用 | Planner tokens |
+| --- | --- | ---: | ---: | ---: | ---: |
+| A | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-a/` | PASS | — | 17 | 115,366 |
+| B | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-seedfix-b/` | PASS | — | 17 | 113,701 |
+| C | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-context-elision-d-20260905T0032Z/` | PASS | 435 s | 17 | 100,951 |
+| D | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-baseline-stability-1-20260905T025522Z/` | PASS | 316 s | 17 | 100,059 |
+| E | `/root/autodl-tmp/openeta-final-dev-qwen-validation/multi-normal-baseline-stability-2-20260905T030330Z/` | PASS | 350 s | 17 | 99,933 |
 
-三份 `acceptance-report.json` 都记录：
+五份 `acceptance-report.json` 都记录：
 
 - `status=passed`、`scenario=multi_normal`、`agentic_closed_loop`；
 - `host_dispatch_count=0`、`fast_v3`、GraspGenX，且 verifier errors 为空；
@@ -43,7 +50,8 @@
 
 其中 C 在此前出现一次 `TF_TIMEOUT` 的相同共享服务器条件下重新创建隔离环境并通过，说明
 当前 reset 时序修复没有把基础设施问题降格为候选失败。A、B 提供独立复现基线，C 为当前
-`final-dev` 运行时源码的物理桥接证据。更广的任务组合和随机世界仍可作为后续研发评估，
+`final-dev` 运行时源码的物理桥接证据。D、E 则在旧 domain 池已拥挤的共享服务器上，
+通过新的隔离 domain 选择完整通过。更广的任务组合和随机世界仍可作为后续研发评估，
 但不是当前版本的验收门槛，也不会由默认复现流程触发。
 
 ## 已纳入的可靠性修复
