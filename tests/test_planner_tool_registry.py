@@ -40,6 +40,7 @@ from agent.runtime.planner import (
     _model_phase_and_legal_tools,
     _validate_grasp_recovery_obligation,
     _validate_grasp_view_selection_obligation,
+    _validate_host_owned_task_completion,
     _validate_placement_release_obligation,
     _validate_semantic_perception_obligation,
     _validate_anyplace_parameters,
@@ -1647,6 +1648,158 @@ def test_multi_sort_release_finishes_without_an_agent_cleanup_turn() -> None:
     )
 
     assert obligation is None
+
+
+def test_host_owned_task_completion_rejects_an_incomplete_vlm_work_order() -> None:
+    decision = PlannerDecision(
+        action_type="response",
+        action="task_complete",
+        parameters={"success": True},
+    )
+    errors = _validate_host_owned_task_completion(
+        decision,
+        tool_context={
+            "planner_mode": "agentic_closed_loop",
+            "active_environment_task": {
+                "lifecycle_owner": "host",
+                "host_cleanup_pending": True,
+            },
+            "multi_sort_progress": {
+                "schema_version": "openeta.multi_sort_progress.v1",
+                "assignment_count": 3,
+                "completed_count": 2,
+                "remaining_count": 1,
+                "all_completed": False,
+            },
+        },
+    )
+
+    assert len(errors) == 1
+    assert "1 assignment(s) remaining" in errors[0]
+    assert "causal post-release observation" in errors[0]
+
+
+def test_agentic_host_completion_retries_instead_of_ending_an_incomplete_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool_context = {
+        "schema_version": "openeta.planner_context.v1",
+        "task": "sort the workcell",
+        "planner_mode": "agentic_closed_loop",
+        "active_environment_task": {
+            "status": "running",
+            "lifecycle_owner": "host",
+            "host_cleanup_pending": True,
+        },
+        "multi_sort_progress": {
+            "schema_version": "openeta.multi_sort_progress.v1",
+            "assignment_count": 2,
+            "completed_count": 1,
+            "remaining_count": 1,
+            "all_completed": False,
+        },
+        "memory": {"metadata": {}},
+        "tool_references": [
+            {
+                "name": "observe",
+                "category": "perception",
+                "description": "Refresh the current workcell view.",
+                "parameters": {},
+                "effect": "read_only",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "agent.runtime.planner.build_tool_context",
+        lambda **_kwargs: tool_context,
+    )
+    planner = ToolCallingPlanner(
+        StaticPlannerBackend(
+            [
+                {
+                    "kind": "response",
+                    "name": "task_complete",
+                    "parameters": {"success": True},
+                },
+                {
+                    "kind": "tool_call",
+                    "name": "observe",
+                    "parameters": {},
+                },
+            ]
+        ),
+        max_validation_retries=1,
+    )
+    memory = AgentMemory()
+    memory.start_session(task=tool_context["task"])
+
+    decision = planner.plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("observe"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "observe"
+    assert decision.metadata["validation_attempts"] == 2
+    first_errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
+    assert any("active VLM work order" in error for error in first_errors)
+
+
+def test_agentic_host_completion_accepts_a_proven_complete_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "assignment_count": 2,
+        "completed_count": 2,
+        "remaining_count": 0,
+        "all_completed": True,
+    }
+    tool_context = {
+        "schema_version": "openeta.planner_context.v1",
+        "task": "sort the workcell",
+        "planner_mode": "agentic_closed_loop",
+        "active_environment_task": {
+            "status": "running",
+            "lifecycle_owner": "host",
+            "host_cleanup_pending": True,
+        },
+        "multi_sort_progress": progress,
+        "task_completion_evidence": {
+            "schema_version": "openeta.task_completion_evidence.v2",
+            "status": "proven",
+            "outcome": "success",
+            "lifecycle_owner": "host",
+            "host_cleanup_pending": True,
+        },
+        "memory": {"metadata": {}},
+        "tool_references": [],
+    }
+    monkeypatch.setattr(
+        "agent.runtime.planner.build_tool_context",
+        lambda **_kwargs: tool_context,
+    )
+    memory = AgentMemory()
+    memory.start_session(task=tool_context["task"])
+
+    decision = ToolCallingPlanner(
+        StaticPlannerBackend(
+            {
+                "kind": "response",
+                "name": "task_complete",
+                "parameters": {"success": True},
+            }
+        )
+    ).plan(
+        _observation(),
+        memory=memory,
+        tools=_tools_with_handlers("observe"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "task_complete"
+    assert decision.metadata["validation_attempts"] == 1
 
 
 def test_current_release_requires_visual_observation_before_completion() -> None:

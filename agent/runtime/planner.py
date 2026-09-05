@@ -508,6 +508,13 @@ class ToolCallingPlanner(BasePlanner):
                 )
             if not validation_errors:
                 validation_errors.extend(
+                    _validate_host_owned_task_completion(
+                        decision,
+                        tool_context=tool_context,
+                    )
+                )
+            if not validation_errors:
+                validation_errors.extend(
                     _validate_official_reward_completion(
                         decision,
                         tool_context=tool_context,
@@ -3592,6 +3599,78 @@ def _validate_official_reward_completion(
     return [
         "LIBERO batch completion requires an official positive reward from the same "
         "episode. Continue the task policy until official completion instead of declaring task_complete."
+    ]
+
+
+def _validate_host_owned_task_completion(
+    decision: PlannerDecision,
+    *,
+    tool_context: JsonDict,
+) -> list[str]:
+    """Require host proof before ending a launcher-owned embodied task.
+
+    The agent remains responsible for selecting the semantic work order, its
+    sorting rule, and its action sequence.  A launcher-owned environment is
+    different: it has a physical lifecycle and must not be closed merely
+    because a model emits a final response.  The host records the terminal
+    release and causal post-release observation, then the model may end the
+    conversation.  This applies to any host-owned embodiment, not one scene
+    or one catalog.
+    """
+
+    if decision.action_type.lower().strip() != "response" or decision.action != "task_complete":
+        return []
+
+    active = tool_context.get("active_environment_task")
+    completion = tool_context.get("task_completion_evidence")
+    active_host_owned = isinstance(active, Mapping) and active.get("lifecycle_owner") == "host"
+    completion_host_owned = (
+        isinstance(completion, Mapping) and completion.get("lifecycle_owner") == "host"
+    )
+    if not active_host_owned and not completion_host_owned:
+        return []
+
+    progress = tool_context.get("multi_sort_progress")
+    if isinstance(progress, Mapping) and not _completed_work_order_progress(dict(progress)):
+        remaining = progress.get("remaining_count")
+        try:
+            remaining_count = max(0, int(remaining))
+        except (TypeError, ValueError):
+            remaining_count = None
+        remaining_summary = (
+            f"{remaining_count} assignment(s) remaining"
+            if remaining_count is not None
+            else "an incomplete work order"
+        )
+        return [
+            "The active VLM work order has "
+            f"{remaining_summary}. Continue the current task; task_complete requires "
+            "host-proven success after every assignment has released and received a "
+            "causal post-release observation."
+        ]
+
+    completion_proven = (
+        isinstance(completion, Mapping)
+        and completion.get("status") == "proven"
+        and completion.get("outcome") == "success"
+    )
+    host_cleanup_pending = (
+        isinstance(completion, Mapping)
+        and completion.get("lifecycle_owner") == "host"
+        and completion.get("host_cleanup_pending") is True
+        and active_host_owned
+        and isinstance(active, Mapping)
+        and active.get("host_cleanup_pending") is True
+    )
+    environment_closed = isinstance(completion, Mapping) and completion.get(
+        "environment_closed"
+    ) is True
+    if completion_proven and (environment_closed or host_cleanup_pending):
+        return []
+    return [
+        "This launcher-owned embodied task has no host-proven successful completion "
+        "receipt yet. Continue the active task; task_complete is allowed only after "
+        "the host records its terminal release and causal post-release observation."
     ]
 
 
