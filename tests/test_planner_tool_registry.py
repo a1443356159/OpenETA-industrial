@@ -67,6 +67,7 @@ from agent.tools.registry import (
     ToolResult,
     build_default_tool_registry,
 )
+from extensions.gazebo.native_grasp import NativePickPlaceConfig
 
 
 def _observation() -> EnvObservation:
@@ -505,6 +506,88 @@ def test_general_sort_request_allows_the_vlm_to_author_a_complete_order(
         "every catalog target exactly once"
     )
     assert obligation["manipulation_catalog"] == catalog
+
+
+def test_open_ended_chinese_sort_covers_the_real_multi_normal_catalog(
+    tmp_path: Path,
+) -> None:
+    """The task-neutral prompt reaches the same five-target resolver as Gazebo."""
+
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    catalog = config.acceptance_scene_evidence()["manipulation_catalog"]
+    scene_rgb = tmp_path / "multi-normal.rgb.png"
+    scene_depth = tmp_path / "multi-normal.depth.png"
+    scene_rgb.write_bytes(b"rgb")
+    scene_depth.write_bytes(b"depth")
+    observation = _rgbd_observation(
+        task="task-neutral industrial workcell",
+        views=[("top", scene_rgb, scene_depth)],
+    )
+    observation.metadata.update(
+        {
+            "manipulation_catalog": catalog,
+            "work_order_required": True,
+        }
+    )
+    memory = AgentMemory()
+    memory.start_session(task="按照你认为有秩序的方式，把桌子上的零散物件进行分拣。")
+
+    def decide(_request):
+        # This stands in for a VLM's semantic policy, not a host-selected
+        # assignment: it reads the public catalog attributes and names the
+        # resulting grouping in the model-authored work order.
+        items = []
+        for target in config.manipulation_targets:
+            family = target["sorting_attributes"]["functional_family"]
+            items.append(
+                {
+                    "target_prompt": target["target_prompt"],
+                    "placement_region_prompt": (
+                        "blue parts bin" if family == "fastener" else "green parts bin"
+                    ),
+                    "sort_group": "fasteners" if family == "fastener" else "hand tools",
+                }
+            )
+        return {
+            "kind": "tool_call",
+            "name": "configure_work_order",
+            "parameters": {
+                "selection_scope": "all_catalog_targets",
+                "sorting_policy": {
+                    "criterion": "functional family",
+                    "rationale": "Keep hand tools and fasteners in separate bins.",
+                },
+                "items": items,
+            },
+        }
+
+    decision = ToolCallingPlanner(CallablePlannerBackend(decide)).plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+    configs = config.work_order_configs(
+        decision.parameters["items"],
+        selection_scope=decision.parameters["selection_scope"],
+        sorting_policy=decision.parameters["sorting_policy"],
+    )
+
+    assert decision.action == "configure_work_order"
+    assert [item.target_id for item in configs] == [
+        "target_object",
+        "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
+    ]
+    assert [item.selected_placement_region_id for item in configs] == [
+        "green_parts_bin",
+        "blue_parts_bin",
+        "green_parts_bin",
+        "green_parts_bin",
+        "green_parts_bin",
+    ]
 
 
 def test_complete_catalog_work_order_requires_a_policy_and_item_groups() -> None:
