@@ -81,6 +81,9 @@ def test_container_entrypoints_use_graspgenx_and_two_run_default() -> None:
     assert "operator-session-report.json" in (
         REPO_ROOT / "docs" / "final-dev-delivery.md"
     ).read_text(encoding="utf-8")
+    assert "deploy/ubuntu/openeta.sh open-sort" in (
+        REPO_ROOT / "docs" / "ubuntu-docker-deployment.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_docker_example_matches_final_graspgenx_reserve_default() -> None:

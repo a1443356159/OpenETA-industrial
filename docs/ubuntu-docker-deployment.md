@@ -77,6 +77,9 @@ deploy/ubuntu/openeta.sh smoke-normal
 # 带百炼 Qwen Planner/VLM 的最终双物件 `multi_normal`，默认连续两轮
 deploy/ubuntu/openeta.sh agentic-normal
 
+# 任务中立的连续分拣会话；在 TUI 中输入开放式自然语言工单
+deploy/ubuntu/openeta.sh open-sort
+
 # 容器内测试
 deploy/ubuntu/openeta.sh test tests/test_hpc_deployment.py -q
 ```
@@ -113,6 +116,12 @@ deploy/ubuntu/openeta.sh agentic-normal --runs 1
 ```
 
 人工 TUI 不需要这个变量：上一张工作单完成后，直接输入下一条自然语言任务即可。
+
+`open-sort` 适合演示“按你认为有序的方式整理工作台”这类开放式任务。它启动与
+`agentic-normal` 相同的 SAM3、GraspGenX、AnyPlace、MoveIt、Gazebo 和 VLM 链路，但没有
+固定验收工单；VLM 根据 live RGB-D 和 manipulation catalog 编写完整分类工单。退出后的
+`operator-session-report.json` 以 `work_order_outcome: completed` 汇总宿主
+`multi_sort_progress`，并不替代正式固定工单的 `acceptance-report.json` PASS。
 
 `--scenario` 和 `--task-variant` 仍保留为研发接口，但不属于当前交付验收。物理场景
 不会从这些参数获取任务语义，实际指令仍由 Planner 从 TUI 工作单读取。
