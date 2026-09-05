@@ -8,6 +8,7 @@ __pycache__/
 # Virtual environments
 .venv/
 .venv-sam3/
+.openeta_runtime/
 venv/
 sim/venvs/
 .tools/
