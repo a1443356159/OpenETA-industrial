@@ -30,9 +30,11 @@ ssh -N -L 5903:127.0.0.1:5903 hhh
 ```bash
 ssh hhh
 
-# Override OPENETA_REPO if this server uses a different final-dev worktree.
-export REPO="${OPENETA_REPO:-/root/autodl-tmp/openeta-industrial-workstation/source/worktrees/final-dev-qwen-validation}"
-test -d "$REPO/.git" || { echo "not an OpenETA worktree: $REPO" >&2; exit 2; }
+# First enter the deployed final-dev checkout.  Derive REPO from the current
+# directory so a later experiment worktree can never be selected implicitly.
+cd /path/to/OpenETA-industrial
+export REPO="${OPENETA_REPO:-$PWD}"
+test -e "$REPO/.git" || { echo "not an OpenETA worktree: $REPO" >&2; exit 2; }
 cd "$REPO"
 git status --short --branch
 git rev-parse --short HEAD
