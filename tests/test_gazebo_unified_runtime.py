@@ -461,6 +461,86 @@ def test_final_work_order_item_synchronizes_released_pose_once() -> None:
     )
 
 
+def test_completed_work_order_can_be_replaced_without_recreating_the_workcell() -> None:
+    attachments = {}
+
+    class Attachment:
+        def __init__(self, *, child_model, **_kwargs):
+            self.child_model = child_model
+            self.state = "detached"
+            attachments[child_model] = self
+
+        @staticmethod
+        def native_target_mount_poses_with_retry(*, max_attempts):
+            assert max_attempts == 2
+            return (
+                SimpleNamespace(
+                    xyz=(0.44, -0.18, 0.06),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                SimpleNamespace(
+                    xyz=(0.0, 0.0, 0.9),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                1,
+            )
+
+    profile = replace(
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
+        model_config=NativePickPlaceConfig(acceptance_scene_id="multi_normal"),
+    )
+    runtime = GazeboRuntime(
+        _deployment(),
+        profile,
+        world_control=_World(),
+        attachment_factory=Attachment,
+    )
+    first_config = profile.model_config.work_order_configs(
+        [
+            {
+                "target_prompt": "yellow wrench",
+                "placement_region_prompt": "green parts bin",
+            }
+        ]
+    )[0]
+    runtime._work_order_configs = (first_config,)
+    runtime.attachment = attachments[first_config.target_id]
+    activation_calls = []
+    runtime.controller = SimpleNamespace(
+        sync_planning_scene_target_pose=lambda _config, **_pose: 3,
+        activate_pick_place_config=lambda config, **pose: (
+            activation_calls.append((config, pose)) or 4
+        ),
+    )
+
+    completed = runtime.complete_active_work_order_item(
+        release_evidence={
+            "schema_version": "openeta.native_release_evidence.v1",
+            "detached_confirmed": True,
+            "gripper_open_confirmed": True,
+        }
+    )
+    assert completed["all_completed"] is True
+    assert runtime.work_order_required is True
+
+    configured = runtime.configure_work_order(
+        items=[
+            {
+                "target_prompt": "red hex bolt",
+                "placement_region_prompt": "blue parts bin",
+            }
+        ]
+    )
+
+    assert runtime.start_count == 0
+    assert runtime.work_order_required is False
+    assert configured["completed_count"] == 0
+    assert configured["remaining_count"] == 1
+    assert runtime.active_pick_place_config.target_id == "red_m24_hex_bolt"
+    assert runtime.attachment is attachments["red_m24_hex_bolt"]
+    assert activation_calls[0][0].selected_placement_region_id == "blue_parts_bin"
+
+
 def test_all_profiles_use_the_same_direct_env_type_without_starting_runtime() -> None:
     for profile in gazebo_profiles().values():
         runtime = SimpleNamespace(started=False, close=lambda: None)

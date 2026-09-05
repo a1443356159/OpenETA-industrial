@@ -1793,6 +1793,11 @@ def run_case(
             "OPENETA_WORKER_LOG_DIR": str(paths.root / "worker-logs"),
             "OPENETA_SUPERVISION_PROFILE": SCRIPTED_TUI if scripted else "human_gated",
             "OPENETA_SCRIPTED_TUI": "1" if scripted else "0",
+            # The fixed industrial workcell exposes only its operational
+            # manipulation tools.  Optional external retrieval integrations
+            # remain available in the full profile, but must not become an
+            # accidental dependency of a normal Gazebo acceptance task.
+            "OPENETA_TOOL_PROFILE": "gazebo_industrial",
             "OPENETA_CONTROL_ONLY": "0",
             "RMW_IMPLEMENTATION": env.get("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
         }

@@ -29,6 +29,17 @@ def test_normal_runner_enables_case_owned_operator_gui_by_default() -> None:
     )
 
 
+def test_normal_acceptance_uses_the_narrow_industrial_tool_profile() -> None:
+    runtime = (
+        Path(__file__).resolve().parents[1] / "scripts/gazebo_acceptance_runtime.py"
+    )
+    source = runtime.read_text(
+        encoding="utf-8"
+    )
+
+    assert '"OPENETA_TOOL_PROFILE": "gazebo_industrial"' in source
+
+
 def test_normal_acceptance_reserves_cold_startup_budget_for_native_endpoints() -> None:
     assert acceptance.DEFAULT_GAZEBO_ACCEPTANCE_STARTUP_TIMEOUT_S == 180.0
 

@@ -65,6 +65,57 @@ SCENE_EPOCH_KEY = "scene_epoch"
 PLANNING_SCENE_TARGET_POSE_SYNC_KEY = "planning_scene_target_pose_sync"
 TRANSITION_LEDGER_KEY = "transition_ledger"
 ACTIVE_ENVIRONMENT_TASK_KEY = "active_environment_task"
+
+# These facts describe one semantic pick/place order, rather than durable
+# world state.  A successful ``configure_work_order`` starts a new order in
+# the same Gazebo cell, so retaining any of them could accidentally bind the
+# next user request to an old mask, grasp candidate, or release proof.
+_WORK_ORDER_SCOPED_FACT_KEYS = frozenset(
+    {
+        PENDING_SAM3_SELECTION_KEY,
+        SELECTED_SAM3_DETECTION_KEY,
+        PENDING_REFERENCE_LOCALIZATION_KEY,
+        REFERENCE_LOCALIZATION_FAILURE_KEY,
+        TARGET_LOCALIZATION_BUDGET_KEY,
+        TARGET_ASSET_REFERENCE_KEY,
+        SAM3_NO_DETECTION_KEY,
+        SAM3_SEMANTIC_STATE_KEY,
+        GRASP_CANDIDATE_POLICY_KEY,
+        LEGACY_ANYGRASP_CANDIDATE_POLICY_KEY,
+        GRASP_REESTIMATION_KEY,
+        ARTICULATED_ATTACHMENT_PROBE_KEY,
+        GRASP_EXECUTION_KEY,
+        GRASP_RECOVERY_KEY,
+        GRASP_ESTIMATION_RECOVERY_KEY,
+        GRIPPER_COMMAND_STATE_KEY,
+        ATTACHMENT_GATE_KEY,
+        PLACEMENT_RELEASE_KEY,
+        TASK_COMPLETION_EVIDENCE_KEY,
+        PLACEMENT_CANDIDATE_POLICY_KEY,
+        PLACEMENT_OBJECT_DETECTION_KEY,
+        PLACEMENT_REGION_DETECTION_KEY,
+        FROZEN_PLACEMENT_POOL_KEY,
+        COMPLETED_PLACEMENT_SUBGOALS_KEY,
+        WORK_ORDER_KEY,
+        MULTI_SORT_PROGRESS_KEY,
+        MOTION_RECONCILIATION_KEY,
+        PLANNING_SCENE_TARGET_POSE_SYNC_KEY,
+    }
+)
+_WORK_ORDER_SCOPED_ARTIFACT_TOOLS = frozenset(
+    {
+        "sam3",
+        "active_observe",
+        "retrieve_asset_reference",
+        "molmopoint",
+        "grasp_pose_estimate",
+        "anygrasp",
+        "graspgenx",
+        "contact_graspnet",
+        "anyplace",
+        "camera_pose_to_world",
+    }
+)
 NATIVE_GRASP_SCHEMA_VERSION = "openeta.gazebo.native_grasp.v1"
 NATIVE_GRASP_MAXIMUM_DRIFT_M = 0.01
 GRASP_CANDIDATE_MAX_ATTEMPTS = 3
@@ -568,6 +619,7 @@ class AgentMemory:
         return True
 
     def add_action(self, action: EnvAction) -> None:
+        work_order_reconfigured = self._capture_work_order_reconfiguration(action)
         environment_task_updated = self._capture_active_environment_task(action)
         self._capture_reference_localization_state(action)
         self._capture_sam3_selection_state(action)
@@ -696,6 +748,7 @@ class AgentMemory:
             or terminal_compile_blocked
             or target_mask_invalidated
             or environment_task_updated
+            or work_order_reconfigured
         ):
             self._save_working_memory()
         self.record(
@@ -710,6 +763,54 @@ class AgentMemory:
         )
         for conversation_item in self.conversation.add_action(action):
             self._append_conversation_record(item_record(conversation_item))
+
+    def _capture_work_order_reconfiguration(self, action: EnvAction) -> bool:
+        """Invalidate only task-scoped caches after a new order is accepted.
+
+        The physical world, scene epoch, active environment binding, and
+        transition ledger intentionally survive.  They describe the same
+        running cell.  Semantic candidates and release proofs do not: their
+        target/destination binding belongs exclusively to the previous order.
+        """
+
+        call = _successful_tool_call(action, "configure_work_order")
+        if call is None:
+            return False
+
+        invalidated_facts = [
+            key
+            for key in sorted(_WORK_ORDER_SCOPED_FACT_KEYS)
+            if self.facts.pop(key, None) is not None
+        ]
+        invalidated_artifacts: list[str] = []
+        for key, entry in list(self.artifacts.items()):
+            value = entry.get("value") if isinstance(entry, dict) else None
+            tool_name = str(value.get("tool") or "") if isinstance(value, dict) else ""
+            if tool_name in _WORK_ORDER_SCOPED_ARTIFACT_TOOLS:
+                self.artifacts.pop(key, None)
+                invalidated_artifacts.append(key)
+
+        request = action.command.get("request") if isinstance(action.command, dict) else None
+        parameters = request.get("parameters") if isinstance(request, dict) else None
+        items = parameters.get("items") if isinstance(parameters, dict) else None
+        self.record(
+            "work_order_reconfigured",
+            {
+                "item_count": len(items) if isinstance(items, list) else 0,
+                "invalidated_facts": invalidated_facts,
+                "invalidated_artifacts": sorted(invalidated_artifacts),
+                "preserved_fact_keys": [
+                    key
+                    for key in (
+                        ACTIVE_ENVIRONMENT_TASK_KEY,
+                        SCENE_EPOCH_KEY,
+                        TRANSITION_LEDGER_KEY,
+                    )
+                    if key in self.facts
+                ],
+            },
+        )
+        return True
 
     def _capture_native_grasp_infrastructure_failure(self, action: EnvAction) -> bool:
         """Stop after the simulator exhausted its bounded post-attach retry."""

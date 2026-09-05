@@ -266,6 +266,149 @@ def test_vlm_configures_task_neutral_workcell_from_user_conversation() -> None:
     }
 
 
+def test_completed_work_order_accepts_the_next_operator_request() -> None:
+    """A persistent workcell must treat a later user turn as a new order."""
+
+    old_items = [
+        {
+            "id": "yellow_wrench_to_green_parts_bin",
+            "target_prompt": "yellow wrench",
+            "placement_region_prompt": "green parts bin",
+        }
+    ]
+    old_work_order = {
+        "schema_version": "openeta.work_order.v1",
+        "source": "vlm_tool_call",
+        "items": old_items,
+    }
+    completed_progress = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "source": "vlm_work_order",
+        "work_order": old_work_order,
+        "assignment_count": 1,
+        "completed_count": 1,
+        "remaining_count": 0,
+        "all_completed": True,
+        "active_assignment_index": None,
+        "active_assignment": None,
+    }
+    catalog = {
+        "schema_version": "openeta.manipulation_catalog.v1",
+        "targets": [{"target_prompt": "silver wrench"}],
+        "placement_regions": [{"prompt": "green parts bin"}],
+    }
+    memory = AgentMemory()
+    memory.start_session(task="put the yellow wrench in the green bin")
+    memory.add_observation(
+        EnvObservation(
+            task="normal pick and place",
+            cameras=[],
+            robot=RobotState(),
+            metadata={"multi_sort_progress": completed_progress},
+        )
+    )
+    follow_up = "把银色扳手也放进绿色料箱"
+    memory.begin_user_turn(follow_up, source="episode_start")
+    observation = EnvObservation(
+        task="normal pick and place",
+        cameras=[],
+        robot=RobotState(),
+        metadata={
+            "manipulation_catalog": catalog,
+            "work_order_required": True,
+            "multi_sort_progress": completed_progress,
+        },
+    )
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        return {
+            "kind": "tool_call",
+            "name": "configure_work_order",
+            "parameters": {
+                "items": [
+                    {
+                        "target_prompt": "silver wrench",
+                        "placement_region_prompt": "green parts bin",
+                    }
+                ]
+            },
+        }
+
+    decision = ToolCallingPlanner(CallablePlannerBackend(decide)).plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "configure_work_order"
+    assert decision.parameters["items"][0]["target_prompt"] == "silver wrench"
+    assert requests[0].tool_context["task"] == follow_up
+    assert requests[0].tool_context["controller"]["phase"] == "work_order_configuration"
+    assert requests[0].tool_context["obligations"]["work_order_obligation"][
+        "previous_work_order_completed"
+    ] is True
+
+
+def test_general_sort_request_allows_the_vlm_to_author_a_complete_order() -> None:
+    """A broad operator goal is semantic planning, not a hidden static task."""
+
+    catalog = {
+        "schema_version": "openeta.manipulation_catalog.v1",
+        "targets": [
+            {"target_prompt": "silver wrench"},
+            {"target_prompt": "red hex bolt"},
+        ],
+        "placement_regions": [
+            {"prompt": "green parts bin"},
+            {"prompt": "blue parts bin"},
+        ],
+    }
+    observation = EnvObservation(
+        task="normal pick and place",
+        cameras=[],
+        robot=RobotState(),
+        metadata={"manipulation_catalog": catalog, "work_order_required": True},
+    )
+    memory = AgentMemory()
+    memory.start_session(task="对桌子上的物品进行分拣")
+    requests = []
+
+    def decide(request):
+        requests.append(request)
+        return {
+            "kind": "tool_call",
+            "name": "configure_work_order",
+            "parameters": {
+                "items": [
+                    {
+                        "target_prompt": "silver wrench",
+                        "placement_region_prompt": "green parts bin",
+                    },
+                    {
+                        "target_prompt": "red hex bolt",
+                        "placement_region_prompt": "blue parts bin",
+                    },
+                ]
+            },
+        }
+
+    decision = ToolCallingPlanner(CallablePlannerBackend(decide)).plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+
+    obligation = requests[0].tool_context["obligations"]["work_order_obligation"]
+    assert decision.action == "configure_work_order"
+    assert len(decision.parameters["items"]) == 2
+    assert "generally to sort the table" in obligation["rule"]
+    assert obligation["manipulation_catalog"] == catalog
+
+
 def test_empty_work_order_is_rejected_before_tool_dispatch_and_replanned() -> None:
     user_request = "put the bolt in the blue bin"
     observation = EnvObservation(
@@ -367,6 +510,56 @@ def test_environment_normalized_work_order_is_persisted_in_memory() -> None:
     )
 
     assert memory.planning_context()["work_order"] == work_order
+
+
+def test_successful_work_order_reconfiguration_clears_task_scoped_memory() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="put the yellow wrench in the green bin")
+    memory.save_fact("work_order", {"items": [{"id": "old"}]}, source="test")
+    memory.save_fact("selected_sam3_detection", {"id": "old-mask"}, source="test")
+    memory.save_fact("scene_epoch", {"epoch": 7}, source="test")
+    memory.artifacts["sam3:grasp_candidates:latest"] = {
+        "value": {"tool": "sam3", "id": "old-result"},
+        "source": "test",
+    }
+    memory.artifacts["observe:image:latest"] = {
+        "value": {"tool": "observe", "id": "scene-frame"},
+        "source": "test",
+    }
+
+    memory.add_action(
+        EnvAction(
+            action_type="tool_call",
+            command={
+                "request": {
+                    "name": "configure_work_order",
+                    "parameters": {
+                        "items": [
+                            {
+                                "target_prompt": "silver wrench",
+                                "placement_region_prompt": "green parts bin",
+                            }
+                        ]
+                    },
+                },
+                "tool_calls": [
+                    {
+                        "name": "configure_work_order",
+                        "status": "executed",
+                        "result": {"success": True, "details": {}},
+                    }
+                ],
+            },
+        )
+    )
+
+    facts = memory.get_memory(namespace="facts")["facts"]
+    artifacts = memory.get_memory(namespace="artifacts")["artifacts"]
+    assert "work_order" not in facts
+    assert "selected_sam3_detection" not in facts
+    assert facts["scene_epoch"]["value"] == {"epoch": 7}
+    assert "sam3:grasp_candidates:latest" not in artifacts
+    assert "observe:image:latest" in artifacts
 
 
 def test_model_context_preserves_current_multi_sort_assignment() -> None:

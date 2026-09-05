@@ -7174,17 +7174,42 @@ def _placement_obligation(
     }
 
 
+def _completed_work_order_progress(value: object) -> bool:
+    """Recognize a completed order without trusting a truthy loose payload."""
+
+    if not isinstance(value, dict) or value.get("all_completed") is not True:
+        return False
+    try:
+        assignment_count = int(value.get("assignment_count"))
+        completed_count = int(value.get("completed_count"))
+        remaining_count = int(value.get("remaining_count"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        assignment_count > 0
+        and completed_count == assignment_count
+        and remaining_count == 0
+    )
+
+
 def _work_order_obligation(
     observation: EnvObservation,
     *,
     memory_context: JsonDict,
 ) -> JsonDict | None:
     catalog = observation.metadata.get("manipulation_catalog")
+    progress = observation.metadata.get("multi_sort_progress")
+    if not isinstance(progress, dict):
+        progress = memory_context.get("multi_sort_progress")
+    previous_work_order_completed = _completed_work_order_progress(progress)
     if not (
         observation.metadata.get("work_order_required") is True
         and isinstance(catalog, dict)
         and catalog.get("schema_version") == "openeta.manipulation_catalog.v1"
-        and not isinstance(memory_context.get("work_order"), dict)
+        and (
+            not isinstance(memory_context.get("work_order"), dict)
+            or previous_work_order_completed
+        )
     ):
         return None
     return {
@@ -7194,11 +7219,23 @@ def _work_order_obligation(
         "required_tool": "configure_work_order",
         "manipulation_catalog": dict(catalog),
         "required_item_fields": ["target_prompt", "placement_region_prompt"],
+        "previous_work_order_completed": previous_work_order_completed,
         "rule": (
             "Read the user's current request, preserve its requested item order, and "
             "call configure_work_order with semantic target/destination prompts. The "
             "environment may validate the catalog but must not choose the task. Supply "
-            "a non-empty ordered items list; parameters={} is invalid."
+            "a non-empty ordered items list; parameters={} is invalid. If the user "
+            "asks generally to sort the table rather than specifying pairs, inspect the "
+            "live views and catalog, then author a complete coherent sorting order for "
+            "the visible catalog targets yourself. Choose the grouping semantically, use "
+            "each physical target at most once, and do not invent unlisted targets or "
+            "destinations. "
+            + (
+                "The prior work order is complete and is historical evidence only; "
+                "do not reuse its target, masks, candidates, or destination."
+                if previous_work_order_completed
+                else ""
+            )
         ),
     }
 
@@ -7212,10 +7249,7 @@ def _semantic_perception_obligation(
 ) -> JsonDict | None:
     """Describe the one legal semantic role without asking the model to track phase."""
 
-    if (
-        observation.metadata.get("work_order_required") is True
-        and not isinstance(memory_context.get("work_order"), dict)
-    ):
+    if observation.metadata.get("work_order_required") is True:
         return None
     if isinstance(memory_context.get("selection_obligation"), dict) or isinstance(
         memory_context.get("reference_localization_obligation"), dict

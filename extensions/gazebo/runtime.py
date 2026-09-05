@@ -215,6 +215,24 @@ class GazeboRuntime:
             return self.profile.model_config
         return self._target_configs[0]
 
+    @property
+    def work_order_required(self) -> bool:
+        """Whether the operator may author the next ordered sorting task.
+
+        A launcher-owned workcell persists after an order completes.  The
+        completed order is useful audit history, but it must not permanently
+        lock the cell to its original assignment: a later operator request is
+        a new order over the same physical scene.  An incomplete order remains
+        exclusive so a follow-up cannot silently replace work already in
+        progress.
+        """
+
+        if not self._work_order_configs:
+            return True
+        return len(self._completed_work_order_item_ids) == len(
+            self._work_order_configs
+        )
+
     def multi_sort_progress(self) -> dict[str, Any] | None:
         if not self._work_order_configs:
             return None
@@ -446,7 +464,7 @@ class GazeboRuntime:
                 **(
                     {
                         "manipulation_catalog": dict(self._manipulation_catalog),
-                        "work_order_required": not bool(self._work_order_configs),
+                        "work_order_required": self.work_order_required,
                     }
                     if self._manipulation_catalog is not None
                     else {}
@@ -618,7 +636,7 @@ class GazeboRuntime:
 
         if self._manipulation_catalog is None:
             raise GazeboProcessError("WORK_ORDER_CONFIGURATION_UNAVAILABLE")
-        if self._completed_work_order_item_ids:
+        if self._completed_work_order_item_ids and not self.work_order_required:
             raise GazeboProcessError("WORK_ORDER_ALREADY_IN_PROGRESS")
         if any(
             getattr(attachment, "state", None) != DetachableJointState.DETACHED
