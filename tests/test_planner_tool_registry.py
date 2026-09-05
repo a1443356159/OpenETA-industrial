@@ -595,6 +595,63 @@ def test_open_ended_chinese_sort_covers_the_real_multi_normal_catalog(
     ]
 
 
+def test_open_sort_model_context_keeps_the_full_catalog_and_current_view(
+    tmp_path: Path,
+) -> None:
+    """The VLM sees the complete task-neutral choice set in one compact turn."""
+
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    scene_rgb = tmp_path / "multi-normal.rgb.png"
+    scene_depth = tmp_path / "multi-normal.depth.png"
+    scene_rgb.write_bytes(b"rgb")
+    scene_depth.write_bytes(b"depth")
+    observation = _rgbd_observation(
+        task="task-neutral industrial workcell",
+        views=[("top", scene_rgb, scene_depth)],
+    )
+    observation.metadata.update(
+        {
+            "manipulation_catalog": config.acceptance_scene_evidence()[
+                "manipulation_catalog"
+            ],
+            "work_order_required": True,
+        }
+    )
+    memory = AgentMemory()
+    memory.start_session(task="按照你认为有秩序的方式，把桌子上的零散物件进行分拣。")
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+    model_context, _messages = _model_request_context(
+        context,
+        memory=memory,
+        config=PlannerContextConfig(),
+    )
+
+    work_order = model_context["obligations"]["work_order_obligation"]
+    assert model_context["controller"]["phase"] == "work_order_configuration"
+    assert model_context["controller"]["legal_tool_names"] == ["configure_work_order"]
+    assert model_context["vision_image_paths"] == [str(scene_rgb)]
+    assert [item["target_prompt"] for item in work_order["manipulation_catalog"]["targets"]] == [
+        "yellow wrench",
+        "red hex bolt",
+        "silver box-end wrench",
+        "blue-handled pliers",
+        "blue and black screwdriver",
+    ]
+    assert [item["prompt"] for item in work_order["manipulation_catalog"]["placement_regions"]] == [
+        "green parts bin",
+        "blue parts bin",
+    ]
+    assert work_order["selection_scopes"]["all_catalog_targets"]["coverage"] == (
+        "every catalog target exactly once"
+    )
+    assert model_context["context_budget"]["within_soft_limit"] is True
+
+
 def test_complete_catalog_work_order_requires_a_policy_and_item_groups() -> None:
     planner = ToolCallingPlanner(
         StaticPlannerBackend(
