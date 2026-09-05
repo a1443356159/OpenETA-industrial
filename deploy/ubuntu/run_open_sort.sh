@@ -71,6 +71,10 @@ mkdir -p "$(dirname -- "${run_root}")"
 # accidental reuse.  Keep service logs in a sibling directory so model startup
 # never pre-creates the directory that the launcher must own atomically.
 service_root="${run_root}.services"
+if [[ -e "${service_root}" ]]; then
+  echo "refusing to overwrite existing open-sort service root: ${service_root}" >&2
+  exit 2
+fi
 mkdir -p "${service_root}"
 
 export NO_PROXY="127.0.0.1,localhost,::1"

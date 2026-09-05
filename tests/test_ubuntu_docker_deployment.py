@@ -78,6 +78,7 @@ def test_container_entrypoints_use_graspgenx_and_two_run_default() -> None:
     assert "run_open_sort.sh" in entrypoint
     assert "run_open_sort_gazebo_tui.sh" in open_sort
     assert "--grasp-backend graspgenx" in open_sort
+    assert "refusing to overwrite existing open-sort service root" in open_sort
     assert "operator-session-report.json" in (
         REPO_ROOT / "docs" / "final-dev-delivery.md"
     ).read_text(encoding="utf-8")
