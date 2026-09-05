@@ -561,11 +561,53 @@ def test_attached_world_audit_rejects_carried_object_crossing_bin_wall() -> None
         "reason": "attached_object_static_collision",
         "point_index": 1,
         "sample_kind": "midpoint",
+        "segment_fraction": 0.5,
         "obstacle_id": "green_parts_bin",
         "target_primitive_index": 0,
         "obstacle_primitive_index": 0,
     }
     assert evidence["exact_static_box_pair_check_count"] == 2
+
+
+def test_attached_world_audit_uses_rm75_resolution_between_waypoints() -> None:
+    """A carried part cannot cross a thin bin wall between returned points."""
+
+    target, table = _support_departure_geometry()
+    thin_wall = {
+        "id": "parts_bin_wall",
+        "shape": "box",
+        "size_xyz": [0.001, 0.1, 0.1],
+        # The old point-and-midpoint sampler checked only 0.0, 0.5 and 1.0,
+        # missing this wall.  It is intentionally geometry-driven, not tied
+        # to one object model or a scene-specific coordinate.
+        "pose_xyz": [0.107142857, 0.0, 0.1],
+        "pose_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+    observed: list[float] = []
+
+    def forward_kinematics(_names, joints):
+        observed.append(float(joints[0]))
+        return [float(joints[0]), 0.0, 0.1], [0.0, 0.0, 0.0, 1.0]
+
+    evidence = _attached_support_departure_audit(
+        joint_names=list(ARM_JOINTS),
+        trajectory_positions=[[0.0] * len(ARM_JOINTS), [1.0] + [0.0] * 6],
+        forward_kinematics=forward_kinematics,
+        mount_xyz=[0.0, 0.0, 0.0],
+        mount_quat_xyzw=[0.0, 0.0, 0.0, 1.0],
+        attached_spec=target,
+        support_spec=table,
+        obstacle_specs={"parts_bin_wall": thin_wall},
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["sampling"] == "moveit_state_space_resolution_interpolation"
+    assert evidence["max_state_space_segment_fraction"] == pytest.approx(
+        CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION
+    )
+    assert evidence["failure"]["reason"] == "attached_object_static_collision"
+    assert evidence["failure"]["sample_kind"] == "interpolated"
+    assert any(0.10 < position < 0.11 for position in observed)
 
 
 def test_attached_support_departure_rejects_initial_penetration() -> None:

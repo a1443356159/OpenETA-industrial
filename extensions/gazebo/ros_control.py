@@ -124,21 +124,19 @@ def _sim_clock_diagnostics(
     }
 
 
-def _detached_contact_route_samples(
+def _trajectory_state_space_samples(
     *,
     joint_names: Sequence[str],
     trajectory_positions: Sequence[Sequence[float]],
 ) -> tuple[list[tuple[int, str, tuple[float, ...], bool, float]], dict[str, Any]]:
-    """Sample a contact route at the configured MoveIt state-space resolution.
+    """Sample a robot route at the configured MoveIt state-space resolution.
 
-    A grasp contact plan gets a narrowly-scoped ACM exception so the final
-    fingertip contact is representable.  Its returned trajectory must be
-    rechecked in the strict scene before execution.  OMPL's output points are
-    not a guarantee that every intermediate state is represented, especially
-    after time parameterisation, so use the same bounded state-space segment
-    length as the planner rather than a fixed count or an object-specific
-    offset.  For a non-RM75 test/extension joint set, preserve the historical
-    midpoint fallback because no certified state-space extent is available.
+    OMPL's output points are not a guarantee that every intermediate state is
+    represented, especially after time parameterisation.  Contact and attached
+    object audits therefore use the same bounded state-space segment length as
+    the planner rather than a fixed count or an object-specific offset.  For a
+    non-RM75 test/extension joint set, preserve the historical midpoint
+    fallback because no certified state-space extent is available.
     """
 
     names = tuple(str(name) for name in joint_names)
@@ -959,7 +957,7 @@ def _detached_contact_approach_audit(
 
     # The exact final waypoint is the sole state allowed to use the model
     # contact exception.  All preceding samples use strict collision policy.
-    samples, sampling_evidence = _detached_contact_route_samples(
+    samples, sampling_evidence = _trajectory_state_space_samples(
         joint_names=names,
         trajectory_positions=points,
     )
@@ -1112,7 +1110,9 @@ def _attached_support_departure_audit(
     motion is rejected until the object has positive separation.
 
     No artificial lift pose is generated here.  MoveIt still owns the route;
-    this is a deterministic acceptance proof over that route.
+    this is a deterministic acceptance proof at the planner's state-space
+    resolution, including every interpolated segment state needed to prevent a
+    thin carried object from crossing a wall between returned waypoints.
     """
 
     names = tuple(str(name) for name in joint_names)
@@ -1249,24 +1249,10 @@ def _attached_support_departure_audit(
         static_penetration_tolerance_m,
     )
 
-    samples: list[tuple[int, str, tuple[float, ...]]] = [(0, "point", first)]
-    for index in range(1, len(points)):
-        previous, current = points[index - 1], points[index]
-        if any(
-            abs(current[offset] - previous[offset]) > joint_numeric_band
-            for offset in range(len(names))
-        ):
-            samples.append(
-                (
-                    index,
-                    "midpoint",
-                    tuple(
-                        (previous[offset] + current[offset]) * 0.5
-                        for offset in range(len(names))
-                    ),
-                )
-            )
-        samples.append((index, "point", current))
+    samples, sampling_evidence = _trajectory_state_space_samples(
+        joint_names=names,
+        trajectory_positions=points,
+    )
 
     minimum_clearance = math.inf
     initial_clearance: float | None = None
@@ -1277,7 +1263,7 @@ def _attached_support_departure_audit(
     exact_static_box_pair_checks = 0
     start_bounds = compound_axis_aligned_bounds(geometry_at(first))
     support_departed = support_clearance(start_bounds) is None
-    for point_index, sample_kind, joints in samples:
+    for point_index, sample_kind, joints, _terminal, segment_fraction in samples:
         evaluated += 1
         moving = any(
             abs(joints[offset] - first[offset]) > joint_numeric_band
@@ -1324,6 +1310,7 @@ def _attached_support_departure_audit(
                 "reason": "attached_object_static_collision",
                 "point_index": point_index,
                 "sample_kind": sample_kind,
+                "segment_fraction": segment_fraction,
                 "obstacle_id": static_collision[0],
                 "target_primitive_index": static_collision[1],
                 "obstacle_primitive_index": static_collision[2],
@@ -1336,6 +1323,7 @@ def _attached_support_departure_audit(
                     "reason": "initial_support_penetration",
                     "point_index": point_index,
                     "sample_kind": sample_kind,
+                    "segment_fraction": segment_fraction,
                     "clearance_m": clearance,
                 }
                 break
@@ -1354,6 +1342,7 @@ def _attached_support_departure_audit(
                 "reason": "support_penetration_increased_after_attach",
                 "point_index": point_index,
                 "sample_kind": sample_kind,
+                "segment_fraction": segment_fraction,
                 "clearance_m": clearance,
             }
             break
@@ -1375,6 +1364,7 @@ def _attached_support_departure_audit(
                 "reason": "support_contact_persists_after_departure",
                 "point_index": point_index,
                 "sample_kind": sample_kind,
+                "segment_fraction": segment_fraction,
                 "clearance_m": clearance,
                 "tangential_surface_displacement_m": tangential_surface_displacement,
             }
@@ -1398,7 +1388,7 @@ def _attached_support_departure_audit(
         "unsupported_primitive_pair_count": unsupported_primitive_pair_count,
         "trajectory_point_count": len(points),
         "evaluated_sample_count": evaluated,
-        "sampling": "time_parameterized_points_and_joint_midpoints",
+        **sampling_evidence,
         "initial_clearance_m": initial_clearance,
         "initial_support_reference_clearance_m": reference_clearance,
         "initial_support_clearance_floor_m": support_contact_clearance_floor,
