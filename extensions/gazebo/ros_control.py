@@ -63,6 +63,14 @@ from agent.runtime.collision_geometry import (
 QUALIFIED_JOINT_GOAL_TOLERANCE_RAD = 0.001
 L5_TRAJECTORY_START_TOLERANCE_RAD = 0.001
 L5_TRAJECTORY_CACHE_LIMIT = 64
+# Keep the detached-contact audit at the same state-space resolution as the
+# OMPL configuration.  The planner intentionally uses a 0.2% longest-valid
+# segment fraction for thin industrial parts; sampling only returned waypoints
+# (or one midpoint) can otherwise leave an unchecked sweep between them once
+# the target/tip ACM exception is active.  This is a geometric route-proof
+# resolution, not a candidate-specific heuristic.  The matching MoveIt value
+# is asserted by ``test_gazebo_robot_assets``.
+CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION = 0.002
 # Public tool poses may make a rotation-matrix -> quaternion round trip while
 # private L5 qualification keeps the original quaternion.  The conversion can
 # differ by a few 1e-7 and straddle a six-decimal rounding boundary even though
@@ -114,6 +122,138 @@ def _sim_clock_diagnostics(
         "sim_clock_elapsed_ms": round(sim_elapsed_s * 1000.0, 3),
         "observed_sim_clock_ratio": round(sim_elapsed_s / wall_elapsed_s, 6),
     }
+
+
+def _detached_contact_route_samples(
+    *,
+    joint_names: Sequence[str],
+    trajectory_positions: Sequence[Sequence[float]],
+) -> tuple[list[tuple[int, str, tuple[float, ...], bool, float]], dict[str, Any]]:
+    """Sample a contact route at the configured MoveIt state-space resolution.
+
+    A grasp contact plan gets a narrowly-scoped ACM exception so the final
+    fingertip contact is representable.  Its returned trajectory must be
+    rechecked in the strict scene before execution.  OMPL's output points are
+    not a guarantee that every intermediate state is represented, especially
+    after time parameterisation, so use the same bounded state-space segment
+    length as the planner rather than a fixed count or an object-specific
+    offset.  For a non-RM75 test/extension joint set, preserve the historical
+    midpoint fallback because no certified state-space extent is available.
+    """
+
+    names = tuple(str(name) for name in joint_names)
+    points = [tuple(float(value) for value in row) for row in trajectory_positions]
+    if not names or not points or any(len(point) != len(names) for point in points):
+        raise ValueError("detached contact trajectory is invalid")
+
+    limits_by_name = {
+        str(name): (float(lower), float(upper))
+        for name, lower, upper in ARM_JOINT_BOUNDS
+    }
+    known_extent = all(name in limits_by_name for name in names)
+    state_space_extent = (
+        math.sqrt(
+            sum(
+                (limits_by_name[name][1] - limits_by_name[name][0]) ** 2
+                for name in names
+            )
+        )
+        if known_extent
+        else None
+    )
+    maximum_segment_distance = (
+        state_space_extent * CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION
+        if state_space_extent is not None
+        else None
+    )
+    if maximum_segment_distance is not None and maximum_segment_distance <= 0.0:
+        raise ValueError("detached contact state-space extent is invalid")
+
+    samples: list[tuple[int, str, tuple[float, ...], bool, float]] = [
+        (0, "point", points[0], len(points) == 1, 1.0 if len(points) == 1 else 0.0)
+    ]
+    maximum_observed_segment_distance = 0.0
+    maximum_intervals = 1
+    interpolated_count = 0
+    for index in range(1, len(points)):
+        previous, current = points[index - 1], points[index]
+        segment_distance = math.sqrt(
+            sum(
+                (current[offset] - previous[offset]) ** 2
+                for offset in range(len(names))
+            )
+        )
+        maximum_observed_segment_distance = max(
+            maximum_observed_segment_distance,
+            segment_distance,
+        )
+        # The fallback remains the old points-and-midpoint proof for unknown
+        # joint models.  Production RM75 plans use their known joint limits
+        # and therefore always take the resolution-matched branch.
+        interval_count = (
+            max(1, math.ceil(segment_distance / maximum_segment_distance))
+            if maximum_segment_distance is not None
+            else 2
+        )
+        maximum_intervals = max(maximum_intervals, interval_count)
+        for ordinal in range(1, interval_count + 1):
+            fraction = ordinal / interval_count
+            terminal = index == len(points) - 1 and ordinal == interval_count
+            if ordinal == interval_count:
+                kind = "point"
+            elif interval_count == 2:
+                kind = "midpoint"
+            else:
+                kind = "interpolated"
+                interpolated_count += 1
+            samples.append(
+                (
+                    index,
+                    kind,
+                    tuple(
+                        previous[offset]
+                        + (current[offset] - previous[offset]) * fraction
+                        for offset in range(len(names))
+                    ),
+                    terminal,
+                    fraction,
+                )
+            )
+    return samples, {
+        "sampling": (
+            "moveit_state_space_resolution_interpolation"
+            if maximum_segment_distance is not None
+            else "time_parameterized_points_and_joint_midpoints"
+        ),
+        "state_space_extent_rad": state_space_extent,
+        "max_state_space_segment_fraction": (
+            CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION
+            if maximum_segment_distance is not None
+            else None
+        ),
+        "max_state_space_segment_distance_rad": maximum_segment_distance,
+        "max_observed_joint_segment_distance_rad": maximum_observed_segment_distance,
+        "maximum_intervals_per_trajectory_segment": maximum_intervals,
+        "interpolated_sample_count": interpolated_count,
+    }
+
+
+def _requires_detached_contact_route_preflight(goal: Mapping[str, Any]) -> bool:
+    """Return whether physical dispatch must be preceded by a strict route proof.
+
+    Contact is the only detached-object motion that carries a target/tip ACM
+    exception.  A cache hit already replays the corresponding L5 proof.  If
+    its cache key cannot be reused, MoveGroup must not silently plan and
+    execute under that exception in one action: obtain a new plan-only route,
+    audit it in the strict scene, then dispatch that exact trajectory.
+    """
+
+    return bool(
+        goal.get("plan_only") is not True
+        and str(goal.get("grasp_stage") or "") in {"contact", "recovery_restore"}
+        and isinstance(goal.get("qualification_allowed_collisions"), Mapping)
+        and isinstance(goal.get("qualification_goal_joint_state"), Mapping)
+    )
 
 
 def _qualification_pose_target(target: Mapping[str, Any]) -> dict[str, Any]:
@@ -817,25 +957,12 @@ def _detached_contact_approach_audit(
     ):
         raise ValueError("detached contact audit concurrency is invalid")
 
-    # Check time-parameterized waypoints and the joint midpoint of every
-    # segment.  The exact final waypoint is the sole state allowed to use the
-    # model contact exception.
-    samples: list[tuple[int, str, tuple[float, ...], bool]] = []
-    for index, point in enumerate(points):
-        if index:
-            previous = points[index - 1]
-            samples.append(
-                (
-                    index,
-                    "midpoint",
-                    tuple(
-                        (previous[offset] + point[offset]) * 0.5
-                        for offset in range(len(names))
-                    ),
-                    False,
-                )
-            )
-        samples.append((index, "point", point, index == len(points) - 1))
+    # The exact final waypoint is the sole state allowed to use the model
+    # contact exception.  All preceding samples use strict collision policy.
+    samples, sampling_evidence = _detached_contact_route_samples(
+        joint_names=names,
+        trajectory_positions=points,
+    )
 
     allowed_terminal_pairs = {
         tuple(sorted((normalized_target_id, link)))
@@ -846,9 +973,9 @@ def _detached_contact_approach_audit(
     terminal_target_contact_links: list[str] = []
 
     def evaluate(
-        sample: tuple[int, str, tuple[float, ...], bool],
+        sample: tuple[int, str, tuple[float, ...], bool, float],
     ) -> Mapping[str, Any]:
-        _, _, positions, _ = sample
+        _, _, positions, _, _ = sample
         return state_validity(
             {
                 "names": list(names),
@@ -884,7 +1011,7 @@ def _detached_contact_approach_audit(
                 futures = [executor.submit(evaluate, sample) for sample in batch]
                 results = [future.result() for future in futures]
             rpc_sample_count += len(results)
-            for (point_index, sample_kind, _, terminal), result in zip(
+            for (point_index, sample_kind, _, terminal, fraction), result in zip(
                 batch, results, strict=True
             ):
                 if not isinstance(result, Mapping) or not isinstance(
@@ -904,6 +1031,7 @@ def _detached_contact_approach_audit(
                 check = {
                     "point_index": point_index,
                     "sample_kind": sample_kind,
+                    "segment_fraction": fraction,
                     "terminal": terminal,
                     "strict_valid": bool(result["valid"]),
                     "collision_pairs": [list(pair) for pair in sorted(pairs)],
@@ -950,7 +1078,7 @@ def _detached_contact_approach_audit(
         "evaluated_sample_count": len(checks),
         "rpc_sample_count": rpc_sample_count,
         "max_state_validity_concurrency": min(max_concurrency, len(samples)),
-        "sampling": "time_parameterized_points_and_joint_midpoints",
+        **sampling_evidence,
         "terminal_contact_exception_scope": "exact_final_waypoint_only",
         "terminal_target_contact_links": terminal_target_contact_links,
         "route_owner": "moveit",
@@ -4491,6 +4619,109 @@ class _RosRuntime:
             ),
         }
 
+    def _execute_preflight_l5_trajectory(
+        self,
+        *,
+        cache_key: str,
+        action_started: float,
+        timeout_s: float,
+    ) -> Mapping[str, Any]:
+        """Dispatch a just-audited contact route without a direct-MoveIt bypass.
+
+        This is deliberately separate from the normal cache-hit path.  The
+        route was created only because its earlier L5 cache entry no longer
+        matched; it still receives an immediate start-state comparison before
+        FollowJointTrajectory is accepted.  A drift or dispatch rejection
+        produces a no-motion failure for the ordinary frozen-frontier recovery
+        policy rather than falling through to an unaudited MoveGroup execute.
+        """
+
+        entry = self._l5_trajectory_cache.pop(cache_key, None)
+        if not isinstance(entry, Mapping):
+            return {
+                "ok": False,
+                "error_code": "MOTION_PLAN_FAILED",
+                "motion_outcome": "failed",
+                "execution_started": False,
+                "reason": "l5_preflight_trajectory_unavailable",
+                "l5_trajectory_preflight": True,
+                "l5_trajectory_cache_key": cache_key,
+            }
+        try:
+            current = self.state_source.wait_fresh(min(1.0, timeout_s))
+            current_start = {
+                "names": list(ARM_JOINTS),
+                "positions": [
+                    float(value)
+                    for value in current.joint_positions[: len(ARM_JOINTS)]
+                ],
+            }
+        except Exception:  # noqa: BLE001 - no current state means no dispatch.
+            return {
+                "ok": False,
+                "error_code": "MOTION_PLAN_FAILED",
+                "motion_outcome": "failed",
+                "execution_started": False,
+                "reason": "l5_preflight_fresh_joint_state_unavailable",
+                "l5_trajectory_preflight": True,
+                "l5_trajectory_cache_key": cache_key,
+            }
+        start_delta = _joint_state_max_abs_delta(
+            entry.get("start_joint_state"), current_start
+        )
+        if (
+            start_delta is None
+            or start_delta > L5_TRAJECTORY_START_TOLERANCE_RAD
+        ):
+            return {
+                "ok": False,
+                "error_code": "MOTION_PLAN_FAILED",
+                "motion_outcome": "failed",
+                "execution_started": False,
+                "reason": "l5_preflight_start_state_changed",
+                "l5_trajectory_preflight": True,
+                "l5_trajectory_cache_key": cache_key,
+                "l5_trajectory_preflight_start_max_delta_rad": start_delta,
+            }
+        try:
+            result = self._execute_cached_l5_trajectory(
+                cache_key=cache_key,
+                entry=entry,
+                action_started=action_started,
+                timeout_s=timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 - no direct-execute fallback.
+            return {
+                "ok": False,
+                "error_code": "MOTION_PLAN_FAILED",
+                "motion_outcome": "failed",
+                "execution_started": False,
+                "reason": "l5_preflight_trajectory_dispatch_error",
+                "error_type": type(exc).__name__,
+                "l5_trajectory_preflight": True,
+                "l5_trajectory_cache_key": cache_key,
+                "l5_trajectory_preflight_start_max_delta_rad": start_delta,
+            }
+        if result is None:
+            return {
+                "ok": False,
+                "error_code": "MOTION_PLAN_FAILED",
+                "motion_outcome": "failed",
+                "execution_started": False,
+                "reason": "l5_preflight_trajectory_dispatch_rejected",
+                "l5_trajectory_preflight": True,
+                "l5_trajectory_cache_key": cache_key,
+                "l5_trajectory_preflight_start_max_delta_rad": start_delta,
+            }
+        payload = dict(result)
+        # It is a newly generated plan-only proof, not a reuse of the older
+        # qualification cache.  Keep that distinction in the artifact and
+        # let the normal terminal telemetry checks remain active.
+        payload["l5_trajectory_reused"] = False
+        payload["l5_trajectory_preflight"] = True
+        payload["l5_trajectory_preflight_start_max_delta_rad"] = start_delta
+        return payload
+
     def move(self, goal: dict, timeout_s: float) -> Mapping[str, Any]:
         from geometry_msgs.msg import Pose
         from moveit_msgs.action import MoveGroup
@@ -4505,6 +4736,7 @@ class _RosRuntime:
 
         action_started = self.ros_time_s()
         wall_started = time.monotonic()
+        requires_contact_preflight = _requires_detached_contact_route_preflight(goal)
         cache_lookup: dict[str, Any] = {
             "status": "not_applicable",
             "reason": "plan_only_request",
@@ -4571,6 +4803,26 @@ class _RosRuntime:
                 "status": "miss",
                 "reason": "cached_trajectory_rejected_before_execution",
             }
+
+        # A public contact move normally reuses the L5 proof above.  If that
+        # proof is absent or stale, bind the fresh state as the start of a new
+        # plan-only proof instead of allowing MoveGroup to execute immediately
+        # under the endpoint contact exception.
+        if requires_contact_preflight:
+            live_start = goal.get("live_start_joint_state")
+            if _normalized_arm_joint_state(live_start) is None:
+                return finish(
+                    {
+                        "ok": False,
+                        "error_code": "MOTION_PLAN_FAILED",
+                        "motion_outcome": "failed",
+                        "execution_started": False,
+                        "reason": "l5_preflight_live_start_state_unavailable",
+                        "l5_trajectory_preflight": True,
+                    }
+                )
+            goal = dict(goal)
+            goal["start_joint_state"] = dict(live_start)
 
         # The start state read in GazeboController happened before this call.  Do
         # not permit it to double as post-action reconciliation state.
@@ -4711,7 +4963,9 @@ class _RosRuntime:
             request.planning_options.planning_scene_diff = self._qualification_scene_diff_message(
                 qualification_diff
             )
-        request.planning_options.plan_only = bool(goal.get("plan_only", False))
+        request.planning_options.plan_only = bool(
+            goal.get("plan_only", False) or requires_contact_preflight
+        )
         send = self.move_client.send_goal_async(request)
         handle = self._await(send, min(5.0, timeout_s))
         if not handle.accepted:
@@ -4797,6 +5051,46 @@ class _RosRuntime:
                         point_count=len(planned_points),
                         trajectory_safety=trajectory_safety,
                     )
+                    if requires_contact_preflight:
+                        if trajectory_cache_key is None:
+                            return finish(
+                                {
+                                    "ok": False,
+                                    "error_code": "MOTION_PLAN_FAILED",
+                                    "reason": "l5_preflight_trajectory_cache_unavailable",
+                                    "motion_outcome": "failed",
+                                    "planned_point_count": len(planned_points),
+                                    "execution_started": False,
+                                    "trajectory_safety": trajectory_safety,
+                                    "l5_trajectory_preflight": True,
+                                }
+                            )
+                        cache_lookup = {
+                            "status": "preflight",
+                            "reason": "l5_cache_miss_replanned_and_strictly_audited",
+                            "lookup_key": trajectory_cache_key,
+                        }
+                        return finish(
+                            dict(
+                                self._execute_preflight_l5_trajectory(
+                                    cache_key=trajectory_cache_key,
+                                    action_started=action_started,
+                                    timeout_s=timeout_s,
+                                )
+                            )
+                        )
+            if requires_contact_preflight:
+                return finish(
+                    {
+                        "ok": False,
+                        "error_code": "MOTION_PLAN_FAILED",
+                        "reason": "l5_preflight_empty_trajectory",
+                        "motion_outcome": "failed",
+                        "planned_point_count": 0,
+                        "execution_started": False,
+                        "l5_trajectory_preflight": True,
+                    }
+                )
             return finish(
                 {
                     "ok": True,

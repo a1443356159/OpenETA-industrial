@@ -10,6 +10,7 @@ import yaml
 
 from extensions.gazebo.asset_preflight import validate_asset_root
 from extensions.gazebo.robot_control import ARM_JOINT_BOUNDS, ARM_JOINTS, GazeboControlConfig
+from extensions.gazebo.ros_control import CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION
 
 
 ROOT = Path(__file__).parents[1]
@@ -134,6 +135,9 @@ def test_robot_profiles_use_production_command_limits_without_ineffective_adapte
         assert arm_interfaces.count('<limits enable="false"/>') == 1
         assert "start_state_max_bounds_error" not in ompl
         assert "longest_valid_segment_fraction: 0.002" in ompl
+        assert yaml.safe_load(ompl)["rm_group"][
+            "longest_valid_segment_fraction"
+        ] == CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION
 
 
 def test_arm_controller_proves_loaded_terminal_tracking() -> None:

@@ -22,6 +22,7 @@ from extensions.gazebo.robot_control import (
 from extensions.gazebo.robotiq_kinematics import six_joint_positions
 from extensions.gazebo.native_grasp import NativePickPlaceConfig
 from extensions.gazebo.ros_control import (
+    CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION,
     L5_TRAJECTORY_START_TOLERANCE_RAD,
     QUALIFIED_JOINT_GOAL_TOLERANCE_RAD,
     RosGazeboController,
@@ -30,6 +31,7 @@ from extensions.gazebo.ros_control import (
     _sim_clock_diagnostics,
     _attached_support_departure_audit,
     _detached_contact_approach_audit,
+    _requires_detached_contact_route_preflight,
     _collision_message_geometry_record,
     _configured_qualification_solver_profile,
     _qualification_ik_response_timeout_s,
@@ -290,6 +292,175 @@ def test_detached_contact_approach_rejects_preterminal_target_contact() -> None:
     assert evidence["failure"]["reason"] == "target_contact_before_terminal"
     assert evidence["failure"]["sample_kind"] == "midpoint"
     assert evidence["evaluated_sample_count"] == 2
+
+
+def test_detached_contact_approach_uses_rm75_planning_resolution_between_waypoints() -> None:
+    """A coarse returned trajectory cannot hide a thin-target sweep collision."""
+
+    observed: list[float] = []
+
+    def state_validity(state):
+        position = float(state["positions"][0])
+        observed.append(position)
+        # The old keypoint-plus-midpoint audit checks 0.0, 0.5 and 1.0, so it
+        # would miss this short contact interval.  It is not tied to an object
+        # identity; it represents any thin geometry in the swept route.
+        collision = 0.10 < position < 0.11
+        return {
+            "valid": not collision,
+            "collision_pairs": [["target", "left_tip"]] if collision else [],
+        }
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=list(ARM_JOINTS),
+        trajectory_positions=[[0.0] * len(ARM_JOINTS), [1.0] + [0.0] * 6],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["sampling"] == "moveit_state_space_resolution_interpolation"
+    assert evidence["max_state_space_segment_fraction"] == pytest.approx(
+        CONTACT_ROUTE_AUDIT_MAX_STATE_SPACE_FRACTION
+    )
+    assert evidence["interpolated_sample_count"] > 1
+    assert evidence["failure"]["reason"] == "target_contact_before_terminal"
+    assert evidence["failure"]["sample_kind"] == "interpolated"
+    assert any(0.10 < position < 0.11 for position in observed)
+
+
+def test_detached_contact_preflight_applies_only_to_scoped_physical_contact() -> None:
+    contact_goal = {
+        "grasp_stage": "contact",
+        "qualification_allowed_collisions": {"target": ["left_tip", "right_tip"]},
+        "qualification_goal_joint_state": {
+            "names": list(ARM_JOINTS),
+            "positions": [0.0] * len(ARM_JOINTS),
+        },
+    }
+
+    assert _requires_detached_contact_route_preflight(contact_goal) is True
+    assert _requires_detached_contact_route_preflight(
+        {**contact_goal, "plan_only": True}
+    ) is False
+    assert _requires_detached_contact_route_preflight(
+        {**contact_goal, "grasp_stage": "transport"}
+    ) is False
+    assert _requires_detached_contact_route_preflight(
+        {key: value for key, value in contact_goal.items() if key != "qualification_allowed_collisions"}
+    ) is False
+
+
+def test_preflight_contact_route_refuses_start_drift_before_dispatch() -> None:
+    runtime = object.__new__(_RosRuntime)
+    runtime._l5_trajectory_cache = {
+        "fresh-proof": {
+            "start_joint_state": {
+                "names": list(ARM_JOINTS),
+                "positions": [0.0] * len(ARM_JOINTS),
+            }
+        }
+    }
+    runtime.state_source = SimpleNamespace(
+        wait_fresh=lambda _timeout_s: SimpleNamespace(
+            joint_positions=[0.01] + [0.0] * (len(ARM_JOINTS) - 1)
+        )
+    )
+    dispatched: list[dict] = []
+    runtime._execute_cached_l5_trajectory = lambda **kwargs: dispatched.append(kwargs) or {}
+
+    result = runtime._execute_preflight_l5_trajectory(
+        cache_key="fresh-proof",
+        action_started=1.0,
+        timeout_s=5.0,
+    )
+
+    assert result["ok"] is False
+    assert result["execution_started"] is False
+    assert result["reason"] == "l5_preflight_start_state_changed"
+    assert result["l5_trajectory_preflight"] is True
+    assert dispatched == []
+    assert runtime._l5_trajectory_cache == {}
+
+
+def test_preflight_contact_route_dispatches_only_the_just_audited_trajectory() -> None:
+    runtime = object.__new__(_RosRuntime)
+    entry = {
+        "start_joint_state": {
+            "names": list(ARM_JOINTS),
+            "positions": [0.0] * len(ARM_JOINTS),
+        }
+    }
+    runtime._l5_trajectory_cache = {"fresh-proof": entry}
+    runtime.state_source = SimpleNamespace(
+        wait_fresh=lambda _timeout_s: SimpleNamespace(
+            joint_positions=[0.0] * len(ARM_JOINTS)
+        )
+    )
+    dispatched: list[dict] = []
+    runtime._execute_cached_l5_trajectory = lambda **kwargs: (
+        dispatched.append(kwargs)
+        or {
+            "ok": True,
+            "execution_started": True,
+            "l5_trajectory_reused": True,
+        }
+    )
+
+    result = runtime._execute_preflight_l5_trajectory(
+        cache_key="fresh-proof",
+        action_started=1.0,
+        timeout_s=5.0,
+    )
+
+    assert result["ok"] is True
+    assert result["execution_started"] is True
+    assert result["l5_trajectory_preflight"] is True
+    assert result["l5_trajectory_reused"] is False
+    assert result["l5_trajectory_preflight_start_max_delta_rad"] == 0.0
+    assert dispatched == [
+        {
+            "cache_key": "fresh-proof",
+            "entry": entry,
+            "action_started": 1.0,
+            "timeout_s": 5.0,
+        }
+    ]
+    assert runtime._l5_trajectory_cache == {}
+
+
+def test_preflight_contact_route_never_falls_back_after_dispatch_error() -> None:
+    runtime = object.__new__(_RosRuntime)
+    runtime._l5_trajectory_cache = {
+        "fresh-proof": {
+            "start_joint_state": {
+                "names": list(ARM_JOINTS),
+                "positions": [0.0] * len(ARM_JOINTS),
+            }
+        }
+    }
+    runtime.state_source = SimpleNamespace(
+        wait_fresh=lambda _timeout_s: SimpleNamespace(
+            joint_positions=[0.0] * len(ARM_JOINTS)
+        )
+    )
+
+    def dispatch_error(**_kwargs):
+        raise RuntimeError("trajectory controller unavailable")
+
+    runtime._execute_cached_l5_trajectory = dispatch_error
+    result = runtime._execute_preflight_l5_trajectory(
+        cache_key="fresh-proof",
+        action_started=1.0,
+        timeout_s=5.0,
+    )
+
+    assert result["ok"] is False
+    assert result["execution_started"] is False
+    assert result["reason"] == "l5_preflight_trajectory_dispatch_error"
+    assert result["error_type"] == "RuntimeError"
+    assert result["l5_trajectory_preflight"] is True
 
 
 def test_detached_contact_approach_rejects_non_fingertip_target_penetration() -> None:

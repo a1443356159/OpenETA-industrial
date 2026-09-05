@@ -1531,6 +1531,8 @@ class GazeboController:
                         "max_velocity_scaling_factor",
                         "max_acceleration_scaling_factor",
                         "l5_trajectory_reused",
+                        "l5_trajectory_preflight",
+                        "l5_trajectory_preflight_start_max_delta_rad",
                         "l5_trajectory_cache_key",
                         "l5_trajectory_scene_sha256",
                         "l5_trajectory_cache_status",
