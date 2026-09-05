@@ -7202,13 +7202,30 @@ def _work_order_obligation(
     if not isinstance(progress, dict):
         progress = memory_context.get("multi_sort_progress")
     previous_work_order_completed = _completed_work_order_progress(progress)
+    current_user_turn_id = str(memory_context.get("current_user_turn_id") or "").strip()
+    work_order_request_turn_id = str(
+        memory_context.get("work_order_request_turn_id") or ""
+    ).strip()
+    replacement_authorized_by_new_user_turn = bool(
+        previous_work_order_completed
+        and current_user_turn_id
+        and work_order_request_turn_id
+        and current_user_turn_id != work_order_request_turn_id
+    )
+    # A marker is present for all newly configured orders.  Keep historical
+    # trace/session compatibility when it is absent, but do not let a current
+    # order's own user message authorize a duplicate configuration.
+    legacy_completed_order_without_turn_marker = bool(
+        previous_work_order_completed and not work_order_request_turn_id
+    )
     if not (
         observation.metadata.get("work_order_required") is True
         and isinstance(catalog, dict)
         and catalog.get("schema_version") == "openeta.manipulation_catalog.v1"
         and (
             not isinstance(memory_context.get("work_order"), dict)
-            or previous_work_order_completed
+            or replacement_authorized_by_new_user_turn
+            or legacy_completed_order_without_turn_marker
         )
     ):
         return None
@@ -7220,6 +7237,7 @@ def _work_order_obligation(
         "manipulation_catalog": dict(catalog),
         "required_item_fields": ["target_prompt", "placement_region_prompt"],
         "previous_work_order_completed": previous_work_order_completed,
+        "replacement_authorized_by_new_user_turn": replacement_authorized_by_new_user_turn,
         "rule": (
             "Read the user's current request, preserve its requested item order, and "
             "call configure_work_order with semantic target/destination prompts. The "
@@ -7231,9 +7249,10 @@ def _work_order_obligation(
             "each physical target at most once, and do not invent unlisted targets or "
             "destinations. "
             + (
-                "The prior work order is complete and is historical evidence only; "
+                "This is a new operator turn. The prior work order is complete and is "
+                "historical evidence only; "
                 "do not reuse its target, masks, candidates, or destination."
-                if previous_work_order_completed
+                if replacement_authorized_by_new_user_turn
                 else ""
             )
         ),

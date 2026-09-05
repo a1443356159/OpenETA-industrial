@@ -299,6 +299,12 @@ def test_completed_work_order_accepts_the_next_operator_request() -> None:
     }
     memory = AgentMemory()
     memory.start_session(task="put the yellow wrench in the green bin")
+    initial_turn_id = memory.conversation.current_turn_id
+    memory.save_fact(
+        "work_order_request_turn",
+        {"turn_id": initial_turn_id},
+        source="test",
+    )
     memory.add_observation(
         EnvObservation(
             task="normal pick and place",
@@ -350,6 +356,71 @@ def test_completed_work_order_accepts_the_next_operator_request() -> None:
     assert requests[0].tool_context["obligations"]["work_order_obligation"][
         "previous_work_order_completed"
     ] is True
+    assert requests[0].tool_context["obligations"]["work_order_obligation"][
+        "replacement_authorized_by_new_user_turn"
+    ] is True
+
+
+def test_completed_work_order_does_not_reconfigure_without_a_new_operator_turn() -> None:
+    """A completed order must terminate its own episode before a replacement starts."""
+
+    work_order = {
+        "schema_version": "openeta.work_order.v1",
+        "source": "vlm_tool_call",
+        "items": [
+            {
+                "id": "silver_wrench_to_green_parts_bin",
+                "target_prompt": "silver wrench",
+                "placement_region_prompt": "green parts bin",
+            }
+        ],
+    }
+    completed_progress = {
+        "schema_version": "openeta.multi_sort_progress.v1",
+        "source": "vlm_work_order",
+        "work_order": work_order,
+        "assignment_count": 1,
+        "completed_count": 1,
+        "remaining_count": 0,
+        "all_completed": True,
+        "active_assignment_index": None,
+        "active_assignment": None,
+    }
+    catalog = {
+        "schema_version": "openeta.manipulation_catalog.v1",
+        "targets": [{"target_prompt": "silver wrench"}],
+        "placement_regions": [{"prompt": "green parts bin"}],
+    }
+    memory = AgentMemory()
+    memory.start_session(task="put the silver wrench in the green bin")
+    memory.save_fact(
+        "work_order_request_turn",
+        {"turn_id": memory.conversation.current_turn_id},
+        source="test",
+    )
+    observation = EnvObservation(
+        task="normal pick and place",
+        cameras=[],
+        robot=RobotState(),
+        metadata={
+            "manipulation_catalog": catalog,
+            "work_order_required": True,
+            "multi_sort_progress": completed_progress,
+        },
+    )
+    memory.add_observation(observation)
+
+    context = build_tool_context(
+        observation=observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert context["work_order_obligation"] is None
+    assert context["memory"]["current_user_turn_id"] == context["memory"][
+        "work_order_request_turn_id"
+    ]
 
 
 def test_general_sort_request_allows_the_vlm_to_author_a_complete_order() -> None:
@@ -558,6 +629,9 @@ def test_successful_work_order_reconfiguration_clears_task_scoped_memory() -> No
     assert "work_order" not in facts
     assert "selected_sam3_detection" not in facts
     assert facts["scene_epoch"]["value"] == {"epoch": 7}
+    assert facts["work_order_request_turn"]["value"]["turn_id"] == (
+        memory.conversation.current_turn_id
+    )
     assert "sam3:grasp_candidates:latest" not in artifacts
     assert "observe:image:latest" in artifacts
 

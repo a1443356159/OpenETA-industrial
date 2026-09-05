@@ -59,6 +59,7 @@ PLACEMENT_REGION_DETECTION_KEY = "placement_region_detection"
 FROZEN_PLACEMENT_POOL_KEY = "frozen_placement_goal_pool"
 COMPLETED_PLACEMENT_SUBGOALS_KEY = "completed_placement_subgoals"
 WORK_ORDER_KEY = "work_order"
+WORK_ORDER_REQUEST_TURN_KEY = "work_order_request_turn"
 MULTI_SORT_PROGRESS_KEY = "multi_sort_progress"
 MOTION_RECONCILIATION_KEY = "motion_reconciliation"
 SCENE_EPOCH_KEY = "scene_epoch"
@@ -790,6 +791,17 @@ class AgentMemory:
                 self.artifacts.pop(key, None)
                 invalidated_artifacts.append(key)
 
+        # An order is bound to the exact operator message that requested it.
+        # Once the runtime reports that order complete, the same planner turn
+        # must be allowed to finish rather than treating its own still-current
+        # message as permission to configure the identical work order again.
+        # A subsequent TUI user turn receives a new ConversationHistory ID and
+        # is the only normal path that may replace the completed order.
+        request_turn_id = str(self.conversation.current_turn_id or "").strip()
+        self.facts[WORK_ORDER_REQUEST_TURN_KEY] = _memory_fact_entry(
+            {"turn_id": request_turn_id},
+            source="vlm_configure_work_order",
+        )
         request = action.command.get("request") if isinstance(action.command, dict) else None
         parameters = request.get("parameters") if isinstance(request, dict) else None
         items = parameters.get("items") if isinstance(parameters, dict) else None
@@ -797,6 +809,7 @@ class AgentMemory:
             "work_order_reconfigured",
             {
                 "item_count": len(items) if isinstance(items, list) else 0,
+                "request_turn_id": request_turn_id,
                 "invalidated_facts": invalidated_facts,
                 "invalidated_artifacts": sorted(invalidated_artifacts),
                 "preserved_fact_keys": [
@@ -7857,11 +7870,20 @@ class AgentMemory:
     def planning_context(self, *, max_events: int = 8) -> JsonDict:
         """Return compact context suitable for a planner prompt or policy."""
 
+        request_turn = _memory_fact_value(self.facts.get(WORK_ORDER_REQUEST_TURN_KEY))
+        request_turn_id = (
+            str(request_turn.get("turn_id") or "").strip()
+            if isinstance(request_turn, dict)
+            else ""
+        )
+
         return {
             "session_id": self.session_id,
             "task": self.current_user_request or self.task,
             "session_initial_task": self.task,
             "current_user_request": self.current_user_request,
+            "current_user_turn_id": self.conversation.current_turn_id,
+            "work_order_request_turn_id": request_turn_id,
             "active_environment_task": self.active_environment_task(),
             "task_completion_evidence": self.task_completion_evidence(),
             "multi_sort_progress": _memory_fact_value(
