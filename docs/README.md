@@ -8,7 +8,7 @@ the first table instead of reading the `docs/` directory alphabetically.
 
 | Document | Status | Purpose |
 | --- | --- | --- |
-| [`multi-normal-tui-reproduction.md`](multi-normal-tui-reproduction.md) | Operator runbook | Canonical human TUI procedure, representative prompt, evidence checks, and task variants. |
+| [`multi-normal-tui-reproduction.md`](multi-normal-tui-reproduction.md) | Operator runbook | Canonical human TUI procedure, representative prompt, task-neutral open-sort session, and evidence checks. |
 | [`final-dev-delivery.md`](final-dev-delivery.md) | Migration runbook | Credential-free source bundle, Docker build, model validation, provider setup, and judge reproduction commands. |
 | [`final-dev-validation-report.md`](final-dev-validation-report.md) | Release evidence | Current `final-dev` BaiLian Qwen `multi_normal` evidence, timing, and exact evidence roots. |
 | [`gazebo-normal-acceptance.md`](gazebo-normal-acceptance.md) | Normative contract | Final task-neutral scene, model/geometry boundaries, physical proofs, recovery, and release gates. |

@@ -282,7 +282,7 @@ environment receipts, rewards, checkers, and retained rollout evidence.
 | [Agent command pipeline](docs/agent-action-pipeline.md) | Command schemas, Tool contracts, AtomActions, and safety gates |
 | [Simulation layer](sim/README.md) | Installation, environment registry, MCP, REST, and Dashboard |
 | [Gazebo `multi_normal` acceptance](docs/gazebo-normal-acceptance.md) | GraspGenX/AnyPlace compilation, MoveIt scene constraints, frozen-frontier recovery, and release gates |
-| [Human TUI reproduction](docs/multi-normal-tui-reproduction.md) | Operator procedure for the representative two-item `multi_normal` work order |
+| [Human TUI reproduction](docs/multi-normal-tui-reproduction.md) | Representative `multi_normal` work order and task-neutral open-sort procedure |
 | [`final-dev` migration and Docker reproduction](docs/final-dev-delivery.md) | Credential-free source package, GPU/Docker setup, model validation, provider secret setup, and judge commands |
 | [Parallel simulator evaluation](docs/parallel-simulator-evaluation.md) | Concurrency, budgets, human recovery, and experience promotion |
 | [Rollout data contract](docs/rollout-data-contract.md) | Session data layers and immutable evidence |

@@ -130,6 +130,16 @@ deploy/ubuntu/openeta.sh smoke-normal --runs 2
 不依赖 Object Memory Bank。宽泛的命令（如“对桌子上的物品进行分拣”）保留给 VLM 根据当前
 可见物品和 catalog 自主构造有序工作单，不由场景注入静态任务。
 
+若要直接演示这种开放式整理，而非代表性固定验收工单，使用任务中立入口：
+
+```bash
+deploy/ubuntu/openeta.sh --gui open-sort
+```
+
+它会启动同一套模型服务和 GPU Gazebo GUI；操作员在 TUI 中输入开放任务。退出后生成的
+`operator-session-report.json` 中的 `work_order_outcome: completed` 汇总本轮 trace 的
+宿主 `multi_sort_progress`；它不是固定工单验收 PASS。
+
 为 CI 或研发验证真实持续 TUI 行为，可传递一个 JSON 数组；这只是 driver 将自然语言逐条
 送进同一 PTY，不会替 Agent 决策：
 

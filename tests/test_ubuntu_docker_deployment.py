@@ -57,6 +57,10 @@ def test_ubuntu_compose_keeps_models_read_only_and_state_writable() -> None:
 def test_container_entrypoints_use_graspgenx_and_two_run_default() -> None:
     compose = (UBUNTU_DEPLOY / "compose.yaml").read_text(encoding="utf-8")
     normal = (UBUNTU_DEPLOY / "run_normal.sh").read_text(encoding="utf-8")
+    open_sort = (UBUNTU_DEPLOY / "run_open_sort.sh").read_text(encoding="utf-8")
+    entrypoint = (UBUNTU_DEPLOY / "container_entrypoint.sh").read_text(
+        encoding="utf-8"
+    )
     services = (UBUNTU_DEPLOY / "model_services.sh").read_text(encoding="utf-8")
 
     assert "OPENETA_ACCEPTANCE_RUNS: ${OPENETA_ACCEPTANCE_RUNS:-2}" in compose
@@ -70,6 +74,13 @@ def test_container_entrypoints_use_graspgenx_and_two_run_default() -> None:
     assert "run_m6_gazebo_acceptance.sh" not in normal
     assert "for target in sam3 anyplace graspgenx" in services
     assert "start anygrasp" not in services
+    assert 'open-sort)' in entrypoint
+    assert "run_open_sort.sh" in entrypoint
+    assert "run_open_sort_gazebo_tui.sh" in open_sort
+    assert "--grasp-backend graspgenx" in open_sort
+    assert "operator-session-report.json" in (
+        REPO_ROOT / "docs" / "final-dev-delivery.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_docker_example_matches_final_graspgenx_reserve_default() -> None:

@@ -144,13 +144,28 @@ grasp_pose_estimate mode=frozen_frontier model_inference=False
 
 ## 开放式全目录分拣
 
-若操作员希望系统自行确定有序的分类方案，可以在同一 TUI 中输入例如：
+开放式任务使用独立的任务中立会话入口，避免代表性验收夹具中的双物件 Prompt
+干扰操作员的自由任务。它复用同一 Gazebo 场景、GPU GUI、MCP、VLM、MoveIt 和
+安全链，但退出时只报告会话是否干净关闭，不将其冒充为固定验收 PASS：
+
+```bash
+RUN_ROOT="$REPO/.cache/reports/open-sort-human-$(date -u +%Y%m%dT%H%M%SZ)"
+test ! -e "$RUN_ROOT"
+
+scripts/run_open_sort_gazebo_tui.sh --run-root "$RUN_ROOT"
+```
+
+在 TUI 中输入例如：
 
 ```text
 请先看清当前工作台，然后按照你认为有秩序、便于后续取用的方式，把桌子上的零散物件分拣到合适的料箱。先说明并执行一致的分类原则；所有授权的待操作物件都要处理一次，未授权的干扰物不要移动。每放好一件都重新确认当前场景，全部完成后再结束。
 ```
 
 这不是隐藏的静态任务。`configure_work_order` 的 `all_catalog_targets` 作用域由 VLM 在看过本轮图像后选择；其工单必须为每个授权目录物件给出 `sort_group`，并给出分类标准和理由。同一分组必须指向同一个料箱，且每个授权物件恰好出现一次。宿主只拒绝不完整、重复或自相矛盾的工单，绝不替 VLM 决定类别或料箱。当前目录之外的可见物体仍是干扰物，不能因为开放式措辞被擅自移动。
+
+退出后查看 `$RUN_ROOT/operator-session-report.json`。报告中的 `status: closed` 仅表示环境
+已经由启动器关闭；其中 `work_order_outcome: completed` 来自本轮 trace 中宿主记录的
+`multi_sort_progress.all_completed`，才表示该次开放式整理完成。这仍不是固定工单验收 PASS。
 
 ## 5. 判断 PASS
 

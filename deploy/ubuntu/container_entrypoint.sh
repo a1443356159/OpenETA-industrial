@@ -73,6 +73,9 @@ case "${mode}" in
   tui)
     exec /opt/openeta/src/deploy/ubuntu/run_tui.sh "$@"
     ;;
+  open-sort)
+    exec /opt/openeta/src/deploy/ubuntu/run_open_sort.sh "$@"
+    ;;
   smoke-normal|agentic-normal)
     exec /opt/openeta/src/deploy/ubuntu/run_normal.sh "${mode}" "$@"
     ;;
@@ -92,6 +95,6 @@ case "${mode}" in
     exec "$@"
     ;;
   *)
-    fail "unknown mode '${mode}'; expected shell, tui, smoke-normal, agentic-normal, validate-assets, test, or exec"
+    fail "unknown mode '${mode}'; expected shell, tui, open-sort, smoke-normal, agentic-normal, validate-assets, test, or exec"
     ;;
 esac

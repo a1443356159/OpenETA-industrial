@@ -15,6 +15,7 @@ Commands:
   config                Render and validate the Compose configuration
   shell                 Open a shell in the immutable image
   tui [ARGS...]         Start the interactive OpenETA TUI
+  open-sort [ARGS...]   Start a task-neutral interactive Gazebo sorting session
   smoke-normal [ARGS]   Run single-item normal without a Planner/VLM (two runs by default)
   agentic-normal [ARGS] Run final multi_normal sorting with the configured Planner/VLM
   validate-assets       Validate mounted model assets and prepare writable cache
@@ -140,7 +141,7 @@ if (( gui == 1 )); then
 fi
 
 case "${command_name}" in
-  shell|tui|smoke-normal|agentic-normal|validate-assets|test)
+  shell|tui|open-sort|smoke-normal|agentic-normal|validate-assets|test)
     exec "${compose[@]}" run "${run_options[@]}" openeta "${command_name}" "$@"
     ;;
   exec)

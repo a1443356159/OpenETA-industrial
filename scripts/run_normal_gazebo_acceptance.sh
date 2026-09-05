@@ -76,4 +76,17 @@ export PYTHONPATH="${REPO_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 # OPENETA_GAZEBO_OPERATOR_GUI=0.
 export OPENETA_GAZEBO_OPERATOR_GUI="${OPENETA_GAZEBO_OPERATOR_GUI:-1}"
 
-exec "${PYTHON_BIN}" "${SCRIPT_DIR}/normal_gazebo_acceptance.py" "$@"
+# Keep the formal acceptance's canonical command literal and immutable.  The
+# task-neutral operator wrapper opts into the one separately allowlisted
+# alternate entry point below; sourcing a ROS environment must never turn an
+# arbitrary environment value into a Python entry point.
+if [[ -z "${OPENETA_GAZEBO_RUNNER:-}" ]]; then
+  exec "${PYTHON_BIN}" "${SCRIPT_DIR}/normal_gazebo_acceptance.py" "$@"
+fi
+
+if [[ "${OPENETA_GAZEBO_RUNNER}" != "${SCRIPT_DIR}/open_sort_gazebo_tui.py" ]]; then
+  echo "OPENETA_GAZEBO_RUNNER_INVALID: unsupported runner ${OPENETA_GAZEBO_RUNNER}" >&2
+  exit 3
+fi
+
+exec "${PYTHON_BIN}" "${OPENETA_GAZEBO_RUNNER}" "$@"
