@@ -3117,7 +3117,15 @@ def test_grasp_contact_allows_only_request_local_target_touch_links():
         return {
             "revision": 4,
             "target_id": "target_object",
-            "target_touch_links": ["right_tip", "left_tip"],
+            "grasp_contact_touch_links": ["right_tip", "left_tip"],
+            # A completed attachment has a wider collision exception set,
+            # but contact qualification must never inherit it.
+            "target_touch_links": [
+                "left_inner_knuckle",
+                "left_tip",
+                "right_inner_knuckle",
+                "right_tip",
+            ],
             "transitions": [],
         }
 
@@ -3194,6 +3202,7 @@ def test_grasp_contact_rejects_static_collision_during_l5_close_sweep() -> None:
         clone_scene=lambda: {
             "revision": 4,
             "target_id": "target_object",
+            "grasp_contact_touch_links": ["left_tip", "right_tip"],
             "target_touch_links": ["left_tip", "right_tip"],
             "transitions": [],
         },
@@ -3269,6 +3278,7 @@ def test_grasp_contact_rejects_seed_independent_one_sided_contact_geometry() -> 
         clone_scene=lambda: {
             "revision": 4,
             "target_id": "target_object",
+            "grasp_contact_touch_links": ["left_tip", "right_tip"],
             "target_touch_links": ["left_tip", "right_tip"],
             "transitions": [],
         },

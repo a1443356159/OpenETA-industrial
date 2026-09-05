@@ -2336,6 +2336,28 @@ def _validate_configure_work_order_parameters(parameters: JsonDict) -> list[str]
         ]
 
     errors: list[str] = []
+    selection_scope = parameters.get("selection_scope", "explicit_items")
+    if selection_scope not in {"explicit_items", "all_catalog_targets"}:
+        errors.append(
+            "configure_work_order `selection_scope` must be explicit_items or "
+            "all_catalog_targets."
+        )
+    complete_catalog = selection_scope == "all_catalog_targets"
+    sorting_policy = parameters.get("sorting_policy")
+    if complete_catalog:
+        if not isinstance(sorting_policy, dict):
+            errors.append(
+                "configure_work_order all_catalog_targets requires a `sorting_policy` "
+                "object with criterion and rationale."
+            )
+        else:
+            for field_name in ("criterion", "rationale"):
+                value = sorting_policy.get(field_name)
+                if not isinstance(value, str) or not value.strip():
+                    errors.append(
+                        "configure_work_order all_catalog_targets sorting_policy "
+                        f"requires a non-empty `{field_name}`."
+                    )
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             errors.append(f"configure_work_order item {index} must be an object.")
@@ -2345,6 +2367,13 @@ def _validate_configure_work_order_parameters(parameters: JsonDict) -> list[str]
             if not isinstance(value, str) or not value.strip():
                 errors.append(
                     f"configure_work_order item {index} requires a non-empty `{field_name}`."
+                )
+        if complete_catalog:
+            sort_group = item.get("sort_group")
+            if not isinstance(sort_group, str) or not sort_group.strip():
+                errors.append(
+                    "configure_work_order all_catalog_targets item "
+                    f"{index} requires a non-empty `sort_group`."
                 )
     return errors
 
@@ -2969,7 +2998,8 @@ def _default_tool_planner_system_prompt() -> str:
         "parameter_binding_sha256. An absent parameter_mode, or "
         "parameter_mode=model_authored, requires the model to supply the documented "
         "semantic parameters; configure_work_order always requires a non-empty ordered "
-        "items list. If more than one "
+        "items list. For an open-ended sort, use selection_scope=all_catalog_targets, "
+        "a sorting_policy with criterion/rationale, and one sort_group per item. If more than one "
         "binding exists for the chosen tool, return only "
         'parameters={"obligation_ref": "<parameter_binding_sha256>"}. Never invent '
         "or reconstruct host-owned paths, poses, or calibration. tool_context.state is the "
@@ -4812,7 +4842,11 @@ def _model_phase_requires_images(
             in {"semantic_decision_required", "selection_required"}
             for value in obligations.values()
         )
-    return phase in {"grasp_align", "reference_localization"}
+    return phase in {
+        "work_order_configuration",
+        "grasp_align",
+        "reference_localization",
+    }
 
 
 def _model_has_exact_obligation(obligations: Mapping[str, object]) -> bool:
@@ -5102,7 +5136,7 @@ def _compact_model_state(key: str, value: object) -> object:
             if isinstance(items, list)
             else []
         )
-        return {
+        compact = {
             "schema_version": value.get("schema_version"),
             "source": value.get("source"),
             "assignment_count": len(assignments),
@@ -5113,12 +5147,23 @@ def _compact_model_state(key: str, value: object) -> object:
                         "id",
                         "target_prompt",
                         "placement_region_prompt",
+                        "sort_group",
                     )
                     if name in item
                 }
                 for item in assignments[:6]
             ],
         }
+        if isinstance(value.get("selection_scope"), str):
+            compact["selection_scope"] = value["selection_scope"]
+        if isinstance(value.get("sorting_policy"), dict):
+            compact["sorting_policy"] = _bounded_model_value(
+                value["sorting_policy"],
+                text_limit=500,
+                item_limit=8,
+                depth=0,
+            )
+        return compact
     if key == "multi_sort_progress":
         active = value.get("active_assignment")
         active = active if isinstance(active, dict) else {}
@@ -5156,6 +5201,7 @@ def _compact_model_state(key: str, value: object) -> object:
                 "placement_region_prompt",
                 "placement_region_perception_prompt",
                 "placement_region_id",
+                "sort_group",
             )
             if name in active
         }
@@ -7240,6 +7286,20 @@ def _work_order_obligation(
         "required_tool": "configure_work_order",
         "manipulation_catalog": dict(catalog),
         "required_item_fields": ["target_prompt", "placement_region_prompt"],
+        "selection_scopes": {
+            "explicit_items": {
+                "description": "Use only the specific object/bin pairs requested by the operator."
+            },
+            "all_catalog_targets": {
+                "description": (
+                    "Use for an open-ended request to sort the loose workcell items. "
+                    "Include every catalog target exactly once."
+                ),
+                "required_item_fields": ["sort_group"],
+                "required_sorting_policy_fields": ["criterion", "rationale"],
+                "coverage": "every catalog target exactly once",
+            },
+        },
         "previous_work_order_completed": previous_work_order_completed,
         "replacement_authorized_by_new_user_turn": replacement_authorized_by_new_user_turn,
         "rule": (
@@ -7249,9 +7309,11 @@ def _work_order_obligation(
             "a non-empty ordered items list; parameters={} is invalid. If the user "
             "asks generally to sort the table rather than specifying pairs, inspect the "
             "live views and catalog, then author a complete coherent sorting order for "
-            "the visible catalog targets yourself. Choose the grouping semantically, use "
-            "each physical target at most once, and do not invent unlisted targets or "
-            "destinations. "
+            "the visible catalog targets yourself. Set selection_scope to "
+            "all_catalog_targets, include every catalog target exactly once, provide a "
+            "sorting_policy with criterion and rationale, and give every item a sort_group. "
+            "Choose the grouping semantically, use each physical target at most once, "
+            "and do not invent unlisted targets or destinations. "
             + (
                 "This is a new operator turn. The prior work order is complete and is "
                 "historical evidence only; "

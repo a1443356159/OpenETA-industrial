@@ -484,6 +484,26 @@ class AgentMemory:
             and len(work_order["items"]) == assignment_count
         ):
             return False
+        selection_scope = work_order.get("selection_scope", "explicit_items")
+        if selection_scope not in {"explicit_items", "all_catalog_targets"}:
+            return False
+        if selection_scope == "all_catalog_targets":
+            sorting_policy = work_order.get("sorting_policy")
+            if not (
+                isinstance(sorting_policy, dict)
+                and all(
+                    isinstance(sorting_policy.get(field), str)
+                    and sorting_policy[field].strip()
+                    for field in ("criterion", "rationale")
+                )
+                and all(
+                    isinstance(item, dict)
+                    and isinstance(item.get("sort_group"), str)
+                    and item["sort_group"].strip()
+                    for item in work_order["items"]
+                )
+            ):
+                return False
         normalized = dict(progress)
         previous = _memory_fact_value(self.facts.get(MULTI_SORT_PROGRESS_KEY))
         previous_work_order = _memory_fact_value(self.facts.get(WORK_ORDER_KEY))

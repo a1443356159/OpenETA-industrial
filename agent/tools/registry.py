@@ -890,12 +890,24 @@ def build_default_tool_registry(*, perception_profile: str | None = None) -> Too
                 "conversation into session memory and bind it to the active physical "
                 "workcell. Call this only when the current observation reports "
                 "work_order_required=true. The environment validates each semantic "
-                "target and destination against its task-neutral manipulation catalog."
+                "target and destination against its task-neutral manipulation catalog. "
+                "For an open-ended sorting request, the model may declare "
+                "selection_scope=all_catalog_targets; the environment then verifies "
+                "complete catalog coverage but never chooses object groups or bins."
             ),
             parameters={
                 "items": (
                     "ordered non-empty list of objects with target_prompt and "
-                    "placement_region_prompt; preserve the user's requested order"
+                    "placement_region_prompt; preserve the user's requested order. "
+                    "For all_catalog_targets include a non-empty sort_group per item"
+                ),
+                "selection_scope": (
+                    "optional explicit_items (default) or all_catalog_targets for a "
+                    "model-authored complete table-sorting plan"
+                ),
+                "sorting_policy": (
+                    "required for all_catalog_targets: object with non-empty criterion "
+                    "and rationale explaining the model's semantic grouping"
                 ),
             },
             safe_by_default=True,

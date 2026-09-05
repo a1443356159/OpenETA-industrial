@@ -471,7 +471,13 @@ class GazeboDirectEnv(Env):
             items = raw_action.get("items")
             if not isinstance(items, list):
                 raise GazeboProcessError("WORK_ORDER_ITEMS_INVALID")
-            progress = configure(items=items)
+            selection_scope = raw_action.get("selection_scope", "explicit_items")
+            sorting_policy = raw_action.get("sorting_policy")
+            progress = configure(
+                items=items,
+                selection_scope=selection_scope,
+                sorting_policy=sorting_policy,
+            )
             active_config = getattr(self.runtime, "active_pick_place_config", None)
             if not isinstance(active_config, NativePickPlaceConfig):
                 raise GazeboProcessError("WORK_ORDER_ACTIVE_CONFIG_UNAVAILABLE")

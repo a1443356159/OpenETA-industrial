@@ -21,7 +21,10 @@ the first table instead of reading the `docs/` directory alphabetically.
 | [`anygrasp-remote-deployment.md`](anygrasp-remote-deployment.md) | Optional runbook | Licensed AnyGrasp development backend. It is not part of the final `multi_normal` gate. |
 
 The release scene does not contain a static work order. The operator's natural-language TUI
-request supplies object order and destination bins. The release path uses GraspGenX, AnyPlace,
+request supplies object order and destination bins; an open-ended sorting request may instead let
+the VLM author a complete catalog-wide grouping policy after inspecting the live scene. The host
+checks coverage and group/destination consistency but never supplies a hidden object-to-bin map.
+The release path uses GraspGenX, AnyPlace,
 SAM3, MoveIt, and the `fast_v3` qualification profile. AnyGrasp remains available for separate
 backend evaluation. The repository-wide rollback default may remain `legacy`; the release runner
 selects `fast_v3` explicitly.

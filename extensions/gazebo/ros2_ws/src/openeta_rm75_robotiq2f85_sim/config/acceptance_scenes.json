@@ -59,6 +59,7 @@
           "target_link": "target_link",
           "target_prompt": "yellow wrench",
           "semantic_aliases": ["yellow adjustable wrench", "黄色活动扳手"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "adjustable wrench"},
           "source_support_object_id": "work_table"
         },
         {
@@ -67,6 +68,7 @@
           "target_link": "red_m24_hex_bolt_link",
           "target_prompt": "red hex bolt",
           "semantic_aliases": ["red M24 hex bolt", "红色六角螺栓"],
+          "sorting_attributes": {"functional_family": "fastener", "subtype": "hex bolt"},
           "source_support_object_id": "work_table"
         },
         {
@@ -75,6 +77,7 @@
           "target_link": "silver_box_wrench_link",
           "target_prompt": "silver box-end wrench",
           "semantic_aliases": ["silver wrench", "box wrench", "银色扳手", "银色梅花扳手"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "box-end wrench"},
           "source_support_object_id": "work_table"
         },
         {
@@ -83,6 +86,7 @@
           "target_link": "distractor_link",
           "target_prompt": "blue-handled pliers",
           "semantic_aliases": ["wire pliers", "blue handled pliers", "钢丝钳", "蓝柄钢丝钳"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "pliers"},
           "source_support_object_id": "work_table"
         },
         {
@@ -91,6 +95,7 @@
           "target_link": "blue_black_screwdriver_link",
           "target_prompt": "blue and black screwdriver",
           "semantic_aliases": ["blue-black screwdriver", "screwdriver", "蓝黑色螺丝刀", "螺丝刀"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "screwdriver"},
           "source_support_object_id": "work_table"
         }
       ],
@@ -131,6 +136,7 @@
           "target_link": "target_link",
           "target_prompt": "yellow wrench",
           "semantic_aliases": ["yellow adjustable wrench", "黄色活动扳手"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "adjustable wrench"},
           "source_support_object_id": "work_table"
         },
         {
@@ -139,6 +145,7 @@
           "target_link": "red_m24_hex_bolt_link",
           "target_prompt": "red hex bolt",
           "semantic_aliases": ["red M24 hex bolt", "红色六角螺栓"],
+          "sorting_attributes": {"functional_family": "fastener", "subtype": "hex bolt"},
           "source_support_object_id": "work_table"
         },
         {
@@ -147,6 +154,7 @@
           "target_link": "silver_box_wrench_link",
           "target_prompt": "silver box-end wrench",
           "semantic_aliases": ["silver wrench", "box wrench", "银色扳手", "银色梅花扳手"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "box-end wrench"},
           "source_support_object_id": "work_table"
         },
         {
@@ -155,6 +163,7 @@
           "target_link": "distractor_link",
           "target_prompt": "blue-handled pliers",
           "semantic_aliases": ["wire pliers", "blue handled pliers", "钢丝钳", "蓝柄钢丝钳"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "pliers"},
           "source_support_object_id": "work_table"
         },
         {
@@ -163,6 +172,7 @@
           "target_link": "blue_black_screwdriver_link",
           "target_prompt": "blue and black screwdriver",
           "semantic_aliases": ["blue-black screwdriver", "screwdriver", "蓝黑色螺丝刀", "螺丝刀"],
+          "sorting_attributes": {"functional_family": "hand tool", "subtype": "screwdriver"},
           "source_support_object_id": "work_table"
         }
       ],

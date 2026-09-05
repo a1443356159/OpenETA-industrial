@@ -40,6 +40,7 @@ from .robot_control import (
 )
 from .robotiq_kinematics import six_joint_positions
 from .planning_scene import (
+    GRASP_CONTACT_TOUCH_LINKS,
     LEFT_FINGERTIP,
     RIGHT_FINGERTIP,
     TARGET_TOUCH_LINKS,
@@ -3618,6 +3619,11 @@ class _RosRuntime:
             "moveit_geometry_verified_ids": list(
                 getattr(self.planning_scene, "geometry_verified_ids", ())
             ),
+            # Contact planning is constrained to the physical pad pair.  The
+            # broader ``target_touch_links`` set remains exclusively for an
+            # object that has already passed native bilateral-contact and
+            # detachable-joint attachment proof.
+            "grasp_contact_touch_links": list(GRASP_CONTACT_TOUCH_LINKS),
             "target_touch_links": list(TARGET_TOUCH_LINKS),
             "workspace_envelope": {
                 "frame": self.config.base_link,
@@ -4675,10 +4681,15 @@ class _RosRuntime:
             normalized_allowed = {
                 key: sorted(set(values)) for key, values in normalized_allowed.items()
             }
+            expected_touch_links = (
+                GRASP_CONTACT_TOUCH_LINKS
+                if goal.get("grasp_stage") in {"contact", "recovery_restore"}
+                else TARGET_TOUCH_LINKS
+            )
             expected_allowed = (
                 {
                     str(self.planning_scene.target_id): sorted(
-                        str(link) for link in TARGET_TOUCH_LINKS
+                        str(link) for link in expected_touch_links
                     )
                 }
                 if self.planning_scene.target_id

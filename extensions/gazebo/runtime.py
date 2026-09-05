@@ -66,6 +66,8 @@ class GazeboRuntime:
         self.attachment: Any | None = None
         self._target_configs: tuple[Any, ...] = ()
         self._work_order_configs: tuple[Any, ...] = ()
+        self._work_order_selection_scope = "explicit_items"
+        self._work_order_sorting_policy: dict[str, str] | None = None
         self._active_work_order_index = 0
         self._completed_work_order_item_ids: list[str] = []
         self._multi_sort_observation_required = False
@@ -255,6 +257,12 @@ class GazeboRuntime:
             "work_order": {
                 "schema_version": "openeta.work_order.v1",
                 "source": "vlm_tool_call",
+                "selection_scope": self._work_order_selection_scope,
+                **(
+                    {"sorting_policy": dict(self._work_order_sorting_policy)}
+                    if self._work_order_sorting_policy is not None
+                    else {}
+                ),
                 "items": work_order_items,
             },
             "assignment_count": len(self._work_order_configs),
@@ -487,6 +495,8 @@ class GazeboRuntime:
         # closed.
         if self._target_configs:
             self._work_order_configs = ()
+            self._work_order_selection_scope = "explicit_items"
+            self._work_order_sorting_policy = None
             self._active_work_order_index = 0
             self._completed_work_order_item_ids = []
             self._multi_sort_observation_required = False
@@ -631,6 +641,8 @@ class GazeboRuntime:
         self,
         *,
         items: Sequence[Mapping[str, Any]],
+        selection_scope: str = "explicit_items",
+        sorting_policy: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Activate the ordered work plan authored by the VLM tool call."""
 
@@ -648,7 +660,13 @@ class GazeboRuntime:
         if not callable(resolver):
             raise GazeboProcessError("WORK_ORDER_RESOLVER_UNAVAILABLE")
         try:
-            configs = tuple(resolver(items))
+            configs = tuple(
+                resolver(
+                    items,
+                    selection_scope=selection_scope,
+                    sorting_policy=sorting_policy,
+                )
+            )
         except ValueError as exc:
             raise GazeboProcessError(f"WORK_ORDER_INVALID: {exc}") from exc
         if not configs:
@@ -673,6 +691,17 @@ class GazeboRuntime:
             target_quat_xyzw=tuple(float(value) for value in target_pose.quat_xyzw),
         )
         self._work_order_configs = configs
+        first_item = getattr(first_config, "work_order_item", None)
+        first_item = first_item if isinstance(first_item, Mapping) else {}
+        self._work_order_selection_scope = str(
+            first_item.get("selection_scope") or "explicit_items"
+        )
+        policy = first_item.get("sorting_policy")
+        self._work_order_sorting_policy = (
+            {str(key): str(value) for key, value in policy.items()}
+            if isinstance(policy, Mapping)
+            else None
+        )
         self._active_work_order_index = 0
         self._completed_work_order_item_ids = []
         self.attachment = first_attachment

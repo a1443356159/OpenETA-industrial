@@ -772,8 +772,16 @@ def configure_work_order(
     items: list[dict],
     *,
     session_id: str = "",
+    selection_scope: str = "explicit_items",
+    sorting_policy: dict | None = None,
 ) -> dict:
-    """Bind a VLM-authored ordered manipulation plan to the active workcell."""
+    """Bind a VLM-authored ordered manipulation plan to the active workcell.
+
+    ``all_catalog_targets`` is a declarative scope chosen by the VLM for an
+    open-ended sorting request. The simulator verifies that the supplied
+    items cover each catalog target exactly once; it never chooses a grouping
+    or a destination on the model's behalf.
+    """
 
     sid = session_id or _current_session.get() or ""
     _touch_session(sid)
@@ -785,7 +793,12 @@ def configure_work_order(
         return {"ok": False, "error": "Work-order configuration is unavailable"}
     return _proxy_step(
         meta,
-        {"action_type": "configure_work_order", "items": items},
+        {
+            "action_type": "configure_work_order",
+            "items": items,
+            "selection_scope": selection_scope,
+            "sorting_policy": sorting_policy,
+        },
         num_steps=1,
     )
 

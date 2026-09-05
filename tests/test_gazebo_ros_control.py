@@ -292,6 +292,27 @@ def test_detached_contact_approach_rejects_preterminal_target_contact() -> None:
     assert evidence["evaluated_sample_count"] == 2
 
 
+def test_detached_contact_approach_rejects_non_fingertip_target_penetration() -> None:
+    """Attachment-only knuckle exemptions must not leak into approach plans."""
+
+    def state_validity(_state):
+        return {
+            "valid": False,
+            "collision_pairs": [["target", "left_inner_knuckle"]],
+        }
+
+    evidence = _detached_contact_approach_audit(
+        joint_names=["slide"],
+        trajectory_positions=[[0.0]],
+        target_id="target",
+        target_touch_links=["left_tip", "right_tip"],
+        state_validity=state_validity,
+    )
+
+    assert evidence["valid"] is False
+    assert evidence["failure"]["reason"] == "terminal_state_has_unapproved_collision"
+
+
 def test_attached_support_departure_accepts_moveit_generated_separation() -> None:
     target, table = _support_departure_geometry()
 

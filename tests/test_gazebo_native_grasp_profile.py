@@ -257,12 +257,16 @@ def test_normal_target_compound_geometry_matches_thick_canonical_wrench() -> Non
     assert target is not None
     assert config.target_size_m == (0.22, 0.062, 0.030)
     assert config.target_initial_xyz[2] == pytest.approx(0.015)
-    assert len(primitives) == 2
-    assert [primitive["shape"] for primitive in primitives] == ["box", "box"]
-    assert [primitive["size_xyz"] for primitive in primitives] == [
+    assert len(primitives) == 3
+    assert [primitive["shape"] for primitive in primitives] == ["box", "box", "box"]
+    assert [primitive["size_xyz"] for primitive in primitives[:2]] == [
         [0.165, 0.025, 0.026],
         [0.055, 0.062, 0.030],
     ]
+    # The compiled visual-mesh envelope closes the small extent gap between
+    # the detailed rendered wrench and the hand-authored two-box proxy.
+    assert primitives[-1]["size_xyz"][0] == pytest.approx(0.22)
+    assert primitives[-1]["size_xyz"][2] > 0.028
     assert target.findtext("pose").split()[2] == "0.015"
     assert target.findtext("link/inertial/mass") == "0.30"
     assert target.findtext("link/visual/geometry/mesh/scale") == "1 1 2.0"
@@ -532,6 +536,85 @@ def test_vlm_work_order_rejects_duplicate_or_unknown_physical_targets() -> None:
                     "placement_region_prompt": "green parts bin",
                 }
             ]
+        )
+
+
+def test_complete_catalog_sort_plan_is_vlm_authored_but_host_coverage_checked() -> None:
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    policy = {
+        "criterion": "functional family",
+        "rationale": "Store hand tools together and hardware fasteners separately.",
+    }
+    items = [
+        {
+            "target_prompt": "yellow wrench",
+            "placement_region_prompt": "green parts bin",
+            "sort_group": "hand tools",
+        },
+        {
+            "target_prompt": "red hex bolt",
+            "placement_region_prompt": "blue parts bin",
+            "sort_group": "fasteners",
+        },
+        {
+            "target_prompt": "silver box-end wrench",
+            "placement_region_prompt": "green parts bin",
+            "sort_group": "hand tools",
+        },
+        {
+            "target_prompt": "blue-handled pliers",
+            "placement_region_prompt": "green parts bin",
+            "sort_group": "hand tools",
+        },
+        {
+            "target_prompt": "blue and black screwdriver",
+            "placement_region_prompt": "green parts bin",
+            "sort_group": "hand tools",
+        },
+    ]
+
+    configs = config.work_order_configs(
+        items,
+        selection_scope="all_catalog_targets",
+        sorting_policy=policy,
+    )
+
+    assert [item.target_id for item in configs] == [
+        "target_object",
+        "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
+    ]
+    assert all(
+        item.work_order_item["selection_scope"] == "all_catalog_targets"
+        for item in configs
+    )
+    assert all(item.work_order_item["sorting_policy"] == policy for item in configs)
+    assert {
+        item["sorting_attributes"]["functional_family"]
+        for item in config.manipulation_targets
+    } == {"hand tool", "fastener"}
+
+    with pytest.raises(
+        ValueError,
+        match="complete-catalog work order must include every target exactly once",
+    ):
+        config.work_order_configs(
+            items[:-1],
+            selection_scope="all_catalog_targets",
+            sorting_policy=policy,
+        )
+    inconsistent_items = [dict(item) for item in items]
+    inconsistent_items[1]["sort_group"] = "hand tools"
+    with pytest.raises(
+        ValueError,
+        match="maps one sort group to multiple destinations",
+    ):
+        config.work_order_configs(
+            inconsistent_items,
+            selection_scope="all_catalog_targets",
+            sorting_policy=policy,
         )
 
 

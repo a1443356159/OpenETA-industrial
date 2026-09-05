@@ -320,6 +320,71 @@ def test_vlm_work_order_advances_target_without_recreating_the_runtime() -> None
     assert post_release.metadata["planning_scene_revision"] == 7
 
 
+def test_runtime_preserves_complete_catalog_sort_policy_in_progress() -> None:
+    class Attachment:
+        def __init__(self, **_kwargs):
+            self.state = "detached"
+
+        @staticmethod
+        def native_target_mount_poses_with_retry(*, max_attempts):
+            assert max_attempts == 2
+            return (
+                SimpleNamespace(
+                    xyz=(0.24, -0.19, 0.002),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                SimpleNamespace(
+                    xyz=(0.0, 0.0, 0.9),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                1,
+            )
+
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    profile = replace(
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
+        model_config=config,
+    )
+    runtime = GazeboRuntime(
+        _deployment(),
+        profile,
+        world_control=_World(),
+        attachment_factory=Attachment,
+    )
+    runtime.controller = SimpleNamespace(
+        activate_pick_place_config=lambda *_args, **_kwargs: 7
+    )
+    policy = {
+        "criterion": "functional family",
+        "rationale": "Separate hand tools from fasteners.",
+    }
+    items = [
+        {
+            "target_prompt": target["target_prompt"],
+            "placement_region_prompt": (
+                "blue parts bin"
+                if target["sorting_attributes"]["functional_family"] == "fastener"
+                else "green parts bin"
+            ),
+            "sort_group": target["sorting_attributes"]["functional_family"],
+        }
+        for target in config.manipulation_targets
+    ]
+
+    configured = runtime.configure_work_order(
+        items=items,
+        selection_scope="all_catalog_targets",
+        sorting_policy=policy,
+    )
+
+    work_order = configured["work_order"]
+    assert work_order["selection_scope"] == "all_catalog_targets"
+    assert work_order["sorting_policy"] == policy
+    assert len(work_order["items"]) == len(config.manipulation_targets)
+    assert all("sort_group" in item for item in work_order["items"])
+    assert configured["remaining_count"] == len(config.manipulation_targets)
+
+
 def test_failed_atomic_work_order_transition_does_not_advance_progress() -> None:
     attachments = {}
 

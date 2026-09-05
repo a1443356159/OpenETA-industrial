@@ -10,6 +10,16 @@ from typing import Any
 
 LEFT_FINGERTIP = "robotiq_85_left_finger_tip_link"
 RIGHT_FINGERTIP = "robotiq_85_right_finger_tip_link"
+# A detached target may touch only the two sensing pads at the terminal grasp
+# contact pose.  This is deliberately narrower than ``TARGET_TOUCH_LINKS``:
+# the latter models the internal exemptions of an object which has already
+# been physically attached to the four-bar gripper.  Reusing it while
+# approaching would permit an inner knuckle or finger body to pass through a
+# target before the native contact/attach proof exists.
+GRASP_CONTACT_TOUCH_LINKS = (
+    LEFT_FINGERTIP,
+    RIGHT_FINGERTIP,
+)
 # MoveIt touch links describe every gripper link that a physically verified
 # held object may contact, not only the two Gazebo links used as the bilateral
 # contact sensor gate.  The 2F-85 four-bar linkage brings the inner knuckles

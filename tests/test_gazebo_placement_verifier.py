@@ -127,7 +127,9 @@ def test_stable_placement_requires_duration_drift_height_and_oriented_footprint(
     assert result.evidence["terminal_drift_m"] == 0.0
     assert result.evidence["conservative_footprint_radius_m"] > 0.11
     assert result.evidence["projected_footprint_half_extent_xy_m"] == pytest.approx(
-        [0.1075, 0.031]
+        # The shared visual/collision envelope includes the rendered wrench's
+        # full 220 mm extent, not only the former hand-authored proxy.
+        [0.11, 0.031]
     )
     assert result.evidence["geometry_source"] == "compound_collision_primitives"
     assert result.evidence["final_pose"]["quat_xyzw"] == [0.0, 0.0, 0.0, 1.0]
@@ -360,15 +362,19 @@ def test_offset_compound_body_uses_physical_bottom_after_tipping() -> None:
         -0.056720734639233744,
         0.7048282812249195,
     )
-    center_x, center_y = NativePickPlaceConfig().destination_center_xy
-    xyz = (center_x + 0.02, center_y, 0.044764681111384076)
+    config = NativePickPlaceConfig()
+    center_x, center_y = config.destination_center_xy
+    # Derive the supported link height from the authoritative compound
+    # geometry.  The test concerns an offset/tipped body, rather than the
+    # incidental dimensions of one rendered wrench mesh.
+    xyz = (center_x + 0.02, center_y, _supported_link_height(config, quat))
     samples = [_sample(stamp, xyz, quat) for stamp in (10.0, 10.3, 10.4, 10.5)]
 
     result = verify_stable_placement(samples)
 
     assert result.verdict is Verdict.PASS
     assert result.evidence["projected_collision_minimum_z_m"] == pytest.approx(
-        0.02, abs=1e-6
+        config.destination_support_z_m, abs=1e-6
     )
     assert result.evidence["support_height_error_m"] < 1e-6
 

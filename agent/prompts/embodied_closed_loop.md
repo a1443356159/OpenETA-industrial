@@ -23,6 +23,14 @@ Apply these obligations on every planning turn:
   include a non-empty ordered `items` list in the call and never send empty
   parameters. Treat the returned normalized work order in session memory as
   the active task plan.
+- For an open-ended request such as “sort the loose items on the table in an
+  orderly way,” inspect the current RGB-D views and the manipulation catalog
+  before authoring the plan. Set `selection_scope=all_catalog_targets`, include
+  every catalog target exactly once, provide a short `sorting_policy` with a
+  semantic `criterion` and `rationale`, and give every item a `sort_group`.
+  The host verifies coverage and group-to-destination consistency, but never
+  chooses the grouping or a destination. Unlisted scene bodies remain
+  distractors unless the operator explicitly changes the authorized catalog.
 - A successful tool call proves only that the call ran. Declare `task_complete`
   only from a host checker, structured state transition, or other current proof,
   and name that proof in `reasoning`. In benchmarks, the same episode must also

@@ -423,25 +423,38 @@ def test_completed_work_order_does_not_reconfigure_without_a_new_operator_turn()
     ]
 
 
-def test_general_sort_request_allows_the_vlm_to_author_a_complete_order() -> None:
+def test_general_sort_request_allows_the_vlm_to_author_a_complete_order(
+    tmp_path: Path,
+) -> None:
     """A broad operator goal is semantic planning, not a hidden static task."""
 
     catalog = {
         "schema_version": "openeta.manipulation_catalog.v1",
         "targets": [
-            {"target_prompt": "silver wrench"},
-            {"target_prompt": "red hex bolt"},
+            {
+                "target_prompt": "silver wrench",
+                "sorting_attributes": {"functional_family": "hand tool"},
+            },
+            {
+                "target_prompt": "red hex bolt",
+                "sorting_attributes": {"functional_family": "fastener"},
+            },
         ],
         "placement_regions": [
             {"prompt": "green parts bin"},
             {"prompt": "blue parts bin"},
         ],
     }
-    observation = EnvObservation(
+    scene_rgb = tmp_path / "sort-scene.rgb.png"
+    scene_depth = tmp_path / "sort-scene.depth.png"
+    scene_rgb.write_bytes(b"rgb")
+    scene_depth.write_bytes(b"depth")
+    observation = _rgbd_observation(
         task="normal pick and place",
-        cameras=[],
-        robot=RobotState(),
-        metadata={"manipulation_catalog": catalog, "work_order_required": True},
+        views=[("top", scene_rgb, scene_depth)],
+    )
+    observation.metadata.update(
+        {"manipulation_catalog": catalog, "work_order_required": True}
     )
     memory = AgentMemory()
     memory.start_session(task="对桌子上的物品进行分拣")
@@ -453,14 +466,21 @@ def test_general_sort_request_allows_the_vlm_to_author_a_complete_order() -> Non
             "kind": "tool_call",
             "name": "configure_work_order",
             "parameters": {
+                "selection_scope": "all_catalog_targets",
+                "sorting_policy": {
+                    "criterion": "functional family",
+                    "rationale": "Keep hand tools together and fasteners together.",
+                },
                 "items": [
                     {
                         "target_prompt": "silver wrench",
                         "placement_region_prompt": "green parts bin",
+                        "sort_group": "hand tools",
                     },
                     {
                         "target_prompt": "red hex bolt",
                         "placement_region_prompt": "blue parts bin",
+                        "sort_group": "fasteners",
                     },
                 ]
             },
@@ -476,8 +496,70 @@ def test_general_sort_request_allows_the_vlm_to_author_a_complete_order() -> Non
     obligation = requests[0].tool_context["obligations"]["work_order_obligation"]
     assert decision.action == "configure_work_order"
     assert len(decision.parameters["items"]) == 2
+    assert decision.parameters["selection_scope"] == "all_catalog_targets"
+    assert decision.parameters["sorting_policy"]["criterion"] == "functional family"
+    assert requests[0].tool_context["vision_image_paths"] == [str(scene_rgb)]
     assert "generally to sort the table" in obligation["rule"]
+    assert obligation["selection_scopes"]["all_catalog_targets"]["coverage"] == (
+        "every catalog target exactly once"
+    )
     assert obligation["manipulation_catalog"] == catalog
+
+
+def test_complete_catalog_work_order_requires_a_policy_and_item_groups() -> None:
+    planner = ToolCallingPlanner(
+        StaticPlannerBackend(
+            [
+                {
+                    "kind": "tool_call",
+                    "name": "configure_work_order",
+                    "parameters": {
+                        "selection_scope": "all_catalog_targets",
+                        "items": [
+                            {
+                                "target_prompt": "silver wrench",
+                                "placement_region_prompt": "green parts bin",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "kind": "response",
+                    "name": "ask_human",
+                    "parameters": {"question": "Need a complete sorting plan."},
+                },
+            ]
+        ),
+        max_validation_retries=1,
+    )
+    memory = AgentMemory()
+    memory.start_session(task="sort the table")
+    observation = EnvObservation(
+        task="sort the table",
+        cameras=[],
+        robot=RobotState(),
+        metadata={
+            "manipulation_catalog": {
+                "schema_version": "openeta.manipulation_catalog.v1",
+                "targets": [{"target_prompt": "silver wrench"}],
+                "placement_regions": [{"prompt": "green parts bin"}],
+            },
+            "work_order_required": True,
+        },
+    )
+
+    decision = planner.plan(
+        observation,
+        memory=memory,
+        tools=_tools_with_handlers("configure_work_order"),
+        skills=build_default_skill_registry(),
+    )
+
+    assert decision.action == "ask_human"
+    assert decision.metadata["validation_attempts"] == 2
+    errors = decision.metadata["validation_attempt_history"][0]["validation_errors"]
+    assert any("sorting_policy" in error for error in errors)
+    assert any("sort_group" in error for error in errors)
 
 
 def test_empty_work_order_is_rejected_before_tool_dispatch_and_replanned() -> None:
@@ -544,18 +626,25 @@ def test_environment_normalized_work_order_is_persisted_in_memory() -> None:
             "id": "red_bolt_to_blue_parts_bin",
             "target_prompt": "red hex bolt",
             "placement_region_prompt": "blue parts bin",
+            "sort_group": "fasteners",
             "source": "vlm_work_order",
         },
         {
             "id": "yellow_wrench_to_green_parts_bin",
             "target_prompt": "yellow wrench",
             "placement_region_prompt": "green parts bin",
+            "sort_group": "hand tools",
             "source": "vlm_work_order",
         },
     ]
     work_order = {
         "schema_version": "openeta.work_order.v1",
         "source": "vlm_tool_call",
+        "selection_scope": "all_catalog_targets",
+        "sorting_policy": {
+            "criterion": "functional family",
+            "rationale": "Keep tools and fasteners separate.",
+        },
         "items": items,
     }
     memory.add_observation(
@@ -581,6 +670,45 @@ def test_environment_normalized_work_order_is_persisted_in_memory() -> None:
     )
 
     assert memory.planning_context()["work_order"] == work_order
+
+
+def test_memory_rejects_an_incomplete_complete_catalog_sort_plan() -> None:
+    memory = AgentMemory()
+    memory.start_session(task="sort loose items")
+    malformed_order = {
+        "schema_version": "openeta.work_order.v1",
+        "source": "vlm_tool_call",
+        "selection_scope": "all_catalog_targets",
+        "items": [
+            {
+                "id": "wrench_to_green",
+                "target_prompt": "yellow wrench",
+                "placement_region_prompt": "green parts bin",
+            }
+        ],
+    }
+    memory.add_observation(
+        EnvObservation(
+            task="sort loose items",
+            cameras=[],
+            robot=RobotState(),
+            metadata={
+                "multi_sort_progress": {
+                    "schema_version": "openeta.multi_sort_progress.v1",
+                    "source": "vlm_work_order",
+                    "work_order": malformed_order,
+                    "assignment_count": 1,
+                    "completed_count": 0,
+                    "remaining_count": 1,
+                    "all_completed": False,
+                    "active_assignment_index": 0,
+                    "active_assignment": malformed_order["items"][0],
+                }
+            },
+        )
+    )
+
+    assert memory.planning_context()["work_order"] is None
 
 
 def test_successful_work_order_reconfiguration_clears_task_scoped_memory() -> None:

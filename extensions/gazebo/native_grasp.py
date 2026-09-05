@@ -58,6 +58,14 @@ PLACEMENT_ACCEPTANCE_SEMANTICS = frozenset(
         PLACEMENT_ACCEPTANCE_STABLE_GEOMETRY_CENTROID,
     }
 )
+WORK_ORDER_SCOPE_EXPLICIT_ITEMS = "explicit_items"
+WORK_ORDER_SCOPE_ALL_CATALOG_TARGETS = "all_catalog_targets"
+WORK_ORDER_SELECTION_SCOPES = frozenset(
+    {
+        WORK_ORDER_SCOPE_EXPLICIT_ITEMS,
+        WORK_ORDER_SCOPE_ALL_CATALOG_TARGETS,
+    }
+)
 
 
 def acceptance_scene_contract_path() -> Path:
@@ -176,6 +184,29 @@ def load_acceptance_scene_contract(
         ):
             raise ValueError("acceptance scene perception prompt is invalid")
 
+    def validate_sorting_attributes(owner: Mapping[str, Any]) -> None:
+        """Validate optional semantic descriptors without assigning a bin.
+
+        These attributes describe an object for a VLM-authored sorting policy;
+        they deliberately do not encode a destination or a preferred order.
+        """
+
+        attributes = owner.get("sorting_attributes")
+        if attributes is None:
+            return
+        if (
+            not isinstance(attributes, Mapping)
+            or not attributes
+            or any(
+                not isinstance(key, str)
+                or not key.strip()
+                or not isinstance(value, str)
+                or not value.strip()
+                for key, value in attributes.items()
+            )
+        ):
+            raise ValueError("acceptance scene sorting attributes are invalid")
+
     model_pose_overrides = scene.get("model_pose_overrides")
     if model_pose_overrides is not None:
         if not isinstance(model_pose_overrides, list) or not model_pose_overrides:
@@ -293,6 +324,7 @@ def load_acceptance_scene_contract(
             target_ids.add(target_id)
             validate_semantic_aliases(item)
             validate_perception_prompt(item)
+            validate_sorting_attributes(item)
         if task is not None:
             raise ValueError(
                 "task-neutral manipulation catalog cannot contain a static task"
@@ -526,7 +558,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
     parent_link: str = "gripper_mount_link"
     acceptance_scene_id: str = field(default_factory=_acceptance_scene_from_environment)
     active_manipulation_target_index: int = 0
-    work_order_item: Mapping[str, str] | None = None
+    work_order_item: Mapping[str, Any] | None = None
     left_contact_topic: str = "/openeta/native_grasp/contacts/left_pad"
     right_contact_topic: str = "/openeta/native_grasp/contacts/right_pad"
     attach_topic: str = "/openeta/native_grasp/detachable_joint/target/attach"
@@ -857,11 +889,38 @@ class NativePickPlaceConfig(GazeboControlConfig):
     def work_order_configs(
         self,
         items: Sequence[Mapping[str, Any]],
+        *,
+        selection_scope: str = WORK_ORDER_SCOPE_EXPLICIT_ITEMS,
+        sorting_policy: Mapping[str, Any] | None = None,
     ) -> tuple["NativePickPlaceConfig", ...]:
         """Resolve VLM-authored semantic work items against physical catalogs."""
 
         if not isinstance(items, Sequence) or isinstance(items, (str, bytes)) or not items:
             raise ValueError("work order requires at least one item")
+        scope = str(selection_scope or "").strip()
+        if scope not in WORK_ORDER_SELECTION_SCOPES:
+            raise ValueError("work-order selection scope is invalid")
+        normalized_policy: dict[str, str] | None = None
+        if sorting_policy is not None:
+            if not isinstance(sorting_policy, Mapping):
+                raise ValueError("work-order sorting policy is invalid")
+            criterion = str(sorting_policy.get("criterion") or "").strip()
+            rationale = str(sorting_policy.get("rationale") or "").strip()
+            if (
+                not criterion
+                or not rationale
+                or len(criterion) > 160
+                or len(rationale) > 1_000
+            ):
+                raise ValueError("work-order sorting policy is invalid")
+            normalized_policy = {
+                "criterion": criterion,
+                "rationale": rationale,
+            }
+        if scope == WORK_ORDER_SCOPE_ALL_CATALOG_TARGETS and normalized_policy is None:
+            raise ValueError(
+                "complete-catalog work order requires a sorting policy"
+            )
         targets = self.manipulation_targets
         regions = self.acceptance_scene_contract.get("placement_regions")
         region_catalog = (
@@ -871,6 +930,7 @@ class NativePickPlaceConfig(GazeboControlConfig):
         )
         resolved: list[NativePickPlaceConfig] = []
         used_target_ids: set[str] = set()
+        group_destinations: dict[str, str] = {}
         for item in items:
             if not isinstance(item, Mapping):
                 raise ValueError("work-order item is invalid")
@@ -892,6 +952,20 @@ class NativePickPlaceConfig(GazeboControlConfig):
             if target_id in used_target_ids:
                 raise ValueError("work order cannot select one physical target twice")
             used_target_ids.add(target_id)
+            sort_group = str(item.get("sort_group") or "").strip()
+            if scope == WORK_ORDER_SCOPE_ALL_CATALOG_TARGETS and not sort_group:
+                raise ValueError(
+                    "complete-catalog work order requires a sort group per item"
+                )
+            if len(sort_group) > 160:
+                raise ValueError("work-order sort group is invalid")
+            region_id = str(region["id"])
+            if sort_group:
+                previous_region = group_destinations.setdefault(sort_group, region_id)
+                if previous_region != region_id:
+                    raise ValueError(
+                        "work order maps one sort group to multiple destinations"
+                    )
             normalized = {
                 "id": f"{target['id']}_to_{region['id']}",
                 "target_object_id": target_id,
@@ -902,13 +976,20 @@ class NativePickPlaceConfig(GazeboControlConfig):
                 ),
                 "placement_object_prompt": str(target["target_prompt"]),
                 "source_support_object_id": str(target["source_support_object_id"]),
-                "placement_region_id": str(region["id"]),
+                "placement_region_id": region_id,
                 "placement_region_prompt": str(region["prompt"]),
                 "placement_region_perception_prompt": str(
                     region.get("perception_prompt") or region["prompt"]
                 ),
                 "source": "vlm_work_order",
             }
+            if sort_group:
+                normalized["sort_group"] = sort_group
+            if scope == WORK_ORDER_SCOPE_ALL_CATALOG_TARGETS:
+                normalized["selection_scope"] = scope
+                # This small shared record makes every assignment auditable
+                # even after the runtime advances to a later object.
+                normalized["sorting_policy"] = dict(normalized_policy or {})
             resolved.append(
                 replace(
                     self,
@@ -920,6 +1001,20 @@ class NativePickPlaceConfig(GazeboControlConfig):
                     placement_acceptance_semantics=None,
                 )
             )
+        if scope == WORK_ORDER_SCOPE_ALL_CATALOG_TARGETS:
+            catalog_target_ids = {
+                str(target["target_object_id"])
+                for target in targets
+                if str(target.get("target_object_id") or "")
+            }
+            if used_target_ids != catalog_target_ids:
+                missing = sorted(catalog_target_ids - used_target_ids)
+                unexpected = sorted(used_target_ids - catalog_target_ids)
+                detail = ",".join([*missing, *unexpected]) or "unknown"
+                raise ValueError(
+                    "complete-catalog work order must include every target exactly once: "
+                    + detail
+                )
         return tuple(resolved)
 
     @property

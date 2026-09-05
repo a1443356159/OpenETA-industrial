@@ -13,7 +13,7 @@ import pytest
 
 import agent.tools.sim_mcp as sim_mcp
 from sim.mcp_server.worker_mgr import _attach_control_spec
-from adapter.protocol import EnvAction, EnvObservation, JsonDict, RobotState
+from adapter.protocol import EnvAction, JsonDict
 from agent.tools.sim_mcp import (
     DEFAULT_SIMULATOR_MCP_TOOL_NAMES,
     SimulatorMcpEpisodeConfig,
@@ -543,7 +543,7 @@ def test_default_simulator_mcp_binding_uses_remote_stable_tools() -> None:
     assert tools.can_execute("gripper_control")
 
 
-def test_configure_work_order_proxy_forwards_only_vlm_items_and_session_binding() -> None:
+def test_configure_work_order_proxy_forwards_vlm_sort_plan_and_session_binding() -> None:
     work_order = {
         "schema_version": "openeta.work_order.v1",
         "source": "vlm_tool_call",
@@ -574,10 +574,22 @@ def test_configure_work_order_proxy_forwards_only_vlm_items_and_session_binding(
         {
             "target_prompt": "red hex bolt",
             "placement_region_prompt": "blue parts bin",
+            "sort_group": "fasteners",
         }
     ]
+    sorting_policy = {
+        "criterion": "functional family",
+        "rationale": "Keep fasteners separate from hand tools.",
+    }
 
-    result = tools.call("configure_work_order", {"items": requested_items})
+    result = tools.call(
+        "configure_work_order",
+        {
+            "items": requested_items,
+            "selection_scope": "all_catalog_targets",
+            "sorting_policy": sorting_policy,
+        },
+    )
 
     assert result.success is True
     assert transport.calls == [
@@ -585,6 +597,8 @@ def test_configure_work_order_proxy_forwards_only_vlm_items_and_session_binding(
             "name": "configure_work_order",
             "arguments": {
                 "items": requested_items,
+                "selection_scope": "all_catalog_targets",
+                "sorting_policy": sorting_policy,
                 "handle": "env-1",
                 "session_id": "session-1",
             },

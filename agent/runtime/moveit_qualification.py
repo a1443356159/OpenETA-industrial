@@ -108,7 +108,11 @@ def _contact_allowed_collisions(
     if target.get("grasp_stage") != "contact" or not isinstance(scene, Mapping):
         return {}
     target_id = str(scene.get("target_id") or "")
-    links = scene.get("target_touch_links")
+    # This is intentionally distinct from ``target_touch_links``.  The latter
+    # belongs to an attached object and includes inner knuckles needed by the
+    # four-bar linkage while carrying it.  A detached target admits only the
+    # two fingertip pads at its exact contact endpoint.
+    links = scene.get("grasp_contact_touch_links")
     if not target_id or not isinstance(links, (list, tuple)):
         return {}
     normalized = sorted({str(link) for link in links if str(link)})
