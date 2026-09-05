@@ -66,6 +66,15 @@ def _accepted_gate():
             "post_attach_infrastructure_failure",
         ),
         (
+            gazebo_direct_env.GazeboProcessError(
+                "NATIVE_GRASP_COLLISION_FILTER_ACK_MISSING"
+            ),
+            True,
+            False,
+            True,
+            "post_attach_infrastructure_failure",
+        ),
+        (
             RuntimeError("ATTACH_FAILED"),
             False,
             False,
@@ -581,6 +590,98 @@ def test_post_attach_pose_retry_exhaustion_preserves_infrastructure_error(
         "maximum_attempts_per_read": 2,
         "retry_exhausted": True,
     }
+    assert receipt["detachable_joint"]["state"] == "detached"
+    assert attachment.state == "detached"
+
+
+def test_collision_filter_timeout_after_joint_attach_is_infrastructure_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A proven joint attach is never discarded as a bad grasp candidate."""
+
+    config = NativePickPlaceConfig()
+    observation = EnvObservation(task="pick and place", cameras=[], robot=RobotState())
+
+    class ContactWindow:
+        def __init__(self, **_kwargs):
+            pass
+
+        @staticmethod
+        def arm():
+            return None
+
+        @staticmethod
+        def evaluate(**_kwargs):
+            return _accepted_gate()
+
+        @staticmethod
+        def close():
+            return None
+
+    class Attachment:
+        state = "detached"
+
+        def attach(self):
+            # This matches the real controller's state after the stock
+            # DetachableJoint acknowledgement but before the independent
+            # collision-filter state proof has returned.
+            self.state = "attached"
+            raise gazebo_direct_env.GazeboProcessError(
+                "NATIVE_GRASP_COLLISION_FILTER_ACK_MISSING"
+            )
+
+        @staticmethod
+        def native_target_mount_poses():
+            return (
+                SimpleNamespace(
+                    xyz=(0.31, -0.08, 0.43),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                SimpleNamespace(
+                    xyz=(0.30, -0.08, 0.55),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+            )
+
+        def ensure_detached(self, *, require_ack):
+            assert require_ack is True
+            self.state = "detached"
+
+    attachment = Attachment()
+    controller = SimpleNamespace(
+        planning_scene=SimpleNamespace(revision=7, attached_ids=set())
+    )
+    runtime = SimpleNamespace(
+        attachment=attachment,
+        controller=controller,
+        scene_revision=7,
+        observe=lambda: observation,
+        execute=lambda _action: (observation, {"ok": True}),
+    )
+    env = object.__new__(GazeboDirectEnv)
+    env.runtime = runtime
+    env.deployment = SimpleNamespace(gz_executable="gz", process_environment={})
+    env.profile = SimpleNamespace(
+        model_config=config,
+        cameras=(),
+        capabilities={STRUCTURED_RECEIPT},
+    )
+    env._native_grasp_config = config
+    env._native_grasp_verifier = NativeGraspVerifier(config)
+    env._native_grasp_transport_locked = False
+    env._attachment_transform = None
+    env._attachment_source_pose_sync = None
+    monkeypatch.setattr(gazebo_direct_env, "GazeboNativeContactWindow", ContactWindow)
+
+    _, _, _, _, result = env.step({"action_type": "gripper_close"})
+
+    receipt = result["_openeta_receipt"]
+    assert receipt["ok"] is False
+    assert receipt["error_code"] == "NATIVE_GRASP_COLLISION_FILTER_ACK_MISSING"
+    assert receipt["infrastructure_error"] is True
+    assert receipt["candidate_rejection"] is False
+    assert receipt["failure_class"] == "post_attach_infrastructure_failure"
+    assert receipt["attach_acked_before_rollback"] is True
     assert receipt["detachable_joint"]["state"] == "detached"
     assert attachment.state == "detached"
 

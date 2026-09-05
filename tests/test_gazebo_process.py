@@ -263,6 +263,61 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
     }
 
 
+def test_collision_filter_ack_retries_after_one_transient_listener_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single short-lived ``gz topic`` listener must not consume the proof."""
+
+    attempts: list[str] = []
+
+    class Listener:
+        def __init__(self, outcome: str) -> None:
+            self.outcome = outcome
+
+        def communicate(self, timeout):
+            attempts.append(self.outcome)
+            if self.outcome == "timeout":
+                raise subprocess.TimeoutExpired(["gz", "topic"], timeout)
+            return ("data: true\n", "")
+
+        @staticmethod
+        def poll():
+            return 0
+
+    outcomes = iter(("timeout", "ack"))
+    monkeypatch.setattr(
+        gazebo_process.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: Listener(next(outcomes)),
+    )
+
+    def run(command, **_kwargs):
+        if "-i" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "Publishers [Address, Message Type]:\n"
+                    "  tcp://127.0.0.1:12344, gz.msgs.Boolean\n"
+                    "Subscribers [Address, Message Type]:\n"
+                    "  tcp://127.0.0.1:12345, google.protobuf.Message\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(gazebo_process.subprocess, "run", run)
+    control = gazebo_process.GazeboDetachableJointControl(
+        gz_executable=sys.executable,
+        timeout_s=1.0,
+    )
+
+    control._wait_collision_filter_state(attached=True)
+
+    assert attempts == ["timeout", "ack"]
+    assert control.collision_filter_evidence()["state"] == "robot_excluded"
+
+
 def test_detachable_joint_proof_uses_the_target_model_world_pose() -> None:
     """The target link is local-to-model in Gazebo Pose_V, not world-space."""
 

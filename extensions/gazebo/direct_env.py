@@ -1135,13 +1135,24 @@ class GazeboDirectEnv(Env):
                                 "detail": str(rollback_exc),
                             }
                     original_error = str(exc) or type(exc).__name__
+                    # ``attachment.attach()`` can receive the stock
+                    # DetachableJoint ACK and then fail only while proving
+                    # the separate collision-filter transition.  The
+                    # attachment controller records the joint state before
+                    # that second proof so rollback can detach safely.  Keep
+                    # the same distinction in the receipt: this is transport
+                    # infrastructure uncertainty, not a geometrically bad
+                    # grasp candidate.
+                    attach_transition_acked = bool(
+                        attach_acked or attached_before_cleanup
+                    )
                     (
                         candidate_attachment_failure,
                         post_attach_infrastructure_failure,
                         failure_class,
                     ) = _native_close_failure_classification(
                         exc,
-                        attach_acked=attach_acked,
+                        attach_acked=attach_transition_acked,
                     )
                     terminal_gate = (
                         gate
@@ -1168,7 +1179,7 @@ class GazeboDirectEnv(Env):
                         ),
                         "physical_verification": record.to_dict(),
                         "detail": original_error,
-                        "attach_acked_before_rollback": attach_acked,
+                        "attach_acked_before_rollback": attach_transition_acked,
                         "infrastructure_error": post_attach_infrastructure_failure,
                         "candidate_rejection": candidate_attachment_failure,
                         "failure_class": failure_class,

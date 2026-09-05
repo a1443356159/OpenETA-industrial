@@ -498,12 +498,23 @@ class GazeboDetachableJointControl:
     def _executable(value: str) -> str:
         return shutil.which(value) or value
 
-    def _publish_empty(self, topic: str) -> None:
+    def _publish_empty(self, topic: str, *, timeout_s: float | None = None) -> None:
+        """Publish one Empty transport request within an explicit deadline.
+
+        Attach / detach commands retain the controller-wide timeout.  The
+        collision-filter state request is retryable, however, so each attempt
+        must leave time for another fresh listener instead of allowing one
+        overloaded ``gz topic`` client to consume the whole proof window.
+        """
+
+        timeout = self.timeout_s if timeout_s is None else float(timeout_s)
+        if not math.isfinite(timeout) or timeout <= 0.0:
+            raise ValueError("Gazebo transport timeout must be positive")
         try:
             result = subprocess.run(
                 [self._executable(self.gz_executable), "topic", "-t", topic, "-m", "gz.msgs.Empty", "-p", ""],
                 capture_output=True, text=True, check=False, env=self.environment,
-                timeout=self.timeout_s,
+                timeout=timeout,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GazeboProcessError("NATIVE_GRASP_DETACHABLE_JOINT_UNAVAILABLE") from exc
@@ -579,11 +590,19 @@ class GazeboDetachableJointControl:
         """
 
         deadline = time.monotonic() + self.timeout_s
+        # ``gz topic`` is a short-lived transport client.  On a loaded host a
+        # listener can occasionally fail to receive its first response even
+        # though the native filter has transitioned correctly.  Bound every
+        # attempt so the remaining proof window can establish a new listener
+        # and issue a new request.  This is a transport reliability policy,
+        # independent of scene/object identity and collision geometry.
+        attempt_budget_s = min(3.0, self.timeout_s)
         last_error = "no collision-filter state received"
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
+            attempt_deadline = min(deadline, time.monotonic() + attempt_budget_s)
             listener: subprocess.Popen[str] | None = None
             output = ""
             listener_stderr = ""
@@ -611,8 +630,8 @@ class GazeboDetachableJointControl:
                     r"(?:\s+\S+,[^\n]*\n)*?\s+\S+,\s*gz\.msgs\.Boolean\b"
                 )
                 subscriber = r"Subscribers\s*\[[^\]]*\]:\s*\n\s+\S"
-                while time.monotonic() < deadline:
-                    remaining = deadline - time.monotonic()
+                while time.monotonic() < attempt_deadline:
+                    remaining = attempt_deadline - time.monotonic()
                     try:
                         state_info = subprocess.run(
                             [
@@ -626,7 +645,7 @@ class GazeboDetachableJointControl:
                             text=True,
                             check=False,
                             env=self.environment,
-                            timeout=min(5.0, max(0.1, remaining)),
+                            timeout=min(1.0, max(0.1, remaining)),
                         )
                     except subprocess.TimeoutExpired as exc:
                         last_error = f"{type(exc).__name__}: {exc}"
@@ -650,15 +669,26 @@ class GazeboDetachableJointControl:
                         min(0.02, max(0.0, deadline - time.monotonic()))
                     )
                 if not listener_ready:
-                    break
-                self._publish_empty(self.collision_filter_state_request_topic)
+                    continue
+                remaining = attempt_deadline - time.monotonic()
+                if remaining <= 0:
+                    last_error = "collision-filter ACK attempt expired before request"
+                    continue
+                self._publish_empty(
+                    self.collision_filter_state_request_topic,
+                    timeout_s=min(attempt_budget_s, remaining),
+                )
                 output, listener_stderr = listener.communicate(
-                    timeout=max(0.1, deadline - time.monotonic())
+                    timeout=max(0.1, attempt_deadline - time.monotonic())
                 )
                 listener_returncode = listener.poll()
             except (OSError, subprocess.TimeoutExpired, GazeboProcessError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                break
+                # The finally block retires this listener.  Retry from a
+                # fresh transport endpoint while the explicit proof deadline
+                # remains; do not turn one client-side timeout into a false
+                # candidate rejection.
+                continue
             finally:
                 if listener is not None and listener.poll() is None:
                     listener.terminate()
@@ -828,6 +858,11 @@ class GazeboDetachableJointControl:
             raise GazeboProcessError(
                 "NATIVE_GRASP_ATTACH_ACK_MISSING" if action == "attach" else "NATIVE_GRASP_DETACH_ACK_MISSING"
             )
+        # The stock DetachableJoint acknowledgement establishes this state
+        # before the independent collision-filter proof completes.  Keep that
+        # fact available to cleanup and failure classification: a later
+        # collision-filter transport timeout is infrastructure uncertainty,
+        # not evidence that the physical candidate never attached.
         self._state = DetachableJointState.ATTACHED if action == "attach" else DetachableJointState.DETACHED
         expected_filter_state = action == "attach"
         self._wait_collision_filter_state(attached=expected_filter_state)
