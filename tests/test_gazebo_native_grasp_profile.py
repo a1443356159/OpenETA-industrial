@@ -618,6 +618,67 @@ def test_complete_catalog_sort_plan_is_vlm_authored_but_host_coverage_checked() 
         )
 
 
+def test_complete_catalog_sort_resolves_chinese_operator_terms() -> None:
+    """Open Chinese instructions resolve aliases, not fixture object IDs."""
+
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    policy = {
+        "criterion": "按功能类别整理",
+        "rationale": "将手工具和紧固件分别放入便于后续取用的料箱。",
+    }
+    configs = config.work_order_configs(
+        [
+            {
+                "target_prompt": "黄色活动扳手",
+                "placement_region_prompt": "绿色零件箱",
+                "sort_group": "手工具",
+            },
+            {
+                "target_prompt": "红色六角螺栓",
+                "placement_region_prompt": "蓝色零件箱",
+                "sort_group": "紧固件",
+            },
+            {
+                "target_prompt": "银色梅花扳手",
+                "placement_region_prompt": "绿色零件箱",
+                "sort_group": "手工具",
+            },
+            {
+                "target_prompt": "蓝柄钢丝钳",
+                "placement_region_prompt": "绿色零件箱",
+                "sort_group": "手工具",
+            },
+            {
+                "target_prompt": "蓝黑色螺丝刀",
+                "placement_region_prompt": "绿色零件箱",
+                "sort_group": "手工具",
+            },
+        ],
+        selection_scope="all_catalog_targets",
+        sorting_policy=policy,
+    )
+
+    assert [item.target_id for item in configs] == [
+        "target_object",
+        "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
+    ]
+    assert [item.selected_placement_region_id for item in configs] == [
+        "green_parts_bin",
+        "blue_parts_bin",
+        "green_parts_bin",
+        "green_parts_bin",
+        "green_parts_bin",
+    ]
+    assert all(
+        item.work_order_item["selection_scope"] == "all_catalog_targets"
+        and item.work_order_item["sorting_policy"] == policy
+        for item in configs
+    )
+
+
 def test_native_grasp_sdf_renderer_rejects_a_conflicting_robot_collision_mask() -> None:
     root = ET.fromstring(
         """<sdf><model name="robot"><link name="base_link">
