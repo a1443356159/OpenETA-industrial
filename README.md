@@ -29,6 +29,7 @@ change reality.
 [Action Pipeline](docs/agent-action-pipeline.md) ·
 [Parallel Evaluation](docs/parallel-simulator-evaluation.md) ·
 [Docker Deployment](docs/ubuntu-docker-deployment.md) ·
+[`final-dev` Judge Reproduction](docs/final-dev-delivery.md) ·
 [Real-robot Deployment](real/README.md)
 
 ## What's New
@@ -282,6 +283,7 @@ environment receipts, rewards, checkers, and retained rollout evidence.
 | [Simulation layer](sim/README.md) | Installation, environment registry, MCP, REST, and Dashboard |
 | [Gazebo `multi_normal` acceptance](docs/gazebo-normal-acceptance.md) | GraspGenX/AnyPlace compilation, MoveIt scene constraints, frozen-frontier recovery, and release gates |
 | [Human TUI reproduction](docs/multi-normal-tui-reproduction.md) | Operator procedure for the representative two-item `multi_normal` work order |
+| [`final-dev` migration and Docker reproduction](docs/final-dev-delivery.md) | Credential-free source package, GPU/Docker setup, model validation, provider secret setup, and judge commands |
 | [Parallel simulator evaluation](docs/parallel-simulator-evaluation.md) | Concurrency, budgets, human recovery, and experience promotion |
 | [Rollout data contract](docs/rollout-data-contract.md) | Session data layers and immutable evidence |
 | [Code policy runtime](docs/code-policy-runtime.md) | Bounded code backends and sandbox boundaries |
