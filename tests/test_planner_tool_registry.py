@@ -508,15 +508,20 @@ def test_general_sort_request_allows_the_vlm_to_author_a_complete_order(
     assert obligation["manipulation_catalog"] == catalog
 
 
+@pytest.mark.parametrize(
+    "scene_id",
+    ("multi_normal", "multi_normal_random_12345"),
+)
 def test_open_ended_chinese_sort_covers_the_real_multi_normal_catalog(
     tmp_path: Path,
+    scene_id: str,
 ) -> None:
-    """The task-neutral prompt reaches the same five-target resolver as Gazebo."""
+    """The task-neutral prompt reaches the same catalog in fixed and random layouts."""
 
-    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    config = NativePickPlaceConfig(acceptance_scene_id=scene_id)
     catalog = config.acceptance_scene_evidence()["manipulation_catalog"]
-    scene_rgb = tmp_path / "multi-normal.rgb.png"
-    scene_depth = tmp_path / "multi-normal.depth.png"
+    scene_rgb = tmp_path / f"{scene_id}.rgb.png"
+    scene_depth = tmp_path / f"{scene_id}.depth.png"
     scene_rgb.write_bytes(b"rgb")
     scene_depth.write_bytes(b"depth")
     observation = _rgbd_observation(
