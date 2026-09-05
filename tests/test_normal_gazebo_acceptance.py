@@ -377,6 +377,58 @@ def test_cleanup_still_rejects_persistent_ros_participant(monkeypatch) -> None:
     assert result["settle_attempts"] == 1
 
 
+def test_allocate_uses_the_next_preflight_proven_domain_after_busy_initial_pool(
+    monkeypatch,
+) -> None:
+    """A crowded shared host must not exhaust the historical 80--101 slice."""
+
+    assert max(acceptance.base.DOMAIN_CANDIDATES) == 232
+    monkeypatch.setattr(
+        acceptance.base,
+        "_candidate_domain_preflight",
+        lambda domain: {
+            "state": "PASSED",
+            "ok": True,
+            "reason_code": "ROS_DOMAIN_EMPTY",
+            "domain": domain,
+        },
+    )
+
+    allocation = acceptance.base.allocate(
+        "crowded-host",
+        occupied_domains=range(80, 102),
+        preflight=True,
+    )
+
+    assert allocation.ros_domain_id == 102
+    assert allocation.candidate_domain_preflight == {
+        "state": "PASSED",
+        "ok": True,
+        "reason_code": "ROS_DOMAIN_EMPTY",
+        "domain": 102,
+    }
+
+
+def test_allocate_prefers_the_fresh_namespace_before_legacy_fallback(monkeypatch) -> None:
+    """A free legacy domain must not win over the dedicated high-numbered pool."""
+
+    monkeypatch.setattr(
+        acceptance.base,
+        "_candidate_domain_preflight",
+        lambda domain: {
+            "state": "PASSED",
+            "ok": True,
+            "reason_code": "ROS_DOMAIN_EMPTY",
+            "domain": domain,
+        },
+    )
+
+    allocation = acceptance.base.allocate("fresh-namespace", preflight=True)
+
+    assert allocation.ros_domain_id == 102
+    assert acceptance.base.DOMAIN_CANDIDATES[:3] == (102, 103, 104)
+
+
 def test_normal_prepare_registers_real_services_and_human_task_prompt(tmp_path, monkeypatch) -> None:
     allocation = acceptance.base.Allocation(81, "openeta-normal-test", 18765, "run-id")
     monkeypatch.setattr(acceptance.base, "_process_snapshot", lambda: [])

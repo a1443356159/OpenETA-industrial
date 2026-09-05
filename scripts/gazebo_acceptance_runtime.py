@@ -90,7 +90,16 @@ HUMAN_TUI = "human_tui"
 PROTECTED_DOMAINS = frozenset({42, 100})
 
 
-DOMAIN_CANDIDATES = tuple(i for i in range(80, 102) if i not in PROTECTED_DOMAINS)
+# Prefer the otherwise unused standard ROS 2 domain range on a shared host.
+# The historic 80--101 slice remains a verified fallback for compatibility.
+# Every candidate still receives the same fail-closed, two-sample ROS graph
+# preflight before it can be allocated.
+DOMAIN_CANDIDATES = tuple(
+    i
+    for interval in (range(102, 233), range(80, 102))
+    for i in interval
+    if i not in PROTECTED_DOMAINS
+)
 
 
 MUTATING_TOOLS = frozenset(
