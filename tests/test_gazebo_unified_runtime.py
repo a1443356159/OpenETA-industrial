@@ -385,11 +385,17 @@ def test_runtime_preserves_complete_catalog_sort_policy_in_progress() -> None:
     assert configured["remaining_count"] == len(config.manipulation_targets)
 
 
-def test_complete_catalog_sort_advances_every_target_in_one_world_session() -> None:
+@pytest.mark.parametrize(
+    "scene_id",
+    ("multi_normal", "multi_normal_random_12345"),
+)
+def test_complete_catalog_sort_advances_every_target_in_one_world_session(
+    scene_id: str,
+) -> None:
     """A VLM-authored table sort must not stop after its first successful item."""
 
     attachments = {}
-    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    config = NativePickPlaceConfig(acceptance_scene_id=scene_id)
     poses = {
         item.object_id: SimpleNamespace(
             xyz=item.pose_xyz,
