@@ -385,6 +385,122 @@ def test_runtime_preserves_complete_catalog_sort_policy_in_progress() -> None:
     assert configured["remaining_count"] == len(config.manipulation_targets)
 
 
+def test_complete_catalog_sort_advances_every_target_in_one_world_session() -> None:
+    """A VLM-authored table sort must not stop after its first successful item."""
+
+    attachments = {}
+    config = NativePickPlaceConfig(acceptance_scene_id="multi_normal")
+    poses = {
+        item.object_id: SimpleNamespace(
+            xyz=item.pose_xyz,
+            quat_xyzw=item.pose_quat_xyzw,
+        )
+        for item in config.authoritative_scene.objects
+    }
+
+    class Attachment:
+        def __init__(self, *, child_model, **_kwargs):
+            self.child_model = child_model
+            self.state = "detached"
+            attachments[child_model] = self
+
+        def native_target_mount_poses_with_retry(self, *, max_attempts):
+            assert max_attempts == 2
+            return (
+                poses[self.child_model],
+                SimpleNamespace(
+                    xyz=(0.0, 0.0, 0.9),
+                    quat_xyzw=(0.0, 0.0, 0.0, 1.0),
+                ),
+                1,
+            )
+
+        @staticmethod
+        def native_target_model_poses_with_retry(target_links, *, max_attempts):
+            assert max_attempts == 2
+            return ({target_id: poses[target_id] for target_id in target_links}, 1)
+
+    profile = replace(
+        gazebo_profile("rm75_robotiq2f85_pickplace"),
+        model_config=config,
+    )
+    runtime = GazeboRuntime(
+        _deployment(),
+        profile,
+        world_control=_World(),
+        attachment_factory=Attachment,
+    )
+    activations = []
+    final_syncs = []
+    runtime.controller = SimpleNamespace(
+        activate_pick_place_config=lambda target_config, **pose: (
+            activations.append((target_config, pose)) or len(activations)
+        ),
+        sync_planning_scene_target_pose=lambda target_config, **pose: (
+            final_syncs.append((target_config, pose)) or len(activations) + 1
+        ),
+    )
+    policy = {
+        "criterion": "functional family",
+        "rationale": "Keep hand tools together and fasteners separately.",
+    }
+    configured = runtime.configure_work_order(
+        items=[
+            {
+                "target_prompt": target["target_prompt"],
+                "placement_region_prompt": (
+                    "blue parts bin"
+                    if target["sorting_attributes"]["functional_family"] == "fastener"
+                    else "green parts bin"
+                ),
+                "sort_group": target["sorting_attributes"]["functional_family"],
+            }
+            for target in config.manipulation_targets
+        ],
+        selection_scope="all_catalog_targets",
+        sorting_policy=policy,
+    )
+
+    expected_ids = [item["id"] for item in configured["work_order"]["items"]]
+    progress = configured
+    for index, expected_id in enumerate(expected_ids):
+        assert runtime.active_pick_place_config.work_order_item["id"] == expected_id
+        post_release = (
+            EnvObservation(
+                task="sort the loose table items",
+                cameras=[_Camera(profile.cameras[0]).capture()],
+                robot=RobotState(),
+                metadata={"observation_provenance": "gazebo_ros_live"},
+            )
+            if index + 1 < len(expected_ids)
+            else None
+        )
+        progress = runtime.complete_active_work_order_item(
+            release_evidence={
+                "schema_version": "openeta.native_release_evidence.v1",
+                "detached_confirmed": True,
+                "gripper_open_confirmed": True,
+            },
+            post_release_observation=post_release,
+        )
+        assert progress["completed_count"] == index + 1
+        assert progress["completed_assignment_ids"] == expected_ids[: index + 1]
+        assert progress["same_environment_session"] is True
+        assert progress["transition"]["world_recreated"] is False
+
+    assert progress["all_completed"] is True
+    assert progress["remaining_count"] == 0
+    assert runtime.start_count == 0
+    assert [item[0].target_id for item in activations] == [
+        "target_object",
+        "red_m24_hex_bolt",
+        "silver_box_wrench",
+        "distractor_object",
+        "blue_black_screwdriver",
+    ]
+    assert len(final_syncs) == 1
+
+
 def test_failed_atomic_work_order_transition_does_not_advance_progress() -> None:
     attachments = {}
 
