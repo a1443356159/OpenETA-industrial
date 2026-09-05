@@ -382,6 +382,207 @@ def _text(values: list[float]) -> str:
     return " ".join(f"{value:.12g}" for value in values)
 
 
+_VISUAL_ENVELOPE_COLLISION_NAME = "openeta_visual_mesh_envelope"
+_VISUAL_COLLISION_COVERAGE_TOLERANCE_M = 1e-6
+
+
+def _package_visual_obj_path(base_world: Path, uri: str) -> Path | None:
+    """Resolve an offline visual mesh to its source OBJ when available.
+
+    The release assets retain an OBJ beside the rendered GLB.  OBJ parsing is
+    intentionally dependency-free, and an unrelated presentation-only URI is
+    left independent from collision geometry rather than being guessed.
+    """
+
+    prefix = "model://"
+    if not uri.startswith(prefix):
+        return None
+    model_path = uri[len(prefix) :]
+    package_name, separator, relative_path = model_path.partition("/")
+    package_root = base_world.parent.parent
+    if (
+        not separator
+        or package_name != package_root.name
+        or not relative_path
+    ):
+        return None
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    source = (package_root / relative).with_suffix(".obj")
+    return source if source.is_file() else None
+
+
+def _obj_vertex_bounds(path: Path) -> tuple[
+    tuple[float, float, float], tuple[float, float, float]
+] | None:
+    """Return finite OBJ vertex bounds without requiring a mesh dependency."""
+
+    lower = [math.inf, math.inf, math.inf]
+    upper = [-math.inf, -math.inf, -math.inf]
+    found = False
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 4 or fields[0] != "v":
+            continue
+        try:
+            vertex = [float(value) for value in fields[1:4]]
+        except ValueError:
+            continue
+        if not all(math.isfinite(value) for value in vertex):
+            continue
+        found = True
+        for axis, value in enumerate(vertex):
+            lower[axis] = min(lower[axis], value)
+            upper[axis] = max(upper[axis], value)
+    if not found:
+        return None
+    return tuple(lower), tuple(upper)  # type: ignore[return-value]
+
+
+def _visual_mesh_bounds(
+    visual: ET.Element,
+    *,
+    base_world: Path,
+    owner: str,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    """Return a conservative link-frame AABB for one known visual mesh."""
+
+    mesh = visual.find("geometry/mesh")
+    uri = (mesh.findtext("uri") or "").strip() if mesh is not None else ""
+    source = _package_visual_obj_path(base_world, uri) if uri else None
+    vertices = _obj_vertex_bounds(source) if source is not None else None
+    if vertices is None:
+        return None
+    scale_text = mesh.findtext("scale") if mesh is not None else None
+    try:
+        scale = (
+            tuple(float(value) for value in scale_text.split())
+            if scale_text
+            else (1.0, 1.0, 1.0)
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"authoritative visual mesh scale is invalid: {owner}") from exc
+    if (
+        len(scale) != 3
+        or any(not math.isfinite(value) or value <= 0.0 for value in scale)
+    ):
+        raise RuntimeError(f"authoritative visual mesh scale is invalid: {owner}")
+    visual_xyz, visual_quat = _pose(visual, owner=owner)
+    raw_lower, raw_upper = vertices
+    lower = [math.inf, math.inf, math.inf]
+    upper = [-math.inf, -math.inf, -math.inf]
+    for x in (raw_lower[0] * scale[0], raw_upper[0] * scale[0]):
+        for y in (raw_lower[1] * scale[1], raw_upper[1] * scale[1]):
+            for z in (raw_lower[2] * scale[2], raw_upper[2] * scale[2]):
+                rotated = _quaternion_rotate(visual_quat, (x, y, z))
+                for axis, value in enumerate(rotated):
+                    coordinate = visual_xyz[axis] + value
+                    lower[axis] = min(lower[axis], coordinate)
+                    upper[axis] = max(upper[axis], coordinate)
+    return tuple(lower), tuple(upper)  # type: ignore[return-value]
+
+
+def _materialize_visual_collision_envelopes(
+    world: ET.Element,
+    *,
+    base_world: Path,
+) -> None:
+    """Fill any visual extent absent from the shared Gazebo/MoveIt geometry.
+
+    Detailed meshes remain visual assets; low-complexity collision proxies are
+    still preferred.  When a proxy fails to bound the mesh, add one exact
+    mesh-AABB envelope to the *authoritative* SDF.  Gazebo and MoveIt then
+    consume the same conservative geometry and a visual-only protrusion can
+    no longer be planned through.
+    """
+
+    for model in world.findall("model"):
+        model_id = str(model.get("name") or "")
+        if not model_id:
+            raise RuntimeError("authoritative model identity is invalid")
+        for link in model.findall("link"):
+            link_id = str(link.get("name") or "")
+            if not link_id:
+                raise RuntimeError(f"authoritative link identity is invalid: {model_id}")
+            mesh_bounds = [
+                bounds
+                for visual in link.findall("visual")
+                if (
+                    bounds := _visual_mesh_bounds(
+                        visual,
+                        base_world=base_world,
+                        owner=f"{model_id}/{link_id}/{visual.get('name') or 'visual'}",
+                    )
+                )
+                is not None
+            ]
+            if not mesh_bounds:
+                continue
+            visual_lower = tuple(
+                min(bounds[0][axis] for bounds in mesh_bounds) for axis in range(3)
+            )
+            visual_upper = tuple(
+                max(bounds[1][axis] for bounds in mesh_bounds) for axis in range(3)
+            )
+            collisions = link.findall("collision")
+            primitive_bounds = [
+                _primitive_from_collision(
+                    collision,
+                    model_id=model_id,
+                    link_xyz=(0.0, 0.0, 0.0),
+                    link_quat=(0.0, 0.0, 0.0, 1.0),
+                ).local_bounds()
+                for collision in collisions
+            ]
+            if primitive_bounds:
+                collision_lower = tuple(
+                    min(bounds[0][axis] for bounds in primitive_bounds)
+                    for axis in range(3)
+                )
+                collision_upper = tuple(
+                    max(bounds[1][axis] for bounds in primitive_bounds)
+                    for axis in range(3)
+                )
+                covered = all(
+                    collision_lower[axis]
+                    <= visual_lower[axis] + _VISUAL_COLLISION_COVERAGE_TOLERANCE_M
+                    and collision_upper[axis]
+                    >= visual_upper[axis] - _VISUAL_COLLISION_COVERAGE_TOLERANCE_M
+                    for axis in range(3)
+                )
+                if covered:
+                    continue
+            names = {str(collision.get("name") or "") for collision in collisions}
+            if _VISUAL_ENVELOPE_COLLISION_NAME in names:
+                raise RuntimeError(
+                    f"authoritative visual envelope does not cover mesh: {model_id}/{link_id}"
+                )
+            center = tuple(
+                (visual_lower[axis] + visual_upper[axis]) / 2.0 for axis in range(3)
+            )
+            size = tuple(
+                visual_upper[axis] - visual_lower[axis] for axis in range(3)
+            )
+            if any(value <= 0.0 or not math.isfinite(value) for value in size):
+                raise RuntimeError(
+                    f"authoritative visual mesh bounds are invalid: {model_id}/{link_id}"
+                )
+            envelope = ET.SubElement(
+                link,
+                "collision",
+                {"name": _VISUAL_ENVELOPE_COLLISION_NAME},
+            )
+            ET.SubElement(envelope, "pose").text = _text([*center, 0.0, 0.0, 0.0])
+            geometry = ET.SubElement(envelope, "geometry")
+            box = ET.SubElement(geometry, "box")
+            ET.SubElement(box, "size").text = _text(list(size))
+
+
 def _apply_model_pose_overrides(
     world: ET.Element,
     *,
@@ -459,6 +660,7 @@ def _render_scene_tree(
     model_pose_overrides = scene.get("model_pose_overrides")
     if model_pose_overrides is not None:
         _apply_model_pose_overrides(world, overrides=model_pose_overrides)
+    _materialize_visual_collision_envelopes(world, base_world=base_world)
     return tree, world_scene
 
 
@@ -902,12 +1104,22 @@ def _validate_catalog_bindings(
             )
         expected_primitives = target_raw.get("primitives")
         if isinstance(expected_primitives, list):
-            if len(expected_primitives) != len(target.primitives):
+            # The catalog locks the hand-authored source proxies.  A visual
+            # mesh envelope is a deterministic compiler product, derived
+            # from the same authoritative SDF, and is verified separately
+            # by its reserved collision name rather than being mistaken for
+            # a catalog-editable task primitive.
+            source_primitives = tuple(
+                primitive
+                for primitive in target.primitives
+                if primitive.name != _VISUAL_ENVELOPE_COLLISION_NAME
+            )
+            if len(expected_primitives) != len(source_primitives):
                 raise RuntimeError(
                     "authoritative target primitive count differs from the task contract"
                 )
             for raw, primitive in zip(
-                expected_primitives, target.primitives, strict=True
+                expected_primitives, source_primitives, strict=True
             ):
                 if not isinstance(raw, Mapping):
                     raise RuntimeError("authoritative target primitive is invalid")

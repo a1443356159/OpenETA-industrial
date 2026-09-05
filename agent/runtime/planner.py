@@ -580,10 +580,14 @@ class ToolCallingPlanner(BasePlanner):
 
         return PlannerDecision(
             action_type="response",
-            action="talk",
+            action="ask_human",
             parameters={
-                "message": "Planner could not produce a valid action request.",
-                "code": "planner_validation_failed",
+                "question": (
+                    "The planner could not produce a valid action request after "
+                    "schema validation retries. The task remains unfinished; inspect "
+                    "the current cell or provide guidance before continuing."
+                ),
+                "failure_code": "planner_validation_failed",
                 "validation_errors": validation_errors,
                 "validation_attempts": len(validation_attempt_history),
             },

@@ -2075,6 +2075,13 @@ class _FrozenGoalPairCoordinator:
         pair_artifacts: list[JsonDict] = []
         grasp_artifacts: list[JsonDict] = []
         expansion_count = 0
+        # A frozen provider tail can be large.  Keep one qualification call
+        # bounded to the same diverse grasp-branch wave used by the pair
+        # funnel, then expose the untouched tail as the next explicit frozen
+        # frontier obligation.  This preserves complete-pool recall without
+        # turning one TUI tool call into an unbounded synchronous search.
+        frontier_wave_grasp_ids: set[str] = set()
+        frontier_wave_complete = False
         pair_totals = {
             "frozen_pair_count": 0,
             "frozen_pair_lookahead_grasp_count": 0,
@@ -2264,12 +2271,22 @@ class _FrozenGoalPairCoordinator:
                 if isinstance(batch_input_grasps, list)
                 else []
             )
+            # ``_filter_grasp_batch`` processes at most the configured
+            # number of diverse branches.  Use only the remaining capacity
+            # of this top-level wave too: an initial partial result followed
+            # by a frozen expansion must still total at most one wave.
+            wave_capacity = max(
+                0,
+                self.grasp_branch_limit - len(frontier_wave_grasp_ids),
+            )
+            batch_input_grasps = batch_input_grasps[:wave_capacity]
             batch_entries = cached_grasp_entries(batch_input_grasps)
             batch_ids = {
                 str(candidate.get("id") or "")
                 for candidate in batch_input_grasps
                 if isinstance(candidate, Mapping) and str(candidate.get("id") or "")
             }
+            frontier_wave_grasp_ids.update(batch_ids)
             can_defer_batch = bool(batch_ids) and batch_ids.issubset(batch_entries)
             filtered = self._filter_grasp_batch(
                 current,
@@ -2356,6 +2373,14 @@ class _FrozenGoalPairCoordinator:
                     deferred_count += len(deferred)
                 break
             if not self.grasp_frontier_candidates:
+                break
+            if len(frontier_wave_grasp_ids) >= self.grasp_branch_limit:
+                # The deterministic barrier above has already merged all
+                # results from this wave (including the fixed recovery seeds
+                # once four fast peers were deferred).  Return control now;
+                # the planner receives a frozen_frontier obligation for the
+                # remaining immutable provider output.
+                frontier_wave_complete = True
                 break
 
             previous_frontier_ids = tuple(
@@ -2444,6 +2469,9 @@ class _FrozenGoalPairCoordinator:
                 "frozen_pair_deferred_recovery_batch_count": recovery_batch_count,
                 "frozen_pair_recovery_policy": ("resume_frozen_frontier_after_execution_failure"),
                 "frozen_pair_frontier_expansion_count": expansion_count,
+                "frozen_pair_frontier_wave_grasp_count": len(frontier_wave_grasp_ids),
+                "frozen_pair_frontier_wave_grasp_limit": self.grasp_branch_limit,
+                "frozen_pair_frontier_resume_required": frontier_wave_complete,
                 "frozen_grasp_frontier_remaining_count": len(self.grasp_frontier_candidates),
                 "frozen_grasp_frontier_generation": self.grasp_frontier_generation,
                 "frozen_grasp_frontier_model_inference_invoked": False,
@@ -2452,6 +2480,8 @@ class _FrozenGoalPairCoordinator:
                     if goal_pool_exhausted
                     else "complete_pair_found"
                     if len(final_grasps) >= target
+                    else "frozen_grasp_frontier_wave_complete"
+                    if frontier_wave_complete
                     else "frozen_grasp_frontier_exhausted"
                 ),
                 "ranking": "grasp_place_physical_quality",

@@ -2530,8 +2530,8 @@ def test_planner_validation_exhaustion_returns_structured_internal_failure() -> 
     )
 
     assert decision.action_type == "response"
-    assert decision.action == "talk"
-    assert decision.parameters["code"] == "planner_validation_failed"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "planner_validation_failed"
     assert decision.parameters["validation_attempts"] == 2
     assert decision.metadata["validation_attempts"] == 2
     assert len(decision.metadata["validation_attempt_history"]) == 2
@@ -2563,8 +2563,8 @@ def test_legacy_top_level_command_kinds_are_rejected() -> None:
     )
 
     assert decision.action_type == "response"
-    assert decision.action == "talk"
-    assert decision.parameters["code"] == "planner_validation_failed"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "planner_validation_failed"
     assert "Unsupported command kind" in decision.parameters["validation_errors"][0]
     assert decision.metadata["validation_attempts"] == 1
     assert decision.metadata["validation_attempt_history"][0]["decision"]["name"] == "pick"
@@ -2593,8 +2593,8 @@ def test_noop_response_is_not_planner_facing() -> None:
     )
 
     assert decision.action_type == "response"
-    assert decision.action == "talk"
-    assert decision.parameters["code"] == "planner_validation_failed"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "planner_validation_failed"
     assert "Unsupported response name" in decision.parameters["validation_errors"][0]
 
 
@@ -2936,8 +2936,8 @@ def test_code_policy_validation_feedback_requires_top_level_code() -> None:
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "talk"
-    assert decision.parameters["code"] == "planner_validation_failed"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "planner_validation_failed"
     validation_error = decision.parameters["validation_errors"][0]
     assert "requires a top-level `code` string" in validation_error
 
@@ -3080,8 +3080,8 @@ def test_anygrasp_validation_feedback_mentions_concrete_mask_path() -> None:
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "talk"
-    assert decision.parameters["code"] == "planner_validation_failed"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "planner_validation_failed"
     errors = "\n".join(decision.parameters["validation_errors"])
     assert "details.outputs.selected_detection.mask_ref" in errors
     assert "details.outputs.detections[i].mask_ref" in errors
@@ -3812,8 +3812,8 @@ def test_planner_rejects_registered_tool_without_handler() -> None:
         skills=build_default_skill_registry(),
     )
 
-    assert decision.action == "talk"
-    assert decision.parameters["code"] == "planner_validation_failed"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "planner_validation_failed"
     assert decision.parameters["validation_errors"] == [
         "Tool requested by planner is not executable: slam."
     ]
@@ -3843,8 +3843,8 @@ def test_sim_creation_is_not_an_agent_tool() -> None:
     )
 
     assert decision.action_type == "response"
-    assert decision.action == "talk"
-    assert decision.parameters["code"] == "planner_validation_failed"
+    assert decision.action == "ask_human"
+    assert decision.parameters["failure_code"] == "planner_validation_failed"
     assert "Unknown tool" in decision.parameters["validation_errors"][0]
     assert decision.metadata["validation_attempts"] == 1
 

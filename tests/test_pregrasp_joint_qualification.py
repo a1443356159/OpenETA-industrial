@@ -1440,6 +1440,82 @@ def test_frozen_pair_recovery_runs_after_four_peer_fast_branches(
     ]
 
 
+def test_frozen_pair_frontier_returns_after_one_bounded_wave(
+    tmp_path: Path,
+) -> None:
+    """A failed wave must not synchronously consume the immutable tail."""
+
+    calls: list[tuple[list[str], bool]] = []
+
+    class _WaveCoordinator(_FrozenGoalPairCoordinator):
+        def _filter_grasp_batch(
+            self,
+            result: ToolResult,
+            *,
+            scene_epoch: int,
+            planning_scene_revision: int,
+            source: dict[str, object],
+            defer_pair_recovery: bool = False,
+        ) -> ToolResult:
+            candidates = result.details.get("grasp_candidates")
+            candidate_ids = [
+                str(candidate.get("id") or "")
+                for candidate in candidates
+                if isinstance(candidates, list) and isinstance(candidate, dict)
+            ]
+            calls.append((candidate_ids, defer_pair_recovery))
+            return ToolResult(
+                True,
+                "no complete pair in this deterministic barrier",
+                {
+                    "grasp_candidates": [],
+                    "frozen_pair_count": len(candidate_ids),
+                    "frozen_pair_full_plan_pass_count": 0,
+                },
+            )
+
+        def prepare_grasp_frontier_expansion(self, **_kwargs: object) -> ToolResult:
+            raise AssertionError("the next frozen wave must be planner-dispatched")
+
+    grasps = [{"id": f"g{index}", "score": 1.0 - index * 0.1} for index in range(4)]
+    cache = QualificationCache()
+    cache.replace(
+        purpose="grasp",
+        candidates=grasps,
+        proofs={grasp["id"]: {"verdict": "PASS"} for grasp in grasps},
+        scene_epoch=3,
+        planning_scene_revision=7,
+    )
+    qualifier = SimpleNamespace(cache=cache, qualification_profile="fast_v3")
+    coordinator = _WaveCoordinator(qualifier, grasp_branch_limit=4)
+    coordinator.object_current_pose = {"frame": "world"}
+    coordinator.object_goals = [{"id": "p0"}]
+    coordinator.scene_epoch = 3
+    coordinator.planning_scene_revision = 7
+    coordinator.grasp_frontier_candidates = [{"id": "g4", "score": 0.5}]
+    coordinator.grasp_frontier_generation = 1
+
+    result = coordinator.filter_grasps(
+        ToolResult(True, "qualified", {"grasp_candidates": grasps}),
+        scene_epoch=3,
+        planning_scene_revision=7,
+        source={},
+    )
+
+    assert calls == [(["g0", "g1", "g2", "g3"], True), (["g0", "g1", "g2", "g3"], False)]
+    assert result.details["grasp_candidates"] == []
+    assert result.details["frozen_pair_stop_reason"] == (
+        "frozen_grasp_frontier_wave_complete"
+    )
+    assert result.details["frozen_pair_frontier_resume_required"] is True
+    assert result.details["frozen_pair_frontier_wave_grasp_count"] == 4
+    assert result.details["frozen_pair_frontier_expansion_count"] == 0
+    assert result.details["frozen_grasp_frontier_remaining_count"] == 1
+    assert [candidate["id"] for candidate in coordinator.grasp_frontier_candidates] == [
+        "g4"
+    ]
+
+
 def test_frozen_pair_search_does_not_reuse_stale_goal_pool() -> None:
     qualifier = MoveItCandidateQualifier(lambda *_args: {})
     coordinator = _FrozenGoalPairCoordinator(

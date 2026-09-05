@@ -180,6 +180,33 @@ def test_authoritative_multi_normal_owns_filtered_dynamic_target_catalog() -> No
         } == {"65535"}
 
 
+def test_authoritative_mesh_extent_is_covered_by_shared_collision_geometry() -> None:
+    """A rendered mesh must not protrude beyond Gazebo/MoveIt collision data."""
+
+    compiled = _compile("multi_normal")
+    wrench = compiled.object("silver_box_wrench")
+    envelope = next(
+        primitive
+        for primitive in wrench.primitives
+        if primitive.name == "openeta_visual_mesh_envelope"
+    )
+    lower, upper = envelope.local_bounds()
+    world = ET.fromstring(compiled.sdf_bytes).find("world")
+
+    assert envelope.shape == "box"
+    assert envelope.size_xyz is not None
+    # The original low-profile proxy ended below z=0.018 m while the real
+    # rendered wrench reaches z=0.0532 m in link coordinates.
+    assert lower[2] == pytest.approx(0.0015)
+    assert upper[2] >= 0.0532
+    assert world is not None
+    assert world.find(
+        "model[@name='silver_box_wrench']/link/"
+        "collision[@name='openeta_visual_mesh_envelope']/geometry/box"
+    ) is not None
+    assert envelope.name in wrench.moveit_spec()["gazebo_collision_names"]
+
+
 def test_multi_normal_is_one_task_neutral_physical_world() -> None:
     compiled = _compile("multi_normal")
     contract = load_acceptance_scene_contract("multi_normal")
