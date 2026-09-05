@@ -236,7 +236,6 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
         "command_listener",
         "publish",
         "joint_ack",
-        "filter_listener",
         "publish",
         "filter_ack",
     ]
@@ -266,44 +265,35 @@ def test_detachable_joint_command_waits_for_state_listener_discovery(
 def test_collision_filter_ack_retries_after_one_transient_listener_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A single short-lived ``gz topic`` listener must not consume the proof."""
+    """A pending ACK is retried through the same listener and request endpoint."""
 
     attempts: list[str] = []
 
     class Listener:
-        def __init__(self, outcome: str) -> None:
-            self.outcome = outcome
+        calls = 0
 
         def communicate(self, timeout):
-            attempts.append(self.outcome)
-            if self.outcome == "timeout":
+            self.calls += 1
+            if self.calls == 1:
+                attempts.append("timeout")
                 raise subprocess.TimeoutExpired(["gz", "topic"], timeout)
+            attempts.append("ack")
             return ("data: true\n", "")
 
-        @staticmethod
-        def poll():
-            return 0
+        def poll(self):
+            return None if self.calls == 1 else 0
 
-    outcomes = iter(("timeout", "ack"))
+    listener = Listener()
     monkeypatch.setattr(
         gazebo_process.subprocess,
         "Popen",
-        lambda *_args, **_kwargs: Listener(next(outcomes)),
+        lambda *_args, **_kwargs: listener,
     )
 
+    commands: list[list[str]] = []
+
     def run(command, **_kwargs):
-        if "-i" in command:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    "Publishers [Address, Message Type]:\n"
-                    "  tcp://127.0.0.1:12344, gz.msgs.Boolean\n"
-                    "Subscribers [Address, Message Type]:\n"
-                    "  tcp://127.0.0.1:12345, google.protobuf.Message\n"
-                ),
-                stderr="",
-            )
+        commands.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(gazebo_process.subprocess, "run", run)
@@ -315,6 +305,8 @@ def test_collision_filter_ack_retries_after_one_transient_listener_timeout(
     control._wait_collision_filter_state(attached=True)
 
     assert attempts == ["timeout", "ack"]
+    assert sum("-i" in command for command in commands) == 0
+    assert len(commands) == 2
     assert control.collision_filter_evidence()["state"] == "robot_excluded"
 
 

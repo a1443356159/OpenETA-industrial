@@ -581,28 +581,31 @@ class GazeboDetachableJointControl:
     def _wait_collision_filter_state(self, *, attached: bool) -> None:
         """Request and prove the authoritative physics mask.
 
-        This mirrors the stock DetachableJoint transport contract: start the
-        state listener, prove its Boolean publisher and our subscription are
-        discoverable, then publish one Empty request.  Receiving the dedicated
-        ACK also proves the request subscription end-to-end.  The plugin
-        answers from an atomic stable-state snapshot even while simulation
-        physics is paused.
+        The collision-filter plugin's request endpoint is read-only and
+        idempotent: every Empty request publishes its current atomic Boolean
+        state.  Keep one listener alive and repeat those requests until it
+        receives the ACK.  This avoids treating a slow, one-shot ``gz topic
+        -i`` graph-inspection client as a physics failure on a busy host.
+
+        Endpoint existence is already proved by :meth:`wait_ready`; receiving
+        the Boolean response is the stronger end-to-end proof that both the
+        listener and plugin request subscription were live.  The plugin can
+        answer while physics is paused, so this protocol has no dependency on
+        a simulation tick or a scene-specific timing constant.
         """
 
         deadline = time.monotonic() + self.timeout_s
-        # ``gz topic`` is a short-lived transport client.  On a loaded host a
-        # listener can occasionally fail to receive its first response even
-        # though the native filter has transitioned correctly.  Bound every
-        # attempt so the remaining proof window can establish a new listener
-        # and issue a new request.  This is a transport reliability policy,
-        # independent of scene/object identity and collision geometry.
-        attempt_budget_s = min(3.0, self.timeout_s)
+        # A listener is cheap to keep open, whereas topic introspection starts
+        # a separate transport graph client and can itself time out under GPU
+        # or CPU contention.  Recycle a listener only after a bounded window
+        # so a genuinely unhealthy client cannot consume the full deadline.
+        listener_window_s = min(4.0, self.timeout_s)
+        request_timeout_s = min(1.0, self.timeout_s)
         last_error = "no collision-filter state received"
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            attempt_deadline = min(deadline, time.monotonic() + attempt_budget_s)
             listener: subprocess.Popen[str] | None = None
             output = ""
             listener_stderr = ""
@@ -624,71 +627,46 @@ class GazeboDetachableJointControl:
                     env=self.environment,
                     start_new_session=True,
                 )
-                listener_ready = False
-                publisher = (
-                    r"Publishers\s*\[[^\]]*\]:\s*\n"
-                    r"(?:\s+\S+,[^\n]*\n)*?\s+\S+,\s*gz\.msgs\.Boolean\b"
+                listener_deadline = min(
+                    deadline, time.monotonic() + listener_window_s
                 )
-                subscriber = r"Subscribers\s*\[[^\]]*\]:\s*\n\s+\S"
-                while time.monotonic() < attempt_deadline:
-                    remaining = attempt_deadline - time.monotonic()
-                    try:
-                        state_info = subprocess.run(
-                            [
-                                self._executable(self.gz_executable),
-                                "topic",
-                                "-i",
-                                "-t",
-                                self.collision_filter_state_ack_topic,
-                            ],
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                            env=self.environment,
-                            timeout=min(1.0, max(0.1, remaining)),
-                        )
-                    except subprocess.TimeoutExpired as exc:
-                        last_error = f"{type(exc).__name__}: {exc}"
-                        time.sleep(
-                            min(0.02, max(0.0, deadline - time.monotonic()))
-                        )
-                        continue
-                    if (
-                        state_info.returncode == 0
-                        and re.search(publisher, state_info.stdout)
-                        and re.search(subscriber, state_info.stdout)
-                    ):
-                        listener_ready = True
+                while time.monotonic() < listener_deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         break
-                    detail = (state_info.stderr or state_info.stdout)[-500:].strip()
-                    last_error = (
-                        "collision-filter ACK endpoint not ready"
-                        + (f": {detail}" if detail else "")
-                    )
-                    time.sleep(
-                        min(0.02, max(0.0, deadline - time.monotonic()))
-                    )
-                if not listener_ready:
-                    continue
-                remaining = attempt_deadline - time.monotonic()
-                if remaining <= 0:
-                    last_error = "collision-filter ACK attempt expired before request"
-                    continue
-                self._publish_empty(
-                    self.collision_filter_state_request_topic,
-                    timeout_s=min(attempt_budget_s, remaining),
-                )
-                output, listener_stderr = listener.communicate(
-                    timeout=max(0.1, attempt_deadline - time.monotonic())
-                )
-                listener_returncode = listener.poll()
-            except (OSError, subprocess.TimeoutExpired, GazeboProcessError) as exc:
+                    try:
+                        self._publish_empty(
+                            self.collision_filter_state_request_topic,
+                            timeout_s=min(
+                                request_timeout_s, max(0.1, remaining)
+                            ),
+                        )
+                    except GazeboProcessError as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                    try:
+                        output, listener_stderr = listener.communicate(
+                            timeout=min(0.25, max(0.1, remaining))
+                        )
+                    except subprocess.TimeoutExpired:
+                        # The listener remains active.  A subsequent request
+                        # is both a readiness retry and a fresh state query.
+                        last_error = "collision-filter ACK response pending"
+                    else:
+                        listener_returncode = listener.poll()
+                        break
+                    if listener.poll() is not None:
+                        try:
+                            output, listener_stderr = listener.communicate(
+                                timeout=0.1
+                            )
+                        except subprocess.TimeoutExpired:
+                            last_error = "collision-filter listener exited without ACK"
+                        else:
+                            listener_returncode = listener.poll()
+                        break
+                    time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+            except (OSError, GazeboProcessError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
-                # The finally block retires this listener.  Retry from a
-                # fresh transport endpoint while the explicit proof deadline
-                # remains; do not turn one client-side timeout into a false
-                # candidate rejection.
-                continue
             finally:
                 if listener is not None and listener.poll() is None:
                     listener.terminate()
@@ -710,9 +688,9 @@ class GazeboDetachableJointControl:
                 and not listener_stderr.strip()
             ):
                 # ``gz topic -e`` prints a blank record for the proto3 default
-                # Boolean value.  A clean one-message exit plus the typed
-                # publisher proof above therefore represents ``false``; an
-                # absent message cannot make ``-n 1`` exit successfully.
+                # Boolean value.  A clean one-message exit therefore
+                # represents ``false``; an absent message cannot make ``-n
+                # 1`` exit successfully.
                 observed = False
             else:
                 observed = None
@@ -726,9 +704,10 @@ class GazeboDetachableJointControl:
                 )
             else:
                 detail = (listener_stderr or output)[-500:].strip()
-                last_error = "collision-filter response was not a Boolean"
-                if detail:
-                    last_error += f": {detail}"
+                if listener_returncode is not None:
+                    last_error = "collision-filter response was not a Boolean"
+                    if detail:
+                        last_error += f": {detail}"
             time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
         self._collision_filter_attached = None
         raise GazeboProcessError(
